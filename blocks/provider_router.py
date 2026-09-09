@@ -28,7 +28,7 @@ OPENAI_FAST_MODEL = APRIL_QUANTUM_PROVIDER_MODEL
 OPENAI_PREMIUM_MODEL = APRIL_QUANTUM_PROVIDER_MODEL
 
 INPUT_TOKEN_BUDGET = 900
-MIN_OUTPUT_TOKENS = 1
+MIN_OUTPUT_TOKENS = 16
 MAX_OUTPUT_TOKENS = 8000
 
 PROVIDER_DUPLICATE_TTL_SECONDS = 90
@@ -61,13 +61,9 @@ def _get_gemini_client():
 PROVIDER_MACHINE_SYSTEM_PROMPT = """
 You are the internal text-generation engine used by April.
 The user-facing assistant is ALWAYS April. The provider/model name is an internal implementation detail.
-When the current request asks who you are, answer as April in natural language. Do not emit a fixed capability checklist or canned product description unless the user explicitly asks. Use the identity/context signals supplied by the Quantum Processor.
+When the current request asks who you are, answer as April and describe April's own capabilities.
 Never identify yourself to the user as GPT-5.6 Luna, ChatGPT, a model, the provider, or an internal module.
 Never expose internal provider/model names unless the user explicitly asks for technical implementation details.
-Prefer natural, context-aware conversation over support-style boilerplate.
-Do not repeat generic "what April can do" lists, feature menus, or stock introductions unless directly requested.
-The Quantum Processor owns dialogue relation, memory, visual evidence, intent, representation and response guidance.
-Treat those signals as authoritative; do not create a competing routing or interpretation path.
 
 You receive one canonical MachineRequest already interpreted by April's processor.
 Return exactly one MachineResponse JSON object. Do not wrap it in markdown fences.
@@ -82,7 +78,6 @@ Rules:
 - Use dialogue_contract only to preserve necessary continuity.
 - When the request is independent, do not invent old context.
 - When it is a continuation/reference, use only the supplied relevant context.
-- RESOLVED_SCENE_CONTEXT is authoritative semantic evidence selected by April's Interpretation Layer; use it to resolve references and preserve relevant presentation context, never as a keyword trigger.
 - Preserve the complete logical answer; never cut a sentence or scene for style.
 - The output budget is dynamic and canonical: use only the tokens logically required, from 1 through 8000.
 - If the complete logical answer would exceed 8000 tokens, compact the representation (especially structured payloads) while preserving all requested information; never stop mid-JSON, mid-row, or mid-scene.
@@ -242,34 +237,6 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
             "dialog_act": intent.get("dialog_act") or dialogue.get("dialog_act"),
         },
         "dialogue_contract": dialogue,
-        "response_guidance": (
-            raw.get("conversation", {}).get("response_guidance", {})
-            if isinstance(raw.get("conversation"), dict) else {}
-        ),
-        "current_visual_evidence": (
-            raw.get("conversation", {}).get("current_visual_evidence", {})
-            if isinstance(raw.get("conversation"), dict) else {}
-        ),
-        "dialogue_vector": (
-            raw.get("conversation", {}).get("dialogue_vector", {})
-            if isinstance(raw.get("conversation"), dict) else {}
-        ),
-        "dialogue_delta": (
-            raw.get("conversation", {}).get("dialogue_delta", {})
-            if isinstance(raw.get("conversation"), dict) else {}
-        ),
-        "render_continuity": (
-            raw.get("conversation", {}).get("render_continuity", {})
-            if isinstance(raw.get("conversation"), dict) else {}
-        ),
-        "visual_schema": (
-            raw.get("conversation", {}).get("visual_schema", "")
-            if isinstance(raw.get("conversation"), dict) else ""
-        ),
-        "visual_schema_confidence": (
-            raw.get("conversation", {}).get("visual_schema_confidence", 0.0)
-            if isinstance(raw.get("conversation"), dict) else 0.0
-        ),
         "memory": raw.get("memory") or {},
         "requested_outputs": raw.get("requested_outputs") or [],
         "required_competencies": raw.get("required_competencies") or [],
@@ -766,180 +733,6 @@ def _compact_summary(answer: str, blocks: list[dict]) -> str:
     return f"{first} | scene: {', '.join(kinds[:5])}" if kinds else first
 
 
-def _extract_resolved_artifact_context(resolved_scene: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extract only canonical structured artifact payloads from a resolved scene.
-
-    The provider must receive the existing artifact data when a turn continues or
-    edits a visual scene. Presentation metadata is intentionally excluded here so
-    a compact graph/table/formula payload survives the 900-token input envelope.
-    """
-    if not isinstance(resolved_scene, dict):
-        return []
-
-    blocks = resolved_scene.get("render_blocks") or []
-    if not isinstance(blocks, list):
-        blocks = []
-
-    artifacts: list[dict[str, Any]] = []
-    for block in blocks:
-        if not isinstance(block, dict):
-            continue
-        kind = _safe_text(
-            block.get("type")
-            or block.get("artifact_type")
-            or block.get("representation")
-        ).strip().lower()
-        if not kind or kind in {"text", "markdown"}:
-            continue
-
-        payload = block.get("payload")
-        if not isinstance(payload, dict):
-            artifact = block.get("artifact")
-            if isinstance(artifact, dict):
-                payload = artifact.get("payload")
-        if not isinstance(payload, dict):
-            artifact_payload = block.get("artifact_payload")
-            if isinstance(artifact_payload, dict):
-                payload = artifact_payload.get("payload") or artifact_payload
-        if not isinstance(payload, dict):
-            payload = block.get(kind) if isinstance(block.get(kind), dict) else None
-        if not isinstance(payload, dict):
-            continue
-
-        artifacts.append({
-            "type": kind,
-            "renderer": _safe_text(block.get("renderer")),
-            "viewer": _safe_text(block.get("viewer")),
-            "block_id": _safe_text(block.get("block_id")),
-            "sequence_index": block.get("sequence_index"),
-            "payload": _compact_value(payload, max_items=16, max_keys=18),
-        })
-
-    return artifacts[:4]
-
-
-
-def _canonical_dialogue_pairs(payload: dict[str, Any]) -> list[dict[str, str]]:
-    """Read the processor-owned USER↔APRIL history without opening a second route."""
-    conversation = payload.get("conversation")
-    if not isinstance(conversation, dict):
-        return []
-
-    candidates = conversation.get("recent_dialogue_pairs")
-    if not isinstance(candidates, list):
-        candidates = conversation.get("recent_dialogue")
-    if not isinstance(candidates, list):
-        return []
-
-    result: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        user = _safe_text(
-            item.get("user")
-            or item.get("USER")
-            or item.get("content")
-            or item.get("question")
-        ).strip()
-        april = _safe_text(
-            item.get("april")
-            or item.get("APRIL")
-            or item.get("assistant")
-            or item.get("answer")
-        ).strip()
-        if not user and not april:
-            continue
-        key = (user, april)
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append({"user": user, "april": april})
-    return result[-10:]
-
-
-def _pack_cascade_dialogue(
-    pairs: list[dict[str, str]],
-    *,
-    max_estimated_tokens: int = 120,
-) -> dict[str, Any]:
-    """
-    Build a deterministic compact dialogue ledger.
-
-    The ledger keeps the semantic order of the conversation while clipping each
-    turn enough to remain inside the fixed Provider input envelope. Newer pairs
-    retain more detail; older pairs remain as short anchors instead of vanishing.
-    No model call or semantic reclassification is performed here.
-    """
-    if not pairs:
-        return {}
-
-    compact: list[dict[str, str]] = []
-    # Allocate more detail to recent turns while retaining the complete pair
-    # sequence as a compact cascade.
-    newest_first = list(reversed(pairs))
-    for age, pair in enumerate(newest_first):
-        user_limit = 150 if age < 2 else 72
-        april_limit = 190 if age < 2 else 92
-
-        user = _safe_text(pair.get("user")).strip()
-        april = _safe_text(pair.get("april")).strip()
-        if len(user) > user_limit:
-            user = user[: max(1, user_limit - 1)].rstrip() + "…"
-        if len(april) > april_limit:
-            april = april[: max(1, april_limit - 1)].rstrip() + "…"
-
-        compact.append({
-            "turn": str(len(pairs) - age),
-            "user": user,
-            "april": april,
-        })
-
-        candidate = {
-            "cascade": "USER→APRIL",
-            "pairs": list(reversed(compact)),
-        }
-        rendered = json.dumps(candidate, ensure_ascii=False, separators=(",", ":"))
-        if _estimate_input_tokens(rendered) > max_estimated_tokens:
-            compact.pop()
-            break
-
-    if not compact:
-        latest = pairs[-1]
-        candidate = {
-            "cascade": "USER→APRIL",
-            "pairs": [{
-                "turn": str(len(pairs)),
-                "user": _safe_text(latest.get("user"))[:80],
-                "april": _safe_text(latest.get("april"))[:100],
-            }],
-        }
-    else:
-        candidate = {
-            "cascade": "USER→APRIL",
-            "pairs": list(reversed(compact)),
-        }
-
-    return candidate
-
-
-def _dialogue_memory_priority(
-    payload: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Return immediate + rolling dialogue context in compact canonical form."""
-    pairs = _canonical_dialogue_pairs(payload)
-    if not pairs:
-        return {}, {}
-
-    latest = pairs[-1]
-    immediate = {
-        "user": _safe_text(latest.get("user"))[:120],
-        "april": _safe_text(latest.get("april"))[:150],
-    }
-    rolling = _pack_cascade_dialogue(pairs, max_estimated_tokens=120)
-    return immediate, rolling
-
-
 def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     """
     Semantic context selection. It does not key off magic words.
@@ -953,24 +746,6 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     fields: list[tuple[str, Any]] = []
     fields.append(("CURRENT_REQUEST", current))
 
-    # These signals are produced by the Quantum Processor. Provider only realizes
-    # them as language/output and never creates a competing decision path.
-    response_guidance = payload.get("response_guidance")
-    if isinstance(response_guidance, dict) and response_guidance:
-        fields.append(("PROCESSOR_RESPONSE_GUIDANCE", response_guidance))
-
-    current_visual_evidence = payload.get("current_visual_evidence")
-    if isinstance(current_visual_evidence, dict) and current_visual_evidence:
-        fields.append(("CURRENT_VISUAL_EVIDENCE", current_visual_evidence))
-
-    # A compact immediate pair is always available as semantic evidence. This
-    # keeps short follow-ups such as "Ты уверен?" connected even if another
-    # layer conservatively labels the turn INDEPENDENT. The provider is instructed
-    # to use it only when the current request semantically depends on it.
-    immediate_dialogue, rolling_dialogue = _dialogue_memory_priority(payload)
-    if immediate_dialogue:
-        fields.append(("IMMEDIATE_DIALOGUE", immediate_dialogue))
-
     dialog_act = _safe_text(dialogue.get("dialog_act")).lower()
     continuation = bool(dialogue.get("continuation"))
     reference = dialog_act == "reference" or bool(dialogue.get("reply_to"))
@@ -979,94 +754,21 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
         continuation or reference or same_goal
     )
 
-    # The full rolling cascade is admitted only when the processor has declared
-    # that prior dialogue is relevant. It is compacted before budget selection,
-    # so adding this field never expands the configured input-token ceiling.
-    if rolling_dialogue and (
-        continuation
-        or reference
-        or topic_relation
-        or bool(dialogue.get("context_dependency"))
-        or bool(payload.get("history_dependent_task"))
-    ):
-        fields.append(("DIALOGUE_MEMORY", rolling_dialogue))
-
-    # The compact dialogue vector is a first-class semantic context field.
-    # It explains what has already been established and what is being developed,
-    # without replaying the whole conversation.
-    vector_payload = payload.get("dialogue_vector") or dialogue.get("dialogue_vector")
-    dialogue_delta = payload.get("dialogue_delta") or dialogue.get("delta")
-    render_continuity = payload.get("render_continuity") or {}
-    if continuation or reference or topic_relation or vector_payload:
+    # A small self-contained dialogue vector is nearly always useful when the
+    # processor has already resolved a continuation/reference relation.
+    if continuation or reference or topic_relation:
         vector = {
             "dialog_act": dialogue.get("dialog_act"),
-            "relation": dialogue.get("relation"),
-            "subtype": dialogue.get("subtype"),
             "continuation": continuation,
             "reply_to": dialogue.get("reply_to"),
             "active_goal": dialogue.get("active_goal"),
             "active_topic": dialogue.get("active_topic"),
+            "previous_april_turn": dialogue.get("previous_april_turn"),
             "previous_user_turn": dialogue.get("previous_user_turn"),
-            "avoid_repeat": True,
         }
-        if isinstance(vector_payload, dict):
-            vector["semantic_relation"] = vector_payload.get("relation")
-            vector["delta_mode"] = vector_payload.get("delta_mode")
-            vector["shared_tokens"] = vector_payload.get("shared_tokens", [])[:20]
-            vector["new_tokens"] = vector_payload.get("new_tokens", [])[:20]
-        if isinstance(dialogue_delta, dict):
-            vector["delta"] = dialogue_delta
-        if isinstance(render_continuity, dict):
-            vector["render_continuity"] = {
-                "mode": render_continuity.get("mode"),
-                "reuse_existing_scene": bool(render_continuity.get("reuse_existing_scene")),
-                "previous_render_types": render_continuity.get("previous_render_types", [])[:10],
-                "avoid_repeat": True,
-            }
-        resolved_scene = dialogue.get("resolved_scene")
-        if not (isinstance(resolved_scene, dict) and resolved_scene.get("scene_id")):
-            vector["previous_april_turn"] = dialogue.get("previous_april_turn")
-        fields.append(("DIALOGUE_VECTOR", _compact_value(vector, max_items=12, max_keys=16)))
+        fields.append(("DIALOGUE_VECTOR", _compact_value(vector, max_items=6, max_keys=8)))
 
-    resolved_scene = dialogue.get("resolved_scene")
-    if isinstance(resolved_scene, dict) and resolved_scene.get("scene_id"):
-        # The interpretation layer has already resolved which scene is relevant.
-        # First send a compact canonical artifact payload. This is the actual data
-        # required to continue/edit the previous renderer without asking the model
-        # to reconstruct it from verbose presentation metadata.
-        artifact_context = _extract_resolved_artifact_context(resolved_scene)
-        if artifact_context:
-            fields.append((
-                "RESOLVED_ARTIFACT_CONTEXT",
-                _compact_value(
-                    {
-                        "scene_id": resolved_scene.get("scene_id"),
-                        "relation": resolved_scene.get("relation"),
-                        "artifacts": artifact_context,
-                    },
-                    max_items=6,
-                    max_keys=8,
-                ),
-            ))
-
-        # Keep the scene envelope semantic and compact. The canonical artifact
-        # data above replaces the previous verbose render/presentation dump.
-        fields.append(("RESOLVED_SCENE_CONTEXT", _compact_value(
-            {
-                "relation": resolved_scene.get("relation"),
-                "scene_id": resolved_scene.get("scene_id"),
-                "turn_id": resolved_scene.get("turn_id"),
-                "topic": resolved_scene.get("topic"),
-                "user_request": resolved_scene.get("user_request"),
-                "answer": resolved_scene.get("answer"),
-                "summary": resolved_scene.get("summary"),
-                "render_block_types": resolved_scene.get("render_block_types"),
-                "presentation_types": resolved_scene.get("presentation_types"),
-                "confidence": resolved_scene.get("confidence"),
-            },
-            max_items=10, max_keys=12,
-        )))
-    elif continuation and dialogue.get("previous_april_turn"):
+    if continuation and dialogue.get("previous_april_turn"):
         fields.append(("PREVIOUS_APRIL_TURN", dialogue.get("previous_april_turn")))
 
     if same_goal:
@@ -1083,34 +785,11 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     if competencies:
         fields.append(("COMPETENCIES", competencies))
 
-    # Visual schema is semantic planning evidence (function/timeline/series/etc.),
-    # not a renderer trigger. Send it whenever a structured output was authorized.
-    schema = (
-        payload.get("visual_schema")
-        or (payload.get("semantic") or {}).get("visual_schema")
-        or (payload.get("interpretation") or {}).get("visual_schema")
-    )
-    if schema and requested_outputs:
-        fields.append(("VISUAL_SCHEMA", {
-            "schema": schema,
-            "confidence": (
-                payload.get("visual_schema_confidence")
-                or (payload.get("semantic") or {}).get("visual_schema_confidence")
-                or 0.0
-            ),
-        }))
-
     memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
     memory_mode = _safe_text(memory.get("retrieval_mode") or "").lower()
     dynamic_memory = memory.get("dynamic_memory")
-    if memory_mode == "memory_query":
-        # MEMORY_QUERY is itself an explicit authorization to carry the rolling
-        # dialogue cascade. The compact ledger remains bounded by the same input
-        # token envelope, so this does not raise the configured limit.
-        if rolling_dialogue and not any(label == "DIALOGUE_MEMORY" for label, _ in fields):
-            fields.append(("DIALOGUE_MEMORY", rolling_dialogue))
-        if dynamic_memory:
-            fields.append(("MEMORY_RECALL", dynamic_memory))
+    if memory_mode == "memory_query" and dynamic_memory:
+        fields.append(("MEMORY_RECALL", dynamic_memory))
 
     # Visual context is sent only for an actual visual/artifact relation.
     visual = payload.get("visual_context")
@@ -1140,43 +819,16 @@ def _build_provider_user_text(payload: dict[str, Any], budget_tokens: int) -> st
     mandatory = [
         "APRIL CANONICAL REQUEST",
         render("REQUEST", fields[0][1]),
-        render("PROCESSOR_BEHAVIOR", "answer naturally as April; focus on the user's actual purpose; avoid canned capability lists"),
         render("REQUESTED_OUTPUTS", payload.get("requested_outputs") or []),
         render("COMPLEXITY", complexity),
         render("OUTPUT_CAP", output_tokens),
     ]
 
     pieces = list(mandatory)
+    used = _estimate_input_tokens("\n".join(pieces))
     soft_limit = max(1, budget_tokens - 10)
 
-    # Priority is semantic, not textual:
-    # current request > immediate dialogue > rolling cascade > resolved scene /
-    # artifact > dialogue vector > plan/competencies > optional diagnostics.
-    priority = {
-        "PROCESSOR_RESPONSE_GUIDANCE": 0,
-        "IMMEDIATE_DIALOGUE": 1,
-        "DIALOGUE_MEMORY": 2,
-        "CURRENT_VISUAL_EVIDENCE": 3,
-        "RESOLVED_ARTIFACT_CONTEXT": 4,
-        "RESOLVED_SCENE_CONTEXT": 5,
-        "DIALOGUE_VECTOR": 6,
-        "PREVIOUS_APRIL_TURN": 7,
-        "RESOLVED_GOAL": 8,
-        "REQUESTED_OUTPUTS": 9,
-        "REQUIRED_ARTIFACTS": 10,
-        "COMPETENCIES": 11,
-        "VISUAL_SCHEMA": 12,
-        "MEMORY_RECALL": 13,
-        "VISUAL_CONTEXT": 14,
-        "RESPONSE_DECISION": 15,
-        "SEMANTIC_STATE": 16,
-    }
-
-    ordered_fields = sorted(
-        enumerate(fields[1:]),
-        key=lambda item: (priority.get(item[1][0], 50), item[0]),
-    )
-    for _, (label, value) in ordered_fields:
+    for label, value in fields[1:]:
         candidate = render(label, value)
         candidate_total = _estimate_input_tokens("\n".join(pieces + [candidate]))
         if candidate_total <= soft_limit:
@@ -1204,93 +856,46 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     user_message = build_openai_request(machine_request)
     user_text = user_message["content"][0]["text"]
 
-    # The hard 900-token input envelope applies to the final Provider packet.
-    # If the first semantic packing pass reaches the boundary, rebuild from the
-    # smallest canonical cascade ledger rather than dropping conversation history.
+    # If the conservative estimator still exceeds the boundary, rebuild from
+    # the already-computed semantic fields. This is logical machine-packet
+    # compression, not character truncation: intent, goal, representation plan
+    # and output constraints survive while verbose transport context is removed.
     if _estimate_input_tokens(user_text) > remaining:
         payload = machine_request_to_dict(machine_request)
         intent = payload.get("intent") or {}
+        constraints = payload.get("constraints") or {}
+        representation_plan = constraints.get("representation_plan") or {}
         current = _extract_request_text(payload)
         complexity = _derive_complexity(payload)
         output_tokens = _derive_output_tokens(payload)
-        immediate, rolling = _dialogue_memory_priority(payload)
 
-        pieces = [
+        compact_fields = [
             "APRIL CANONICAL REQUEST",
+            f"GOAL: {_safe_text(payload.get('goal')).strip()}",
+            f"INTENT_TYPE: {_safe_text(intent.get('type')).strip()}",
             f"REQUEST: {current}",
-            "PROCESSOR_BEHAVIOR: answer naturally as April; focus on the user's actual purpose; avoid canned capability lists",
+            f"ASSISTANT_IDENTITY: {json.dumps({"name": APRIL_IDENTITY.get("name", "April"), "mode": APRIL_IDENTITY.get("identity_mode", "integrated")}, ensure_ascii=False, separators=(",", ":"))}",
+            f"REQUESTED_OUTPUTS: {json.dumps(payload.get('requested_outputs') or [], ensure_ascii=False, separators=(',', ':'))}",
+            f"REQUIRED_ARTIFACTS: {json.dumps(payload.get('required_artifacts') or [], ensure_ascii=False, separators=(',', ':'))}",
+            f"REPRESENTATION_PLAN: {json.dumps(representation_plan, ensure_ascii=False, separators=(',', ':'), default=str)}",
+            f"COMPLEXITY: {complexity}",
+            f"OUTPUT_CAP: {output_tokens}",
+            "Preserve the logical request; omit verbose transport context.",
+            "Return one complete logical answer as JSON.",
         ]
-
-        response_guidance = payload.get("response_guidance")
-        if isinstance(response_guidance, dict) and response_guidance:
-            candidate = "PROCESSOR_RESPONSE_GUIDANCE: " + json.dumps(
-                response_guidance, ensure_ascii=False, separators=(",", ":"), default=str
-            )
-            if _estimate_input_tokens("\n".join(pieces + [candidate])) <= remaining:
-                pieces.append(candidate)
-
-        current_visual_evidence = payload.get("current_visual_evidence")
-        if isinstance(current_visual_evidence, dict) and current_visual_evidence:
-            candidate = "CURRENT_VISUAL_EVIDENCE: " + json.dumps(
-                current_visual_evidence, ensure_ascii=False, separators=(",", ":"), default=str
-            )
-            if _estimate_input_tokens("\n".join(pieces + [candidate])) <= remaining:
-                pieces.append(candidate)
-
-        # Keep the immediate pair first because it is the cheapest way to
-        # preserve short-turn conversational continuity.
-        if immediate:
-            candidate = "IMMEDIATE_DIALOGUE: " + json.dumps(
-                immediate, ensure_ascii=False, separators=(",", ":")
-            )
-            if _estimate_input_tokens("\n".join(pieces + [candidate])) <= remaining:
-                pieces.append(candidate)
-
-        # Then keep the compact rolling USER→APRIL cascade when there is room.
-        if rolling:
-            candidate = "DIALOGUE_MEMORY: " + json.dumps(
-                rolling, ensure_ascii=False, separators=(",", ":")
-            )
-            if _estimate_input_tokens("\n".join(pieces + [candidate])) <= remaining:
-                pieces.append(candidate)
-
-        # History-dependent arithmetic/semantic evidence is tiny and outranks
-        # optional presentation metadata.
-        history_task_context = {}
-        conversation = payload.get("conversation")
-        if isinstance(conversation, dict):
-            history_task_context = conversation.get("history_task_context")
-        if isinstance(history_task_context, dict) and history_task_context.get("required"):
-            compact_history = {
-                "required": True,
-                "operation": history_task_context.get("operation")
-                    or history_task_context.get("arithmetic_operation"),
-                "resolved_operands": list(history_task_context.get("resolved_operands") or [])[:8],
-                "available_numeric_results": history_task_context.get("available_numeric_results", 0),
-            }
-            candidate = "HISTORY_TASK: " + json.dumps(
-                compact_history, ensure_ascii=False, separators=(",", ":")
-            )
-            if _estimate_input_tokens("\n".join(pieces + [candidate])) <= remaining:
-                pieces.append(candidate)
-
-        for label, value in (
-            ("INTENT_TYPE", intent.get("type")),
-            ("REQUESTED_OUTPUTS", payload.get("requested_outputs") or []),
-            ("COMPLEXITY", complexity),
-            ("OUTPUT_CAP", output_tokens),
-        ):
-            if value in (None, "", [], {}):
-                continue
-            candidate = f"{label}: " + (
-                json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
-                if isinstance(value, (dict, list, tuple))
-                else _safe_text(value)
-            )
-            if _estimate_input_tokens("\n".join(pieces + [candidate])) <= remaining:
-                pieces.append(candidate)
-
-        pieces.append("Return one complete logical answer as JSON.")
+        # Drop the least critical verbose fields until the whole machine packet
+        # fits the 900-token envelope. The current request itself is retained.
+        removable = {"REPRESENTATION_PLAN:", "REQUIRED_ARTIFACTS:", "INTENT_TYPE:"}
+        pieces = []
+        for piece in compact_fields:
+            trial = "\n".join(pieces + [piece])
+            if _estimate_input_tokens(trial) <= remaining:
+                pieces.append(piece)
+            elif piece.split(":", 1)[0] + ":" not in removable:
+                # Preserve the authoritative current request even when other
+                # machine metadata has to yield to the 900-token envelope.
+                if piece.startswith("REQUEST:"):
+                    pieces.append(piece)
         user_text = "\n".join(pieces)
         user_message = {
             "role": "user",
@@ -1302,7 +907,7 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         "input_token_budget": INPUT_TOKEN_BUDGET,
         "estimated_input_tokens": estimated,
         "input_budget_enforced": estimated <= INPUT_TOKEN_BUDGET,
-        "context_strategy": "semantic_field_selection_with_cascade_memory",
+        "context_strategy": "semantic_field_selection",
         "current_request_truncation": False,
         "canonical_packet_fingerprint": _provider_packet_fingerprint(user_text),
     })
@@ -1398,32 +1003,6 @@ def _unwrap_model_answer(value: Any) -> str:
     return text
 
 
-def _decode_json_envelope(value: Any) -> Any:
-    """
-    Decode a machine envelope only when the value is itself serialized JSON.
-    This is transport normalization, not semantic routing: natural prose is
-    returned unchanged and no representation is inferred from its wording.
-    """
-    if not isinstance(value, str):
-        return value
-    text = normalize_response_text(value)
-    if not text:
-        return value
-    if text.startswith("```") and text.endswith("```"):
-        lines = text.splitlines()
-        if len(lines) >= 3:
-            text = "\n".join(lines[1:-1]).strip()
-            if text.lower().startswith("json\n"):
-                text = text[5:].lstrip("\n")
-    if not text.startswith(("{", "[")):
-        return value
-    try:
-        parsed = json.loads(text)
-    except Exception:
-        return value
-    return parsed
-
-
 def _sanitize_render_block_texts(blocks: Any, answer: str) -> list:
     sanitized = []
     for block in list(blocks or []):
@@ -1447,29 +1026,6 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         return raw_text
 
     parsed = raw_text if isinstance(raw_text, dict) else _parse_provider_json(raw_text)
-
-    # The canonical model contract may itself be serialized inside answer/content.
-    # Decode that envelope before selecting render_blocks so structured table,
-    # graph, formula, link, gallery and diagram payloads cannot be trapped inside
-    # a human-text field.
-    for envelope_key in ("answer", "content", "response", "payload", "data"):
-        nested = _decode_json_envelope(parsed.get(envelope_key))
-        if isinstance(nested, dict) and any(
-            key in nested
-            for key in ("answer", "content", "summary", "render_blocks", "artifacts", "scene")
-        ):
-            merged = dict(parsed)
-            merged.update(nested)
-            for key in (
-                "answer", "content", "summary", "render_blocks", "artifacts",
-                "scene", "scene_plan", "render_priority", "metadata",
-                "renderer_state", "presentation",
-            ):
-                if key in nested:
-                    merged[key] = nested[key]
-            parsed = merged
-            break
-
     answer = _unwrap_model_answer(
         parsed.get("answer") or parsed.get("content") or parsed.get("response") or ""
     )
@@ -1529,20 +1085,7 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             block for block in blocks
             if str(block.get("type") or block.get("artifact_type") or "").lower() in {"text", "markdown"}
         ]
-        # A text-only request cannot acquire a structured artifact as a side
-        # effect of model output. This blocks accidental/random tables, graphs,
-        # formulas or links from becoming renderer input downstream.
-        artifacts = []
-        scene_plan = ["text"]
-        render_priority = []
-    processor_guidance = source_payload.get("response_guidance")
-    processor_visual = source_payload.get("current_visual_evidence")
     metadata.update({
-        "processor_response_guidance": (
-            _compact_value(processor_guidance, max_items=8, max_keys=12)
-            if isinstance(processor_guidance, dict) else {}
-        ),
-        "processor_visual_evidence_received": bool(processor_visual),
         "provider_version": APRIL_QUANTUM_PROVIDER_VERSION,
         "provider_model": APRIL_QUANTUM_PROVIDER_MODEL,
         "provider_calls": 1,
@@ -1582,56 +1125,6 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
     }
 
 
-
-def _filter_render_outputs_to_plan(blocks: list[dict], artifacts: list[dict], requested_outputs: list[str]):
-    """Enforce the processor-owned output plan after model decoding.
-
-    The model may provide helpful prose, but it cannot introduce a second
-    renderer that the current semantic plan did not authorize.
-    """
-    allowed = {str(x).strip().lower() for x in (requested_outputs or ["text"])}
-    if "markdown" in allowed:
-        allowed.add("text")
-    if "visual" in allowed:
-        allowed.add("graph")
-    if "plot" in allowed:
-        allowed.add("graph")
-    structured_allowed = {x for x in allowed if x not in {"text", "markdown"}}
-
-    def kind(item):
-        if not isinstance(item, dict):
-            return ""
-        return str(item.get("type") or item.get("artifact_type") or item.get("representation") or "").strip().lower()
-
-    clean_blocks = []
-    for block in blocks or []:
-        k = kind(block)
-        if k in {"text", "markdown"} or k in structured_allowed:
-            clean_blocks.append(block)
-
-    clean_artifacts = []
-    for artifact in artifacts or []:
-        k = kind(artifact)
-        if k in structured_allowed:
-            clean_artifacts.append(artifact)
-    return clean_blocks, clean_artifacts
-
-
-def _strip_unrequested_code_fences(answer: str, requested_outputs: list[str]) -> str:
-    if "code" in {str(x).strip().lower() for x in (requested_outputs or [])}:
-        return answer
-    if not answer or "```" not in answer:
-        return answer
-    lines = answer.splitlines()
-    out, inside = [], False
-    for line in lines:
-        if line.strip().startswith("```"):
-            inside = not inside
-            continue
-        if not inside:
-            out.append(line)
-    return "\n".join(out).strip()
-
 def provider_finalize_for_executor(contract: dict) -> dict:
     if not isinstance(contract, dict):
         raise RuntimeError("Provider contract must be a dict.")
@@ -1651,7 +1144,6 @@ def provider_finalize_for_executor(contract: dict) -> dict:
 
     # Remove duplicated full structured representations from the narrative channel.
     answer = _strip_duplicate_structured_text(answer, requested_outputs)
-    answer = _strip_unrequested_code_fences(answer, requested_outputs)
 
     constraints = payload.get("constraints", {}) if isinstance(payload.get("constraints"), dict) else {}
     metadata = constraints.get("metadata", {}) if isinstance(constraints.get("metadata"), dict) else {}
@@ -1662,12 +1154,21 @@ def provider_finalize_for_executor(contract: dict) -> dict:
         or (constraints.get("dialogue_act") == "self_identification")
     )
 
-    # Identity is decided by the Processor. Keep the Provider's natural answer;
-    # do not overwrite it with a fixed capabilities paragraph.
+    # Identity is a processor-owned semantic decision. Provider never infers it
+    # from phrases and never exposes its internal model identity to the user.
     if identity_request:
-        parsed_metadata = parsed.get("metadata")
-        if isinstance(parsed_metadata, dict):
-            parsed_metadata["identity_request_processor_owned"] = True
+        identity = APRIL_IDENTITY if isinstance(APRIL_IDENTITY, dict) else {}
+        identity_name = _safe_text(identity.get("name") or "April")
+        capabilities = identity.get("capabilities") if isinstance(identity.get("capabilities"), list) else []
+        capability_text = ", ".join(str(x) for x in capabilities[:6] if x)
+        answer = (
+            f"Я — {identity_name}. Я веду с тобой единый диалог, понимаю смысл запроса, "
+            f"учитываю релевантный контекст и могу работать с текстом, голосом, изображениями "
+            f"и структурированными представлениями ответа"
+            + (f", включая {capability_text}." if capability_text else ".")
+            + " Внутри April использует модельные и вычислительные инструменты, "
+              "но пользователь общается именно с April."
+        )
 
     mr["answer"] = answer
     mr["content"] = answer
@@ -1681,9 +1182,6 @@ def provider_finalize_for_executor(contract: dict) -> dict:
     original_blocks = _materialize_artifacts_as_render_blocks(
         mr["artifacts"],
         original_blocks,
-    )
-    original_blocks, mr["artifacts"] = _filter_render_outputs_to_plan(
-        original_blocks, mr["artifacts"], requested_outputs
     )
     mr["render_blocks"] = _dedupe_render_blocks(
         original_blocks,
@@ -1806,7 +1304,7 @@ async def generate_text(messages: Any, temperature: Any = None,
         # the request's own response budget.
         output_tokens = _derive_output_tokens(source_request, None)
         if not (MIN_OUTPUT_TOKENS <= output_tokens <= MAX_OUTPUT_TOKENS):
-            raise RuntimeError("Provider budget outside canonical 1..8000 range")
+            raise RuntimeError("Provider budget outside canonical 16..8000 range")
         normalized_input = normalize_provider_input(source_request)
 
         request = {
