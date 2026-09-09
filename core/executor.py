@@ -46,7 +46,7 @@ from blocks.image_system import scan_image, render_visual_answer, NANO_PRINTER_V
 PROCESSOR_VERSION = "april_quantum_processor_quantum64_v49_provider_signal_visual_dialogue_fix_r1"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
-OUTPUT_MIN_TOKENS = 1
+OUTPUT_MIN_TOKENS = 16
 OUTPUT_MAX_TOKENS = 8000
 
 # Canonical structural dimensions of the single processor matrix.
@@ -7256,9 +7256,19 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "input_token_budget": 900,
         "single_route": True,
     })
+    # OpenAI Responses API requires max_output_tokens >= 16.
+    # Keep the canonical request budget intact, but enforce the transport floor
+    # at the final Provider boundary so an invalid value can never be sent.
+    provider_output_tokens = max(
+        OUTPUT_MIN_TOKENS,
+        min(OUTPUT_MAX_TOKENS, int(request.response_output_tokens or OUTPUT_MIN_TOKENS)),
+    )
+    request.response_output_tokens = provider_output_tokens
+    request.max_output_tokens = provider_output_tokens
+
     provider_result = await generate_text(
         request,
-        max_output_tokens=request.response_output_tokens,
+        max_output_tokens=provider_output_tokens,
     )
     response = _response(provider_result, request)
     _record_engine_handoff(
