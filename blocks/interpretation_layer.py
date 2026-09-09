@@ -620,11 +620,13 @@ class QuantumContextUnderstandingEngine:
         profile: dict[str, Any],
         modality: dict[str, Any],
     ) -> dict[str, Any]:
-        """Compile an action/output vector from semantic evidence.
+        """Compile the COMPLETE current-turn action/output vector.
 
-        Operation is measured by the existing matrix. Structured outputs are
-        admitted when operation + object semantics agree; raw words are never
-        used as renderer commands.
+        The whole request is interpreted as an ordered set of semantic segments.
+        Each segment is measured independently and the resulting output plan is
+        merged without allowing one dominant representation to erase another.
+        The primary representation is still useful downstream, but it is never
+        treated as the complete task when the user asked for multiple results.
         """
         scores = {
             key: float(value or 0.0)
@@ -641,10 +643,8 @@ class QuantumContextUnderstandingEngine:
 
         op_rank = sorted(scores.items(), key=lambda item: item[1], reverse=True)
         best = op_rank[0][0] if op_rank else "answer"
-        flags = modality.get("flags", {})
+        flags = modality.get("flags", {}) if isinstance(modality, dict) else {}
 
-        # Explicit arithmetic structure is strong CALCULATE evidence even when
-        # natural-language wording pulls another operation prototype upward.
         if flags.get("number") and re.search(
             r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?\s*[+\-*/×÷]\s*[-+]?\d+(?:[.,]\d+)?(?![\w.])",
             text,
@@ -653,7 +653,7 @@ class QuantumContextUnderstandingEngine:
 
         compatible = {
             "formula": {"calculate", "answer", "explain", "present", "build", "modify"},
-            "code": {"build", "modify", "present", "explain", "analyze"},
+            "code": {"build", "modify", "present", "explain", "analyze", "list"},
             "link": {"retrieve", "present", "answer", "list", "explain"},
             "table": {"build", "present", "compare", "list", "explain", "analyze"},
             "graph": {"build", "present", "calculate", "analyze", "compare", "list", "explain"},
@@ -661,87 +661,195 @@ class QuantumContextUnderstandingEngine:
             "image": {"build", "present", "modify", "create"},
             "gallery": {"build", "present", "compare", "list"},
             "file": {"retrieve", "present", "analyze", "read"},
-            "audio": {"retrieve", "present", "analyze", "read"},
-            "video": {"retrieve", "present", "analyze", "read"},
+            "audio": {"build", "present", "retrieve", "analyze", "read"},
+            "video": {"build", "present", "retrieve", "analyze", "read"},
         }
 
-        candidates = []
-        for action in cls.ACTION_UNIVERSE:
-            score = float(scores.get(action, 0.0) or 0.0)
-            if score >= 0.05:
-                candidates.append({"action": action, "score": round(score, 6)})
+        candidates = [
+            {"action": action, "score": round(float(score), 6)}
+            for action, score in sorted(scores.items(), key=lambda item: item[1], reverse=True)
+            if score >= 0.05
+        ]
 
-        outputs: list[str] = []
+        # Preserve the user's semantic order. This is the key repair for compound
+        # requests: each current-turn clause can contribute a distinct result.
+        segments = cls._request_segments(text)
+        segment_plans: list[dict[str, Any]] = []
+        ordered_outputs: list[str] = []
 
-        # Structural numeric expression: the answer itself is a numerical result,
-        # usually accompanied by text explanation.
+        def append_output(label: str, segment_index: int, source: str, score: float = 0.0) -> None:
+            label = _clean_representation(label)
+            if not label or label == "text":
+                return
+            if label not in ordered_outputs:
+                ordered_outputs.append(label)
+            segment_plans.append({
+                "segment_index": segment_index,
+                "output": label,
+                "source": source,
+                "score": round(float(score or 0.0), 6),
+            })
+
+        # First, measure each clause on its own. This prevents a strong "image"
+        # clause from suppressing a separate "code" clause in the same request.
+        for segment in segments:
+            segment_text = cls._compact(segment.get("text"))
+            if not segment_text:
+                continue
+
+            segment_modality = cls._modality_evidence(segment_text)
+            sf = segment_modality.get("flags", {}) if isinstance(segment_modality, dict) else {}
+            segment_scores = {
+                "representation": QUANTUM_INTERPRETATION_ENGINE._family_scores(segment_text, "representation", REPRESENTATION_HYPOTHESES),
+                "object": QUANTUM_INTERPRETATION_ENGINE._family_scores(segment_text, "object", OBJECT_HYPOTHESES),
+                "operation": QUANTUM_INTERPRETATION_ENGINE._operation_family_scores(segment_text),
+                "goal": QUANTUM_INTERPRETATION_ENGINE._family_scores(segment_text, "goal", GOAL_HYPOTHESES),
+            }
+            segment_ops = segment_scores["operation"]
+            segment_op = max(segment_ops.items(), key=lambda item: float(item[1] or 0.0))[0] if segment_ops else "answer"
+
+            # Structural modalities are high-confidence evidence for their own
+            # clause. A code clause such as "выдай дополненным кодом" does not need
+            # a Python syntax fragment in the input to count as a code output.
+            structural_flags = {
+                "code": bool(sf.get("code")),
+                "image": bool(sf.get("image")) and not bool(sf.get("screenshot")),
+                "gallery": False,
+                "table": bool(sf.get("table")),
+                "graph": bool(sf.get("graph")),
+                "diagram": bool(sf.get("diagram")),
+                "formula": bool(sf.get("formula")),
+                "link": bool(sf.get("link")),
+                "file": bool(sf.get("file")),
+                "audio": bool(sf.get("audio")),
+                "video": bool(sf.get("video")),
+            }
+
+            for label, active in structural_flags.items():
+                if active:
+                    append_output(label, int(segment.get("segment_index", 1)), "segment_modality", 1.0)
+
+            # Semantic representation/object agreement can add another result even
+            # when the wording is indirect ("выдай ... кодом", "покажи ... картинке").
+            rep_items = sorted(
+                segment_scores["representation"].items(),
+                key=lambda item: float(item[1] or 0.0),
+                reverse=True,
+            )
+            obj_items = sorted(
+                segment_scores["object"].items(),
+                key=lambda item: float(item[1] or 0.0),
+                reverse=True,
+            )
+            top_rep, top_rep_score = rep_items[0] if rep_items else ("", 0.0)
+            top_obj, top_obj_score = obj_items[0] if obj_items else ("", 0.0)
+
+            for rep_pos, (label, score) in enumerate(rep_items[:5]):
+                label_score = float(score or 0.0)
+                object_score = float(
+                    segment_scores["object"].get(label, 0.0) or 0.0
+                )
+                compatible_op = segment_op in compatible.get(label, set())
+                # Keep the semantically strongest representation for a clause.
+                # A close runner-up such as gallery beside image is not a second
+                # user request unless its object evidence independently confirms it.
+                semantic_agreement = (
+                    label_score >= 0.10
+                    and (
+                        object_score >= 0.08
+                        or (rep_pos == 0 and label_score >= 0.16 and compatible_op)
+                    )
+                )
+                if semantic_agreement:
+                    append_output(
+                        label,
+                        int(segment.get("segment_index", 1)),
+                        "segment_representation_matrix",
+                        max(label_score, object_score),
+                    )
+
+            if top_obj in STRUCTURED_REPRESENTATIONS:
+                obj_score = float(top_obj_score or 0.0)
+                # Compact clauses such as "выдай дополненным кодом" can carry a
+                # clear semantic object while remaining lexically short. Accept
+                # the measured best object at a lower floor, but only when the
+                # operation and object are semantically compatible.
+                if obj_score >= 0.05 and segment_op in compatible.get(top_obj, set()):
+                    append_output(
+                        top_obj,
+                        int(segment.get("segment_index", 1)),
+                        "segment_object_matrix",
+                        obj_score,
+                    )
+
+        # Whole-turn evidence remains a fallback and also preserves numeric,
+        # explicit modalities already measured before segmentation.
         if flags.get("number") and best in {"calculate", "answer"}:
-            outputs.append("number")
+            if "number" not in ordered_outputs:
+                ordered_outputs.append("number")
 
-        # The request's semantic object can authorize a structured output even when
-        # the character-level representation rank is polluted by decorative words.
         compatible_object_candidates = []
         for label, obj_score in objects.items():
             if label not in cls.OUTPUT_UNIVERSE or label == "text":
                 continue
             if best in compatible.get(label, set()) and obj_score >= 0.08:
                 compatible_object_candidates.append((label, obj_score))
-        compatible_object_candidates.sort(key=lambda item: item[1], reverse=True)
-        for label, _ in compatible_object_candidates[:4]:
-            outputs.append(label)
+        for label, obj_score in sorted(
+            compatible_object_candidates,
+            key=lambda item: item[1],
+            reverse=True,
+        )[:4]:
+            append_output(label, 1, "whole_turn_object_matrix", obj_score)
 
-        # Representation measurements remain evidence, not a hard trigger. When
-        # they agree with the current operation, they contribute to the output plan.
-        for label, rep_score in sorted(reps.items(), key=lambda item: item[1], reverse=True):
+        for label, rep_score in sorted(
+            reps.items(), key=lambda item: item[1], reverse=True
+        ):
             if label == "text" or label not in cls.OUTPUT_UNIVERSE:
                 continue
-            if rep_score < 0.10:
+            if float(rep_score or 0.0) < 0.10:
                 continue
             if best in compatible.get(label, set()) or label in {
                 "formula" if flags.get("formula") else "",
                 "code" if flags.get("code") else "",
                 "link" if flags.get("link") else "",
+                "table" if flags.get("table") else "",
+                "graph" if flags.get("graph") else "",
+                "diagram" if flags.get("diagram") else "",
+                "image" if flags.get("image") and not flags.get("screenshot") else "",
             }:
-                outputs.append(label)
+                append_output(label, 1, "whole_turn_representation_matrix", rep_score)
 
-        # Explicit input/output modality mapping.
-        if flags.get("formula"):
-            outputs.append("formula")
-        if flags.get("code"):
-            outputs.append("code")
-        if flags.get("link"):
-            outputs.append("link")
-        if flags.get("table"):
-            outputs.append("table")
-        if flags.get("graph"):
-            outputs.append("graph")
-        if flags.get("diagram"):
-            outputs.append("diagram")
         if flags.get("screenshot"):
-            # Reading/analysing a screenshot produces an understanding, not another
-            # screenshot. A later renderer may display an annotated result, but the
-            # semantic output is visual_context unless the current request explicitly
-            # asks to create a new image.
-            outputs.append("visual_context")
+            append_output("visual_context", 1, "whole_turn_screenshot_input", 1.0)
         elif flags.get("image"):
-            outputs.append("image")
-        if flags.get("file"):
-            outputs.append("file")
-        if flags.get("audio"):
-            outputs.append("audio")
-        if flags.get("video"):
-            outputs.append("video")
+            append_output("image", 1, "whole_turn_image_input", 1.0)
+        for label in ("table", "graph", "diagram", "formula", "link", "file", "audio", "video", "code"):
+            if flags.get(label):
+                append_output(label, 1, "whole_turn_modality", 1.0)
 
+        # The current turn always keeps a human-readable answer channel in
+        # addition to every requested structured result.
+        if ordered_outputs and "text" not in ordered_outputs:
+            ordered_outputs.append("text")
         return {
             "primary": best,
             "primary_score": float(scores.get(best, 0.0) or 0.0),
-            "candidates": candidates[:16],
-            "requested_outputs": list(dict.fromkeys(outputs)),
+            "candidates": candidates[:24],
+            "requested_outputs": list(dict.fromkeys(ordered_outputs)),
+            "output_segments": segment_plans,
             "output_evidence": {
-                "object_scores": {k: round(float(v), 6) for k, v in sorted(objects.items(), key=lambda item: item[1], reverse=True)[:12]},
-                "representation_scores": {k: round(float(v), 6) for k, v in sorted(reps.items(), key=lambda item: item[1], reverse=True)[:12]},
+                "object_scores": {
+                    k: round(float(v), 6)
+                    for k, v in sorted(objects.items(), key=lambda item: item[1], reverse=True)[:16]
+                },
+                "representation_scores": {
+                    k: round(float(v), 6)
+                    for k, v in sorted(reps.items(), key=lambda item: item[1], reverse=True)[:16]
+                },
+                "segment_count": len(segments),
+                "complete_request": True,
             },
-            "source": "task_action_matrix",
+            "source": "complete_current_turn_task_matrix",
         }
 
     @classmethod
@@ -809,7 +917,7 @@ class QuantumContextUnderstandingEngine:
         previous_scene: dict[str, Any] | None,
     ) -> list[dict[str, Any]]:
         profiles = []
-        current_entities = self._entities(current)
+        current_entities = QuantumContextUnderstandingEngine._entities(current)
         candidates = list(reversed(recent_pairs[-self.TOPIC_WINDOW:]))
         if active_topic:
             candidates.insert(0, {"user": active_topic, "assistant": active_topic, "source": "active_topic"})
@@ -822,7 +930,7 @@ class QuantumContextUnderstandingEngine:
             sim, source = self._embedding_similarity(current, pair_text)
             prior_entities = self._entities(pair_text)
             shared = self._shared_entities(current_entities, prior_entities)
-            current_terms = set(self._content_tokens(current))
+            current_terms = set(QuantumContextUnderstandingEngine._content_tokens(current))
             prior_terms = set(self._content_tokens(pair_text))
             lexical_overlap = (
                 len(current_terms & prior_terms) / max(1, len(current_terms | prior_terms))
@@ -1092,7 +1200,7 @@ class QuantumContextUnderstandingEngine:
 
         topic_similarity = float(top_topic.get("semantic_similarity", 0.0) or 0.0)
         shared_entities = list(top_topic.get("shared_entities") or [])
-        current_entities = self._entities(current)
+        current_entities = QuantumContextUnderstandingEngine._entities(current)
 
         topic_shift = bool(
             top_topic
@@ -1252,6 +1360,7 @@ class QuantumContextUnderstandingEngine:
                 "input_modalities": modality.get("inputs", []),
                 "input_evidence": modality,
                 "requested_outputs": action_matrix.get("requested_outputs", []),
+                "output_segments": action_matrix.get("output_segments", []),
                 "active_goal": self._compact(active_goal, 700),
                 "source": "unified_multimodal_task_matrix",
             },
@@ -1713,97 +1822,278 @@ class QuantumInterpretationEngine:
         previous_assistant: str = "",
         previous_user: str = "",
     ) -> dict:
-        """Select exactly one dialogue relationship for the current CONTEXT.
+        """Select exactly one CONTINUE / RECALL / NEW relation.
 
-        CONTINUE: the new request develops the latest authenticated USER->APRIL result.
-        RECALL: the new request returns to an older authenticated topic/result.
-        NEW: no prior topic/result is sufficiently related.
+        Selection is object/topic anchored, not merely similarity anchored:
+          - CONTINUE may only bind to the latest authenticated result.
+          - RECALL may bind to an older result when the older result matches the
+            current object/topic materially better than the latest result.
+          - NEW is used when no prior result clears the relevance floor.
 
-        The selected pair is returned as a concrete memory operand. Similarity is
-        used to select among authenticated dialogue pairs; it never creates a
-        second route or calls a provider.
+        A selected pair is returned as a concrete memory operand.
         """
         current = self.normalize(current)
         pairs = [x for x in (recent_pairs or []) if isinstance(x, dict)]
         if not current or not pairs:
             return {
-                "relation": "NEW", "confidence": 0.95 if not pairs else 0.0,
-                "selected_index": -1, "selected_pair": {},
-                "latest_score": 0.0, "best_score": 0.0,
+                "relation": "NEW",
+                "confidence": 0.95 if not pairs else 0.0,
+                "selected_index": -1,
+                "selected_pair": {},
+                "latest_score": 0.0,
+                "best_score": 0.0,
                 "source": "three_way_dialogue_selector",
             }
 
-        scored = []
+        current_tokens = {
+            token for token in QuantumContextUnderstandingEngine._content_tokens(current)
+            if len(token) >= 4
+        }
+        current_entities = QuantumContextUnderstandingEngine._entities(current)
+        current_entity_values = {
+            str(item.get("value") or "").casefold()
+            for item in current_entities
+            if item.get("value")
+        }
+        current_token_values = set(self._tokens(current))
+        anaphoric_reference = bool(
+            current_token_values
+            & QuantumContextUnderstandingEngine._PRONOUNS
+        )
+
+        # Semantic discourse evidence is only used to authorize that the user is
+        # talking about dialogue/history. It does not choose which pair wins.
+        dialogue_scores = self._family_scores(
+            current, "dialogue", SEMANTIC_TURN_PROTOTYPES
+        )
+        followup_authorized = max(
+            float(dialogue_scores.get(label, 0.0) or 0.0)
+            for label in (
+                "continuation", "reformulation", "correction",
+                "reference", "artifact_reference", "memory_query",
+            )
+        ) >= 0.10
+
+        scored: list[dict[str, Any]] = []
         for index, pair in enumerate(pairs):
             user = self.normalize(pair.get("user"))
             answer = self.normalize(pair.get("april") or pair.get("result"))
             combined = " ".join(x for x in (user, answer) if x)
             if not combined:
                 continue
-            score = float(self.similarity(current, combined).get("score", 0.0) or 0.0)
-            user_score = float(self.similarity(current, user).get("score", 0.0) or 0.0) if user else 0.0
-            answer_score = float(self.similarity(current, answer).get("score", 0.0) or 0.0) if answer else 0.0
+
+            user_score = (
+                float(self.similarity(current, user).get("score", 0.0) or 0.0)
+                if user else 0.0
+            )
+            answer_score = (
+                float(self.similarity(current, answer).get("score", 0.0) or 0.0)
+                if answer else 0.0
+            )
+            combined_score = float(
+                self.similarity(current, combined).get("score", 0.0) or 0.0
+            )
+
+            pair_tokens = set(QuantumContextUnderstandingEngine._content_tokens(combined))
+            shared_tokens = current_tokens & pair_tokens
+            pair_entities = QuantumContextUnderstandingEngine._entities(combined)
+            pair_entity_values = {
+                str(item.get("value") or "").casefold()
+                for item in pair_entities
+                if item.get("value")
+            }
+            shared_entities = current_entity_values & pair_entity_values
+
+            # Object/topic overlap is more discriminating than answer prose.
+            token_overlap = len(shared_tokens) / max(1, len(current_tokens))
+            entity_overlap = len(shared_entities) / max(
+                1, len(current_entity_values)
+            )
+
+            # Strong novel object terms make an older pair preferable when those
+            # terms occur there but not in the latest pair. This fixes the "theme
+            # button vs difficulty button" collision.
+            distinctive = {
+                token for token in current_tokens
+                if token not in {
+                    "теперь", "добавь", "напиши", "сделай", "покажи",
+                    "показывать", "показать", "выдай", "выдать", "кодом",
+                    "кнопка", "кнопки", "режим", "режима", "сделай",
+                }
+            }
+            distinctive_overlap = len(distinctive & pair_tokens) / max(
+                1, len(distinctive)
+            )
+
+            recency = 1.0 / (1.0 + 0.08 * (len(pairs) - 1 - index))
+            score = (
+                0.44 * user_score
+                + 0.16 * answer_score
+                + 0.12 * combined_score
+                + 0.14 * token_overlap
+                + 0.08 * distinctive_overlap
+                + 0.04 * entity_overlap
+                + 0.02 * recency
+            )
+
             scored.append({
                 "index": index,
-                "score": max(score, 0.78 * user_score + 0.22 * answer_score),
+                "score": float(min(1.0, score)),
                 "user_score": user_score,
                 "answer_score": answer_score,
+                "combined_score": combined_score,
+                "token_overlap": token_overlap,
+                "distinctive_overlap": distinctive_overlap,
+                "entity_overlap": entity_overlap,
+                "shared_tokens": sorted(shared_tokens)[:20],
+                "shared_entities": sorted(shared_entities)[:12],
                 "pair": pair,
             })
-        scored.sort(key=lambda x: (x["score"], x["index"]), reverse=True)
+
+        scored.sort(key=lambda item: (item["score"], item["index"]), reverse=True)
         if not scored:
-            return {"relation": "NEW", "confidence": 0.95, "selected_index": -1, "selected_pair": {},
-                    "latest_score": 0.0, "best_score": 0.0, "source": "three_way_dialogue_selector"}
+            return {
+                "relation": "NEW", "confidence": 0.95,
+                "selected_index": -1, "selected_pair": {},
+                "latest_score": 0.0, "best_score": 0.0,
+                "source": "three_way_dialogue_selector",
+            }
 
-        best = scored[0]
         latest_index = len(pairs) - 1
-        latest = next((x for x in scored if x["index"] == latest_index), None)
-        latest_score = float(latest["score"] if latest else 0.0)
-        best_score = float(best["score"])
-
-        # The latest turn owns CONTINUE only when it is materially related to the
-        # current request. An older stronger match is RECALL, never continuation.
-        # The absolute floor is intentionally modest because short follow-ups can
-        # have little lexical overlap; selection still requires a winning pair.
-        CONTINUE_FLOOR = 0.020
-        RECALL_FLOOR = 0.020
-        dialogue_scores = self._family_scores(current, "dialogue", SEMANTIC_TURN_PROTOTYPES)
-        dialogue_followup = max(
-            float(dialogue_scores.get(label, 0.0) or 0.0)
-            for label in ("continuation", "reformulation", "correction", "reference", "artifact_reference", "memory_query")
+        latest = next(
+            (item for item in scored if item["index"] == latest_index), None
         )
-        followup_authorized = dialogue_followup >= 0.12
-        if best["index"] == latest_index and latest_score >= CONTINUE_FLOOR and (
-            followup_authorized or latest_score >= 0.055
-        ):
-            relation = "CONTINUE"
+        best = scored[0]
+        latest_score = float(latest["score"] if latest else 0.0)
+
+        # A standalone self-contained task is not allowed to jump into an older
+        # pair merely because generic words ("code", "button", "show") overlap.
+        # RECALL requires materially better object/topic evidence than the latest
+        # pair, unless the current dialogue itself explicitly behaves as recall.
+        CONTINUE_FLOOR = 0.055
+        RECALL_FLOOR = 0.085
+        RECALL_MARGIN = 0.045
+
+        if latest is not None:
+            latest_task_anchor = (
+                0.70 * latest["user_score"]
+                + 0.20 * latest["distinctive_overlap"]
+                + 0.10 * latest["token_overlap"]
+            )
+        else:
+            latest_task_anchor = 0.0
+
+        best_task_anchor = (
+            0.70 * best["user_score"]
+            + 0.20 * best["distinctive_overlap"]
+            + 0.10 * best["token_overlap"]
+        )
+
+        # Discourse relation tells us whether the user is continuing the current
+        # result or deliberately pointing back to an older result. It is used to
+        # arbitrate between candidate pairs; topical similarity alone cannot cause
+        # a historical jump.
+        reference_strength = max(
+            float(dialogue_scores.get("reference", 0.0) or 0.0),
+            float(dialogue_scores.get("artifact_reference", 0.0) or 0.0),
+            float(dialogue_scores.get("memory_query", 0.0) or 0.0),
+        )
+        continuation_strength = max(
+            float(dialogue_scores.get("continuation", 0.0) or 0.0),
+            float(dialogue_scores.get("reformulation", 0.0) or 0.0),
+            float(dialogue_scores.get("correction", 0.0) or 0.0),
+        )
+
+        # RECALL requires both an older-object advantage and semantic evidence that
+        # the user is intentionally referring back. This is what prevents "button"
+        # from resolving to the wrong historical button.
+        older_better = bool(
+            best["index"] < latest_index
+            and best["score"] >= RECALL_FLOOR
+            and best["score"] >= latest_score + RECALL_MARGIN
+            and best_task_anchor >= max(latest_task_anchor + 0.04, 0.10)
+            and (
+                (
+                    anaphoric_reference
+                    and best["score"] >= 0.12
+                )
+                or reference_strength >= 0.06
+                or best["distinctive_overlap"] >= 0.25
+            )
+        )
+
+        latest_is_material = bool(
+            latest is not None
+            and latest_score >= CONTINUE_FLOOR
+            and (
+                latest["distinctive_overlap"] >= 0.12
+                or latest["token_overlap"] >= 0.20
+                or latest["user_score"] >= 0.18
+                or continuation_strength >= 0.10
+            )
+        )
+
+        if older_better:
+            relation = "RECALL"
             selected = best
-        elif best["index"] < latest_index and best_score >= RECALL_FLOOR and (
-            followup_authorized or best_score >= 0.055
+        elif latest_is_material and (
+            continuation_strength >= 0.10 or reference_strength < 0.12
         ):
+            # In an ordinary follow-up, the immediately previous authenticated
+            # result remains the active object even when an older turn happens to
+            # have similar generic words.
+            relation = "CONTINUE"
+            selected = latest
+        elif best["score"] >= RECALL_FLOOR and reference_strength >= 0.18 and best["index"] < latest_index:
             relation = "RECALL"
             selected = best
         else:
             relation = "NEW"
             selected = {}
 
-        confidence = max(0.0, min(1.0, best_score if relation != "NEW" else 1.0 - best_score))
+        confidence = (
+            best["score"]
+            if relation != "NEW"
+            else max(0.0, min(1.0, 1.0 - best["score"]))
+        )
         selected_pair = dict(selected.get("pair") or {}) if selected else {}
+
         return {
             "relation": relation,
-            "confidence": round(confidence, 6),
+            "confidence": round(float(confidence), 6),
             "selected_index": int(selected.get("index", -1)) if selected else -1,
             "selected_pair": selected_pair,
             "latest_score": round(latest_score, 6),
-            "best_score": round(best_score, 6),
-            "dialogue_followup_evidence": round(float(dialogue_followup), 6),
+            "best_score": round(float(best["score"]), 6),
+            "dialogue_followup_evidence": round(
+                float(max(
+                    (float(dialogue_scores.get(label, 0.0) or 0.0)
+                     for label in (
+                         "continuation", "reformulation", "correction",
+                         "reference", "artifact_reference", "memory_query"
+                     )),
+                    default=0.0,
+                )),
+                6,
+            ),
+            "latest_task_anchor": round(float(latest_task_anchor), 6),
+            "best_task_anchor": round(float(best_task_anchor), 6),
+            "anaphoric_reference": bool(anaphoric_reference),
+            "reference_strength": round(float(reference_strength), 6),
+            "continuation_strength": round(float(continuation_strength), 6),
+            "older_pair_selected": bool(older_better),
             "candidates": [
-                {"index": int(x["index"]), "score": round(float(x["score"]), 6),
-                 "user_score": round(float(x["user_score"]), 6),
-                 "answer_score": round(float(x["answer_score"]), 6)}
-                for x in scored[:8]
+                {
+                    "index": int(item["index"]),
+                    "score": round(float(item["score"]), 6),
+                    "user_score": round(float(item["user_score"]), 6),
+                    "answer_score": round(float(item["answer_score"]), 6),
+                    "distinctive_overlap": round(float(item["distinctive_overlap"]), 6),
+                    "token_overlap": round(float(item["token_overlap"]), 6),
+                }
+                for item in scored[:10]
             ],
-            "source": "three_way_dialogue_selector",
+            "source": "three_way_dialogue_selector_v2_object_anchored",
         }
 
     def _dialogue_relation_engine(
@@ -2653,6 +2943,13 @@ class QuantumInterpretationEngine:
                 "previous_scene_id": ""}
         turn_structure_understanding = context_understanding.get("turn_structure") if isinstance(context_understanding.get("turn_structure"), dict) else {}
         task_understanding = context_understanding.get("task") if isinstance(context_understanding.get("task"), dict) else {}
+        complete_outputs = [
+            str(x).lower() for x in (
+                task_understanding.get("requested_outputs")
+                if isinstance(task_understanding, dict) else []
+            )
+            if str(x).strip()
+        ]
 
         # A locally numbered/compound request ("second", "the third item", etc.)
         # refers to the structure of the CURRENT turn unless the user explicitly
@@ -2995,6 +3292,7 @@ class QuantumInterpretationEngine:
         presentation_recommendations = self._presentation_recommendations(
             text, p, production, locked=locked, continuation=continuation,
             previous_scene=previous_scene, explicit=explicit,
+            requested_outputs=complete_outputs,
         )
         presentation={
             "version":"quantum_interpretation_transport_v4","decision_owner":DECISION_OWNER,
@@ -3021,11 +3319,21 @@ class QuantumInterpretationEngine:
                 "reason": "semantic_text_schema_request",
             }
         result=build_result(text)
+        structured_requested = [
+            x for x in complete_outputs
+            if x in REPRESENTATION_UNIVERSE and x != "number"
+        ]
+        if production and production not in structured_requested:
+            structured_requested.insert(0, production)
+        # Every compound current-turn request remains visible in the semantic
+        # contract. The first/primary representation is retained separately.
         result.update({
             "type":p["dialogue_best"],"subtype":production,"scene_type":production,
             "normalized":text,"required_domains":domains,"candidate_domains":domains,
-            "required_representations":[production],"candidate_representations":[production],
-            "requested_representations":[production],"requested_representation":production,
+            "required_representations":structured_requested or [production],
+            "candidate_representations":structured_requested or [production],
+            "requested_representations":structured_requested or [production],
+            "requested_representation":production,
             "production_representation":production,"production_representation_locked":locked,
             "production_representation_source":source,
             "production_representation_confidence":max(
@@ -3061,6 +3369,8 @@ class QuantumInterpretationEngine:
                 "history_dependent_task": bool(history_task_context.get("required")),
                 "history_window_size": len(self._recent_dialogue_pairs(history, limit=10)),
                 "history_task_context": history_task_context,
+                "requested_outputs": complete_outputs,
+                "output_segments": task_understanding.get("output_segments", []),
             },
             "dialogue_delta": {
                 "mode": dialogue_vector.get("delta_mode"),
@@ -3102,6 +3412,8 @@ class QuantumInterpretationEngine:
                 "local_current_turn_structure": local_turn_reference,
                 "history_dependent_task": bool(history_task_context.get("required")),
                 "history_task_context": history_task_context,
+                "requested_outputs": complete_outputs,
+                "output_segments": task_understanding.get("output_segments", []),
                 "context_dependency": (
                     "continuation" if dialogue_vector.get("three_way_relation") == "CONTINUE"
                     else "recall" if dialogue_vector.get("three_way_relation") == "RECALL"
@@ -3161,7 +3473,8 @@ class QuantumInterpretationEngine:
             "visual_schema": visual_schema,
             "visual_schema_confidence": visual_schema_confidence,
             "required_capabilities":["semantic_interpretation","dialogue_context"],
-            "required_outputs":[production],"requested_outputs":[production],
+            "required_outputs":structured_requested or [production],
+            "requested_outputs":complete_outputs or structured_requested or [production],
             "response_mode":"structured" if production!="text" else "talk","renderer_first":production!="text",
             "discussion_mode":p["capability_scores"].get("discussion",0.0)>=0.60,
             "space_discussion":p["capability_scores"].get("space",0.0)>=0.60,
@@ -3256,7 +3569,7 @@ class QuantumInterpretationEngine:
     @classmethod
     def _presentation_recommendations(cls, text, profile, production, *, locked=False,
                                       continuation=False, previous_scene=None,
-                                      explicit=None):
+                                      explicit=None, requested_outputs=None):
         """Return post-interpretation presentation/scene recommendations.
 
         The current semantic task is authoritative. Evidence may justify zero,
@@ -3268,6 +3581,10 @@ class QuantumInterpretationEngine:
         op_scores = dict(profile.get("operation_scores") or {})
         explicit_values = list(dict.fromkeys(
             _clean_representation(x) for x in (explicit or []) if _clean_representation(x)
+        ))
+        requested_values = list(dict.fromkeys(
+            _clean_representation(x) for x in (requested_outputs or [])
+            if _clean_representation(x)
         ))
         compatible_ops = {
             "graph": {"build","modify","present","calculate","analyze","list","explain"},
@@ -3283,6 +3600,7 @@ class QuantumInterpretationEngine:
         }
         op = str(profile.get("best_operation") or "answer").lower()
         candidates = set(explicit_values)
+        candidates.update(requested_values)
         if production:
             candidates.add(production)
         for label, value in rep_scores.items():
