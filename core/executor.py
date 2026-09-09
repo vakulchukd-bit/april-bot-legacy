@@ -2590,39 +2590,80 @@ def _dialogue_context_consensus(
             "vector_id": vector_id,
             "source_part_ids": [],
         }
-        relation = "INDEPENDENT"
+        relation = "NEW"
+        vector_class = "NEW"
         existing_vector = False
     else:
         existing_vector = matrix.get("decision") == "EXISTING_VECTOR"
-        base_relation = _s(frozen.get("relation")).upper() or "INDEPENDENT"
-        if existing_vector:
-            if bool(frozen.get("reference_to_previous")) or base_relation == "ARTIFACT_REFERENCE":
-                relation = "ARTIFACT_REFERENCE"
-            elif base_relation == "MEMORY_QUERY":
-                relation = "MEMORY_QUERY"
-            elif base_relation in {"CONTINUATION", "CONTINUE_TOPIC"}:
-                relation = "CONTINUATION"
-            elif base_relation == "SAME_TOPIC":
-                relation = "SAME_TOPIC"
-            else:
-                relation = "CONTINUATION"
-        else:
-            relation = "NEW_TOPIC" if base_relation == "NEW_TOPIC" else "INDEPENDENT"
+        matched = list(matrix.get("interpretations") or [])
+        latest_pair_index = max(
+            [int(part.get("turn_id") or 0) for part in (
+                _dialogue_memory_parts(
+                    state=state,
+                    current_visual_scene=_best_visual_context(state),
+                    dynamic_memory=dynamic_memory,
+                    limit=12,
+                )
+            ) if _s(part.get("kind")).lower() == "dialogue_pair"] or [0]
+        )
+        matched_current = False
+        matched_old = False
+        memory_query_match = False
+        for item in matched:
+            part_id = _s(item.get("part_id"))
+            part = next(
+                (candidate for candidate in _dialogue_memory_parts(
+                    state=state,
+                    current_visual_scene=_best_visual_context(state),
+                    dynamic_memory=dynamic_memory,
+                    limit=12,
+                ) if _s(candidate.get("part_id")) == part_id),
+                {},
+            )
+            kind = _s(part.get("kind")).lower()
+            label = _s(item.get("dialogue_label")).lower()
+            if label == "memory_query" or _s(item.get("relation")).startswith("MEMORY_QUERY"):
+                memory_query_match = True
+            if kind == "dialogue_pair" and int(part.get("turn_id") or 0) == latest_pair_index:
+                matched_current = True
+            elif part:
+                matched_old = True
 
-    continuation = bool(
-        existing_vector
-        and relation in {
-            "CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY", "SAME_TOPIC"
-        }
-    )
-    reference = relation == "ARTIFACT_REFERENCE"
+        # Three-way processor decision:
+        # CONTINUE = current active topic/result is interpreted.
+        # RECALL   = an older memory topic is interpreted.
+        # NEW      = no memory part is interpreted.
+        if matched_current:
+            relation = "CONTINUE"
+            vector_class = "EXISTING"
+        elif matched_old or memory_query_match:
+            relation = "RECALL"
+            vector_class = "EXISTING"
+        else:
+            relation = "NEW"
+            vector_class = "NEW"
+
+        existing_vector = vector_class == "EXISTING"
+
+    continuation = relation == "CONTINUE"
+    reference = relation == "RECALL"
+
+    # Preserve a memory-query request as a semantic query while classifying the
+    # target topic as CONTINUE or RECALL. The three-way vector class is primary.
+    if not fresh_visual and relation == "RECALL":
+        vector_id = _s(_as_dict(matrix.get("vector")).get("vector_id"))
+        if not vector_id:
+            vector_id = f"vector-{hashlib.sha256(_s(text).encode('utf-8')).hexdigest()[:16]}"
+        matrix["vector"]["status"] = "EXISTING"
+        matrix["vector"]["kind"] = "RECALL_VECTOR"
 
     return {
         "version": "QUANTUM_DIALOGUE_CONSENSUS_V2",
         "relation": relation,
+        "dialogue_class": relation,
         "continuation": continuation,
         "reference_to_previous": reference,
-        "memory_query": relation == "MEMORY_QUERY",
+        "memory_query": relation == "RECALL" or relation == "MEMORY_QUERY",
         "vector_status": "EXISTING" if existing_vector else "NEW",
         "vector_id": _s(_as_dict(matrix.get("vector")).get("vector_id")),
         "memory_part_ids": list(matrix.get("matched_part_ids") or []),
@@ -2684,24 +2725,12 @@ def _quantum_context_binding(
             semantic.get("quantum_dynamic_memory_evidence")
         ),
     )
-    relation = _s(consensus.get("relation")).upper() or _s(
-        frozen.get("relation")
-        or vector.get("relation")
-        or scene.get("mode")
-        or "INDEPENDENT"
-    ).upper()
-    continuation = bool(
-        consensus.get("continuation")
-        or frozen.get("continuation")
-        or scene.get("continuation")
-        or vector.get("continuation")
-    )
-    reference = bool(
-        consensus.get("reference_to_previous")
-        or frozen.get("reference_to_previous")
-        or scene.get("reference_to_previous")
-        or vector.get("reference_to_previous")
-    )
+    # The consensus engine is the sole owner of the three-way dialogue class.
+    # Older/frozen interpretation, scene continuity and memory-understanding are
+    # evidence only and cannot overwrite CONTINUE / RECALL / NEW.
+    relation = _s(consensus.get("relation")).upper() or "NEW"
+    continuation = relation == "CONTINUE"
+    reference = relation == "RECALL"
 
     # Memory may strengthen a reference only after the CONTEXT was interpreted
     # against at least one decomposed memory part. Memory alone cannot create a
@@ -2710,23 +2739,15 @@ def _quantum_context_binding(
     interpreted_part_ids = set(
         _as_list(dialogue_formula.get("matched_part_ids"))
     )
+    # Memory-understanding may enrich an already-proved RECALL/CONTINUE vector,
+    # but it cannot create or change the vector class.
     if (
-        bool(mem_ref.get("resolved"))
+        relation in {"CONTINUE", "RECALL"}
+        and bool(mem_ref.get("resolved"))
         and interpreted_part_ids
-        and (
-            _s(mem_ref.get("target"))
-            or _s(mem_visual.get("scene_id"))
-        )
+        and (_s(mem_ref.get("target")) or _s(mem_visual.get("scene_id")))
     ):
-        relation = "ARTIFACT_REFERENCE"
-        continuation = True
-        reference = True
-
-    # A memory query is explicitly a history-dependent request even when the
-    # original Interpretation pass was conservative.
-    if relation == "MEMORY_QUERY":
-        continuation = bool(continuation)
-        reference = bool(reference)
+        reference = relation == "RECALL"
 
     current_complete = semantic_dialogue.get("current_request_complete")
     incomplete = current_complete is False
@@ -2746,18 +2767,10 @@ def _quantum_context_binding(
     formula_existing = bool(
         _as_dict(consensus.get("dialogue_formula")).get("decision") == "EXISTING_VECTOR"
     )
-    if (
-        incomplete
-        and history_available
-        and formula_existing
-        and relation in {"INDEPENDENT", "NEW_TOPIC", "SAME_TOPIC"}
-    ):
-        relation = "CONTINUATION"
-        continuation = True
+    # Incompleteness alone never upgrades a NEW vector. Only the interpreted
+    # memory relation may authorize CONTINUE/RECALL.
 
-    context_dependency = relation in {
-        "CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY", "SAME_TOPIC"
-    }
+    context_dependency = relation in {"CONTINUE", "RECALL"}
 
     # When history is needed, attach the authentic recent pairs. Provider_router
     # remains responsible for compacting them under the existing 900-token cap.
@@ -2767,7 +2780,7 @@ def _quantum_context_binding(
 
     resolved_request = _s(
         memory.get("resolved_request")
-        if relation in {"CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
+        if relation in {"CONTINUE", "RECALL"}
         else ""
     ) or _s(frozen.get("resolved_request")) or _s(text)
 
@@ -2799,7 +2812,7 @@ def _quantum_context_binding(
         history_available and (
             context_dependency
             or incomplete
-            or relation == "MEMORY_QUERY"
+            or relation == "RECALL"
         )
     )
 
@@ -2812,9 +2825,8 @@ def _quantum_context_binding(
         "reference_to_previous": bool(reference),
         "context_dependency": (
             "reference" if reference
-            else "continuation" if continuation
-            else "memory_query" if relation == "MEMORY_QUERY"
-            else "topic" if relation == "SAME_TOPIC"
+            else "continuation" if relation == "CONTINUE"
+            else "recall" if relation == "RECALL"
             else "independent"
         ),
         "resolved_request": resolved_request,
@@ -2835,6 +2847,15 @@ def _quantum_context_binding(
         "vector_status": _s(consensus.get("vector_status")) or "NEW",
         "vector_id": _s(consensus.get("vector_id")),
         "memory_part_ids": list(consensus.get("memory_part_ids") or []),
+        "dialogue_class": relation,
+        "development_context": {
+            "mode": "CONTINUE" if relation == "CONTINUE" else "RECALL" if relation == "RECALL" else "NEW",
+            "memory_part_ids": list(consensus.get("memory_part_ids") or []),
+            "resolved_scene": deepcopy(resolved_scene),
+            "previous_user_turn": _s(evidence.get("previous_user")),
+            "previous_april_turn": _s(evidence.get("previous_april")),
+            "current_request": _s(text),
+        },
         "markers": [
             "[MEMORY]", "[PART]", "[CONTEXT]", "[INTERP]", "[VECTOR]",
             "[ACTION]", "[PROCESS]", "[RESULT]",
