@@ -1033,6 +1033,14 @@ class QuantumContextUnderstandingEngine:
                 pending_user = ""
         recent_pairs = recent_pairs[-self.TOPIC_WINDOW:]
 
+        dialogue_selection = self.semantic_engine._select_three_way_dialogue_relation(
+            current, recent_pairs, active_topic=self._compact(active_topic, 500),
+            previous_assistant=self._compact(recent_pairs[-1].get("assistant"), 1200) if recent_pairs else "",
+            previous_user=self._compact(recent_pairs[-1].get("user"), 1200) if recent_pairs else "",
+        )
+        selected_pair = dialogue_selection.get("selected_pair") if isinstance(dialogue_selection.get("selected_pair"), dict) else {}
+        canonical_three_way = str(dialogue_selection.get("relation") or "NEW").upper()
+
         topic_profiles = self._topic_profiles(
             current,
             recent_pairs,
@@ -1125,9 +1133,22 @@ class QuantumContextUnderstandingEngine:
 
         # Pronoun references strengthen continuation, but must have an actual
         # antecedent candidate. An unresolved pronoun never invents a topic.
-        if historical_reference and coreference[0].get("confidence", 0.0) < 0.34:
+        if historical_reference and coreference and coreference[0].get("confidence", 0.0) < 0.34:
             historical_reference = False
             relation = "SAME_TOPIC" if topic_similarity >= 0.22 else "INDEPENDENT"
+
+        # Replace the legacy multi-state relation with the processor's exact
+        # three-way dialogue classification. SAME_TOPIC/INDEPENDENT remain only
+        # as compatibility evidence and cannot become the final dialogue state.
+        if canonical_three_way == "CONTINUE":
+            relation = "CONTINUE_TOPIC"
+            historical_reference = False
+        elif canonical_three_way == "RECALL":
+            relation = "RECALL"
+            historical_reference = True
+        else:
+            relation = "NEW_TOPIC"
+            historical_reference = False
 
         discourse_confidence = max(
             0.0,
@@ -1149,8 +1170,14 @@ class QuantumContextUnderstandingEngine:
         # Topic selection follows the discourse result. A resolved historical
         # coreference keeps the previous topic even when the new sentence shares
         # few literal tokens; a detected topic shift adopts the current anchor.
-        if historical_reference and top_topic and top_topic.get("topic"):
-            reconstructed_topic = self._compact(top_topic.get("topic"), 500)
+        if canonical_three_way == "RECALL" and selected_pair:
+            reconstructed_topic = self._compact(
+                selected_pair.get("user") or selected_pair.get("topic") or current_topic_label, 500
+            )
+        elif canonical_three_way == "CONTINUE" and selected_pair:
+            reconstructed_topic = self._compact(
+                selected_pair.get("user") or selected_pair.get("topic") or top_topic.get("topic") or current_topic_label, 500
+            )
         elif topic_shift and current_topic_label:
             reconstructed_topic = current_topic_label
         elif relation == "SAME_TOPIC" and top_topic and top_topic.get("topic"):
@@ -1169,7 +1196,7 @@ class QuantumContextUnderstandingEngine:
                 "new_topic",
                 f"The current user request starts a different subject from: {top_topic.get('user', '')}",
             ))
-        if historical_reference and coreference[0].get("candidates"):
+        if historical_reference and coreference and coreference[0].get("candidates"):
             hypothesis_pairs.append((
                 "reference",
                 f"The current request refers to: {coreference[0]['candidates'][0]['entity']}",
@@ -1188,6 +1215,11 @@ class QuantumContextUnderstandingEngine:
                 "candidates": topic_profiles[:8],
                 "source": "multilingual_embedding_topic_tracking",
             },
+            "dialogue_selection": {
+                **dialogue_selection,
+                "selected_memory_operand": selected_pair,
+                "memory_role": canonical_three_way,
+            },
             "entities": {
                 "current": current_entities[:24],
                 "shared_with_active_topic": shared_entities[:16],
@@ -1205,9 +1237,11 @@ class QuantumContextUnderstandingEngine:
             "discourse": {
                 "relation": relation,
                 "continuation": relation == "CONTINUE_TOPIC",
-                "same_topic": relation == "SAME_TOPIC",
+                "same_topic": relation in {"CONTINUE_TOPIC", "RECALL"},
                 "new_topic": relation == "NEW_TOPIC",
-                "independent": relation == "INDEPENDENT",
+                "independent": relation == "NEW_TOPIC",
+                "three_way_relation": canonical_three_way,
+                "selected_memory_operand": selected_pair,
                 "historical_reference": historical_reference,
                 "self_contained": self_contained,
                 "confidence": round(float(discourse_confidence), 6),
@@ -1235,9 +1269,9 @@ class QuantumContextUnderstandingEngine:
                     if item.get("entity")
                 ][:8],
                 "local_current_turn_structure": bool(local_compound),
-                "historical_memory_allowed": bool(
-                    relation in {"CONTINUE_TOPIC", "SAME_TOPIC"} or historical_reference
-                ),
+                "historical_memory_allowed": bool(canonical_three_way in {"CONTINUE", "RECALL"}),
+                "three_way_relation": canonical_three_way,
+                "selected_memory_operand": selected_pair,
                 "historical_reference_blocked_for_local_ordinals": bool(
                     local_compound and ordinals
                 ),
@@ -1567,7 +1601,12 @@ class QuantumInterpretationEngine:
             if role in {"assistant", "april", "bot"}:
                 answer = cls.normalize(item.get("content") or item.get("answer") or item.get("text") or item.get("summary"))
                 if pending_user and answer:
-                    pairs.append({"user": pending_user[:700], "april": answer[:900]})
+                    pairs.append({
+                        "user": pending_user[:700],
+                        "april": answer[:900],
+                        "result": answer[:1200],
+                        "development_state": "completed_turn",
+                    })
                 pending_user = ""
                 continue
             user_obj = item.get("user") if isinstance(item.get("user"), dict) else None
@@ -1665,6 +1704,108 @@ class QuantumInterpretationEngine:
             "confidence": confidence,
         }
 
+    def _select_three_way_dialogue_relation(
+        self,
+        current: str,
+        recent_pairs: list[dict[str, str]],
+        *,
+        active_topic: str = "",
+        previous_assistant: str = "",
+        previous_user: str = "",
+    ) -> dict:
+        """Select exactly one dialogue relationship for the current CONTEXT.
+
+        CONTINUE: the new request develops the latest authenticated USER->APRIL result.
+        RECALL: the new request returns to an older authenticated topic/result.
+        NEW: no prior topic/result is sufficiently related.
+
+        The selected pair is returned as a concrete memory operand. Similarity is
+        used to select among authenticated dialogue pairs; it never creates a
+        second route or calls a provider.
+        """
+        current = self.normalize(current)
+        pairs = [x for x in (recent_pairs or []) if isinstance(x, dict)]
+        if not current or not pairs:
+            return {
+                "relation": "NEW", "confidence": 0.95 if not pairs else 0.0,
+                "selected_index": -1, "selected_pair": {},
+                "latest_score": 0.0, "best_score": 0.0,
+                "source": "three_way_dialogue_selector",
+            }
+
+        scored = []
+        for index, pair in enumerate(pairs):
+            user = self.normalize(pair.get("user"))
+            answer = self.normalize(pair.get("april") or pair.get("result"))
+            combined = " ".join(x for x in (user, answer) if x)
+            if not combined:
+                continue
+            score = float(self.similarity(current, combined).get("score", 0.0) or 0.0)
+            user_score = float(self.similarity(current, user).get("score", 0.0) or 0.0) if user else 0.0
+            answer_score = float(self.similarity(current, answer).get("score", 0.0) or 0.0) if answer else 0.0
+            scored.append({
+                "index": index,
+                "score": max(score, 0.78 * user_score + 0.22 * answer_score),
+                "user_score": user_score,
+                "answer_score": answer_score,
+                "pair": pair,
+            })
+        scored.sort(key=lambda x: (x["score"], x["index"]), reverse=True)
+        if not scored:
+            return {"relation": "NEW", "confidence": 0.95, "selected_index": -1, "selected_pair": {},
+                    "latest_score": 0.0, "best_score": 0.0, "source": "three_way_dialogue_selector"}
+
+        best = scored[0]
+        latest_index = len(pairs) - 1
+        latest = next((x for x in scored if x["index"] == latest_index), None)
+        latest_score = float(latest["score"] if latest else 0.0)
+        best_score = float(best["score"])
+
+        # The latest turn owns CONTINUE only when it is materially related to the
+        # current request. An older stronger match is RECALL, never continuation.
+        # The absolute floor is intentionally modest because short follow-ups can
+        # have little lexical overlap; selection still requires a winning pair.
+        CONTINUE_FLOOR = 0.020
+        RECALL_FLOOR = 0.020
+        dialogue_scores = self._family_scores(current, "dialogue", SEMANTIC_TURN_PROTOTYPES)
+        dialogue_followup = max(
+            float(dialogue_scores.get(label, 0.0) or 0.0)
+            for label in ("continuation", "reformulation", "correction", "reference", "artifact_reference", "memory_query")
+        )
+        followup_authorized = dialogue_followup >= 0.12
+        if best["index"] == latest_index and latest_score >= CONTINUE_FLOOR and (
+            followup_authorized or latest_score >= 0.055
+        ):
+            relation = "CONTINUE"
+            selected = best
+        elif best["index"] < latest_index and best_score >= RECALL_FLOOR and (
+            followup_authorized or best_score >= 0.055
+        ):
+            relation = "RECALL"
+            selected = best
+        else:
+            relation = "NEW"
+            selected = {}
+
+        confidence = max(0.0, min(1.0, best_score if relation != "NEW" else 1.0 - best_score))
+        selected_pair = dict(selected.get("pair") or {}) if selected else {}
+        return {
+            "relation": relation,
+            "confidence": round(confidence, 6),
+            "selected_index": int(selected.get("index", -1)) if selected else -1,
+            "selected_pair": selected_pair,
+            "latest_score": round(latest_score, 6),
+            "best_score": round(best_score, 6),
+            "dialogue_followup_evidence": round(float(dialogue_followup), 6),
+            "candidates": [
+                {"index": int(x["index"]), "score": round(float(x["score"]), 6),
+                 "user_score": round(float(x["user_score"]), 6),
+                 "answer_score": round(float(x["answer_score"]), 6)}
+                for x in scored[:8]
+            ],
+            "source": "three_way_dialogue_selector",
+        }
+
     def _dialogue_relation_engine(
         self,
         text: str,
@@ -1719,6 +1860,10 @@ class QuantumInterpretationEngine:
         )
 
         recent_pairs = recent_dialogue_pairs if isinstance(recent_dialogue_pairs, list) else []
+        three_way = self._select_three_way_dialogue_relation(
+            current, recent_pairs, active_topic=topic,
+            previous_assistant=prev_a, previous_user=prev_u,
+        )
         history_task = self._history_task_resolution(current, recent_pairs, features)
 
         followup_labels = {"continuation", "reformulation", "correction", "reference", "artifact_reference", "affirmation", "rejection"}
@@ -1817,6 +1962,24 @@ class QuantumInterpretationEngine:
             relation = "NEW_TOPIC"
             topic_relation = "NEW_TOPIC"
 
+        # Canonical three-way dialogue state. Every user turn is a new CONTEXT;
+        # exactly one of CONTINUE/RECALL/NEW is selected. Historical retrieval
+        # cannot silently become continuation merely because memory exists.
+        canonical_three_way = str(three_way.get("relation") or "NEW").upper()
+        selected_pair = three_way.get("selected_pair") if isinstance(three_way.get("selected_pair"), dict) else {}
+        if canonical_three_way == "CONTINUE":
+            relation = "CONTINUE_TOPIC"
+            topic_relation = "SAME_TOPIC"
+            subtype = "DEVELOPMENT"
+        elif canonical_three_way == "RECALL":
+            relation = "RECALL"
+            topic_relation = "RECALL"
+            subtype = "RECALL"
+        else:
+            relation = "NEW_TOPIC"
+            topic_relation = "NEW_TOPIC"
+            subtype = "NEW"
+
         # A direct question about the currently rendered artifact is a semantic
         # artifact reference even when the dialogue classifier ranks it as a
         # generic question. The evidence comes from the existing structured
@@ -1868,7 +2031,7 @@ class QuantumInterpretationEngine:
                 and scene_reference_similarity >= 0.16
             )
 
-        if visual_reference_candidate:
+        if visual_reference_candidate and canonical_three_way == "CONTINUE":
             relation = "ARTIFACT_REFERENCE"
             topic_relation = "SAME_TOPIC"
             subtype = "REFERENCE_OR_DEVELOPMENT"
@@ -1912,12 +2075,20 @@ class QuantumInterpretationEngine:
         independent_score = 1.0 - dependency_score
 
         request_dependency = (
-            "reference" if semantic_reference
-            else "memory_query" if semantic_memory_query
-            else "continuation" if relation == "CONTINUE_TOPIC"
-            else "same_topic" if relation == "SAME_TOPIC"
+            "continuation" if canonical_three_way == "CONTINUE"
+            else "recall" if canonical_three_way == "RECALL"
             else "independent"
         )
+
+        if canonical_three_way == "RECALL":
+            continuation_score = 0.0
+            independent_score = 0.0
+        elif canonical_three_way == "CONTINUE":
+            continuation_score = dependency_score
+            independent_score = 1.0 - dependency_score
+        else:
+            continuation_score = 0.0
+            independent_score = 1.0
 
         return {
             "relation": relation,
@@ -1936,6 +2107,10 @@ class QuantumInterpretationEngine:
             "continuation_score": float(max(0.0, min(1.0, continuation_score))),
             "independent_score": float(max(0.0, min(1.0, independent_score))),
             "relation_strength": float(max(0.0, min(1.0, relation_strength))),
+            "three_way_relation": canonical_three_way,
+            "three_way_confidence": float(three_way.get("confidence", 0.0) or 0.0),
+            "selected_memory_index": int(three_way.get("selected_index", -1) or -1),
+            "selected_memory_operand": selected_pair,
             "subtype": subtype,
             "scores": {
                 **sims,
@@ -2446,7 +2621,36 @@ class QuantumInterpretationEngine:
         )
         topic_understanding = context_understanding.get("topic") if isinstance(context_understanding.get("topic"), dict) else {}
         discourse_understanding = context_understanding.get("discourse") if isinstance(context_understanding.get("discourse"), dict) else {}
+        dialogue_selection = context_understanding.get("dialogue_selection") if isinstance(context_understanding.get("dialogue_selection"), dict) else {}
         entities_understanding = context_understanding.get("entities") if isinstance(context_understanding.get("entities"), dict) else {}
+
+        # Context-understanding owns the three-way relationship. Downstream code
+        # receives the selected memory operand, rather than re-deciding from a
+        # frozen legacy continuation flag.
+        selected_relation = str(dialogue_selection.get("relation") or "NEW").upper()
+        selected_pair = dialogue_selection.get("selected_pair") if isinstance(dialogue_selection.get("selected_pair"), dict) else {}
+        if selected_relation == "CONTINUE":
+            dialogue_vector = {**dict(dialogue_vector or {}),
+                "relation": "CONTINUE_TOPIC", "topic_relation": "SAME_TOPIC",
+                "request_relation": "CONTINUE_TOPIC", "request_dependency": "continuation",
+                "continuation": True, "reference_to_previous": False,
+                "three_way_relation": "CONTINUE", "selected_memory_operand": selected_pair,
+                "selected_memory_index": dialogue_selection.get("selected_index", -1)}
+        elif selected_relation == "RECALL":
+            dialogue_vector = {**dict(dialogue_vector or {}),
+                "relation": "RECALL", "topic_relation": "RECALL",
+                "request_relation": "RECALL", "request_dependency": "recall",
+                "continuation": False, "reference_to_previous": True,
+                "three_way_relation": "RECALL", "selected_memory_operand": selected_pair,
+                "selected_memory_index": dialogue_selection.get("selected_index", -1)}
+        else:
+            dialogue_vector = {**dict(dialogue_vector or {}),
+                "relation": "NEW_TOPIC", "topic_relation": "NEW_TOPIC",
+                "request_relation": "NEW_TOPIC", "request_dependency": "independent",
+                "continuation": False, "reference_to_previous": False,
+                "three_way_relation": "NEW", "selected_memory_operand": {},
+                "selected_memory_index": -1, "reuse_existing_scene": False,
+                "previous_scene_id": ""}
         turn_structure_understanding = context_understanding.get("turn_structure") if isinstance(context_understanding.get("turn_structure"), dict) else {}
         task_understanding = context_understanding.get("task") if isinstance(context_understanding.get("task"), dict) else {}
 
@@ -2459,13 +2663,27 @@ class QuantumInterpretationEngine:
             and turn_structure_understanding.get("historical_ordinal_reference_blocked")
         )
         if local_turn_reference:
+            local_relation = (
+                "CONTINUE_TOPIC" if selected_relation == "CONTINUE"
+                else "RECALL" if selected_relation == "RECALL"
+                else "NEW_TOPIC"
+            )
+            local_topic_relation = (
+                "SAME_TOPIC" if selected_relation == "CONTINUE"
+                else "RECALL" if selected_relation == "RECALL"
+                else "NEW_TOPIC"
+            )
             dialogue_vector = {
                 **dict(dialogue_vector or {}),
-                "relation": "SAME_TOPIC" if topic_understanding.get("active") else "INDEPENDENT",
-                "topic_relation": "SAME_TOPIC" if topic_understanding.get("active") else "INDEPENDENT",
-                "request_relation": "SAME_TOPIC" if topic_understanding.get("active") else "INDEPENDENT",
-                "request_dependency": "same_topic" if topic_understanding.get("active") else "independent",
-                "reference_to_previous": False,
+                "relation": local_relation,
+                "topic_relation": local_topic_relation,
+                "request_relation": local_relation,
+                "request_dependency": (
+                    "continuation" if selected_relation == "CONTINUE"
+                    else "recall" if selected_relation == "RECALL"
+                    else "independent"
+                ),
+                "reference_to_previous": selected_relation == "RECALL",
                 "explicit_reference": False,
                 "anaphoric": False,
                 "artifact_reference_evidence": False,
@@ -2487,14 +2705,15 @@ class QuantumInterpretationEngine:
         # a stronger reconstructed topic.
         reconstructed_topic = normalize_text(topic_understanding.get("active"))
         if reconstructed_topic and topic_understanding.get("relation") in {
-            "SAME_TOPIC", "CONTINUE_TOPIC"
+            "SAME_TOPIC", "CONTINUE_TOPIC", "RECALL"
         }:
             active_topic = reconstructed_topic
 
         # Semantic coreference may establish a historical continuation even when
         # the prototype classifier ranks the surface turn as a generic question.
         if (
-            not local_turn_reference
+            selected_relation == "CONTINUE"
+            and not local_turn_reference
             and discourse_understanding.get("historical_reference")
             and entities_understanding.get("coreference")
         ):
@@ -2696,6 +2915,33 @@ class QuantumInterpretationEngine:
         resolved_reference = reference_resolution.get("target") or ""
         resolved_request = text
         history_task_context = dict(dialogue_vector.get("history_task_context") or {})
+
+        # RECALL materializes the selected older USER->APRIL result into the
+        # interpretation operand. This is the missing bridge that previously
+        # left the Provider with only "history exists" instead of the actual
+        # prior answer/code/result to develop.
+        selected_memory = dialogue_vector.get("selected_memory_operand")
+        if selected_relation == "RECALL" and isinstance(selected_memory, dict):
+            recalled_user = self.normalize(selected_memory.get("user"))
+            recalled_result = self.normalize(
+                selected_memory.get("result") or selected_memory.get("april") or selected_memory.get("assistant")
+            )
+            if recalled_user or recalled_result:
+                resolved_request = (
+                    f"{text}\n\n"
+                    "The current request recalls an older authenticated USER↔APRIL result. "
+                    "Use the recalled result as a concrete context operand and develop it; "
+                    "do not ask the user to resend the previous result.\n"
+                    f"Recalled USER request: {recalled_user}\n"
+                    f"Recalled APRIL result: {recalled_result}"
+                )
+                reference = True
+                memory = False
+                dialogue_vector["resolved_memory_operand"] = {
+                    "user": recalled_user,
+                    "result": recalled_result,
+                    "index": dialogue_vector.get("selected_memory_index", -1),
+                }
         if history_task_context.get("required"):
             selected_results = history_task_context.get("selected_results") or []
             lines = []
@@ -2856,7 +3102,15 @@ class QuantumInterpretationEngine:
                 "local_current_turn_structure": local_turn_reference,
                 "history_dependent_task": bool(history_task_context.get("required")),
                 "history_task_context": history_task_context,
-                "context_dependency":"memory_query" if memory else "continuation" if continuation else "reference" if reference else "independent",
+                "context_dependency": (
+                    "continuation" if dialogue_vector.get("three_way_relation") == "CONTINUE"
+                    else "recall" if dialogue_vector.get("three_way_relation") == "RECALL"
+                    else "independent"
+                ),
+                "three_way_relation": dialogue_vector.get("three_way_relation") or (
+                    "CONTINUE" if continuation else "RECALL" if reference else "NEW"
+                ),
+                "selected_memory_operand": dialogue_vector.get("selected_memory_operand") or {},
                 "relation": dialogue_vector.get("relation", "NEW_TOPIC"),
                 "subtype": dialogue_vector.get("subtype", "NEW_TOPIC"),
                 "avoid_repeat": True,
@@ -3559,8 +3813,25 @@ class QuantumMemoryUnderstandingEngine:
         dialogue_vector = interpretation.get("dialogue_vector") if isinstance(interpretation.get("dialogue_vector"), dict) else {}
         dialogue_contract = interpretation.get("dialogue_contract") if isinstance(interpretation.get("dialogue_contract"), dict) else {}
         relation = self._text(dialogue_vector.get("relation") or dialogue_contract.get("relation")).upper()
-        continuation = bool(dialogue_vector.get("continuation") or dialogue_contract.get("continuation") or relation in {"CONTINUE_TOPIC", "CONTINUATION"})
-        reference = bool(dialogue_vector.get("reference_to_previous") or dialogue_contract.get("reference_to_previous") or relation == "ARTIFACT_REFERENCE")
+        three_way = self._text(
+            dialogue_vector.get("three_way_relation")
+            or dialogue_contract.get("three_way_relation")
+        ).upper()
+        continuation = bool(
+            dialogue_vector.get("continuation")
+            or dialogue_contract.get("continuation")
+            or relation in {"CONTINUE_TOPIC", "CONTINUATION"}
+            or three_way == "CONTINUE"
+        )
+        reference = bool(
+            dialogue_vector.get("reference_to_previous")
+            or dialogue_contract.get("reference_to_previous")
+            or relation == "ARTIFACT_REFERENCE"
+            or three_way == "RECALL"
+        )
+        selected_memory_operand = dialogue_vector.get("selected_memory_operand")
+        if not isinstance(selected_memory_operand, dict):
+            selected_memory_operand = {}
 
         candidates = self._visual_candidates(visual_memory)
         schemas = [self._extract_visual_schema(scene) for scene in candidates]
@@ -3598,8 +3869,10 @@ class QuantumMemoryUnderstandingEngine:
                 "active_topic": self._text(dialogue_contract.get("active_topic") or interpretation.get("active_topic")),
                 "active_goal": self._text(dialogue_contract.get("active_goal") or interpretation.get("active_goal")),
                 "relation": relation,
+                "three_way_relation": three_way or ("CONTINUE" if continuation else "RECALL" if reference else "NEW"),
                 "continuation": continuation,
                 "reference_to_previous": reference,
+                "selected_memory_operand": selected_memory_operand,
             },
             "visual_memory": {
                 "available": bool(active_schema),
@@ -3614,8 +3887,13 @@ class QuantumMemoryUnderstandingEngine:
                 "current_request": current_request,
                 "dialogue_meaning": self._text(dialogue_contract.get("resolved_request") or dialogue_contract.get("current_request") or current_request),
                 "visual_reference": "previous_visual_response" if related_visual else "none",
-                "semantic_link": "continuation" if continuation else "reference" if reference else "independent",
-                "context_available": bool(dialogue_memory.get("history") or active_schema or dynamic_memory.get("matches")),
+                "semantic_link": (
+                    "continuation" if three_way == "CONTINUE"
+                    else "recall" if three_way == "RECALL"
+                    else "independent"
+                ),
+                "selected_memory_operand": selected_memory_operand,
+                "context_available": bool(dialogue_memory.get("history") or active_schema or dynamic_memory.get("matches") or selected_memory_operand),
                 "relevant_dynamic_memory_count": len(dynamic_memory.get("matches") or []),
             },
             "generation_intent": {
