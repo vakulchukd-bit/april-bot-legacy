@@ -227,6 +227,19 @@ def build_default_state():
         "last_april_turn": "",
         "last_april_turn_at": None,
         "dialog_state": {},
+        "dialogue_resolution": {
+            "relation": "NEW",
+            "selected_memory_index": -1,
+            "selected_memory_operand": {},
+            "selected_memory_record": {},
+            "previous_result": {},
+            "development_state": {},
+            "source_scene_id": "",
+            "resolved_request": "",
+            "confidence": 0.0,
+            "authoritative": False,
+            "updated_at": None,
+        },
         "focus_snapshot": {},
         "focus_state": {
             "active_topic": None,
@@ -302,6 +315,20 @@ class QuantumMemoryEngine:
             }
         if not isinstance(state_obj.get("memory_matrix"), dict):
             state_obj["memory_matrix"] = {}
+        if not isinstance(state_obj.get("dialogue_resolution"), dict):
+            state_obj["dialogue_resolution"] = {
+                "relation": "NEW",
+                "selected_memory_index": -1,
+                "selected_memory_operand": {},
+                "selected_memory_record": {},
+                "previous_result": {},
+                "development_state": {},
+                "source_scene_id": "",
+                "resolved_request": "",
+                "confidence": 0.0,
+                "authoritative": False,
+                "updated_at": None,
+            }
         return state_obj
 
     def normalize_timeline(self, state_obj):
@@ -1060,17 +1087,27 @@ class QuantumMemoryEngine:
             if isinstance(turn_relation, dict)
             else ""
         )
+        resolution = state_obj.get("dialogue_resolution")
+        authoritative_relation = ""
+        if isinstance(resolution, dict) and resolution.get("authoritative"):
+            authoritative_relation = str(resolution.get("relation") or "").strip().upper()
+
         dependency = str(
             explicit_dependency
             if explicit_dependency is not None
             else turn_dependency
-            or ""
+            or ("continuation" if authoritative_relation == "CONTINUE" else "recall" if authoritative_relation == "RECALL" else "independent" if authoritative_relation == "NEW" else "")
         ).strip().lower()
+
+        if authoritative_relation in {"CONTINUE", "RECALL"}:
+            continuation = authoritative_relation == "CONTINUE"
 
         return {
             "continuation": continuation,
             "context_dependency": dependency,
-            "new_topic": dependency in {"new_topic", "independent"} and not continuation,
+            "relation": authoritative_relation or ("CONTINUE" if continuation else "NEW"),
+            "new_topic": (authoritative_relation == "NEW") or (dependency in {"new_topic", "independent"} and not continuation),
+            "recall": authoritative_relation == "RECALL",
         }
 
     # ---------- unified writes ----------
@@ -1649,8 +1686,20 @@ def _archive_dialog_pair(state_obj, user_id, user_msg, april_msg):
             1000,
         ),
         "topic": safe_trim_text(
-            state_obj.get("current_topic") or state_obj.get("active_topic_slot") or "",
+            state_obj.get("current_topic")
+            or state_obj.get("dialogue_resolution", {}).get("development_state", {}).get("active_topic")
+            or state_obj.get("active_topic_slot")
+            or "",
             240,
+        ),
+        "dialogue_relation": str(
+            state_obj.get("dialogue_resolution", {}).get("relation") or "NEW"
+        ).upper(),
+        "development_state": deepcopy(
+            state_obj.get("dialogue_resolution", {}).get("development_state") or {}
+        ),
+        "selected_memory_operand": deepcopy(
+            state_obj.get("dialogue_resolution", {}).get("selected_memory_operand") or {}
         ),
         "continuation_hint": "available_for_reference",
         "created_at": time.time(),
@@ -2083,25 +2132,6 @@ def refresh_unified_scene(user_id):
 # =====================================================
 # SEVEN-DAY MEMORY API
 # =====================================================
-
-def build_memory_day():
-    return {
-        "A": [],
-        "B": [],
-        "C": [],
-        "D": [],
-        "E": [],
-        "visual_scenes": [],
-        "topics": [],
-        "objects": [],
-        "intent_signals": [],
-        "created_at": time.time(),
-    }
-
-
-def build_memory_timeline():
-    return {f"day_{i}": build_memory_day() for i in range(MEMORY_DAYS)}
-
 
 def ensure_memory_engine(state_obj):
     return QUANTUM_MEMORY_ENGINE.ensure(state_obj)
@@ -2713,21 +2743,26 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
     continuity = QUANTUM_MEMORY_ENGINE._continuity_context(
         state_obj, state_obj["active_scene_contract"]
     )
+    dialogue_resolution = state_obj.get("dialogue_resolution")
+    resolved_relation = str(
+        dialogue_resolution.get("relation")
+        if isinstance(dialogue_resolution, dict) and dialogue_resolution.get("authoritative")
+        else continuity.get("relation") or ""
+    ).strip().upper()
+    if resolved_relation not in {"CONTINUE", "RECALL", "NEW"}:
+        resolved_relation = "CONTINUE" if continuity.get("continuation") else "NEW"
     context_mode = str(continuity.get("context_dependency") or "").strip().lower()
-    is_continuation = bool(
-        continuity.get("continuation")
-        or continuity.get("reference_to_previous")
-        or context_mode in {"continuation", "same_topic", "reference"}
-    )
+    is_continuation = resolved_relation == "CONTINUE"
+    is_recall = resolved_relation == "RECALL"
 
     current_scene = state_obj.get("current_visual_scene")
     if not isinstance(current_scene, dict):
         current_scene = state_obj.get("active_visual_scene")
     current_scene = current_scene if isinstance(current_scene, dict) else None
 
-    # If there is an existing scene and the semantic contract says the new turn
-    # is independent/new, move the previous scene into A-E/7D before replacing it.
-    if current_scene and not is_continuation:
+    # Only NEW closes the current active topic. CONTINUE develops it; RECALL
+    # switches the semantic operand to an older authenticated dialogue record.
+    if current_scene and resolved_relation == "NEW":
         previous_topic = safe_trim_text(
             current_scene.get("topic")
             or current_scene.get("current_request")
@@ -2738,11 +2773,25 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
             _archive_current_visual_scene_to_dynamic(state_obj, user_id)
         state_obj["active_topic_slot"] = _next_visual_topic_slot(state_obj)
 
-    previous_scene_id = (
-        str(current_scene.get("scene_id") or "")
-        if is_continuation and isinstance(current_scene, dict)
-        else ""
-    )
+    selected_operand = {}
+    selected_index = -1
+    if isinstance(dialogue_resolution, dict):
+        selected_operand = deepcopy(dialogue_resolution.get("selected_memory_operand") or {})
+        try:
+            selected_index = int(dialogue_resolution.get("selected_memory_index", -1))
+        except (TypeError, ValueError):
+            selected_index = -1
+
+    previous_scene_id = ""
+    if resolved_relation == "CONTINUE" and isinstance(current_scene, dict):
+        previous_scene_id = str(current_scene.get("scene_id") or "")
+    elif resolved_relation == "RECALL" and isinstance(selected_operand, dict):
+        previous_scene_id = str(
+            selected_operand.get("scene_id")
+            or selected_operand.get("visual_scene_id")
+            or selected_operand.get("source_scene_id")
+            or ""
+        )
 
     state_obj["visual_scene_version"] = int(state_obj.get("visual_scene_version") or 0) + 1
     scene_id = str(
@@ -2778,7 +2827,15 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
             1400,
         ),
         "continuation": is_continuation,
-        "context_dependency": context_mode,
+        "context_dependency": ("continuation" if resolved_relation == "CONTINUE" else "recall" if resolved_relation == "RECALL" else "independent"),
+        "dialogue_relation": resolved_relation,
+        "selected_memory_index": selected_index,
+        "selected_memory_operand": deepcopy(selected_operand),
+        "development_state": deepcopy(
+            dialogue_resolution.get("development_state")
+            if isinstance(dialogue_resolution, dict)
+            else {}
+        ),
         "previous_scene_id": previous_scene_id,
         "render_block_types": block_types,
         "presentation_types": presentation_types,
@@ -2794,8 +2851,10 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "dialogue_vector": deepcopy(state_obj.get("dialogue_vector", {})),
         "turn_progression": deepcopy(state_obj.get("turn_progression", {})),
         "render_continuity": {
-            "relation": "CONTINUE_TOPIC" if is_continuation else "NEW_TOPIC",
-            "reuse_existing_scene": bool(is_continuation and previous_scene_id),
+            "relation": resolved_relation,
+            "reuse_existing_scene": bool(resolved_relation == "CONTINUE" and previous_scene_id),
+            "reuse_recalled_memory": bool(resolved_relation == "RECALL" and selected_operand),
+            "selected_memory_index": selected_index,
             "previous_scene_id": previous_scene_id,
             "previous_render_types": list(current_scene.get("render_block_types") or []) if is_continuation and isinstance(current_scene, dict) else [],
             "avoid_repeat": True,
@@ -2867,6 +2926,14 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "april_meaning": safe_trim_text(answer_text, 1400),
         "answer_summary": safe_trim_text(contract.get("summary") or answer_text, 1000),
         "semantic_state": deepcopy(semantic_scene_state),
+        "dialogue_relation": resolved_relation,
+        "selected_memory_index": selected_index,
+        "selected_memory_operand": deepcopy(selected_operand),
+        "development_state": deepcopy(
+            dialogue_resolution.get("development_state")
+            if isinstance(dialogue_resolution, dict)
+            else {}
+        ),
         "visual_scene_id": scene_id,
         "continuation": is_continuation,
         "created_at": time.time(),
@@ -2918,8 +2985,137 @@ def update_dialog_context(user_id, semantic_result):
     if topic:
         state_obj["current_topic"] = topic
 
-    # Store measured dialogue evidence in the existing dialog state so the
-    # scene updater can consume the same decision without another semantic pass.
+    dialogue_vector = (
+        semantic_result.get("dialogue_vector")
+        if isinstance(semantic_result.get("dialogue_vector"), dict)
+        else {}
+    )
+
+    raw_relation = (
+        dialogue_vector.get("three_way_relation")
+        or contract.get("three_way_relation")
+        or semantic_result.get("three_way_relation")
+        or semantic_result.get("dialogue_relation")
+    )
+    relation = str(raw_relation or "").strip().upper()
+    if relation not in {"CONTINUE", "RECALL", "NEW"}:
+        # Compatibility inputs from older semantic contracts.
+        if bool(contract.get("continuation", semantic_result.get("continuation", False))):
+            relation = "CONTINUE"
+        elif bool(contract.get("reference_to_previous", False)):
+            relation = "RECALL"
+        else:
+            relation = "NEW"
+
+    selected_operand = deepcopy(
+        dialogue_vector.get("selected_memory_operand")
+        or contract.get("selected_memory_operand")
+        or semantic_result.get("selected_memory_operand")
+        or {}
+    )
+    try:
+        selected_index = int(
+            dialogue_vector.get(
+                "selected_memory_index",
+                contract.get("selected_memory_index", semantic_result.get("selected_memory_index", -1)),
+            )
+        )
+    except (TypeError, ValueError):
+        selected_index = -1
+
+    selected_record = deepcopy(
+        semantic_result.get("selected_memory_record")
+        or contract.get("selected_memory_record")
+        or {}
+    )
+    resolved_request = str(
+        contract.get("resolved_request")
+        or semantic_result.get("resolved_request")
+        or dialogue_vector.get("resolved_request")
+        or ""
+    ).strip()
+
+    history_context = (
+        contract.get("history_task_context")
+        if isinstance(contract.get("history_task_context"), dict)
+        else semantic_result.get("history_task_context")
+        if isinstance(semantic_result.get("history_task_context"), dict)
+        else {}
+    )
+
+    semantic_scene_state = semantic_result.get("semantic_scene_state")
+    if not isinstance(semantic_scene_state, dict):
+        semantic_scene_state = (
+            contract.get("semantic_scene_state")
+            if isinstance(contract.get("semantic_scene_state"), dict)
+            else {}
+        )
+
+    # The development state is a persisted operand/result description. It does
+    # not decide routing; it records what the semantic processor already chose.
+    development_state = {
+        "relation": relation,
+        "active_topic": topic or semantic_result.get("active_topic"),
+        "active_goal": semantic_result.get("active_goal"),
+        "current_request": semantic_result.get("normalized")
+        or semantic_result.get("current_request")
+        or contract.get("current_request")
+        or "",
+        "resolved_request": resolved_request,
+        "delta": deepcopy(semantic_result.get("dialogue_delta") or {}),
+        "semantic_state": deepcopy(semantic_scene_state),
+        "history_task_context": deepcopy(history_context),
+        "previous_result": deepcopy(
+            selected_operand.get("result")
+            or selected_operand.get("april")
+            or selected_operand.get("assistant")
+            or selected_operand.get("answer")
+            or ""
+        ) if isinstance(selected_operand, dict) else "",
+        "source_scene_id": str(
+            selected_operand.get("scene_id")
+            or selected_operand.get("visual_scene_id")
+            or selected_operand.get("source_scene_id")
+            or ""
+        ) if isinstance(selected_operand, dict) else "",
+        "updated_at": time.time(),
+    }
+
+    now = time.time()
+    resolution = {
+        "relation": relation,
+        "selected_memory_index": selected_index,
+        "selected_memory_operand": selected_operand,
+        "selected_memory_record": selected_record,
+        "previous_result": {
+            "user": (
+                selected_operand.get("user")
+                or selected_operand.get("user_meaning")
+                or ""
+            ) if isinstance(selected_operand, dict) else "",
+            "result": (
+                selected_operand.get("result")
+                or selected_operand.get("april")
+                or selected_operand.get("assistant")
+                or selected_operand.get("answer")
+                or ""
+            ) if isinstance(selected_operand, dict) else "",
+            "scene_id": development_state["source_scene_id"],
+        },
+        "development_state": development_state,
+        "source_scene_id": development_state["source_scene_id"],
+        "resolved_request": resolved_request,
+        "confidence": float(
+            dialogue_vector.get("three_way_confidence")
+            or contract.get("three_way_confidence")
+            or semantic_result.get("confidence")
+            or 0.0
+        ),
+        "authoritative": True,
+        "updated_at": now,
+    }
+    state_obj["dialogue_resolution"] = resolution
+
     dialogue_state = state_obj.get("dialog_state")
     if not isinstance(dialogue_state, dict):
         dialogue_state = {}
@@ -2928,42 +3124,54 @@ def update_dialog_context(user_id, semantic_result):
         "current_request": semantic_result.get("normalized")
         or semantic_result.get("current_request")
         or "",
-        "continuation": bool(
-            contract.get("continuation", semantic_result.get("continuation", False))
+        "continuation": relation == "CONTINUE",
+        "reference_to_previous": relation == "RECALL",
+        "context_dependency": (
+            "continuation" if relation == "CONTINUE"
+            else "recall" if relation == "RECALL"
+            else "independent"
         ),
-        "reference_to_previous": bool(
-            contract.get("reference_to_previous", False)
-        ),
-        "context_dependency": semantic_result.get("context_dependency"),
         "active_topic": topic or semantic_result.get("active_topic"),
         "active_goal": semantic_result.get("active_goal"),
         "dialog_act": contract.get("dialog_act") or semantic_result.get("dialog_act"),
-        "relation": contract.get("relation") or semantic_result.get("dialogue_relation") or "NEW_TOPIC",
-        "subtype": contract.get("subtype") or semantic_result.get("dialogue_subtype") or "NEW_TOPIC",
+        "relation": relation,
+        "three_way_relation": relation,
+        "subtype": contract.get("subtype") or semantic_result.get("dialogue_subtype") or relation,
         "avoid_repeat": True,
         "delta": deepcopy(semantic_result.get("dialogue_delta") or {}),
+        "selected_memory_index": selected_index,
+        "selected_memory_operand": deepcopy(selected_operand),
+        "development_state": deepcopy(development_state),
+        "resolved_request": resolved_request,
     })
-    state_obj["dialogue_vector"] = deepcopy(semantic_result.get("dialogue_vector") or {})
+
+    state_obj["dialogue_vector"] = deepcopy(dialogue_vector)
     state_obj["turn_progression"] = {
-        "relation": dialogue_state.get("relation"),
+        "relation": relation,
         "subtype": dialogue_state.get("subtype"),
         "active_topic": dialogue_state.get("active_topic"),
         "active_goal": dialogue_state.get("active_goal"),
         "delta": deepcopy(dialogue_state.get("delta") or {}),
+        "selected_memory_index": selected_index,
+        "selected_memory_operand": deepcopy(selected_operand),
+        "development_state": deepcopy(development_state),
         "avoid_repeat": True,
-        "updated_at": time.time(),
+        "updated_at": now,
     }
     state_obj["dialog_state"] = dialogue_state
 
-    # Semantic result is evidence entering the same memory field; it is not a
-    # second memory system.
+    # Semantic result is evidence entering the same memory field; the selected
+    # operand is now durably anchored for the next executor/provider stage.
     QUANTUM_MEMORY_ENGINE.record_intent(state_obj, {
         "topic": topic,
         "object": obj,
         "intent": semantic_result.get("intent"),
-        "context_dependency": semantic_result.get("context_dependency"),
-        "continuation": bool(contract.get("continuation", semantic_result.get("continuation", False))),
-        "timestamp": time.time(),
+        "context_dependency": dialogue_state["context_dependency"],
+        "continuation": relation == "CONTINUE",
+        "three_way_relation": relation,
+        "selected_memory_index": selected_index,
+        "selected_memory_operand": deepcopy(selected_operand),
+        "timestamp": now,
     })
     persist_state(user_id)
 
