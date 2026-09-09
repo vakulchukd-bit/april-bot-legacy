@@ -3821,6 +3821,11 @@ def _make_request(
         "response_guidance": response_guidance.get("mode"),
         "provider_calls": 1,
     })
+    # Canonical OpenAI Responses API floor: never allow 0..15.
+    response_budget = max(
+        OUTPUT_MIN_TOKENS,
+        min(OUTPUT_MAX_TOKENS, int(response_budget or OUTPUT_MIN_TOKENS)),
+    )
     request.response_complexity = complexity
     request.response_output_tokens = response_budget
     request.max_output_tokens = response_budget
