@@ -43,11 +43,13 @@ from blocks.energy_manager import (build_quantum_acceleration_profile, apply_qua
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.image_system import scan_image, render_visual_answer, NANO_PRINTER_VERSION
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v49_provider_signal_visual_dialogue_fix_r1"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v49_provider_signal_visual_dialogue_fix_r2_engine_upgrade"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 16
 OUTPUT_MAX_TOKENS = 8000
+DIALOGUE_ENGINE_VERSION = "quantum_dialogue_vector_engine_v2"
+RENDER_ENGINE_VERSION = "quantum_render_integrity_engine_v1"
 
 # Canonical structural dimensions of the single processor matrix.
 # These are fixed engine dimensions, not routing triggers or score thresholds.
@@ -2304,6 +2306,110 @@ def _dialogue_memory_parts(
     return parts[-max(1, int(limit)):]
 
 
+
+class QuantumDialogueVectorEngine:
+    """
+    Runtime semantic gate for MEMORY → PARTS → CONTEXT × PARTS → INTERP.
+
+    A memory part becomes an interpretation only when the shared dialogue engine
+    itself produces a positive discourse relation for that part. Raw embedding
+    similarity is retained as evidence, but it can never create an INTERP by
+    itself. This keeps the vector decision engine-driven rather than declaration-
+    driven and prevents tiny/non-zero similarity from turning every new request
+    into an existing vector.
+    """
+
+    VERSION = "quantum_dialogue_vector_engine_v2"
+    POSITIVE_RELATIONS = {
+        "continuation",
+        "reformulation",
+        "correction",
+        "reference",
+        "affirmation",
+        "rejection",
+        "memory_query",
+    }
+
+    @classmethod
+    def _part_dialogue(cls, context: str, part: dict[str, Any]) -> dict:
+        metadata = _as_dict(part.get("metadata"))
+        user = _s(metadata.get("user") or metadata.get("previous_user") or "")
+        april = _s(
+            metadata.get("april")
+            or metadata.get("assistant")
+            or metadata.get("previous_april")
+            or ""
+        )
+        kind = _s(part.get("kind")).lower()
+
+        if kind == "visual_scene" and not april:
+            april = _s(part.get("content"))
+
+        if not april and kind not in {"dialogue_pair", "visual_scene", "dynamic_memory"}:
+            april = _s(part.get("content"))
+
+        try:
+            measured = QUANTUM_DIALOGUE_ENGINE.dialogue(
+                context,
+                previous_assistant=april,
+                previous_user=user,
+                active_goal="",
+                active_topic="",
+            ) or {}
+        except Exception:
+            measured = {}
+
+        dialogue = _as_dict(measured.get("dialogue"))
+        return {
+            "measurement": measured,
+            "label": _s(dialogue.get("label")).lower(),
+            "continuation": bool(measured.get("continuation")),
+            "reference_to_previous": bool(measured.get("reference_to_previous")),
+            "confidence": float(dialogue.get("confidence") or 0.0),
+        }
+
+    @classmethod
+    def prove_part(cls, context: str, part: dict[str, Any], similarity: float = 0.0) -> dict:
+        measurement = cls._part_dialogue(context, part)
+        label = measurement["label"]
+
+        # The shared discourse engine is authoritative for semantic relation.
+        # Similarity alone is never sufficient evidence for INTERP.
+        proved = bool(
+            label in cls.POSITIVE_RELATIONS
+            or measurement["continuation"]
+            or measurement["reference_to_previous"]
+        )
+
+        # A semantic 'memory_query' is itself a legitimate interpretation of
+        # memory content. It binds the query to the part without a lexical map.
+        if label == "memory_query":
+            relation = "MEMORY_QUERY_TO_PART"
+        elif measurement["reference_to_previous"]:
+            relation = "REFERENCE_TO_MEMORY_PART"
+        elif measurement["continuation"]:
+            relation = "CONTINUATION_TO_MEMORY_PART"
+        elif label in cls.POSITIVE_RELATIONS:
+            relation = f"{label.upper()}_TO_MEMORY_PART"
+        else:
+            relation = ""
+
+        return {
+            "proved": proved,
+            "relation": relation,
+            "label": label,
+            "continuation": bool(measurement["continuation"]),
+            "reference_to_previous": bool(measurement["reference_to_previous"]),
+            "dialogue_confidence": round(measurement["confidence"], 6),
+            "similarity_evidence": round(float(similarity or 0.0), 6),
+            "semantic_source": "QUANTUM_DIALOGUE_ENGINE",
+            "interpretation_source": "dialogue_relation_proof",
+        }
+
+
+QUANTUM_DIALOGUE_VECTOR_ENGINE = QuantumDialogueVectorEngine()
+
+
 def _interpret_context_against_memory_parts(
     *,
     context: str,
@@ -2351,22 +2457,29 @@ def _interpret_context_against_memory_parts(
     interpretations: list[dict[str, Any]] = []
     for index, part in enumerate(parts):
         similarity = float(similarity_map.get(texts[index], 0.0) or 0.0)
-        # Zero means the current context has no semantic interpretation in this
-        # memory part. Positive similarity creates one explicit interpretation.
-        if similarity <= 0.0:
+
+        # ENGINE GATE:
+        # raw embedding similarity is evidence only. A memory part becomes an
+        # INTERP only when the shared QUANTUM_DIALOGUE_ENGINE establishes an
+        # actual discourse relation to that part.
+        proof = QUANTUM_DIALOGUE_VECTOR_ENGINE.prove_part(
+            context,
+            part,
+            similarity=similarity,
+        )
+        if not proof.get("proved"):
             continue
+
         interpretations.append({
             "marker": "[INTERP]",
             "part_id": _s(part.get("part_id")),
             "part_kind": _s(part.get("kind")),
-            "relation": (
-                "REFERENCE_TO_MEMORY_PART"
-                if bool(frozen.get("reference_to_previous"))
-                and part.get("kind") in {"dialogue_pair", "visual_scene"}
-                else "RELATED_MEMORY_PART"
-            ),
+            "relation": proof.get("relation") or "RELATED_MEMORY_PART",
             "similarity": round(similarity, 6),
             "semantic_source": semantic_source,
+            "interpretation_engine": proof.get("interpretation_source"),
+            "dialogue_label": proof.get("label"),
+            "dialogue_confidence": proof.get("dialogue_confidence"),
         })
 
     existing = bool(interpretations)
@@ -5163,6 +5276,199 @@ def _ensure_visible_text_block(
     return [text_block, *canonical]
 
 
+
+class QuantumRenderIntegrityEngine:
+    """
+    Runtime payload validator for the Web-facing structured render stream.
+
+    The engine validates the actual payload, not a declaration that a renderer
+    exists. Invalid/empty structured blocks are removed before SceneContract.
+    Text remains available as the human answer. No renderer is fabricated here.
+    """
+
+    VERSION = "quantum_render_integrity_engine_v1"
+
+    @staticmethod
+    def kind(block: dict) -> str:
+        return _s(
+            block.get("type")
+            or block.get("artifact_type")
+            or block.get("representation")
+        ).lower()
+
+    @classmethod
+    def validate(cls, block: dict) -> tuple[bool, str]:
+        if not isinstance(block, dict):
+            return False, "not_dict"
+        kind = cls.kind(block)
+        if kind in {"", "text", "markdown"}:
+            return True, "text"
+
+        payload = block.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+
+        def nonempty_text(*values) -> bool:
+            return any(_s(v) for v in values)
+
+        if kind == "graph":
+            series = payload.get("series")
+            if isinstance(series, list):
+                x_values = (
+                    _as_dict(payload.get("x_axis")).get("values")
+                    if isinstance(payload.get("x_axis"), dict)
+                    else []
+                )
+                for item in series:
+                    if not isinstance(item, dict):
+                        continue
+                    points = item.get("points")
+                    if isinstance(points, list) and any(
+                        isinstance(point, dict)
+                        and point.get("x") not in (None, "")
+                        and point.get("y") not in (None, "")
+                        for point in points
+                    ):
+                        return True, "graph_points"
+                    values = item.get("values")
+                    if (
+                        isinstance(values, list)
+                        and isinstance(x_values, list)
+                        and len(values) >= 2
+                        and len(x_values) >= 2
+                    ):
+                        return True, "graph_series"
+            table = payload.get("data_table")
+            if isinstance(table, list) and any(
+                isinstance(row, dict) and len(row) >= 2 for row in table
+            ):
+                return True, "graph_data_table"
+            return False, "graph_payload_empty"
+
+        if kind == "table":
+            for key in ("rows", "items", "data", "values"):
+                value = payload.get(key)
+                if isinstance(value, list) and value:
+                    return True, f"table_{key}"
+            if nonempty_text(payload.get("csv"), payload.get("text")):
+                return True, "table_text"
+            return False, "table_payload_empty"
+
+        if kind in {"diagram", "scene", "drawing"}:
+            elements = payload.get("elements")
+            if isinstance(elements, list) and any(
+                isinstance(item, dict) and (
+                    _s(item.get("kind"))
+                    or _s(item.get("type"))
+                    or _s(item.get("shape"))
+                    or _s(item.get("path"))
+                )
+                for item in elements
+            ):
+                return True, "diagram_elements"
+            svg = payload.get("svg") or payload.get("markup")
+            if _s(svg):
+                return True, "diagram_svg"
+            return False, "diagram_payload_empty"
+
+        if kind in {"formula", "math"}:
+            return (
+                nonempty_text(
+                    payload.get("formula"),
+                    payload.get("expression"),
+                    payload.get("value"),
+                    block.get("content"),
+                    block.get("text"),
+                ),
+                "formula_payload" if nonempty_text(
+                    payload.get("formula"),
+                    payload.get("expression"),
+                    payload.get("value"),
+                    block.get("content"),
+                    block.get("text"),
+                ) else "formula_payload_empty",
+            )
+
+        if kind in {"image", "annotated_image"}:
+            if nonempty_text(
+                payload.get("url"),
+                payload.get("src"),
+                payload.get("source_path"),
+                payload.get("path"),
+                payload.get("data"),
+                payload.get("base64"),
+                block.get("source_path"),
+            ):
+                return True, "image_source"
+            return False, "image_source_empty"
+
+        if kind in {"gallery"}:
+            items = payload.get("items") or payload.get("images") or payload.get("sources")
+            if isinstance(items, list) and items:
+                return True, "gallery_items"
+            return False, "gallery_empty"
+
+        if kind == "link":
+            return (
+                nonempty_text(payload.get("url"), payload.get("href"), block.get("url")),
+                "link_target" if nonempty_text(payload.get("url"), payload.get("href"), block.get("url"))
+                else "link_target_empty",
+            )
+
+        if kind == "code":
+            return (
+                nonempty_text(payload.get("code"), block.get("content"), block.get("text")),
+                "code_content" if nonempty_text(payload.get("code"), block.get("content"), block.get("text"))
+                else "code_content_empty",
+            )
+
+        if kind in {"audio", "video", "file", "action"}:
+            return (
+                nonempty_text(
+                    payload.get("url"),
+                    payload.get("src"),
+                    payload.get("path"),
+                    payload.get("content"),
+                    block.get("content"),
+                ),
+                "media_source" if nonempty_text(
+                    payload.get("url"),
+                    payload.get("src"),
+                    payload.get("path"),
+                    payload.get("content"),
+                    block.get("content"),
+                ) else "media_source_empty",
+            )
+
+        # Unknown structured types are not allowed to pass by declaration alone.
+        # They must carry a non-empty payload/content.
+        if payload and any(value not in (None, "", [], {}) for value in payload.values()):
+            return True, "unknown_nonempty_payload"
+        return False, "unknown_payload_empty"
+
+    @classmethod
+    def sanitize(cls, blocks: Any) -> tuple[list[dict], list[dict]]:
+        source = list(blocks or []) if isinstance(blocks, (list, tuple)) else []
+        valid: list[dict] = []
+        rejected: list[dict] = []
+        for block in source:
+            if not isinstance(block, dict):
+                rejected.append({"reason": "not_dict"})
+                continue
+            ok, reason = cls.validate(block)
+            if ok:
+                valid.append(block)
+            else:
+                rejected.append({
+                    "type": cls.kind(block),
+                    "block_id": _s(block.get("block_id") or block.get("id")),
+                    "reason": reason,
+                })
+        return valid, rejected
+
+
+QUANTUM_RENDER_INTEGRITY_ENGINE = QuantumRenderIntegrityEngine()
+
+
 def _quantum_visible_render_policy(
     blocks: Any,
     answer: str = "",
@@ -5176,6 +5482,7 @@ def _quantum_visible_render_policy(
     discarded.
     """
     source = _canonicalize_render_stream(blocks)
+    source, rejected_render_blocks = QUANTUM_RENDER_INTEGRITY_ENGINE.sanitize(source)
 
     requested: list[str] = []
     if request is not None:
@@ -5314,6 +5621,7 @@ def _finalize_quantum_visible_stream(
 ) -> list[dict]:
     """Final canonical visible stream before SceneContract/Web."""
     collapsed = _quantum_visible_render_policy(blocks, answer=answer, request=request)
+    collapsed, _rejected = QUANTUM_RENDER_INTEGRITY_ENGINE.sanitize(collapsed)
     return _ensure_presentation_signals(collapsed, request=request)
 
 def _presentation_latex(fragment: str) -> str:
@@ -6335,6 +6643,18 @@ def _response(value: Any, request: MachineRequest | None = None) -> MachineRespo
     allowed["metadata"] = metadata
     response = MachineResponse(**allowed)
     response = _ensure_quantum_structured_outputs(response, request)
+    sanitized_blocks, rejected_blocks = QUANTUM_RENDER_INTEGRITY_ENGINE.sanitize(
+        list(getattr(response, "render_blocks", []) or [])
+    )
+    response.render_blocks = sanitized_blocks
+    if rejected_blocks:
+        metadata = dict(getattr(response, "metadata", {}) or {})
+        metadata["render_integrity"] = {
+            "engine": QUANTUM_RENDER_INTEGRITY_ENGINE.VERSION,
+            "rejected": rejected_blocks,
+            "invalid_structured_render_suppressed": True,
+        }
+        response.metadata = metadata
     return response
 
 def _persist_structured_scene_payload(
