@@ -452,10 +452,13 @@ def detect_intent(text: str, state: Optional[dict] = None) -> Dict[str, Any]:
     return result
 
 import asyncio
+import hashlib
 import math
 import os
 import re
 import shutil
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -543,7 +546,7 @@ def _get_matplotlib():
         return None
 
 
-VERSION = "LOCAL_NANO_VISUAL_SCANNER_NANO_PRINTER_V6_NUMPY_SAFE"
+VERSION = "LOCAL_NANO_VISUAL_SCANNER_NANO_PRINTER_V7_MACROQUANTUM_128BIT_16CORE"
 PROVIDER = "local"
 MAX_OCR_ITEMS = 500
 MAX_TEXT_CHARS = 16000
@@ -555,6 +558,153 @@ MAX_VECTOR_PRIMITIVES = 260
 MAX_DIFF_REGIONS = 80
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+
+# ---------------------------------------------------------------------------
+# MACRO-QUANTUM / NANO SCANNER V7
+# ---------------------------------------------------------------------------
+# "128-bit" is an internal evidence fingerprint width, not a claim of
+# physical quantum hardware. The scanner uses 16 parallel logical lanes over
+# the same decoded pixel buffer and returns deterministic multiscale evidence.
+NANO_SCANNER_VERSION = "NANO_SCANNER_128BIT_16CORE_MACROQUANTUM_V7"
+NANO_SCANNER_BITS = 128
+NANO_SCANNER_LOGICAL_CORES = 16
+NANO_SCANNER_MAX_WORKERS = 16
+NANO_PIXEL_LEVELS = (16, 32, 64)
+NANO_MICROGRID = 4
+
+
+def _visual_log(event: str, **data: Any) -> None:
+    """Lightweight runtime telemetry for scanner/printer observation only."""
+    try:
+        print(
+            f"[NANO-VISUAL] {event} "
+            f"{json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=str)}",
+            flush=True,
+        )
+    except Exception:
+        pass
+
+
+def _nano_hash_bytes(data: bytes) -> str:
+    return hashlib.blake2b(data, digest_size=NANO_SCANNER_BITS // 8).hexdigest()
+
+
+def _image_fingerprint(img: Image.Image) -> dict:
+    """Deterministic 128-bit identity of the decoded RGB pixel stream."""
+    try:
+        raw = img.tobytes()
+        digest = _nano_hash_bytes(raw)
+    except Exception:
+        digest = _nano_hash_bytes(f"{img.size}:{img.mode}".encode("utf-8"))
+    return {
+        "bits": NANO_SCANNER_BITS,
+        "algorithm": "blake2b-128",
+        "digest": digest,
+        "resolution": [int(img.width), int(img.height)],
+        "mode": img.mode,
+    }
+
+
+def _nano_pixel_pyramid(img: Image.Image) -> dict:
+    """Multiscale pixel evidence: coarse whole-image + micro-pixel tiles.
+
+    The scanner never attempts to transmit every source pixel downstream. It
+    measures the image at several resolutions and emits deterministic tile
+    descriptors plus a 128-bit digest for each level. High-detail regions are
+    represented by 4x4 micro-samples inside selected tiles.
+    """
+    levels = {}
+    for grid in NANO_PIXEL_LEVELS:
+        small = img.resize((grid, grid), Image.Resampling.BILINEAR)
+        px = list(small.getdata())
+        total = max(1, len(px))
+        mean = [sum(c[i] for c in px) / total for i in range(3)]
+        variance = sum(
+            ((0.2126*r + 0.7152*g + 0.0722*b) -
+             (0.2126*mean[0] + 0.7152*mean[1] + 0.0722*mean[2])) ** 2
+            for r, g, b in px
+        ) / total
+        levels[str(grid)] = {
+            "grid": grid,
+            "samples": grid * grid,
+            "mean_rgb": [round(v, 2) for v in mean],
+            "luma_std": round(math.sqrt(max(0.0, variance)) / 255.0, 6),
+            "digest_128": _nano_hash_bytes(bytes(int(max(0, min(255, c))) for rgb in px for c in rgb)),
+        }
+
+    # Adaptive micro-pixel pass on a bounded 8x8 tile map. A tile is expanded
+    # only when its local luma variation is above the image median.
+    base_grid = 8
+    thumb = img.resize((base_grid, base_grid), Image.Resampling.BILINEAR)
+    vals = []
+    for rgb in thumb.getdata():
+        vals.append(0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2])
+    median = sorted(vals)[len(vals)//2] if vals else 0.0
+    adaptive = []
+    for idx, value in enumerate(vals):
+        if abs(value - median) < 22.0:
+            continue
+        gx, gy = idx % base_grid, idx // base_grid
+        left = int(gx * img.width / base_grid)
+        top = int(gy * img.height / base_grid)
+        right = max(left + 1, int((gx + 1) * img.width / base_grid))
+        bottom = max(top + 1, int((gy + 1) * img.height / base_grid))
+        crop = img.crop((left, top, right, bottom))
+        micro = crop.resize((NANO_MICROGRID, NANO_MICROGRID), Image.Resampling.BOX)
+        micro_values = [list(rgb) for rgb in micro.getdata()]
+        adaptive.append({
+            "tile": [gx, gy],
+            "bbox": [left, top, right - left, bottom - top],
+            "luma_deviation": round(abs(value - median) / 255.0, 6),
+            "micro_grid": NANO_MICROGRID,
+            "micro_pixels": micro_values,
+            "digest_128": _nano_hash_bytes(bytes(int(max(0, min(255, c))) for rgb in micro_values for c in rgb)),
+        })
+        if len(adaptive) >= 64:
+            break
+
+    return {
+        "engine": "nano_pixel_pyramid_local",
+        "levels": levels,
+        "adaptive_micro_tiles": adaptive,
+        "microgrid": NANO_MICROGRID,
+        "pixel_domain": "decoded_rgb_pixels",
+        "nano_domain": "adaptive_micro_pixel_tiles",
+    }
+
+
+def _parallel_local_scan(img: Image.Image, user_request: str, previous_path: Optional[str], request: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Run independent local scan engines across 16 logical lanes.
+
+    The lanes are logical worker slots. Actual CPU parallelism is determined by
+    the host and whether the underlying library releases the GIL.
+    """
+    tasks = {
+        "visual": lambda: _pil_stats(img),
+        "pixels": lambda: _pixel_scan(img),
+        "nano_pixels": lambda: _nano_pixel_pyramid(img),
+        "color": lambda: _color_scan(img),
+        "ocr": lambda: _ocr_scan(img),
+        "layout": lambda: _layout_scan(img),
+        "components": lambda: _connected_components_scan(img),
+        "geometry": lambda: _geometry_scan(img),
+        "compare": lambda: _compare_images(img, previous_path),
+    }
+    results: Dict[str, Any] = {}
+    started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=NANO_SCANNER_MAX_WORKERS, thread_name_prefix="april-nano") as pool:
+        futures = {pool.submit(fn): name for name, fn in tasks.items()}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                results[name] = future.result()
+            except Exception as exc:
+                results[name] = {"available": False, "error": f"{name}_failed:{exc}"}
+    results["parallel_elapsed_ms"] = round((time.perf_counter() - started) * 1000.0, 2)
+    results["logical_lanes"] = NANO_SCANNER_LOGICAL_CORES
+    results["worker_slots"] = NANO_SCANNER_MAX_WORKERS
+    return results
+
 
 # Fast adaptive hot-path controls. Expensive secondary passes are disabled by
 # default and run only when the first measurement is weak.
@@ -1405,15 +1555,26 @@ def _capabilities() -> Dict[str, Any]:
 
 
 def scan_image(path: str, *, user_request: str = "", previous_path: Optional[str] = None, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Macro-quantum local scan: one decoded image, 16 parallel evidence lanes.
+
+    All observations remain local. The result is a processor-ready evidence
+    packet; it does not decide routing and does not call a paid provider.
+    """
+    t0 = time.perf_counter()
+    _visual_log("SCAN_START", path=str(path), request=_clip_text(user_request, 140))
     if not path:
+        _visual_log("SCAN_ERROR", reason="image_path_missing")
         return build_error_packet("image_path_missing")
     if not os.path.exists(path):
+        _visual_log("SCAN_ERROR", reason="image_file_missing")
         return build_error_packet("image_file_missing")
     if Path(path).suffix.lower() not in IMAGE_EXTENSIONS:
+        _visual_log("SCAN_ERROR", reason="unsupported_image_type")
         return build_error_packet("unsupported_image_type")
 
     img = _load_image(path)
     if img is None:
+        _visual_log("SCAN_ERROR", reason="image_decode_failed")
         return build_error_packet("image_decode_failed")
 
     if not previous_path and isinstance(state, dict):
@@ -1421,17 +1582,20 @@ def scan_image(path: str, *, user_request: str = "", previous_path: Optional[str
         if isinstance(candidate, str):
             previous_path = candidate
 
-    visual = _pil_stats(img)
-    pixels = _pixel_scan(img)
-    color = _color_scan(img)
-    ocr = _ocr_scan(img)
-    layout = _layout_scan(img)
-    components = _connected_components_scan(img)
-    tables = _table_scan(layout, img.size)
-    geometry = _geometry_scan(img)
-    semantics = _text_semantics(ocr.get("text", ""))
-    compare = _compare_images(img, previous_path)
     request = _request_evidence(user_request)
+    lanes = _parallel_local_scan(img, user_request, previous_path, request=request)
+    visual = lanes.get("visual", {})
+    pixels = lanes.get("pixels", {})
+    nano_pixels = lanes.get("nano_pixels", {})
+    color = lanes.get("color", {})
+    ocr = lanes.get("ocr", {})
+    layout = lanes.get("layout", {})
+    components = lanes.get("components", {})
+    geometry = lanes.get("geometry", {})
+    compare = lanes.get("compare", {})
+
+    tables = _table_scan(layout, img.size)
+    semantics = _text_semantics(ocr.get("text", ""))
     is_screenshot, screenshot_score, screenshot_reasons = _looks_like_screenshot(img, ocr, layout)
     vector_plan = _vector_plan(geometry, ocr, color, img.size)
     recolor = _recolor_plan(img, color, request)
@@ -1448,15 +1612,83 @@ def scan_image(path: str, *, user_request: str = "", previous_path: Optional[str
         components.get("confidence", 0.0),
     ]
     confidence = round(min(1.0, 0.28 + 0.72 * _confidence(feature_scores)), 4)
+    fingerprint = _image_fingerprint(img)
 
-    return {
+    scope = state if isinstance(state, dict) else {}
+    memory_scope = scope.get("memory_scope") if isinstance(scope.get("memory_scope"), dict) else {}
+    user_id = scope.get("user_id") or memory_scope.get("user_id")
+    conversation_id = scope.get("conversation_id") or memory_scope.get("conversation_id")
+
+    provider_packet = {
+        "input_type": "screenshot" if is_screenshot else "image",
+        "request": user_request,
+        "image_fingerprint": fingerprint,
+        "visual": visual,
+        "ocr": ocr,
+        "text": semantics,
+        "layout": layout,
+        "geometry": geometry,
+        "components": components,
+        "color_scan": color,
+        "nano_pixels": nano_pixels,
+        "screenshot_detection": {
+            "is_screenshot": is_screenshot,
+            "confidence": screenshot_score,
+            "reasons": screenshot_reasons,
+        },
+        "tables": tables,
+        "links": semantics.get("urls", []),
+        "formulas": semantics.get("formula_candidates", []),
+        "code_blocks": semantics.get("code_candidates", []),
+        "change_detection": compare,
+        "visual_objects": summary.get("objects", []),
+        "issues": summary.get("issues", []),
+        "vector_drawing_plan": vector_plan,
+        "three_d_evidence": pseudo_3d,
+    }
+
+    visual_types = [
+        str(x.get("type")) for x in summary.get("objects", [])
+        if isinstance(x, dict) and x.get("type")
+    ]
+    _visual_log(
+        "SCAN_DONE",
+        kind="screenshot" if is_screenshot else "image",
+        resolution=[img.width, img.height],
+        ocr_items=len(ocr.get("items", [])),
+        ocr_preview=_normalize_text(ocr.get("text", ""))[:180],
+        objects=visual_types[:12],
+        formulas=len(semantics.get("formula_candidates", [])),
+        links=len(semantics.get("urls", [])),
+        regions=len(layout.get("regions", [])),
+        lines=len(geometry.get("lines", [])),
+        nano_levels=list(NANO_PIXEL_LEVELS),
+        confidence=confidence,
+        elapsed_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+    )
+    result = {
         "version": VERSION,
+        "nano_scanner_version": NANO_SCANNER_VERSION,
+        "macro_quantum": {
+            "enabled": True,
+            "architecture": "16_parallel_logical_lanes",
+            "logical_core_count": NANO_SCANNER_LOGICAL_CORES,
+            "worker_slots": NANO_SCANNER_MAX_WORKERS,
+            "bit_width": NANO_SCANNER_BITS,
+            "pixel_mode": True,
+            "nano_pixel_mode": True,
+            "levels": list(NANO_PIXEL_LEVELS),
+            "processor_handoff": "direct_structured_evidence",
+        },
         "source": PROVIDER,
         "performance": {
             "fast_mode": NANO_FAST_MODE,
             "ocr_max_passes": NANO_OCR_MAX_PASSES,
             "lazy_matplotlib": True,
             "heavy_optional_image_libs_enabled": NANO_USE_OPTIONAL_HEAVY_IMAGE_LIBS,
+            "parallel_scan": True,
+            "parallel_elapsed_ms": lanes.get("parallel_elapsed_ms", 0.0),
+            "total_scan_elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
         },
         "provider_calls": 0,
         "single_call": False,
@@ -1464,8 +1696,12 @@ def scan_image(path: str, *, user_request: str = "", previous_path: Optional[str
         "local_only": True,
         "input_type": "screenshot" if is_screenshot else "image",
         "path": str(path),
+        "user_id": user_id,
+        "conversation_id": conversation_id,
+        "image_fingerprint": fingerprint,
         "visual": visual,
         "pixels": pixels,
+        "nano_pixels": nano_pixels,
         "color_scan": color,
         "screenshot_detection": {"is_screenshot": is_screenshot, "confidence": screenshot_score, "reasons": screenshot_reasons},
         "ocr": ocr,
@@ -1496,11 +1732,13 @@ def scan_image(path: str, *, user_request: str = "", previous_path: Optional[str
         "vector_drawing_plan": vector_plan,
         "recolor_plan": recolor,
         "three_d_evidence": pseudo_3d,
+        "processor_packet": provider_packet,
         "capabilities": _capabilities(),
         "semantic_scope": {
             "can_explain_visible_content": True,
             "can_extract_text": bool(ocr.get("available")),
             "can_scan_pixels": True,
+            "can_scan_nano_pixels": True,
             "can_scan_colors": bool(color.get("palette")),
             "can_extract_links": bool(semantics["urls"]),
             "can_extract_formula_candidates": bool(semantics["formula_candidates"]),
@@ -1508,7 +1746,7 @@ def scan_image(path: str, *, user_request: str = "", previous_path: Optional[str
             "can_detect_tables": bool(tables["detected"]),
             "can_detect_graph_geometry": geometry.get("graph_confidence", 0.0) > 0.0,
             "can_detect_diagram_geometry": geometry.get("diagram_confidence", 0.0) > 0.0,
-            "can_compare_previous_image": compare["available"],
+            "can_compare_previous_image": compare.get("available", False),
             "can_propose_change_evidence": bool(request["asks_edit_or_fix"] or request["asks_color_change"]),
             "can_build_2d_editable_evidence": bool(vector_plan["available"]),
             "can_build_3d_evidence": bool(pseudo_3d["confidence"] > 0.0),
@@ -1521,19 +1759,26 @@ def scan_image(path: str, *, user_request: str = "", previous_path: Optional[str
             "can_print_3d_scenes": bool(_plt is not None),
             "can_recolor_pixels_locally": True,
             "printer_engine": NANO_PRINTER_VERSION,
-            "semantic_decision_owner": "QUANTUM_INTERPRETATION",
+            "semantic_decision_owner": "QUANTUM_PROCESSOR",
         },
         "confidence": confidence,
         "safe_for_interpretation": True,
-        "decision_owner": "QUANTUM_INTERPRETATION",
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "handoff": {
+            "route": "INPUT -> NANO_SCANNER -> QUANTUM_PROCESSOR",
+            "complete": True,
+            "provider_calls": 0,
+            "next_consumer": "QUANTUM_PROCESSOR",
+        },
     }
+    return result
 
 
 # ============================================================
 # NANO PRINTER V4
 # ============================================================
 
-NANO_PRINTER_VERSION = "NANO_PRINTER_V6_NUMPY_SAFE"
+NANO_PRINTER_VERSION = "NANO_PRINTER_V7_FIDELITY_LOCAL"
 DEFAULT_CANVAS = (1280, 800)
 SUPPORTED_PRINT_KINDS = {
     "image", "screenshot", "annotated_image", "drawing", "diagram",
@@ -1764,15 +2009,59 @@ def _recolor_exact(source_path,spec,output_path):
     return {"ok":True,"changed_pixels":changed,"source_color":list(target),"target_color":list(repl),
             "tolerance":tol,"artifact":_save_image(img,output_path)}
 
+def _copy_source_without_reencode(source_path: str, output_path: str) -> Dict[str, Any]:
+    """Preserve an image byte-for-byte when the printer is only displaying it."""
+    source = Path(source_path)
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, output)
+    img = _load_image(str(output))
+    return {
+        "path": str(output),
+        "mime": f"image/{output.suffix.lstrip('.').lower() or 'png'}",
+        "format": output.suffix.lstrip('.').lower() or 'png',
+        "width": img.width if img else 0,
+        "height": img.height if img else 0,
+        "bytes": output.stat().st_size,
+        "byte_preserved": True,
+        "digest_128": _nano_hash_bytes(output.read_bytes()),
+    }
+
+
 def print_visual(spec, output_path, *, size=DEFAULT_CANVAS, format=None):
-    if not isinstance(spec,dict):return {"ok":False,"error":"spec_must_be_dict","provider_calls":0,"local_only":True}
+    if not isinstance(spec,dict):
+        _visual_log("PRINT_ERROR", reason="spec_must_be_dict")
+        return {"ok":False,"error":"spec_must_be_dict","provider_calls":0,"local_only":True}
     kind=str(spec.get("kind") or spec.get("type") or "scene").lower()
+    _visual_log("PRINT_START", kind=kind, output_path=str(output_path))
     if kind=="recolor":
         source=spec.get("source_path") or spec.get("path")
         if not source:return {"ok":False,"error":"source_path_required","provider_calls":0,"local_only":True}
         r=_recolor_exact(source,spec,output_path); r.update({"kind":"image","printer_version":NANO_PRINTER_VERSION,"provider_calls":0,"local_only":True}); return r
     if kind in {"image","screenshot"}:
-        img=_load_image(str(spec.get("source_path") or spec.get("path","")))
+        source_path = str(spec.get("source_path") or spec.get("path",""))
+        # Pure display paths are copied without decode/re-encode. This preserves
+        # the exact screenshot pixels and is the fastest printer path.
+        if source_path and os.path.exists(source_path) and not spec.get("force_reencode"):
+            artifact = _copy_source_without_reencode(source_path, output_path)
+            _visual_log(
+                "PRINT_DONE", kind=kind, mode="byte_preserved_source", ok=True,
+                width=artifact.get("width", 0), height=artifact.get("height", 0),
+                bytes=artifact.get("bytes", 0),
+            )
+            return {
+                "ok": True,
+                "kind": kind,
+                "printer_version": NANO_PRINTER_VERSION,
+                "provider_calls": 0,
+                "single_call": False,
+                "paid_provider_used": False,
+                "local_only": True,
+                "artifact": artifact,
+                "editable": False,
+                "fidelity_mode": "byte_preserved_source",
+            }
+        img=_load_image(source_path)
     elif kind=="annotated_image":
         img=_load_image(str(spec.get("source_path") or spec.get("path","")))
         if img:
@@ -1788,8 +2077,23 @@ def print_visual(spec, output_path, *, size=DEFAULT_CANVAS, format=None):
     elif kind=="formula":img=_render_formula(spec,size)
     elif kind=="3d":img=_render_3d(spec,size) or _render_drawing({"title":spec.get("title","3D Scene")},size)
     else:return {"ok":False,"error":f"unsupported_print_kind:{kind}","supported":sorted(SUPPORTED_PRINT_KINDS),"provider_calls":0,"local_only":True}
-    if img is None:return {"ok":False,"error":"source_image_unreadable","provider_calls":0,"local_only":True}
+    if img is None:
+        _visual_log("PRINT_ERROR", kind=kind, reason="source_image_unreadable")
+        return {"ok":False,"error":"source_image_unreadable","provider_calls":0,"local_only":True}
     a=_save_image(img,output_path,format)
+    payload_counts = {
+        "series": len(spec.get("series", []) or []) if isinstance(spec.get("series"), list) else 0,
+        "rows": len(spec.get("rows", []) or []) if isinstance(spec.get("rows"), list) else 0,
+        "nodes": len(spec.get("nodes", []) or []) if isinstance(spec.get("nodes"), list) else 0,
+        "edges": len(spec.get("edges", []) or []) if isinstance(spec.get("edges"), list) else 0,
+        "primitives": len(spec.get("primitives", []) or []) if isinstance(spec.get("primitives"), list) else 0,
+        "points": len(spec.get("points", []) or []) if isinstance(spec.get("points"), list) else 0,
+    }
+    _visual_log(
+        "PRINT_DONE", kind=kind, mode="render", ok=True,
+        width=img.width, height=img.height, bytes=a.get("bytes", 0),
+        payload=payload_counts,
+    )
     return {"ok":True,"kind":kind,"printer_version":NANO_PRINTER_VERSION,"provider_calls":0,"single_call":False,
             "paid_provider_used":False,"local_only":True,"artifact":a,"editable":True}
 
@@ -1815,6 +2119,7 @@ def print_from_evidence(evidence, output_path, *, mode="auto", size=DEFAULT_CANV
 def render_visual_answer(action, *, output_path, title="April Visual Answer", graph=None, table=None, diagram=None,
                          drawing=None, formula=None, scene_3d=None, source_image=None, recolor=None, size=DEFAULT_CANVAS):
     action=str(action or "").lower()
+    _visual_log("RENDER_REQUEST", action=action, title=str(title)[:120])
     if recolor:
         spec=dict(recolor); spec["kind"]="recolor"; spec.setdefault("source_path",source_image)
         return print_visual(spec,output_path,size=size)
@@ -1911,4 +2216,7 @@ __all__ = [
     "print_from_evidence",
     "render_visual_answer",
     "NANO_PRINTER_VERSION",
+    "NANO_SCANNER_VERSION",
+    "NANO_SCANNER_BITS",
+    "NANO_SCANNER_LOGICAL_CORES",
 ]
