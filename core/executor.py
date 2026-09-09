@@ -2202,78 +2202,333 @@ def _dialogue_evidence(
 
 
 
+
+def _dialogue_memory_parts(
+    *,
+    state: dict,
+    current_visual_scene: dict | None = None,
+    dynamic_memory: dict | None = None,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    """Decompose dialogue memory into auditable semantic parts."""
+    state = state if isinstance(state, dict) else {}
+    parts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_part(
+        kind: str,
+        content: Any,
+        *,
+        source: str,
+        turn_id: Any = None,
+        scene_id: str = "",
+        metadata: dict | None = None,
+    ) -> None:
+        value = _text(content, 2200)
+        if not value:
+            return
+        fingerprint = hashlib.sha256(
+            f"{kind}|{source}|{turn_id}|{scene_id}|{value}".encode("utf-8")
+        ).hexdigest()[:20]
+        if fingerprint in seen:
+            return
+        seen.add(fingerprint)
+        parts.append({
+            "part_id": f"memory-part-{fingerprint}",
+            "kind": kind,
+            "source": source,
+            "turn_id": turn_id,
+            "scene_id": scene_id,
+            "content": value,
+            "metadata": _quantum_snapshot(metadata or {}),
+        })
+
+    for index, pair in enumerate(
+        _recent_canonical_dialogue_pairs(state, limit=limit)[-limit:], start=1
+    ):
+        if not isinstance(pair, dict):
+            continue
+        user = _s(pair.get("user"))
+        april = _s(pair.get("april"))
+        if user or april:
+            add_part(
+                "dialogue_pair",
+                f"USER: {user}\nAPRIL: {april}",
+                source="canonical_dialogue_history",
+                turn_id=index,
+                metadata={"user": user, "april": april},
+            )
+
+    scene = _as_dict(current_visual_scene)
+    if scene:
+        scene_id = _s(scene.get("scene_id") or scene.get("id"))
+        scene_text = QuantumMemoryUnderstandingEngine._scene_text(scene)
+        if scene_text:
+            add_part(
+                "visual_scene",
+                scene_text,
+                source="visual_scene_memory",
+                scene_id=scene_id,
+                metadata={
+                    "render_block_types": list(scene.get("render_block_types") or []),
+                },
+            )
+
+    memory = dynamic_memory if isinstance(dynamic_memory, dict) else {}
+    for index, match in enumerate(_as_list(memory.get("matches"))[:limit], start=1):
+        if isinstance(match, dict):
+            content = (
+                match.get("text")
+                or match.get("content")
+                or match.get("summary")
+                or match.get("answer")
+                or ""
+            )
+            metadata = {
+                key: match.get(key)
+                for key in ("memory_id", "timestamp", "source", "type", "score")
+                if match.get(key) not in (None, "", [], {})
+            }
+        else:
+            content = match
+            metadata = {}
+        if _s(content):
+            add_part(
+                "dynamic_memory",
+                content,
+                source="dynamic_memory",
+                turn_id=index,
+                metadata=metadata,
+            )
+
+    return parts[-max(1, int(limit)):]
+
+
+def _interpret_context_against_memory_parts(
+    *,
+    context: str,
+    parts: list[dict[str, Any]],
+    interpretation: dict,
+    state: dict | None = None,
+) -> dict:
+    """Evaluate CONTEXT against MEMORY PARTS and resolve vector existence."""
+    context = _text(context, 2200)
+    parts = [part for part in (parts or []) if isinstance(part, dict)]
+    markers = ["[MEMORY]", "[PART]", "[CONTEXT]", "[INTERP]", "[VECTOR]"]
+
+    if not context or not parts:
+        vector_id = (
+            f"vector-{hashlib.sha256(context.encode('utf-8')).hexdigest()[:16]}"
+            if context
+            else ""
+        )
+        return {
+            "version": "DIALOGUE_VECTOR_MATRIX_V1",
+            "markers": markers,
+            "context": {"marker": "[CONTEXT]", "value": context},
+            "memory": {"marker": "[MEMORY]", "parts": _quantum_snapshot(parts), "part_count": len(parts)},
+            "interpretations": [],
+            "interpretation_count": 0,
+            "matched_part_ids": [],
+            "vector": {
+                "marker": "[VECTOR]",
+                "status": "NEW",
+                "kind": "NEW_VECTOR",
+                "vector_id": vector_id,
+                "source_part_ids": [],
+            },
+            "decision": "NEW_VECTOR",
+            "decision_owner": "QUANTUM_PROCESSOR",
+        }
+
+    texts = [str(part.get("content") or "") for part in parts]
+    similarity_map, semantic_source = QuantumMemoryUnderstandingEngine._semantic_score(
+        context, texts
+    )
+    frozen = _freeze_interpretation_dialogue(_as_dict(interpretation))
+    base_relation = _s(frozen.get("relation")).upper() or "INDEPENDENT"
+
+    interpretations: list[dict[str, Any]] = []
+    for index, part in enumerate(parts):
+        similarity = float(similarity_map.get(texts[index], 0.0) or 0.0)
+        # Zero means the current context has no semantic interpretation in this
+        # memory part. Positive similarity creates one explicit interpretation.
+        if similarity <= 0.0:
+            continue
+        interpretations.append({
+            "marker": "[INTERP]",
+            "part_id": _s(part.get("part_id")),
+            "part_kind": _s(part.get("kind")),
+            "relation": (
+                "REFERENCE_TO_MEMORY_PART"
+                if bool(frozen.get("reference_to_previous"))
+                and part.get("kind") in {"dialogue_pair", "visual_scene"}
+                else "RELATED_MEMORY_PART"
+            ),
+            "similarity": round(similarity, 6),
+            "semantic_source": semantic_source,
+        })
+
+    existing = bool(interpretations)
+
+    prior_vector_id = ""
+    if isinstance(state, dict):
+        prior_vector_id = _s(state.get("_active_dialogue_vector_id"))
+    if not prior_vector_id:
+        prior_vector_id = _s(
+            _as_dict(
+                _as_dict(interpretation).get("dialogue_vector")
+            ).get("vector_id")
+        )
+
+    if existing:
+        vector_id = prior_vector_id or (
+            f"vector-{_s(interpretations[0].get('part_id'))[12:28]}"
+        )
+        decision = "EXISTING_VECTOR"
+    else:
+        vector_id = f"vector-{hashlib.sha256(context.encode('utf-8')).hexdigest()[:16]}"
+        decision = "NEW_VECTOR"
+
+    matched_ids = [item["part_id"] for item in interpretations]
+
+    return {
+        "version": "DIALOGUE_VECTOR_MATRIX_V1",
+        "markers": markers,
+        "context": {"marker": "[CONTEXT]", "value": context},
+        "memory": {
+            "marker": "[MEMORY]",
+            "parts": _quantum_snapshot(parts),
+            "part_count": len(parts),
+        },
+        "interpretations": interpretations[:12],
+        "interpretation_count": len(interpretations),
+        "matched_part_ids": matched_ids[:12],
+        "vector": {
+            "marker": "[VECTOR]",
+            "status": "EXISTING" if existing else "NEW",
+            "kind": decision,
+            "vector_id": vector_id,
+            "source_part_ids": matched_ids[:12],
+        },
+        "decision": decision,
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "semantic_source": semantic_source if interpretations else "none",
+        "base_interpretation_relation": base_relation,
+        "base_interpretation": _quantum_snapshot(frozen),
+        "actions": [
+            "[ACTION: LOAD_MEMORY]",
+            "[ACTION: DECOMPOSE_MEMORY]",
+            "[ACTION: RECEIVE_CONTEXT]",
+            "[ACTION: INTERPRET_CONTEXT]",
+            "[ACTION: RESOLVE_VECTOR]",
+        ],
+        "processes": [
+            "[PROCESS: MEMORY_TO_PARTS]",
+            "[PROCESS: CONTEXT_X_PARTS]",
+            "[PROCESS: INTERPRETATIONS]",
+            "[PROCESS: VECTOR_COLLAPSE]",
+        ],
+        "results": [
+            "[RESULT: EXISTING_VECTOR]" if existing else "[RESULT: NEW_VECTOR]"
+        ],
+    }
+
+
 def _dialogue_context_consensus(
     *,
     interpretation: dict,
     scene_continuity: dict,
     semantic: dict,
     memory_understanding: dict,
+    state: dict | None = None,
+    text: str = "",
+    dynamic_memory: dict | None = None,
 ) -> dict:
-    """Fuse explicit dialogue-state outputs from existing engines.
+    """Resolve dialogue by MEMORY → PARTS → CONTEXT × PARTS → VECTOR."""
+    state = state if isinstance(state, dict) else {}
+    frozen = _freeze_interpretation_dialogue(_as_dict(interpretation))
 
-    The processor uses structural state consensus. It does not inspect words,
-    invoke another provider, or calculate a local routing score.
-    """
-    sources = {
-        "interpretation": _freeze_interpretation_dialogue(_as_dict(interpretation)),
-        "scene_continuity": _as_dict(scene_continuity),
-        "semantic": _as_dict(semantic.get("quantum_dialogue_measurement")),
-        "memory": _as_dict(memory_understanding),
-    }
-    buckets = {
-        "reference": [],
-        "memory_query": [],
-        "continuation": [],
-        "same_topic": [],
-        "independent": [],
-        "new_topic": [],
-    }
-    for name, packet in sources.items():
-        relation = _s(
-            packet.get("relation")
-            or packet.get("dialogue_relation")
-            or packet.get("mode")
-            or packet.get("state")
-        ).upper()
-        if bool(packet.get("reference_to_previous")) or relation == "ARTIFACT_REFERENCE":
-            buckets["reference"].append(name)
-        elif relation == "MEMORY_QUERY":
-            buckets["memory_query"].append(name)
-        elif bool(packet.get("continuation")) or relation in {"CONTINUATION", "CONTINUE_TOPIC"}:
-            buckets["continuation"].append(name)
-        elif relation == "SAME_TOPIC":
-            buckets["same_topic"].append(name)
-        elif relation == "NEW_TOPIC":
-            buckets["new_topic"].append(name)
-        elif relation == "INDEPENDENT":
-            buckets["independent"].append(name)
+    matrix = _interpret_context_against_memory_parts(
+        context=text,
+        parts=_dialogue_memory_parts(
+            state=state,
+            current_visual_scene=_best_visual_context(state),
+            dynamic_memory=dynamic_memory,
+            limit=12,
+        ),
+        interpretation=interpretation,
+        state=state,
+    )
 
-    if buckets["reference"]:
-        relation = "ARTIFACT_REFERENCE"
-    elif buckets["memory_query"]:
-        relation = "MEMORY_QUERY"
-    elif len(buckets["continuation"]) >= 2 or buckets["continuation"]:
-        relation = "CONTINUATION"
-    elif buckets["same_topic"] and not buckets["independent"]:
-        relation = "SAME_TOPIC"
-    elif buckets["new_topic"] and not buckets["same_topic"] and not buckets["independent"]:
-        relation = "NEW_TOPIC"
-    elif buckets["independent"]:
+    fresh_visual = bool(
+        _as_dict(state.get("_incoming_visual_evidence")).get("current_turn")
+    )
+    if fresh_visual:
+        vector_id = f"vector-{hashlib.sha256(_s(text).encode('utf-8')).hexdigest()[:16]}"
+        matrix["interpretations"] = []
+        matrix["matched_part_ids"] = []
+        matrix["interpretation_count"] = 0
+        matrix["decision"] = "NEW_VECTOR"
+        matrix["vector"] = {
+            "marker": "[VECTOR]",
+            "status": "NEW",
+            "kind": "NEW_VECTOR",
+            "vector_id": vector_id,
+            "source_part_ids": [],
+        }
         relation = "INDEPENDENT"
+        existing_vector = False
     else:
-        relation = "INDEPENDENT"
+        existing_vector = matrix.get("decision") == "EXISTING_VECTOR"
+        base_relation = _s(frozen.get("relation")).upper() or "INDEPENDENT"
+        if existing_vector:
+            if bool(frozen.get("reference_to_previous")) or base_relation == "ARTIFACT_REFERENCE":
+                relation = "ARTIFACT_REFERENCE"
+            elif base_relation == "MEMORY_QUERY":
+                relation = "MEMORY_QUERY"
+            elif base_relation in {"CONTINUATION", "CONTINUE_TOPIC"}:
+                relation = "CONTINUATION"
+            elif base_relation == "SAME_TOPIC":
+                relation = "SAME_TOPIC"
+            else:
+                relation = "CONTINUATION"
+        else:
+            relation = "NEW_TOPIC" if base_relation == "NEW_TOPIC" else "INDEPENDENT"
+
+    continuation = bool(
+        existing_vector
+        and relation in {
+            "CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY", "SAME_TOPIC"
+        }
+    )
+    reference = relation == "ARTIFACT_REFERENCE"
 
     return {
-        "version": "QUANTUM_DIALOGUE_CONSENSUS_V1",
+        "version": "QUANTUM_DIALOGUE_CONSENSUS_V2",
         "relation": relation,
-        "continuation": relation == "CONTINUATION",
-        "reference_to_previous": relation == "ARTIFACT_REFERENCE",
+        "continuation": continuation,
+        "reference_to_previous": reference,
         "memory_query": relation == "MEMORY_QUERY",
-        "evidence_sources": buckets,
-        "consensus_method": "explicit_engine_state_consensus",
+        "vector_status": "EXISTING" if existing_vector else "NEW",
+        "vector_id": _s(_as_dict(matrix.get("vector")).get("vector_id")),
+        "memory_part_ids": list(matrix.get("matched_part_ids") or []),
+        "evidence_sources": {
+            "interpretation": bool(frozen),
+            "scene_continuity": bool(scene_continuity),
+            "semantic": bool(semantic),
+            "memory_understanding": bool(memory_understanding),
+            "memory_parts": int(
+                _as_dict(matrix.get("memory")).get("part_count") or 0
+            ),
+            "interpretations": int(matrix.get("interpretation_count") or 0),
+        },
+        "consensus_method": "MEMORY_PARTS_X_CONTEXT_INTERPRETATION",
+        "dialogue_formula": matrix,
         "lexical_triggers": False,
         "score_routing": False,
         "decision_owner": "QUANTUM_PROCESSOR",
+        "fresh_visual_boundary": fresh_visual,
     }
 
 
@@ -2310,6 +2565,11 @@ def _quantum_context_binding(
         scene_continuity=scene_continuity,
         semantic=semantic,
         memory_understanding=memory_understanding,
+        state=state,
+        text=text,
+        dynamic_memory=_as_dict(
+            semantic.get("quantum_dynamic_memory_evidence")
+        ),
     )
     relation = _s(consensus.get("relation")).upper() or _s(
         frozen.get("relation")
@@ -2330,8 +2590,21 @@ def _quantum_context_binding(
         or vector.get("reference_to_previous")
     )
 
-    # A resolved memory target is stronger than an unresolved top-level label.
-    if bool(mem_ref.get("resolved")):
+    # Memory may strengthen a reference only after the CONTEXT was interpreted
+    # against at least one decomposed memory part. Memory alone cannot create a
+    # continuation vector.
+    dialogue_formula = _as_dict(consensus.get("dialogue_formula"))
+    interpreted_part_ids = set(
+        _as_list(dialogue_formula.get("matched_part_ids"))
+    )
+    if (
+        bool(mem_ref.get("resolved"))
+        and interpreted_part_ids
+        and (
+            _s(mem_ref.get("target"))
+            or _s(mem_visual.get("scene_id"))
+        )
+    ):
         relation = "ARTIFACT_REFERENCE"
         continuation = True
         reference = True
@@ -2354,7 +2627,18 @@ def _quantum_context_binding(
     # If the semantic measurement says the current request is incomplete and a
     # canonical prior exchange exists, history is mandatory processor context.
     # This is structural evidence, not a lexical trigger.
-    if incomplete and history_available and relation in {"INDEPENDENT", "NEW_TOPIC", "SAME_TOPIC"}:
+    # The formal vector rule is strict: an incomplete request may continue an
+    # existing vector only when CONTEXT was actually interpreted against MEMORY.
+    # Without an interpretation, this remains a NEW_VECTOR.
+    formula_existing = bool(
+        _as_dict(consensus.get("dialogue_formula")).get("decision") == "EXISTING_VECTOR"
+    )
+    if (
+        incomplete
+        and history_available
+        and formula_existing
+        and relation in {"INDEPENDENT", "NEW_TOPIC", "SAME_TOPIC"}
+    ):
         relation = "CONTINUATION"
         continuation = True
 
@@ -2432,6 +2716,16 @@ def _quantum_context_binding(
         "incomplete_request_evidence": incomplete,
         "semantic_measurement": _quantum_snapshot(semantic_dialogue),
         "dialogue_consensus": _quantum_snapshot(consensus),
+        "dialogue_formula": _quantum_snapshot(
+            consensus.get("dialogue_formula", {})
+        ),
+        "vector_status": _s(consensus.get("vector_status")) or "NEW",
+        "vector_id": _s(consensus.get("vector_id")),
+        "memory_part_ids": list(consensus.get("memory_part_ids") or []),
+        "markers": [
+            "[MEMORY]", "[PART]", "[CONTEXT]", "[INTERP]", "[VECTOR]",
+            "[ACTION]", "[PROCESS]", "[RESULT]",
+        ],
         "interpretation_evidence": _quantum_snapshot(frozen),
         "memory_evidence": _quantum_snapshot(memory),
         "visual_evidence": _quantum_snapshot(visual),
@@ -6918,6 +7212,42 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     semantic["quantum_memory_understanding"] = _quantum_snapshot(memory_understanding)
     state["_quantum_memory_understanding"] = _quantum_snapshot(memory_understanding)
 
+    # Canonical dialogue formula:
+    # [MEMORY] → [PARTS] → [CONTEXT] × [PARTS] → [INTERP] → [VECTOR].
+    dialogue_vector_matrix = _interpret_context_against_memory_parts(
+        context=text,
+        parts=_dialogue_memory_parts(
+            state=state,
+            current_visual_scene=visual_scene,
+            dynamic_memory=dynamic_memory,
+            limit=12,
+        ),
+        interpretation=interpretation,
+        state=state,
+    )
+    if bool(
+        _as_dict(state.get("_incoming_visual_evidence")).get("current_turn")
+    ):
+        vector_id = f"vector-{hashlib.sha256(_s(text).encode('utf-8')).hexdigest()[:16]}"
+        dialogue_vector_matrix["interpretations"] = []
+        dialogue_vector_matrix["matched_part_ids"] = []
+        dialogue_vector_matrix["interpretation_count"] = 0
+        dialogue_vector_matrix["decision"] = "NEW_VECTOR"
+        dialogue_vector_matrix["vector"] = {
+            "marker": "[VECTOR]",
+            "status": "NEW",
+            "kind": "NEW_VECTOR",
+            "vector_id": vector_id,
+            "source_part_ids": [],
+        }
+
+    semantic["quantum_dialogue_vector_matrix"] = _quantum_snapshot(
+        dialogue_vector_matrix
+    )
+    state["_dialogue_vector_matrix"] = _quantum_snapshot(
+        dialogue_vector_matrix
+    )
+
     # Memory-understanding is evidence only.  The current Interpretation dialogue
     # vector is authoritative and is never rewritten by historical retrieval.
     # A memory packet may be attached for diagnostics/provider context only when the
@@ -6968,6 +7298,12 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     semantic["quantum_context_binding"] = _quantum_snapshot(context_binding)
     state["_quantum_context_binding"] = _quantum_snapshot(context_binding)
     state["_canonical_processor_dialogue"] = _quantum_snapshot(context_binding)
+    state["_active_dialogue_vector_id"] = _s(
+        context_binding.get("vector_id")
+    ) or None
+    state["_dialogue_vector_matrix"] = _quantum_snapshot(
+        context_binding.get("dialogue_formula", {})
+    )
     _record_engine_handoff(
         state, "CONTEXT_BINDING", context_binding,
         consumes=("INTERPRETATION", "SEMANTIC", "MEMORY_UNDERSTANDING", "VISUAL_REFERENCE"),
@@ -6990,6 +7326,12 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "previous_user_turn": processor_dialogue.get("previous_user_turn"),
         "previous_april_turn": processor_dialogue.get("previous_april_turn"),
         "reply_to": _freeze_interpretation_dialogue(interpretation).get("reply_to"),
+        "vector_status": _s(processor_dialogue.get("vector_status")) or "NEW",
+        "vector_id": _s(processor_dialogue.get("vector_id")),
+        "memory_part_ids": list(processor_dialogue.get("memory_part_ids") or []),
+        "dialogue_formula": _quantum_snapshot(
+            processor_dialogue.get("dialogue_formula", {})
+        ),
         "source": "QUANTUM_PROCESSOR_CONTEXT_BINDING",
     })
     print("🧠 QUANTUM CONTEXT BINDING:", {
@@ -7183,6 +7525,9 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "requested_outputs": list(request.requested_outputs),
         "dialogue_vector": _quantum_snapshot(
             interpretation.get("dialogue_vector", {})
+        ),
+        "dialogue_vector_matrix": _quantum_snapshot(
+            semantic.get("quantum_dialogue_vector_matrix", {})
         ),
         "dialogue_delta": _quantum_snapshot(
             interpretation.get("dialogue_delta", {})
