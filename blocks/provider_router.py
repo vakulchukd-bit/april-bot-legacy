@@ -28,7 +28,7 @@ OPENAI_FAST_MODEL = APRIL_QUANTUM_PROVIDER_MODEL
 OPENAI_PREMIUM_MODEL = APRIL_QUANTUM_PROVIDER_MODEL
 
 INPUT_TOKEN_BUDGET = 900
-MIN_OUTPUT_TOKENS = 16
+MIN_OUTPUT_TOKENS = 1
 MAX_OUTPUT_TOKENS = 8000
 
 PROVIDER_DUPLICATE_TTL_SECONDS = 90
@@ -82,7 +82,9 @@ Rules:
 - The output budget is dynamic and canonical: use only the tokens logically required, from 1 through 8000.
 - If the complete logical answer would exceed 8000 tokens, compact the representation (especially structured payloads) while preserving all requested information; never stop mid-JSON, mid-row, or mid-scene.
 - Never assume a 2000, 5000, or 8000 fixed tier. The supplied OUTPUT_CAP is the exact per-request ceiling selected by the Quantum Processor.
-- Treat requested_outputs as the canonical multi-output plan already computed by April.
+- Treat requested_outputs as the set of representations already understood for the current request.
+- Treat SCENE_COMPOSITION as the semantic decomposition of the current request into related answer parts.
+- Preserve every meaningful scene part in the response and keep the parts connected to the same user goal.
 - Do not invent an output type that is absent from requested_outputs.
 - If one or more structured representations are requested (table, graph, diagram, formula, link, etc.),
   emit structured data for those representations in render_blocks and/or artifacts using the canonical
@@ -242,6 +244,18 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
         "required_competencies": raw.get("required_competencies") or [],
         "required_artifacts": raw.get("required_artifacts") or [],
         "visual_context": raw.get("visual_context") or {},
+        "scene_composition": (
+            raw.get("scene_composition")
+            or (raw.get("conversation") or {}).get("scene_composition")
+            or (raw.get("constraints") or {}).get("scene_composition")
+            or []
+        ),
+        "turn_meaning": (
+            raw.get("turn_meaning")
+            or (raw.get("conversation") or {}).get("turn_meaning")
+            or (raw.get("conversation") or {}).get("turn_meaning_transition")
+            or {}
+        ),
         "constraints": raw.get("constraints") or {},
         "response_decision": raw.get("response_decision") or {},
         "semantic": raw.get("semantic") or {},
@@ -780,6 +794,32 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
 
     if requested_outputs:
         fields.append(("REQUESTED_OUTPUTS", requested_outputs))
+
+    # The scene composition is a semantic decomposition of the current request.
+    # Pass it as its own provider context surface so multiple task parts remain
+    # distinct instead of being reduced to one dominant representation.
+    scene_composition = payload.get("scene_composition")
+    if not isinstance(scene_composition, list):
+        constraints = payload.get("constraints")
+        scene_composition = (
+            constraints.get("scene_composition")
+            if isinstance(constraints, dict)
+            else []
+        )
+    if isinstance(scene_composition, list) and scene_composition:
+        fields.append(("SCENE_COMPOSITION", scene_composition))
+
+    turn_meaning = payload.get("turn_meaning")
+    if not isinstance(turn_meaning, dict):
+        conversation = payload.get("conversation")
+        turn_meaning = (
+            conversation.get("turn_meaning_transition")
+            if isinstance(conversation, dict)
+            else {}
+        )
+    if isinstance(turn_meaning, dict) and turn_meaning:
+        fields.append(("TURN_MEANING", turn_meaning))
+
     if required_artifacts:
         fields.append(("REQUIRED_ARTIFACTS", required_artifacts))
     if competencies:
@@ -876,6 +916,8 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             f"REQUEST: {current}",
             f"ASSISTANT_IDENTITY: {json.dumps({"name": APRIL_IDENTITY.get("name", "April"), "mode": APRIL_IDENTITY.get("identity_mode", "integrated")}, ensure_ascii=False, separators=(",", ":"))}",
             f"REQUESTED_OUTPUTS: {json.dumps(payload.get('requested_outputs') or [], ensure_ascii=False, separators=(',', ':'))}",
+            f"SCENE_COMPOSITION: {json.dumps(payload.get('scene_composition') or [], ensure_ascii=False, separators=(',', ':'), default=str)}",
+            f"TURN_MEANING: {json.dumps(payload.get('turn_meaning') or {}, ensure_ascii=False, separators=(',', ':'), default=str)}",
             f"REQUIRED_ARTIFACTS: {json.dumps(payload.get('required_artifacts') or [], ensure_ascii=False, separators=(',', ':'))}",
             f"REPRESENTATION_PLAN: {json.dumps(representation_plan, ensure_ascii=False, separators=(',', ':'), default=str)}",
             f"COMPLEXITY: {complexity}",
@@ -1304,7 +1346,7 @@ async def generate_text(messages: Any, temperature: Any = None,
         # the request's own response budget.
         output_tokens = _derive_output_tokens(source_request, None)
         if not (MIN_OUTPUT_TOKENS <= output_tokens <= MAX_OUTPUT_TOKENS):
-            raise RuntimeError("Provider budget outside canonical 16..8000 range")
+            raise RuntimeError("Provider budget outside canonical 1..8000 range")
         normalized_input = normalize_provider_input(source_request)
 
         request = {
