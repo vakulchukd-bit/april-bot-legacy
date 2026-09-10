@@ -5659,12 +5659,20 @@ def _quantum_visible_render_policy(
         authorized = {preferred}
 
     chosen: list[dict] = []
-    seen_kinds: set[str] = set()
+    seen_structured: set[str] = set()
     for block in structured:
         kind = kind_of(block)
-        if kind not in authorized or kind in seen_kinds:
+        if kind not in authorized:
             continue
-        seen_kinds.add(kind)
+
+        # Do not collapse a whole representation type into one block. A formula
+        # card may contain many formulas, a gallery may contain several images,
+        # and a scene may contain several distinct diagrams. Only an actual
+        # transport duplicate is removed. The payload is part of the identity.
+        dedupe_key = _canonical_semantic_block_key(block)
+        if dedupe_key in seen_structured:
+            continue
+        seen_structured.add(dedupe_key)
         chosen.append(block)
 
     # Preserve existing text blocks only as the canonical answer companion.
