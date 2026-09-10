@@ -5263,22 +5263,75 @@ def _canonical_answer_composer(blocks: Any, answer: str = "") -> list[dict]:
     return result
 
 
+def _merge_human_text_blocks(blocks: list[dict], answer: str) -> str:
+    """Compose the complete human answer without dropping distinct text segments.
+
+    ``MachineResponse.answer`` is authoritative when present, but Provider output
+    can also contain useful text-only render blocks. Those segments are appended
+    only when they are not already represented in the canonical answer. This
+    prevents both information loss and duplicate visible prose.
+    """
+    canonical_answer = _sanitize_visible_text(answer)
+    fragments: list[str] = []
+    if canonical_answer:
+        fragments.append(canonical_answer)
+
+    def normalize(value: str) -> str:
+        return re.sub(r"\\s+", " ", _sanitize_visible_text(value)).strip().casefold()
+
+    answer_norm = normalize(canonical_answer)
+    seen = {answer_norm} if answer_norm else set()
+
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = _s(
+            block.get("type")
+            or block.get("artifact_type")
+            or block.get("representation")
+            or "text"
+        ).lower()
+        if kind not in {"text", "markdown"}:
+            continue
+        content = _clean_text_value(
+            block.get("content") or block.get("text") or block.get("value")
+        )
+        content = _sanitize_visible_text(content)
+        if not content:
+            continue
+        key = normalize(content)
+        if not key or key in seen:
+            continue
+        # Avoid treating a short prefix/suffix copy as a distinct response.
+        if answer_norm and (
+            key in answer_norm
+            or answer_norm in key
+        ):
+            continue
+        seen.add(key)
+        fragments.append(content)
+
+    return "\n\n".join(fragment for fragment in fragments if fragment).strip()
+
+
 def _ensure_visible_text_block(
     blocks: Any,
     answer: str,
     *,
     source: str = "quantum_processor",
 ) -> list[dict]:
-    """Guarantee one canonical human-visible MessageTextBlock in the stream.
+    """Guarantee one complete human-visible text block without dropping text.
 
-    The top-level ``answer`` is the semantic text value; this helper mirrors it
-    into exactly one text render block so every Web-facing representation has a
-    visible textual companion.  Structured renderer blocks remain intact.
+    The scene owns one canonical human text block plus every distinct structured
+    renderer block. Multiple Provider text envelopes are merged into that one
+    block instead of keeping the first and silently discarding the rest.
     """
     canonical = _canonicalize_render_stream(blocks)
-    answer_text = _clean_text_value(answer)
-    text_indexes = []
-    for idx, block in enumerate(canonical):
+    visible_answer = _merge_human_text_blocks(canonical, answer)
+
+    text_block: dict | None = None
+    structured: list[dict] = []
+    for block in canonical:
         if not isinstance(block, dict):
             continue
         kind = _s(
@@ -5288,58 +5341,29 @@ def _ensure_visible_text_block(
             or "text"
         ).lower()
         if kind in {"text", "markdown"}:
-            content = _clean_text_value(
-                block.get("content") or block.get("text") or block.get("value")
-            )
-            if content:
-                text_indexes.append((idx, content, block))
+            if text_block is None:
+                text_block = dict(block)
+            continue
+        structured.append(block)
 
-    if text_indexes:
-        # Keep the first human text block and align it with the canonical answer.
-        first_idx, first_content, first_block = text_indexes[0]
-        if answer_text and first_content != answer_text:
-            first_block["content"] = answer_text
-            first_block["text"] = answer_text
-        first_block["type"] = "text"
-        first_block["artifact_type"] = "text"
-        first_block.setdefault("renderer", "TextBlock")
-        first_block.setdefault("viewer", "TextBlock")
-        # Remove duplicate text transport blocks while retaining every structured block.
-        kept = []
-        seen_text = False
-        for block in canonical:
-            kind = _s(
-                block.get("type")
-                or block.get("artifact_type")
-                or block.get("representation")
-                or "text"
-            ).lower()
-            if kind in {"text", "markdown"}:
-                if seen_text:
-                    continue
-                seen_text = True
-            kept.append(block)
-        return kept
+    if visible_answer:
+        if text_block is None:
+            text_block = {}
+        text_block.update({
+            "type": "text",
+            "artifact_type": "text",
+            "content": visible_answer,
+            "text": visible_answer,
+            "renderer": text_block.get("renderer") or "TextBlock",
+            "viewer": text_block.get("viewer") or "TextBlock",
+            "scene_contract": True,
+            "human_visible": True,
+            "presentation_role": "answer",
+            "source": text_block.get("source") or source,
+        })
+        return [text_block, *structured]
 
-    if not answer_text:
-        return canonical
-
-    text_block = {
-        "type": "text",
-        "artifact_type": "text",
-        "content": answer_text,
-        "text": answer_text,
-        "renderer": "TextBlock",
-        "viewer": "TextBlock",
-        "scene_contract": True,
-        "human_visible": True,
-        "presentation_role": "answer",
-        "source": source,
-    }
-
-    # Text must lead the stream so the structured renderer is always accompanied
-    # by a deterministic MessageTextBlock before Web dispatch.
-    return [text_block, *canonical]
+    return structured
 
 
 
@@ -5675,12 +5699,14 @@ def _quantum_visible_render_policy(
         seen_structured.add(dedupe_key)
         chosen.append(block)
 
-    # Preserve existing text blocks only as the canonical answer companion.
+    # Preserve every distinct text segment here. _ensure_visible_text_block()
+    # merges them into one complete human answer instead of silently keeping only
+    # the first Provider text block.
     existing_text = [
         block for block in visible
         if kind_of(block) in {"text", "markdown"}
     ]
-    combined = existing_text[:1] + chosen
+    combined = existing_text + chosen
 
     # The text block is mandatory for every human-visible response, including
     # pure text turns and all specialized renderers.
