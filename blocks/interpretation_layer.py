@@ -713,6 +713,29 @@ class QuantumTurnMeaningEngine:
             min(1.0, content_semantic_similarity),
             min(1.0, entity_overlap),
         )
+
+        # A completed turn owns the current subject only when the next request
+        # remains semantically attached to that subject.  Conversational words
+        # such as "расскажи", "покажи", "опиши", "теперь" or "а теперь" are
+        # discourse form, not evidence that the subject itself continues.  A
+        # self-contained request that introduces new content with essentially no
+        # overlap must therefore release the old turn and become a new topic.
+        current_content_count = len(current_content_tokens)
+        explicit_topic_novelty = bool(
+            current_content_count >= 2
+            and entity_overlap == 0.0
+            and content_overlap < 0.12
+            and morphological_content_overlap < 0.22
+            and content_semantic_similarity < 0.22
+            and reference < 0.35
+            and not any(
+                token in current_content_tokens
+                for token in {
+                    "это", "этот", "эта", "эти", "того", "нему", "ней",
+                    "него", "неё", "нее", "его", "ее", "её", "им", "их",
+                }
+            )
+        )
         followup_total = max(0.001, followup_mass + non_followup_mass)
         continuation_ratio = continuation / followup_total
         reference_ratio = reference / followup_total
@@ -734,6 +757,17 @@ class QuantumTurnMeaningEngine:
                 1.0 - 0.90 * max(topic_fit, followup_ratio),
             ),
         }
+
+        if explicit_topic_novelty:
+            # Topic novelty is stronger than generic discourse continuation.
+            # The previous answer remains available as historical context, but it
+            # no longer owns the current turn.
+            transition_scores["new_topic"] = max(
+                transition_scores["new_topic"],
+                0.92,
+            )
+            transition_scores["develop_current"] *= 0.30
+            transition_scores["refer_current"] *= 0.30
         relation_score = max(
             float(transition_scores["develop_current"]),
             float(transition_scores["refer_current"]),
@@ -833,6 +867,8 @@ class QuantumTurnMeaningEngine:
                 "morphological_content_overlap": round(morphological_content_overlap, 6),
                 "content_semantic_similarity": round(content_semantic_similarity, 6),
                 "contextual_support": round(topic_evidence, 6),
+                "explicit_topic_novelty": explicit_topic_novelty,
+                "current_content_count": current_content_count,
                 "context_fit": round(context_fit, 6),
                 "continuation_ratio": round(continuation_ratio, 6),
                 "reference_ratio": round(reference_ratio, 6),
@@ -3764,11 +3800,35 @@ class QuantumInterpretationEngine:
                 "topic_score": float(topic_understanding.get("similarity_to_best_pair", 0.0) or 0.0),
             }
 
-        # The context tracker owns the repaired topic label.  Do not let a stale
-        # state slot remain authoritative when the current canonical history gives
-        # a stronger reconstructed topic.
+        # The current semantic transition owns topic continuity. A stale state
+        # topic is not allowed to survive a genuine NEW_TOPIC transition. When
+        # the turn continues/references the immediate answer, the previous
+        # meaning remains the active topic; otherwise the current request becomes
+        # the new topic seed. This is ownership of meaning, not a routing flag.
         reconstructed_topic = normalize_text(topic_understanding.get("active"))
-        if reconstructed_topic and topic_understanding.get("relation") in {
+        if transition_relation == "NEW_TOPIC":
+            current_profile_topic = normalize_text(
+                p.get("best_object")
+                or p.get("best_domain")
+                or p.get("best_goal")
+                or ""
+            )
+            current_content = QuantumContextUnderstandingEngine._content_tokens(text)
+            if current_content:
+                current_profile_topic = normalize_text(
+                    " ".join(current_content[:6])
+                ) or current_profile_topic
+            active_topic = current_profile_topic or normalize_text(text)
+            active_goal = normalize_text(p.get("best_goal") or "")
+        elif transition_relation in {"DEVELOP_CURRENT", "REFER_CURRENT"}:
+            active_topic = normalize_text(
+                (last_turn_meaning.get("meaning", {}).get("topic")
+                 if isinstance(last_turn_meaning, dict) and isinstance(last_turn_meaning.get("meaning"), dict)
+                 else "")
+                or reconstructed_topic
+                or active_topic
+            )
+        elif reconstructed_topic and topic_understanding.get("relation") in {
             "SAME_TOPIC", "CONTINUE_TOPIC", "RECALL"
         }:
             active_topic = reconstructed_topic
