@@ -17,6 +17,9 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from copy import deepcopy
+from collections import Counter
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
@@ -280,6 +283,580 @@ def _clean_representation(value: Any) -> str:
     return value if value in REPRESENTATION_UNIVERSE else ""
 
 
+
+class QuantumTurnMeaningEngine:
+    """
+    Persistent semantic understanding of one completed USER -> APRIL turn.
+
+    The engine stores meaning, not routing commands:
+      - what the user was trying to accomplish;
+      - what April actually answered;
+      - which objects/concepts were developed;
+      - which representations were actually produced;
+      - which semantic thread the turn leaves active.
+
+    A later request is compared with this meaning before older history is considered.
+    This makes dialogue development a continuation of meaning rather than a search
+    for a matching phrase or a predeclared memory state.
+    """
+
+    VERSION = "quantum_turn_meaning_engine_v1"
+
+    @staticmethod
+    def _clean(value: Any, limit: int = 5000) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip())[:limit]
+
+    @staticmethod
+    def _block_type(block: Any) -> str:
+        if not isinstance(block, dict):
+            return ""
+        return _clean_representation(
+            block.get("type")
+            or block.get("artifact_type")
+            or block.get("representation")
+        )
+
+    @classmethod
+    def _semantic_terms(cls, profile: dict[str, Any], key: str, limit: int = 8) -> list[dict[str, Any]]:
+        values = profile.get(key)
+        if not isinstance(values, dict):
+            return []
+        ranked = sorted(
+            ((str(name), float(score or 0.0)) for name, score in values.items()),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        return [
+            {"value": name, "strength": round(score, 6)}
+            for name, score in ranked[:limit]
+            if name
+        ]
+
+    @classmethod
+    def build(
+        cls,
+        user_request: str,
+        answer: str,
+        *,
+        render_blocks: list[dict[str, Any]] | None = None,
+        summary: str = "",
+        turn_id: Any = None,
+        scene_id: str = "",
+        semantic_engine: Any = None,
+    ) -> dict[str, Any]:
+        user_request = cls._clean(user_request, 2600)
+        answer = cls._clean(answer, 7000)
+        blocks = [x for x in (render_blocks or []) if isinstance(x, dict)]
+
+        engine = semantic_engine
+        user_profile = {}
+        answer_profile = {}
+        try:
+            if engine is not None:
+                user_profile = engine.measure(user_request)
+                answer_profile = engine.measure(
+                    answer,
+                    previous_user=user_request,
+                    active_topic=user_request,
+                )
+        except Exception:
+            user_profile = {}
+            answer_profile = {}
+
+        actual_representations = []
+        for block in blocks:
+            kind = cls._block_type(block)
+            if kind and kind not in {"text", "markdown"} and kind not in actual_representations:
+                actual_representations.append(kind)
+
+        # The meaning anchor is deliberately textual/semantic rather than a set of
+        # routing switches. It is what future turns compare against.
+        topic = ""
+        goal = ""
+        operation = ""
+        objects = []
+        for profile in (answer_profile, user_profile):
+            if not profile:
+                continue
+            if not topic:
+                topic = cls._clean(
+                    profile.get("best_object")
+                    or profile.get("best_goal")
+                    or profile.get("best_domain")
+                    or "",
+                    500,
+                )
+            if not goal:
+                goal = cls._clean(profile.get("best_goal"), 300)
+            if not operation:
+                operation = cls._clean(profile.get("best_operation"), 300)
+            for item in cls._semantic_terms(profile, "object_scores", 8):
+                if item["value"] not in {x["value"] for x in objects}:
+                    objects.append(item)
+
+        content_tokens = QuantumContextUnderstandingEngine._content_tokens(
+            f"{user_request} {answer}"
+        )
+        term_counts = Counter(content_tokens)
+        salient_terms = [
+            token for token, _ in sorted(
+                term_counts.items(),
+                key=lambda item: (item[1], len(item[0])),
+                reverse=True,
+            )
+            if token
+        ][:6]
+
+        if salient_terms:
+            semantic_topic = " ".join(salient_terms[:4])
+            if topic in {"diagram", "image", "gallery", "text", "table", "file", "audio", "video", "action"}:
+                topic = semantic_topic
+        if not topic:
+            topic = " ".join(salient_terms[:4]) or cls._clean(user_request, 500)
+
+        output_plan = list(actual_representations)
+        if not output_plan:
+            output_plan = ["text"]
+
+        semantic_anchor = cls._clean(
+            " ".join(
+                x for x in (
+                    user_request,
+                    answer,
+                    topic,
+                    goal,
+                    operation,
+                    " ".join(x["value"] for x in objects[:6]),
+                    " ".join(output_plan),
+                )
+                if x
+            ),
+            9000,
+        )
+
+        return {
+            "version": cls.VERSION,
+            "turn_id": turn_id,
+            "scene_id": cls._clean(scene_id, 300),
+            "user_request": user_request,
+            "answer": answer,
+            "summary": cls._clean(summary, 1500),
+            "meaning": {
+                "topic": topic,
+                "goal": goal,
+                "operation": operation,
+                "objects": objects[:8],
+                "concepts": [
+                    {"value": term, "strength": round(float(term_counts[term]), 6)}
+                    for term in salient_terms[:8]
+                ],
+                "representations": output_plan,
+                "semantic_anchor": semantic_anchor,
+                "user_profile": {
+                    "best_operation": cls._clean(user_profile.get("best_operation"), 120),
+                    "best_object": cls._clean(user_profile.get("best_object"), 120),
+                    "best_goal": cls._clean(user_profile.get("best_goal"), 120),
+                    "representation": cls._clean(user_profile.get("best_representation"), 120),
+                },
+                "answer_profile": {
+                    "best_operation": cls._clean(answer_profile.get("best_operation"), 120),
+                    "best_object": cls._clean(answer_profile.get("best_object"), 120),
+                    "best_goal": cls._clean(answer_profile.get("best_goal"), 120),
+                    "representation": cls._clean(answer_profile.get("best_representation"), 120),
+                },
+            },
+            "dialogue_anchor": {
+                "user": user_request,
+                "april": answer,
+                "topic": topic,
+                "goal": goal,
+                "active_meaning": semantic_anchor,
+            },
+            "scene": {
+                "render_block_types": output_plan,
+                "render_blocks": deepcopy(blocks[:24]),
+                "complete": bool(answer),
+            },
+            "source": "completed_turn_semantic_understanding",
+        }
+
+    @staticmethod
+    def _morphological_content_overlap(
+        current_tokens: set[str],
+        prior_tokens: set[str],
+    ) -> float:
+        """Measure content continuity across inflectional variants without a
+        vocabulary of topic triggers. Character-shape similarity lets forms such
+        as ``опыты``/``опытов`` or ``сахар``/``сахаром`` remain the same concept.
+        """
+        if not current_tokens or not prior_tokens:
+            return 0.0
+        scores: list[float] = []
+        for token in current_tokens:
+            best = 0.0
+            for prior in prior_tokens:
+                if not prior or abs(len(token) - len(prior)) > max(4, len(token) // 2):
+                    continue
+                best = max(best, SequenceMatcher(None, token, prior).ratio())
+            # Very short words are too noisy to be useful as concept evidence.
+            if len(token) >= 4:
+                scores.append(best if best >= 0.45 else 0.0)
+        if not scores:
+            return 0.0
+        return sum(scores) / max(1, len(scores))
+
+    @classmethod
+    def compare(
+        cls,
+        current_request: str,
+        meaning: dict[str, Any] | None,
+        *,
+        semantic_engine: Any = None,
+        recent_meanings: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        current_request = cls._clean(current_request, 2600)
+        meaning = meaning if isinstance(meaning, dict) else {}
+        meaning_block = meaning.get("meaning") if isinstance(meaning.get("meaning"), dict) else meaning
+        anchor = cls._clean(
+            meaning_block.get("semantic_anchor")
+            or meaning_block.get("active_meaning")
+            or meaning.get("answer")
+            or meaning.get("user_request"),
+            8000,
+        )
+        previous_user = cls._clean(
+            meaning.get("user_request")
+            or (meaning.get("dialogue_anchor") if isinstance(meaning.get("dialogue_anchor"), dict) else {}).get("user"),
+            2600,
+        )
+        previous_answer = cls._clean(
+            meaning.get("answer")
+            or (meaning.get("dialogue_anchor") if isinstance(meaning.get("dialogue_anchor"), dict) else {}).get("april"),
+            7000,
+        )
+        topic = cls._clean(meaning_block.get("topic"), 600)
+        goal = cls._clean(meaning_block.get("goal"), 600)
+
+        engine = semantic_engine
+        similarities: dict[str, float] = {}
+        source = "none"
+        if engine is not None and current_request:
+            candidates = [x for x in (anchor, previous_answer, previous_user, topic, goal) if x]
+            try:
+                result = engine.similarity_many(current_request, candidates)
+                if isinstance(result, dict):
+                    similarities = {
+                        str(k): round(float(v or 0.0), 6)
+                        for k, v in result.items()
+                    }
+                    source = "quantum_semantic_similarity"
+            except Exception:
+                for candidate in [x for x in (anchor, previous_answer, previous_user, topic, goal) if x]:
+                    try:
+                        similarities[candidate] = round(
+                            float(engine.similarity(current_request, candidate).get("score", 0.0) or 0.0),
+                            6,
+                        )
+                        source = "quantum_semantic_similarity"
+                    except Exception:
+                        pass
+
+        def sim_of(value: str) -> float:
+            return float(similarities.get(value, 0.0) or 0.0)
+
+        current_entities = QuantumContextUnderstandingEngine._entities(current_request)
+        current_content_tokens = set(
+            QuantumContextUnderstandingEngine._content_tokens(current_request)
+        )
+        prior_content_tokens = set(
+            QuantumContextUnderstandingEngine._content_tokens(
+                " ".join(x for x in (previous_user, previous_answer, anchor) if x)
+            )
+        )
+        concept_items = meaning_block.get("concepts")
+        if isinstance(concept_items, list):
+            prior_content_tokens.update(
+                str(item.get("value")).casefold()
+                for item in concept_items
+                if isinstance(item, dict) and item.get("value")
+            )
+        content_overlap = (
+            len(current_content_tokens & prior_content_tokens)
+            / max(1, len(current_content_tokens))
+        )
+        morphological_content_overlap = cls._morphological_content_overlap(
+            current_content_tokens, prior_content_tokens
+        )
+        content_semantic_similarity = 0.0
+        if semantic_engine is not None and current_content_tokens and prior_content_tokens:
+            try:
+                current_content_text = " ".join(sorted(current_content_tokens))
+                prior_content_text = " ".join(sorted(prior_content_tokens))
+                content_semantic_similarity = float(
+                    semantic_engine.similarity(current_content_text, prior_content_text).get("score", 0.0)
+                    or 0.0
+                )
+            except Exception:
+                content_semantic_similarity = 0.0
+
+        current_entity_values = {
+            str(x.get("value") or "").casefold()
+            for x in current_entities
+            if x.get("value")
+        }
+        prior_entities = QuantumContextUnderstandingEngine._entities(
+            " ".join(x for x in (previous_user, previous_answer, anchor) if x)
+        )
+        prior_entity_values = {
+            str(x.get("value") or "").casefold()
+            for x in prior_entities
+            if x.get("value")
+        }
+        entity_overlap = (
+            len(current_entity_values & prior_entity_values)
+            / max(1, len(current_entity_values))
+        )
+
+        answer_similarity = sim_of(previous_answer)
+        user_similarity = sim_of(previous_user)
+        anchor_similarity = sim_of(anchor)
+        topic_similarity = sim_of(topic)
+        goal_similarity = sim_of(goal)
+
+        # The semantic engine's discourse measurement supplies the distinction
+        # between developing an answer and deliberately referring back to it.
+        discourse_scores: dict[str, float] = {}
+        if engine is not None:
+            try:
+                measured = engine.measure(
+                    current_request,
+                    previous_assistant=previous_answer,
+                    previous_user=previous_user,
+                    active_topic=topic,
+                    active_goal=goal,
+                )
+                discourse_scores = dict(measured.get("dialogue_scores") or {})
+            except Exception:
+                discourse_scores = {}
+
+        continuation = max(
+            float(discourse_scores.get("continuation", 0.0) or 0.0),
+            float(discourse_scores.get("reformulation", 0.0) or 0.0),
+            float(discourse_scores.get("correction", 0.0) or 0.0),
+        )
+        reference = max(
+            float(discourse_scores.get("reference", 0.0) or 0.0),
+            float(discourse_scores.get("artifact_reference", 0.0) or 0.0),
+        )
+        followup_mass = max(continuation, reference)
+        non_followup_mass = max(
+            float(discourse_scores.get("new_topic", 0.0) or 0.0),
+            float(discourse_scores.get("independent", 0.0) or 0.0),
+            float(discourse_scores.get("question", 0.0) or 0.0),
+        )
+        discourse_relative = (
+            followup_mass / max(0.001, followup_mass + non_followup_mass)
+        )
+
+        current_output_profile = {}
+        if engine is not None:
+            try:
+                current_output_profile = engine.measure(current_request)
+            except Exception:
+                current_output_profile = {}
+
+        current_operation = str(current_output_profile.get("best_operation") or "").lower()
+        current_representation = str(current_output_profile.get("best_representation") or "").lower()
+        previous_representations = [
+            str(x).lower()
+            for x in (meaning_block.get("representations") if isinstance(meaning_block.get("representations"), list) else [])
+            if str(x).strip()
+        ]
+
+        representation_continuity = 0.0
+        if current_representation and current_representation in previous_representations:
+            representation_continuity = 1.0
+
+        # Meaning continuity is composed from the actual semantic relations.
+        development_score = (
+            0.22 * answer_similarity
+            + 0.14 * anchor_similarity
+            + 0.08 * user_similarity
+            + 0.06 * topic_similarity
+            + 0.05 * goal_similarity
+            + 0.07 * min(1.0, entity_overlap)
+            + 0.10 * continuation
+            + 0.10 * discourse_relative
+            + 0.18 * min(1.0, max(content_overlap, morphological_content_overlap, content_semantic_similarity))
+        )
+        reference_score = (
+            0.20 * answer_similarity
+            + 0.12 * anchor_similarity
+            + 0.08 * topic_similarity
+            + 0.09 * min(1.0, entity_overlap)
+            + 0.18 * reference
+            + 0.06 * representation_continuity
+            + 0.16 * discourse_relative
+            + 0.11 * min(1.0, max(content_overlap, morphological_content_overlap, content_semantic_similarity))
+        )
+        relation_score = max(development_score, reference_score)
+
+        # The transition engine separates conversational form from subject fit.
+        # A generic "tell/show/explain" continuation signal is useful only when it
+        # is supported by semantic continuity of the concepts or an actual
+        # discourse-reference relation. This keeps a request about a new subject
+        # from inheriting the previous topic merely because the request looks like
+        # a follow-up.
+        topic_evidence = max(
+            min(1.0, content_overlap),
+            min(1.0, morphological_content_overlap),
+            min(1.0, content_semantic_similarity),
+            min(1.0, entity_overlap),
+        )
+        followup_total = max(0.001, followup_mass + non_followup_mass)
+        continuation_ratio = continuation / followup_total
+        reference_ratio = reference / followup_total
+        followup_ratio = followup_mass / followup_total
+        topic_fit = 1.0 - __import__("math").exp(-5.0 * max(0.0, topic_evidence))
+        context_fit = max(topic_fit, 0.85 * followup_ratio)
+
+        transition_scores = {
+            "develop_current": (
+                development_score * (0.55 + 0.45 * context_fit)
+                + 0.50 * continuation_ratio
+            ),
+            "refer_current": (
+                reference_score * (0.55 + 0.45 * context_fit)
+                + 0.80 * reference_ratio
+            ),
+            "new_topic": max(
+                0.0,
+                1.0 - 0.90 * max(topic_fit, followup_ratio),
+            ),
+        }
+        relation_score = max(
+            float(transition_scores["develop_current"]),
+            float(transition_scores["refer_current"]),
+        )
+
+        # Only after the immediate turn has been evaluated do we inspect older
+        # completed meanings. An older turn may win only when the current request
+        # relates to it materially more than to the immediate turn.
+        recent_candidates: list[dict[str, Any]] = []
+        for age, candidate in enumerate(reversed(recent_meanings or []), start=2):
+            if not isinstance(candidate, dict):
+                continue
+            candidate_result = cls.compare(
+                current_request,
+                candidate,
+                semantic_engine=semantic_engine,
+                recent_meanings=[],
+            )
+            candidate_result["age"] = age
+            candidate_result["_meaning"] = candidate
+            recent_candidates.append(candidate_result)
+
+        recent_best = None
+        if recent_candidates:
+            recent_best = max(
+                recent_candidates,
+                key=lambda item: max(
+                    float((item.get("relation_scores") if isinstance(item.get("relation_scores"), dict) else {}).get("develop_current", 0.0) or 0.0),
+                    float((item.get("relation_scores") if isinstance(item.get("relation_scores"), dict) else {}).get("refer_current", 0.0) or 0.0),
+                ),
+            )
+        immediate_relation = max(
+            {
+                "REFER_CURRENT": float(transition_scores["refer_current"]),
+                "DEVELOP_CURRENT": float(transition_scores["develop_current"]),
+                "NEW_TOPIC": float(transition_scores["new_topic"]),
+            }.items(),
+            key=lambda item: item[1],
+        )[0]
+        if recent_best is not None:
+            recent_relation_scores = (recent_best.get("relation_scores") if isinstance(recent_best.get("relation_scores"), dict) else {})
+            recent_strength = max(
+                float(recent_relation_scores.get("develop_current", 0.0) or 0.0),
+                float(recent_relation_scores.get("refer_current", 0.0) or 0.0),
+            )
+            immediate_strength = max(development_score, reference_score)
+            # The semantic margin is intentionally small enough to allow a genuine
+            # return to an earlier thread, but large enough to prevent accidental
+            # jumps caused by generic conversational vocabulary.
+            if (
+                recent_strength >= 0.22
+                and recent_strength > immediate_strength + 0.07
+            ):
+                selected_relation = str(recent_best.get("relation") or "DEVELOP_CURRENT")
+                relation = "REVISIT_RECENT"
+                relation_scores = dict(recent_best.get("relation_scores") or {})
+                relation_scores["immediate"] = round(immediate_strength, 6)
+                relation_scores["selected_recent"] = round(recent_strength, 6)
+                return {
+                    "version": cls.VERSION,
+                    "current_request": current_request,
+                    "relation_scores": relation_scores,
+                    "evidence": {
+                        **dict(recent_best.get("evidence") or {}),
+                        "immediate_strength": round(immediate_strength, 6),
+                        "selected_recent_strength": round(recent_strength, 6),
+                    },
+                    "current_task": dict(recent_best.get("current_task") or {}),
+                    "previous_task": dict(recent_best.get("previous_task") or {}),
+                    "relation": selected_relation,
+                    "anchor": "recent_turn",
+                    "selected_turn_meaning": deepcopy(recent_best.get("_meaning") or {}),
+                    "source": "semantic_meaning_transition_recent",
+                }
+
+        return {
+            "version": cls.VERSION,
+            "current_request": current_request,
+            "relation_scores": {
+                "develop_current": round(max(0.0, min(1.0, float(transition_scores["develop_current"]))), 6),
+                "refer_current": round(max(0.0, min(1.0, float(transition_scores["refer_current"]))), 6),
+                "revisit_recent": 0.0,
+                "new_topic": round(max(0.0, min(1.0, float(transition_scores["new_topic"]))), 6),
+            },
+            "evidence": {
+                "answer_similarity": round(answer_similarity, 6),
+                "user_similarity": round(user_similarity, 6),
+                "anchor_similarity": round(anchor_similarity, 6),
+                "topic_similarity": round(topic_similarity, 6),
+                "goal_similarity": round(goal_similarity, 6),
+                "entity_overlap": round(entity_overlap, 6),
+                "continuation_semantics": round(continuation, 6),
+                "reference_semantics": round(reference, 6),
+                "representation_continuity": round(representation_continuity, 6),
+                "discourse_relative": round(discourse_relative, 6),
+                "content_overlap": round(content_overlap, 6),
+                "morphological_content_overlap": round(morphological_content_overlap, 6),
+                "content_semantic_similarity": round(content_semantic_similarity, 6),
+                "contextual_support": round(topic_evidence, 6),
+                "context_fit": round(context_fit, 6),
+                "continuation_ratio": round(continuation_ratio, 6),
+                "reference_ratio": round(reference_ratio, 6),
+                "semantic_source": source,
+            },
+            "current_task": {
+                "operation": current_operation,
+                "representation": current_representation,
+            },
+            "previous_task": {
+                "operation": str(meaning_block.get("operation") or ""),
+                "topic": topic,
+                "goal": goal,
+                "representations": previous_representations,
+            },
+            "relation": immediate_relation,
+            "anchor": (
+                "last_turn"
+                if immediate_relation in {"REFER_CURRENT", "DEVELOP_CURRENT"}
+                else "none"
+            ),
+            "source": "semantic_meaning_transition",
+        }
+
 class QuantumContextUnderstandingEngine:
     """
     Context-first semantic fusion layer.
@@ -509,19 +1086,29 @@ class QuantumContextUnderstandingEngine:
         cognition: dict[str, Any] | None = None,
         state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        sources = [
+        """
+        Measure modalities from the current utterance plus concrete multimodal
+        payloads. Serialized semantic state is never treated as user language.
+        This prevents remembered words such as "table", "file" or "audio" from
+        becoming accidental output requests on a later turn.
+        """
+        text = str(text or "")
+        sources = (
             semantic if isinstance(semantic, dict) else {},
             cognition if isinstance(cognition, dict) else {},
             state if isinstance(state, dict) else {},
-        ]
-        combined = " ".join(cls._compact(s) for s in sources if s)
-        source_text = f"{text} {combined}"
+        )
 
-        code = bool(re.search(r"```[\s\S]*?```|(?:\bdef\b|\bclass\b|\bimport\b|\bfunction\b)\s+\w+", text, re.I))
+        code = bool(re.search(
+            r"```[\s\S]*?```|(?:\bdef\b|\bclass\b|\bimport\b|\bfunction\b)\s+\w+",
+            text,
+            re.I,
+        ))
         link = bool(re.search(r"https?://|www\.[\w.-]+\.", text, re.I))
         screenshot = bool(re.search(
             r"\b(?:скриншот|скрин|screenshot|screen shot|снимок экрана|изображен(?:ие|ия) на экране)\b",
-            source_text, re.I,
+            text,
+            re.I,
         ))
         formula = bool(re.search(
             r"(?:[A-Za-z]\s*=\s*[A-Za-z0-9^_()+*/.\-]+|\b(?:mc\^2|E\s*=\s*mc2)\b|\\frac|\\sqrt)",
@@ -534,41 +1121,73 @@ class QuantumContextUnderstandingEngine:
         ))
         image_signal = screenshot or bool(re.search(
             r"\b(?:изображение|картинка|фото|фотография|image|picture|photo)\b",
-            source_text, re.I,
+            text,
+            re.I,
         ))
         table_signal = bool(re.search(
             r"\b(?:таблица|таблич(?:а|ный)|table|rows?|columns?)\b",
-            source_text, re.I,
+            text,
+            re.I,
         ))
         graph_signal = bool(re.search(
             r"\b(?:график|графика|chart|plot|curve|диаграмма данных)\b",
-            source_text, re.I,
+            text,
+            re.I,
         ))
         diagram_signal = bool(re.search(
-            r"\b(?:схема|чертёж|чертеж|diagram|schematic|flowchart|блок-схема)\b",
-            source_text, re.I,
+            r"\b(?:схема|черт[её]ж|diagram|schematic|flowchart|блок-схема)\b",
+            text,
+            re.I,
         ))
-        audio_signal = bool(re.search(r"\b(?:аудио|голос|audio|voice|sound)\b", source_text, re.I))
-        video_signal = bool(re.search(r"\b(?:видео|ролик|video)\b", source_text, re.I))
-        file_signal = bool(re.search(r"\b(?:файл|документ|attachment|file|pdf|docx?)\b", source_text, re.I))
+        audio_signal = bool(re.search(
+            r"\b(?:аудио|голос|audio|voice|sound)\b",
+            text,
+            re.I,
+        ))
+        video_signal = bool(re.search(
+            r"\b(?:видео|ролик|video)\b",
+            text,
+            re.I,
+        ))
+        file_signal = bool(re.search(
+            r"\b(?:файл|документ|attachment|file|pdf|docx?)\b",
+            text,
+            re.I,
+        ))
+
+        def concrete(value: Any) -> bool:
+            if value in (None, "", [], {}, False, 0, 0.0):
+                return False
+            if isinstance(value, (int, float, bool)):
+                return False
+            if isinstance(value, dict):
+                # Score maps and semantic matrices are evidence, not payloads.
+                score_keys = {"score", "scores", "weights", "measurements", "representation_scores", "object_scores"}
+                if set(map(str.lower, value.keys())) & score_keys and len(value) <= 8:
+                    return False
+                return bool(value)
+            return bool(value)
 
         for src in sources:
-            keys = {str(k).lower(): v for k, v in src.items()}
-            if any(k in keys and keys[k] for k in ("images", "image", "vision_context", "vision")):
-                image_signal = True
-            if any(k in keys and keys[k] for k in ("files", "file_context", "attachment", "attachments")):
-                file_signal = True
-            if any(k in keys and keys[k] for k in ("audio", "voice_context", "voice")):
-                audio_signal = True
-            if any(k in keys and keys[k] for k in ("video", "video_context")):
-                video_signal = True
-            if any(k in keys and keys[k] for k in ("screenshot", "screenshots")):
-                screenshot = True
-                image_signal = True
+            for key in ("images", "image", "vision_context", "vision"):
+                if key in src and concrete(src.get(key)):
+                    image_signal = True
+            for key in ("files", "file_context", "attachment", "attachments"):
+                if key in src and concrete(src.get(key)):
+                    file_signal = True
+            for key in ("audio", "voice_context", "voice"):
+                if key in src and concrete(src.get(key)):
+                    audio_signal = True
+            for key in ("video", "video_context"):
+                if key in src and concrete(src.get(key)):
+                    video_signal = True
+            if key := "_incoming_visual_evidence":
+                incoming = src.get(key)
+                if concrete(incoming):
+                    image_signal = True
+                    screenshot = True
 
-        inputs = []
-        if text.strip():
-            inputs.append("text")
+        inputs = ["text"] if text.strip() else []
         if numeric:
             inputs.append("number")
         if formula:
@@ -609,7 +1228,7 @@ class QuantumContextUnderstandingEngine:
                 "audio": audio_signal,
                 "video": video_signal,
             },
-            "source": "multimodal_structural_evidence",
+            "source": "current_turn_multimodal_measurement",
             "lexical_routing": False,
         }
 
@@ -677,7 +1296,13 @@ class QuantumContextUnderstandingEngine:
         segment_plans: list[dict[str, Any]] = []
         ordered_outputs: list[str] = []
 
-        def append_output(label: str, segment_index: int, source: str, score: float = 0.0) -> None:
+        def append_output(
+            label: str,
+            segment_index: int,
+            source: str,
+            score: float = 0.0,
+            segment_text: str = "",
+        ) -> None:
             label = _clean_representation(label)
             if not label or label == "text":
                 return
@@ -686,6 +1311,7 @@ class QuantumContextUnderstandingEngine:
             segment_plans.append({
                 "segment_index": segment_index,
                 "output": label,
+                "segment_text": cls._compact(segment_text, 1200),
                 "source": source,
                 "score": round(float(score or 0.0), 6),
             })
@@ -727,7 +1353,7 @@ class QuantumContextUnderstandingEngine:
 
             for label, active in structural_flags.items():
                 if active:
-                    append_output(label, int(segment.get("segment_index", 1)), "segment_modality", 1.0)
+                    append_output(label, int(segment.get("segment_index", 1)), "segment_modality", 1.0, segment_text)
 
             # Semantic representation/object agreement can add another result even
             # when the wording is indirect ("выдай ... кодом", "покажи ... картинке").
@@ -766,6 +1392,7 @@ class QuantumContextUnderstandingEngine:
                         int(segment.get("segment_index", 1)),
                         "segment_representation_matrix",
                         max(label_score, object_score),
+                        segment_text,
                     )
 
             if top_obj in STRUCTURED_REPRESENTATIONS:
@@ -780,6 +1407,7 @@ class QuantumContextUnderstandingEngine:
                         int(segment.get("segment_index", 1)),
                         "segment_object_matrix",
                         obj_score,
+                        segment_text,
                     )
 
         # Whole-turn evidence remains a fallback and also preserves numeric,
@@ -818,6 +1446,22 @@ class QuantumContextUnderstandingEngine:
                 "image" if flags.get("image") and not flags.get("screenshot") else "",
             }:
                 append_output(label, 1, "whole_turn_representation_matrix", rep_score)
+
+        # Image and gallery are two semantic granularities of the same medium.
+        # Keep the stronger measured interpretation unless the user supplied
+        # concrete gallery evidence through the segment itself.
+        if "image" in ordered_outputs and "gallery" in ordered_outputs and not any(
+            item.get("output") == "gallery" and item.get("source") == "segment_modality"
+            for item in segment_plans
+        ):
+            image_score = float(reps.get("image", 0.0) or 0.0)
+            gallery_score = float(reps.get("gallery", 0.0) or 0.0)
+            weaker = "gallery" if image_score >= gallery_score else "image"
+            ordered_outputs = [x for x in ordered_outputs if x != weaker]
+            segment_plans = [
+                item for item in segment_plans
+                if item.get("output") != weaker or item.get("source") == "segment_modality"
+            ]
 
         if flags.get("screenshot"):
             append_output("visual_context", 1, "whole_turn_screenshot_input", 1.0)
@@ -2861,8 +3505,55 @@ class QuantumInterpretationEngine:
         state=state if isinstance(state,dict) else {}
         history=history if isinstance(history,list) else []
         last_a,last_u,reply_to=self._history(history)
-        active_topic=self.normalize(state.get("active_topic") or state.get("current_topic") or semantic.get("active_topic") or cognition.get("active_topic"))
-        active_goal=self.normalize(state.get("active_goal") or state.get("current_goal") or semantic.get("active_goal") or cognition.get("active_goal"))
+
+        # The previous completed turn is a semantic object, not just two strings.
+        # It is the first context surface for every new request. Older history is
+        # consulted only after this meaning has been compared with the current turn.
+        last_turn_meaning = state.get("last_turn_meaning")
+        if not isinstance(last_turn_meaning, dict) and last_a:
+            last_turn_meaning = QUANTUM_TURN_MEANING_ENGINE.build(
+                last_u,
+                last_a,
+                render_blocks=[],
+                turn_id=reply_to,
+                semantic_engine=self,
+            )
+        transition = QUANTUM_TURN_MEANING_ENGINE.compare(
+            text,
+            last_turn_meaning if isinstance(last_turn_meaning, dict) else {},
+            semantic_engine=self,
+            recent_meanings=(
+                state.get("turn_meaning_history", [])
+                if isinstance(state.get("turn_meaning_history"), list)
+                else []
+            ),
+        ) if isinstance(last_turn_meaning, dict) else {
+            "relation": "NEW_TOPIC",
+            "anchor": "none",
+            "relation_scores": {},
+            "evidence": {},
+        }
+
+        active_topic=self.normalize(
+            state.get("active_topic")
+            or state.get("current_topic")
+            or (
+                (last_turn_meaning.get("meaning").get("topic") if isinstance(last_turn_meaning.get("meaning"), dict) else "")
+                if isinstance(last_turn_meaning, dict) else ""
+            )
+            or semantic.get("active_topic")
+            or cognition.get("active_topic")
+        )
+        active_goal=self.normalize(
+            state.get("active_goal")
+            or state.get("current_goal")
+            or (
+                (last_turn_meaning.get("meaning").get("goal") if isinstance(last_turn_meaning.get("meaning"), dict) else "")
+                if isinstance(last_turn_meaning, dict) else ""
+            )
+            or semantic.get("active_goal")
+            or cognition.get("active_goal")
+        )
         p=self.measure(text,previous_assistant=last_a,previous_user=last_u,active_topic=active_topic,active_goal=active_goal)
         previous_scene = state.get("current_visual_scene") or state.get("active_visual_scene")
         if not isinstance(previous_scene, dict):
@@ -2919,6 +3610,33 @@ class QuantumInterpretationEngine:
         # frozen legacy continuation flag.
         selected_relation = str(dialogue_selection.get("relation") or "NEW").upper()
         selected_pair = dialogue_selection.get("selected_pair") if isinstance(dialogue_selection.get("selected_pair"), dict) else {}
+
+        # Meaning transition is evaluated before historical retrieval. A current
+        # request that develops the immediately previous answer stays attached to
+        # that answer even when an older turn contains superficially similar words.
+        transition_relation = str(transition.get("relation") or "").upper()
+        if transition_relation in {"DEVELOP_CURRENT", "REFER_CURRENT"} and transition.get("anchor") == "last_turn":
+            if last_u or last_a:
+                selected_relation = "CONTINUE"
+                selected_pair = {
+                    "user": last_u,
+                    "april": last_a,
+                    "source": "last_turn_meaning",
+                    "meaning": deepcopy(last_turn_meaning),
+                }
+        elif transition_relation == "NEW_TOPIC":
+            selected_relation = "NEW"
+            selected_pair = {}
+        elif transition_relation == "REVISIT_RECENT":
+            selected_relation = "RECALL"
+            selected_meaning = transition.get("selected_turn_meaning")
+            if isinstance(selected_meaning, dict):
+                selected_pair = {
+                    "user": self.normalize(selected_meaning.get("user_request")),
+                    "april": self.normalize(selected_meaning.get("answer")),
+                    "source": "recent_turn_meaning",
+                    "meaning": deepcopy(selected_meaning),
+                }
         if selected_relation == "CONTINUE":
             dialogue_vector = {**dict(dialogue_vector or {}),
                 "relation": "CONTINUE_TOPIC", "topic_relation": "SAME_TOPIC",
@@ -2950,6 +3668,55 @@ class QuantumInterpretationEngine:
             )
             if str(x).strip()
         ]
+
+        # Keep the user's request as one semantic scene. Each independently
+        # understood clause owns a place in the scene, while the whole answer
+        # remains one coherent response.
+        scene_composition = []
+        seen_scene_parts = set()
+        for segment in (task_understanding.get("output_segments") or []):
+            if not isinstance(segment, dict):
+                continue
+            output = _clean_representation(segment.get("output"))
+            if not output:
+                continue
+            key = (int(segment.get("segment_index", 1) or 1), output)
+            if key in seen_scene_parts:
+                continue
+            seen_scene_parts.add(key)
+            scene_composition.append({
+                "segment_index": key[0],
+                "representation": output,
+                "segment_text": self.normalize(
+                    segment.get("segment_text") or segment.get("text") or ""
+                ),
+                "semantic_source": segment.get("source", "current_turn_task_matrix"),
+                "sequence": len(scene_composition),
+            })
+        for output in complete_outputs:
+            output = _clean_representation(output)
+            if not output:
+                continue
+            if not any(item.get("representation") == output for item in scene_composition):
+                scene_composition.append({
+                    "segment_index": 1,
+                    "representation": output,
+                    "segment_text": text,
+                    "semantic_source": "complete_current_turn",
+                    "sequence": len(scene_composition),
+                })
+        if scene_composition and not any(
+            item.get("representation") == "text" for item in scene_composition
+        ):
+            scene_composition.insert(0, {
+                "segment_index": 1,
+                "representation": "text",
+                "segment_text": text,
+                "semantic_source": "human_answer_companion",
+                "sequence": 0,
+            })
+        for index, item in enumerate(scene_composition):
+            item["sequence"] = index
 
         # A locally numbered/compound request ("second", "the third item", etc.)
         # refers to the structure of the CURRENT turn unless the user explicitly
@@ -3352,6 +4119,18 @@ class QuantumInterpretationEngine:
             "entity_understanding": entities_understanding,
             "turn_structure_understanding": turn_structure_understanding,
             "task_understanding": task_understanding,
+            "scene_composition": deepcopy(scene_composition),
+            "turn_meaning_transition": deepcopy(transition),
+            "last_turn_meaning": deepcopy(last_turn_meaning or {}),
+            "scene_graph": {
+                "root": "current_request",
+                "parts": deepcopy(scene_composition),
+                "representation_order": [
+                    item.get("representation") for item in scene_composition
+                    if isinstance(item, dict)
+                ],
+                "semantic_source": "current_turn_scene_composition",
+            },
             "ascii_schema_advisory": ascii_schema_advisory,
             "resolved_scene":resolved_scene,
             "reference_resolution":reference_resolution,
@@ -3371,6 +4150,8 @@ class QuantumInterpretationEngine:
                 "history_task_context": history_task_context,
                 "requested_outputs": complete_outputs,
                 "output_segments": task_understanding.get("output_segments", []),
+                "turn_meaning_transition": deepcopy(transition),
+                "selected_meaning_anchor": transition.get("anchor"),
             },
             "dialogue_delta": {
                 "mode": dialogue_vector.get("delta_mode"),
@@ -3425,6 +4206,8 @@ class QuantumInterpretationEngine:
                 "selected_memory_operand": dialogue_vector.get("selected_memory_operand") or {},
                 "relation": dialogue_vector.get("relation", "NEW_TOPIC"),
                 "subtype": dialogue_vector.get("subtype", "NEW_TOPIC"),
+                "turn_meaning_transition": deepcopy(transition),
+                "last_turn_meaning": deepcopy(last_turn_meaning or {}),
                 "avoid_repeat": True,
                 "canonical":True,"version":"quantum_dialogue_field_v4"
             },
@@ -3446,6 +4229,8 @@ class QuantumInterpretationEngine:
                 "semantic_task":semantic_task,
                 "history_dependent_task": bool(history_task_context.get("required")),
                 "history_task_context": history_task_context,
+                "scene_composition": deepcopy(scene_composition),
+                "turn_meaning_transition": deepcopy(transition),
                 "engine":"quantum_interpretation_engine_v9"
             },
             "quantum_interpretation_field":{
@@ -3520,6 +4305,7 @@ class QuantumInterpretationEngine:
             "presentation_recommendations":presentation_recommendations,
             "scene_recommendations":[x["scene_recommendation"] for x in presentation_recommendations],
             "scene_plan":[x["scene_recommendation"] for x in presentation_recommendations],
+            "scene_composition": deepcopy(scene_composition),
             "decision_owner":DECISION_OWNER,
             "recommendations_only":True,
         }
@@ -3994,6 +4780,40 @@ QUANTUM_EMBEDDING_ENGINE = QUANTUM_INTERPRETATION_ENGINE
 QUANTUM_INTENT_ENGINE = QUANTUM_INTERPRETATION_ENGINE
 QUANTUM_EVIDENCE_FUSION = QUANTUM_INTERPRETATION_ENGINE
 QUANTUM_DIALOGUE_ENGINE = QUANTUM_INTERPRETATION_ENGINE
+QUANTUM_TURN_MEANING_ENGINE = QuantumTurnMeaningEngine()
+
+def build_turn_meaning_state(
+    user_request: str,
+    answer: str,
+    *,
+    render_blocks: list[dict[str, Any]] | None = None,
+    summary: str = "",
+    turn_id: Any = None,
+    scene_id: str = "",
+) -> dict[str, Any]:
+    """Build the persistent semantic meaning of a completed USER→APRIL turn."""
+    return QUANTUM_TURN_MEANING_ENGINE.build(
+        user_request,
+        answer,
+        render_blocks=render_blocks,
+        summary=summary,
+        turn_id=turn_id,
+        scene_id=scene_id,
+        semantic_engine=QUANTUM_INTERPRETATION_ENGINE,
+    )
+
+
+def compare_request_to_turn_meaning(
+    current_request: str,
+    turn_meaning: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Compare a new request with the meaning of the immediately previous turn."""
+    return QUANTUM_TURN_MEANING_ENGINE.compare(
+        current_request,
+        turn_meaning,
+        semantic_engine=QUANTUM_INTERPRETATION_ENGINE,
+    )
+
 
 # Public class aliases preserve import names without reinstating parallel engines.
 QuantumFastSemanticEngine = QuantumInterpretationEngine
