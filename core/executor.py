@@ -20,6 +20,7 @@ from blocks.context_system import build_deephub_context, build_executor_context_
 from blocks.interpretation_layer import (
     interpret_request,
     build_processor_execution_context,
+    build_turn_meaning_state,
     QUANTUM_EVIDENCE_FUSION,
     QUANTUM_DIALOGUE_ENGINE,
 )
@@ -2590,80 +2591,39 @@ def _dialogue_context_consensus(
             "vector_id": vector_id,
             "source_part_ids": [],
         }
-        relation = "NEW"
-        vector_class = "NEW"
+        relation = "INDEPENDENT"
         existing_vector = False
     else:
         existing_vector = matrix.get("decision") == "EXISTING_VECTOR"
-        matched = list(matrix.get("interpretations") or [])
-        latest_pair_index = max(
-            [int(part.get("turn_id") or 0) for part in (
-                _dialogue_memory_parts(
-                    state=state,
-                    current_visual_scene=_best_visual_context(state),
-                    dynamic_memory=dynamic_memory,
-                    limit=12,
-                )
-            ) if _s(part.get("kind")).lower() == "dialogue_pair"] or [0]
-        )
-        matched_current = False
-        matched_old = False
-        memory_query_match = False
-        for item in matched:
-            part_id = _s(item.get("part_id"))
-            part = next(
-                (candidate for candidate in _dialogue_memory_parts(
-                    state=state,
-                    current_visual_scene=_best_visual_context(state),
-                    dynamic_memory=dynamic_memory,
-                    limit=12,
-                ) if _s(candidate.get("part_id")) == part_id),
-                {},
-            )
-            kind = _s(part.get("kind")).lower()
-            label = _s(item.get("dialogue_label")).lower()
-            if label == "memory_query" or _s(item.get("relation")).startswith("MEMORY_QUERY"):
-                memory_query_match = True
-            if kind == "dialogue_pair" and int(part.get("turn_id") or 0) == latest_pair_index:
-                matched_current = True
-            elif part:
-                matched_old = True
-
-        # Three-way processor decision:
-        # CONTINUE = current active topic/result is interpreted.
-        # RECALL   = an older memory topic is interpreted.
-        # NEW      = no memory part is interpreted.
-        if matched_current:
-            relation = "CONTINUE"
-            vector_class = "EXISTING"
-        elif matched_old or memory_query_match:
-            relation = "RECALL"
-            vector_class = "EXISTING"
+        base_relation = _s(frozen.get("relation")).upper() or "INDEPENDENT"
+        if existing_vector:
+            if bool(frozen.get("reference_to_previous")) or base_relation == "ARTIFACT_REFERENCE":
+                relation = "ARTIFACT_REFERENCE"
+            elif base_relation == "MEMORY_QUERY":
+                relation = "MEMORY_QUERY"
+            elif base_relation in {"CONTINUATION", "CONTINUE_TOPIC"}:
+                relation = "CONTINUATION"
+            elif base_relation == "SAME_TOPIC":
+                relation = "SAME_TOPIC"
+            else:
+                relation = "CONTINUATION"
         else:
-            relation = "NEW"
-            vector_class = "NEW"
+            relation = "NEW_TOPIC" if base_relation == "NEW_TOPIC" else "INDEPENDENT"
 
-        existing_vector = vector_class == "EXISTING"
-
-    continuation = relation == "CONTINUE"
-    reference = relation == "RECALL"
-
-    # Preserve a memory-query request as a semantic query while classifying the
-    # target topic as CONTINUE or RECALL. The three-way vector class is primary.
-    if not fresh_visual and relation == "RECALL":
-        vector_id = _s(_as_dict(matrix.get("vector")).get("vector_id"))
-        if not vector_id:
-            vector_id = f"vector-{hashlib.sha256(_s(text).encode('utf-8')).hexdigest()[:16]}"
-        matrix["vector"]["status"] = "EXISTING"
-        matrix["vector"]["kind"] = "RECALL_VECTOR"
+    continuation = bool(
+        existing_vector
+        and relation in {
+            "CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY", "SAME_TOPIC"
+        }
+    )
+    reference = relation == "ARTIFACT_REFERENCE"
 
     return {
         "version": "QUANTUM_DIALOGUE_CONSENSUS_V2",
         "relation": relation,
-        "dialogue_class": relation,
         "continuation": continuation,
         "reference_to_previous": reference,
-        "memory_query": relation == "RECALL" or relation == "MEMORY_QUERY",
+        "memory_query": relation == "MEMORY_QUERY",
         "vector_status": "EXISTING" if existing_vector else "NEW",
         "vector_id": _s(_as_dict(matrix.get("vector")).get("vector_id")),
         "memory_part_ids": list(matrix.get("matched_part_ids") or []),
@@ -2725,12 +2685,24 @@ def _quantum_context_binding(
             semantic.get("quantum_dynamic_memory_evidence")
         ),
     )
-    # The consensus engine is the sole owner of the three-way dialogue class.
-    # Older/frozen interpretation, scene continuity and memory-understanding are
-    # evidence only and cannot overwrite CONTINUE / RECALL / NEW.
-    relation = _s(consensus.get("relation")).upper() or "NEW"
-    continuation = relation == "CONTINUE"
-    reference = relation == "RECALL"
+    relation = _s(consensus.get("relation")).upper() or _s(
+        frozen.get("relation")
+        or vector.get("relation")
+        or scene.get("mode")
+        or "INDEPENDENT"
+    ).upper()
+    continuation = bool(
+        consensus.get("continuation")
+        or frozen.get("continuation")
+        or scene.get("continuation")
+        or vector.get("continuation")
+    )
+    reference = bool(
+        consensus.get("reference_to_previous")
+        or frozen.get("reference_to_previous")
+        or scene.get("reference_to_previous")
+        or vector.get("reference_to_previous")
+    )
 
     # Memory may strengthen a reference only after the CONTEXT was interpreted
     # against at least one decomposed memory part. Memory alone cannot create a
@@ -2739,15 +2711,23 @@ def _quantum_context_binding(
     interpreted_part_ids = set(
         _as_list(dialogue_formula.get("matched_part_ids"))
     )
-    # Memory-understanding may enrich an already-proved RECALL/CONTINUE vector,
-    # but it cannot create or change the vector class.
     if (
-        relation in {"CONTINUE", "RECALL"}
-        and bool(mem_ref.get("resolved"))
+        bool(mem_ref.get("resolved"))
         and interpreted_part_ids
-        and (_s(mem_ref.get("target")) or _s(mem_visual.get("scene_id")))
+        and (
+            _s(mem_ref.get("target"))
+            or _s(mem_visual.get("scene_id"))
+        )
     ):
-        reference = relation == "RECALL"
+        relation = "ARTIFACT_REFERENCE"
+        continuation = True
+        reference = True
+
+    # A memory query is explicitly a history-dependent request even when the
+    # original Interpretation pass was conservative.
+    if relation == "MEMORY_QUERY":
+        continuation = bool(continuation)
+        reference = bool(reference)
 
     current_complete = semantic_dialogue.get("current_request_complete")
     incomplete = current_complete is False
@@ -2767,10 +2747,40 @@ def _quantum_context_binding(
     formula_existing = bool(
         _as_dict(consensus.get("dialogue_formula")).get("decision") == "EXISTING_VECTOR"
     )
-    # Incompleteness alone never upgrades a NEW vector. Only the interpreted
-    # memory relation may authorize CONTINUE/RECALL.
+    if (
+        incomplete
+        and history_available
+        and formula_existing
+        and relation in {"INDEPENDENT", "NEW_TOPIC", "SAME_TOPIC"}
+    ):
+        relation = "CONTINUATION"
+        continuation = True
 
-    context_dependency = relation in {"CONTINUE", "RECALL"}
+    # The completed-turn meaning is the newest semantic evidence. It can refine
+    # the relation that was measured earlier, but it never comes from a word trigger.
+    transition = _as_dict(semantic.get("turn_meaning_transition"))
+    transition_relation = _s(transition.get("relation")).upper()
+    transition_anchor = _s(transition.get("anchor")).lower()
+    if transition_relation == "NEW_TOPIC":
+        relation = "NEW_TOPIC"
+        continuation = False
+        reference = False
+    elif transition_relation == "DEVELOP_CURRENT" and transition_anchor == "last_turn":
+        relation = "CONTINUATION"
+        continuation = True
+        reference = False
+    elif transition_relation == "REFER_CURRENT" and transition_anchor == "last_turn":
+        relation = "ARTIFACT_REFERENCE"
+        continuation = True
+        reference = True
+    elif transition_relation == "REVISIT_RECENT" and transition_anchor == "recent_turn":
+        relation = "CONTINUATION"
+        continuation = True
+        reference = True
+
+    context_dependency = relation in {
+        "CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY", "SAME_TOPIC"
+    }
 
     # When history is needed, attach the authentic recent pairs. Provider_router
     # remains responsible for compacting them under the existing 900-token cap.
@@ -2780,9 +2790,24 @@ def _quantum_context_binding(
 
     resolved_request = _s(
         memory.get("resolved_request")
-        if relation in {"CONTINUE", "RECALL"}
+        if relation in {"CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
         else ""
     ) or _s(frozen.get("resolved_request")) or _s(text)
+
+    selected_turn_meaning = transition.get("selected_turn_meaning")
+    if (
+        transition_relation == "REVISIT_RECENT"
+        and isinstance(selected_turn_meaning, dict)
+    ):
+        recalled_user = _s(selected_turn_meaning.get("user_request"))
+        recalled_answer = _s(selected_turn_meaning.get("answer"))
+        resolved_request = (
+            f"{text}\n\n"
+            "Continue the earlier semantic thread using the selected completed turn "
+            "as context; do not replace the current request with the old request.\n"
+            f"Earlier USER: {recalled_user}\n"
+            f"Earlier APRIL: {recalled_answer}"
+        )
 
     resolved_scene = deepcopy(
         mem_visual if mem_visual.get("scene_id") else frozen.get("resolved_scene") or {}
@@ -2812,7 +2837,7 @@ def _quantum_context_binding(
         history_available and (
             context_dependency
             or incomplete
-            or relation == "RECALL"
+            or relation == "MEMORY_QUERY"
         )
     )
 
@@ -2825,8 +2850,9 @@ def _quantum_context_binding(
         "reference_to_previous": bool(reference),
         "context_dependency": (
             "reference" if reference
-            else "continuation" if relation == "CONTINUE"
-            else "recall" if relation == "RECALL"
+            else "continuation" if continuation
+            else "memory_query" if relation == "MEMORY_QUERY"
+            else "topic" if relation == "SAME_TOPIC"
             else "independent"
         ),
         "resolved_request": resolved_request,
@@ -2847,15 +2873,6 @@ def _quantum_context_binding(
         "vector_status": _s(consensus.get("vector_status")) or "NEW",
         "vector_id": _s(consensus.get("vector_id")),
         "memory_part_ids": list(consensus.get("memory_part_ids") or []),
-        "dialogue_class": relation,
-        "development_context": {
-            "mode": "CONTINUE" if relation == "CONTINUE" else "RECALL" if relation == "RECALL" else "NEW",
-            "memory_part_ids": list(consensus.get("memory_part_ids") or []),
-            "resolved_scene": deepcopy(resolved_scene),
-            "previous_user_turn": _s(evidence.get("previous_user")),
-            "previous_april_turn": _s(evidence.get("previous_april")),
-            "current_request": _s(text),
-        },
         "markers": [
             "[MEMORY]", "[PART]", "[CONTEXT]", "[INTERP]", "[VECTOR]",
             "[ACTION]", "[PROCESS]", "[RESULT]",
@@ -3596,11 +3613,23 @@ def _canonical_requested_outputs(
     ).lower()
     canonical = aliases.get(canonical, canonical)
 
+    # The scene composition is the semantic result of interpreting the complete
+    # request. It is stronger than a single preferred representation and preserves
+    # all distinct task parts in their original order.
+    composed = []
+    for item in _as_list(semantic.get("scene_composition")):
+        if not isinstance(item, dict):
+            continue
+        name = _clean_representation(item.get("representation"))
+        if name and name not in composed:
+            composed.append(name)
+
     declared = clean(
-        semantic.get("requested_outputs")
-        or semantic.get("required_outputs")
-        or semantic.get("requested_representations")
-        or semantic.get("required_representations")
+        composed
+        + _as_list(semantic.get("requested_outputs"))
+        + _as_list(semantic.get("required_outputs"))
+        + _as_list(semantic.get("requested_representations"))
+        + _as_list(semantic.get("required_representations"))
     )
     decision_declared = clean(
         decision.get("requested_outputs")
@@ -3733,9 +3762,10 @@ def _build_processor_control_plane(
     representation_state = {
         "outputs": list(outputs),
         "preferred": preferred,
-        "selection_method": "interpretation_canonical_production",
-        "scoring": False,
-        "triggers": False,
+        "selection_method": "semantic_scene_composition",
+        "scene_composition": _quantum_snapshot(
+            _as_list(semantic.get("scene_composition"))
+        ),
     }
 
     # Canonical semantic continuity: when Interpretation has already declared
@@ -3791,6 +3821,9 @@ def _build_processor_control_plane(
         "resolved_scene": resolved_scene,
         "active_topic": topic,
         "visual_continuity": continuity_representation,
+        "scene_composition": _quantum_snapshot(
+            _as_list(semantic.get("scene_composition"))
+        ),
         "active_goal": goal,
         "dialogue_evidence": evidence,
         "requested_outputs": outputs,
@@ -4077,6 +4110,12 @@ def _make_request(
             ),
             "dialogue_delta": deepcopy(semantic.get("dialogue_delta") or {}),
             "render_continuity": deepcopy(semantic.get("render_continuity") or {}),
+            "scene_composition": deepcopy(
+                _as_list(semantic.get("scene_composition"))
+            ),
+            "turn_meaning_transition": deepcopy(
+                semantic.get("turn_meaning_transition") or {}
+            ),
             "visual_schema": _s(semantic.get("visual_schema")),
             "visual_schema_confidence": float(semantic.get("visual_schema_confidence") or 0.0),
             "context_mode": mode,
@@ -4217,6 +4256,12 @@ def _make_request(
             "presentation_plan": presentation_plan,
             "quantum_context_diagnostic": _quantum_snapshot(
                 semantic.get("quantum_context_diagnostic") or {}
+            ),
+            "scene_composition": deepcopy(
+                _as_list(semantic.get("scene_composition"))
+            ),
+            "turn_meaning_transition": deepcopy(
+                semantic.get("turn_meaning_transition") or {}
             ),
             "representation_plan": {
                 "requested_outputs": requested_outputs,
@@ -5956,18 +6001,33 @@ def _presentation_payload_contract(source: dict, kind: str) -> dict:
 
 
 def _canonical_block_payload(block: dict) -> dict:
-    """Return the block's canonical structured payload without changing it."""
+    """Return the strongest structured payload available on one renderer block."""
     source = _as_dict(block)
     payload = source.get("payload")
-    if isinstance(payload, dict):
+    if isinstance(payload, dict) and payload:
         return payload
+
+    # Provider payloads can arrive as payload={} with the real SVG/image/table
+    # nested under artifact.payload. An empty envelope must never mask the
+    # concrete artifact data.
     artifact = source.get("artifact")
     if isinstance(artifact, dict):
         nested = artifact.get("payload")
-        if isinstance(nested, dict):
+        if isinstance(nested, dict) and nested:
             return nested
-        return artifact
-    return {}
+        if artifact:
+            return artifact
+
+    # Some providers put the typed payload directly under the representation.
+    kind = _s(
+        source.get("type")
+        or source.get("artifact_type")
+        or source.get("representation")
+    ).lower()
+    candidate = source.get(kind) if kind else None
+    if isinstance(candidate, dict) and candidate:
+        return candidate
+    return payload if isinstance(payload, dict) else {}
 
 
 def _canonical_block_id(block: dict, index: int) -> str:
@@ -6820,6 +6880,58 @@ def _persist_structured_scene_payload(
         pass
 
 
+
+def _persist_turn_meaning(
+    state: dict,
+    *,
+    user_request: str,
+    answer: str,
+    render_blocks: list[dict],
+    summary: str = "",
+    turn_id: Any = None,
+    scene_id: str = "",
+    user_id: str = "",
+) -> dict:
+    """
+    Understand the completed turn immediately and persist that meaning.
+
+    This is post-response cognition: the next request can therefore reason over
+    what April actually answered instead of reconstructing the previous turn from
+    raw chat text or searching old memory first.
+    """
+    meaning = build_turn_meaning_state(
+        user_request,
+        answer,
+        render_blocks=render_blocks,
+        summary=summary,
+        turn_id=turn_id,
+        scene_id=scene_id,
+    )
+    state["last_turn_meaning"] = _quantum_snapshot(meaning)
+    history = state.get("turn_meaning_history")
+    if not isinstance(history, list):
+        history = []
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            meaning,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    compact = deepcopy(meaning)
+    compact["fingerprint"] = fingerprint[:24]
+    history.append(compact)
+    state["turn_meaning_history"] = history[-12:]
+    state["last_turn_meaning_fingerprint"] = fingerprint[:24]
+    if user_id:
+        try:
+            persist_state(user_id)
+        except Exception:
+            pass
+    return meaning
+
+
 def _canonicalize(
     user_id: str,
     response: MachineResponse,
@@ -7006,6 +7118,21 @@ def _canonicalize(
         contract,
         render_blocks,
     )
+
+    # Immediately understand and remember what April has just answered. This
+    # state becomes the first semantic context surface of the next user turn.
+    # It contains the actual answer and actual render stream, not a routing flag.
+    turn_meaning = _persist_turn_meaning(
+        state,
+        user_request=_s(request.conversation.get("current_request")),
+        answer=answer,
+        render_blocks=render_blocks,
+        summary=_s(response.summary),
+        turn_id=getattr(contract, "turn_id", None) or getattr(request, "turn_id", None),
+        scene_id=_s(getattr(contract, "scene_id", "")),
+        user_id=_s(user_id),
+    )
+    semantic["turn_meaning"] = _quantum_snapshot(turn_meaning)
     request_meta = _request_metadata(request)
 
     # One canonical visible presentation stream is released to Web.
