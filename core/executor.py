@@ -44,7 +44,7 @@ from blocks.energy_manager import (build_quantum_acceleration_profile, apply_qua
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.image_system import scan_image, render_visual_answer, NANO_PRINTER_VERSION
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v51_lossless_scene_presentation_v1"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v52_continuation_scene_handoff_v1"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 16
@@ -3359,6 +3359,140 @@ def _adaptive_output_budget(text: str, semantic: dict, cognition: dict, decision
     """Continuous structural capacity with representation-specific envelopes."""
     return _quantum_budget_from_64(_quantum_64_field(text, semantic, cognition, decision))
 
+def _compact_continuation_scene_data(state: dict) -> dict:
+    """Expose canonical active-scene structured data to Provider on continuations."""
+    scene = _best_visual_context(state)
+    if not isinstance(scene, dict) or not scene:
+        return {}
+
+    blocks = scene.get("render_blocks")
+    if not isinstance(blocks, list):
+        blocks = scene.get("blocks") if isinstance(scene.get("blocks"), list) else []
+
+    structured_blocks = []
+    rows = []
+    data_points = []
+    source_ids = []
+
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = _scene_block_kind(block)
+        payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+        if not kind:
+            continue
+        block_id = _s(block.get("block_id") or block.get("id"))
+        if block_id:
+            source_ids.append(block_id)
+
+        item = {
+            "block_id": block_id,
+            "type": kind,
+            "title": _s(block.get("title") or payload.get("title")),
+        }
+
+        x_values = payload.get("x")
+        if not isinstance(x_values, list):
+            x_values = payload.get("categories")
+        if not isinstance(x_values, list):
+            x_axis = payload.get("x_axis")
+            x_values = x_axis.get("values") if isinstance(x_axis, dict) else []
+
+        series = payload.get("series")
+        compact_series = []
+        if isinstance(series, list):
+            for series_item in series[:12]:
+                if not isinstance(series_item, dict):
+                    continue
+                values = series_item.get("values")
+                if not isinstance(values, list):
+                    values = []
+                clean_values = []
+                for value in values[:60]:
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        clean_values.append(value)
+                    else:
+                        try:
+                            number = float(str(value).replace(",", "."))
+                            clean_values.append(int(number) if number.is_integer() else number)
+                        except Exception:
+                            clean_values.append(value)
+                compact_series.append({
+                    "name": _s(series_item.get("name") or series_item.get("label")),
+                    "type": _s(series_item.get("type")),
+                    "axis": _s(series_item.get("axis")),
+                    "values": clean_values,
+                })
+
+        if isinstance(x_values, list) and x_values and compact_series:
+            x_values = [_s(value) for value in x_values[:60]]
+            item["x"] = x_values
+            item["series"] = compact_series
+            for pos, period in enumerate(x_values):
+                row = {"period": period}
+                for series_item in compact_series:
+                    values = series_item.get("values") or []
+                    if pos < len(values):
+                        row[series_item.get("name") or f"series_{len(row)}"] = values[pos]
+                rows.append(row)
+
+        columns = payload.get("columns")
+        payload_rows = payload.get("rows")
+        if isinstance(columns, list) and columns:
+            item["columns"] = [_s(value) for value in columns[:30]]
+        if isinstance(payload_rows, list) and payload_rows:
+            item_rows = []
+            for row in payload_rows[:60]:
+                if isinstance(row, dict):
+                    item_rows.append(_quantum_snapshot(row))
+                elif isinstance(row, (list, tuple)):
+                    item_rows.append([_quantum_snapshot(value) for value in list(row)[:30]])
+            if item_rows:
+                item["rows"] = item_rows
+                if not rows and isinstance(columns, list) and columns:
+                    for row in item_rows:
+                        if isinstance(row, list):
+                            rows.append({
+                                _s(columns[pos]) if pos < len(columns) else f"column_{pos+1}": value
+                                for pos, value in enumerate(row)
+                            })
+                        elif isinstance(row, dict):
+                            rows.append(row)
+
+        explicit_points = payload.get("data_points")
+        if isinstance(explicit_points, list) and explicit_points:
+            item["data_points"] = _quantum_snapshot(explicit_points[:60])
+            for point in explicit_points[:60]:
+                if isinstance(point, dict):
+                    data_points.append(_quantum_snapshot(point))
+                elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                    data_points.append({"label": _s(point[0]), "value": _quantum_snapshot(point[1])})
+
+        for key in ("totals", "growth", "axes", "formula"):
+            value = payload.get(key)
+            if value not in (None, "", [], {}):
+                item[key] = _quantum_snapshot(value)
+
+        if any(key in item for key in (
+            "x", "series", "columns", "rows", "data_points", "totals", "growth", "axes", "formula"
+        )):
+            structured_blocks.append(item)
+
+    if not structured_blocks and not rows and not data_points:
+        return {}
+
+    return {
+        "scene_id": _s(scene.get("scene_id") or scene.get("id")),
+        "topic": _clip(scene.get("topic") or scene.get("active_topic"), 500),
+        "source": "QUANTUM_PROCESSOR_CANONICAL_SCENE",
+        "structured_blocks": structured_blocks[:12],
+        "rows": rows[:60],
+        "data_points": data_points[:60],
+        "source_block_ids": list(dict.fromkeys(source_ids))[:24],
+        "lossless_context": True,
+        "presentation_bodies_omitted": True,
+    }
+
 def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -> dict:
     dialog = state.get("dialog", []) if isinstance(state, dict) else []
     recent = []
@@ -3726,7 +3860,17 @@ def _build_processor_control_plane(
     )
 
     resolved_scene = _as_dict(canonical_dialogue.get("resolved_scene"))
-    if not (continuation or reference_to_previous or mode == "MEMORY_QUERY"):
+    if continuation or reference_to_previous or mode == "MEMORY_QUERY":
+        if not resolved_scene:
+            active_scene = _best_visual_context(state)
+            if active_scene:
+                resolved_scene = {
+                    "scene_id": _s(active_scene.get("scene_id") or active_scene.get("id")),
+                    "relation": "current_scene",
+                    "source": "QUANTUM_PROCESSOR_SCENE_FALLBACK",
+                    "structured_scene_available": True,
+                }
+    else:
         resolved_scene = {}
 
     scene_relation = _s(resolved_scene.get("relation")) or (
@@ -3972,6 +4116,11 @@ def _make_request(
             or _s(control.get("active_topic")),
         "resolved_scene": _as_dict(control.get("resolved_scene"))
             or _as_dict(canonical_dialogue.get("resolved_scene")),
+        "resolved_scene_data_available": bool(continuation_scene_data),
+        "resolved_scene_id": _s(
+            continuation_scene_data.get("scene_id")
+            if isinstance(continuation_scene_data, dict) else ""
+        ),
         "resolved_reference": _s(canonical_dialogue.get("resolved_reference")),
         "resolved_request": _s(canonical_dialogue.get("resolved_request") or text),
         "current_request": _s(text),
@@ -4002,6 +4151,12 @@ def _make_request(
     # The immediate canonical scene is part of the same dialogue state. When
     # hot history is absent, carry the measured previous scene through the
     # existing conversation contract instead of creating a second memory path.
+    continuation_scene_data = {}
+    if mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}:
+        continuation_scene_data = _compact_continuation_scene_data(state)
+        if continuation_scene_data:
+            context["continuation_scene_data"] = _quantum_snapshot(continuation_scene_data)
+
     dialogue_evidence = _as_dict(control.get("dialogue_evidence"))
     previous_scene_user = _s(evidence.get("previous_user"))
     previous_scene_april = _s(evidence.get("previous_april"))
@@ -4068,6 +4223,17 @@ def _make_request(
         "context_binding_history_required": bool(
             _as_dict(state.get("_canonical_processor_dialogue", {})).get("history_required")
         ),
+        "continuation_scene_data": {
+            "available": bool(continuation_scene_data),
+            "scene_id": _s(
+                continuation_scene_data.get("scene_id")
+                if isinstance(continuation_scene_data, dict) else ""
+            ),
+            "row_count": len(
+                continuation_scene_data.get("rows", [])
+                if isinstance(continuation_scene_data, dict) else []
+            ),
+        },
     }
 
     if isinstance(state, dict):
@@ -4094,6 +4260,7 @@ def _make_request(
             "dialogue_state": mode,
             "coherence": round(coherence, 4),
             "dialog_act": dialogue_contract["dialog_act"],
+            "continuation_scene_data": deepcopy(continuation_scene_data),
             "history_dependent_task": bool(history_task_context.get("required")),
             "resolved_operands": list(history_task_context.get("resolved_operands") or []),
         },
@@ -4215,17 +4382,21 @@ def _make_request(
         visual_context=(
             {
                 "current_input": current_visual_evidence,
-                "historical_reference": visual if isinstance(visual, dict) else {},
+                "historical_reference": (
+                    {
+                        "scene_id": _s(continuation_scene_data.get("scene_id")),
+                        "source": continuation_scene_data.get("source"),
+                    }
+                    if continuation_scene_data
+                    else (visual if isinstance(visual, dict) else {})
+                ),
+                "continuation_scene_data": continuation_scene_data,
                 "source": "QUANTUM_PROCESSOR",
                 "decision_owner": "QUANTUM_PROCESSOR",
+                "structured_data_preserved": bool(continuation_scene_data),
             }
-            if current_visual_evidence
-            else (
-                visual
-                if isinstance(visual, dict)
-                and mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
-                else {}
-            )
+            if current_visual_evidence or continuation_scene_data
+            else {}
         ),
         available_tools=list(control.get("capabilities") or []),
         requested_outputs=requested_outputs,
@@ -8588,6 +8759,15 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     # OpenAI Responses API requires max_output_tokens >= 16.
     # Keep the canonical request budget intact, but enforce the transport floor
     # at the final Provider boundary so an invalid value can never be sent.
+    if (
+        mode in {"CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
+        and _best_visual_context(state)
+        and not continuation_scene_data
+    ):
+        raise RuntimeError(
+            "Quantum release blocked: continuation scene data was lost before Provider"
+        )
+
     provider_output_tokens = max(
         OUTPUT_MIN_TOKENS,
         min(OUTPUT_MAX_TOKENS, int(request.response_output_tokens or OUTPUT_MIN_TOKENS)),
@@ -8603,6 +8783,20 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         if isinstance(request.conversation, dict)
         else ""
     )
+    carried_scene = (
+        request.conversation.get("continuation_scene_data")
+        if isinstance(request.conversation, dict) else {}
+    )
+    carried_rows = carried_scene.get("rows", []) if isinstance(carried_scene, dict) else []
+    carried_points = carried_scene.get("data_points", []) if isinstance(carried_scene, dict) else []
+    carried_count = len(carried_rows) or len(carried_points) or len(handoff_pairs)
+    carried_labels = [
+        _s(row.get("period") or row.get("label"))
+        for row in carried_rows[:12]
+        if isinstance(row, dict)
+    ]
+    if not carried_labels:
+        carried_labels = [p[0] for p in handoff_pairs[:12]]
     print("🧭 PROVIDER INPUT SCENE:", {
         "request": _clip(
             _s(request.conversation.get("current_request"))
@@ -8610,8 +8804,12 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
             500,
         ),
         "requested_outputs": list(request.requested_outputs or []),
-        "data_points": len(handoff_pairs),
-        "data_labels": [p[0] for p in handoff_pairs[:12]],
+        "data_points": carried_count,
+        "data_labels": carried_labels,
+        "continuation_scene_data": bool(carried_scene),
+        "continuation_scene_id": _s(
+            carried_scene.get("scene_id") if isinstance(carried_scene, dict) else ""
+        ),
         "input_budget": 900,
         "provider_calls": 1,
     })
