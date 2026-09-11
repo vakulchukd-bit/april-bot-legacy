@@ -44,7 +44,7 @@ from blocks.energy_manager import (build_quantum_acceleration_profile, apply_qua
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.image_system import scan_image, render_visual_answer, NANO_PRINTER_VERSION
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v49_semantic_owner_scene_integrity_v3"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v50_full_scene_materialization_v1"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 16
@@ -6540,11 +6540,31 @@ def _apply_new_dataset_dialogue_boundary(
     }
 
 def _extract_label_value_pairs(text: str) -> list[tuple[str, float, str]]:
-    """Extract explicit label/value pairs from user/provider text structurally."""
+    """Extract explicit label/value pairs from current text structurally.
+
+    Supports both line-oriented rows and compact comma/semicolon-separated
+    rows such as "Пн — 120, Вт — 135, ...". This is data parsing, not
+    keyword-trigger routing.
+    """
     source = _s(text)
     if not source:
         return []
+
     pairs: list[tuple[str, float, str]] = []
+
+    def add_pair(label: Any, raw_value: Any, unit: Any = "") -> None:
+        label_text = _s(label).strip(" \t\r\n.,;:")
+        if not label_text:
+            return
+        try:
+            value = float(_s(raw_value).replace(",", "."))
+        except Exception:
+            return
+        parsed_unit = _s(unit)
+        candidate = (label_text, value, parsed_unit)
+        if candidate not in pairs:
+            pairs.append(candidate)
+
     # Month names are a structural calendar axis, not a topic trigger.
     month_names = (
         "январь", "февраль", "март", "апрель", "май", "июнь",
@@ -6552,42 +6572,47 @@ def _extract_label_value_pairs(text: str) -> list[tuple[str, float, str]]:
     )
     month_pattern = r"(?i)\b(" + "|".join(month_names) + r")\b\s*(?:[—–:-]\s*)?\$?\s*(-?\d+(?:[.,]\d+)?)\s*(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?"
     for match in re.finditer(month_pattern, source):
-        label = match.group(1)
-        try:
-            value = float(match.group(2).replace(",", "."))
-        except Exception:
-            continue
-        unit = _s(match.group(3))
-        pairs.append((label, value, unit))
+        add_pair(match.group(1), match.group(2), match.group(3))
 
     year_pattern = r"\b((?:19|20)\d{2})\b\s*(?:[—–:-]\s*)?[$€£]?\s*(-?\d+(?:[.,]\d+)?)\s*(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?"
     for match in re.finditer(year_pattern, source):
-        label = match.group(1)
-        try:
-            value = float(match.group(2).replace(",", "."))
-        except Exception:
-            continue
-        unit = _s(match.group(3))
-        pairs.append((label, value, unit))
+        add_pair(match.group(1), match.group(2), match.group(3))
 
-    # Generic label/value rows such as "Q1 — 42" or "Alpha: 17".
-    # Require a line-oriented structural row so prose such as
-    # "Используй значения: 1950" cannot be mistaken for a data point.
-    generic_pattern = r"(?m)^\s*(?:[-*•]\s*)?([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9 _]{1,30}?)\s*(?:[—–:-])\s*\$?\s*(-?\d+(?:[.,]\d+)?)\s*(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?\s*$"
-    for match in re.finditer(generic_pattern, source):
-        label = _s(match.group(1)).strip(" .,;")
-        if not label:
-            continue
-        # Exclude labels that are plainly prose; structure is retained only when
-        # a numeric value is explicitly attached to the label.
-        try:
-            value = float(match.group(2).replace(",", "."))
-        except Exception:
-            continue
-        unit = _s(match.group(3))
-        candidate = (label, value, unit)
-        if candidate not in pairs:
-            pairs.append(candidate)
+    # Line-oriented rows such as "Q1 — 42" or "Alpha: 17".
+    generic_line_pattern = r"(?m)^\s*(?:[-*•]\s*)?([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9 _]{1,30}?)\s*(?:[—–:-])\s*\$?\s*(-?\d+(?:[.,]\d+)?)\s*(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?\s*$"
+    for match in re.finditer(generic_line_pattern, source):
+        add_pair(match.group(1), match.group(2), match.group(3))
+
+    # Compact rows on one line, separated by commas/semicolons.
+    # Require either multiple structural pairs in the same sentence or an
+    # explicit comma/semicolon boundary around the pair to avoid turning prose
+    # into data. The parser never relies on the semantic topic.
+    generic_inline_pattern = (
+        r"(?<!\w)"
+        r"([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9 _]{1,30}?)"
+        r"\s*(?:[—–:-])\s*"
+        r"\$?\s*(-?\d+(?:[.,]\d+)?)"
+        r"\s*(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?"
+        r"(?=\s*(?:[,;.]|$|\n))"
+    )
+    inline_matches = list(re.finditer(generic_inline_pattern, source))
+    if len(inline_matches) >= 2:
+        for match in inline_matches:
+            add_pair(match.group(1), match.group(2), match.group(3))
+
+    # Also allow compact two+ row sequences separated by whitespace when the
+    # labels are clearly repeated structural tokens. This covers "A—1 B—2".
+    if not inline_matches:
+        compact_pattern = (
+            r"(?<!\w)"
+            r"([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9 _]{1,24}?)"
+            r"\s*[—–:-]\s*"
+            r"(-?\d+(?:[.,]\d+)?)"
+            r"\s*(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?"
+            r"(?=\s+[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9 _]{1,24}?\s*[—–:-])"
+        )
+        for match in re.finditer(compact_pattern, source):
+            add_pair(match.group(1), match.group(2), match.group(3))
 
     # Deduplicate while preserving order.
     seen = set()
@@ -6677,132 +6702,288 @@ def _graph_payload_from_pairs(
     return result
 
 
+
+def _image_payload_from_pairs(
+    pairs: list[tuple[str, float, str]],
+    *,
+    title: str = "Данные текущей сцены",
+) -> dict[str, Any]:
+    """Build one real SVG image from explicit current-turn label/value data."""
+    if len(pairs) < 2:
+        return {}
+
+    labels = [str(label) for label, _, _ in pairs]
+    values = [float(value) for _, value, _ in pairs]
+    maximum = max(values) if values else 0.0
+    if maximum <= 0:
+        maximum = 1.0
+
+    width = 820
+    row_height = 54
+    top = 96
+    bottom = 46
+    height = max(300, top + len(labels) * row_height + bottom)
+    chart_left = 235
+    chart_right = 770
+    bar_max = chart_right - chart_left
+
+    def esc(value: str) -> str:
+        return (
+            str(value)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&apos;")
+        )
+
+    rows = []
+    for idx, (label, value, _) in enumerate(pairs):
+        y = top + idx * row_height
+        bar_width = max(2.0, (value / maximum) * bar_max)
+        rows.append(
+            f'<text x="28" y="{y + 27}" font-family="sans-serif" font-size="18" fill="#1f2937">'
+            f'{esc(label)}</text>'
+            f'<rect x="{chart_left}" y="{y + 8}" width="{bar_width:.2f}" height="30" rx="6" fill="#3b82f6"/>'
+            f'<text x="{min(chart_left + bar_width + 10, 735):.2f}" y="{y + 29}" '
+            f'font-family="sans-serif" font-size="17" fill="#111827">{value:g}</text>'
+        )
+
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
+        f'<rect width="100%" height="100%" rx="18" fill="#ffffff"/>'
+        f'<text x="28" y="48" font-family="sans-serif" font-size="26" font-weight="700" fill="#111827">'
+        f'{esc(title)}</text>'
+        f'<line x1="{chart_left}" y1="{top - 8}" x2="{chart_left}" y2="{height - bottom + 8}" stroke="#d1d5db"/>'
+        + "".join(rows)
+        + f'<text x="28" y="{height - 16}" font-family="sans-serif" font-size="14" fill="#6b7280">'
+          f'Processor scene materialization • {len(labels)} explicit values</text>'
+        + '</svg>'
+    )
+    return {
+        "title": title,
+        "alt": "SVG-визуализация текущего набора явных данных",
+        "format": "svg",
+        "width": width,
+        "height": height,
+        "svg": svg,
+        "content": svg,
+        "data": svg,
+        "source": "QUANTUM_PROCESSOR_SCENE_MATERIALIZER",
+        "data_points": [
+            {"label": label, "value": value, "unit": unit}
+            for label, value, unit in pairs
+        ],
+    }
+
+
+def _usable_image_payload(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    svg = payload.get("svg") or payload.get("content")
+    if isinstance(svg, str) and "<svg" in svg.lower():
+        return True
+    data = payload.get("data")
+    if isinstance(data, str) and "<svg" in data.lower():
+        return True
+    for key in ("src", "url", "image", "path"):
+        if isinstance(payload.get(key), str) and payload.get(key).strip():
+            return True
+    items = payload.get("items") or payload.get("images") or payload.get("gallery")
+    return isinstance(items, list) and any(isinstance(item, dict) and (
+        item.get("src") or item.get("url") or item.get("image")
+    ) for item in items)
+
+
+def _scene_block_kind(block: Any) -> str:
+    if not isinstance(block, dict):
+        return ""
+    return _s(
+        block.get("type")
+        or block.get("artifact_type")
+        or block.get("representation")
+    ).lower()
+
+
 def _ensure_quantum_structured_outputs(
     response: MachineResponse,
     request: MachineRequest | None,
 ) -> MachineResponse:
-    """Enforce typed output consistency before SceneContract release.
+    """Materialize the Processor-owned scene before SceneContract release.
 
-    This is a processor invariant, not a topic/word trigger. A declared graph
-    request must result in a graph block when explicit structured data exists
-    in the current request/answer or a valid previous visual artifact.
+    The Processor owns the scene composition. Provider output is preserved when
+    valid; when an explicitly requested structured representation is missing but
+    the *current request itself* contains enough explicit structured data, the
+    Processor materializes that representation from the same data stream.
+
+    This is deterministic scene compilation, not a keyword trigger, retry, or
+    second model route.
     """
     if request is None:
         return response
-    requested = {_s(x).lower() for x in list(getattr(request, "requested_outputs", []) or []) if _s(x)}
-    if "graph" not in requested:
+
+    requested = {
+        _s(x).lower()
+        for x in list(getattr(request, "requested_outputs", []) or [])
+        if _s(x)
+    }
+    requested_structured = {
+        item for item in requested
+        if item not in {"", "text", "markdown", "production_signal"}
+    }
+    if not requested_structured:
         return response
 
-    blocks = list(getattr(response, "render_blocks", []) or [])
-    graph_block = next(
-        (b for b in blocks
-         if isinstance(b, dict)
-         and _s(b.get("type") or b.get("artifact_type") or b.get("representation")).lower() == "graph"),
-        None,
+    blocks = [
+        deepcopy(block)
+        for block in list(getattr(response, "render_blocks", []) or [])
+        if isinstance(block, dict)
+    ]
+
+    # Current-turn explicit data is the only automatic materialization source.
+    # Previous visual memory is deliberately excluded here so a new scene cannot
+    # inherit a stale artifact just because it has a matching representation type.
+    current_text = ""
+    conversation = getattr(request, "conversation", {})
+    if isinstance(conversation, dict):
+        current_text = _s(conversation.get("current_request"))
+    if not current_text:
+        intent = getattr(request, "intent", {})
+        if isinstance(intent, dict):
+            current_text = _s(intent.get("normalized_text") or intent.get("text"))
+
+    answer_text = _s(
+        getattr(response, "answer", "")
+        or getattr(response, "content", "")
     )
-
-    def _usable_graph_payload(payload: Any) -> bool:
-        if not isinstance(payload, dict):
-            return False
-        series = payload.get("series")
-        if isinstance(series, list):
-            x_values = payload.get("x_axis", {}).get("values") if isinstance(payload.get("x_axis"), dict) else []
-            for item in series:
-                if not isinstance(item, dict):
-                    continue
-                points = item.get("points")
-                if isinstance(points, list) and any(
-                    isinstance(p, dict) and p.get("x") not in (None, "") and p.get("y") not in (None, "")
-                    for p in points
-                ):
-                    return True
-                values = item.get("values")
-                if isinstance(values, list) and isinstance(x_values, list) and min(len(values), len(x_values)) >= 2:
-                    return True
-        table = payload.get("data_table")
-        if isinstance(table, list) and len(table) >= 2:
-            return any(isinstance(row, dict) and len(row) >= 2 for row in table)
-        return False
-
-    existing_valid = False
-    if isinstance(graph_block, dict):
-        existing_payload = graph_block.get("payload") if isinstance(graph_block.get("payload"), dict) else {}
-        existing_valid = _usable_graph_payload(existing_payload)
-    if graph_block is not None and existing_valid:
-        return response
-
-    # Remove only malformed graph blocks. Valid text/other artifacts remain untouched.
-    if graph_block is not None and not existing_valid:
-        blocks = [
-            block for block in blocks
-            if not (
-                isinstance(block, dict)
-                and _s(block.get("type") or block.get("artifact_type") or block.get("representation")).lower() == "graph"
-            )
-        ]
-
-    current_text = _s(
-        request.conversation.get("current_request")
-        if isinstance(request.conversation, dict) else ""
-    )
-    answer_text = _s(getattr(response, "answer", "") or getattr(response, "content", ""))
     pairs = _extract_label_value_pairs(current_text)
     if not pairs:
         pairs = _extract_label_value_pairs(answer_text)
 
-    existing_payload = {}
-    visual = getattr(request, "visual_context", {})
-    contextual_mode = _s((getattr(request, "dialogue_contract", {}) or {}).get("context_dependency")).lower()
-    allow_previous_visual = bool(contextual_mode not in {"", "independent", "none", "false", "0"})
-    if allow_previous_visual and isinstance(visual, dict):
-        candidate_blocks = visual.get("render_blocks")
-        if isinstance(candidate_blocks, list):
-            for block in candidate_blocks:
-                if not isinstance(block, dict):
-                    continue
-                if _s(block.get("type") or block.get("artifact_type") or block.get("representation")).lower() != "graph":
-                    continue
-                payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-                status = _s(payload.get("status")).lower()
-                if status not in {"unavailable", "pending_data", "error", "incomplete"}:
-                    existing_payload = deepcopy(payload)
-                    break
+    existing_by_kind: dict[str, dict] = {}
+    for block in blocks:
+        kind = _scene_block_kind(block)
+        if kind and kind not in existing_by_kind:
+            existing_by_kind[kind] = block
 
-    payload = _graph_payload_from_pairs(pairs, existing=existing_payload)
-    if not payload:
-        return response
+    materialized: list[str] = []
 
-    graph = {
-        "type": "graph",
-        "artifact_type": "graph",
-        "renderer": "line_chart",
-        "viewer": "line_chart",
-        "content": "",
-        "text": "",
-        "payload": payload,
-        "artifact": {
-            "type": "graph",
-            "renderer": "line_chart",
-            "viewer": "chart",
-            "scene_contract": True,
-            "payload": deepcopy(payload),
-        },
-        "scene_contract": True,
-        "provider_payload": True,
-        "canonical_provider_payload": True,
-        "source": "QUANTUM_STRUCTURED_OUTPUT_ENGINE",
-    }
-    blocks.append(graph)
-    response.render_blocks = blocks
+    # Graph: reuse a valid Provider graph, otherwise compile from current-turn
+    # explicit label/value pairs using the canonical graph schema.
+    if "graph" in requested_structured:
+        graph_block = existing_by_kind.get("graph")
+        graph_payload = (
+            graph_block.get("payload")
+            if isinstance(graph_block, dict) and isinstance(graph_block.get("payload"), dict)
+            else {}
+        )
+
+        if not _usable_graph_payload(graph_payload) and pairs:
+            compiled = _graph_payload_from_pairs(pairs, existing=graph_payload)
+            if compiled:
+                if graph_block is not None:
+                    graph_block["payload"] = compiled
+                    graph_block.setdefault("artifact_type", "graph")
+                    graph_block["renderer"] = graph_block.get("renderer") or "line_chart"
+                    graph_block["viewer"] = graph_block.get("viewer") or "line_chart"
+                    graph_block["scene_contract"] = True
+                    graph_block["source"] = "QUANTUM_PROCESSOR_SCENE_MATERIALIZER"
+                else:
+                    graph_block = {
+                        "type": "graph",
+                        "artifact_type": "graph",
+                        "renderer": "line_chart",
+                        "viewer": "line_chart",
+                        "content": "",
+                        "text": "",
+                        "payload": compiled,
+                        "artifact": {
+                            "type": "graph",
+                            "renderer": "line_chart",
+                            "viewer": "chart",
+                            "scene_contract": True,
+                            "payload": deepcopy(compiled),
+                        },
+                        "scene_contract": True,
+                        "provider_payload": False,
+                        "canonical_provider_payload": True,
+                        "source": "QUANTUM_PROCESSOR_SCENE_MATERIALIZER",
+                    }
+                    blocks.append(graph_block)
+                materialized.append("graph")
+
+    # Image: reuse a valid Provider image, otherwise compile an SVG infographic
+    # from the same current-turn dataset. This keeps table/graph/image on one
+    # canonical data source.
+    if "image" in requested_structured and pairs:
+        image_block = existing_by_kind.get("image") or existing_by_kind.get("gallery")
+        image_payload = (
+            image_block.get("payload")
+            if isinstance(image_block, dict) and isinstance(image_block.get("payload"), dict)
+            else {}
+        )
+
+        if not _usable_image_payload(image_payload):
+            title = "Визуализация данных"
+            plan = _as_dict(getattr(request, "constraints", {}) or {}).get("representation_plan")
+            if isinstance(plan, dict):
+                title = _s(plan.get("title") or plan.get("scene_title")) or title
+            compiled_image = _image_payload_from_pairs(pairs, title=title)
+            if compiled_image:
+                if image_block is not None:
+                    image_block["type"] = "image"
+                    image_block["artifact_type"] = "image"
+                    image_block["renderer"] = image_block.get("renderer") or "gallery"
+                    image_block["viewer"] = image_block.get("viewer") or "image"
+                    image_block["payload"] = compiled_image
+                    image_block["scene_contract"] = True
+                    image_block["source"] = "QUANTUM_PROCESSOR_SCENE_MATERIALIZER"
+                else:
+                    image_block = {
+                        "type": "image",
+                        "artifact_type": "image",
+                        "renderer": "gallery",
+                        "viewer": "image",
+                        "content": "",
+                        "text": "",
+                        "payload": compiled_image,
+                        "artifact": {
+                            "type": "image",
+                            "format": "svg",
+                            "mime_type": "image/svg+xml",
+                            "payload": compiled_image.get("svg", ""),
+                        },
+                        "scene_contract": True,
+                        "provider_payload": False,
+                        "canonical_provider_payload": True,
+                        "source": "QUANTUM_PROCESSOR_SCENE_MATERIALIZER",
+                    }
+                    blocks.append(image_block)
+                materialized.append("image")
+
+    # Add a compact processor audit without duplicating payloads.
     meta = dict(getattr(response, "metadata", {}) or {})
-    meta["quantum_structured_output_engine"] = {
-        "version": "V1",
-        "materialized": ["graph"],
-        "source": "explicit_structured_data_and_visual_context",
-        "natural_language_triggering": False,
-        "payload_preserved": True,
+    meta["quantum_scene_materialization"] = {
+        "version": "v1",
+        "owner": "QUANTUM_PROCESSOR",
+        "source": "current_turn_explicit_data",
+        "requested": sorted(requested_structured),
+        "current_data_points": len(pairs),
+        "materialized": materialized,
+        "blocks_after_materialization": [
+            _scene_block_kind(block)
+            for block in blocks
+            if _scene_block_kind(block)
+        ],
+        "previous_visual_memory_used": False,
+        "provider_calls_added": 0,
     }
     response.metadata = meta
+    response.render_blocks = _finalize_quantum_visible_stream(
+        blocks,
+        answer=answer_text,
+        request=request,
+    )
     return response
 
 
@@ -8272,11 +8453,56 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     request.response_output_tokens = provider_output_tokens
     request.max_output_tokens = provider_output_tokens
 
+    # Lightweight scene handoff trace: log only the current request, requested
+    # representations and explicit data-point inventory. Payload bodies remain
+    # out of logs to keep the trace readable and safe.
+    handoff_pairs = _extract_label_value_pairs(
+        _s(request.conversation.get("current_request"))
+        if isinstance(request.conversation, dict)
+        else ""
+    )
+    print("🧭 PROVIDER INPUT SCENE:", {
+        "request": _clip(
+            _s(request.conversation.get("current_request"))
+            if isinstance(request.conversation, dict) else "",
+            500,
+        ),
+        "requested_outputs": list(request.requested_outputs or []),
+        "data_points": len(handoff_pairs),
+        "data_labels": [p[0] for p in handoff_pairs[:12]],
+        "input_budget": 900,
+        "provider_calls": 1,
+    })
+
     provider_result = await generate_text(
         request,
         max_output_tokens=provider_output_tokens,
     )
+    raw_machine = provider_result.get("machine_response", {}) if isinstance(provider_result, dict) else {}
+    raw_blocks = raw_machine.get("render_blocks", []) if isinstance(raw_machine, dict) else []
+    raw_types = [
+        _scene_block_kind(block)
+        for block in list(raw_blocks or [])
+        if isinstance(block, dict) and _scene_block_kind(block)
+    ]
+    print("🧭 PROVIDER RAW SCENE:", {
+        "requested_outputs": list(request.requested_outputs or []),
+        "received_types": raw_types,
+        "received_count": len(raw_types),
+    })
+
     response = _response(provider_result, request)
+    received_blocks = [
+        _scene_block_kind(block)
+        for block in list(getattr(response, "render_blocks", []) or [])
+        if isinstance(block, dict) and _scene_block_kind(block)
+    ]
+    print("🧭 PROVIDER OUTPUT SCENE:", {
+        "requested_outputs": list(request.requested_outputs or []),
+        "received_types": received_blocks,
+        "received_count": len(received_blocks),
+        "answer_present": bool(_s(getattr(response, "answer", "") or getattr(response, "content", ""))),
+    })
     _record_engine_handoff(
         state, "OUTPUT_UNDERSTANDING",
         {
