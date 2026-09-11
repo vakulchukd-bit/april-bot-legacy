@@ -44,7 +44,7 @@ from blocks.energy_manager import (build_quantum_acceleration_profile, apply_qua
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.image_system import scan_image, render_visual_answer, NANO_PRINTER_VERSION
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v50_full_scene_materialization_v1"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v51_lossless_scene_presentation_v1"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 16
@@ -5571,8 +5571,10 @@ def _quantum_visible_render_policy(
     alongside the text companion and only internal transport signals are
     discarded.
     """
+    # Provider render_blocks are canonical source data. Do not sanitize them out
+    # at this boundary: the Processor must preserve every received representation
+    # and its payload. Render integrity remains an audit signal only.
     source = _canonicalize_render_stream(blocks)
-    source, rejected_render_blocks = QUANTUM_RENDER_INTEGRITY_ENGINE.sanitize(source)
 
     requested: list[str] = []
     if request is not None:
@@ -5686,7 +5688,11 @@ def _quantum_visible_render_policy(
     seen_structured: set[str] = set()
     for block in structured:
         kind = kind_of(block)
-        if kind not in authorized:
+
+        # Provider output is data, not a recommendation. Preserve every concrete
+        # structured block it returned. Authorization is used for diagnostics and
+        # scene intent, never as a destructive post-filter.
+        if kind in internal_kinds:
             continue
 
         # Do not collapse a whole representation type into one block. A formula
@@ -5721,7 +5727,8 @@ def _finalize_quantum_visible_stream(
 ) -> list[dict]:
     """Final canonical visible stream before SceneContract/Web."""
     collapsed = _quantum_visible_render_policy(blocks, answer=answer, request=request)
-    collapsed, _rejected = QUANTUM_RENDER_INTEGRITY_ENGINE.sanitize(collapsed)
+    # Never discard a received render block after the scene has been composed.
+    # Invalidity is diagnostic metadata for the renderer, not permission to lose data.
     return _ensure_presentation_signals(collapsed, request=request)
 
 def _presentation_latex(fragment: str) -> str:
@@ -6246,7 +6253,7 @@ def _presentation_signal_for_block(block: dict, request: MachineRequest | None =
     source = dict(block or {})
     payload = _canonical_block_payload(source)
     kind = _s(source.get("type") or source.get("artifact_type") or source.get("representation") or "text").lower()
-    kind = {"markdown": "text", "plot": "graph", "chart": "graph", "scene": "diagram", "layout": "diagram", "visual": "diagram", "image": "gallery", "media": "gallery"}.get(kind, kind)
+    kind = {"markdown": "text", "plot": "graph", "chart": "graph", "scene": "diagram", "layout": "diagram", "visual": "diagram"}.get(kind, kind)
     math_policy = _math_presentation_policy(request)
     signal = {
         "version": "presentation_signal_v4", "kind": kind, "renderer": "", "engine": "", "producer": "QUANTUM_PROCESSOR", "route": "canonical",
@@ -6540,11 +6547,17 @@ def _apply_new_dataset_dialogue_boundary(
     }
 
 def _extract_label_value_pairs(text: str) -> list[tuple[str, float, str]]:
-    """Extract explicit label/value pairs from current text structurally.
+    """Extract explicit label/value pairs from the current request without dropping points.
 
-    Supports both line-oriented rows and compact comma/semicolon-separated
-    rows such as "Пн — 120, Вт — 135, ...". This is data parsing, not
-    keyword-trigger routing.
+    The parser is structural only. It supports:
+      * one pair per line: ``Q1 — 42``;
+      * compact comma/semicolon rows: ``Пн — 40 яблок по 30 грн, Вт — 55, ...``;
+      * compact whitespace rows: ``A—1 B—2``;
+      * month/year axes.
+
+    A comma/semicolon row is accepted as a dataset only when the same physical
+    line contains at least two label/value pairs. This prevents prose such as
+    ``Цена одного яблока — 30 грн.`` from becoming a chart point.
     """
     source = _s(text)
     if not source:
@@ -6570,23 +6583,75 @@ def _extract_label_value_pairs(text: str) -> list[tuple[str, float, str]]:
         "январь", "февраль", "март", "апрель", "май", "июнь",
         "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
     )
-    month_pattern = r"(?i)\b(" + "|".join(month_names) + r")\b\s*(?:[—–:-]\s*)?\$?\s*(-?\d+(?:[.,]\d+)?)\s*(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?"
+    month_pattern = (
+        r"(?i)\b(" + "|".join(month_names) + r")\b\s*"
+        r"(?:[—–:-]\s*)?\$?\s*(-?\d+(?:[.,]\d+)?)\s*"
+        r"(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?"
+    )
     for match in re.finditer(month_pattern, source):
         add_pair(match.group(1), match.group(2), match.group(3))
 
-    year_pattern = r"\b((?:19|20)\d{2})\b\s*(?:[—–:-]\s*)?[$€£]?\s*(-?\d+(?:[.,]\d+)?)\s*(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?"
+    year_pattern = (
+        r"\b((?:19|20)\d{2})\b\s*(?:[—–:-]\s*)?\$?"
+        r"\s*(-?\d+(?:[.,]\d+)?)\s*"
+        r"(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?"
+    )
     for match in re.finditer(year_pattern, source):
         add_pair(match.group(1), match.group(2), match.group(3))
 
-    # Line-oriented rows such as "Q1 — 42" or "Alpha: 17".
-    generic_line_pattern = r"(?m)^\s*(?:[-*•]\s*)?([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9 _]{1,30}?)\s*(?:[—–:-])\s*\$?\s*(-?\d+(?:[.,]\d+)?)\s*(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?\s*$"
-    for match in re.finditer(generic_line_pattern, source):
-        add_pair(match.group(1), match.group(2), match.group(3))
+    # Compact comma/semicolon rows are checked first. When such a dataset is
+    # present, its physical line is authoritative for structured data on that
+    # line; standalone prose numeric statements elsewhere are not imported as
+    # accidental chart points.
+    compact_rows_found = False
+    compact_row_pattern = re.compile(
+        r"^\s*(?:[-*•]\s*)?"
+        r"(?P<label>[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9 _]{1,30}?)"
+        r"\s*(?:[—–:-])\s*"
+        r"(?P<value>-?\d+(?:[.,]\d+)?)"
+        r"\s*(?P<unit>%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?"
+    )
+    for line in source.splitlines():
+        if not line.strip() or not re.search(r"[,;]", line):
+            continue
+        line_candidates: list[tuple[str, float, str]] = []
+        for segment in re.split(r"[,;]", line):
+            match = compact_row_pattern.match(segment)
+            if not match:
+                continue
+            try:
+                value = float(_s(match.group("value")).replace(",", "."))
+            except Exception:
+                continue
+            label = _s(match.group("label")).strip(" \t\r\n.,;:")
+            unit = _s(match.group("unit"))
+            if label:
+                candidate = (label, value, unit)
+                if candidate not in line_candidates:
+                    line_candidates.append(candidate)
+        if len(line_candidates) >= 2:
+            compact_rows_found = True
+            for label, value, unit in line_candidates:
+                add_pair(label, value, unit)
 
-    # Compact rows on one line, separated by commas/semicolons.
-    # Require either multiple structural pairs in the same sentence or an
-    # explicit comma/semicolon boundary around the pair to avoid turning prose
-    # into data. The parser never relies on the semantic topic.
+    # One pair per physical line.
+    generic_line_pattern = (
+        r"(?m)^\s*(?:[-*•]\s*)?"
+        r"([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9 _]{1,30}?)"
+        r"\s*(?:[—–:-])\s*\$?\s*(-?\d+(?:[.,]\d+)?)\s*"
+        r"(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?\s*$"
+    )
+    # Only fall back to one-pair-per-line extraction when no multi-pair
+    # comma/semicolon dataset was found. This prevents prose such as
+    # ``Цена одного яблока — 30 грн.`` from entering a five-day dataset.
+    if not compact_rows_found:
+        for match in re.finditer(generic_line_pattern, source):
+            add_pair(match.group(1), match.group(2), match.group(3))
+
+    # Compact rows using explicit punctuation. Keep the original path for cases
+    # not covered above, such as ``Q1 — 42, Q2 — 57`` with no trailing prose.
+    # Skip it when a multi-pair comma/semicolon dataset was already recovered,
+    # because that dataset is the complete structural source for the line.
     generic_inline_pattern = (
         r"(?<!\w)"
         r"([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9 _]{1,30}?)"
@@ -6595,13 +6660,13 @@ def _extract_label_value_pairs(text: str) -> list[tuple[str, float, str]]:
         r"\s*(%|°\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?"
         r"(?=\s*(?:[,;.]|$|\n))"
     )
-    inline_matches = list(re.finditer(generic_inline_pattern, source))
+    inline_matches = [] if compact_rows_found else list(re.finditer(generic_inline_pattern, source))
     if len(inline_matches) >= 2:
         for match in inline_matches:
             add_pair(match.group(1), match.group(2), match.group(3))
 
     # Also allow compact two+ row sequences separated by whitespace when the
-    # labels are clearly repeated structural tokens. This covers "A—1 B—2".
+    # labels are clearly repeated structural tokens. This covers ``A—1 B—2``.
     if not inline_matches:
         compact_pattern = (
             r"(?<!\w)"
@@ -6624,7 +6689,6 @@ def _extract_label_value_pairs(text: str) -> list[tuple[str, float, str]]:
         seen.add(key)
         result.append(item)
     return result[:60]
-
 
 def _graph_payload_from_pairs(
     pairs: list[tuple[str, float, str]],
@@ -6959,97 +7023,69 @@ def _ensure_quantum_structured_outputs(
 
     materialized: list[str] = []
 
-    # Graph: reuse a valid Provider graph, otherwise compile from current-turn
-    # explicit label/value pairs using the canonical graph schema.
+    # Graph: preserve every Provider graph exactly as received. Only create a
+    # graph when Provider returned none and the current request itself contains
+    # explicit structured data. Existing Provider payloads are never replaced.
     if "graph" in requested_structured:
         graph_block = existing_by_kind.get("graph")
-        graph_payload = (
-            graph_block.get("payload")
-            if isinstance(graph_block, dict) and isinstance(graph_block.get("payload"), dict)
-            else {}
-        )
-
-        if not _usable_graph_payload(graph_payload) and pairs:
-            compiled = _graph_payload_from_pairs(pairs, existing=graph_payload)
+        if graph_block is None and pairs:
+            compiled = _graph_payload_from_pairs(pairs)
             if compiled:
-                if graph_block is not None:
-                    graph_block["payload"] = compiled
-                    graph_block.setdefault("artifact_type", "graph")
-                    graph_block["renderer"] = graph_block.get("renderer") or "line_chart"
-                    graph_block["viewer"] = graph_block.get("viewer") or "line_chart"
-                    graph_block["scene_contract"] = True
-                    graph_block["source"] = "QUANTUM_PROCESSOR_SCENE_MATERIALIZER"
-                else:
-                    graph_block = {
+                graph_block = {
+                    "type": "graph",
+                    "artifact_type": "graph",
+                    "renderer": "line_chart",
+                    "viewer": "line_chart",
+                    "content": "",
+                    "text": "",
+                    "payload": compiled,
+                    "artifact": {
                         "type": "graph",
-                        "artifact_type": "graph",
                         "renderer": "line_chart",
-                        "viewer": "line_chart",
-                        "content": "",
-                        "text": "",
-                        "payload": compiled,
-                        "artifact": {
-                            "type": "graph",
-                            "renderer": "line_chart",
-                            "viewer": "chart",
-                            "scene_contract": True,
-                            "payload": deepcopy(compiled),
-                        },
+                        "viewer": "chart",
                         "scene_contract": True,
-                        "provider_payload": False,
-                        "canonical_provider_payload": True,
-                        "source": "QUANTUM_PROCESSOR_SCENE_MATERIALIZER",
-                    }
-                    blocks.append(graph_block)
+                        "payload": deepcopy(compiled),
+                    },
+                    "scene_contract": True,
+                    "provider_payload": False,
+                    "canonical_provider_payload": True,
+                    "source": "QUANTUM_PROCESSOR_SCENE_MATERIALIZER",
+                }
+                blocks.append(graph_block)
                 materialized.append("graph")
 
-    # Image: reuse a valid Provider image, otherwise compile an SVG infographic
-    # from the same current-turn dataset. This keeps table/graph/image on one
-    # canonical data source.
+    # Image: preserve every Provider image exactly as received. Only create an
+    # image when Provider returned none and the current request itself contains
+    # enough explicit data to materialize one.
     if "image" in requested_structured and pairs:
         image_block = existing_by_kind.get("image") or existing_by_kind.get("gallery")
-        image_payload = (
-            image_block.get("payload")
-            if isinstance(image_block, dict) and isinstance(image_block.get("payload"), dict)
-            else {}
-        )
-
-        if not _usable_image_payload(image_payload):
+        if image_block is None:
             title = "Визуализация данных"
             plan = _as_dict(getattr(request, "constraints", {}) or {}).get("representation_plan")
             if isinstance(plan, dict):
                 title = _s(plan.get("title") or plan.get("scene_title")) or title
             compiled_image = _image_payload_from_pairs(pairs, title=title)
             if compiled_image:
-                if image_block is not None:
-                    image_block["type"] = "image"
-                    image_block["artifact_type"] = "image"
-                    image_block["renderer"] = image_block.get("renderer") or "gallery"
-                    image_block["viewer"] = image_block.get("viewer") or "image"
-                    image_block["payload"] = compiled_image
-                    image_block["scene_contract"] = True
-                    image_block["source"] = "QUANTUM_PROCESSOR_SCENE_MATERIALIZER"
-                else:
-                    image_block = {
+                image_block = {
+                    "type": "image",
+                    "artifact_type": "image",
+                    "renderer": "gallery",
+                    "viewer": "image",
+                    "content": "",
+                    "text": "",
+                    "payload": compiled_image,
+                    "artifact": {
                         "type": "image",
-                        "artifact_type": "image",
-                        "renderer": "gallery",
-                        "viewer": "image",
-                        "content": "",
-                        "text": "",
-                        "payload": compiled_image,
-                        "artifact": {
-                            "type": "image",
-                            "format": "svg",
-                            "mime_type": "image/svg+xml",
-                            "payload": compiled_image.get("svg", ""),
-                        },
-                        "scene_contract": True,
-                        "provider_payload": False,
-                        "canonical_provider_payload": True,
-                        "source": "QUANTUM_PROCESSOR_SCENE_MATERIALIZER",
-                    }
-                    blocks.append(image_block)
+                        "format": "svg",
+                        "mime_type": "image/svg+xml",
+                        "payload": compiled_image.get("svg", ""),
+                    },
+                    "scene_contract": True,
+                    "provider_payload": False,
+                    "canonical_provider_payload": True,
+                    "source": "QUANTUM_PROCESSOR_SCENE_MATERIALIZER",
+                }
+                blocks.append(image_block)
                 materialized.append("image")
 
     # Add a compact processor audit without duplicating payloads.
@@ -7110,16 +7146,31 @@ def _response(value: Any, request: MachineRequest | None = None) -> MachineRespo
     allowed["metadata"] = metadata
     response = MachineResponse(**allowed)
     response = _ensure_quantum_structured_outputs(response, request)
-    sanitized_blocks, rejected_blocks = QUANTUM_RENDER_INTEGRITY_ENGINE.sanitize(
-        list(getattr(response, "render_blocks", []) or [])
-    )
-    response.render_blocks = sanitized_blocks
-    if rejected_blocks:
+
+    # Final render-integrity pass is audit-only. Every Provider block remains in
+    # the canonical scene, including blocks whose payload shape is unfamiliar to
+    # this Executor version. Presentation/Web receives the original payload
+    # through the presentation contract instead of silently losing it.
+    integrity_rejected: list[dict] = []
+    for block in list(getattr(response, "render_blocks", []) or []):
+        if not isinstance(block, dict):
+            integrity_rejected.append({"reason": "not_dict"})
+            continue
+        ok, reason = QUANTUM_RENDER_INTEGRITY_ENGINE.validate(block)
+        if not ok:
+            integrity_rejected.append({
+                "type": QUANTUM_RENDER_INTEGRITY_ENGINE.kind(block),
+                "block_id": _s(block.get("block_id") or block.get("id")),
+                "reason": reason,
+            })
+    if integrity_rejected:
         metadata = dict(getattr(response, "metadata", {}) or {})
         metadata["render_integrity"] = {
             "engine": QUANTUM_RENDER_INTEGRITY_ENGINE.VERSION,
-            "rejected": rejected_blocks,
-            "invalid_structured_render_suppressed": True,
+            "audit_only": True,
+            "rejected": integrity_rejected,
+            "invalid_structured_render_suppressed": False,
+            "provider_payloads_preserved": True,
         }
         response.metadata = metadata
     return response
