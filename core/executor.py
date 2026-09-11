@@ -44,7 +44,7 @@ from blocks.energy_manager import (build_quantum_acceleration_profile, apply_qua
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.image_system import scan_image, render_visual_answer, NANO_PRINTER_VERSION
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v49_provider_signal_visual_dialogue_fix_r2_engine_upgrade"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v49_semantic_owner_scene_integrity_v3"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 16
@@ -5277,7 +5277,7 @@ def _merge_human_text_blocks(blocks: list[dict], answer: str) -> str:
         fragments.append(canonical_answer)
 
     def normalize(value: str) -> str:
-        return re.sub(r"\\s+", " ", _sanitize_visible_text(value)).strip().casefold()
+        return re.sub(r"\s+", " ", _sanitize_visible_text(value)).strip().casefold()
 
     answer_norm = normalize(canonical_answer)
     seen = {answer_norm} if answer_norm else set()
@@ -6105,6 +6105,81 @@ def _materialize_provider_blocks(payload: dict) -> list[dict]:
     return candidates
 
 
+def _payload_richness(payload: Any) -> int:
+    """Approximate how much usable structured information a payload carries."""
+    if isinstance(payload, dict):
+        score = 0
+        for key, value in payload.items():
+            if value in (None, "", [], {}):
+                continue
+            score += 1
+            if isinstance(value, (list, tuple, dict)):
+                score += min(24, len(value))
+            elif isinstance(value, str):
+                score += min(12, max(1, len(value) // 40))
+        return score
+    if isinstance(payload, (list, tuple)):
+        return min(64, len(payload) * 2)
+    return 1 if payload not in (None, "", [], {}) else 0
+
+
+def _merge_payload_dicts(existing: Any, incoming: Any) -> Any:
+    """Merge non-empty payload fields without letting a thin envelope hide richer data."""
+    if not isinstance(existing, dict):
+        existing = {}
+    if not isinstance(incoming, dict):
+        return deepcopy(existing)
+    merged = deepcopy(existing)
+    for key, value in incoming.items():
+        if value in (None, "", [], {}):
+            continue
+        current = merged.get(key)
+        if current in (None, "", [], {}):
+            merged[key] = deepcopy(value)
+            continue
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _merge_payload_dicts(current, value)
+            continue
+        if isinstance(current, list) and isinstance(value, list):
+            if current == value:
+                continue
+            # Preserve both lists unless one is a strict duplicate of the other.
+            seen = {json.dumps(x, ensure_ascii=False, sort_keys=True, default=str) for x in current}
+            for item in value:
+                key_repr = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+                if key_repr not in seen:
+                    current.append(deepcopy(item))
+                    seen.add(key_repr)
+            merged[key] = current
+            continue
+        if _payload_richness({key: value}) > _payload_richness({key: current}):
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def _merge_render_blocks(existing: dict, incoming: dict) -> dict:
+    """Prefer the richest canonical block while preserving complementary metadata."""
+    merged = dict(existing)
+    for key, value in incoming.items():
+        if key in {"payload", "artifact", "data"}:
+            continue
+        if merged.get(key) in (None, "", [], {}) and value not in (None, "", [], {}):
+            merged[key] = deepcopy(value)
+    existing_payload = _canonical_block_payload(existing)
+    incoming_payload = _canonical_block_payload(incoming)
+    if isinstance(existing_payload, dict) or isinstance(incoming_payload, dict):
+        merged_payload = _merge_payload_dicts(existing_payload, incoming_payload)
+        if merged_payload:
+            merged["payload"] = merged_payload
+    # A nested artifact may be the only holder of a concrete payload.
+    if isinstance(incoming.get("artifact"), dict):
+        if not isinstance(merged.get("artifact"), dict):
+            merged["artifact"] = deepcopy(incoming["artifact"])
+        elif _payload_richness(_canonical_block_payload(incoming["artifact"])) > _payload_richness(_canonical_block_payload(merged["artifact"])):
+            merged["artifact"] = deepcopy(incoming["artifact"])
+    return merged
+
+
 def _canonicalize_render_stream(blocks: Any) -> list[dict]:
     """Create one canonical visible stream while preserving structured payloads."""
     if not isinstance(blocks, list):
@@ -6122,11 +6197,16 @@ def _canonicalize_render_stream(blocks: Any) -> list[dict]:
         fp = _payload_fingerprint(block)
         existing = by_id.get(block_id) or by_fp.get(fp)
         if existing is not None:
-            if not _canonical_block_payload(existing) and _canonical_block_payload(block):
-                existing["payload"] = deepcopy(_canonical_block_payload(block))
-            for key in ("title", "description", "caption", "renderer", "viewer", "language"):
-                if not existing.get(key) and block.get(key):
-                    existing[key] = block[key]
+            merged = _merge_render_blocks(existing, block)
+            existing.clear()
+            existing.update(merged)
+            # Keep the earliest stream position as the canonical visual order.
+            existing["sequence_index"] = min(
+                int(existing.get("sequence_index", index)),
+                int(block.get("sequence_index", index)),
+            )
+            # Refresh the fingerprint index in case the richer payload changed.
+            by_fp[_payload_fingerprint(existing)] = existing
             continue
         result.append(block)
         by_id[block_id] = block
@@ -7057,6 +7137,22 @@ def _canonicalize(
         answer,
     )
     response.render_blocks = provider_blocks
+    response.metadata["scene_integrity"] = {
+        "render_block_count": len(provider_blocks),
+        "render_block_types": [
+            _s(b.get("type") or b.get("artifact_type") or b.get("representation")).lower()
+            for b in provider_blocks if isinstance(b, dict)
+        ],
+        "distinct_structured_blocks": len([
+            b for b in provider_blocks
+            if isinstance(b, dict)
+            and _s(b.get("type") or b.get("artifact_type") or b.get("representation")).lower()
+                not in {"", "text", "markdown"}
+        ]),
+        "payload_preservation": True,
+        "same_type_blocks_preserved": True,
+        "richer_duplicate_payload_wins": True,
+    }
 
     try:
         scene.blocks = provider_blocks
