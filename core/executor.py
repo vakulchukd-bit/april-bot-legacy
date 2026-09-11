@@ -6805,6 +6805,97 @@ def _scene_block_kind(block: Any) -> str:
     ).lower()
 
 
+def _usable_graph_payload(payload: Any) -> bool:
+    """Return True only when a graph payload contains renderable structured data."""
+    if not isinstance(payload, dict):
+        return False
+
+    # Canonical series payload: either explicit points or parallel x/y values.
+    series = payload.get("series")
+    if isinstance(series, list):
+        x_values = []
+        x_axis = payload.get("x_axis")
+        if isinstance(x_axis, dict):
+            x_values = x_axis.get("values") or []
+        for item in series:
+            if not isinstance(item, dict):
+                continue
+
+            points = item.get("points")
+            if isinstance(points, list):
+                valid_points = 0
+                for point in points:
+                    if isinstance(point, dict):
+                        x = point.get("x")
+                        y = point.get("y")
+                        if x not in (None, "") and y not in (None, ""):
+                            valid_points += 1
+                    elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                        if point[0] not in (None, "") and point[1] not in (None, ""):
+                            valid_points += 1
+                if valid_points >= 2:
+                    return True
+
+            values = item.get("values")
+            if (
+                isinstance(values, list)
+                and isinstance(x_values, list)
+                and min(len(values), len(x_values)) >= 2
+            ):
+                return True
+
+    # Compact graph forms used by some Provider payloads.
+    categories = payload.get("categories")
+    values = payload.get("values")
+    if (
+        isinstance(categories, list)
+        and isinstance(values, list)
+        and min(len(categories), len(values)) >= 2
+    ):
+        return True
+
+    x_values = payload.get("x")
+    y_values = payload.get("y")
+    if (
+        isinstance(x_values, list)
+        and isinstance(y_values, list)
+        and min(len(x_values), len(y_values)) >= 2
+    ):
+        return True
+
+    # Table-shaped payloads can still be rendered as a graph when the graph
+    # compiler already received a structured row set.
+    table = payload.get("table")
+    if isinstance(table, dict):
+        rows = table.get("rows") or table.get("data") or table.get("items")
+        if isinstance(rows, list):
+            valid_rows = 0
+            for row in rows:
+                if isinstance(row, (list, tuple)) and len(row) >= 2:
+                    valid_rows += 1
+                elif isinstance(row, dict):
+                    row_values = list(row.values())
+                    if len(row_values) >= 2 and any(v not in (None, "") for v in row_values):
+                        valid_rows += 1
+            if valid_rows >= 2:
+                return True
+
+    rows = payload.get("rows") or payload.get("data")
+    if isinstance(rows, list):
+        valid_rows = 0
+        for row in rows:
+            if isinstance(row, (list, tuple)) and len(row) >= 2:
+                valid_rows += 1
+            elif isinstance(row, dict):
+                row_values = list(row.values())
+                if len(row_values) >= 2 and any(v not in (None, "") for v in row_values):
+                    valid_rows += 1
+        if valid_rows >= 2:
+            return True
+
+    return False
+
+
 def _ensure_quantum_structured_outputs(
     response: MachineResponse,
     request: MachineRequest | None,
