@@ -69,7 +69,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v15_fast_context_no_cold_model_v1"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v16_hot_meaning_owner_v3"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
@@ -3570,27 +3570,51 @@ class QuantumInterpretationEngine:
             "evidence": {},
         }
 
-        active_topic=self.normalize(
-            state.get("active_topic")
-            or state.get("current_topic")
-            or (
-                (last_turn_meaning.get("meaning").get("topic") if isinstance(last_turn_meaning.get("meaning"), dict) else "")
-                if isinstance(last_turn_meaning, dict) else ""
-            )
-            or semantic.get("active_topic")
-            or cognition.get("active_topic")
+        # Semantic ownership is decided by the completed-turn meaning before any
+        # legacy active_topic/state value is allowed into the hot path. A stale
+        # state topic must never bias a genuinely new request.
+        last_meaning_topic = (
+            self.normalize(last_turn_meaning.get("meaning", {}).get("topic"))
+            if isinstance(last_turn_meaning, dict)
+            and isinstance(last_turn_meaning.get("meaning"), dict)
+            else ""
         )
-        active_goal=self.normalize(
-            state.get("active_goal")
-            or state.get("current_goal")
-            or (
-                (last_turn_meaning.get("meaning").get("goal") if isinstance(last_turn_meaning.get("meaning"), dict) else "")
-                if isinstance(last_turn_meaning, dict) else ""
-            )
-            or semantic.get("active_goal")
-            or cognition.get("active_goal")
+        last_meaning_goal = (
+            self.normalize(last_turn_meaning.get("meaning", {}).get("goal"))
+            if isinstance(last_turn_meaning, dict)
+            and isinstance(last_turn_meaning.get("meaning"), dict)
+            else ""
         )
-        p=self.measure(text,previous_assistant=last_a,previous_user=last_u,active_topic=active_topic,active_goal=active_goal)
+        if transition.get("relation") in {"DEVELOP_CURRENT", "REFER_CURRENT"} and transition.get("anchor") == "last_turn":
+            active_topic = last_meaning_topic or self.normalize(state.get("active_topic") or state.get("current_topic"))
+            active_goal = last_meaning_goal or self.normalize(state.get("active_goal") or state.get("current_goal"))
+            topic_owner = "last_turn_meaning"
+        elif transition.get("relation") == "REVISIT_RECENT":
+            selected = transition.get("selected_turn_meaning") if isinstance(transition.get("selected_turn_meaning"), dict) else {}
+            selected_meaning = selected.get("meaning") if isinstance(selected.get("meaning"), dict) else {}
+            active_topic = self.normalize(
+                selected_meaning.get("topic")
+                or selected.get("user_request")
+                or ""
+            )
+            active_goal = self.normalize(selected_meaning.get("goal") or "")
+            topic_owner = "recent_turn_meaning"
+        else:
+            # NEW_TOPIC/independent turns start from the current request itself.
+            # Do not inherit state.active_topic/current_topic in the first semantic
+            # measurement pass. This is the ownership cut that prevents stale
+            # memory from changing the meaning of the new turn.
+            active_topic = ""
+            active_goal = ""
+            topic_owner = "current_request"
+
+        p=self.measure(
+            text,
+            previous_assistant=last_a,
+            previous_user=last_u,
+            active_topic=active_topic,
+            active_goal=active_goal,
+        )
         previous_scene = state.get("current_visual_scene") or state.get("active_visual_scene")
         if not isinstance(previous_scene, dict):
             previous_scene = {}
@@ -3807,27 +3831,33 @@ class QuantumInterpretationEngine:
         # the new topic seed. This is ownership of meaning, not a routing flag.
         reconstructed_topic = normalize_text(topic_understanding.get("active"))
         if transition_relation == "NEW_TOPIC":
-            current_profile_topic = normalize_text(
-                p.get("best_object")
-                or p.get("best_domain")
-                or p.get("best_goal")
-                or ""
-            )
+            # The new turn owns its own topic. This deliberately ignores stale
+            # active_topic/current_topic values and starts the topic from the
+            # current semantic request.
             current_content = QuantumContextUnderstandingEngine._content_tokens(text)
-            if current_content:
-                current_profile_topic = normalize_text(
-                    " ".join(current_content[:6])
-                ) or current_profile_topic
+            current_profile_topic = normalize_text(
+                " ".join(current_content[:6])
+            ) if current_content else ""
             active_topic = current_profile_topic or normalize_text(text)
             active_goal = normalize_text(p.get("best_goal") or "")
-        elif transition_relation in {"DEVELOP_CURRENT", "REFER_CURRENT"}:
+            topic_owner = "current_request"
+        elif transition_relation in {"DEVELOP_CURRENT", "REFER_CURRENT"} and transition.get("anchor") == "last_turn":
             active_topic = normalize_text(
-                (last_turn_meaning.get("meaning", {}).get("topic")
-                 if isinstance(last_turn_meaning, dict) and isinstance(last_turn_meaning.get("meaning"), dict)
-                 else "")
+                last_meaning_topic
                 or reconstructed_topic
                 or active_topic
             )
+            active_goal = normalize_text(
+                last_meaning_goal
+                or active_goal
+            )
+            topic_owner = "last_turn_meaning"
+        elif transition_relation == "REVISIT_RECENT":
+            selected = transition.get("selected_turn_meaning") if isinstance(transition.get("selected_turn_meaning"), dict) else {}
+            selected_meaning = selected.get("meaning") if isinstance(selected.get("meaning"), dict) else {}
+            active_topic = normalize_text(selected_meaning.get("topic") or selected.get("user_request") or active_topic)
+            active_goal = normalize_text(selected_meaning.get("goal") or active_goal)
+            topic_owner = "recent_turn_meaning"
         elif reconstructed_topic and topic_understanding.get("relation") in {
             "SAME_TOPIC", "CONTINUE_TOPIC", "RECALL"
         }:
@@ -4182,6 +4212,14 @@ class QuantumInterpretationEngine:
             "scene_composition": deepcopy(scene_composition),
             "turn_meaning_transition": deepcopy(transition),
             "last_turn_meaning": deepcopy(last_turn_meaning or {}),
+            "topic_owner": topic_owner,
+            "semantic_ownership": {
+                "relation": transition_relation or "NEW_TOPIC",
+                "owner": topic_owner,
+                "stale_state_topic_ignored": topic_owner == "current_request",
+                "immediate_turn_first": True,
+                "historical_memory_is_evidence_only": True,
+            },
             "scene_graph": {
                 "root": "current_request",
                 "parts": deepcopy(scene_composition),
