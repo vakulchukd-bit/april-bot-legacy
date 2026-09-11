@@ -16,7 +16,7 @@ from blocks.april_personality import APRIL_IDENTITY
 # APRIL PROVIDER — CANONICAL LUNA ROUTE
 # ============================================================
 
-APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_3_2_64lane_canonical_render"
+APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_3_3_semantic_scene_preservation_v3"
 APRIL_QUANTUM_PROVIDER_MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-5.6-luna")
 APRIL_QUANTUM_PROVIDER_SINGLE_CALL = True
 APRIL_QUANTUM_PROVIDER_NO_MODEL_ESCALATION = True
@@ -75,8 +75,13 @@ scene_plan, render_priority, confidence.
 Rules:
 - answer/content are the complete human-visible narrative answer.
 - Answer the current request, not the transport protocol.
-- Use dialogue_contract only to preserve necessary continuity.
-- When the request is independent, do not invent old context.
+- Use dialogue_contract and TURN_MEANING only to preserve necessary continuity.
+- The immediately completed turn is the hot semantic anchor. It owns continuity when
+  the Processor says DEVELOP_CURRENT or REFER_CURRENT.
+- When the request is NEW_TOPIC/independent, ignore stale topic/memory fields even
+  if they contain overlapping vocabulary.
+- Historical memory is recall-only evidence. It must never override the current
+  semantic owner selected by the Processor.
 - When it is a continuation/reference, use only the supplied relevant context.
 - Preserve the complete logical answer; never cut a sentence or scene for style.
 - The output budget is dynamic and canonical: use only the tokens logically required, from 1 through 8000.
@@ -809,6 +814,9 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     if isinstance(scene_composition, list) and scene_composition:
         fields.append(("SCENE_COMPOSITION", scene_composition))
 
+    # Turn meaning is the hot semantic memory of the immediately completed turn.
+    # It is more authoritative than an old memory summary and should survive
+    # input packing whenever the request is a continuation/reference.
     turn_meaning = payload.get("turn_meaning")
     if not isinstance(turn_meaning, dict):
         conversation = payload.get("conversation")
@@ -918,6 +926,7 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             f"REQUESTED_OUTPUTS: {json.dumps(payload.get('requested_outputs') or [], ensure_ascii=False, separators=(',', ':'))}",
             f"SCENE_COMPOSITION: {json.dumps(payload.get('scene_composition') or [], ensure_ascii=False, separators=(',', ':'), default=str)}",
             f"TURN_MEANING: {json.dumps(payload.get('turn_meaning') or {}, ensure_ascii=False, separators=(',', ':'), default=str)}",
+            f"TOPIC_OWNERSHIP: {json.dumps(((payload.get('turn_meaning') or {}).get('semantic_ownership') if isinstance(payload.get('turn_meaning'), dict) else {}), ensure_ascii=False, separators=(',', ':'), default=str)}",
             f"REQUIRED_ARTIFACTS: {json.dumps(payload.get('required_artifacts') or [], ensure_ascii=False, separators=(',', ':'))}",
             f"REPRESENTATION_PLAN: {json.dumps(representation_plan, ensure_ascii=False, separators=(',', ':'), default=str)}",
             f"COMPLEXITY: {complexity}",
