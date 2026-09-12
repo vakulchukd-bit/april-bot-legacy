@@ -4084,6 +4084,14 @@ def _make_request(
     )
     response_guidance = _human_response_guidance()
 
+    # Initialize before any contract/metadata access.
+    # Continuation scene data must never be conditionally created after it is read.
+    continuation_scene_data = {}
+    if mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}:
+        continuation_scene_data = _compact_continuation_scene_data(state)
+        if continuation_scene_data:
+            context["continuation_scene_data"] = _quantum_snapshot(continuation_scene_data)
+
     dialogue_contract = {
         "dialog_act": _s(
             canonical_dialogue.get("dialog_act")
@@ -4151,12 +4159,6 @@ def _make_request(
     # The immediate canonical scene is part of the same dialogue state. When
     # hot history is absent, carry the measured previous scene through the
     # existing conversation contract instead of creating a second memory path.
-    continuation_scene_data = {}
-    if mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}:
-        continuation_scene_data = _compact_continuation_scene_data(state)
-        if continuation_scene_data:
-            context["continuation_scene_data"] = _quantum_snapshot(continuation_scene_data)
-
     dialogue_evidence = _as_dict(control.get("dialogue_evidence"))
     previous_scene_user = _s(evidence.get("previous_user"))
     previous_scene_april = _s(evidence.get("previous_april"))
