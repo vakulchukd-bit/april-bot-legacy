@@ -3360,27 +3360,107 @@ def _adaptive_output_budget(text: str, semantic: dict, cognition: dict, decision
     return _quantum_budget_from_64(_quantum_64_field(text, semantic, cognition, decision))
 
 def _compact_continuation_scene_data(state: dict) -> dict:
-    """Expose canonical active-scene structured data to Provider on continuations."""
-    scene = _best_visual_context(state)
-    if not isinstance(scene, dict) or not scene:
+    """Carry the most recent successful structured scene into a continuation.
+
+    Continuation is a data dependency: once the processor has decided that the
+    turn continues the existing dialogue, the previous successful scene remains
+    authoritative input evidence for Provider. Empty/partial hot scene slots are
+    never allowed to mask a richer successful scene.
+    """
+    if not isinstance(state, dict):
         return {}
 
-    blocks = scene.get("render_blocks")
-    if not isinstance(blocks, list):
-        blocks = scene.get("blocks") if isinstance(scene.get("blocks"), list) else []
+    # Collect all plausible scene slots.  The hot slot may temporarily contain
+    # only a presentation envelope, while last_successful_visual_scene or the
+    # active contract still contains the complete structured payload.
+    candidates: list[tuple[int, int, str, dict]] = []
+    seen: set[str] = set()
 
-    structured_blocks = []
-    rows = []
-    data_points = []
-    source_ids = []
+    def add_candidate(source: str, candidate: Any, priority: int) -> None:
+        if not isinstance(candidate, dict) or not candidate:
+            return
+        key = _s(candidate.get("scene_id") or candidate.get("id")) or source
+        fingerprint = f"{source}|{key}"
+        if fingerprint in seen:
+            return
+        seen.add(fingerprint)
+        blocks = candidate.get("render_blocks")
+        if not isinstance(blocks, list):
+            blocks = candidate.get("blocks") if isinstance(candidate.get("blocks"), list) else []
+        if not blocks:
+            return
+
+        richness = 0
+        normalized_blocks: list[dict] = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            kind = _scene_block_kind(block)
+            payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+            has_structured = any(
+                payload.get(key) not in (None, "", [], {})
+                for key in (
+                    "x", "categories", "x_axis", "series", "rows", "columns",
+                    "data_points", "points", "items", "totals", "growth", "axes", "formula",
+                )
+            )
+            if kind and (has_structured or kind in {"graph", "table", "image", "diagram"}):
+                normalized_blocks.append(block)
+                richness += 2 if has_structured else 1
+
+        if not normalized_blocks:
+            return
+
+        turn_raw = candidate.get("turn_id") or candidate.get("timestamp") or 0
+        try:
+            turn_id = int(float(turn_raw))
+        except Exception:
+            turn_id = 0
+        normalized = deepcopy(candidate)
+        normalized["render_blocks"] = normalized_blocks
+        normalized["render_block_types"] = list(dict.fromkeys(
+            _scene_block_kind(block) for block in normalized_blocks if _scene_block_kind(block)
+        ))
+        candidates.append((richness, turn_id, source, normalized))
+
+    # Prefer the explicit successful anchor first on equal richness/turn.
+    add_candidate("last_successful_visual_scene", state.get("last_successful_visual_scene"), 0)
+    add_candidate("current_visual_scene", state.get("current_visual_scene"), 1)
+    add_candidate("active_visual_scene", state.get("active_visual_scene"), 2)
+    add_candidate("active_visual_scene_turn", state.get("active_visual_scene_turn"), 3)
+    add_candidate("active_scene_contract", state.get("active_scene_contract"), 4)
+
+    visual_history = state.get("visual_scene_history")
+    if isinstance(visual_history, list):
+        for idx, candidate in enumerate(visual_history[-6:]):
+            add_candidate(f"visual_scene_history[{idx}]", candidate, 10)
+
+    if not candidates:
+        # Final compatibility fallback: the canonical visual selector may still
+        # have access to a scene stored in a legacy location.
+        scene = _best_visual_context(state)
+        if isinstance(scene, dict) and scene:
+            add_candidate("best_visual_context", scene, 20)
+
+    if not candidates:
+        return {}
+
+    # Richness wins over recency so a thin/empty hot slot cannot erase a complete
+    # successful scene. Recency breaks ties among equally rich candidates.
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    scene = candidates[0][3]
+
+    blocks = scene.get("render_blocks") if isinstance(scene.get("render_blocks"), list) else scene.get("blocks", [])
+    structured_blocks: list[dict] = []
+    rows: list[dict] = []
+    data_points: list[dict] = []
+    source_ids: list[str] = []
 
     for block in blocks:
         if not isinstance(block, dict):
             continue
         kind = _scene_block_kind(block)
         payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-        if not kind:
-            continue
         block_id = _s(block.get("block_id") or block.get("id"))
         if block_id:
             source_ids.append(block_id)
@@ -3478,18 +3558,30 @@ def _compact_continuation_scene_data(state: dict) -> dict:
         )):
             structured_blocks.append(item)
 
-    if not structured_blocks and not rows and not data_points:
+    # De-duplicate data points generated from both explicit data_points and series.
+    unique_points: list[dict] = []
+    seen_points: set[str] = set()
+    for point in data_points:
+        fp = json.dumps(point, ensure_ascii=False, sort_keys=True, default=str)
+        if fp in seen_points:
+            continue
+        seen_points.add(fp)
+        unique_points.append(point)
+
+    if not structured_blocks and not rows and not unique_points:
         return {}
 
     return {
         "scene_id": _s(scene.get("scene_id") or scene.get("id")),
         "topic": _clip(scene.get("topic") or scene.get("active_topic"), 500),
         "source": "QUANTUM_PROCESSOR_CANONICAL_SCENE",
+        "selection_source": _s(scene.get("_selection_source")),
         "structured_blocks": structured_blocks[:12],
         "rows": rows[:60],
-        "data_points": data_points[:60],
+        "data_points": unique_points[:120],
         "source_block_ids": list(dict.fromkeys(source_ids))[:24],
         "lossless_context": True,
+        "continuation_authoritative": True,
         "presentation_bodies_omitted": True,
     }
 
@@ -4084,8 +4176,17 @@ def _make_request(
     )
     response_guidance = _human_response_guidance()
 
-    # Initialize before any contract/metadata access.
-    # Continuation scene data must never be conditionally created after it is read.
+    # Build the compact context before attaching continuation scene data.
+    # A continuation is never allowed to read an uninitialized/empty context
+    # slot and thereby erase the previously successful scene handoff.
+    context = _compact_context(
+        text,
+        state,
+        mode,
+        _s(control.get("active_topic")),
+        _s(control.get("active_goal")),
+    )
+
     continuation_scene_data = {}
     if mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}:
         continuation_scene_data = _compact_continuation_scene_data(state)
@@ -4148,13 +4249,8 @@ def _make_request(
     memory_resolved_request = _s(memory_packet.get("resolved_request"))
     # Memory is evidence only. The canonical Interpretation dialogue contract
     # above remains authoritative and is never mutated from the memory packet.
-    context = _compact_context(
-        text,
-        state,
-        mode,
-        _s(control.get("active_topic")),
-        _s(control.get("active_goal")),
-    )
+    # `context` was deliberately materialized before continuation_scene_data so
+    # continuation handoff cannot depend on an undefined local.
 
     # The immediate canonical scene is part of the same dialogue state. When
     # hot history is absent, carry the measured previous scene through the
@@ -8811,6 +8907,11 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "continuation_scene_data": bool(carried_scene),
         "continuation_scene_id": _s(
             carried_scene.get("scene_id") if isinstance(carried_scene, dict) else ""
+        ),
+        "continuation_scene_rows": len(carried_rows),
+        "continuation_scene_data_points": len(carried_points),
+        "continuation_scene_authoritative": bool(
+            isinstance(carried_scene, dict) and carried_scene.get("continuation_authoritative")
         ),
         "input_budget": 900,
         "provider_calls": 1,
