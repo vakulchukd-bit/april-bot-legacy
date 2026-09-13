@@ -843,8 +843,26 @@ class QuantumTurnMeaningEngine:
             }.items(),
             key=lambda item: item[1],
         )[0]
-        if latest_development_lock:
+
+        # A development lock may preserve an existing thread only when semantic
+        # evidence does not already establish a stronger independent/new-topic
+        # boundary. The lock is subordinate to the three-way semantic decision;
+        # otherwise terse unrelated requests can be forced into the old thread.
+        new_topic_score = float(transition_scores["new_topic"] or 0.0)
+        best_forward_score = max(
+            float(transition_scores["develop_current"] or 0.0),
+            float(transition_scores["refer_current"] or 0.0),
+        )
+        new_topic_dominant = bool(
+            new_topic_score > best_forward_score
+            and new_topic_score >= 0.14
+            and (new_topic_score - best_forward_score) >= 0.02
+            and not semantic_reference
+        )
+        if latest_development_lock and not new_topic_dominant:
             immediate_relation = "DEVELOP_CURRENT"
+        elif new_topic_dominant:
+            immediate_relation = "NEW_TOPIC"
         if recent_best is not None:
             recent_relation_scores = (recent_best.get("relation_scores") if isinstance(recent_best.get("relation_scores"), dict) else {})
             recent_strength = max(
