@@ -435,6 +435,44 @@ class QuantumTurnMeaningEngine:
             9000,
         )
 
+        numeric_literals = re.findall(
+            r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?(?![\w.])",
+            user_request,
+        )
+        numeric_range = bool(
+            len(numeric_literals) >= 2
+            and re.search(
+                r"[-+]?\d+(?:[.,]\d+)?\s*(?:до|to|-)\s*[-+]?\d+(?:[.,]\d+)?",
+                user_request,
+                flags=re.I,
+            )
+        )
+        scalar_task = bool(
+            numeric_range
+            and (
+                operation in {"answer", "calculate", "build", "present"}
+                or "text" in output_plan
+            )
+        )
+        produced_scalar = bool(
+            answer and len(re.findall(
+                r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?(?![\w.])",
+                answer,
+            )) == 1
+        )
+        expected_response_type = (
+            "number" if scalar_task or (produced_scalar and numeric_range)
+            else ("text" if not actual_representations else output_plan[0])
+        )
+        # A terminal question in the completed assistant answer records an
+        # interaction state: the next user turn may be supplying the missing input.
+        pending_input = bool(answer.rstrip().endswith("?"))
+        pending_input_type = (
+            expected_response_type
+            if expected_response_type in {"number", "text"}
+            else ("number" if numeric_range else "unknown")
+        )
+
         return {
             "version": cls.VERSION,
             "turn_id": turn_id,
@@ -472,6 +510,15 @@ class QuantumTurnMeaningEngine:
                 "topic": topic,
                 "goal": goal,
                 "active_meaning": semantic_anchor,
+            },
+            "response_contract": {
+                "expected_type": expected_response_type,
+                "numeric_range_request": numeric_range,
+                "scalar_task": scalar_task,
+                "produced_scalar": produced_scalar,
+                "produced_representations": list(output_plan),
+                "pending_input": pending_input,
+                "pending_input_type": pending_input_type if pending_input else "",
             },
             "scene": {
                 "render_block_types": output_plan,
@@ -1065,6 +1112,23 @@ class QuantumSequentialDialogueEngine:
         previous_obj = str(previous_profile.get("best_object") or "").lower()
         previous_goal = str(previous_profile.get("best_goal") or "").lower()
 
+        previous_response_contract = (
+            meaning.get("response_contract")
+            if isinstance(meaning.get("response_contract"), dict)
+            else {}
+        )
+        expected_previous_type = str(
+            previous_response_contract.get("expected_type") or ""
+        ).lower()
+        previous_scalar_task = bool(
+            previous_response_contract.get("scalar_task")
+            or previous_response_contract.get("numeric_range_request")
+        )
+        previous_pending_input = bool(previous_response_contract.get("pending_input"))
+        previous_pending_input_type = str(
+            previous_response_contract.get("pending_input_type") or ""
+        ).lower()
+
         def sim(left: str, right: str) -> float:
             if semantic_engine is None or not left or not right:
                 return 0.0
@@ -1081,6 +1145,34 @@ class QuantumSequentialDialogueEngine:
         previous_tokens = cls._content_tokens(" ".join(x for x in (previous_user, previous_answer) if x))
         overlap = len(current_tokens & previous_tokens) / max(1, len(current_tokens))
 
+        current_numeric_literals = re.findall(
+            r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?(?![\w.])",
+            current,
+        )
+        bare_scalar = bool(
+            len(current_tokens) <= 2
+            and len(current_numeric_literals) == 1
+        )
+        scalar_response_dependency = bool(
+            bare_scalar
+            and (
+                (
+                    previous_scalar_task
+                    and expected_previous_type in {"number", "text"}
+                )
+                or (
+                    previous_pending_input
+                    and previous_pending_input_type in {"number", "text", ""}
+                )
+            )
+        )
+        explicit_arithmetic_expression = bool(
+            re.search(
+                r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?\s*[+*/×÷-]\s*[-+]?\d+(?:[.,]\d+)?(?![\w.])",
+                current,
+            )
+        )
+
         # Grammatical anaphora is a discourse-structure measurement. It does not
         # classify a topic and it does not select a renderer. It only tells the
         # sequential owner that a short utterance contains an antecedent-dependent
@@ -1088,6 +1180,7 @@ class QuantumSequentialDialogueEngine:
         grammatical_reference_forms = {
             "он", "она", "оно", "они", "его", "ее", "её", "ему", "ей", "им", "ими",
             "этот", "эта", "это", "эти", "того", "той", "тем", "такой",
+            "него", "неё", "нее", "ней", "нему", "ним", "них",
             "it", "he", "she", "they", "him", "her", "them", "this", "that", "these", "those",
         }
         raw_reference_tokens = set(
@@ -1177,6 +1270,7 @@ class QuantumSequentialDialogueEngine:
             + 0.05 * (1.0 if underspecified else 0.0)
             + 0.05 * (1.0 if artifact_continuity else 0.0)
             + 0.18 * (1.0 if grammatical_reference else 0.0)
+            + 0.24 * (1.0 if scalar_response_dependency else 0.0)
         )
         continuation_score = max(0.0, min(1.0, continuation_score))
 
@@ -1191,6 +1285,7 @@ class QuantumSequentialDialogueEngine:
             and continuation_semantics < 0.16
             and reference_semantics < 0.12
             and not grammatical_reference
+            and not scalar_response_dependency
         )
 
         if memory_semantics >= max(0.22, continuation_semantics + 0.04) and not self_contained:
@@ -1199,12 +1294,15 @@ class QuantumSequentialDialogueEngine:
             confidence = min(1.0, memory_semantics)
             reason = "semantic_memory_query"
         elif not topic_break and continuation_score >= 0.13 and (
+            (not explicit_arithmetic_expression or previous_pending_input or grammatical_reference)
+        ) and (
             continuation_semantics >= 0.02
             or reference_semantics >= 0.02
             or underspecified
             or core_signature_matches >= 1
             or artifact_continuity
             or grammatical_reference
+            or scalar_response_dependency
         ):
             relation = "CONTINUE"
             selected_pair = {
@@ -1865,6 +1963,25 @@ class QuantumContextUnderstandingEngine:
         for label in ("table", "graph", "diagram", "formula", "link", "file", "audio", "video", "code"):
             if flags.get(label):
                 append_output(label, 1, "whole_turn_modality", 1.0)
+
+        # Calculation is answer-first. A structured mathematical/visual output
+        # is kept only when the task vector independently supports it.
+        if best == "calculate":
+            strong_structured = [
+                item for item in ordered_outputs
+                if item in {
+                    "formula", "graph", "table", "diagram", "image",
+                    "gallery", "code", "link", "file", "audio", "video",
+                    "action", "scene", "memory", "visual_context",
+                }
+                and (
+                    bool(flags.get(item))
+                    or float(reps.get(item, 0.0) or 0.0) >= 0.22
+                )
+            ]
+            if not strong_structured:
+                ordered_outputs = ["text"]
+                segment_plans = []
 
         # The current turn always keeps a human-readable answer channel in
         # addition to every requested structured result.
@@ -2858,7 +2975,25 @@ class QuantumInterpretationEngine:
                 latest_pair = pair
                 break
         latest_pairs = [latest_pair] if latest_pair else []
-        numeric_results = cls._extract_numeric_results(latest_pairs)
+        candidate_pairs = list(reversed(recent_dialogue_pairs or []))
+        numeric_source_pair = None
+        for pair in candidate_pairs:
+            if not isinstance(pair, dict):
+                continue
+            answer_text = cls.normalize(pair.get("april") or pair.get("assistant"))
+            if re.search(
+                r"(?:=|равно|equals)\s*[-+]?\d+(?:[.,]\d+)?\b",
+                answer_text,
+                flags=re.I,
+            ) or len(re.findall(
+                r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?(?![\w.])",
+                answer_text,
+            )) == 1:
+                numeric_source_pair = pair
+                break
+        numeric_results = cls._extract_numeric_results(
+            [numeric_source_pair] if numeric_source_pair else latest_pairs
+        )
         # Preserve structural result-bearing turns even when the answer contains
         # several measurements. The existence of numeric evidence is enough to
         # mark a dependent calculation; the actual operand remains in the full
@@ -3136,6 +3271,11 @@ class QuantumInterpretationEngine:
         latest_is_material = bool(
             latest is not None
             and latest_score >= CONTINUE_FLOOR
+            and (
+                not explicit_arithmetic_expression
+                or previous_pending_input
+                or grammatical_reference
+            )
             and (
                 latest["distinctive_overlap"] >= 0.12
                 or latest["token_overlap"] >= 0.20
@@ -3828,6 +3968,18 @@ class QuantumInterpretationEngine:
             and best_obj in {"text", "diagram"}
         ):
             return "text", "semantic_text_schema_format_advisory", True
+
+        # Plain calculations resolve to a clean text answer unless structured
+        # representation has strong independent semantic support.
+        if best_op == "calculate":
+            structured_calc = []
+            for label in ("formula", "graph", "table", "diagram", "image", "gallery"):
+                rep_score = float(rep.get(label, 0.0) or 0.0)
+                object_score = float(obj.get(label, 0.0) or 0.0)
+                if rep_score >= 0.22 and (object_score >= 0.08 or rep_score >= 0.30):
+                    structured_calc.append(label)
+            if not structured_calc:
+                return "text", "semantic_calculation_answer", True
 
         compatible_ops={
             "graph":{"build","modify","present","calculate","analyze","list","explain"},
@@ -5068,6 +5220,11 @@ class QuantumInterpretationEngine:
             "turn_meaning_transition": deepcopy(transition),
             "sequential_dialogue": deepcopy(sequential_dialogue),
             "last_turn_meaning": deepcopy(last_turn_meaning or {}),
+            "previous_response_contract": deepcopy(
+                last_turn_meaning.get("response_contract", {})
+                if isinstance(last_turn_meaning, dict)
+                else {}
+            ),
             "topic_owner": topic_owner,
             "semantic_ownership": {
                 "relation": transition_relation or "NEW_TOPIC",
