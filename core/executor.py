@@ -8854,11 +8854,46 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "input_token_budget": 900,
         "single_route": True,
     })
+    # Final Provider-boundary continuation handoff.
+    # IMPORTANT: mode and continuation_scene_data are owned by the canonical
+    # MachineRequest created above. They must never be read from execute() local
+    # scope because those names only exist inside _make_request(). This was the
+    # direct cause of the NameError release crash.
+    request_dialogue = getattr(request, "dialogue_contract", {})
+    if not isinstance(request_dialogue, dict):
+        request_dialogue = {}
+
+    mode = _s(
+        request_dialogue.get("context_dependency")
+        or request_dialogue.get("dialogue_state")
+        or (getattr(request, "quantum_state", {}) or {}).get("dialogue_relation")
+        or (getattr(request, "intent", {}) or {}).get("dialogue_state")
+        or ""
+    ).upper()
+
+    request_conversation = getattr(request, "conversation", {})
+    if not isinstance(request_conversation, dict):
+        request_conversation = {}
+
+    continuation_scene_data = request_conversation.get("continuation_scene_data")
+    if not isinstance(continuation_scene_data, dict):
+        continuation_scene_data = {}
+
+    # The canonical continuation data is also mirrored in visual_context by
+    # _make_request(). Use that mirror only as a transport fallback; never
+    # rebuild or mutate the scene here.
+    if not continuation_scene_data:
+        request_visual_context = getattr(request, "visual_context", {})
+        if isinstance(request_visual_context, dict):
+            candidate = request_visual_context.get("continuation_scene_data")
+            if isinstance(candidate, dict):
+                continuation_scene_data = candidate
+
     # OpenAI Responses API requires max_output_tokens >= 16.
     # Keep the canonical request budget intact, but enforce the transport floor
     # at the final Provider boundary so an invalid value can never be sent.
     if (
-        mode in {"CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
+        mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
         and _best_visual_context(state)
         and not continuation_scene_data
     ):
@@ -8895,6 +8930,20 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     ]
     if not carried_labels:
         carried_labels = [p[0] for p in handoff_pairs[:12]]
+    # Hard handoff invariant: when the canonical dialogue state says this is a
+    # continuation/reference, the previous successful scene data must be
+    # materially present in the Provider request. We do not manufacture it here.
+    if mode in {"CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}:
+        if not continuation_scene_data:
+            raise RuntimeError(
+                "Quantum release blocked: continuation request reached Provider boundary without scene data"
+            )
+        request_conversation["continuation_scene_data"] = _quantum_snapshot(
+            continuation_scene_data
+        )
+        if hasattr(request, "conversation"):
+            request.conversation = request_conversation
+
     print("🧭 PROVIDER INPUT SCENE:", {
         "request": _clip(
             _s(request.conversation.get("current_request"))
