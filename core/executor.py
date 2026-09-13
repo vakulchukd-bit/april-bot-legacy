@@ -2685,24 +2685,43 @@ def _quantum_context_binding(
             semantic.get("quantum_dynamic_memory_evidence")
         ),
     )
-    relation = _s(consensus.get("relation")).upper() or _s(
+    frozen_relation = _s(
         frozen.get("relation")
         or vector.get("relation")
         or scene.get("mode")
         or "INDEPENDENT"
     ).upper()
+    consensus_relation = _s(consensus.get("relation")).upper()
     continuation = bool(
-        consensus.get("continuation")
-        or frozen.get("continuation")
-        or scene.get("continuation")
+        frozen.get("continuation")
         or vector.get("continuation")
+        or consensus.get("continuation")
+        or scene.get("continuation")
     )
     reference = bool(
-        consensus.get("reference_to_previous")
-        or frozen.get("reference_to_previous")
-        or scene.get("reference_to_previous")
+        frozen.get("reference_to_previous")
         or vector.get("reference_to_previous")
+        or consensus.get("reference_to_previous")
+        or scene.get("reference_to_previous")
     )
+
+    # Interpretation is the semantic owner of the dialogue state. The memory
+    # vector is evidence only. When the canonical Interpretation pass has
+    # already established a continuation/reference, an unsuccessful MEMORY×
+    # CONTEXT proof must not collapse that turn back to INDEPENDENT. That was the
+    # exact failure mode where Provider received continuation=True together with
+    # dialogue_mode=INDEPENDENT. A fresh visual turn has already been converted
+    # to INDEPENDENT before this function, so honoring frozen_relation here does
+    # not reopen that boundary.
+    if frozen_relation in {
+        "CONTINUATION", "CONTINUE_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"
+    } and (continuation or reference):
+        relation = (
+            "CONTINUATION" if frozen_relation == "CONTINUE_TOPIC"
+            else frozen_relation
+        )
+    else:
+        relation = consensus_relation or frozen_relation or "INDEPENDENT"
 
     # Memory may strengthen a reference only after the CONTEXT was interpreted
     # against at least one decomposed memory part. Memory alone cannot create a
