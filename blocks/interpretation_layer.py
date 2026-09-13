@@ -69,7 +69,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v16_hot_meaning_owner_v5_semantic_dialogue_no_triggers"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v16_sequential_dialogue_owner_v2"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
@@ -950,6 +950,320 @@ class QuantumTurnMeaningEngine:
                 else "none"
             ),
             "source": "semantic_meaning_transition",
+        }
+
+
+class QuantumSequentialDialogueEngine:
+    """
+    Single-owner sequential dialogue state machine.
+
+    Invariants:
+      1) Every new user turn is interpreted against exactly one active completed
+         USER -> APRIL turn (the immediately preceding successful exchange).
+      2) The semantic result of that turn is the next turn's anchor.
+      3) Older turns are historical evidence only; they cannot silently become the
+         active topic during ordinary interpretation.
+      4) The engine chooses exactly one of CONTINUE / NEW. RECALL is reserved for
+         an explicit semantic memory-query measurement.
+      5) No lexical trigger tables participate. Continuation is derived from the
+         measured task vector, semantic similarity, discourse scores, structural
+         incompleteness and artifact continuity.
+    """
+
+    VERSION = "quantum_sequential_dialogue_engine_v1"
+
+    @staticmethod
+    def _norm(value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip())
+
+    @classmethod
+    def _content_tokens(cls, text: Any) -> set[str]:
+        return {
+            token for token in QuantumContextUnderstandingEngine._content_tokens(text)
+            if len(token) >= 3
+        }
+
+    @classmethod
+    def _latest_pair(cls, history: list[dict[str, Any]] | None) -> dict[str, str]:
+        pending_user = ""
+        pairs: list[dict[str, str]] = []
+        for item in history if isinstance(history, list) else []:
+            if not isinstance(item, dict):
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            if metadata.get("internal_context") or metadata.get("internal_turn"):
+                continue
+            role = str(item.get("role") or "").lower()
+            if role in {"user", "human"}:
+                pending_user = cls._norm(item.get("content") or item.get("text") or item.get("answer"))
+                continue
+            if role in {"assistant", "april", "bot"} and pending_user:
+                answer = cls._norm(item.get("content") or item.get("answer") or item.get("text") or item.get("summary"))
+                if answer:
+                    pairs.append({"user": pending_user, "april": answer, "assistant": answer})
+                pending_user = ""
+        return pairs[-1] if pairs else {}
+
+    @classmethod
+    def resolve(
+        cls,
+        current_request: str,
+        previous_meaning: dict[str, Any] | None,
+        *,
+        previous_user: str = "",
+        previous_answer: str = "",
+        recent_history: list[dict[str, str]] | None = None,
+        semantic_engine: Any = None,
+        previous_scene: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        current = cls._norm(current_request)
+        meaning = previous_meaning if isinstance(previous_meaning, dict) else {}
+        meaning_block = meaning.get("meaning") if isinstance(meaning.get("meaning"), dict) else {}
+        previous_user = cls._norm(previous_user or meaning.get("user_request"))
+        previous_answer = cls._norm(previous_answer or meaning.get("answer"))
+        recent_history = [x for x in (recent_history or []) if isinstance(x, dict)]
+        latest_pair = cls._latest_pair(recent_history) or {
+            "user": previous_user,
+            "april": previous_answer,
+        }
+        if not previous_user:
+            previous_user = cls._norm(latest_pair.get("user"))
+        if not previous_answer:
+            previous_answer = cls._norm(latest_pair.get("april") or latest_pair.get("assistant"))
+
+        if not current or not previous_user and not previous_answer:
+            return {
+                "relation": "NEW",
+                "confidence": 0.98,
+                "selected_pair": {},
+                "selected_index": -1,
+                "scores": {},
+                "reason": "no_completed_previous_turn",
+                "source": cls.VERSION,
+            }
+
+        current_profile = {}
+        previous_profile = {}
+        if semantic_engine is not None:
+            try:
+                current_profile = semantic_engine.measure(current)
+            except Exception:
+                current_profile = {}
+            try:
+                previous_profile = semantic_engine.measure(previous_user)
+            except Exception:
+                previous_profile = {}
+
+        current_sem = current_profile.get("dialogue_scores") if isinstance(current_profile.get("dialogue_scores"), dict) else {}
+        current_op = str(current_profile.get("best_operation") or "").lower()
+        current_rep = str(current_profile.get("best_representation") or "").lower()
+        current_obj = str(current_profile.get("best_object") or "").lower()
+        current_goal = str(current_profile.get("best_goal") or "").lower()
+
+        previous_rep = str(previous_profile.get("best_representation") or "").lower()
+        previous_op = str(previous_profile.get("best_operation") or "").lower()
+        previous_obj = str(previous_profile.get("best_object") or "").lower()
+        previous_goal = str(previous_profile.get("best_goal") or "").lower()
+
+        def sim(left: str, right: str) -> float:
+            if semantic_engine is None or not left or not right:
+                return 0.0
+            try:
+                return float(semantic_engine.similarity(left, right).get("score", 0.0) or 0.0)
+            except Exception:
+                return 0.0
+
+        answer_similarity = sim(current, previous_answer)
+        user_similarity = sim(current, previous_user)
+        combined_similarity = sim(current, " ".join(x for x in (previous_user, previous_answer) if x))
+
+        current_tokens = cls._content_tokens(current)
+        previous_tokens = cls._content_tokens(" ".join(x for x in (previous_user, previous_answer) if x))
+        overlap = len(current_tokens & previous_tokens) / max(1, len(current_tokens))
+
+        # Grammatical anaphora is a discourse-structure measurement. It does not
+        # classify a topic and it does not select a renderer. It only tells the
+        # sequential owner that a short utterance contains an antecedent-dependent
+        # reference whose object lives in the previous completed turn.
+        grammatical_reference_forms = {
+            "он", "она", "оно", "они", "его", "ее", "её", "ему", "ей", "им", "ими",
+            "этот", "эта", "это", "эти", "того", "той", "тем", "такой",
+            "it", "he", "she", "they", "him", "her", "them", "this", "that", "these", "those",
+        }
+        raw_reference_tokens = set(
+            re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ]+", current.lower())
+        )
+        grammatical_reference = bool(
+            raw_reference_tokens & grammatical_reference_forms
+            and previous_tokens
+            and len(current_tokens) <= 7
+        )
+
+        signature_matches = sum(
+            1 for a, b in (
+                (current_rep, previous_rep),
+                (current_op, previous_op),
+                (current_obj, previous_obj),
+                (current_goal, previous_goal),
+            ) if a and b and a == b
+        )
+        core_signature_matches = sum(
+            1 for a, b in (
+                (current_rep, previous_rep),
+                (current_op, previous_op),
+                (current_obj, previous_obj),
+            ) if a and b and a == b
+        )
+
+        continuation_semantics = max(
+            float(current_sem.get("continuation", 0.0) or 0.0),
+            float(current_sem.get("reformulation", 0.0) or 0.0),
+            float(current_sem.get("correction", 0.0) or 0.0),
+        )
+        reference_semantics = max(
+            float(current_sem.get("reference", 0.0) or 0.0),
+            float(current_sem.get("artifact_reference", 0.0) or 0.0),
+        )
+        memory_semantics = float(current_sem.get("memory_query", 0.0) or 0.0)
+
+        # A turn is semantically open-ended when its task vector cannot fully
+        # identify the object/result it needs from the current request alone.
+        request_features = current_profile.get("request_features") if isinstance(current_profile.get("request_features"), dict) else {}
+        self_contained = bool(request_features.get("self_contained"))
+        current_content_count = len(current_tokens)
+        underspecified = bool(
+            not self_contained
+            and current_content_count <= 7
+            and (
+                continuation_semantics >= 0.02
+                or reference_semantics >= 0.02
+                or answer_similarity >= 0.025
+                or user_similarity >= 0.025
+            )
+        )
+
+        prior_structured_types = []
+        if isinstance(previous_scene, dict):
+            prior_structured_types = [
+                str(x).lower() for x in (previous_scene.get("render_block_types") or [])
+                if str(x).strip()
+            ]
+            if not prior_structured_types:
+                prior_structured_types = [
+                    str(block.get("type") or block.get("artifact_type") or block.get("representation") or "").lower()
+                    for block in (previous_scene.get("render_blocks") or [])
+                    if isinstance(block, dict)
+                ]
+        artifact_continuity = bool(
+            prior_structured_types
+            and (
+                current_rep in prior_structured_types
+                or continuation_semantics >= 0.02
+                or reference_semantics >= 0.02
+            )
+        )
+
+        # Semantic dependency score: the previous completed turn is the only
+        # forward anchor. No older turn is consulted here.
+        continuation_score = (
+            0.24 * answer_similarity
+            + 0.18 * user_similarity
+            + 0.16 * combined_similarity
+            + 0.12 * min(1.0, overlap)
+            + 0.10 * min(1.0, core_signature_matches / 3.0)
+            + 0.08 * min(1.0, signature_matches / 4.0)
+            + 0.07 * continuation_semantics
+            + 0.05 * reference_semantics
+            + 0.05 * (1.0 if underspecified else 0.0)
+            + 0.05 * (1.0 if artifact_continuity else 0.0)
+            + 0.18 * (1.0 if grammatical_reference else 0.0)
+        )
+        continuation_score = max(0.0, min(1.0, continuation_score))
+
+        # Semantic topic break: a complete current task with a different semantic
+        # core is a new topic, even when surface dialogue form is similar.
+        topic_break = bool(
+            self_contained
+            and core_signature_matches == 0
+            and overlap < 0.25
+            and answer_similarity < 0.25
+            and user_similarity < 0.30
+            and continuation_semantics < 0.16
+            and reference_semantics < 0.12
+            and not grammatical_reference
+        )
+
+        if memory_semantics >= max(0.22, continuation_semantics + 0.04) and not self_contained:
+            relation = "RECALL"
+            selected_pair = {}
+            confidence = min(1.0, memory_semantics)
+            reason = "semantic_memory_query"
+        elif not topic_break and continuation_score >= 0.13 and (
+            continuation_semantics >= 0.02
+            or reference_semantics >= 0.02
+            or underspecified
+            or core_signature_matches >= 1
+            or artifact_continuity
+            or grammatical_reference
+        ):
+            relation = "CONTINUE"
+            selected_pair = {
+                "user": previous_user,
+                "april": previous_answer,
+                "assistant": previous_answer,
+                "development_state": "completed_turn",
+            }
+            confidence = continuation_score
+            reason = "sequential_semantic_dependency"
+        else:
+            relation = "NEW"
+            selected_pair = {}
+            confidence = max(0.0, min(1.0, 1.0 - continuation_score))
+            reason = "semantic_topic_release" if topic_break else "no_dependency_proof"
+
+        return {
+            "relation": relation,
+            "confidence": round(float(confidence), 6),
+            "selected_pair": selected_pair,
+            "selected_index": -1,
+            "scores": {
+                "continuation": round(float(continuation_score), 6),
+                "answer_similarity": round(float(answer_similarity), 6),
+                "user_similarity": round(float(user_similarity), 6),
+                "combined_similarity": round(float(combined_similarity), 6),
+                "content_overlap": round(float(overlap), 6),
+                "signature_matches": signature_matches,
+                "core_signature_matches": core_signature_matches,
+                "continuation_semantics": round(float(continuation_semantics), 6),
+                "reference_semantics": round(float(reference_semantics), 6),
+                "memory_semantics": round(float(memory_semantics), 6),
+                "grammatical_reference": grammatical_reference,
+                "underspecified": underspecified,
+                "self_contained": self_contained,
+                "artifact_continuity": artifact_continuity,
+                "topic_break": topic_break,
+            },
+            "previous_turn": {
+                "user": previous_user,
+                "april": previous_answer,
+                "meaning": deepcopy(meaning),
+            },
+            "current_task": {
+                "operation": current_op,
+                "representation": current_rep,
+                "object": current_obj,
+                "goal": current_goal,
+            },
+            "previous_task": {
+                "operation": previous_op,
+                "representation": previous_rep,
+                "object": previous_obj,
+                "goal": previous_goal,
+            },
+            "reason": reason,
+            "source": cls.VERSION,
+            "single_active_anchor": True,
+            "older_turns_are_historical_only": True,
         }
 
 class QuantumContextUnderstandingEngine:
@@ -1867,24 +2181,19 @@ class QuantumContextUnderstandingEngine:
                 pending_user = ""
         recent_pairs = recent_pairs[-self.TOPIC_WINDOW:]
 
-        # ONE dialogue decision enters context understanding.
-        # Context analysis may add evidence, task structure and entity information,
-        # but it must never run a second relation selector.  The canonical dialogue
-        # packet is produced once by QuantumInterpretationEngine and propagated
-        # unchanged through the interpretation chain.
-        dialogue_relation = (
-            deepcopy(canonical_dialogue)
-            if isinstance(canonical_dialogue, dict)
-            else self.semantic_engine._dialogue_relation_engine(
-                current,
-                previous_assistant=self._compact(recent_pairs[-1].get("assistant"), 1200) if recent_pairs else "",
-                previous_user=self._compact(recent_pairs[-1].get("user"), 1200) if recent_pairs else "",
-                active_topic=self._compact(active_topic, 500),
-                active_goal="",
-                previous_scene=previous_scene,
-                recent_dialogue_pairs=recent_pairs,
-            )
-        )
+        # Dialogue relation is owned by the sequential dialogue engine. Context
+        # understanding consumes that canonical decision and only enriches it with
+        # task/entity/scene evidence; it never reruns a competing selector.
+        if isinstance(canonical_dialogue, dict) and canonical_dialogue:
+            dialogue_relation = dict(canonical_dialogue)
+        else:
+            dialogue_relation = {
+                "relation": "NEW",
+                "confidence": 0.0,
+                "selected_pair": {},
+                "selected_index": -1,
+                "source": "canonical_dialogue_not_provided",
+            }
         canonical_three_way = str(
             dialogue_relation.get("three_way_relation")
             or dialogue_relation.get("relation")
@@ -2605,31 +2914,6 @@ class QuantumInterpretationEngine:
             "confidence": confidence,
         }
 
-    @staticmethod
-    def _linguistic_anaphora_score(text: str) -> float:
-        """Estimate unresolved discourse anaphora from grammatical categories.
-
-        This is not a routing trigger table. It is a linguistic feature used only
-        as evidence that the current utterance may omit its subject/antecedent.
-        The feature becomes meaningful only together with an authenticated prior
-        turn that can supply the missing referent.
-        """
-        tokens = {
-            token.casefold()
-            for token in QuantumContextUnderstandingEngine._tokens(text)
-        }
-        # Russian/Ukrainian/English personal/demonstrative forms commonly used as
-        # anaphoric grammatical dependents.  They are linguistic classes, not
-        # commands or topic labels.
-        anaphoric_forms = {
-            "он", "она", "оно", "они", "его", "ее", "её", "него", "неё", "нее",
-            "ему", "ей", "ими", "им", "нею", "ними",
-            "им", "этот", "эта", "это", "эти", "этого", "этой", "этому",
-            "цей", "ця", "це", "ці", "його", "її", "йому", "їй",
-            "he", "she", "it", "they", "him", "her", "them", "this", "that",
-        }
-        return 1.0 if tokens & anaphoric_forms else 0.0
-
     def _select_three_way_dialogue_relation(
         self,
         current: str,
@@ -2831,28 +3115,6 @@ class QuantumInterpretationEngine:
             )
         )
 
-        # A complete question can still be discourse-dependent when the current
-        # utterance contains an omitted antecedent and the latest turn supplied a
-        # concrete object/result. This is grammatical + structural evidence, not
-        # a topic trigger. It repairs cases such as "Какой породы она?" after an
-        # image of a dog: the subject is carried by the immediately preceding turn.
-        current_anaphora = QuantumInterpretationEngine._linguistic_anaphora_score(current)
-        latest_has_concrete_result = bool(
-            latest is not None
-            and bool(self.normalize(
-                (latest.get("pair") or {}).get("april")
-                or (latest.get("pair") or {}).get("assistant")
-                or (latest.get("pair") or {}).get("result")
-            ))
-            and current_content_count <= 4
-        )
-        structural_anaphoric_continuation = bool(
-            latest_has_concrete_result
-            and current_anaphora >= 1.0
-            and current_content_count <= 4
-            and not (best["index"] < latest_index and older_better)
-        )
-
         # A current task with a single numeric operand can depend on a numeric
         # result from the preceding answer even when semantic wording changes the
         # operation label. This is structural task-dependency inference, not a
@@ -2872,21 +3134,15 @@ class QuantumInterpretationEngine:
         )
 
         latest_is_material = bool(
-            (
-                structural_anaphoric_continuation
-                and latest is not None
-            )
-            or (
-                latest is not None
-                and latest_score >= CONTINUE_FLOOR
-                and (
-                    latest["distinctive_overlap"] >= 0.12
-                    or latest["token_overlap"] >= 0.20
-                    or latest["user_score"] >= 0.18
-                    or continuation_strength >= 0.10
-                    or latest_semantic_underspecification
-                    or current_numeric_dependency
-                )
+            latest is not None
+            and latest_score >= CONTINUE_FLOOR
+            and (
+                latest["distinctive_overlap"] >= 0.12
+                or latest["token_overlap"] >= 0.20
+                or latest["user_score"] >= 0.18
+                or continuation_strength >= 0.10
+                or latest_semantic_underspecification
+                or current_numeric_dependency
             )
         )
 
@@ -2894,9 +3150,7 @@ class QuantumInterpretationEngine:
             relation = "RECALL"
             selected = best
         elif latest_is_material and (
-            continuation_strength >= 0.10
-            or reference_strength < 0.12
-            or structural_anaphoric_continuation
+            continuation_strength >= 0.10 or reference_strength < 0.12
         ):
             # In an ordinary follow-up, the immediately previous authenticated
             # result remains the active object even when an older turn happens to
@@ -3206,7 +3460,6 @@ class QuantumInterpretationEngine:
             and core_signature_matches == 0
             and not semantic_reference
             and not semantic_memory_query
-            and str(three_way.get("relation") or "").upper() == "NEW"
         )
         if semantic_topic_boundary:
             canonical_three_way = "NEW"
@@ -3956,24 +4209,10 @@ class QuantumInterpretationEngine:
             if isinstance(last_turn_meaning, dict)
             else None
         )
+        # Sequential dialogue uses one active completed turn only. Older turns
+        # stay persistent for historical recall but never compete with the
+        # immediate turn during ordinary interpretation.
         recent_meanings = []
-        raw_recent_meanings = (
-            state.get("turn_meaning_history", [])
-            if isinstance(state.get("turn_meaning_history"), list)
-            else []
-        )
-        for meaning in raw_recent_meanings:
-            if not isinstance(meaning, dict):
-                continue
-            meaning_turn = self._turn_id_number(meaning.get("turn_id"))
-            # Do not feed the active immediate turn back as "older" memory.
-            if (
-                selected_turn_number >= 0
-                and meaning_turn >= 0
-                and meaning_turn >= selected_turn_number
-            ):
-                continue
-            recent_meanings.append(meaning)
 
         transition = QUANTUM_TURN_MEANING_ENGINE.compare(
             text,
@@ -3986,6 +4225,51 @@ class QuantumInterpretationEngine:
             "relation_scores": {},
             "evidence": {},
         }
+
+        # ------------------------------------------------------------------
+        # Canonical sequential dialogue decision.
+        # All downstream interpretation reads this single decision. The legacy
+        # TurnMeaning comparator remains available as evidence, but it no longer
+        # selects an older turn or owns the active dialogue state.
+        # ------------------------------------------------------------------
+        sequential_dialogue = QUANTUM_SEQUENTIAL_DIALOGUE_ENGINE.resolve(
+            text,
+            last_turn_meaning if isinstance(last_turn_meaning, dict) else {},
+            previous_user=last_u,
+            previous_answer=last_a,
+            recent_history=history,
+            semantic_engine=self,
+            previous_scene=state.get("current_visual_scene") if isinstance(state.get("current_visual_scene"), dict) else {},
+        )
+        sequential_relation = str(sequential_dialogue.get("relation") or "NEW").upper()
+        if sequential_relation == "CONTINUE":
+            transition = {
+                **dict(transition or {}),
+                "relation": "DEVELOP_CURRENT",
+                "anchor": "last_turn",
+                "selected_turn_meaning": deepcopy(last_turn_meaning),
+                "selected_memory_operand": deepcopy(sequential_dialogue.get("selected_pair") or {}),
+                "source": "sequential_dialogue_owner",
+                "sequential_dialogue": deepcopy(sequential_dialogue),
+            }
+        elif sequential_relation == "RECALL":
+            transition = {
+                **dict(transition or {}),
+                "relation": "REVISIT_RECENT",
+                "anchor": "none",
+                "source": "sequential_dialogue_owner",
+                "sequential_dialogue": deepcopy(sequential_dialogue),
+            }
+        else:
+            transition = {
+                **dict(transition or {}),
+                "relation": "NEW_TOPIC",
+                "anchor": "none",
+                "selected_turn_meaning": {},
+                "selected_memory_operand": {},
+                "source": "sequential_dialogue_owner",
+                "sequential_dialogue": deepcopy(sequential_dialogue),
+            }
 
         # Semantic ownership is decided by the completed-turn meaning before any
         # legacy active_topic/state value is allowed into the hot path. A stale
@@ -4050,17 +4334,37 @@ class QuantumInterpretationEngine:
         except Exception:
             pass
         recent_dialogue_pairs = self._recent_dialogue_pairs(history, limit=10)
-        dialogue_packet = self.dialogue(
-            text,
-            previous_assistant=last_a,
-            previous_user=last_u,
-            active_goal=active_goal,
-            active_topic=active_topic,
-            previous_scene=previous_scene,
-            recent_dialogue_pairs=recent_dialogue_pairs,
+        # Build the dialogue packet directly from the single sequential owner.
+        # The legacy `dialogue()` view remains available for compatibility, but it
+        # is not executed on the canonical interpretation path.
+        canonical_selected_pair = deepcopy(sequential_dialogue.get("selected_pair") or {})
+        canonical_dialogue_relation = (
+            "CONTINUE_TOPIC" if sequential_relation == "CONTINUE"
+            else "RECALL" if sequential_relation == "RECALL"
+            else "NEW_TOPIC"
         )
-        d=dialogue_packet["dialogue"]
-        dialogue_vector=dialogue_packet.get("dialogue_relation", {})
+        dialogue_vector = {
+            "relation": canonical_dialogue_relation,
+            "topic_relation": "SAME_TOPIC" if sequential_relation == "CONTINUE" else canonical_dialogue_relation,
+            "request_relation": canonical_dialogue_relation,
+            "request_dependency": "continuation" if sequential_relation == "CONTINUE" else "recall" if sequential_relation == "RECALL" else "independent",
+            "continuation": sequential_relation == "CONTINUE",
+            "reference_to_previous": sequential_relation == "RECALL",
+            "three_way_relation": sequential_relation,
+            "selected_memory_operand": canonical_selected_pair,
+            "selected_memory_index": -1,
+            "semantic_dialogue_label": p.get("dialogue_best", "independent"),
+            "semantic_dialogue_confidence": p.get("dialogue_confidence", 0.0),
+            "source": "sequential_dialogue_owner",
+            "sequential_dialogue": deepcopy(sequential_dialogue),
+        }
+        d = {
+            "label": ("continuation" if sequential_relation == "CONTINUE" else "reference" if sequential_relation == "RECALL" else p.get("dialogue_best", "independent")),
+            "confidence": float(sequential_dialogue.get("confidence", 0.0) or 0.0),
+            "continuation_score": float(sequential_dialogue.get("scores", {}).get("continuation", 0.0) or 0.0),
+            "reference_score": float(sequential_dialogue.get("scores", {}).get("reference_semantics", 0.0) or 0.0),
+            "topic_score": float(sequential_dialogue.get("scores", {}).get("answer_similarity", 0.0) or 0.0),
+        }
         explicit=(semantic.get("required_representations") or cognition.get("required_representations") or [])
 
         # Context-first fusion.  This is the interpretation authority for topic,
@@ -4076,12 +4380,65 @@ class QuantumInterpretationEngine:
             active_goal=active_goal,
             previous_scene=previous_scene,
             semantic_profile=p,
-            canonical_dialogue=dialogue_vector,
+            canonical_dialogue=sequential_dialogue,
         )
         topic_understanding = context_understanding.get("topic") if isinstance(context_understanding.get("topic"), dict) else {}
         discourse_understanding = context_understanding.get("discourse") if isinstance(context_understanding.get("discourse"), dict) else {}
         dialogue_selection = context_understanding.get("dialogue_selection") if isinstance(context_understanding.get("dialogue_selection"), dict) else {}
         entities_understanding = context_understanding.get("entities") if isinstance(context_understanding.get("entities"), dict) else {}
+
+        # The ContextUnderstanding layer is evidence-only. It cannot create a
+        # competing dialogue route. Replace its relation with the single canonical
+        # sequential decision and carry the concrete latest USER→APRIL operand.
+        sequential_pair = sequential_dialogue.get("selected_pair") if isinstance(sequential_dialogue.get("selected_pair"), dict) else {}
+        if sequential_relation == "CONTINUE":
+            dialogue_selection = {
+                **dict(dialogue_selection or {}),
+                "relation": "CONTINUE",
+                "selected_pair": deepcopy(sequential_pair),
+                "selected_index": -1,
+                "confidence": sequential_dialogue.get("confidence", 0.0),
+                "source": "sequential_dialogue_owner",
+            }
+            context_understanding["dialogue_selection"] = deepcopy(dialogue_selection)
+            context_understanding["discourse"] = {
+                **dict(context_understanding.get("discourse") or {}),
+                "relation": "CONTINUE_TOPIC",
+                "continuation": True,
+                "new_topic": False,
+                "three_way_relation": "CONTINUE",
+                "selected_memory_operand": deepcopy(sequential_pair),
+                "source": "sequential_dialogue_owner",
+            }
+        elif sequential_relation == "RECALL":
+            dialogue_selection = {
+                **dict(dialogue_selection or {}),
+                "relation": "RECALL",
+                "selected_pair": {},
+                "selected_index": -1,
+                "confidence": sequential_dialogue.get("confidence", 0.0),
+                "source": "sequential_dialogue_owner",
+            }
+            context_understanding["dialogue_selection"] = deepcopy(dialogue_selection)
+        else:
+            dialogue_selection = {
+                **dict(dialogue_selection or {}),
+                "relation": "NEW",
+                "selected_pair": {},
+                "selected_index": -1,
+                "confidence": sequential_dialogue.get("confidence", 0.0),
+                "source": "sequential_dialogue_owner",
+            }
+            context_understanding["dialogue_selection"] = deepcopy(dialogue_selection)
+            context_understanding["discourse"] = {
+                **dict(context_understanding.get("discourse") or {}),
+                "relation": "NEW_TOPIC",
+                "continuation": False,
+                "new_topic": True,
+                "three_way_relation": "NEW",
+                "selected_memory_operand": {},
+                "source": "sequential_dialogue_owner",
+            }
 
         # The semantic context engine is a second-stage measurement over the same
         # completed-turn meaning. When it proves a structural dependency, promote
@@ -4091,33 +4448,34 @@ class QuantumInterpretationEngine:
         context_task_state = context_understanding.get("task") if isinstance(context_understanding.get("task"), dict) else {}
         context_history_task = dialogue_selection.get("history_task_context") if isinstance(dialogue_selection.get("history_task_context"), dict) else {}
         context_semantic_dependency = bool(
-            context_relation_raw in {"CONTINUE_TOPIC", "CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
+            sequential_relation == "CONTINUE"
+            and context_relation_raw in {"CONTINUE", "CONTINUE_TOPIC", "CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
             and dialogue_selection.get("selected_pair")
         )
-        # Context evidence is recorded diagnostically. It cannot create a second
-        # dialogue route or overwrite the canonical decision.
-        context_relation_conflict = bool(
-            context_relation_raw
-            and context_relation_raw not in {
-                str(dialogue_vector.get("relation") or "").upper(),
-                str(dialogue_vector.get("three_way_relation") or "").upper(),
-                "CONTINUE_TOPIC" if str(dialogue_vector.get("three_way_relation") or "").upper() == "CONTINUE" else "",
-                "RECALL" if str(dialogue_vector.get("three_way_relation") or "").upper() == "RECALL" else "",
-                "NEW_TOPIC" if str(dialogue_vector.get("three_way_relation") or "").upper() == "NEW" else "",
+        if context_semantic_dependency:
+            semantic_anchor_meaning = deepcopy(last_turn_meaning) if isinstance(last_turn_meaning, dict) and last_turn_meaning else {
+                "user_request": dialogue_selection.get("selected_pair", {}).get("user") or last_u,
+                "answer": dialogue_selection.get("selected_pair", {}).get("april") or last_a,
+                "dialogue_anchor": {
+                    "user": dialogue_selection.get("selected_pair", {}).get("user") or last_u,
+                    "april": dialogue_selection.get("selected_pair", {}).get("april") or last_a,
+                },
+                "source": "authenticated_latest_dialogue_pair",
             }
-        )
+            transition = {
+                **dict(transition or {}),
+                "relation": "DEVELOP_CURRENT",
+                "anchor": "last_turn",
+                "selected_turn_meaning": semantic_anchor_meaning,
+                "source": "semantic_context_structural_dependency",
+                "semantic_dependency_proven": True,
+            }
 
-        # ONE semantic route: the already-computed dialogue_vector is the sole
-        # relation decision. Context-understanding is evidence only.
-        # It may enrich the packet but cannot replace CONTINUE/RECALL/NEW.
-        selected_relation = str(
-            dialogue_vector.get("three_way_relation")
-            or dialogue_vector.get("relation")
-            or "NEW"
-        ).upper()
-        selected_pair = dialogue_vector.get("selected_memory_operand")
-        if not isinstance(selected_pair, dict):
-            selected_pair = {}
+        # Context-understanding owns the three-way relationship. Downstream code
+        # receives the selected memory operand, rather than re-deciding from a
+        # frozen legacy continuation flag.
+        selected_relation = sequential_relation
+        selected_pair = deepcopy(sequential_dialogue.get("selected_pair") or {}) if sequential_relation == "CONTINUE" else {}
         # Context engine emits canonical semantic relation names; normalize
         # aliases once so later composition never mistakes CONTINUE_TOPIC for NEW.
         selected_relation = {
@@ -4151,10 +4509,36 @@ class QuantumInterpretationEngine:
         # Meaning transition is evaluated before historical retrieval. A current
         # request that develops the immediately previous answer stays attached to
         # that answer even when an older turn contains superficially similar words.
-        transition_relation = str(transition.get("relation") or "").upper()
-        # The turn-meaning comparison is evidence/diagnostics only. It cannot open
-        # a second input channel into Processor. The canonical dialogue relation
-        # selected above remains authoritative for downstream transport.
+        transition_relation = (
+            "DEVELOP_CURRENT" if sequential_relation == "CONTINUE"
+            else "REVISIT_RECENT" if sequential_relation == "RECALL"
+            else "NEW_TOPIC"
+        )
+        if transition_relation in {"DEVELOP_CURRENT", "REFER_CURRENT"} and transition.get("anchor") == "last_turn":
+            if last_u or last_a:
+                selected_relation = "CONTINUE"
+                selected_pair = {
+                    "user": last_u,
+                    "april": last_a,
+                    "source": "last_turn_meaning",
+                    "meaning": deepcopy(last_turn_meaning),
+                }
+        elif transition_relation == "NEW_TOPIC":
+            # NEW_TOPIC is authoritative only when the context selector also found
+            # no semantic/structural dependency on the newest completed pair.
+            if selected_relation != "CONTINUE":
+                selected_relation = "NEW"
+                selected_pair = {}
+        elif transition_relation == "REVISIT_RECENT":
+            selected_relation = "RECALL"
+            selected_meaning = transition.get("selected_turn_meaning")
+            if isinstance(selected_meaning, dict):
+                selected_pair = {
+                    "user": self.normalize(selected_meaning.get("user_request")),
+                    "april": self.normalize(selected_meaning.get("answer")),
+                    "source": "recent_turn_meaning",
+                    "meaning": deepcopy(selected_meaning),
+                }
         if selected_relation == "CONTINUE":
             dialogue_vector = {**dict(dialogue_vector or {}),
                 "relation": "CONTINUE_TOPIC", "topic_relation": "SAME_TOPIC",
@@ -4401,8 +4785,8 @@ class QuantumInterpretationEngine:
                 production = best_context_rep
                 source = "context_task_matrix_resolution"
                 locked = True
-        continuation=bool(
-            dialogue_packet.get("continuation")
+        continuation = bool(
+            sequential_relation == "CONTINUE"
             or dialogue_vector.get("relation") == "CONTINUE_TOPIC"
         )
         # A short continuation question does not acquire a structured renderer
@@ -4526,19 +4910,20 @@ class QuantumInterpretationEngine:
         )
         resolved_reference = reference_resolution.get("target") or ""
         resolved_request = text
-        # Materialize the single canonical continuation context for downstream
-        # consumers. This is not a second route: it is the payload attached to the
-        # one semantic decision already made above. A continuation therefore never
-        # relies on a renderer/scene lookup to recover what the preceding answer was.
-        if selected_relation == "CONTINUE" and (last_u or last_a):
+        history_task_context = dict(dialogue_vector.get("history_task_context") or {})
+
+        if sequential_relation == "CONTINUE" and (last_u or last_a):
+            # Carry the previous completed answer as semantic context to the next
+            # processing stage. This is the single active dialogue operand, not a
+            # second input channel and not a lexical trigger.
             resolved_request = (
                 f"{text}\n\n"
-                "Continue the immediately preceding authenticated dialogue result.\n"
+                "The current request is a semantic continuation of the immediately "
+                "preceding completed USER→APRIL turn. Continue from that result; "
+                "do not ask the user to repeat information already present.\n"
                 f"Previous USER request: {last_u}\n"
-                f"Previous APRIL answer: {last_a}\n"
-                "Use that result as the active semantic context and answer the current request as its development."
+                f"Previous APRIL answer: {last_a}"
             )
-        history_task_context = dict(dialogue_vector.get("history_task_context") or {})
 
         # RECALL materializes the selected older USER->APRIL result into the
         # interpretation operand. This is the missing bridge that previously
@@ -4681,6 +5066,7 @@ class QuantumInterpretationEngine:
             "task_understanding": task_understanding,
             "scene_composition": deepcopy(scene_composition),
             "turn_meaning_transition": deepcopy(transition),
+            "sequential_dialogue": deepcopy(sequential_dialogue),
             "last_turn_meaning": deepcopy(last_turn_meaning or {}),
             "topic_owner": topic_owner,
             "semantic_ownership": {
@@ -4708,22 +5094,6 @@ class QuantumInterpretationEngine:
             "scene_recommendations":[x["scene_recommendation"] for x in presentation_recommendations],
             "scene_plan":[x["scene_recommendation"] for x in presentation_recommendations],
             "dialogue_memory_window": self._recent_dialogue_pairs(history, limit=10),
-            "canonical_dialogue_input": {
-                "version": "quantum_canonical_dialogue_input_v1",
-                "relation": (
-                    "CONTINUE" if selected_relation == "CONTINUE"
-                    else "RECALL" if selected_relation == "RECALL"
-                    else "NEW"
-                ),
-                "selected_memory_index": dialogue_vector.get("selected_memory_index", -1),
-                "selected_memory_operand": deepcopy(selected_pair),
-                "previous_user_turn": last_u if selected_relation == "CONTINUE" else "",
-                "previous_april_turn": last_a if selected_relation == "CONTINUE" else "",
-                "resolved_request": resolved_request if selected_relation in {"CONTINUE", "RECALL"} else text,
-                "active_topic": active_topic if selected_relation in {"CONTINUE", "RECALL"} else active_topic,
-                "single_input": True,
-                "decision_owner": DECISION_OWNER,
-            },
             "dialogue_vector": {
                 **dict(dialogue_vector or {}),
                 "reference_resolution": reference_resolution,
@@ -4735,6 +5105,7 @@ class QuantumInterpretationEngine:
                 "requested_outputs": complete_outputs,
                 "output_segments": task_understanding.get("output_segments", []),
                 "turn_meaning_transition": deepcopy(transition),
+                "sequential_dialogue": deepcopy(sequential_dialogue),
                 "selected_meaning_anchor": transition.get("anchor"),
             },
             "dialogue_delta": {
@@ -5358,6 +5729,7 @@ QUANTUM_INTERPRETATION_ENGINE = QuantumInterpretationEngine()
 
 # Compatibility singleton names intentionally reference the same engine object.
 QUANTUM_CONTEXT_ENGINE = QuantumContextUnderstandingEngine(QUANTUM_INTERPRETATION_ENGINE)
+QUANTUM_SEQUENTIAL_DIALOGUE_ENGINE = QuantumSequentialDialogueEngine()
 QUANTUM_FAST_SEMANTIC = QUANTUM_INTERPRETATION_ENGINE
 QUANTUM_LINGUISTIC_ENGINE = QUANTUM_INTERPRETATION_ENGINE
 QUANTUM_EMBEDDING_ENGINE = QUANTUM_INTERPRETATION_ENGINE
@@ -5584,7 +5956,8 @@ class QuantumMemoryUnderstandingEngine:
             "evidence_only": True,
             "lexical_triggers": False,
             "score_routing": False,
-            "parallel_memory_channels": True,
+            "parallel_memory_channels": False,
+            "single_dialogue_owner": True,
             "dialogue_memory": {
                 "history_present": bool(self._dialogue_text(dialogue_memory.get("history"))),
                 "recent_turns": self._dialogue_text(dialogue_memory.get("history")),
