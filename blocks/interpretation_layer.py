@@ -857,7 +857,6 @@ class QuantumTurnMeaningEngine:
             new_topic_score > best_forward_score
             and new_topic_score >= 0.14
             and (new_topic_score - best_forward_score) >= 0.02
-            and not semantic_reference
         )
         if latest_development_lock and not new_topic_dominant:
             immediate_relation = "DEVELOP_CURRENT"
