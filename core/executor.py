@@ -44,7 +44,7 @@ from blocks.energy_manager import (build_quantum_acceleration_profile, apply_qua
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.image_system import scan_image, render_visual_answer, NANO_PRINTER_VERSION
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v52_continuation_scene_handoff_v1"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v51_lossless_scene_presentation_v1"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 16
@@ -3359,232 +3359,6 @@ def _adaptive_output_budget(text: str, semantic: dict, cognition: dict, decision
     """Continuous structural capacity with representation-specific envelopes."""
     return _quantum_budget_from_64(_quantum_64_field(text, semantic, cognition, decision))
 
-def _compact_continuation_scene_data(state: dict) -> dict:
-    """Carry the most recent successful structured scene into a continuation.
-
-    Continuation is a data dependency: once the processor has decided that the
-    turn continues the existing dialogue, the previous successful scene remains
-    authoritative input evidence for Provider. Empty/partial hot scene slots are
-    never allowed to mask a richer successful scene.
-    """
-    if not isinstance(state, dict):
-        return {}
-
-    # Collect all plausible scene slots.  The hot slot may temporarily contain
-    # only a presentation envelope, while last_successful_visual_scene or the
-    # active contract still contains the complete structured payload.
-    candidates: list[tuple[int, int, str, dict]] = []
-    seen: set[str] = set()
-
-    def add_candidate(source: str, candidate: Any, priority: int) -> None:
-        if not isinstance(candidate, dict) or not candidate:
-            return
-        key = _s(candidate.get("scene_id") or candidate.get("id")) or source
-        fingerprint = f"{source}|{key}"
-        if fingerprint in seen:
-            return
-        seen.add(fingerprint)
-        blocks = candidate.get("render_blocks")
-        if not isinstance(blocks, list):
-            blocks = candidate.get("blocks") if isinstance(candidate.get("blocks"), list) else []
-        if not blocks:
-            return
-
-        richness = 0
-        normalized_blocks: list[dict] = []
-        for block in blocks:
-            if not isinstance(block, dict):
-                continue
-            kind = _scene_block_kind(block)
-            payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-            has_structured = any(
-                payload.get(key) not in (None, "", [], {})
-                for key in (
-                    "x", "categories", "x_axis", "series", "rows", "columns",
-                    "data_points", "points", "items", "totals", "growth", "axes", "formula",
-                )
-            )
-            if kind and (has_structured or kind in {"graph", "table", "image", "diagram"}):
-                normalized_blocks.append(block)
-                richness += 2 if has_structured else 1
-
-        if not normalized_blocks:
-            return
-
-        turn_raw = candidate.get("turn_id") or candidate.get("timestamp") or 0
-        try:
-            turn_id = int(float(turn_raw))
-        except Exception:
-            turn_id = 0
-        normalized = deepcopy(candidate)
-        normalized["render_blocks"] = normalized_blocks
-        normalized["render_block_types"] = list(dict.fromkeys(
-            _scene_block_kind(block) for block in normalized_blocks if _scene_block_kind(block)
-        ))
-        candidates.append((richness, turn_id, source, normalized))
-
-    # Prefer the explicit successful anchor first on equal richness/turn.
-    add_candidate("last_successful_visual_scene", state.get("last_successful_visual_scene"), 0)
-    add_candidate("current_visual_scene", state.get("current_visual_scene"), 1)
-    add_candidate("active_visual_scene", state.get("active_visual_scene"), 2)
-    add_candidate("active_visual_scene_turn", state.get("active_visual_scene_turn"), 3)
-    add_candidate("active_scene_contract", state.get("active_scene_contract"), 4)
-
-    visual_history = state.get("visual_scene_history")
-    if isinstance(visual_history, list):
-        for idx, candidate in enumerate(visual_history[-6:]):
-            add_candidate(f"visual_scene_history[{idx}]", candidate, 10)
-
-    if not candidates:
-        # Final compatibility fallback: the canonical visual selector may still
-        # have access to a scene stored in a legacy location.
-        scene = _best_visual_context(state)
-        if isinstance(scene, dict) and scene:
-            add_candidate("best_visual_context", scene, 20)
-
-    if not candidates:
-        return {}
-
-    # Richness wins over recency so a thin/empty hot slot cannot erase a complete
-    # successful scene. Recency breaks ties among equally rich candidates.
-    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    scene = candidates[0][3]
-
-    blocks = scene.get("render_blocks") if isinstance(scene.get("render_blocks"), list) else scene.get("blocks", [])
-    structured_blocks: list[dict] = []
-    rows: list[dict] = []
-    data_points: list[dict] = []
-    source_ids: list[str] = []
-
-    for block in blocks:
-        if not isinstance(block, dict):
-            continue
-        kind = _scene_block_kind(block)
-        payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-        block_id = _s(block.get("block_id") or block.get("id"))
-        if block_id:
-            source_ids.append(block_id)
-
-        item = {
-            "block_id": block_id,
-            "type": kind,
-            "title": _s(block.get("title") or payload.get("title")),
-        }
-
-        x_values = payload.get("x")
-        if not isinstance(x_values, list):
-            x_values = payload.get("categories")
-        if not isinstance(x_values, list):
-            x_axis = payload.get("x_axis")
-            x_values = x_axis.get("values") if isinstance(x_axis, dict) else []
-
-        series = payload.get("series")
-        compact_series = []
-        if isinstance(series, list):
-            for series_item in series[:12]:
-                if not isinstance(series_item, dict):
-                    continue
-                values = series_item.get("values")
-                if not isinstance(values, list):
-                    values = []
-                clean_values = []
-                for value in values[:60]:
-                    if isinstance(value, (int, float)) and not isinstance(value, bool):
-                        clean_values.append(value)
-                    else:
-                        try:
-                            number = float(str(value).replace(",", "."))
-                            clean_values.append(int(number) if number.is_integer() else number)
-                        except Exception:
-                            clean_values.append(value)
-                compact_series.append({
-                    "name": _s(series_item.get("name") or series_item.get("label")),
-                    "type": _s(series_item.get("type")),
-                    "axis": _s(series_item.get("axis")),
-                    "values": clean_values,
-                })
-
-        if isinstance(x_values, list) and x_values and compact_series:
-            x_values = [_s(value) for value in x_values[:60]]
-            item["x"] = x_values
-            item["series"] = compact_series
-            for pos, period in enumerate(x_values):
-                row = {"period": period}
-                for series_item in compact_series:
-                    values = series_item.get("values") or []
-                    if pos < len(values):
-                        row[series_item.get("name") or f"series_{len(row)}"] = values[pos]
-                rows.append(row)
-
-        columns = payload.get("columns")
-        payload_rows = payload.get("rows")
-        if isinstance(columns, list) and columns:
-            item["columns"] = [_s(value) for value in columns[:30]]
-        if isinstance(payload_rows, list) and payload_rows:
-            item_rows = []
-            for row in payload_rows[:60]:
-                if isinstance(row, dict):
-                    item_rows.append(_quantum_snapshot(row))
-                elif isinstance(row, (list, tuple)):
-                    item_rows.append([_quantum_snapshot(value) for value in list(row)[:30]])
-            if item_rows:
-                item["rows"] = item_rows
-                if not rows and isinstance(columns, list) and columns:
-                    for row in item_rows:
-                        if isinstance(row, list):
-                            rows.append({
-                                _s(columns[pos]) if pos < len(columns) else f"column_{pos+1}": value
-                                for pos, value in enumerate(row)
-                            })
-                        elif isinstance(row, dict):
-                            rows.append(row)
-
-        explicit_points = payload.get("data_points")
-        if isinstance(explicit_points, list) and explicit_points:
-            item["data_points"] = _quantum_snapshot(explicit_points[:60])
-            for point in explicit_points[:60]:
-                if isinstance(point, dict):
-                    data_points.append(_quantum_snapshot(point))
-                elif isinstance(point, (list, tuple)) and len(point) >= 2:
-                    data_points.append({"label": _s(point[0]), "value": _quantum_snapshot(point[1])})
-
-        for key in ("totals", "growth", "axes", "formula"):
-            value = payload.get(key)
-            if value not in (None, "", [], {}):
-                item[key] = _quantum_snapshot(value)
-
-        if any(key in item for key in (
-            "x", "series", "columns", "rows", "data_points", "totals", "growth", "axes", "formula"
-        )):
-            structured_blocks.append(item)
-
-    # De-duplicate data points generated from both explicit data_points and series.
-    unique_points: list[dict] = []
-    seen_points: set[str] = set()
-    for point in data_points:
-        fp = json.dumps(point, ensure_ascii=False, sort_keys=True, default=str)
-        if fp in seen_points:
-            continue
-        seen_points.add(fp)
-        unique_points.append(point)
-
-    if not structured_blocks and not rows and not unique_points:
-        return {}
-
-    return {
-        "scene_id": _s(scene.get("scene_id") or scene.get("id")),
-        "topic": _clip(scene.get("topic") or scene.get("active_topic"), 500),
-        "source": "QUANTUM_PROCESSOR_CANONICAL_SCENE",
-        "selection_source": _s(scene.get("_selection_source")),
-        "structured_blocks": structured_blocks[:12],
-        "rows": rows[:60],
-        "data_points": unique_points[:120],
-        "source_block_ids": list(dict.fromkeys(source_ids))[:24],
-        "lossless_context": True,
-        "continuation_authoritative": True,
-        "presentation_bodies_omitted": True,
-    }
-
 def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -> dict:
     dialog = state.get("dialog", []) if isinstance(state, dict) else []
     recent = []
@@ -3952,17 +3726,7 @@ def _build_processor_control_plane(
     )
 
     resolved_scene = _as_dict(canonical_dialogue.get("resolved_scene"))
-    if continuation or reference_to_previous or mode == "MEMORY_QUERY":
-        if not resolved_scene:
-            active_scene = _best_visual_context(state)
-            if active_scene:
-                resolved_scene = {
-                    "scene_id": _s(active_scene.get("scene_id") or active_scene.get("id")),
-                    "relation": "current_scene",
-                    "source": "QUANTUM_PROCESSOR_SCENE_FALLBACK",
-                    "structured_scene_available": True,
-                }
-    else:
+    if not (continuation or reference_to_previous or mode == "MEMORY_QUERY"):
         resolved_scene = {}
 
     scene_relation = _s(resolved_scene.get("relation")) or (
@@ -4176,23 +3940,6 @@ def _make_request(
     )
     response_guidance = _human_response_guidance()
 
-    # Build the compact context before attaching continuation scene data.
-    # A continuation is never allowed to read an uninitialized/empty context
-    # slot and thereby erase the previously successful scene handoff.
-    context = _compact_context(
-        text,
-        state,
-        mode,
-        _s(control.get("active_topic")),
-        _s(control.get("active_goal")),
-    )
-
-    continuation_scene_data = {}
-    if mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}:
-        continuation_scene_data = _compact_continuation_scene_data(state)
-        if continuation_scene_data:
-            context["continuation_scene_data"] = _quantum_snapshot(continuation_scene_data)
-
     dialogue_contract = {
         "dialog_act": _s(
             canonical_dialogue.get("dialog_act")
@@ -4225,11 +3972,6 @@ def _make_request(
             or _s(control.get("active_topic")),
         "resolved_scene": _as_dict(control.get("resolved_scene"))
             or _as_dict(canonical_dialogue.get("resolved_scene")),
-        "resolved_scene_data_available": bool(continuation_scene_data),
-        "resolved_scene_id": _s(
-            continuation_scene_data.get("scene_id")
-            if isinstance(continuation_scene_data, dict) else ""
-        ),
         "resolved_reference": _s(canonical_dialogue.get("resolved_reference")),
         "resolved_request": _s(canonical_dialogue.get("resolved_request") or text),
         "current_request": _s(text),
@@ -4249,8 +3991,13 @@ def _make_request(
     memory_resolved_request = _s(memory_packet.get("resolved_request"))
     # Memory is evidence only. The canonical Interpretation dialogue contract
     # above remains authoritative and is never mutated from the memory packet.
-    # `context` was deliberately materialized before continuation_scene_data so
-    # continuation handoff cannot depend on an undefined local.
+    context = _compact_context(
+        text,
+        state,
+        mode,
+        _s(control.get("active_topic")),
+        _s(control.get("active_goal")),
+    )
 
     # The immediate canonical scene is part of the same dialogue state. When
     # hot history is absent, carry the measured previous scene through the
@@ -4321,17 +4068,6 @@ def _make_request(
         "context_binding_history_required": bool(
             _as_dict(state.get("_canonical_processor_dialogue", {})).get("history_required")
         ),
-        "continuation_scene_data": {
-            "available": bool(continuation_scene_data),
-            "scene_id": _s(
-                continuation_scene_data.get("scene_id")
-                if isinstance(continuation_scene_data, dict) else ""
-            ),
-            "row_count": len(
-                continuation_scene_data.get("rows", [])
-                if isinstance(continuation_scene_data, dict) else []
-            ),
-        },
     }
 
     if isinstance(state, dict):
@@ -4358,7 +4094,6 @@ def _make_request(
             "dialogue_state": mode,
             "coherence": round(coherence, 4),
             "dialog_act": dialogue_contract["dialog_act"],
-            "continuation_scene_data": deepcopy(continuation_scene_data),
             "history_dependent_task": bool(history_task_context.get("required")),
             "resolved_operands": list(history_task_context.get("resolved_operands") or []),
         },
@@ -4480,21 +4215,17 @@ def _make_request(
         visual_context=(
             {
                 "current_input": current_visual_evidence,
-                "historical_reference": (
-                    {
-                        "scene_id": _s(continuation_scene_data.get("scene_id")),
-                        "source": continuation_scene_data.get("source"),
-                    }
-                    if continuation_scene_data
-                    else (visual if isinstance(visual, dict) else {})
-                ),
-                "continuation_scene_data": continuation_scene_data,
+                "historical_reference": visual if isinstance(visual, dict) else {},
                 "source": "QUANTUM_PROCESSOR",
                 "decision_owner": "QUANTUM_PROCESSOR",
-                "structured_data_preserved": bool(continuation_scene_data),
             }
-            if current_visual_evidence or continuation_scene_data
-            else {}
+            if current_visual_evidence
+            else (
+                visual
+                if isinstance(visual, dict)
+                and mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
+                else {}
+            )
         ),
         available_tools=list(control.get("capabilities") or []),
         requested_outputs=requested_outputs,
@@ -8854,53 +8585,9 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "input_token_budget": 900,
         "single_route": True,
     })
-    # Final Provider-boundary continuation handoff.
-    # IMPORTANT: mode and continuation_scene_data are owned by the canonical
-    # MachineRequest created above. They must never be read from execute() local
-    # scope because those names only exist inside _make_request(). This was the
-    # direct cause of the NameError release crash.
-    request_dialogue = getattr(request, "dialogue_contract", {})
-    if not isinstance(request_dialogue, dict):
-        request_dialogue = {}
-
-    mode = _s(
-        request_dialogue.get("context_dependency")
-        or request_dialogue.get("dialogue_state")
-        or (getattr(request, "quantum_state", {}) or {}).get("dialogue_relation")
-        or (getattr(request, "intent", {}) or {}).get("dialogue_state")
-        or ""
-    ).upper()
-
-    request_conversation = getattr(request, "conversation", {})
-    if not isinstance(request_conversation, dict):
-        request_conversation = {}
-
-    continuation_scene_data = request_conversation.get("continuation_scene_data")
-    if not isinstance(continuation_scene_data, dict):
-        continuation_scene_data = {}
-
-    # The canonical continuation data is also mirrored in visual_context by
-    # _make_request(). Use that mirror only as a transport fallback; never
-    # rebuild or mutate the scene here.
-    if not continuation_scene_data:
-        request_visual_context = getattr(request, "visual_context", {})
-        if isinstance(request_visual_context, dict):
-            candidate = request_visual_context.get("continuation_scene_data")
-            if isinstance(candidate, dict):
-                continuation_scene_data = candidate
-
     # OpenAI Responses API requires max_output_tokens >= 16.
     # Keep the canonical request budget intact, but enforce the transport floor
     # at the final Provider boundary so an invalid value can never be sent.
-    if (
-        mode in {"CONTINUATION", "SAME_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
-        and _best_visual_context(state)
-        and not continuation_scene_data
-    ):
-        raise RuntimeError(
-            "Quantum release blocked: continuation scene data was lost before Provider"
-        )
-
     provider_output_tokens = max(
         OUTPUT_MIN_TOKENS,
         min(OUTPUT_MAX_TOKENS, int(request.response_output_tokens or OUTPUT_MIN_TOKENS)),
@@ -8916,34 +8603,6 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         if isinstance(request.conversation, dict)
         else ""
     )
-    carried_scene = (
-        request.conversation.get("continuation_scene_data")
-        if isinstance(request.conversation, dict) else {}
-    )
-    carried_rows = carried_scene.get("rows", []) if isinstance(carried_scene, dict) else []
-    carried_points = carried_scene.get("data_points", []) if isinstance(carried_scene, dict) else []
-    carried_count = len(carried_rows) or len(carried_points) or len(handoff_pairs)
-    carried_labels = [
-        _s(row.get("period") or row.get("label"))
-        for row in carried_rows[:12]
-        if isinstance(row, dict)
-    ]
-    if not carried_labels:
-        carried_labels = [p[0] for p in handoff_pairs[:12]]
-    # Hard handoff invariant: when the canonical dialogue state says this is a
-    # continuation/reference, the previous successful scene data must be
-    # materially present in the Provider request. We do not manufacture it here.
-    if mode in {"CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}:
-        if not continuation_scene_data:
-            raise RuntimeError(
-                "Quantum release blocked: continuation request reached Provider boundary without scene data"
-            )
-        request_conversation["continuation_scene_data"] = _quantum_snapshot(
-            continuation_scene_data
-        )
-        if hasattr(request, "conversation"):
-            request.conversation = request_conversation
-
     print("🧭 PROVIDER INPUT SCENE:", {
         "request": _clip(
             _s(request.conversation.get("current_request"))
@@ -8951,17 +8610,8 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
             500,
         ),
         "requested_outputs": list(request.requested_outputs or []),
-        "data_points": carried_count,
-        "data_labels": carried_labels,
-        "continuation_scene_data": bool(carried_scene),
-        "continuation_scene_id": _s(
-            carried_scene.get("scene_id") if isinstance(carried_scene, dict) else ""
-        ),
-        "continuation_scene_rows": len(carried_rows),
-        "continuation_scene_data_points": len(carried_points),
-        "continuation_scene_authoritative": bool(
-            isinstance(carried_scene, dict) and carried_scene.get("continuation_authoritative")
-        ),
+        "data_points": len(handoff_pairs),
+        "data_labels": [p[0] for p in handoff_pairs[:12]],
         "input_budget": 900,
         "provider_calls": 1,
     })
