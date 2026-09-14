@@ -175,12 +175,23 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
             "required_competencies", "required_artifacts", "routing",
             "constraints", "metadata", "dialogue_contract",
             "response_decision", "semantic", "cognition",
-            "semantic_context_packet",
+            "semantic_context_packet", "scene_composition", "turn_meaning",
             "response_complexity", "response_output_tokens", "quantum_state",
         )
+        # Canonical structural fields must survive serialization even when their
+        # valid value is an empty container. Generic "drop empty values" logic is
+        # unsafe here because [] is a valid scene_composition for text-only turns.
+        canonical_structural_fields = {
+            "semantic_context_packet",
+            "scene_composition",
+            "turn_meaning",
+        }
         for name in names:
             value = getattr(machine_request, name, None)
-            if value not in (None, "", [], {}):
+            if name in canonical_structural_fields:
+                if value is not None:
+                    raw[name] = value
+            elif value not in (None, "", [], {}):
                 raw[name] = value
         # Executor-added attributes are read from the same MachineRequest,
         # not from a second route.
@@ -755,8 +766,13 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     # Pass it as its own provider context surface so multiple task parts remain
     # distinct instead of being reduced to one dominant representation.
     scene_composition = payload.get("scene_composition")
+    if scene_composition is None:
+        # A text-only turn has a valid empty composition. The canonical Processor
+        # still owns the field; absence after serialization is a transport defect,
+        # not a reason to reinterpret the request.
+        scene_composition = []
     if not isinstance(scene_composition, list):
-        raise ValueError("scene_composition must be supplied by the canonical Processor packet")
+        raise ValueError("scene_composition must be a list on the canonical Processor packet")
     if isinstance(scene_composition, list) and scene_composition:
         fields.append(("SCENE_COMPOSITION", scene_composition))
 
