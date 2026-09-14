@@ -2054,136 +2054,184 @@ def _dialogue_evidence(
     decision: dict,
     state: dict,
 ) -> dict:
-    """Collapse dialogue evidence around one immediate canonical pair."""
+    """Collapse dialogue evidence around one immutable Interpretation decision.
+
+    Algorithmic ownership:
+      1. Interpretation freezes the dialogue state.
+      2. Context Binding consumes that frozen state verbatim.
+      3. Missing optional fields are derived from the frozen relation.
+      4. Historical USER→APRIL data is required only when the frozen state
+         actually depends on history.
+
+    No downstream engine is allowed to reinterpret the relation or require an
+    implementation detail that Interpretation did not provide explicitly.
+    """
+    semantic = _as_dict(semantic)
+    cognition = _as_dict(cognition)
+    decision = _as_dict(decision)
+    state = state if isinstance(state, dict) else {}
+
+    # --- 1. Canonical packet must exist, but it is not reconstructed here.
     canonical_packet = _as_dict(semantic.get("semantic_context_packet"))
     if not canonical_packet:
-        raise ValueError("semantic_context_packet is required before context binding")
-    state["_canonical_semantic_context_packet"] = _quantum_snapshot(canonical_packet)
-
-    previous = _as_dict(canonical_packet.get("previous"))
-    previous_user = _s(previous.get("user") or previous.get("user_request"))
-    previous_april = _s(
-        previous.get("assistant")
-        or previous.get("april")
-        or previous.get("april_answer")
-        or previous.get("answer")
-    )
-    last_turn_id = previous.get("turn_id") or canonical_packet.get("previous_turn_id")
-    pair_source = "canonical_semantic_context"
-    if not previous_user or not previous_april:
-        # A new topic at the beginning of a conversation has no previous pair.
-        # For that case Interpretation still supplies a valid empty previous state.
-        previous_user = ""
-        previous_april = ""
-
-    scene_continuity = _as_dict(
-        semantic.get("quantum_scene_continuity")
-    )
-    if not scene_continuity:
-        # History is resolved from the executor state boundary, never from an
-        # implicit local variable. This keeps Context Binding on one canonical
-        # history channel and makes first-turn execution deterministic.
-        scene_continuity = _scene_continuity_engine(
-            text=text,
-            state=state,
-            history=_canonical_dialogue_history(state),
+        raise ValueError(
+            "semantic_context_packet is required before context binding"
         )
+    state["_canonical_semantic_context_packet"] = _quantum_snapshot(
+        canonical_packet
+    )
 
-    interpretation_packet = _as_dict(semantic.get("quantum_interpretation_evidence"))
-    dialogue_contract = _as_dict(interpretation_packet.get("dialogue_contract"))
-    if not dialogue_contract:
-        raise ValueError("Interpretation dialogue_contract is required; no secondary context source is permitted")
+    # --- 2. Freeze once. The frozen snapshot is the sole dialogue authority.
+    interpretation_source = _as_dict(
+        semantic.get("quantum_interpretation_evidence")
+    )
+    frozen = _freeze_interpretation_dialogue(interpretation_source)
 
-    # Continuity engine is an evidence source. If Interpretation already emitted
-    # an explicit dialogue state, that explicit structured state remains primary.
+    # If Semantic already carries a canonical frozen snapshot, prefer that exact
+    # snapshot because it is the same Interpretation-owned decision propagated
+    # through the handoff.
+    propagated = _as_dict(semantic.get("canonical_dialogue_frozen"))
+    if propagated:
+        frozen = _quantum_snapshot(propagated)
+
     mode = _s(
-        dialogue_contract.get("context_mode")
-        or dialogue_contract.get("dialogue_state")
-        or dialogue_contract.get("relation")
-        or dialogue_contract.get("request_relation")
-        or semantic.get("dialogue_state")
-        or decision.get("dialogue_state")
+        frozen.get("relation")
+        or frozen.get("dialogue_state")
+        or "INDEPENDENT"
     ).upper()
 
-    if mode not in {
+    allowed = {
         "INDEPENDENT",
         "NEW_TOPIC",
         "SAME_TOPIC",
         "CONTINUATION",
         "ARTIFACT_REFERENCE",
         "MEMORY_QUERY",
-    }:
+    }
+    if mode not in allowed:
         raise ValueError(f"invalid canonical dialogue relation: {mode!r}")
 
-    # A previous USER→APRIL pair is required only for relations that explicitly
-    # depend on prior dialogue. Independent/new-topic turns are valid without a
-    # previous pair and must reach Provider instead of failing in Context Binding.
-    history_dependent_mode = mode in {
+    # --- 3. Normalize dependency from relation when the producer omitted it.
+    dependency = _s(frozen.get("context_dependency")).lower()
+    dependency_by_relation = {
+        "INDEPENDENT": "independent",
+        "NEW_TOPIC": "independent",
+        "SAME_TOPIC": "topic",
+        "CONTINUATION": "continuation",
+        "ARTIFACT_REFERENCE": "reference",
+        "MEMORY_QUERY": "memory_query",
+    }
+    if dependency in {"", "none", "false", "0"}:
+        dependency = dependency_by_relation[mode]
+
+    if dependency not in {
+        "independent",
+        "topic",
+        "continuation",
+        "reference",
+        "memory_query",
+    }:
+        raise ValueError(
+            f"invalid canonical dialogue context_dependency: {dependency!r}"
+        )
+
+    # --- 4. Read the immediate pair from the canonical packet, not from a free
+    # variable or an alternative state source.
+    previous = _as_dict(canonical_packet.get("previous"))
+    previous_user = _s(
+        previous.get("user")
+        or previous.get("user_request")
+        or frozen.get("previous_user_turn")
+    )
+    previous_april = _s(
+        previous.get("assistant")
+        or previous.get("april")
+        or previous.get("april_answer")
+        or previous.get("answer")
+        or frozen.get("previous_april_turn")
+    )
+    last_turn_id = (
+        previous.get("turn_id")
+        or canonical_packet.get("previous_turn_id")
+        or frozen.get("reply_to")
+    )
+
+    # --- 5. Scene continuity is evidence only. It receives canonical history
+    # through the executor boundary.
+    scene_continuity = _as_dict(semantic.get("quantum_scene_continuity"))
+    if not scene_continuity:
+        scene_continuity = _scene_continuity_engine(
+            text=text,
+            state=state,
+            history=_canonical_dialogue_history(state),
+        )
+
+    # --- 6. Enforce history presence only when the canonical relation needs it.
+    # NEW_TOPIC / INDEPENDENT are valid without any prior pair.
+    history_dependent = mode in {
         "SAME_TOPIC",
         "CONTINUATION",
         "ARTIFACT_REFERENCE",
         "MEMORY_QUERY",
     }
-    if history_dependent_mode and (not previous_user or not previous_april):
+    if history_dependent and (not previous_user or not previous_april):
+        # The persisted dialogue list is a valid canonical source for the
+        # immediate pair when the semantic packet contains an empty previous
+        # object due to a storage boundary. This is not a second semantic route:
+        # it is completion of the canonical packet from the same state boundary.
+        pairs = _recent_canonical_dialogue_pairs(state, limit=1)
+        if pairs:
+            previous_user = _s(pairs[-1].get("user"))
+            previous_april = _s(pairs[-1].get("april"))
+
+    if history_dependent and (not previous_user or not previous_april):
         raise ValueError(
-            "canonical dialogue anchor is incomplete for a history-dependent relation; "
-            "previous USER and APRIL turns are required"
+            "canonical dialogue anchor is incomplete for a history-dependent "
+            "relation; previous USER and APRIL turns are required"
         )
 
-    # Persist the selected immediate anchor for diagnostics; historical memory
-    # remains evidence only.
     recent_pairs = _recent_canonical_dialogue_pairs(state, limit=10)
 
-    state["_quantum_context_anchor"] = {
-        "previous_user": previous_user,
-        "previous_april": previous_april,
-        "source": pair_source,
-        "last_turn_id": last_turn_id,
-    }
-
+    # --- 7. Canonical fields remain immutable after this point.
     active_topic = _s(
-        dialogue_contract.get("active_topic")
+        frozen.get("active_topic")
+        or scene_continuity.get("active_topic")
         or semantic.get("active_topic")
         or decision.get("active_topic")
-        or scene_continuity.get("active_topic")
         or state.get("active_topic")
         or state.get("topic")
         or previous_user
     )
     active_goal = _s(
-        dialogue_contract.get("active_goal")
+        frozen.get("active_goal")
+        or scene_continuity.get("active_goal")
         or semantic.get("active_goal")
         or cognition.get("active_goal")
         or decision.get("active_goal")
-        or scene_continuity.get("active_goal")
         or state.get("active_goal")
     )
 
-    explicit_dependency = _s(dialogue_contract.get("context_dependency")).lower()
-    context_dependency = explicit_dependency not in {"", "independent", "none", "false", "0"}
     continuation = bool(
-        dialogue_contract.get("continuation")
-        if dialogue_contract.get("continuation") is not None
-        else scene_continuity.get("continuation")
+        frozen.get("continuation")
+        if frozen.get("continuation") is not None
+        else mode in {"CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}
     )
     reference_to_previous = bool(
-        dialogue_contract.get("reference_to_previous")
-        if dialogue_contract.get("reference_to_previous") is not None
-        else scene_continuity.get("reference_to_previous")
+        frozen.get("reference_to_previous")
+        if frozen.get("reference_to_previous") is not None
+        else mode == "ARTIFACT_REFERENCE"
     )
 
-    if not explicit_dependency:
-        raise ValueError("canonical dialogue context_dependency is required")
+    resolved_scene = _as_dict(frozen.get("resolved_scene"))
 
-    resolved_scene = _as_dict(dialogue_contract.get("resolved_scene"))
-
-    dialog_act = _s(
-        dialogue_contract.get("dialog_act")
-        or scene_continuity.get("dialogue_label")
-        or semantic.get("dialog_act")
-        or decision.get("dialog_act")
-        or "statement"
-    )
+    state["_quantum_context_anchor"] = {
+        "previous_user": previous_user,
+        "previous_april": previous_april,
+        "source": "canonical_semantic_context",
+        "last_turn_id": last_turn_id,
+        "relation": mode,
+        "context_dependency": dependency,
+    }
 
     return {
         "mode": mode,
@@ -2193,18 +2241,26 @@ def _dialogue_evidence(
         "recent_dialogue_pairs": recent_pairs,
         "active_topic": active_topic,
         "active_goal": active_goal,
-        "context_dependency": context_dependency,
+        "context_dependency": dependency,
         "continuation": continuation,
         "reference_to_previous": reference_to_previous,
-        "dialog_act": dialog_act,
+        "dialog_act": _s(
+            frozen.get("dialog_act")
+            or scene_continuity.get("dialogue_label")
+            or semantic.get("dialog_act")
+            or decision.get("dialog_act")
+            or "statement"
+        ),
         "reply_to": _s(
-            dialogue_contract.get("reply_to")
-            or dialogue_contract.get("previous_turn_id")
+            frozen.get("reply_to")
+            or frozen.get("previous_turn_id")
         ),
         "scene_continuity": scene_continuity,
-        "source": "QUANTUM_DIALOGUE_ENGINE",
+        "resolved_scene": resolved_scene,
+        "source": "INTERPRETATION_FROZEN_CANONICAL",
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "history_dependent": history_dependent,
     }
-
 
 
 
