@@ -23,7 +23,6 @@ from blocks.interpretation_layer import (
     build_turn_meaning_state,
     QUANTUM_EVIDENCE_FUSION,
     QUANTUM_DIALOGUE_ENGINE,
-    INTERPRETATION_ENGINE_VERSION,
 )
 from blocks.semantic_core import analyze as semantic_analyze
 from blocks.reasoning_state import build_reasoning_state
@@ -838,12 +837,14 @@ class QuantumMemoryUnderstandingEngine:
         """
         if not query or not candidates:
             return {}, "none"
-        # The canonical semantic measurement has one route: the shared quantum
-        # embedding engine. A missing/failed engine is an execution error, not a
-        # reason to switch to a second lexical interpretation path.
-        from blocks.interpretation_layer import QUANTUM_EMBEDDING_ENGINE
-        values = QUANTUM_EMBEDDING_ENGINE.similarities(query, candidates)
-        return values, "shared_quantum_embedding"
+        try:
+            # Lazy import avoids a circular import: interpretation_layer owns the
+            # shared encoder/cache, while this engine only consumes its measurement.
+            from blocks.interpretation_layer import QUANTUM_EMBEDDING_ENGINE
+            values = QUANTUM_EMBEDDING_ENGINE.similarities(query, candidates)
+            return values, "shared_quantum_embedding"
+        except Exception:
+            return {c: QuantumMemoryUnderstandingEngine._lexical_score(query, c) for c in candidates}, "lexical_fallback"
 
     def _need_memory(
         self,
@@ -1802,21 +1803,40 @@ def _recent_canonical_dialogue_pairs(state: dict, limit: int = 10) -> list[dict[
 
 
 def _latest_canonical_dialogue_pair(state: dict) -> tuple[str, str, Any, str]:
-    """Read the immediate dialogue anchor from the canonical semantic state only."""
+    """Return the newest adjacent USER→APRIL pair in the current conversation.
+
+    The pair is resolved structurally from the hot dialog. Historical memory can
+    support recall but can never replace this immediate dialogue anchor.
+    """
     if not isinstance(state, dict):
-        raise ValueError("state is required for canonical dialogue anchor")
-    packet = _as_dict(state.get("_canonical_semantic_context_packet"))
-    previous = _as_dict(packet.get("previous"))
-    user = _s(previous.get("user") or previous.get("user_request"))
-    assistant = _s(
-        previous.get("assistant")
-        or previous.get("april")
-        or previous.get("april_answer")
-        or previous.get("answer")
+        return "", "", None, "none"
+
+    current_scene = state.get("current_visual_scene")
+    if isinstance(current_scene, dict):
+        user = _s(current_scene.get("user_request") or current_scene.get("current_request"))
+        assistant = _s(current_scene.get("april_answer") or current_scene.get("answer"))
+        if user and assistant:
+            return user, assistant, current_scene.get("turn_id"), "current_visual_scene"
+
+    dialog = state.get("dialog", [])
+    if isinstance(dialog, list):
+        for idx in range(len(dialog) - 2, -1, -1):
+            left = dialog[idx] if isinstance(dialog[idx], dict) else {}
+            right = dialog[idx + 1] if idx + 1 < len(dialog) and isinstance(dialog[idx + 1], dict) else {}
+            left_role = _s(left.get("role")).lower()
+            right_role = _s(right.get("role")).lower()
+            if left_role in {"user", "human"} and right_role in {"assistant", "april", "bot"}:
+                user = _s(left.get("content") or left.get("text"))
+                assistant = _s(right.get("content") or right.get("answer") or right.get("text"))
+                if user and assistant:
+                    return user, assistant, right.get("turn_id") or left.get("turn_id"), "dialog_adjacent_pair"
+
+    return (
+        _s(state.get("last_user_turn")),
+        _s(state.get("last_april_turn")),
+        None,
+        "state_last_turn_fallback",
     )
-    if not user or not assistant:
-        raise ValueError("canonical semantic context packet has no complete previous USER→APRIL turn")
-    return user, assistant, previous.get("turn_id") or packet.get("previous_turn_id"), "canonical_semantic_context"
 
 
 def _usable_visual_scene(state: dict) -> dict:
@@ -2039,26 +2059,8 @@ def _dialogue_evidence(
     state: dict,
 ) -> dict:
     """Collapse dialogue evidence around one immediate canonical pair."""
-    canonical_packet = _as_dict(semantic.get("semantic_context_packet"))
-    if not canonical_packet:
-        raise ValueError("semantic_context_packet is required before context binding")
-    state["_canonical_semantic_context_packet"] = _quantum_snapshot(canonical_packet)
-
-    previous = _as_dict(canonical_packet.get("previous"))
-    previous_user = _s(previous.get("user") or previous.get("user_request"))
-    previous_april = _s(
-        previous.get("assistant")
-        or previous.get("april")
-        or previous.get("april_answer")
-        or previous.get("answer")
-    )
-    last_turn_id = previous.get("turn_id") or canonical_packet.get("previous_turn_id")
-    pair_source = "canonical_semantic_context"
-    if not previous_user or not previous_april:
-        # A new topic at the beginning of a conversation has no previous pair.
-        # For that case Interpretation still supplies a valid empty previous state.
-        previous_user = ""
-        previous_april = ""
+    previous_user, previous_april, last_turn_id, pair_source = _latest_canonical_dialogue_pair(state)
+    dialog = state.get("dialog", []) if isinstance(state, dict) else []
 
     scene_continuity = _as_dict(
         semantic.get("quantum_scene_continuity")
@@ -2070,13 +2072,17 @@ def _dialogue_evidence(
             history=dialog,
         )
 
-    if not previous_user or not previous_april:
-        raise ValueError("canonical dialogue anchor is incomplete; previous USER and APRIL turns are required")
+    if not previous_user:
+        previous_user = _s(scene_continuity.get("previous_user"))
+    if not previous_april:
+        previous_april = _s(scene_continuity.get("previous_april"))
+    if not last_turn_id:
+        last_turn_id = _as_dict(state.get("current_visual_scene")).get("turn_id")
 
     interpretation_packet = _as_dict(semantic.get("quantum_interpretation_evidence"))
     dialogue_contract = _as_dict(interpretation_packet.get("dialogue_contract"))
     if not dialogue_contract:
-        raise ValueError("Interpretation dialogue_contract is required; no secondary context source is permitted")
+        dialogue_contract = _as_dict(semantic.get("dialogue_context_field"))
 
     # Continuity engine is an evidence source. If Interpretation already emitted
     # an explicit dialogue state, that explicit structured state remains primary.
@@ -2097,7 +2103,10 @@ def _dialogue_evidence(
         "ARTIFACT_REFERENCE",
         "MEMORY_QUERY",
     }:
-        raise ValueError(f"invalid canonical dialogue relation: {mode!r}")
+        mode = ""
+
+    if not mode:
+        mode = _s(scene_continuity.get("mode")).upper() or "INDEPENDENT"
 
     # Persist the selected immediate anchor for diagnostics; historical memory
     # remains evidence only.
@@ -2141,10 +2150,30 @@ def _dialogue_evidence(
         else scene_continuity.get("reference_to_previous")
     )
 
+    # Structured continuity evidence can promote the state when the canonical
+    # Interpretation packet did not emit a full contract.
     if not explicit_dependency:
-        raise ValueError("canonical dialogue context_dependency is required")
+        context_dependency = bool(
+            continuation
+            or reference_to_previous
+            or mode in {"CONTINUATION", "ARTIFACT_REFERENCE", "SAME_TOPIC", "MEMORY_QUERY"}
+        )
 
     resolved_scene = _as_dict(dialogue_contract.get("resolved_scene"))
+    if not resolved_scene and scene_continuity.get("scene_id"):
+        resolved_scene = {
+            "scene_id": _s(scene_continuity.get("scene_id")),
+            "relation": (
+                "current_scene"
+                if continuation or reference_to_previous
+                else "same_topic"
+                if mode == "SAME_TOPIC"
+                else "new_topic"
+                if mode == "NEW_TOPIC"
+                else "independent"
+            ),
+            "source": "quantum_scene_continuity_engine",
+        }
 
     dialog_act = _s(
         dialogue_contract.get("dialog_act")
@@ -2656,19 +2685,12 @@ def _quantum_context_binding(
             semantic.get("quantum_dynamic_memory_evidence")
         ),
     )
-    # Interpretation is the semantic owner of the dialogue relation. The
-    # memory/vector branch is evidence for resolving the referenced object, but
-    # it must not demote an already-collapsed CONTINUATION / ARTIFACT_REFERENCE
-    # into INDEPENDENT simply because no memory-part vector was proved.
-    frozen_relation = _s(
+    relation = _s(consensus.get("relation")).upper() or _s(
         frozen.get("relation")
         or vector.get("relation")
         or scene.get("mode")
         or "INDEPENDENT"
     ).upper()
-    consensus_relation = _s(consensus.get("relation")).upper()
-    relation = consensus_relation or frozen_relation
-
     continuation = bool(
         consensus.get("continuation")
         or frozen.get("continuation")
@@ -2681,33 +2703,6 @@ def _quantum_context_binding(
         or scene.get("reference_to_previous")
         or vector.get("reference_to_previous")
     )
-
-    # Preserve an explicit semantic continuation/reference decision from
-    # Interpretation when the auxiliary memory consensus is neutral/independent.
-    # This is not a trigger: the relation was already semantically measured by
-    # Interpretation and frozen before downstream engines ran.
-    if frozen_relation in {
-        "CONTINUATION",
-        "CONTINUE_TOPIC",
-        "ARTIFACT_REFERENCE",
-        "MEMORY_QUERY",
-    }:
-        relation = frozen_relation
-        continuation = continuation or frozen_relation in {
-            "CONTINUATION",
-            "CONTINUE_TOPIC",
-            "ARTIFACT_REFERENCE",
-            "MEMORY_QUERY",
-        }
-        reference = reference or frozen_relation == "ARTIFACT_REFERENCE"
-
-    # A fresh semantic boundary is authoritative in the opposite direction.
-    # When Interpretation explicitly says NEW_TOPIC, downstream memory evidence
-    # cannot reattach the new request to an old dialogue branch.
-    if frozen_relation == "NEW_TOPIC":
-        relation = "NEW_TOPIC"
-        continuation = False
-        reference = False
 
     # Memory may strengthen a reference only after the CONTEXT was interpreted
     # against at least one decomposed memory part. Memory alone cannot create a
@@ -3364,80 +3359,6 @@ def _adaptive_output_budget(text: str, semantic: dict, cognition: dict, decision
     """Continuous structural capacity with representation-specific envelopes."""
     return _quantum_budget_from_64(_quantum_64_field(text, semantic, cognition, decision))
 
-def _semantic_compact_for_provider(value: Any, *, max_chars: int = 1600) -> Any:
-    """Create a processor-owned semantic projection for the Provider envelope.
-
-    This is not character truncation of the whole packet.  It preserves the
-    fields that determine meaning/continuity first, then recursively retains
-    the most informative values until the Provider envelope fits.
-    """
-    priority = (
-        "current_request", "resolved_request", "relation", "context_dependency",
-        "continuation", "reference_to_previous", "active_topic", "active_goal",
-        "resolved_reference", "selected_reference", "previous_user_turn",
-        "previous_april_turn", "previous_result", "open_task", "history_task_context",
-        "established", "facts", "numeric_results", "resolved_operands",
-        "turn_meaning_transition", "dialogue_delta", "scene_composition",
-        "requested_outputs", "response_guidance",
-    )
-
-    def scalar(v: Any, limit: int) -> Any:
-        if v is None or isinstance(v, (bool, int, float)):
-            return v
-        if isinstance(v, str):
-            s = v.strip()
-            if len(s) <= limit:
-                return s
-            # Preserve semantic head + conclusion rather than blindly taking
-            # the first N characters.
-            head = max(1, int(limit * 0.72))
-            tail = max(1, limit - head - 24)
-            return f"{s[:head].rstrip()} … {s[-tail:].lstrip()}"
-        return None
-
-    def build(v: Any, budget: int, depth: int = 0) -> Any:
-        if budget <= 0 or depth > 3:
-            return None
-        if isinstance(v, (str, bool, int, float)) or v is None:
-            return scalar(v, budget)
-        if isinstance(v, dict):
-            out = {}
-            keys = [k for k in priority if k in v] + [k for k in v if k not in priority]
-            for k in keys:
-                child_budget = max(40, min(520, budget - len(json.dumps(out, ensure_ascii=False, default=str))))
-                if child_budget <= 0:
-                    break
-                item = build(v[k], child_budget, depth + 1)
-                if item not in (None, "", [], {}):
-                    out[str(k)] = item
-                if len(json.dumps(out, ensure_ascii=False, default=str)) >= budget:
-                    break
-            return out
-        if isinstance(v, (list, tuple, set)):
-            out=[]
-            for item in list(v)[:8]:
-                child_budget=max(40, min(420, budget - len(json.dumps(out, ensure_ascii=False, default=str))))
-                if child_budget <= 0:
-                    break
-                built=build(item, child_budget, depth + 1)
-                if built not in (None, "", [], {}):
-                    out.append(built)
-                if len(json.dumps(out, ensure_ascii=False, default=str)) >= budget:
-                    break
-            return out
-        return scalar(str(v), budget)
-
-    compact = build(value, max_chars)
-    if isinstance(compact, dict):
-        compact["compression"] = {
-            "mode": "semantic_projection",
-            "owner": "QUANTUM_PROCESSOR",
-            "preserve_current_request": True,
-            "preserve_context_relation": True,
-        }
-    return compact
-
-
 def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -> dict:
     dialog = state.get("dialog", []) if isinstance(state, dict) else []
     recent = []
@@ -3778,9 +3699,14 @@ def _build_processor_control_plane(
     memory_active = bool(memory_packet.get("active"))
     memory_continuation = bool(memory_packet.get("continuation"))
     memory_resolved = bool(memory_reference.get("resolved"))
-    canonical_dialogue = _as_dict(semantic.get("canonical_dialogue_frozen"))
-    if not canonical_dialogue:
-        raise ValueError("canonical_dialogue_frozen is required from Interpretation; no secondary dialogue route is permitted")
+    canonical_dialogue = _as_dict(
+        state.get("_canonical_processor_dialogue")
+        or semantic.get("canonical_dialogue_frozen")
+        or state.get("_canonical_interpretation_dialogue")
+        or _freeze_interpretation_dialogue(
+            _as_dict(semantic.get("quantum_interpretation_evidence"))
+        )
+    )
 
     interpretation_evidence = _as_dict(semantic.get("quantum_interpretation_evidence"))
     history_task_context = _as_dict(
@@ -3975,13 +3901,24 @@ def _make_request(
     dialogue_contract_source = _as_dict(
         _as_dict(semantic.get("quantum_interpretation_evidence")).get("dialogue_contract")
     )
-    canonical_dialogue = _as_dict(semantic.get("canonical_dialogue_frozen"))
-    if not canonical_dialogue:
-        raise ValueError("canonical_dialogue_frozen is required from Interpretation; no secondary dialogue route is permitted")
+    canonical_dialogue = _as_dict(
+        state.get("_canonical_processor_dialogue")
+        or semantic.get("canonical_dialogue_frozen")
+        or state.get("_canonical_interpretation_dialogue")
+        or _freeze_interpretation_dialogue(
+            _as_dict(semantic.get("quantum_interpretation_evidence"))
+        )
+    )
     # History-task context belongs to the Interpretation packet.  _make_request
     # must materialize it locally before any downstream field reads it; otherwise
     # an otherwise valid request crashes with NameError before Provider release.
-    history_task_context = _as_dict(semantic_context_packet.get("history_task_context"))
+    history_task_context = _as_dict(
+        _as_dict(semantic.get("quantum_interpretation_evidence")).get("history_task_context")
+        or canonical_dialogue.get("history_task_context")
+        or _as_dict(semantic.get("dialogue_vector")).get("history_task_context")
+        or _as_dict(semantic.get("context_resolution")).get("history_task_context")
+        or _as_dict(semantic.get("semantic_profile")).get("history_task_context")
+    )
     if _s(canonical_dialogue.get("relation")).upper() in {"CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}:
         history_snapshot = {
             "required": bool(history_task_context.get("required")),
@@ -4002,15 +3939,6 @@ def _make_request(
         conversation_id=scope_conversation_id,
     )
     response_guidance = _human_response_guidance()
-
-    semantic_context_packet = _as_dict(semantic.get("semantic_context_packet"))
-    if not semantic_context_packet:
-        raise ValueError("semantic_context_packet is required from Interpretation; no fallback source is permitted")
-    # Processor owns semantic compaction. Provider remains the final envelope guard.
-    semantic_context_packet = _semantic_compact_for_provider(semantic_context_packet, max_chars=1600)
-    semantic_context_packet = _quantum_snapshot(semantic_context_packet)
-    semantic["semantic_context_packet"] = semantic_context_packet
-    state["_canonical_semantic_context_packet"] = semantic_context_packet
 
     dialogue_contract = {
         "dialog_act": _s(
@@ -4047,7 +3975,6 @@ def _make_request(
         "resolved_reference": _s(canonical_dialogue.get("resolved_reference")),
         "resolved_request": _s(canonical_dialogue.get("resolved_request") or text),
         "current_request": _s(text),
-        "semantic_context_packet": _quantum_snapshot(semantic_context_packet),
         "response_guidance": response_guidance,
         "visual_input_present": bool(current_visual_evidence),
         "visual_input_status": (
@@ -4172,7 +4099,6 @@ def _make_request(
         },
         conversation={
             "current_request": _s(text),
-            "semantic_context_packet": _quantum_snapshot(semantic_context_packet),
             "dialogue_contract": dialogue_contract,
             "response_guidance": response_guidance,
             "current_visual_evidence": current_visual_evidence,
@@ -4372,7 +4298,7 @@ def _make_request(
     # Canonical OpenAI Responses API floor: never allow 0..15.
     response_budget = max(
         OUTPUT_MIN_TOKENS,
-        min(OUTPUT_MAX_TOKENS, int(response_budget or 1024)),
+        min(OUTPUT_MAX_TOKENS, int(response_budget or OUTPUT_MIN_TOKENS)),
     )
     request.response_complexity = complexity
     request.response_output_tokens = response_budget
@@ -4380,7 +4306,6 @@ def _make_request(
     request.quantum_state = {
         "dialogue": dialogue_state,
         "dialogue_canonical": _quantum_snapshot(canonical_dialogue),
-        "semantic_context_packet": _quantum_snapshot(semantic_context_packet),
         "representation": control.get("representation_state", {}),
         "measured_output": measured_output,
         "geometry_contract": (
@@ -7411,12 +7336,6 @@ def _persist_turn_meaning(
     what April actually answered instead of reconstructing the previous turn from
     raw chat text or searching old memory first.
     """
-    previous_meaning = deepcopy(state.get("last_turn_meaning")) if isinstance(state.get("last_turn_meaning"), dict) else {}
-    inherited_state = (
-        previous_meaning.get("dialogue_state")
-        if isinstance(previous_meaning.get("dialogue_state"), dict)
-        else previous_meaning
-    )
     meaning = build_turn_meaning_state(
         user_request,
         answer,
@@ -7424,7 +7343,6 @@ def _persist_turn_meaning(
         summary=summary,
         turn_id=turn_id,
         scene_id=scene_id,
-        inherited_state=inherited_state,
     )
     state["last_turn_meaning"] = _quantum_snapshot(meaning)
     history = state.get("turn_meaning_history")
@@ -7800,7 +7718,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     print("🧠 APRIL HISTORY TASK CONTEXT: MATERIALIZED_BEFORE_REQUEST")
     print("🧠 APRIL DIALOGUE MEMORY WINDOW: enabled (10 pairs)")
     print("🧠 APRIL HISTORY TASK BRIDGE: processor-context-binding-owned")
-    print("🧠 APRIL EXPECTED INTERPRETATION:", INTERPRETATION_ENGINE_VERSION)
+    print("🧠 APRIL EXPECTED INTERPRETATION: quantum_interpretation_engine_v12_probabilistic_context_reconstruction_10turn_arithmetic_followup_v5")
     """
     ONE ROUTE / UNIFIED MATRIX PROCESSOR / ONE COLLAPSE / ONE PROVIDER CALL.
 
@@ -8672,7 +8590,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     # at the final Provider boundary so an invalid value can never be sent.
     provider_output_tokens = max(
         OUTPUT_MIN_TOKENS,
-        min(OUTPUT_MAX_TOKENS, int(request.response_output_tokens or 1024)),
+        min(OUTPUT_MAX_TOKENS, int(request.response_output_tokens or OUTPUT_MIN_TOKENS)),
     )
     request.response_output_tokens = provider_output_tokens
     request.max_output_tokens = provider_output_tokens
