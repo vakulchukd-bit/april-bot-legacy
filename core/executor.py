@@ -3904,10 +3904,20 @@ def _make_request(
     canonical_dialogue = _as_dict(semantic.get("canonical_dialogue_frozen"))
     if not canonical_dialogue:
         raise ValueError("canonical_dialogue_frozen is required from Interpretation; no secondary dialogue route is permitted")
-    # History-task context belongs to the Interpretation packet.  _make_request
-    # must materialize it locally before any downstream field reads it; otherwise
-    # an otherwise valid request crashes with NameError before Provider release.
-    history_task_context = _as_dict(semantic_context_packet.get("history_task_context"))
+    # History-task context belongs to the Interpretation packet. Materialize the
+    # canonical packet before any downstream field reads it.
+    semantic_context_packet = _as_dict(semantic.get("semantic_context_packet"))
+    if not semantic_context_packet:
+        raise ValueError(
+            "semantic_context_packet is required from Interpretation; no fallback source is permitted"
+        )
+    semantic_context_packet = _quantum_snapshot(semantic_context_packet)
+    semantic["semantic_context_packet"] = semantic_context_packet
+    state["_canonical_semantic_context_packet"] = semantic_context_packet
+
+    history_task_context = _as_dict(
+        semantic_context_packet.get("history_task_context")
+    )
     if _s(canonical_dialogue.get("relation")).upper() in {"CONTINUATION", "ARTIFACT_REFERENCE", "MEMORY_QUERY"}:
         history_snapshot = {
             "required": bool(history_task_context.get("required")),
@@ -3928,13 +3938,6 @@ def _make_request(
         conversation_id=scope_conversation_id,
     )
     response_guidance = _human_response_guidance()
-
-    semantic_context_packet = _as_dict(semantic.get("semantic_context_packet"))
-    if not semantic_context_packet:
-        raise ValueError("semantic_context_packet is required from Interpretation; no fallback source is permitted")
-    semantic_context_packet = _quantum_snapshot(semantic_context_packet)
-    semantic["semantic_context_packet"] = semantic_context_packet
-    state["_canonical_semantic_context_packet"] = semantic_context_packet
 
     dialogue_contract = {
         "dialog_act": _s(
@@ -7942,6 +7945,22 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         dialog_state=dialog_state,
         interpreted=interpretation_authority,
     ) or {}
+
+    # Interpretation is the single authority for the canonical semantic packet.
+    # Semantic Core does not currently copy this field back into its result, but
+    # downstream Context Binding consumes it from `semantic`. Propagate the
+    # already-frozen packet here without creating a fallback or a second route.
+    semantic_context_packet = _as_dict(
+        interpretation_authority.get("semantic_context_packet")
+    )
+    if not semantic_context_packet:
+        raise ValueError(
+            "Interpretation did not provide semantic_context_packet"
+        )
+    semantic["semantic_context_packet"] = _quantum_snapshot(
+        semantic_context_packet
+    )
+
     _record_engine_handoff(state, "SEMANTIC", semantic, consumes=("INTERPRETATION",))
 
     reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
