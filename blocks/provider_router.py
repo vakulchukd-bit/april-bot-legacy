@@ -367,21 +367,11 @@ def _derive_output_tokens(payload: dict[str, Any], requested: Any = None) -> int
             numeric_value = None
         if numeric_value is not None and numeric_value > 0:
             cap = min(max(numeric_value, MIN_OUTPUT_TOKENS), MAX_OUTPUT_TOKENS)
-            package = str(
-                payload.get("package")
-                or payload.get("plan")
-                or ((payload.get("metadata") or {}).get("package") if isinstance(payload.get("metadata"), dict) else "")
-                or ((payload.get("metadata") or {}).get("plan") if isinstance(payload.get("metadata"), dict) else "")
-                or ((payload.get("constraints") or {}).get("package") if isinstance(payload.get("constraints"), dict) else "")
-                or ((payload.get("constraints") or {}).get("plan") if isinstance(payload.get("constraints"), dict) else "")
-                or ""
-            ).strip().lower()
-            complexity = str(payload.get("response_complexity") or "").strip().upper()
-            if package == "free" and complexity == "LOW":
-                cap = min(cap, 480)
             return cap
 
-    return MIN_OUTPUT_TOKENS
+    # Practical default when the processor did not set a usable adaptive budget.
+    # The transport floor remains 16, while the architectural default is 1024.
+    return 1024
 
 
 def _render_block_renderer(block_type: str) -> str:
@@ -817,6 +807,88 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     return fields
 
 
+def _semantic_compact_for_envelope(value: Any, max_chars: int, *, depth: int = 0) -> Any:
+    """Deterministic semantic projection used to fit the canonical 900-token envelope.
+
+    Priority is meaning-first: current request, dialogue relation, resolved
+    reference, active task, prior turn, facts/results, then diagnostics.
+    Repeated renderer/presentation metadata is intentionally lower priority.
+    """
+    if max_chars <= 0 or depth > 3:
+        return None
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        s=value.strip()
+        if len(s) <= max_chars:
+            return s
+        head=max(1, int(max_chars*0.7))
+        tail=max(1, max_chars-head-24)
+        return f"{s[:head].rstrip()} … {s[-tail:].lstrip()}"
+    if isinstance(value, dict):
+        priority=(
+            "current_request","normalized_text","relation","context_dependency",
+            "continuation","reference_to_previous","active_topic","active_goal",
+            "resolved_reference","resolved_request","previous_user_turn",
+            "previous_april_turn","previous_result","open_task","history_task_context",
+            "established","facts","numeric_results","resolved_operands",
+            "turn_meaning_transition","dialogue_delta","scene_composition",
+            "requested_outputs","response_guidance","dialogue_state","summary",
+        )
+        out={}
+        keys=[k for k in priority if k in value] + [k for k in value if k not in priority]
+        for key in keys:
+            current_len=len(json.dumps(out,ensure_ascii=False,default=str))
+            remaining=max_chars-current_len
+            if remaining < 48:
+                break
+            child_cap=min(560, remaining)
+            built=_semantic_compact_for_envelope(value[key], child_cap, depth=depth+1)
+            if built not in (None,"",[],{}):
+                out[str(key)]=built
+        return out
+    if isinstance(value,(list,tuple,set)):
+        out=[]
+        for item in list(value)[:10]:
+            remaining=max_chars-len(json.dumps(out,ensure_ascii=False,default=str))
+            if remaining < 48:
+                break
+            built=_semantic_compact_for_envelope(item,min(440,remaining),depth=depth+1)
+            if built not in (None,"",[],{}):
+                out.append(built)
+        return out
+    return str(value)[:max_chars]
+
+
+def _fit_text_by_semantics(text: str, max_tokens: int) -> str:
+    """Fit text to a token-equivalent ceiling while preserving semantic edges."""
+    text=_safe_text(text).strip()
+    char_cap=max(64, max_tokens*4)
+    if len(text) <= char_cap:
+        return text
+    # Sentence-aware reduction first.
+    sentences=re.split(r"(?<=[.!?])\s+", text)
+    if len(sentences) > 1:
+        selected=[]
+        for sentence in sentences:
+            trial=" ".join(selected+[sentence])
+            if len(trial) <= char_cap:
+                selected.append(sentence)
+            else:
+                break
+        if selected:
+            remainder=" ".join(selected)
+            if len(remainder) < char_cap*0.82:
+                tail=sentences[-1]
+                if tail not in selected and len(remainder)+len(tail)+5 <= char_cap:
+                    remainder=f"{remainder} … {tail}"
+            if remainder:
+                return remainder
+    head=int(char_cap*0.72)
+    tail=char_cap-head-24
+    return f"{text[:head].rstrip()} … {text[-tail:].lstrip()}"
+
+
 def _build_provider_user_text(payload: dict[str, Any], budget_tokens: int) -> str:
     fields = _select_context_fields(payload)
     complexity = _derive_complexity(payload)
@@ -843,6 +915,12 @@ def _build_provider_user_text(payload: dict[str, Any], budget_tokens: int) -> st
         candidate = render(label, value)
         candidate_total = _estimate_input_tokens("\n".join(pieces + [candidate]))
         if candidate_total <= soft_limit:
+            pieces.append(candidate)
+            continue
+        remaining = max(32, soft_limit - _estimate_input_tokens("\n".join(pieces)) - 8)
+        compact_value = _semantic_compact_for_envelope(value, max_chars=remaining*4)
+        candidate = render(label, compact_value)
+        if _estimate_input_tokens("\n".join(pieces + [candidate])) <= soft_limit:
             pieces.append(candidate)
 
     pieces.append("Return one complete logical answer as JSON.")
@@ -885,23 +963,43 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             value = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
         return f"{label}: {value}"
 
+    compact_semantic = _semantic_compact_for_envelope(fields[1][1], max_chars=max(800, (remaining*4)//2))
     mandatory = [
-        render("CURRENT_REQUEST", fields[0][1]),
-        render("CANONICAL_SEMANTIC_CONTEXT", fields[1][1]),
+        render("CURRENT_REQUEST", _semantic_compact_for_envelope(fields[0][1], 1200)),
+        render("CANONICAL_SEMANTIC_CONTEXT", compact_semantic),
         render("REQUESTED_OUTPUTS", payload.get("requested_outputs") or []),
         render("COMPLEXITY", complexity),
         render("OUTPUT_CAP", output_tokens),
     ]
     pieces = list(mandatory)
 
+    # If semantic essentials alone exceed the envelope, compact the context again
+    # rather than failing a valid request.
+    while _estimate_input_tokens("\n".join(pieces)) > remaining:
+        current = _estimate_input_tokens("\n".join(pieces))
+        over = current - remaining
+        if over <= 0:
+            break
+        shrink_chars = max(160, len(json.dumps(compact_semantic, ensure_ascii=False, default=str)) - over*4 - 32)
+        compact_semantic = _semantic_compact_for_envelope(fields[1][1], shrink_chars)
+        pieces[1] = render("CANONICAL_SEMANTIC_CONTEXT", compact_semantic)
+        if shrink_chars <= 160:
+            break
+
     if _estimate_input_tokens("\n".join(pieces)) > remaining:
-        raise ValueError("Canonical semantic request exceeds the 900-token Provider input envelope")
+        raise ValueError("Canonical semantic request cannot fit the 900-token Provider input envelope even after semantic compaction")
 
     for label, value in fields[2:]:
         candidate = render(label, value)
         trial = "\n".join(pieces + [candidate])
         if _estimate_input_tokens(trial) <= remaining:
             pieces.append(candidate)
+            continue
+        spare = max(32, remaining - _estimate_input_tokens("\n".join(pieces)) - 8)
+        compact_candidate = _semantic_compact_for_envelope(value, spare*4)
+        compact_text = render(label, compact_candidate)
+        if _estimate_input_tokens("\n".join(pieces + [compact_text])) <= remaining:
+            pieces.append(compact_text)
 
     pieces.append("Return one complete logical answer as JSON.")
     user_text = "\n".join(pieces)
