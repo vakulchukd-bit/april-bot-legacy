@@ -45,7 +45,7 @@ from blocks.energy_manager import (build_quantum_acceleration_profile, apply_qua
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.image_system import scan_image, render_visual_answer, NANO_PRINTER_VERSION
 
-PROCESSOR_VERSION = "april_quantum_processor_quantum64_v51_lossless_scene_presentation_v1"
+PROCESSOR_VERSION = "april_quantum_processor_quantum64_v52_canonical_request_contract_v1"
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 16
@@ -4431,6 +4431,46 @@ def _make_request(
     request.response_decision = decision
     request.single_route = True
     request.provider_calls_allowed = 1
+
+    # ------------------------------------------------------------------
+    # CANONICAL MACHINE REQUEST CONTRACT
+    # ------------------------------------------------------------------
+    # MachineRequest is the sole object released to Provider.  The Provider
+    # contract requires semantic_context_packet as a TOP-LEVEL field on that
+    # object; nesting the same packet only under conversation/quantum_state is
+    # transport metadata, not the canonical contract.
+    #
+    # Keep one immutable snapshot and expose it through the canonical request
+    # boundary.  The duplicated nested copies below are views of the same
+    # processor-owned state, not alternative sources of truth.
+    request.semantic_context_packet = _quantum_snapshot(
+        semantic_context_packet
+    )
+    request.semantic = _quantum_snapshot(semantic)
+    request.cognition = _quantum_snapshot(cognition)
+    request.response_decision = _quantum_snapshot(decision)
+
+    # These fields are consumed by the Provider serializer in the lab contract.
+    # They are attached to the canonical request object so serialization cannot
+    # lose a structured semantic field merely because MachineRequest's legacy
+    # dataclass predates the current contract.
+    request.scene_composition = _quantum_snapshot(
+        _as_list(semantic.get("scene_composition"))
+    )
+    request.turn_meaning = _quantum_snapshot(
+        semantic.get("turn_meaning_transition") or {}
+    )
+
+    # Contract invariant: the object crossing the Provider boundary must carry
+    # the non-empty semantic packet at top level and inside the conversation view.
+    if not isinstance(request.semantic_context_packet, dict) or not request.semantic_context_packet:
+        raise RuntimeError(
+            "Quantum release blocked: canonical MachineRequest semantic_context_packet missing"
+        )
+    if _as_dict(request.conversation).get("semantic_context_packet") != request.semantic_context_packet:
+        raise RuntimeError(
+            "Quantum release blocked: semantic_context_packet handoff mismatch"
+        )
 
     request.constraints["metadata"].update({
         "engine_handoff_trace": _engine_handoff_context(state),
