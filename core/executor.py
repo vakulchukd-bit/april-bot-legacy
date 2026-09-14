@@ -2031,6 +2031,22 @@ def _quantum_context_diagnostic(
     }
 
 
+def _canonical_dialogue_history(state: dict) -> list[dict]:
+    """Return the one canonical persisted dialogue history for this turn.
+
+    History ownership belongs to the executor state boundary. Downstream engines
+    must not reference a free variable such as ``dialog`` and must not invent a
+    parallel history source. A detached list is returned so context engines can
+    inspect it without mutating persistent state.
+    """
+    if not isinstance(state, dict):
+        return []
+    history = state.get("dialog")
+    if not isinstance(history, list):
+        return []
+    return _quantum_snapshot(history)
+
+
 def _dialogue_evidence(
     text: str,
     semantic: dict,
@@ -2064,14 +2080,14 @@ def _dialogue_evidence(
         semantic.get("quantum_scene_continuity")
     )
     if not scene_continuity:
+        # History is resolved from the executor state boundary, never from an
+        # implicit local variable. This keeps Context Binding on one canonical
+        # history channel and makes first-turn execution deterministic.
         scene_continuity = _scene_continuity_engine(
             text=text,
             state=state,
-            history=dialog,
+            history=_canonical_dialogue_history(state),
         )
-
-    if not previous_user or not previous_april:
-        raise ValueError("canonical dialogue anchor is incomplete; previous USER and APRIL turns are required")
 
     interpretation_packet = _as_dict(semantic.get("quantum_interpretation_evidence"))
     dialogue_contract = _as_dict(interpretation_packet.get("dialogue_contract"))
@@ -2098,6 +2114,21 @@ def _dialogue_evidence(
         "MEMORY_QUERY",
     }:
         raise ValueError(f"invalid canonical dialogue relation: {mode!r}")
+
+    # A previous USER→APRIL pair is required only for relations that explicitly
+    # depend on prior dialogue. Independent/new-topic turns are valid without a
+    # previous pair and must reach Provider instead of failing in Context Binding.
+    history_dependent_mode = mode in {
+        "SAME_TOPIC",
+        "CONTINUATION",
+        "ARTIFACT_REFERENCE",
+        "MEMORY_QUERY",
+    }
+    if history_dependent_mode and (not previous_user or not previous_april):
+        raise ValueError(
+            "canonical dialogue anchor is incomplete for a history-dependent relation; "
+            "previous USER and APRIL turns are required"
+        )
 
     # Persist the selected immediate anchor for diagnostics; historical memory
     # remains evidence only.
