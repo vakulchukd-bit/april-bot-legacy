@@ -58,6 +58,11 @@ try:
 except Exception:  # pragma: no cover
     hf_pipeline = None
 
+try:
+    from nltk.stem.snowball import SnowballStemmer
+except Exception:  # pragma: no cover
+    SnowballStemmer = None
+
 
 # ---------------------------------------------------------------------------
 # Canonical constants
@@ -69,7 +74,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v16_sequential_dialogue_owner_v2"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v17_sequential_dialogue_state_v3"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
@@ -231,7 +236,7 @@ OPERATION_HYPOTHESES = {
     "retrieve": "найти получить ресурс источник ссылку документ",
     "calculate": "арифметическая операция над числовыми величинами: вычисление, сложение, вычитание, умножение, деление, отношение, процентное изменение, получение числового результата; arithmetic calculation over numeric quantities including addition, subtraction, multiplication, division, ratios and percentage change",
     "analyze": "проанализировать разобрать исследовать проверить",
-    "explain": "объяснить разъяснить пояснить растолковать как работает почему смысл принцип",
+    "explain": "объяснить объясни объяснение разъяснить разъясни пояснить поясни растолковать опиши описать описание как работает почему смысл принцип расскажи",
     "summarize": "суммировать сократить основные пункты",
     "list": "перечислить список варианты",
 }
@@ -370,8 +375,12 @@ class QuantumTurnMeaningEngine:
             if kind and kind not in {"text", "markdown"} and kind not in actual_representations:
                 actual_representations.append(kind)
 
-        # The meaning anchor is deliberately textual/semantic rather than a set of
-        # routing switches. It is what future turns compare against.
+        # The completed turn owns a semantic subject. Representation labels such as
+        # ``graph`` or ``image`` are not allowed to become the topic by themselves:
+        # a graph is an artifact of the task, while the subject may be "tomatoes",
+        # "bear", or another entity. Topic is therefore anchored in content/entity
+        # evidence first, with measured semantic object/goal values used only as
+        # supporting evidence.
         topic = ""
         goal = ""
         operation = ""
@@ -379,14 +388,6 @@ class QuantumTurnMeaningEngine:
         for profile in (answer_profile, user_profile):
             if not profile:
                 continue
-            if not topic:
-                topic = cls._clean(
-                    profile.get("best_object")
-                    or profile.get("best_goal")
-                    or profile.get("best_domain")
-                    or "",
-                    500,
-                )
             if not goal:
                 goal = cls._clean(profile.get("best_goal"), 300)
             if not operation:
@@ -406,14 +407,71 @@ class QuantumTurnMeaningEngine:
                 reverse=True,
             )
             if token
-        ][:6]
+        ][:8]
 
-        if salient_terms:
-            semantic_topic = " ".join(salient_terms[:4])
-            if topic in {"diagram", "image", "gallery", "text", "table", "file", "audio", "video", "action"}:
-                topic = semantic_topic
+        semantic_entity_terms = []
+        try:
+            entity_packets = QuantumContextUnderstandingEngine._entities(
+                f"{user_request} {answer}"
+            )
+            semantic_entity_terms = [
+                cls._clean(item.get("value"), 240)
+                for item in entity_packets
+                if isinstance(item, dict)
+                and item.get("value")
+                and item.get("type") in {
+                    "proper_name", "formula_symbol", "number_expression",
+                    "code_identifier",
+                }
+            ]
+        except Exception:
+            semantic_entity_terms = []
+
+        # When April's answer is a compact established object ("медведь", "Париж",
+        # "42"), its semantic content outranks noisy task verbs from the user
+        # request. This prevents the answer's topic from becoming "graph",
+        # "build", or another representation label merely because a matrix family
+        # produced a weak top score.
+        answer_content = QuantumContextUnderstandingEngine._content_tokens(answer)
+        user_content = QuantumContextUnderstandingEngine._content_tokens(user_request)
+        answer_stems = QuantumDialogueStateEngine._tokens(answer) if 'QuantumDialogueStateEngine' in globals() else set(answer_content)
+        answer_is_compact_object = bool(
+            answer_content
+            and len(answer_content) <= 6
+            and len(set(answer_content)) <= 6
+            and (
+                len(answer_content) <= 3
+                or semantic_entity_terms
+            )
+        )
+        if answer_is_compact_object:
+            salient_terms = list(dict.fromkeys(answer_content + user_content))[:8]
+            if answer_content:
+                topic = " ".join(answer_content[:4])
+
+        non_representation_objects = [
+            str(item["value"])
+            for item in objects
+            if str(item["value"]).casefold() not in {
+                "graph", "diagram", "table", "formula", "image", "gallery",
+                "file", "audio", "video", "code", "link", "text", "action",
+            }
+        ]
+        topic_candidates = [
+            *semantic_entity_terms,
+            *non_representation_objects,
+            *salient_terms,
+        ]
+        if topic_candidates and not answer_is_compact_object:
+            # Keep a compact semantic subject rather than a renderer/object label.
+            unique = []
+            for value in topic_candidates:
+                value = cls._clean(value, 240)
+                if value and value.casefold() not in {x.casefold() for x in unique}:
+                    unique.append(value)
+            topic = " ".join(unique[:4])
         if not topic:
-            topic = " ".join(salient_terms[:4]) or cls._clean(user_request, 500)
+            topic = cls._clean(user_request, 500)
 
         output_plan = list(actual_representations)
         if not output_plan:
@@ -525,6 +583,14 @@ class QuantumTurnMeaningEngine:
                 "render_blocks": deepcopy(blocks[:24]),
                 "complete": bool(answer),
             },
+            "dialogue_state": QuantumDialogueStateEngine.commit_turn(
+                user_request,
+                answer,
+                render_blocks=blocks,
+                turn_id=turn_id,
+                scene_id=scene_id,
+                semantic_engine=engine,
+            ),
             "source": "completed_turn_semantic_understanding",
         }
 
@@ -632,8 +698,17 @@ class QuantumTurnMeaningEngine:
             len(current_content_tokens & prior_content_tokens)
             / max(1, len(current_content_tokens))
         )
-        morphological_content_overlap = cls._morphological_content_overlap(
-            current_content_tokens, prior_content_tokens
+        current_stems = QuantumContextUnderstandingEngine._semantic_stems(current_content_tokens)
+        prior_stems = QuantumContextUnderstandingEngine._semantic_stems(prior_content_tokens)
+        stem_overlap = (
+            len(current_stems & prior_stems)
+            / max(1, len(current_stems))
+        )
+        morphological_content_overlap = max(
+            cls._morphological_content_overlap(
+                current_content_tokens, prior_content_tokens
+            ),
+            stem_overlap,
         )
         content_semantic_similarity = 0.0
         if semantic_engine is not None and current_content_tokens and prior_content_tokens:
@@ -1000,6 +1075,398 @@ class QuantumTurnMeaningEngine:
         }
 
 
+class QuantumDialogueStateEngine:
+    """
+    Persistent semantic state for the dialogue loop.
+
+    The engine performs two complementary operations:
+      A) analyze the completed April answer and commit what was established;
+      B) prepare the next turn from that committed state.
+
+    It never chooses a renderer or provider. It creates one semantic state object
+    that later interpretation consumes. This prevents the conversation from
+    splitting into independent "topic", "memory", "scene", and "answer" anchors.
+    """
+
+    VERSION = "quantum_dialogue_state_engine_v1"
+
+    _REPRESENTATION_LABELS = {
+        "text", "table", "graph", "diagram", "formula", "image", "gallery",
+        "code", "link", "audio", "video", "file", "action", "scene",
+        "memory", "visual_context",
+    }
+
+    @classmethod
+    def _norm(cls, value: Any, limit: int = 4000) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip())[:limit]
+
+    @classmethod
+    def _tokens(cls, text: Any) -> set[str]:
+        return {
+            token for token in QuantumContextUnderstandingEngine._content_tokens(text)
+            if len(token) >= 3
+        }
+
+    @classmethod
+    def _extract_entities(cls, text: str) -> list[str]:
+        try:
+            packets = QuantumContextUnderstandingEngine._entities(text)
+        except Exception:
+            packets = []
+        values = []
+        for item in packets:
+            if not isinstance(item, dict):
+                continue
+            value = cls._norm(item.get("value"), 240)
+            if not value:
+                continue
+            if value.casefold() in cls._REPRESENTATION_LABELS:
+                continue
+            if value.casefold() not in {x.casefold() for x in values}:
+                values.append(value)
+        return values[:12]
+
+    @classmethod
+    def _extract_numeric_results(cls, answer: str) -> list[str]:
+        result = []
+        for match in re.finditer(
+            r"(?:=|равно|equals)\s*([-+]?\d+(?:[.,]\d+)?)\b",
+            answer,
+            flags=re.I,
+        ):
+            result.append(match.group(1))
+        if not result:
+            nums = re.findall(
+                r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?(?![\w.])",
+                answer,
+            )
+            if len(nums) == 1:
+                result.append(nums[0])
+        return result[-8:]
+
+    @classmethod
+    def _pending_from_answer(cls, answer: str, expected_type: str) -> dict[str, Any]:
+        stripped = cls._norm(answer, 7000)
+        pending = bool(stripped.endswith("?"))
+        return {
+            "pending": pending,
+            "expected_input_type": expected_type if pending else "",
+            "source": "answer_semantics",
+        }
+
+    @classmethod
+    def commit_turn(
+        cls,
+        user_request: str,
+        answer: str,
+        *,
+        render_blocks: list[dict[str, Any]] | None = None,
+        turn_id: Any = None,
+        scene_id: str = "",
+        semantic_engine: Any = None,
+        inherited_state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        user = cls._norm(user_request, 2600)
+        assistant = cls._norm(answer, 9000)
+        inherited = inherited_state if isinstance(inherited_state, dict) else {}
+
+        profile = {}
+        if semantic_engine is not None:
+            try:
+                profile = semantic_engine.measure(
+                    assistant,
+                    previous_user=user,
+                    active_topic=inherited.get("active_topic", ""),
+                    active_goal=inherited.get("active_goal", ""),
+                )
+            except Exception:
+                profile = {}
+
+        representation_scores = profile.get("representation_scores") if isinstance(profile, dict) else {}
+        operation_scores = profile.get("operation_scores") if isinstance(profile, dict) else {}
+        goal_scores = profile.get("goal_scores") if isinstance(profile, dict) else {}
+        best_rep = str(profile.get("best_representation") or "text").lower()
+        best_op = str(profile.get("best_operation") or "answer").lower()
+        best_goal = str(profile.get("best_goal") or "understand").lower()
+
+        block_types = []
+        artifacts = []
+        for block in render_blocks or []:
+            if not isinstance(block, dict):
+                continue
+            rep = _clean_representation(
+                block.get("type") or block.get("artifact_type") or block.get("representation")
+            )
+            if rep and rep != "text" and rep not in block_types:
+                block_types.append(rep)
+            if rep and rep != "text":
+                artifacts.append({
+                    "type": rep,
+                    "title": cls._norm(block.get("title") or block.get("label"), 300),
+                    "block_id": cls._norm(block.get("block_id"), 200),
+                    "payload": deepcopy(block.get("payload")) if isinstance(block.get("payload"), dict) else {},
+                })
+
+        # The assistant answer is authoritative for what was actually established.
+        # A compact answer (e.g. "медведь", "42", "Париж") therefore becomes the
+        # semantic subject instead of noisy imperative words from the preceding user
+        # request. Longer answers keep user+answer content as supporting evidence.
+        assistant_entities = cls._extract_entities(assistant)
+        user_entities = cls._extract_entities(user)
+        answer_tokens = QuantumContextUnderstandingEngine._content_tokens(assistant)
+        user_tokens = QuantumContextUnderstandingEngine._content_tokens(user)
+        # The answer itself is the first evidence source for the committed active
+        # object. For a compact answer, content nouns from the answer are promoted
+        # to active entities; user imperative verbs are deliberately kept out of
+        # the entity set.
+        operation_stems = set()
+        try:
+            stemmer = SnowballStemmer("russian") if SnowballStemmer is not None else None
+            if stemmer is not None:
+                operation_words = re.findall(
+                    r"[А-Яа-яЁёЇїІіЄєҐґ]+",
+                    " ".join(OPERATION_HYPOTHESES.values()).lower(),
+                )
+                operation_stems = {
+                    stemmer.stem(word) for word in operation_words if len(word) >= 4
+                }
+        except Exception:
+            operation_stems = set()
+
+        answer_entity_tokens = [
+            token for token in answer_tokens
+            if len(token) >= 4
+            and token.casefold() not in {
+                "готово", "сделано", "ответ", "слово", "число", "сейчас",
+                "здесь", "также", "может", "можно",
+            }
+            and (
+                not operation_stems
+                or (
+                    SnowballStemmer is None
+                    or not re.search(r"[А-Яа-яЁёЇїІіЄєҐґ]", token)
+                    or SnowballStemmer("russian").stem(token.casefold()) not in operation_stems
+                )
+            )
+        ]
+        # Prefer an answer token whose normalized stem is also present in the
+        # immediately preceding user request. That is structural entity continuity:
+        # "собачки" -> "собачку", "медведь" -> "медведь", etc. It does not depend
+        # on a topic or renderer trigger list.
+        try:
+            stemmer = SnowballStemmer("russian") if SnowballStemmer is not None else None
+            user_stems = {
+                stemmer.stem(tok) if stemmer is not None and re.search(r"[А-Яа-яЁёЇїІіЄєҐґ]", tok)
+                else tok.casefold()
+                for tok in user_tokens if len(tok) >= 4
+            }
+            answer_entity_tokens.sort(
+                key=lambda tok: (
+                    1 if (
+                        stemmer is not None
+                        and re.search(r"[А-Яа-яЁёЇїІіЄєҐґ]", tok)
+                        and stemmer.stem(tok.casefold()) in user_stems
+                    ) else 0,
+                    len(tok),
+                ),
+                reverse=True,
+            )
+        except Exception:
+            pass
+        filtered_assistant_entities = [
+            value for value in assistant_entities
+            if value.casefold() not in {
+                "готово", "сделано", "ответ", "слово", "число", "вот",
+            }
+        ]
+        if len(answer_tokens) <= 6 and answer_entity_tokens:
+            # For a compact answer, content-bearing answer tokens are stronger than
+            # any capitalization-derived entity candidate.
+            entities = list(dict.fromkeys(
+                answer_entity_tokens
+                + filtered_assistant_entities
+            ))[:12]
+        else:
+            entities = list(dict.fromkeys(
+                assistant_entities
+                + [x for x in user_entities if x.casefold() not in {y.casefold() for y in assistant_entities}]
+            ))[:12]
+        numeric_results = cls._extract_numeric_results(assistant)
+
+        representation_only = {
+            "graph", "diagram", "table", "formula", "image", "gallery",
+            "file", "audio", "video", "code", "link",
+        }
+        answer_topic_tokens = [
+            x for x in answer_tokens
+            if x.casefold() not in representation_only
+        ]
+        user_topic_tokens = [
+            x for x in user_tokens
+            if x.casefold() not in representation_only
+        ]
+        if len(answer_topic_tokens) <= 4 and answer_topic_tokens:
+            topic = " ".join(answer_topic_tokens[:4])
+        else:
+            topic = " ".join(user_topic_tokens[:6]) or (
+                entities[0] if entities else cls._norm(user, 500)
+            )
+
+        expected_type = "number" if numeric_results and len(numeric_results) == 1 else (
+            "text" if not block_types else block_types[0]
+        )
+
+        previous_open = inherited.get("open_task") if isinstance(inherited.get("open_task"), dict) else {}
+        pending = cls._pending_from_answer(assistant, expected_type)
+        open_task = {
+            "pending_input": pending["pending"],
+            "expected_input_type": pending["expected_input_type"],
+            "operation": best_op,
+            "goal": best_goal,
+        }
+        if previous_open.get("pending_input") and not pending["pending"]:
+            open_task["completed_previous_input"] = True
+
+        established_facts = []
+        if numeric_results:
+            for value in numeric_results:
+                established_facts.append({
+                    "kind": "numeric_result",
+                    "value": value,
+                    "source": "assistant_answer",
+                })
+
+        return {
+            "version": cls.VERSION,
+            "turn_id": turn_id,
+            "scene_id": cls._norm(scene_id, 300),
+            "active_thread": {
+                "status": "active",
+                "topic": topic,
+                "goal": best_goal,
+                "operation": best_op,
+                "domain": (
+                    max(
+                        (profile.get("domain_scores") or {}).items(),
+                        key=lambda item: float(item[1] or 0.0),
+                    )[0]
+                    if isinstance(profile.get("domain_scores"), dict)
+                    and profile.get("domain_scores")
+                    else ""
+                ),
+                "entities": entities[:12],
+            },
+            "current_turn": {
+                "user_request": user,
+                "answer": assistant,
+                "operation": best_op,
+                "goal": best_goal,
+                "representation": best_rep,
+            },
+            "established": {
+                "facts": established_facts[:16],
+                "numeric_results": numeric_results[:8],
+                "entities": entities[:12],
+                "artifacts": artifacts[:12],
+                "representations": block_types[:12],
+            },
+            "open_task": open_task,
+            "references": {
+                "active_entity": entities[0] if entities else "",
+                "active_result": numeric_results[-1] if numeric_results else "",
+                "active_artifact_types": block_types[:12],
+            },
+            "answer_semantics": {
+                "best_operation": best_op,
+                "best_goal": best_goal,
+                "best_representation": best_rep,
+                "representation_scores": {
+                    str(k): round(float(v), 6)
+                    for k, v in (representation_scores or {}).items()
+                },
+                "operation_scores": {
+                    str(k): round(float(v), 6)
+                    for k, v in (operation_scores or {}).items()
+                },
+                "goal_scores": {
+                    str(k): round(float(v), 6)
+                    for k, v in (goal_scores or {}).items()
+                },
+            },
+            "continuity_anchor": {
+                "user": user,
+                "april": assistant,
+                "semantic_subject": topic,
+                "entities": entities[:12],
+                "results": numeric_results[:8],
+                "artifacts": artifacts[:12],
+                "open_task": deepcopy(open_task),
+            },
+            "source": cls.VERSION,
+        }
+
+    @classmethod
+    def build_next_turn_context(
+        cls,
+        state: dict[str, Any] | None,
+        current_request: str,
+        *,
+        relation: str,
+        resolved_reference: str = "",
+    ) -> dict[str, Any]:
+        state = state if isinstance(state, dict) else {}
+        relation = str(relation or "NEW").upper()
+        current = cls._norm(current_request, 2600)
+
+        if relation not in {"CONTINUE", "RECALL"}:
+            return {
+                "relation": "NEW",
+                "active": {},
+                "previous": {},
+                "resolved_reference": "",
+                "source": cls.VERSION,
+            }
+
+        previous = state.get("continuity_anchor")
+        if not isinstance(previous, dict):
+            previous = {
+                "user": cls._norm(state.get("current_turn", {}).get("user_request")),
+                "april": cls._norm(state.get("current_turn", {}).get("answer")),
+            }
+
+        active_thread = state.get("active_thread") if isinstance(state.get("active_thread"), dict) else {}
+        established = state.get("established") if isinstance(state.get("established"), dict) else {}
+        open_task = state.get("open_task") if isinstance(state.get("open_task"), dict) else {}
+        references = state.get("references") if isinstance(state.get("references"), dict) else {}
+
+        return {
+            "relation": relation,
+            "active": {
+                "topic": cls._norm(active_thread.get("topic"), 700),
+                "goal": cls._norm(active_thread.get("goal"), 500),
+                "operation": cls._norm(active_thread.get("operation"), 500),
+                "entities": deepcopy(active_thread.get("entities") or []),
+            },
+            "previous": {
+                "user": cls._norm(previous.get("user"), 2600),
+                "april": cls._norm(previous.get("april"), 9000),
+                "semantic_subject": cls._norm(previous.get("semantic_subject"), 700),
+                "entities": deepcopy(previous.get("entities") or established.get("entities") or []),
+                "results": deepcopy(previous.get("results") or established.get("numeric_results") or []),
+                "artifacts": deepcopy(previous.get("artifacts") or established.get("artifacts") or []),
+                "open_task": deepcopy(previous.get("open_task") or open_task),
+            },
+            "resolved_reference": cls._norm(
+                resolved_reference or references.get("active_entity") or "",
+                500,
+            ),
+            "current_request": current,
+            "source": cls.VERSION,
+        }
+
+
+
+
 class QuantumSequentialDialogueEngine:
     """
     Single-owner sequential dialogue state machine.
@@ -1177,20 +1644,109 @@ class QuantumSequentialDialogueEngine:
         # classify a topic and it does not select a renderer. It only tells the
         # sequential owner that a short utterance contains an antecedent-dependent
         # reference whose object lives in the previous completed turn.
-        grammatical_reference_forms = {
-            "он", "она", "оно", "они", "его", "ее", "её", "ему", "ей", "им", "ими",
-            "этот", "эта", "это", "эти", "того", "той", "тем", "такой",
-            "него", "неё", "нее", "ней", "нему", "ним", "них",
-            "it", "he", "she", "they", "him", "her", "them", "this", "that", "these", "those",
-        }
-        raw_reference_tokens = set(
-            re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ]+", current.lower())
+        # Reference is a semantic dependency, not a lexical trigger. A short
+        # underspecified request can depend on the previous completed result when
+        # the previous semantic state exposes a concrete active entity/result.
+        previous_state = meaning.get("dialogue_state") if isinstance(meaning.get("dialogue_state"), dict) else {}
+        active_refs = []
+        if isinstance(previous_state, dict):
+            refs = previous_state.get("references") if isinstance(previous_state.get("references"), dict) else {}
+            active_refs.extend(x for x in (
+                refs.get("active_entity"),
+                refs.get("active_result"),
+            ) if x)
+            thread = previous_state.get("active_thread") if isinstance(previous_state.get("active_thread"), dict) else {}
+            active_refs.extend(list(thread.get("entities") or []))
+        prior_stems = QuantumContextUnderstandingEngine._semantic_stems(previous_tokens)
+        current_stems = QuantumContextUnderstandingEngine._semantic_stems(current_tokens)
+        state_relation_support = bool(
+            active_refs
+            and (
+                len(current_stems & prior_stems) > 0
+                or (
+                    isinstance(meaning.get("response_contract"), dict)
+                    and bool(meaning.get("response_contract", {}).get("pending_input"))
+                )
+                or (
+                    isinstance(previous_state.get("open_task"), dict)
+                    and bool(previous_state.get("open_task", {}).get("pending_input"))
+                )
+            )
         )
         grammatical_reference = bool(
-            raw_reference_tokens & grammatical_reference_forms
+            len(current_tokens) <= 7
             and previous_tokens
-            and len(current_tokens) <= 7
+            and active_refs
+            and state_relation_support
         )
+
+        # Structural antecedent dependency. When the current turn contains no
+        # independently identified entity/object and the committed previous answer
+        # exposes an active entity/result, the current turn can be understood only
+        # with that antecedent. This is semantic dependency, not a list of pronoun
+        # triggers and not a renderer decision.
+        current_entity_packets = QuantumContextUnderstandingEngine._entities(current)
+        current_entity_values = {
+            str(item.get("value") or "").casefold()
+            for item in current_entity_packets
+            if item.get("value")
+        }
+        # Capitalization alone is not an entity. A sentence-initial form that
+        # semantically matches an operation hypothesis is grammatical/task
+        # structure, not a new topic entity.
+        current_first = (re.findall(
+            r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ]+", current
+        ) or [""])[0].casefold()
+        if current_first:
+            try:
+                op_words = set(
+                    re.findall(
+                        r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ]+",
+                        " ".join(OPERATION_HYPOTHESES.values()).lower(),
+                    )
+                )
+                current_first_stem = SnowballStemmer("russian").stem(current_first) if (
+                    SnowballStemmer is not None and re.search(r"[А-Яа-яЁёЇїІіЄєҐґ]", current_first)
+                ) else current_first
+                op_stems = {
+                    SnowballStemmer("russian").stem(word) if (
+                        SnowballStemmer is not None and re.search(r"[А-Яа-яЁёЇїІіЄєҐґ]", word)
+                    ) else word
+                    for word in op_words
+                }
+                if current_first in QuantumContextUnderstandingEngine._STOP or current_first_stem in op_stems:
+                    current_entity_values.discard(current_first)
+            except Exception:
+                pass
+        explicit_current_numeric = bool(re.search(
+            r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?\s*[+*/×÷-]\s*[-+]?\d+(?:[.,]\d+)?(?![\w.])",
+            current,
+        ))
+        # Structural anaphora: identify a grammatically dependent current utterance
+        # from its pronoun morphology, then resolve the antecedent from the committed
+        # semantic state. This is grammar analysis, not a topic/renderer trigger.
+        grammatical_anaphora = bool(
+            re.search(
+                r"(?<![А-Яа-яЁёЇїІіЄєҐґ])"
+                r"(он|она|оно|они|его|её|ее|ему|ей|им|ими|этот|эта|это|эти|того|той|тем|такой|"
+                r"него|неё|нее|ней|нему|ним|них|который|которая|которое|которые)"
+                r"(?![А-Яа-яЁёЇїІіЄєҐґ])",
+                current.lower(),
+            )
+        )
+        contextual_antecedent_dependency = bool(
+            active_refs
+            and len(current_tokens) <= 10
+            and not current_entity_values
+            and not explicit_current_numeric
+            and (
+                grammatical_anaphora
+                or state_relation_support
+            )
+        )
+        if contextual_antecedent_dependency:
+            grammatical_reference = True
+        grammatical_reference = bool(grammatical_reference or contextual_antecedent_dependency)
 
         signature_matches = sum(
             1 for a, b in (
@@ -1270,12 +1826,16 @@ class QuantumSequentialDialogueEngine:
             + 0.05 * (1.0 if underspecified else 0.0)
             + 0.05 * (1.0 if artifact_continuity else 0.0)
             + 0.18 * (1.0 if grammatical_reference else 0.0)
+            + 0.18 * (1.0 if contextual_antecedent_dependency else 0.0)
             + 0.24 * (1.0 if scalar_response_dependency else 0.0)
         )
         continuation_score = max(0.0, min(1.0, continuation_score))
 
         # Semantic topic break: a complete current task with a different semantic
         # core is a new topic, even when surface dialogue form is similar.
+        if contextual_antecedent_dependency:
+            self_contained = False
+
         topic_break = bool(
             self_contained
             and core_signature_matches == 0
@@ -1336,6 +1896,8 @@ class QuantumSequentialDialogueEngine:
                 "reference_semantics": round(float(reference_semantics), 6),
                 "memory_semantics": round(float(memory_semantics), 6),
                 "grammatical_reference": grammatical_reference,
+                "contextual_antecedent_dependency": contextual_antecedent_dependency,
+                "grammatical_anaphora": grammatical_anaphora,
                 "underspecified": underspecified,
                 "self_contained": self_contained,
                 "artifact_continuity": artifact_continuity,
@@ -1431,7 +1993,10 @@ class QuantumContextUnderstandingEngine:
 
     _STOP = {
         "что", "это", "такое", "как", "кто", "когда", "где", "куда",
-        "почему", "зачем", "мне", "тебе", "тебя", "ты", "вы", "он", "она",
+        "почему", "зачем", "какой", "какая", "какое", "какие", "сколько",
+        "скольких", "который", "которая", "которое", "которые",
+        "готово", "готово", "вот", "сейчас", "понимаю",
+        "мне", "тебе", "тебя", "ты", "вы", "он", "она",
         "они", "его", "ее", "её", "их", "ему", "ей", "им", "меня", "нас",
         "вам", "мы", "я", "можно", "нужно", "хочу", "и", "а", "но", "или",
         "ещё", "еще", "да", "нет", "the", "what", "who", "how", "why",
@@ -1461,6 +2026,19 @@ class QuantumContextUnderstandingEngine:
             token for token in cls._tokens(text)
             if len(token) >= 3 and token not in cls._STOP
         ]
+
+    @staticmethod
+    def _semantic_stems(tokens: Sequence[str]) -> set[str]:
+        values = {str(token).casefold() for token in tokens if str(token).strip()}
+        if not values:
+            return set()
+        if SnowballStemmer is None:
+            return values
+        try:
+            stemmer = SnowballStemmer("russian")
+            return {stemmer.stem(token) if re.search(r"[А-Яа-яЁёЇїІіЄєҐґ]", token) else token for token in values}
+        except Exception:
+            return values
 
     @classmethod
     def _entities(cls, text: Any) -> list[dict[str, Any]]:
@@ -3862,6 +4440,39 @@ class QuantumInterpretationEngine:
             "goal":self._family_scores(text,"goal",GOAL_HYPOTHESES),
             "visual_schema":self._family_scores(text,"visual_schema",VISUAL_SCHEMA_HYPOTHESES),
         }
+
+        # Grammatical question structure is stronger evidence of an answer/
+        # analysis operation than a weak matrix match to "build". This operates on
+        # sentence form, not on a topic or renderer trigger.
+        interrogative = bool(
+            "?" in text
+            or re.match(
+                r"^\s*(что|кто|как|какой|какая|какое|какие|сколько|почему|зачем|где|когда|куда|откуда|на\s+что)\b",
+                text.lower(),
+            )
+        )
+        if interrogative:
+            question_words = re.findall(
+                r"[А-Яа-яЁёЇїІіЄєҐґ]+", text.lower()
+            )[:3]
+            explanatory_form = bool(
+                question_words
+                and question_words[0] in {"почему", "зачем", "как"}
+            )
+            if explanatory_form:
+                scores["operation"]["explain"] = max(
+                    float(scores["operation"].get("explain", 0.0) or 0.0), 0.52
+                )
+                scores["operation"]["analyze"] = max(
+                    float(scores["operation"].get("analyze", 0.0) or 0.0), 0.34
+                )
+            else:
+                scores["operation"]["answer"] = max(
+                    float(scores["operation"].get("answer", 0.0) or 0.0), 0.52
+                )
+                scores["operation"]["analyze"] = max(
+                    float(scores["operation"].get("analyze", 0.0) or 0.0), 0.30
+                )
         for label in self._negated_representation_labels(text):
             if label in scores["representation"]:
                 scores["representation"][label] *= 0.05
@@ -4134,6 +4745,24 @@ class QuantumInterpretationEngine:
         profile = semantic_profile if isinstance(semantic_profile, dict) else {}
         candidates: list[str] = []
 
+        # First consult the committed semantic state from the immediately previous
+        # completed answer. This is the strongest antecedent source because it
+        # records entities/results that were actually established by April.
+        committed_state = profile.get("previous_dialogue_state")
+        if isinstance(committed_state, dict):
+            refs = committed_state.get("references") if isinstance(committed_state.get("references"), dict) else {}
+            active_thread = committed_state.get("active_thread") if isinstance(committed_state.get("active_thread"), dict) else {}
+            established = committed_state.get("established") if isinstance(committed_state.get("established"), dict) else {}
+            for value in [
+                refs.get("active_entity"),
+                *list(active_thread.get("entities") or []),
+                *list(established.get("entities") or []),
+                refs.get("active_result"),
+            ]:
+                value = cls.normalize(value)
+                if value and value.casefold() not in {x.casefold() for x in candidates}:
+                    candidates.append(value)
+
         # Generic entity extraction from the authoritative previous USER↔APRIL
         # pair. This is content extraction, not request classification.
         patterns = (
@@ -4166,6 +4795,16 @@ class QuantumInterpretationEngine:
         target = max(
             candidates,
             key=lambda value: (
+                1 if isinstance(committed_state := profile.get("previous_dialogue_state"), dict)
+                and (
+                    value.casefold() == cls.normalize(
+                        (committed_state.get("references") if isinstance(committed_state.get("references"), dict) else {}).get("active_entity")
+                    ).casefold()
+                    or value.casefold() == cls.normalize(
+                        (committed_state.get("active_thread") if isinstance(committed_state.get("active_thread"), dict) else {}).get("topic")
+                    ).casefold()
+                )
+                else 0,
                 1 if any(token.isalpha() for token in cls._tokens(value)) else 0,
                 len(value.split()),
                 len(value),
@@ -4941,6 +5580,29 @@ class QuantumInterpretationEngine:
             sequential_relation == "CONTINUE"
             or dialogue_vector.get("relation") == "CONTINUE_TOPIC"
         )
+        # Representation is resolved from the CURRENT task, not inherited from the
+        # previous artifact. A continuation that merely asks/analyses/describes
+        # an existing result remains a text response; the previous graph/image/
+        # table/formula is supplied as semantic context, not rendered again.
+        current_task_operation = str(p.get("best_operation") or "").lower()
+        current_task_production_request = current_task_operation in {
+            "build", "modify", "present", "calculate"
+        }
+        current_explicit_structured = bool(
+            explicit
+            or (
+                current_task_production_request
+                and any(
+                    _clean_representation(x) in STRUCTURED_REPRESENTATIONS
+                    for x in (complete_outputs or [])
+                )
+            )
+        )
+        if continuation and not current_task_production_request and not current_explicit_structured:
+            production = "text"
+            source = "continuation_answer_without_new_representation"
+            locked = True
+
         # A short continuation question does not acquire a structured renderer
         # merely because the representation matrix found a weak candidate.
         # Structured output must be supported by the current turn's operation,
@@ -4967,10 +5629,14 @@ class QuantumInterpretationEngine:
                 production = "text"
                 source = "current_turn_representation_not_established"
                 locked = False
-        # A semantically resolved continuation of a visual scene keeps the same
-        # output representation. The previous structured artifact is evidence of
-        # the object being modified; no lexical renderer trigger is used.
+        # A continuation inherits the *semantic scene state*, not automatically the
+        # previous renderer. Rendering is resolved from the current task. A prior
+        # graph/image/table/formula remains available through `resolved_scene` and
+        # `semantic_context_packet`; it is reused as an output only when the current
+        # turn itself supports a structured production request.
         if continuation and production == "text" and isinstance(previous_scene, dict):
+            operation = str(p.get("best_operation") or "").lower()
+            current_outputs_explicit = bool(complete_outputs or explicit)
             prior_types = [
                 _clean_representation(x)
                 for x in (previous_scene.get("render_block_types") or [])
@@ -4986,16 +5652,22 @@ class QuantumInterpretationEngine:
                     if isinstance(block, dict)
                 ]
             prior_structured = [x for x in prior_types if x in STRUCTURED_REPRESENTATIONS]
-            operation = p.get("best_operation")
-            dialogue_label = self.normalize(dialogue_vector.get("semantic_dialogue_label")).lower()
-            if prior_structured and operation in {"modify", "build", "present", "list", "analyze"}:
-                production = prior_structured[0]
-                source = "semantic_continuity_preserve_representation"
-                locked = True
-            elif prior_structured and dialogue_label in {"continuation", "reformulation", "correction", "reference"}:
-                production = prior_structured[0]
-                source = "semantic_continuity_preserve_representation"
-                locked = True
+            continuation_can_produce_structured = bool(
+                current_outputs_explicit
+                and operation in {"modify", "build", "present", "calculate"}
+                and prior_structured
+            )
+            if continuation_can_produce_structured:
+                # Do not invent a representation: only reuse a prior representation
+                # explicitly supported by the current semantic task.
+                current_structured = [
+                    _clean_representation(x) for x in complete_outputs
+                    if _clean_representation(x) in STRUCTURED_REPRESENTATIONS
+                ]
+                if current_structured:
+                    production = current_structured[0]
+                    source = "current_task_explicit_structured_continuation"
+                    locked = True
 
         reference=bool(
             dialogue_vector.get("request_relation") == "ARTIFACT_REFERENCE"
@@ -5008,6 +5680,12 @@ class QuantumInterpretationEngine:
         semantic_profile_for_reference = {
             **p,
             "dialogue_best": p.get("dialogue_best"),
+            "previous_dialogue_state": (
+                last_turn_meaning.get("dialogue_state")
+                if isinstance(last_turn_meaning, dict)
+                and isinstance(last_turn_meaning.get("dialogue_state"), dict)
+                else {}
+            ),
         }
         reference_resolution = self._reference_resolution(
             text,
@@ -5060,7 +5738,24 @@ class QuantumInterpretationEngine:
             memory=memory,
             active_topic=active_topic,
         )
-        resolved_reference = reference_resolution.get("target") or ""
+        state_reference = ""
+        if isinstance(last_turn_meaning, dict):
+            previous_state = last_turn_meaning.get("dialogue_state")
+            if isinstance(previous_state, dict):
+                refs = previous_state.get("references")
+                if isinstance(refs, dict):
+                    state_reference = self.normalize(
+                        refs.get("active_entity") or refs.get("active_result") or ""
+                    )
+        resolved_reference = (
+            reference_resolution.get("target")
+            if (continuation or reference)
+            else ""
+        ) or (
+            state_reference
+            if (continuation or reference)
+            else ""
+        )
         resolved_request = text
         history_task_context = dict(dialogue_vector.get("history_task_context") or {})
 
@@ -5118,11 +5813,12 @@ class QuantumInterpretationEngine:
                 + "\n".join(lines)
             )
         if resolved_reference and (continuation or reference):
-            # Structural discourse resolution: make the provider-facing request
-            # explicit without hard-coded topic/entity rules.
+            # Add the resolved referent to the existing canonical continuation packet
+            # rather than replacing the previous-answer context with a shorter prompt.
             resolved_request = (
-                f"{text}\n\nContextual referent resolved from the immediately previous human exchange: "
-                f"{resolved_reference}. Answer the current request about that referent without asking the user to repeat it."
+                f"{resolved_request}\n"
+                f"Resolved semantic referent: {resolved_reference}. "
+                "Use this referent as the object of the current request and do not ask the user to repeat established context."
             )
         if reference_resolution.get("resolved") and reference_resolution.get("target"):
             resolved_scene = dict(resolved_scene or {})
@@ -5182,6 +5878,36 @@ class QuantumInterpretationEngine:
                 "mode": "optional",
                 "reason": "semantic_text_schema_request",
             }
+        # One canonical semantic context packet for the Processor. This is the only
+        # dialogue payload downstream consumers need: current task + previous completed
+        # answer + established facts/results + resolved referent + task transition.
+        previous_dialogue_state = (
+            last_turn_meaning.get("dialogue_state")
+            if isinstance(last_turn_meaning, dict)
+            and isinstance(last_turn_meaning.get("dialogue_state"), dict)
+            else {}
+        )
+        semantic_context_packet = QuantumDialogueStateEngine.build_next_turn_context(
+            previous_dialogue_state,
+            text,
+            relation=(
+                "CONTINUE" if sequential_relation == "CONTINUE"
+                else "RECALL" if sequential_relation == "RECALL"
+                else "NEW"
+            ),
+            resolved_reference=resolved_reference,
+        )
+        if sequential_relation == "CONTINUE":
+            semantic_context_packet["previous"]["meaning"] = deepcopy(last_turn_meaning)
+        semantic_context_packet["current"] = {
+            "request": text,
+            "operation": p.get("best_operation"),
+            "object": p.get("best_object"),
+            "goal": p.get("best_goal"),
+            "representation": production,
+            "requested_outputs": list(dict.fromkeys(complete_outputs)),
+        }
+
         result=build_result(text)
         structured_requested = [
             x for x in complete_outputs
@@ -5220,6 +5946,35 @@ class QuantumInterpretationEngine:
             "turn_meaning_transition": deepcopy(transition),
             "sequential_dialogue": deepcopy(sequential_dialogue),
             "last_turn_meaning": deepcopy(last_turn_meaning or {}),
+            "last_completed_semantic_state": deepcopy(
+                last_turn_meaning.get("dialogue_state", {})
+                if isinstance(last_turn_meaning, dict)
+                else {}
+            ),
+            "dialogue_state": deepcopy(
+                {
+                    "version": QuantumDialogueStateEngine.VERSION,
+                    "current_turn": {
+                        "user_request": text,
+                        "operation": p.get("best_operation"),
+                        "object": p.get("best_object"),
+                        "goal": p.get("best_goal"),
+                        "representation": production,
+                    },
+                    "previous": deepcopy(semantic_context_packet.get("previous") or {}),
+                    "relation": (
+                        "CONTINUE" if sequential_relation == "CONTINUE"
+                        else "RECALL" if sequential_relation == "RECALL"
+                        else "NEW"
+                    ),
+                    "resolved_reference": resolved_reference,
+                    "source": "next_turn_semantic_state",
+                }
+            ),
+            "semantic_context_packet": deepcopy(semantic_context_packet),
+            "active_dialogue_state": deepcopy(
+                semantic_context_packet.get("previous") or {}
+            ),
             "previous_response_contract": deepcopy(
                 last_turn_meaning.get("response_contract", {})
                 if isinstance(last_turn_meaning, dict)
