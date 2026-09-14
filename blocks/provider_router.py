@@ -175,12 +175,16 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
             "required_competencies", "required_artifacts", "routing",
             "constraints", "metadata", "dialogue_contract",
             "response_decision", "semantic", "cognition",
-            "semantic_context_packet",
+            "semantic_context_packet", "scene_composition",
             "response_complexity", "response_output_tokens", "quantum_state",
         )
+        structural_fields = {"semantic_context_packet", "scene_composition", "dialogue_contract"}
         for name in names:
             value = getattr(machine_request, name, None)
-            if value not in (None, "", [], {}):
+            if name in structural_fields:
+                if value is not None:
+                    raw[name] = value
+            elif value not in (None, "", [], {}):
                 raw[name] = value
         # Executor-added attributes are read from the same MachineRequest,
         # not from a second route.
@@ -232,6 +236,15 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
     }
 
     compact = _compact_value(compact) or {}
+    # _compact_value intentionally drops empty containers for token economy,
+    # but canonical structural fields need their semantic "empty" state.
+    compact["scene_composition"] = (
+        raw.get("scene_composition")
+        if isinstance(raw.get("scene_composition"), list)
+        else []
+    )
+    compact["semantic_context_packet"] = raw.get("semantic_context_packet") or {}
+    compact["dialogue_contract"] = dialogue
     compact["intent"] = {
         "type": (compact.get("intent") or {}).get("type"),
         "normalized_text": (compact.get("intent") or {}).get("normalized_text", _safe_text(current).strip()),
@@ -763,9 +776,13 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     # Pass it as its own provider context surface so multiple task parts remain
     # distinct instead of being reduced to one dominant representation.
     scene_composition = payload.get("scene_composition")
-    if not isinstance(scene_composition, list):
-        raise ValueError("scene_composition must be supplied by the canonical Processor packet")
-    if isinstance(scene_composition, list) and scene_composition:
+    if scene_composition is None:
+        # No specialized scene parts is a valid canonical Processor state.
+        # Provider must not infer or reconstruct a scene.
+        scene_composition = []
+    elif not isinstance(scene_composition, list):
+        raise ValueError("scene_composition must be a list on the canonical Processor packet")
+    if scene_composition:
         fields.append(("SCENE_COMPOSITION", scene_composition))
 
     # Turn meaning is the hot semantic memory of the immediately completed turn.
