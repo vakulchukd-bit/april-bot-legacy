@@ -349,10 +349,30 @@ class QuantumTurnMeaningEngine:
         turn_id: Any = None,
         scene_id: str = "",
         semantic_engine: Any = None,
+        inherited_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         user_request = cls._clean(user_request, 2600)
         answer = cls._clean(answer, 7000)
         blocks = [x for x in (render_blocks or []) if isinstance(x, dict)]
+        inherited = inherited_state if isinstance(inherited_state, dict) else {}
+        inherited_thread = inherited.get("active_thread") if isinstance(inherited.get("active_thread"), dict) else {}
+        inherited_established = inherited.get("established") if isinstance(inherited.get("established"), dict) else {}
+        inherited_open_task = inherited.get("open_task") if isinstance(inherited.get("open_task"), dict) else {}
+        previous_pending_input = bool(inherited_open_task.get("pending_input"))
+        pending_input_resolution = {}
+        if previous_pending_input and user_request:
+            pending_input_resolution = {
+                "completed": True,
+                "value": user_request,
+                "expected_input_type": str(inherited_open_task.get("expected_input_type") or "text"),
+                "previous_prompt": cls._clean((inherited.get("current_turn") or {}).get("answer"), 2600),
+                "previous_task": {
+                    "topic": cls._clean(inherited_thread.get("topic"), 700),
+                    "goal": cls._clean(inherited_thread.get("goal"), 500),
+                    "operation": cls._clean(inherited_thread.get("operation"), 500),
+                },
+                "source": "previous_open_task",
+            }
 
         engine = semantic_engine
         user_profile = {}
@@ -590,6 +610,7 @@ class QuantumTurnMeaningEngine:
                 turn_id=turn_id,
                 scene_id=scene_id,
                 semantic_engine=engine,
+                inherited_state=inherited,
             ),
             "source": "completed_turn_semantic_understanding",
         }
@@ -1169,6 +1190,24 @@ class QuantumDialogueStateEngine:
         user = cls._norm(user_request, 2600)
         assistant = cls._norm(answer, 9000)
         inherited = inherited_state if isinstance(inherited_state, dict) else {}
+        inherited_thread = inherited.get("active_thread") if isinstance(inherited.get("active_thread"), dict) else {}
+        inherited_established = inherited.get("established") if isinstance(inherited.get("established"), dict) else {}
+        inherited_open_task = inherited.get("open_task") if isinstance(inherited.get("open_task"), dict) else {}
+        previous_pending_input = bool(inherited_open_task.get("pending_input"))
+        pending_input_resolution = {}
+        if previous_pending_input and user:
+            pending_input_resolution = {
+                "completed": True,
+                "value": user,
+                "expected_input_type": str(inherited_open_task.get("expected_input_type") or "text"),
+                "previous_prompt": cls._norm((inherited.get("current_turn") or {}).get("answer"), 2600),
+                "previous_task": {
+                    "topic": cls._norm(inherited_thread.get("topic"), 700),
+                    "goal": cls._norm(inherited_thread.get("goal"), 500),
+                    "operation": cls._norm(inherited_thread.get("operation"), 500),
+                },
+                "source": "previous_open_task",
+            }
 
         profile = {}
         if semantic_engine is not None:
@@ -1328,13 +1367,34 @@ class QuantumDialogueStateEngine:
             open_task["completed_previous_input"] = True
 
         established_facts = []
+        inherited_facts = inherited_established.get("facts") if isinstance(inherited_established.get("facts"), list) else []
+        established_facts.extend(deepcopy([f for f in inherited_facts if isinstance(f, dict)][:32]))
+        if pending_input_resolution:
+            established_facts.append({
+                "kind": "answered_previous_prompt",
+                "value": user_request,
+                "prompt": pending_input_resolution.get("previous_prompt", ""),
+                "task": deepcopy(pending_input_resolution.get("previous_task") or {}),
+                "source": "user_followup_to_open_task",
+            })
         if numeric_results:
             for value in numeric_results:
-                established_facts.append({
-                    "kind": "numeric_result",
-                    "value": value,
-                    "source": "assistant_answer",
-                })
+                fact = {"kind": "numeric_result", "value": value, "source": "assistant_answer"}
+                if fact not in established_facts:
+                    established_facts.append(fact)
+
+        inherited_entities = [
+            cls._norm(x, 240) for x in (inherited_established.get("entities") or [])
+            if cls._norm(x, 240)
+        ] if isinstance(inherited_established.get("entities"), list) else []
+        if pending_input_resolution:
+            entities = list(dict.fromkeys([user_request] + entities + inherited_entities))[:12]
+            if inherited_thread:
+                topic = cls._norm(inherited_thread.get("topic") or topic or user_request, 500)
+                best_goal = cls._norm(inherited_thread.get("goal") or best_goal or "understand", 300)
+                best_op = cls._norm(inherited_thread.get("operation") or best_op or "answer", 300)
+        else:
+            entities = list(dict.fromkeys(entities + inherited_entities))[:12]
 
         return {
             "version": cls.VERSION,
@@ -1346,13 +1406,12 @@ class QuantumDialogueStateEngine:
                 "goal": best_goal,
                 "operation": best_op,
                 "domain": (
-                    max(
-                        (profile.get("domain_scores") or {}).items(),
-                        key=lambda item: float(item[1] or 0.0),
-                    )[0]
-                    if isinstance(profile.get("domain_scores"), dict)
-                    and profile.get("domain_scores")
-                    else ""
+                    str(inherited_thread.get("domain") or "")
+                    if pending_input_resolution and inherited_thread.get("domain")
+                    else (
+                        max((profile.get("domain_scores") or {}).items(), key=lambda item: float(item[1] or 0.0))[0]
+                        if isinstance(profile.get("domain_scores"), dict) and profile.get("domain_scores") else ""
+                    )
                 ),
                 "entities": entities[:12],
             },
@@ -1372,10 +1431,11 @@ class QuantumDialogueStateEngine:
             },
             "open_task": open_task,
             "references": {
-                "active_entity": entities[0] if entities else "",
+                "active_entity": user_request if pending_input_resolution and user_request else (entities[0] if entities else ""),
                 "active_result": numeric_results[-1] if numeric_results else "",
                 "active_artifact_types": block_types[:12],
             },
+            "pending_input_resolution": deepcopy(pending_input_resolution),
             "answer_semantics": {
                 "best_operation": best_op,
                 "best_goal": best_goal,
@@ -2481,8 +2541,8 @@ class QuantumContextUnderstandingEngine:
                         segment_text,
                     )
 
-        # Whole-turn evidence remains a fallback and also preserves numeric,
-        # explicit modalities already measured before segmentation.
+        # Whole-turn evidence remains part of the same semantic measurement and
+        # preserves numeric and explicit modalities already measured before segmentation.
         if flags.get("number") and best in {"calculate", "answer"}:
             if "number" not in ordered_outputs:
                 ordered_outputs.append("number")
@@ -3151,7 +3211,7 @@ class QuantumInterpretationEngine:
     One semantic engine. It measures evidence, resolves the user's task and
     freezes one production interpretation. Evidence never becomes a renderer
     command by itself. No lexical routing, no domain/capability gates and no
-    silent renderer fallback.
+    canonical renderer selection only; renderer fallback is not performed here.
     """
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -4744,6 +4804,31 @@ class QuantumInterpretationEngine:
 
         profile = semantic_profile if isinstance(semantic_profile, dict) else {}
         candidates: list[str] = []
+        # Reference resolution is an additional semantic operation, not a synonym
+        # for continuation. Only a structurally dependent utterance should create
+        # a concrete referent; a self-contained request such as "Что ты знаешь о Диме?"
+        # must remain unresolved even when it continues the same thread.
+        anaphoric_signal = bool(
+            re.search(
+                r"(?<![А-Яа-яЁёЇїІіЄєҐґ])"
+                r"(?:он|она|оно|они|его|её|ее|ему|ей|им|ими|этот|эта|это|эти|того|той|тем|такой|"
+                r"него|неё|нее|ней|нему|ним|них|который|которая|которое|которые)"
+                r"(?![А-Яа-яЁёЇїІіЄєҐґ])",
+                current.lower(),
+            )
+        )
+
+        # A current utterance with a genuine unresolved grammatical reference is
+        # allowed to consult the committed previous semantic state. Otherwise we
+        # return no target and let the main sequential dialogue engine carry the
+        # continuation without inventing a referent.
+        if not anaphoric_signal:
+            return {
+                "present": False, "target": "", "candidates": [], "confidence": 0.0,
+                "source": "semantic_entity_reference", "anaphoric": False,
+                "short_followup": len(cls._tokens(current)) <= 8,
+                "resolved": False, "semantic_reference_authorized": bool(reference_authorized),
+            }
 
         # First consult the committed semantic state from the immediately previous
         # completed answer. This is the strongest antecedent source because it
@@ -4819,7 +4904,7 @@ class QuantumInterpretationEngine:
             "candidates": candidates[:12],
             "confidence": confidence,
             "source": "semantic_entity_reference",
-            "anaphoric": True,
+            "anaphoric": anaphoric_signal,
             "short_followup": len(cls._tokens(current)) <= 8,
             "resolved": bool(target),
             "semantic_reference_authorized": True,
@@ -5692,7 +5777,7 @@ class QuantumInterpretationEngine:
             last_a,
             last_u,
             semantic_profile=semantic_profile_for_reference,
-            reference_authorized=reference,
+            reference_authorized=bool(reference or continuation),
         )
         explicit_reference = bool(dialogue_vector.get("request_relation") == "ARTIFACT_REFERENCE")
         if reference_resolution.get("resolved") and reference_resolution.get("target") and explicit_reference:
@@ -5747,13 +5832,32 @@ class QuantumInterpretationEngine:
                     state_reference = self.normalize(
                         refs.get("active_entity") or refs.get("active_result") or ""
                     )
+        pending_previous_input = bool(
+            isinstance(last_turn_meaning, dict)
+            and isinstance(last_turn_meaning.get("response_contract"), dict)
+            and last_turn_meaning.get("response_contract", {}).get("pending_input")
+        )
+        seq_scores = (
+            sequential_dialogue.get("scores")
+            if isinstance(sequential_dialogue, dict)
+            and isinstance(sequential_dialogue.get("scores"), dict)
+            else {}
+        )
+        anaphoric_reference = bool(
+            seq_scores.get("grammatical_anaphora")
+            or reference_resolution.get("anaphoric")
+        )
         resolved_reference = (
-            reference_resolution.get("target")
-            if (continuation or reference)
-            else ""
+            ""
+            if pending_previous_input and sequential_relation == "CONTINUE"
+            else (
+                reference_resolution.get("target")
+                if (continuation or reference) and (reference or anaphoric_reference)
+                else ""
+            )
         ) or (
             state_reference
-            if (continuation or reference)
+            if (continuation or reference) and anaphoric_reference and not pending_previous_input
             else ""
         )
         resolved_request = text
@@ -5771,6 +5875,12 @@ class QuantumInterpretationEngine:
                 f"Previous USER request: {last_u}\n"
                 f"Previous APRIL answer: {last_a}"
             )
+            if pending_previous_input:
+                resolved_request += (
+                    "\nThe previous April answer requested user input. "
+                    "The current user message supplies that input and completes the pending task; "
+                    "treat it as the value of the preceding task, not as a new topic."
+                )
 
         # RECALL materializes the selected older USER->APRIL result into the
         # interpretation operand. This is the missing bridge that previously
@@ -5948,6 +6058,11 @@ class QuantumInterpretationEngine:
             "last_turn_meaning": deepcopy(last_turn_meaning or {}),
             "last_completed_semantic_state": deepcopy(
                 last_turn_meaning.get("dialogue_state", {})
+                if isinstance(last_turn_meaning, dict)
+                else {}
+            ),
+            "pending_input_resolution": deepcopy(
+                last_turn_meaning.get("pending_input_resolution", {})
                 if isinstance(last_turn_meaning, dict)
                 else {}
             ),
@@ -6658,6 +6773,7 @@ def build_turn_meaning_state(
     summary: str = "",
     turn_id: Any = None,
     scene_id: str = "",
+    inherited_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the persistent semantic meaning of a completed USER→APRIL turn."""
     return QUANTUM_TURN_MEANING_ENGINE.build(
@@ -6668,6 +6784,7 @@ def build_turn_meaning_state(
         turn_id=turn_id,
         scene_id=scene_id,
         semantic_engine=QUANTUM_INTERPRETATION_ENGINE,
+        inherited_state=inherited_state,
     )
 
 
