@@ -28,7 +28,7 @@ OPENAI_FAST_MODEL = APRIL_QUANTUM_PROVIDER_MODEL
 OPENAI_PREMIUM_MODEL = APRIL_QUANTUM_PROVIDER_MODEL
 
 INPUT_TOKEN_BUDGET = 900
-MIN_OUTPUT_TOKENS = 16
+MIN_OUTPUT_TOKENS = 1
 MAX_OUTPUT_TOKENS = 8000
 
 PROVIDER_DUPLICATE_TTL_SECONDS = 90
@@ -59,21 +59,50 @@ def _get_gemini_client():
     return _gemini_client
 
 PROVIDER_MACHINE_SYSTEM_PROMPT = """
-You are April's internal OpenAI provider. Return exactly one JSON object with:
-answer, content, summary, scene, artifacts, render_blocks, scene_plan, render_priority, confidence.
+You are the internal text-generation engine used by April.
+The user-facing assistant is ALWAYS April. The provider/model name is an internal implementation detail.
+When the current request asks who you are, answer as April and describe April's own capabilities.
+Never identify yourself to the user as GPT-5.6 Luna, ChatGPT, a model, the provider, or an internal module.
+Never expose internal provider/model names unless the user explicitly asks for technical implementation details.
 
-The Processor sends ONE canonical MachineRequest. CANONICAL_SEMANTIC_CONTEXT is the only dialogue context source.
-Obey its relation, active thread, previous completed USER→APRIL answer, established facts/results,
-open task, resolved reference and task transition as one state. Do not reconstruct dialogue from other fields.
-For CONTINUE/REFERENCE, use the supplied previous state and resolved referent. For NEW_TOPIC, do not inherit stale state.
-Answer the current request. Preserve logical continuity and all required parts.
+You receive one canonical MachineRequest already interpreted by April's processor.
+Return exactly one MachineResponse JSON object. Do not wrap it in markdown fences.
 
-requested_outputs is the Processor-owned representation plan. It may contain text plus graph/table/image/diagram/formula/etc.
-Never invent a representation not requested and never duplicate structured payload in prose.
-Emit one canonical text answer and at most one block per requested structured representation unless the plan contains multiples.
-Each structured block must contain type, renderer, viewer, payload, scene_contract=true.
+Required fields:
+answer, content, summary, scene, artifacts, render_blocks,
+scene_plan, render_priority, confidence.
 
-Return valid JSON only. Never return markdown fences, a second answer, internal model/provider names, or another model call.
+Rules:
+- answer/content are the complete human-visible narrative answer.
+- Answer the current request, not the transport protocol.
+- Use dialogue_contract and TURN_MEANING only to preserve necessary continuity.
+- The immediately completed turn is the hot semantic anchor. It owns continuity when
+  the Processor says DEVELOP_CURRENT or REFER_CURRENT.
+- When the request is NEW_TOPIC/independent, ignore stale topic/memory fields even
+  if they contain overlapping vocabulary.
+- Historical memory is recall-only evidence. It must never override the current
+  semantic owner selected by the Processor.
+- When it is a continuation/reference, use only the supplied relevant context.
+- Preserve the complete logical answer; never cut a sentence or scene for style.
+- The output budget is dynamic and canonical: use only the tokens logically required, from 1 through 8000.
+- If the complete logical answer would exceed 8000 tokens, compact the representation (especially structured payloads) while preserving all requested information; never stop mid-JSON, mid-row, or mid-scene.
+- Never assume a 2000, 5000, or 8000 fixed tier. The supplied OUTPUT_CAP is the exact per-request ceiling selected by the Quantum Processor.
+- Treat requested_outputs as the set of representations already understood for the current request.
+- Treat SCENE_COMPOSITION as the semantic decomposition of the current request into related answer parts.
+- Preserve every meaningful scene part in the response and keep the parts connected to the same user goal.
+- Do not invent an output type that is absent from requested_outputs.
+- If one or more structured representations are requested (table, graph, diagram, formula, link, etc.),
+  emit structured data for those representations in render_blocks and/or artifacts using the canonical
+  artifact payload shape. Do not encode the same structured payload twice.
+- The answer may briefly explain a structured result, but never reproduce the complete artifact payload
+  as narrative prose when a dedicated render block exists.
+- Emit one canonical text block plus at most one canonical block per requested structured representation,
+  unless the plan explicitly contains multiple independent items of the same type.
+- Keep structured payloads compact and machine-oriented: do not duplicate row/element data in answer, summary, and render_blocks.
+- Every structured block should carry: type, renderer, viewer, payload, scene_contract=true.
+- Keep Markdown and inline LaTeX inside text unless a separate renderer is explicitly required.
+- Never produce a second answer.
+- Never call another model.
 """.strip()
 
 
@@ -159,9 +188,14 @@ def _compact_value(value: Any, *, depth: int = 0, max_depth: int = 3,
 
 def _dialogue_contract(payload: dict[str, Any]) -> dict[str, Any]:
     contract = payload.get("dialogue_contract")
-    if not isinstance(contract, dict) or not contract:
-        raise ValueError("dialogue_contract is required on canonical MachineRequest")
-    return contract
+    if isinstance(contract, dict):
+        return contract
+    conversation = payload.get("conversation")
+    if isinstance(conversation, dict):
+        candidate = conversation.get("dialogue_contract")
+        if isinstance(candidate, dict):
+            return candidate
+    return {}
 
 
 def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
@@ -175,16 +209,11 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
             "required_competencies", "required_artifacts", "routing",
             "constraints", "metadata", "dialogue_contract",
             "response_decision", "semantic", "cognition",
-            "semantic_context_packet", "scene_composition",
             "response_complexity", "response_output_tokens", "quantum_state",
         )
-        structural_fields = {"semantic_context_packet", "scene_composition", "dialogue_contract"}
         for name in names:
             value = getattr(machine_request, name, None)
-            if name in structural_fields:
-                if value is not None:
-                    raw[name] = value
-            elif value not in (None, "", [], {}):
+            if value not in (None, "", [], {}):
                 raw[name] = value
         # Executor-added attributes are read from the same MachineRequest,
         # not from a second route.
@@ -196,9 +225,6 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
         raise TypeError("Provider accepts only canonical MachineRequest or dict.")
 
     dialogue = _dialogue_contract(raw)
-    semantic_context_packet = raw.get("semantic_context_packet")
-    if not isinstance(semantic_context_packet, dict) or not semantic_context_packet:
-        raise ValueError("semantic_context_packet is required on canonical MachineRequest")
     intent = raw.get("intent")
     if not isinstance(intent, dict):
         intent = {"normalized_text": _safe_text(intent)}
@@ -218,14 +244,23 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
             "dialog_act": intent.get("dialog_act") or dialogue.get("dialog_act"),
         },
         "dialogue_contract": dialogue,
-        "semantic_context_packet": semantic_context_packet or {},
         "memory": raw.get("memory") or {},
         "requested_outputs": raw.get("requested_outputs") or [],
         "required_competencies": raw.get("required_competencies") or [],
         "required_artifacts": raw.get("required_artifacts") or [],
         "visual_context": raw.get("visual_context") or {},
-        "scene_composition": raw.get("scene_composition") or [],
-        "turn_meaning": raw.get("turn_meaning") or {},
+        "scene_composition": (
+            raw.get("scene_composition")
+            or (raw.get("conversation") or {}).get("scene_composition")
+            or (raw.get("constraints") or {}).get("scene_composition")
+            or []
+        ),
+        "turn_meaning": (
+            raw.get("turn_meaning")
+            or (raw.get("conversation") or {}).get("turn_meaning")
+            or (raw.get("conversation") or {}).get("turn_meaning_transition")
+            or {}
+        ),
         "constraints": raw.get("constraints") or {},
         "response_decision": raw.get("response_decision") or {},
         "semantic": raw.get("semantic") or {},
@@ -236,15 +271,6 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
     }
 
     compact = _compact_value(compact) or {}
-    # _compact_value intentionally drops empty containers for token economy,
-    # but canonical structural fields need their semantic "empty" state.
-    compact["scene_composition"] = (
-        raw.get("scene_composition")
-        if isinstance(raw.get("scene_composition"), list)
-        else []
-    )
-    compact["semantic_context_packet"] = raw.get("semantic_context_packet") or {}
-    compact["dialogue_contract"] = dialogue
     compact["intent"] = {
         "type": (compact.get("intent") or {}).get("type"),
         "normalized_text": (compact.get("intent") or {}).get("normalized_text", _safe_text(current).strip()),
@@ -357,21 +383,23 @@ def _derive_output_tokens(payload: dict[str, Any], requested: Any = None) -> int
             if isinstance(payload.get("quantum_state"), dict) else None,
     )
     for value in sources:
-        # The Processor may provide a budget below the provider API minimum.
-        # Normalize it once at the Provider boundary; never send an invalid value.
-        if isinstance(value, bool):
-            continue
-        try:
-            numeric_value = int(value) if isinstance(value, (int, float)) else None
-        except (TypeError, ValueError):
-            numeric_value = None
-        if numeric_value is not None and numeric_value > 0:
-            cap = min(max(numeric_value, MIN_OUTPUT_TOKENS), MAX_OUTPUT_TOKENS)
+        if isinstance(value, int) and value > 0:
+            cap = min(max(int(value), MIN_OUTPUT_TOKENS), MAX_OUTPUT_TOKENS)
+            package = str(
+                payload.get("package")
+                or payload.get("plan")
+                or ((payload.get("metadata") or {}).get("package") if isinstance(payload.get("metadata"), dict) else "")
+                or ((payload.get("metadata") or {}).get("plan") if isinstance(payload.get("metadata"), dict) else "")
+                or ((payload.get("constraints") or {}).get("package") if isinstance(payload.get("constraints"), dict) else "")
+                or ((payload.get("constraints") or {}).get("plan") if isinstance(payload.get("constraints"), dict) else "")
+                or ""
+            ).strip().lower()
+            complexity = str(payload.get("response_complexity") or "").strip().upper()
+            if package == "free" and complexity == "LOW":
+                cap = min(cap, 480)
             return cap
 
-    # Practical default when the processor did not set a usable adaptive budget.
-    # The transport floor remains 16, while the architectural default is 1024.
-    return 1024
+    return MIN_OUTPUT_TOKENS
 
 
 def _render_block_renderer(block_type: str) -> str:
@@ -737,11 +765,6 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     fields: list[tuple[str, Any]] = []
     fields.append(("CURRENT_REQUEST", current))
 
-    canonical_packet = payload.get("semantic_context_packet")
-    if not isinstance(canonical_packet, dict) or not canonical_packet:
-        raise ValueError("semantic_context_packet is required; dialogue must enter Provider through the canonical semantic route")
-    fields.append(("CANONICAL_SEMANTIC_CONTEXT", canonical_packet))
-
     dialog_act = _safe_text(dialogue.get("dialog_act")).lower()
     continuation = bool(dialogue.get("continuation"))
     reference = dialog_act == "reference" or bool(dialogue.get("reply_to"))
@@ -749,8 +772,23 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     topic_relation = bool(dialogue.get("active_topic")) and (
         continuation or reference or same_goal
     )
-    # Provider consumes the canonical semantic packet as its only dialogue route.
-    # No legacy dialogue reconstruction is allowed here.
+
+    # A small self-contained dialogue vector is nearly always useful when the
+    # processor has already resolved a continuation/reference relation.
+    if continuation or reference or topic_relation:
+        vector = {
+            "dialog_act": dialogue.get("dialog_act"),
+            "continuation": continuation,
+            "reply_to": dialogue.get("reply_to"),
+            "active_goal": dialogue.get("active_goal"),
+            "active_topic": dialogue.get("active_topic"),
+            "previous_april_turn": dialogue.get("previous_april_turn"),
+            "previous_user_turn": dialogue.get("previous_user_turn"),
+        }
+        fields.append(("DIALOGUE_VECTOR", _compact_value(vector, max_items=6, max_keys=8)))
+
+    if continuation and dialogue.get("previous_april_turn"):
+        fields.append(("PREVIOUS_APRIL_TURN", dialogue.get("previous_april_turn")))
 
     if same_goal:
         fields.append(("RESOLVED_GOAL", payload.get("goal")))
@@ -766,20 +804,29 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     # Pass it as its own provider context surface so multiple task parts remain
     # distinct instead of being reduced to one dominant representation.
     scene_composition = payload.get("scene_composition")
-    if scene_composition is None:
-        # No specialized scene parts is a valid canonical Processor state.
-        # Provider must not infer or reconstruct a scene.
-        scene_composition = []
-    elif not isinstance(scene_composition, list):
-        raise ValueError("scene_composition must be a list on the canonical Processor packet")
-    if scene_composition:
+    if not isinstance(scene_composition, list):
+        constraints = payload.get("constraints")
+        scene_composition = (
+            constraints.get("scene_composition")
+            if isinstance(constraints, dict)
+            else []
+        )
+    if isinstance(scene_composition, list) and scene_composition:
         fields.append(("SCENE_COMPOSITION", scene_composition))
 
     # Turn meaning is the hot semantic memory of the immediately completed turn.
     # It is more authoritative than an old memory summary and should survive
     # input packing whenever the request is a continuation/reference.
-    # Turn meaning is already embedded in CANONICAL_SEMANTIC_CONTEXT.
-    # Provider does not reconstruct or import a second dialogue state.
+    turn_meaning = payload.get("turn_meaning")
+    if not isinstance(turn_meaning, dict):
+        conversation = payload.get("conversation")
+        turn_meaning = (
+            conversation.get("turn_meaning_transition")
+            if isinstance(conversation, dict)
+            else {}
+        )
+    if isinstance(turn_meaning, dict) and turn_meaning:
+        fields.append(("TURN_MEANING", turn_meaning))
 
     if required_artifacts:
         fields.append(("REQUIRED_ARTIFACTS", required_artifacts))
@@ -805,88 +852,6 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
             fields.append(("SEMANTIC_STATE", payload["semantic"]))
 
     return fields
-
-
-def _semantic_compact_for_envelope(value: Any, max_chars: int, *, depth: int = 0) -> Any:
-    """Deterministic semantic projection used to fit the canonical 900-token envelope.
-
-    Priority is meaning-first: current request, dialogue relation, resolved
-    reference, active task, prior turn, facts/results, then diagnostics.
-    Repeated renderer/presentation metadata is intentionally lower priority.
-    """
-    if max_chars <= 0 or depth > 3:
-        return None
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    if isinstance(value, str):
-        s=value.strip()
-        if len(s) <= max_chars:
-            return s
-        head=max(1, int(max_chars*0.7))
-        tail=max(1, max_chars-head-24)
-        return f"{s[:head].rstrip()} … {s[-tail:].lstrip()}"
-    if isinstance(value, dict):
-        priority=(
-            "current_request","normalized_text","relation","context_dependency",
-            "continuation","reference_to_previous","active_topic","active_goal",
-            "resolved_reference","resolved_request","previous_user_turn",
-            "previous_april_turn","previous_result","open_task","history_task_context",
-            "established","facts","numeric_results","resolved_operands",
-            "turn_meaning_transition","dialogue_delta","scene_composition",
-            "requested_outputs","response_guidance","dialogue_state","summary",
-        )
-        out={}
-        keys=[k for k in priority if k in value] + [k for k in value if k not in priority]
-        for key in keys:
-            current_len=len(json.dumps(out,ensure_ascii=False,default=str))
-            remaining=max_chars-current_len
-            if remaining < 48:
-                break
-            child_cap=min(560, remaining)
-            built=_semantic_compact_for_envelope(value[key], child_cap, depth=depth+1)
-            if built not in (None,"",[],{}):
-                out[str(key)]=built
-        return out
-    if isinstance(value,(list,tuple,set)):
-        out=[]
-        for item in list(value)[:10]:
-            remaining=max_chars-len(json.dumps(out,ensure_ascii=False,default=str))
-            if remaining < 48:
-                break
-            built=_semantic_compact_for_envelope(item,min(440,remaining),depth=depth+1)
-            if built not in (None,"",[],{}):
-                out.append(built)
-        return out
-    return str(value)[:max_chars]
-
-
-def _fit_text_by_semantics(text: str, max_tokens: int) -> str:
-    """Fit text to a token-equivalent ceiling while preserving semantic edges."""
-    text=_safe_text(text).strip()
-    char_cap=max(64, max_tokens*4)
-    if len(text) <= char_cap:
-        return text
-    # Sentence-aware reduction first.
-    sentences=re.split(r"(?<=[.!?])\s+", text)
-    if len(sentences) > 1:
-        selected=[]
-        for sentence in sentences:
-            trial=" ".join(selected+[sentence])
-            if len(trial) <= char_cap:
-                selected.append(sentence)
-            else:
-                break
-        if selected:
-            remainder=" ".join(selected)
-            if len(remainder) < char_cap*0.82:
-                tail=sentences[-1]
-                if tail not in selected and len(remainder)+len(tail)+5 <= char_cap:
-                    remainder=f"{remainder} … {tail}"
-            if remainder:
-                return remainder
-    head=int(char_cap*0.72)
-    tail=char_cap-head-24
-    return f"{text[:head].rstrip()} … {text[-tail:].lstrip()}"
 
 
 def _build_provider_user_text(payload: dict[str, Any], budget_tokens: int) -> str:
@@ -916,12 +881,6 @@ def _build_provider_user_text(payload: dict[str, Any], budget_tokens: int) -> st
         candidate_total = _estimate_input_tokens("\n".join(pieces + [candidate]))
         if candidate_total <= soft_limit:
             pieces.append(candidate)
-            continue
-        remaining = max(32, soft_limit - _estimate_input_tokens("\n".join(pieces)) - 8)
-        compact_value = _semantic_compact_for_envelope(value, max_chars=remaining*4)
-        candidate = render(label, compact_value)
-        if _estimate_input_tokens("\n".join(pieces + [candidate])) <= soft_limit:
-            pieces.append(candidate)
 
     pieces.append("Return one complete logical answer as JSON.")
     return "\n".join(pieces)
@@ -941,80 +900,66 @@ def build_openai_request(machine_request: Any) -> dict:
 
 def normalize_provider_input(machine_request: Any) -> list[dict]:
     system_tokens = _estimate_input_tokens(PROVIDER_MACHINE_SYSTEM_PROMPT)
-    if system_tokens >= INPUT_TOKEN_BUDGET:
-        raise RuntimeError(
-            f"Provider system prompt exceeds the {INPUT_TOKEN_BUDGET}-token input budget"
-        )
+    remaining = max(1, INPUT_TOKEN_BUDGET - system_tokens - 8)
+    user_message = build_openai_request(machine_request)
+    user_text = user_message["content"][0]["text"]
 
-    payload = machine_request_to_dict(machine_request)
-    remaining = INPUT_TOKEN_BUDGET - system_tokens - 8
-    if remaining < 1:
-        raise RuntimeError("No input-token capacity remains after provider system prompt")
+    # If the conservative estimator still exceeds the boundary, rebuild from
+    # the already-computed semantic fields. This is logical machine-packet
+    # compression, not character truncation: intent, goal, representation plan
+    # and output constraints survive while verbose transport context is removed.
+    if _estimate_input_tokens(user_text) > remaining:
+        payload = machine_request_to_dict(machine_request)
+        intent = payload.get("intent") or {}
+        constraints = payload.get("constraints") or {}
+        representation_plan = constraints.get("representation_plan") or {}
+        current = _extract_request_text(payload)
+        complexity = _derive_complexity(payload)
+        output_tokens = _derive_output_tokens(payload)
 
-    # Single canonical packing path. Fields are selected by semantic authority
-    # and packed in deterministic priority order. No alternate reconstruction,
-    # fallback source, or character-truncation path exists.
-    fields = _select_context_fields(payload)
-    complexity = _derive_complexity(payload)
-    output_tokens = _derive_output_tokens(payload)
+        compact_fields = [
+            "APRIL CANONICAL REQUEST",
+            f"GOAL: {_safe_text(payload.get('goal')).strip()}",
+            f"INTENT_TYPE: {_safe_text(intent.get('type')).strip()}",
+            f"REQUEST: {current}",
+            f"ASSISTANT_IDENTITY: {json.dumps({"name": APRIL_IDENTITY.get("name", "April"), "mode": APRIL_IDENTITY.get("identity_mode", "integrated")}, ensure_ascii=False, separators=(",", ":"))}",
+            f"REQUESTED_OUTPUTS: {json.dumps(payload.get('requested_outputs') or [], ensure_ascii=False, separators=(',', ':'))}",
+            f"SCENE_COMPOSITION: {json.dumps(payload.get('scene_composition') or [], ensure_ascii=False, separators=(',', ':'), default=str)}",
+            f"TURN_MEANING: {json.dumps(payload.get('turn_meaning') or {}, ensure_ascii=False, separators=(',', ':'), default=str)}",
+            f"TOPIC_OWNERSHIP: {json.dumps(((payload.get('turn_meaning') or {}).get('semantic_ownership') if isinstance(payload.get('turn_meaning'), dict) else {}), ensure_ascii=False, separators=(',', ':'), default=str)}",
+            f"REQUIRED_ARTIFACTS: {json.dumps(payload.get('required_artifacts') or [], ensure_ascii=False, separators=(',', ':'))}",
+            f"REPRESENTATION_PLAN: {json.dumps(representation_plan, ensure_ascii=False, separators=(',', ':'), default=str)}",
+            f"COMPLEXITY: {complexity}",
+            f"OUTPUT_CAP: {output_tokens}",
+            "Preserve the logical request; omit verbose transport context.",
+            "Return one complete logical answer as JSON.",
+        ]
+        # Drop the least critical verbose fields until the whole machine packet
+        # fits the 900-token envelope. The current request itself is retained.
+        removable = {"REPRESENTATION_PLAN:", "REQUIRED_ARTIFACTS:", "INTENT_TYPE:"}
+        pieces = []
+        for piece in compact_fields:
+            trial = "\n".join(pieces + [piece])
+            if _estimate_input_tokens(trial) <= remaining:
+                pieces.append(piece)
+            elif piece.split(":", 1)[0] + ":" not in removable:
+                # Preserve the authoritative current request even when other
+                # machine metadata has to yield to the 900-token envelope.
+                if piece.startswith("REQUEST:"):
+                    pieces.append(piece)
+        user_text = "\n".join(pieces)
+        user_message = {
+            "role": "user",
+            "content": [{"type": "input_text", "text": user_text}],
+        }
 
-    def render(label: str, value: Any) -> str:
-        if isinstance(value, (dict, list, tuple)):
-            value = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
-        return f"{label}: {value}"
-
-    compact_semantic = _semantic_compact_for_envelope(fields[1][1], max_chars=max(800, (remaining*4)//2))
-    mandatory = [
-        render("CURRENT_REQUEST", _semantic_compact_for_envelope(fields[0][1], 1200)),
-        render("CANONICAL_SEMANTIC_CONTEXT", compact_semantic),
-        render("REQUESTED_OUTPUTS", payload.get("requested_outputs") or []),
-        render("COMPLEXITY", complexity),
-        render("OUTPUT_CAP", output_tokens),
-    ]
-    pieces = list(mandatory)
-
-    # If semantic essentials alone exceed the envelope, compact the context again
-    # rather than failing a valid request.
-    while _estimate_input_tokens("\n".join(pieces)) > remaining:
-        current = _estimate_input_tokens("\n".join(pieces))
-        over = current - remaining
-        if over <= 0:
-            break
-        shrink_chars = max(160, len(json.dumps(compact_semantic, ensure_ascii=False, default=str)) - over*4 - 32)
-        compact_semantic = _semantic_compact_for_envelope(fields[1][1], shrink_chars)
-        pieces[1] = render("CANONICAL_SEMANTIC_CONTEXT", compact_semantic)
-        if shrink_chars <= 160:
-            break
-
-    if _estimate_input_tokens("\n".join(pieces)) > remaining:
-        raise ValueError("Canonical semantic request cannot fit the 900-token Provider input envelope even after semantic compaction")
-
-    for label, value in fields[2:]:
-        candidate = render(label, value)
-        trial = "\n".join(pieces + [candidate])
-        if _estimate_input_tokens(trial) <= remaining:
-            pieces.append(candidate)
-            continue
-        spare = max(32, remaining - _estimate_input_tokens("\n".join(pieces)) - 8)
-        compact_candidate = _semantic_compact_for_envelope(value, spare*4)
-        compact_text = render(label, compact_candidate)
-        if _estimate_input_tokens("\n".join(pieces + [compact_text])) <= remaining:
-            pieces.append(compact_text)
-
-    pieces.append("Return one complete logical answer as JSON.")
-    user_text = "\n".join(pieces)
     estimated = system_tokens + _estimate_input_tokens(user_text)
-    if estimated > INPUT_TOKEN_BUDGET:
-        raise RuntimeError(
-            f"Provider input budget exceeded: estimated {estimated} > {INPUT_TOKEN_BUDGET}"
-        )
-
     provider_log({
         "input_token_budget": INPUT_TOKEN_BUDGET,
         "estimated_input_tokens": estimated,
-        "input_budget_enforced": True,
-        "context_strategy": "single_canonical_semantic_pack",
-        "fallback_route": False,
+        "input_budget_enforced": estimated <= INPUT_TOKEN_BUDGET,
+        "context_strategy": "semantic_field_selection",
+        "current_request_truncation": False,
         "canonical_packet_fingerprint": _provider_packet_fingerprint(user_text),
     })
 
@@ -1023,10 +968,7 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             "role": "system",
             "content": [{"type": "input_text", "text": PROVIDER_MACHINE_SYSTEM_PROMPT}],
         },
-        {
-            "role": "user",
-            "content": [{"type": "input_text", "text": user_text}],
-        },
+        user_message,
     ]
 
 
@@ -1059,25 +1001,35 @@ def _parse_provider_json(raw_text: str) -> dict[str, Any]:
 
     candidate = raw
     if candidate.startswith("```"):
-        raise RuntimeError("Provider returned fenced JSON; canonical JSON-only contract was violated.")
+        candidate = re.sub(r"^```(?:json)?\s*", "", candidate, flags=re.I)
+        candidate = re.sub(r"\s*```$", "", candidate)
 
     try:
         value = json.loads(candidate)
-    except Exception as exc:
-        raise RuntimeError("Provider returned invalid canonical JSON.") from exc
+    except Exception:
+        value = None
 
-    if not isinstance(value, dict):
-        raise RuntimeError("Provider returned a non-object JSON payload.")
+    if isinstance(value, dict):
+        return value
 
-    required = {
-        "answer", "content", "summary", "scene",
-        "artifacts", "render_blocks", "scene_plan",
-        "render_priority", "confidence",
+    return {
+        "answer": raw,
+        "content": raw,
+        "summary": _compact_summary(raw, [{"type": "text"}]),
+        "scene": {},
+        "render_blocks": [{
+            "type": "text",
+            "content": raw,
+            "text": raw,
+            "renderer": "TextBlock",
+            "viewer": "TextBlock",
+        }],
+        "artifacts": [],
+        "scene_plan": ["text"],
+        "render_priority": ["text"],
+        "confidence": 0.5,
+        "metadata": {"provider_json_invalid": True},
     }
-    missing = sorted(key for key in required if key not in value)
-    if missing:
-        raise RuntimeError(f"Provider response missing canonical fields: {', '.join(missing)}")
-    return value
 
 
 def _unwrap_model_answer(value: Any) -> str:
@@ -1362,9 +1314,9 @@ def _extract_usage(response: Any) -> dict[str, int]:
 
 _MODEL_PRICING_PER_MTOK = {
     APRIL_QUANTUM_PROVIDER_MODEL: {
-        "input": 0.20,
-        "cached_input": 0.02,
-        "output": 1.20,
+        "input": 1.00,
+        "cached_input": 0.10,
+        "output": 6.00,
     }
 }
 
@@ -1403,7 +1355,7 @@ async def generate_text(messages: Any, temperature: Any = None,
         # the request's own response budget.
         output_tokens = _derive_output_tokens(source_request, None)
         if not (MIN_OUTPUT_TOKENS <= output_tokens <= MAX_OUTPUT_TOKENS):
-            raise RuntimeError("Provider budget outside canonical 16..8000 range")
+            raise RuntimeError("Provider budget outside canonical 1..8000 range")
         normalized_input = normalize_provider_input(source_request)
 
         request = {
