@@ -342,10 +342,13 @@ def _canonical_action(
     if clarification:
         return "clarify"
 
-    # The canonical semantic state already decided that the current operation
-    # is image generation. This is a logical handoff, not a lexical trigger.
-    if _b(semantic.get("image_generation_request")):
+    visual_mode = _s(semantic.get("visual_production_mode")).lower()
+    if visual_mode == "image_generation":
         return "generate"
+    if visual_mode == "diagram":
+        return "render"
+    if visual_mode in {"image_present", "visual_analysis"}:
+        return "render"
 
     scene_state = _d(cognition.get("scene_semantic_state") or semantic.get("scene_semantic_state"))
     task_phase = _s(scene_state.get("task_phase")).lower()
@@ -524,6 +527,8 @@ def build_response_decision(
         },
 
         "final_action": final_action,
+        "visual_production_mode": _s(semantic.get("visual_production_mode")).lower(),
+        "visual_route": _s(semantic.get("visual_production_mode")).lower(),
         "response_mode": response_mode,
 
         "scores": {
