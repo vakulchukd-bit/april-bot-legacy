@@ -831,10 +831,16 @@ class ImageRoom:
                         "image_generate",
 
                     "renderer_expected":
-                        False,
+                        True,
 
                     "continuity_safe":
                         True,
+
+                    "image_engine":
+                        "April Images Generation",
+
+                    "artifact_route":
+                        "C_ARTIFACT_CONTRACT",
 
                     "machine_channel":
                         IMAGE_ROOM_RESPONSE_CHANNEL
@@ -872,6 +878,12 @@ class ImageRoom:
 
                     "continuity_safe":
                         True,
+
+                    "image_engine":
+                        "April Images Generation",
+
+                    "artifact_route":
+                        "C_ARTIFACT_CONTRACT",
 
                     "machine_channel":
                         IMAGE_ROOM_RESPONSE_CHANNEL
