@@ -4059,6 +4059,8 @@ def _make_request(
         "assistant_identity": deepcopy(APRIL_IDENTITY),
         "assistant_identity_name": APRIL_IDENTITY.get("name", "April"),
         "identity_request": bool(semantic.get("identity_request")),
+        "image_generation_request": bool(semantic.get("image_generation_request")),
+        "image_generation_transport": _s(semantic.get("image_generation_transport")),
         "single_route": True,
         "provider_calls_per_request": 1,
         "context_mode": mode,
@@ -4252,6 +4254,7 @@ def _make_request(
             },
             "provider_input_token_budget": 900,
             "provider_context_strategy": "provider_router_semantic_field_selection",
+            "image_generation_request": bool(semantic.get("image_generation_request")),
             "current_request_must_remain_intact": True,
             "identity_scope": deepcopy(scope),
             "presentation_plan": presentation_plan,
@@ -4309,6 +4312,7 @@ def _make_request(
         "dialogue_canonical": _quantum_snapshot(canonical_dialogue),
         "representation": control.get("representation_state", {}),
         "measured_output": measured_output,
+        "image_generation_request": bool(semantic.get("image_generation_request")),
         "geometry_contract": (
             control.get("geometry_contract", {})
             if measured_output == "diagram" or "diagram" in requested_outputs
@@ -8571,6 +8575,10 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "provider_calls_per_request": 1,
         "single_route": True,
         "requested_outputs": list(request.requested_outputs),
+        "image_generation_request": bool(
+            semantic.get("image_generation_request") or
+            request.constraints.get("image_generation_request")
+        ),
         "dialogue_vector": _quantum_snapshot(
             interpretation.get("dialogue_vector", {})
         ),
