@@ -70,7 +70,7 @@ Return exactly one MachineResponse JSON object. Do not wrap it in markdown fence
 
 Required fields:
 answer, content, summary, scene, artifacts, render_blocks,
-scene_plan, render_priority, confidence.
+scene_plan, render_priority, confidence, metadata.
 
 Rules:
 - answer/content are the complete human-visible narrative answer.
@@ -103,6 +103,32 @@ Rules:
 - Keep Markdown and inline LaTeX inside text unless a separate renderer is explicitly required.
 - Never produce a second answer.
 - Never call another model.
+
+IMAGE GENERATION CONTRACT:
+- When requested_outputs contains "image" and the semantic request is an image
+  generation request, metadata.image_generation_spec is REQUIRED.
+- Do not create image bytes and do not call an image API.
+- image_generation_spec is consumed by C_APRIL_IMAGES_GENERATOR after this one
+  Provider call.
+- Use schema:
+  {"schema":"april_image_spec_v1","prompt":"short visual description",
+   "width":1024,"height":1024,
+   "style":"photorealistic|illustration|cinematic|graphic|abstract",
+   "background":{"top":"#RRGGBB","bottom":"#RRGGBB"},
+   "layers":[
+     {"kind":"polygon|ellipse|rect|line|wave|gradient|sun",
+      "role":"sky|sea|sand|sun|subject|foreground|detail",
+      "points":[[0.0,0.0],[1.0,1.0]],
+      "box":[0.0,0.0,1.0,1.0],
+      "color":"#RRGGBB","width":0.003,"opacity":0.8}
+   ],
+   "negative":["..."],"seed":12345}
+- Include enough layers to describe the complete visible composition (normally 4–20 layers).
+  Layers are rendered in order; background is the base raster.
+- Coordinates are normalized 0..1. Keep the spec compact. Never include
+  base64, PNG data, URLs, or a fake image block.
+- The normal answer is brief human-visible context. The actual image is created
+  downstream by C_APRIL_IMAGES_GENERATOR and returned through SceneContract/Fiber.
 """.strip()
 
 
@@ -1116,6 +1142,10 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
 
     raw_metadata = parsed.get("metadata")
     metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+    if "image_generation_spec" not in metadata and isinstance(
+        parsed.get("image_generation_spec"), dict
+    ):
+        metadata["image_generation_spec"] = parsed.get("image_generation_spec")
     raw_scene = parsed.get("scene")
     scene = dict(raw_scene) if isinstance(raw_scene, dict) else {}
     raw_artifacts = parsed.get("artifacts")
