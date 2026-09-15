@@ -1466,13 +1466,6 @@ async def analyze_image(path: str, prompt: str):
     raise RuntimeError("Visual provider route failed")
 
 
-async def generate_image(prompt: str, size: str = "1024x1024", quality: str = "auto"):
-    return {
-        "success": False,
-        "premium_required": True,
-        "image_generation_disabled": True,
-        "reason": "Image generation is temporarily disabled.",
-    }
-
-
-provider_generate_image = generate_image
+# Image generation has no Provider implementation.
+# Image creation belongs exclusively to C_APRIL_IMAGES_GENERATOR.
+# Text generation, voice transcription, and visual analysis remain unchanged.
