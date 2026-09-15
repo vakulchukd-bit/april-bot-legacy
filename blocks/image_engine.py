@@ -6,16 +6,10 @@ import tempfile
 import time
 from pathlib import Path
 
-# берём существующие функции, НИЧЕГО не удаляем
-from blocks.image_module import (
-    generate_image_v2,
-    generate_image
-)
+# Image creation is owned directly by C_APRIL_IMAGES_GENERATOR.
+from blocks.C_APRIL_IMAGES_GENERATOR import generate_image_result
 
-from blocks.image_edit_module import (
-    edit_image_bytes,
-    edit_image
-)
+from blocks.C_APRIL_IMAGES_GENERATOR import edit_image_result
 
 from blocks.image_system import (
     analyze_image
@@ -103,86 +97,27 @@ async def generate(
     prompt,
     state
 ):
-
+    """Execute the single canonical image-generation route."""
     try:
+        print("🧠 ENGINE: C_APRIL_IMAGES_GENERATOR ACTIVE")
 
-        use_advanced = is_complex_prompt(
-            prompt
+        result = await generate_image_result(
+            prompt=prompt,
+            size="1024x1024",
+            quality="high",
+            variant="room",
         )
 
-        img = None
-
-        # ===============================
-        # 🔥 2.0 ROUTE (СЛОЖНЫЕ ЗАДАЧИ)
-        # ===============================
-
-        if use_advanced:
-
-            print(
-                "🧠 ENGINE: 2.0 ACTIVE (complex prompt)"
-            )
-
-            try:
-
-                img = await generate_image_v2(
-                    prompt
-                )
-
-            except Exception as e:
-
-                print(
-                    "⚠️ 2.0 GENERATE ERROR:",
-                    e
-                )
-
-        # ===============================
-        # 🔥 ОБЫЧНЫЙ РЕЖИМ
-        # ===============================
-
-        if not img:
-
-            print(
-                "⚡ ENGINE: using FAST V2"
-            )
-
-            img = await generate_image_v2(
-                prompt
-            )
-
-        # ===============================
-        # 🔥 FALLBACK
-        # ===============================
-
-        if not img:
-
-            print(
-                "↩️ ENGINE FALLBACK → V1"
-            )
-
-            img = await generate_image(
-                prompt
-            )
-
-        # ===============================
-        # 🔥 FAIL
-        # ===============================
-
-        if not img:
-
+        if not result.get("success") or not result.get("image_bytes"):
             return {
-
                 "type": "error",
-
-                "data":
-                    "⚠️ Внутренний April Images Generation не смог создать изображение"
+                "data": "⚠️ Внутренний April Images Generation не смог создать изображение",
             }
 
-        # 🔥 SAVE BYTES
+        img = result["image_bytes"]
         state["image_current"] = img
 
-        # 🔥 СОХРАНЯЕМ ФАЙЛ
         path = save_temp_image(img)
-
         if path:
             now = time.time()
             state["image_context"] = {
@@ -192,45 +127,36 @@ async def generate(
                 "created_at": now,
                 "expires_at": now + 7 * 24 * 60 * 60,
             }
+            print(f"📂 ENGINE FILE SAVED: {path}")
 
-            print(
-                f"📂 ENGINE FILE SAVED: {path}"
-            )
-
-        # 🔥 META
         set_last_entity(
             user_id,
             {
                 "type": "image",
                 "data": img,
-                "source": "engine_generate"
-            }
+                "source": "C_APRIL_IMAGES_GENERATOR",
+                "artifact": result.get("artifact"),
+                "contract": result.get("contract"),
+            },
         )
 
-        print(
-            "🧠 ENGINE SAVE: image_current + META"
-        )
+        print("🧠 ENGINE SAVE: image_current + META")
 
         return {
-
             "type": "image",
-
-            "data": img
+            "data": img,
+            "artifact": result.get("artifact"),
+            "contract": result.get("contract"),
+            "render_signal": (result.get("artifact") or {}).get("render_signal"),
+            "image_engine": "April Images Generation",
+            "artifact_route": "C_ARTIFACT_CONTRACT",
         }
 
     except Exception as e:
-
-        print(
-            "ENGINE GENERATE ERROR:",
-            e
-        )
-
+        print("ENGINE GENERATE ERROR:", e)
         return {
-
             "type": "error",
-
-            "data":
-                "⚠️ Ошибка генерации"
+            "data": "⚠️ Ошибка генерации изображения",
         }
 
 
@@ -241,142 +167,31 @@ async def edit(
     prompt,
     state
 ):
-
     try:
+        print("🧠 ENGINE: C_APRIL_IMAGES_GENERATOR edit route active")
 
-        print(
-            "🧠 ENGINE: April Images Generation edit route active"
-        )
-
-        print(
-            "🧠 ENGINE EDIT START"
-        )
-
-        img = None
-
-        use_advanced = is_complex_prompt(
-            prompt
-        )
-
-        # ===============================
-        # 🔥 2.0 EDIT (СЛОЖНЫЕ ЗАДАЧИ)
-        # ===============================
-
-        if use_advanced and image_bytes:
-
-            print(
-                "🧠 ENGINE: 2.0 EDIT ACTIVE"
-            )
-
-            try:
-
-                img = await asyncio.wait_for(
-
-                    edit_image_bytes(
-                        image_bytes,
-                        prompt
-                    ),
-
-                    timeout=40
-                )
-
-            except Exception as e:
-
-                print(
-                    "⚠️ 2.0 EDIT ERROR:",
-                    e
-                )
-
-        # ===============================
-        # 🔥 1. BYTES
-        # ===============================
-
-        if not img and image_bytes:
-
-            try:
-
-                img = await asyncio.wait_for(
-
-                    edit_image_bytes(
-                        image_bytes,
-                        prompt
-                    ),
-
-                    timeout=40
-                )
-
-                print(
-                    "🧠 EDIT FROM BYTES"
-                )
-
-            except Exception as e:
-
-                print(
-                    "⚠️ ENGINE BYTES ERROR:",
-                    e
-                )
-
-        # ===============================
-        # 🔥 2. FALLBACK → PATH
-        # ===============================
-
-        if not img:
-
-            print(
-                "⚠️ ENGINE EDIT: bytes failed → trying path"
-            )
-
-            ctx = state.get(
-                "image_context"
-            ) or {}
-
-            path = ctx.get("path")
-
-            if path:
-
-                try:
-
-                    img = await asyncio.wait_for(
-
-                        edit_image(
-                            path,
-                            prompt
-                        ),
-
-                        timeout=40
-                    )
-
-                except Exception as e:
-
-                    print(
-                        "⚠️ ENGINE PATH ERROR:",
-                        e
-                    )
-
-        # ===============================
-        # 🔥 FAIL
-        # ===============================
-
-        if not img:
-
-            print(
-                "❌ ENGINE EDIT FINAL FAIL"
-            )
-
+        if not image_bytes:
             return {
-
                 "type": "error",
-
-                "data":
-                    "⚠️ Не удалось изменить изображение"
+                "data": "⚠️ Не найдено исходное изображение для редактирования",
             }
 
-        # 🔥 SAVE BYTES
+        result = await edit_image_result(
+            image_bytes,
+            prompt,
+            quality="high",
+        )
+
+        if not result.get("success") or not result.get("image_bytes"):
+            return {
+                "type": "error",
+                "data": "⚠️ Не удалось изменить изображение",
+            }
+
+        img = result["image_bytes"]
         state["image_current"] = img
 
-        # 🔥 ОБНОВЛЯЕМ ФАЙЛ
         path = save_temp_image(img)
-
         if path:
             now = time.time()
             state["image_context"] = {
@@ -387,58 +202,32 @@ async def edit(
                 "expires_at": now + 7 * 24 * 60 * 60,
             }
 
-            print(
-                f"📂 ENGINE FILE UPDATED: {path}"
-            )
-
-        # 🔥 META
         set_last_entity(
             user_id,
             {
                 "type": "image",
                 "data": img,
-                "source": "engine_edit"
-            }
-        )
-
-        print(
-            "🧠 ENGINE SAVE AFTER EDIT"
+                "source": "C_APRIL_IMAGES_GENERATOR/edit",
+                "artifact": result.get("artifact"),
+                "contract": result.get("contract"),
+            },
         )
 
         return {
-
             "type": "image",
-
-            "data": img
-        }
-
-    except asyncio.TimeoutError:
-
-        print(
-            "⏱ ENGINE EDIT TIMEOUT"
-        )
-
-        return {
-
-            "type": "error",
-
-            "data":
-                "⏱ Таймаут редактирования"
+            "data": img,
+            "artifact": result.get("artifact"),
+            "contract": result.get("contract"),
+            "render_signal": (result.get("artifact") or {}).get("render_signal"),
+            "image_engine": "April Images Generation",
+            "artifact_route": "C_ARTIFACT_CONTRACT",
         }
 
     except Exception as e:
-
-        print(
-            "ENGINE EDIT ERROR:",
-            e
-        )
-
+        print("ENGINE EDIT ERROR:", e)
         return {
-
             "type": "error",
-
-            "data":
-                "⚠️ Ошибка редактирования"
+            "data": "⚠️ Ошибка редактирования",
         }
 
 
