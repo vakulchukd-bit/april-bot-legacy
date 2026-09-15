@@ -360,22 +360,18 @@ def build_visual_generation_state(
 # APRIL IMAGES GENERATION BRIDGE
 # =====================================================
 
-async def generate_image_provider(prompt, size="1024x1024"):
-    result = await generate_image_result(
-        prompt=prompt,
-        size=size,
-        quality="high",
-        variant="legacy_compatible",
-    )
-    return result.get("image_bytes") if result.get("success") else None
+async def _generate_april_image_result(
+    prompt: str,
+    *,
+    size: str = "1024x1024",
+    quality: str = "high",
+    variant: str = "primary",
+) -> dict:
+    """Canonical image-generation handoff.
 
-
-async def _generate_image_result(
-    prompt,
-    size="1024x1024",
-    quality="high",
-    variant="primary",
-):
+    This module coordinates continuity/state only; actual image creation is
+    owned exclusively by C_APRIL_IMAGES_GENERATOR.
+    """
     return await generate_image_result(
         prompt=prompt,
         size=size,
@@ -414,20 +410,6 @@ def _attach_april_image_artifact(state, prompt, image_bytes, source):
         "image_engine": "April Images Generation",
         "artifact_route": "C_ARTIFACT_CONTRACT",
     }
-
-# =====================================================
-# 🔥 V1 (LEGACY RESERVE)
-# =====================================================
-
-async def generate_image(prompt):
-    return await generate_image_provider(prompt=prompt, size="1024x1024")
-
-# =====================================================
-# 🔥 V2 (PRIMARY)
-# =====================================================
-
-async def generate_image_v2(prompt):
-    return await generate_image_provider(prompt=prompt, size="1024x1024")
 
 # =====================================================
 # 🔥 INCREMENT
@@ -665,9 +647,12 @@ async def process(
             "test_mode_active"
         )
 
-        img = await generate_image_v2(
-            prompt
+        generation = await _generate_april_image_result(
+            prompt,
+            quality="high",
+            variant="primary",
         )
+        img = generation.get("image_bytes") if generation.get("success") else None
 
         if img:
 
@@ -675,13 +660,13 @@ async def process(
                 state,
                 prompt,
                 img,
-                source="v2",
+                source="C_APRIL_IMAGES_GENERATOR",
             )
 
             visual_state = (
                 build_visual_generation_state(
                     prompt,
-                    source="v2"
+                    source="C_APRIL_IMAGES_GENERATOR"
                 )
             )
 
@@ -706,7 +691,7 @@ async def process(
                         img,
 
                     "source":
-                        "April Images Generation / v2",
+                        "April Images Generation / C_APRIL_IMAGES_GENERATOR",
 
                     "renderer_expected":
                         True
@@ -738,7 +723,7 @@ async def process(
                         "generated",
 
                     "source":
-                        "April Images Generation / v2",
+                        "April Images Generation / C_APRIL_IMAGES_GENERATOR",
 
                     "prompt":
                         prompt,
@@ -778,22 +763,8 @@ async def process(
 
             return result_payload
 
-        # ==========================================
-        # 🔥 LEGACY FALLBACK
-        # ==========================================
+        # No secondary generation route: failures are returned below.
 
-        img = await generate_image(
-            prompt
-        )
-
-        if img:
-
-            artifact_info = _attach_april_image_artifact(
-                state,
-                prompt,
-                img,
-                source="v1",
-            )
 
             visual_state = (
                 build_visual_generation_state(
@@ -973,15 +944,12 @@ async def retry_process(
             user_id == ADMIN_ID
         )
 
-        img = await generate_image_v2(
-            prompt
+        generation = await _generate_april_image_result(
+            prompt,
+            quality="high",
+            variant="retry",
         )
-
-        if not img:
-
-            img = await generate_image(
-                prompt
-            )
+        img = generation.get("image_bytes") if generation.get("success") else None
 
         if img:
 
@@ -989,13 +957,13 @@ async def retry_process(
                 state,
                 prompt,
                 img,
-                source="retry",
+                source="C_APRIL_IMAGES_GENERATOR/retry",
             )
 
             visual_state = (
                 build_visual_generation_state(
                     prompt,
-                    source="retry"
+                    source="C_APRIL_IMAGES_GENERATOR/retry"
                 )
             )
 
@@ -1020,7 +988,7 @@ async def retry_process(
                         img,
 
                     "source":
-                        "April Images Generation / retry",
+                        "April Images Generation / C_APRIL_IMAGES_GENERATOR/retry",
 
                     "renderer_expected":
                         True
@@ -1056,7 +1024,7 @@ async def retry_process(
                         "generated",
 
                     "source":
-                        "April Images Generation / retry",
+                        "April Images Generation / C_APRIL_IMAGES_GENERATOR/retry",
 
                     "prompt":
                         prompt,
