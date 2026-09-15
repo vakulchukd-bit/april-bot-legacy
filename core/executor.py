@@ -3605,7 +3605,10 @@ def _canonical_requested_outputs(
                 result.append(name)
         return result
 
+    visual_mode = _s(semantic.get("visual_production_mode") or decision.get("visual_production_mode")).lower()
     canonical = _s(
+        "image" if visual_mode == "image_generation" else
+        "diagram" if visual_mode == "diagram" else
         semantic.get("production_representation")
         or semantic.get("resolved_representation")
         or semantic.get("requested_representation")
@@ -4059,8 +4062,6 @@ def _make_request(
         "assistant_identity": deepcopy(APRIL_IDENTITY),
         "assistant_identity_name": APRIL_IDENTITY.get("name", "April"),
         "identity_request": bool(semantic.get("identity_request")),
-        "image_generation_request": bool(semantic.get("image_generation_request")),
-        "image_generation_transport": _s(semantic.get("image_generation_transport")),
         "single_route": True,
         "provider_calls_per_request": 1,
         "context_mode": mode,
@@ -4071,6 +4072,7 @@ def _make_request(
         "context_binding_history_required": bool(
             _as_dict(state.get("_canonical_processor_dialogue", {})).get("history_required")
         ),
+        "visual_production_mode": _s(semantic.get("visual_production_mode") or decision.get("visual_production_mode")).lower(),
     }
 
     if isinstance(state, dict):
@@ -4254,7 +4256,6 @@ def _make_request(
             },
             "provider_input_token_budget": 900,
             "provider_context_strategy": "provider_router_semantic_field_selection",
-            "image_generation_request": bool(semantic.get("image_generation_request")),
             "current_request_must_remain_intact": True,
             "identity_scope": deepcopy(scope),
             "presentation_plan": presentation_plan,
@@ -4270,6 +4271,7 @@ def _make_request(
             "representation_plan": {
                 "requested_outputs": requested_outputs,
                 "preferred_representation": measured_output,
+                "visual_production_mode": _s(semantic.get("visual_production_mode") or decision.get("visual_production_mode")).lower(),
                 "geometry_contract": (
                     control.get("geometry_contract", {})
                     if measured_output == "diagram" or "diagram" in requested_outputs
@@ -4312,7 +4314,6 @@ def _make_request(
         "dialogue_canonical": _quantum_snapshot(canonical_dialogue),
         "representation": control.get("representation_state", {}),
         "measured_output": measured_output,
-        "image_generation_request": bool(semantic.get("image_generation_request")),
         "geometry_contract": (
             control.get("geometry_contract", {})
             if measured_output == "diagram" or "diagram" in requested_outputs
@@ -7726,7 +7727,14 @@ async def _materialize_provider_image(
 ) -> MachineResponse:
     """Consume the Provider image plan and render it locally as PNG pixels."""
     requested = {_s(x).lower() for x in list(getattr(request, "requested_outputs", []) or []) if _s(x)}
-    if "image" not in requested:
+    constraints = getattr(request, "constraints", {}) if isinstance(getattr(request, "constraints", {}), dict) else {}
+    plan = constraints.get("representation_plan", {}) if isinstance(constraints.get("representation_plan"), dict) else {}
+    meta_constraints = constraints.get("metadata", {}) if isinstance(constraints.get("metadata"), dict) else {}
+    visual_mode = _s(
+        plan.get("visual_production_mode")
+        or meta_constraints.get("visual_production_mode")
+    ).lower()
+    if "image" not in requested or visual_mode != "image_generation":
         return response
 
     metadata = getattr(response, "metadata", {}) or {}
@@ -7741,6 +7749,12 @@ async def _materialize_provider_image(
         return response
 
     try:
+        print("🖼 IMAGE GENERATION HANDOFF:", {
+            "mode": visual_mode,
+            "engine": "C_APRIL_IMAGES_GENERATOR",
+            "provider_calls_added": 0,
+            "spec_present": True,
+        })
         result = await generate_from_spec(spec, variant="provider_spec")
         if not result.get("success") or not result.get("image_bytes"):
             raise RuntimeError("IMAGE_ENGINE_EMPTY_RESULT")
@@ -8575,10 +8589,6 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "provider_calls_per_request": 1,
         "single_route": True,
         "requested_outputs": list(request.requested_outputs),
-        "image_generation_request": bool(
-            semantic.get("image_generation_request") or
-            request.constraints.get("image_generation_request")
-        ),
         "dialogue_vector": _quantum_snapshot(
             interpretation.get("dialogue_vector", {})
         ),
