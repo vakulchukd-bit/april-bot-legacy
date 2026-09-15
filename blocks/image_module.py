@@ -97,7 +97,7 @@ from blocks.state_manager import (
     set_last_entity
 )
 
-from blocks.provider_router import generate_image as provider_generate_image
+from blocks.C_APRIL_IMAGES_GENERATOR import generate_image_result, april_images_generator
 
 # =====================================================
 # 🔥 FILE ID
@@ -357,15 +357,63 @@ def build_visual_generation_state(
 
 
 # =====================================================
-# PROVIDER BRIDGE
+# APRIL IMAGES GENERATION BRIDGE
 # =====================================================
 
 async def generate_image_provider(prompt, size="1024x1024"):
-    return await provider_generate_image(
+    result = await generate_image_result(
         prompt=prompt,
         size=size,
-        quality="auto",
+        quality="high",
+        variant="legacy_compatible",
     )
+    return result.get("image_bytes") if result.get("success") else None
+
+
+async def _generate_image_result(
+    prompt,
+    size="1024x1024",
+    quality="high",
+    variant="primary",
+):
+    return await generate_image_result(
+        prompt=prompt,
+        size=size,
+        quality=quality,
+        variant=variant,
+    )
+
+
+def _attach_april_image_artifact(state, prompt, image_bytes, source):
+    if not image_bytes:
+        return None
+
+    try:
+        artifact, _contract = april_images_generator.build_artifact_from_bytes(
+            image_bytes,
+            prompt,
+            backend="April Images Generation",
+            variant=str(source or "generated"),
+        )
+    except Exception as exc:
+        log_image_generation_event(
+            "artifact_build_error",
+            {"error": str(exc), "source": str(source or "generated")},
+        )
+        return None
+
+    state["image_artifact"] = artifact
+
+    render_signal = artifact.get("render_signal")
+    if isinstance(render_signal, dict):
+        state["image_render_signal"] = render_signal
+
+    return {
+        "artifact": artifact,
+        "render_signal": render_signal if isinstance(render_signal, dict) else None,
+        "image_engine": "April Images Generation",
+        "artifact_route": "C_ARTIFACT_CONTRACT",
+    }
 
 # =====================================================
 # 🔥 V1 (LEGACY RESERVE)
@@ -610,7 +658,7 @@ async def process(
         # ==========================================
 
         print(
-            "🛑 IMAGE GENERATION DISABLED FOR GEMINI TEST MODE"
+            "🧠 APRIL IMAGES GENERATION ACTIVE"
         )
 
         log_image_generation_event(
@@ -622,6 +670,13 @@ async def process(
         )
 
         if img:
+
+            artifact_info = _attach_april_image_artifact(
+                state,
+                prompt,
+                img,
+                source="v2",
+            )
 
             visual_state = (
                 build_visual_generation_state(
@@ -651,7 +706,7 @@ async def process(
                         img,
 
                     "source":
-                        "v2",
+                        "April Images Generation / v2",
 
                     "renderer_expected":
                         True
@@ -683,7 +738,7 @@ async def process(
                         "generated",
 
                     "source":
-                        "v2",
+                        "April Images Generation / v2",
 
                     "prompt":
                         prompt,
@@ -703,14 +758,25 @@ async def process(
                 "v2_generation_success"
             )
 
-            return {
+            result_payload = {
 
-                "type":
-                    "image",
 
-                "data":
-                    img
+                "type": "image",
+
+
+                "data": img,
+
+
             }
+
+
+            if artifact_info:
+
+
+                result_payload.update(artifact_info)
+
+
+            return result_payload
 
         # ==========================================
         # 🔥 LEGACY FALLBACK
@@ -721,6 +787,13 @@ async def process(
         )
 
         if img:
+
+            artifact_info = _attach_april_image_artifact(
+                state,
+                prompt,
+                img,
+                source="v1",
+            )
 
             visual_state = (
                 build_visual_generation_state(
@@ -750,7 +823,7 @@ async def process(
                         img,
 
                     "source":
-                        "v1",
+                        "April Images Generation / v1",
 
                     "renderer_expected":
                         True
@@ -782,7 +855,7 @@ async def process(
                         "generated",
 
                     "source":
-                        "v1",
+                        "April Images Generation / v1",
 
                     "prompt":
                         prompt,
@@ -802,14 +875,25 @@ async def process(
                 "v1_generation_success"
             )
 
-            return {
+            result_payload = {
 
-                "type":
-                    "image",
 
-                "data":
-                    img
+                "type": "image",
+
+
+                "data": img,
+
+
             }
+
+
+            if artifact_info:
+
+
+                result_payload.update(artifact_info)
+
+
+            return result_payload
 
         log_image_generation_event(
             "generation_failed"
@@ -901,6 +985,13 @@ async def retry_process(
 
         if img:
 
+            artifact_info = _attach_april_image_artifact(
+                state,
+                prompt,
+                img,
+                source="retry",
+            )
+
             visual_state = (
                 build_visual_generation_state(
                     prompt,
@@ -929,7 +1020,7 @@ async def retry_process(
                         img,
 
                     "source":
-                        "retry",
+                        "April Images Generation / retry",
 
                     "renderer_expected":
                         True
@@ -965,7 +1056,7 @@ async def retry_process(
                         "generated",
 
                     "source":
-                        "retry",
+                        "April Images Generation / retry",
 
                     "prompt":
                         prompt,
@@ -985,14 +1076,25 @@ async def retry_process(
                 "retry_success"
             )
 
-            return {
+            result_payload = {
 
-                "type":
-                    "image",
 
-                "data":
-                    img
+                "type": "image",
+
+
+                "data": img,
+
+
             }
+
+
+            if artifact_info:
+
+
+                result_payload.update(artifact_info)
+
+
+            return result_payload
 
         log_image_generation_event(
             "retry_failed"
