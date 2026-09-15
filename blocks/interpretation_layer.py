@@ -73,6 +73,31 @@ RESPONSE_COMPLEXITY_MEDIUM = "MEDIUM"
 RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
+
+# Competing conceptual classes for visual production. These are semantic
+# prototypes, not lexical trigger lists. The selected class becomes the single
+# visual production contract consumed by Semantic Core and Executor.
+VISUAL_PRODUCTION_HYPOTHESES = {
+    "image_generation": (
+        "Пользователь просит именно сгенерировать, создать или получить новое отдельное "
+        "изображение, фотографию, иллюстрацию или визуальную сцену по описанию; результатом "
+        "должны стать новые пиксели, а не показ существующего файла и не простая схема."
+    ),
+    "diagram": (
+        "Пользователь просит нарисовать, изобразить или построить простой визуальный объект, "
+        "эскиз, схему, примитивную иллюстрацию или базовую форму, которую можно выразить "
+        "структурированными диаграммными примитивами без отдельной генеративной фотосцены."
+    ),
+    "image_present": (
+        "Пользователь просит показать, вывести, отобразить или повторно использовать уже "
+        "существующую картинку, фотографию или визуальный артефакт, а не создавать новый."
+    ),
+    "visual_analysis": (
+        "Пользователь просит исследовать, понять, описать, сравнить или проанализировать "
+        "существующее изображение или визуальный артефакт."
+    ),
+}
+
 TRANSPORT_NAME = "transport_state"
 INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v17_sequential_dialogue_state_v3"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
@@ -228,8 +253,8 @@ STRUCTURED_REPRESENTATIONS = tuple(x for x in REPRESENTATION_UNIVERSE if x != "t
 
 OPERATION_HYPOTHESES = {
     "answer": "ответить объяснить рассказать сообщить дать информацию",
-    "build": "создать построить сформировать нарисовать начертить сгенерировать сгенерируй генерировать генерация создание рисунок",
-    "present": "показать покажи показывать отобразить отображать продемонстрировать вывести представить предъявить",
+    "build": "создать построить сформировать нарисовать начертить изобразить результат",
+    "present": "показать отобразить продемонстрировать вывести представить результат",
 
     "compare": "сравнить сопоставить различия сходства",
     "modify": "изменить исправить обновить переделать дополнить",
@@ -3306,6 +3331,137 @@ class QuantumInterpretationEngine:
             )
         return scores
 
+    def _visual_production_profile(
+        self,
+        text: str,
+        scores: dict[str, dict[str, float]],
+        *,
+        current_visual_input: bool = False,
+    ) -> dict[str, Any]:
+        """Fuse visual task meaning into one production mode.
+
+        The result is derived from competing semantic prototypes and the already
+        measured operation/representation/object/goal families. It is not a
+        keyword trigger and it does not inspect conversation memory.
+        """
+        rep = scores.get("representation", {}) if isinstance(scores.get("representation"), dict) else {}
+        obj = scores.get("object", {}) if isinstance(scores.get("object"), dict) else {}
+        op = scores.get("operation", {}) if isinstance(scores.get("operation"), dict) else {}
+        goal = scores.get("goal", {}) if isinstance(scores.get("goal"), dict) else {}
+
+        semantic_scores = {
+            name: float(self.similarity(text, hypothesis).get("score", 0.0) or 0.0)
+            for name, hypothesis in VISUAL_PRODUCTION_HYPOTHESES.items()
+        }
+
+        best_op = (
+            max(op.items(), key=lambda item: float(item[1] or 0.0))[0] if op else "answer"
+        )
+
+        visual_rep = max(
+            float(rep.get("image", 0.0) or 0.0),
+            float(rep.get("gallery", 0.0) or 0.0),
+            float(rep.get("diagram", 0.0) or 0.0),
+            float(rep.get("graph", 0.0) or 0.0),
+        )
+        visual_obj = max(
+            float(obj.get("image", 0.0) or 0.0),
+            float(obj.get("gallery", 0.0) or 0.0),
+            float(obj.get("diagram", 0.0) or 0.0),
+            float(obj.get("graph", 0.0) or 0.0),
+        )
+        build = max(
+            float(op.get("build", 0.0) or 0.0),
+            float(op.get("create", 0.0) or 0.0),
+            float(op.get("modify", 0.0) or 0.0),
+        )
+        present = float(op.get("present", 0.0) or 0.0)
+        analyze = float(op.get("analyze", 0.0) or 0.0)
+        visualize = max(
+            float(goal.get("visualize", 0.0) or 0.0),
+            float(goal.get("transform", 0.0) or 0.0),
+            float(goal.get("present", 0.0) or 0.0),
+        )
+
+        composite = dict(semantic_scores)
+        composite["image_generation"] += 0.40 * visual_rep + 0.24 * visual_obj + 0.36 * build + 0.10 * visualize
+        composite["diagram"] += 0.54 * float(rep.get("diagram", 0.0) or 0.0) + 0.34 * float(obj.get("diagram", 0.0) or 0.0) + 0.34 * build + 0.10 * visualize
+        composite["image_present"] += 0.62 * present + 0.28 * visual_obj + 0.20 * float(goal.get("present", 0.0) or 0.0)
+        composite["visual_analysis"] += 0.62 * analyze + 0.28 * visual_obj
+
+        if current_visual_input:
+            composite["image_generation"] *= 0.10
+            composite["diagram"] *= 0.45
+            composite["image_present"] += 0.08 * visual_obj
+            composite["visual_analysis"] += 0.40
+
+        ordered = sorted(composite.items(), key=lambda item: float(item[1]), reverse=True)
+        top_name = ordered[0][0] if ordered else "none"
+        mode = top_name
+        top = float(ordered[0][1]) if ordered else 0.0
+        second = float(ordered[1][1]) if len(ordered) > 1 else 0.0
+        margin = top - second
+
+        gen_sem = float(semantic_scores.get("image_generation", 0.0) or 0.0)
+        diag_sem = float(semantic_scores.get("diagram", 0.0) or 0.0)
+
+        # Build-like requests are resolved as a competition between two visual
+        # construction modes. Complex generation requires semantic evidence for
+        # *new image creation* to lead the lightweight drawing interpretation by
+        # a meaningful margin. This prevents a generic image noun from escalating
+        # a simple drawing.
+        build_like = best_op in {"build", "create", "modify"}
+        # The image-present class is meaningful only when the semantic operation
+        # actually describes presentation/reuse. A generic image noun must not
+        # overpower a request to create a new artifact.
+        if present < 0.14 and best_op not in {"present"}:
+            composite["image_present"] *= 0.25
+        generation_semantically_clear = (
+            gen_sem >= 0.10
+            and gen_sem >= diag_sem + 0.04
+        )
+        if current_visual_input:
+            if analyze >= max(present, build) and analyze >= 0.16:
+                mode = "visual_analysis"
+            elif present >= max(analyze, build) and present >= 0.14:
+                mode = "image_present"
+            else:
+                mode = "visual_analysis"
+        elif analyze >= max(present, build) and analyze >= 0.18:
+            mode = "visual_analysis"
+        elif present >= max(analyze, build) and present >= 0.14:
+            mode = "image_present"
+        elif build_like:
+            if generation_semantically_clear and composite.get("image_generation", 0.0) >= composite.get("diagram", 0.0) + 0.10:
+                mode = "image_generation"
+            else:
+                mode = "diagram"
+        elif generation_semantically_clear and visual_rep >= 0.05 and composite.get("image_generation", 0.0) >= composite.get("image_present", 0.0) + 0.03:
+            # The generation class can repair an under-ranked lexical operation
+            # such as imperative ``generate`` being scored as retrieve/list.
+            mode = "image_generation"
+        elif present >= max(analyze, build) and present >= 0.12:
+            mode = "image_present"
+        elif analyze >= max(present, build) and analyze >= 0.18:
+            mode = "visual_analysis"
+        elif visual_rep >= 0.05:
+            mode = "diagram"
+
+        normalized_operation = best_op
+        if mode in {"image_generation", "diagram"} and best_op not in {"present", "analyze"}:
+            normalized_operation = "build"
+
+        return {
+            "mode": mode,
+            "scores": {k: round(float(v), 6) for k, v in composite.items()},
+            "semantic_scores": {k: round(float(v), 6) for k, v in semantic_scores.items()},
+            "margin": round(float(margin), 6),
+            "normalized_operation": normalized_operation,
+            "current_visual_input": bool(current_visual_input),
+            "source": "semantic_visual_production_fusion_v2",
+            "triggering": False,
+        }
+
     @staticmethod
     def _semantic_request_features(
         text: str,
@@ -4440,6 +4596,9 @@ class QuantumInterpretationEngine:
             "goal":self._family_scores(text,"goal",GOAL_HYPOTHESES),
             "visual_schema":self._family_scores(text,"visual_schema",VISUAL_SCHEMA_HYPOTHESES),
         }
+        visual_production = self._visual_production_profile(
+            text, scores, current_visual_input=bool((modalities or {}).get("current_visual_input"))
+        )
 
         # Grammatical question structure is stronger evidence of an answer/
         # analysis operation than a weak matrix match to "build". This operates on
@@ -4518,27 +4677,16 @@ class QuantumInterpretationEngine:
             "operation_scores":scores["operation"],"object_scores":scores["object"],"goal_scores":scores["goal"],
             "visual_schema_scores":scores["visual_schema"],
             "request_features":request_features,
+            "visual_production":visual_production,
+            "visual_production_mode":visual_production.get("mode", "none"),
+            "image_generation_request":visual_production.get("mode") == "image_generation",
+            "lightweight_visual_request":visual_production.get("mode") == "diagram",
+            "complex_image_generation":visual_production.get("mode") == "image_generation",
             "context_scores":ctx,
             "best_representation":rep[0][0] if rep else "text",
             "best_representation_score":float(rep[0][1]) if rep else 0.0,
             "representation_margin":float(rep[0][1]-rep[1][1]) if len(rep)>1 else (float(rep[0][1]) if rep else 0.0),
-            "best_operation":(
-                "analyze"
-                if float(scores["operation"].get("analyze", 0.0) or 0.0)
-                    >= max(
-                        float(scores["operation"].get("build", 0.0) or 0.0),
-                        float(scores["operation"].get("present", 0.0) or 0.0),
-                    ) + 0.02
-                else (
-                    "present"
-                    if ops
-                    and "present" in scores["operation"]
-                    and "build" in scores["operation"]
-                    and float(scores["operation"].get("present", 0.0) or 0.0)
-                        >= float(scores["operation"].get("build", 0.0) or 0.0) - 0.02
-                    else (ops[0][0] if ops else "answer")
-                )
-            ),
+            "best_operation":ops[0][0] if ops else "answer",
             "best_object":objs[0][0] if objs else "text",
             "best_goal":goals[0][0] if goals else "understand",
             "source":"quantum_matrix_semantic_measurement_v3",
@@ -4562,6 +4710,7 @@ class QuantumInterpretationEngine:
         op=dict(profile.get("operation_scores") or {})
         goal=dict(profile.get("goal_scores") or {})
         features=dict(profile.get("request_features") or {})
+        visual_mode = str(profile.get("visual_production_mode") or "none").lower()
 
         def rank(items):
             return sorted(items.items(), key=lambda x: float(x[1]), reverse=True)
@@ -4576,6 +4725,14 @@ class QuantumInterpretationEngine:
         best_op_score=float(op.get(best_op,0.0))
         best_goal=goal_rank[0][0] if goal_rank else "understand"
         best_goal_score=float(goal.get(best_goal,0.0))
+
+        # Canonical visual-production class selected by the semantic fusion above.
+        if visual_mode == "image_generation":
+            return "image", "semantic_visual_image_generation", True
+        if visual_mode == "diagram" and best_op in {"build", "create", "modify", "present"}:
+            return "diagram", "semantic_light_visual_construction", True
+        if visual_mode == "image_present" and best_op in {"present", "build", "modify", "retrieve", "list"}:
+            return "image", "semantic_existing_image_presentation", True
 
         # A textual/ASCII schema is an optional format advisory for the TEXT
         # block. It must win only when the semantic matrix itself identifies a
@@ -5600,14 +5757,19 @@ class QuantumInterpretationEngine:
             if isinstance(state, dict)
             else False
         )
-        image_generation_request = bool(
-            "image" in context_outputs
-            and op_name in {"build", "create", "modify"}
-            and not current_visual_input_present
-        )
-        if image_generation_request:
+        visual_mode = str(p.get("visual_production_mode") or "none").lower()
+        if current_visual_input_present and visual_mode == "image_generation":
+            visual_mode = "visual_analysis"
+        image_generation_request = visual_mode == "image_generation"
+        lightweight_visual_request = visual_mode == "diagram"
+        complex_image_generation = image_generation_request
+        if visual_mode == "image_generation":
             production = "image"
-            source = "semantic_image_generation_resolution"
+            source = "semantic_visual_image_generation"
+            locked = True
+        elif visual_mode == "diagram":
+            production = "diagram"
+            source = "semantic_light_visual_construction"
             locked = True
         continuation = bool(
             sequential_relation == "CONTINUE"
@@ -5621,16 +5783,6 @@ class QuantumInterpretationEngine:
         current_task_production_request = current_task_operation in {
             "build", "modify", "present", "calculate"
         }
-        # A present/show operation should preserve an explicitly requested image
-        # as the output representation, but it must never imply generation.
-        if (
-            current_task_operation == "present"
-            and "image" in {str(x).lower() for x in (complete_outputs or [])}
-            and not image_generation_request
-        ):
-            production = "image"
-            source = "semantic_presentation_image"
-            locked = True
         current_explicit_structured = bool(
             explicit
             or (
@@ -5956,6 +6108,24 @@ class QuantumInterpretationEngine:
             "requested_outputs": list(dict.fromkeys(complete_outputs)),
         }
 
+        # Collapse the visual output set to the selected semantic production
+        # class. This prevents a lightweight diagram request from carrying a
+        # second, unintended image-generation output into the Provider.
+        if visual_mode == "diagram":
+            complete_outputs = [
+                x for x in complete_outputs
+                if x not in {"image", "gallery"}
+            ]
+            if "diagram" not in complete_outputs:
+                complete_outputs.insert(0, "diagram")
+        elif visual_mode == "image_generation":
+            complete_outputs = [
+                x for x in complete_outputs
+                if x not in {"diagram", "gallery"}
+            ]
+            if "image" not in complete_outputs:
+                complete_outputs.insert(0, "image")
+
         result=build_result(text)
         structured_requested = [
             x for x in complete_outputs
@@ -5979,7 +6149,11 @@ class QuantumInterpretationEngine:
                 p["object_scores"].get(production,0.0),
                 p["goal_scores"].get("visualize" if production in {"graph","diagram","image","gallery"} else "present",0.0)
             ),
+            "visual_production_mode": visual_mode,
+            "visual_production": deepcopy(p.get("visual_production") or {}),
             "image_generation_request": image_generation_request,
+            "lightweight_visual_request": lightweight_visual_request,
+            "complex_image_generation": complex_image_generation,
             "visual_generation_needed": image_generation_request,
             "explicit_visual_generation": image_generation_request,
             "explicit_image_generation_only": image_generation_request,
@@ -5996,7 +6170,11 @@ class QuantumInterpretationEngine:
             "turn_structure_understanding": turn_structure_understanding,
             "task_understanding": task_understanding,
             "scene_composition": deepcopy(scene_composition),
+            "visual_production_mode": visual_mode,
+            "visual_production": deepcopy(p.get("visual_production") or {}),
             "image_generation_request": image_generation_request,
+            "lightweight_visual_request": lightweight_visual_request,
+            "complex_image_generation": complex_image_generation,
             "visual_generation_needed": image_generation_request,
             "explicit_visual_generation": image_generation_request,
             "explicit_image_generation_only": image_generation_request,
