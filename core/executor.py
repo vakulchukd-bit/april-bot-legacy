@@ -2685,19 +2685,12 @@ def _quantum_context_binding(
             semantic.get("quantum_dynamic_memory_evidence")
         ),
     )
-    # Interpretation is the semantic owner of the dialogue relation. The
-    # memory/vector branch is evidence for resolving the referenced object, but
-    # it must not demote an already-collapsed CONTINUATION / ARTIFACT_REFERENCE
-    # into INDEPENDENT simply because no memory-part vector was proved.
-    frozen_relation = _s(
+    relation = _s(consensus.get("relation")).upper() or _s(
         frozen.get("relation")
         or vector.get("relation")
         or scene.get("mode")
         or "INDEPENDENT"
     ).upper()
-    consensus_relation = _s(consensus.get("relation")).upper()
-    relation = consensus_relation or frozen_relation
-
     continuation = bool(
         consensus.get("continuation")
         or frozen.get("continuation")
@@ -2710,33 +2703,6 @@ def _quantum_context_binding(
         or scene.get("reference_to_previous")
         or vector.get("reference_to_previous")
     )
-
-    # Preserve an explicit semantic continuation/reference decision from
-    # Interpretation when the auxiliary memory consensus is neutral/independent.
-    # This is not a trigger: the relation was already semantically measured by
-    # Interpretation and frozen before downstream engines ran.
-    if frozen_relation in {
-        "CONTINUATION",
-        "CONTINUE_TOPIC",
-        "ARTIFACT_REFERENCE",
-        "MEMORY_QUERY",
-    }:
-        relation = frozen_relation
-        continuation = continuation or frozen_relation in {
-            "CONTINUATION",
-            "CONTINUE_TOPIC",
-            "ARTIFACT_REFERENCE",
-            "MEMORY_QUERY",
-        }
-        reference = reference or frozen_relation == "ARTIFACT_REFERENCE"
-
-    # A fresh semantic boundary is authoritative in the opposite direction.
-    # When Interpretation explicitly says NEW_TOPIC, downstream memory evidence
-    # cannot reattach the new request to an old dialogue branch.
-    if frozen_relation == "NEW_TOPIC":
-        relation = "NEW_TOPIC"
-        continuation = False
-        reference = False
 
     # Memory may strengthen a reference only after the CONTEXT was interpreted
     # against at least one decomposed memory part. Memory alone cannot create a
