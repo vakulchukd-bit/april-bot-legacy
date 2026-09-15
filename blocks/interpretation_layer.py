@@ -3201,119 +3201,6 @@ class QuantumInterpretationEngine:
                 self._semantic_encoder = None
 
     @staticmethod
-    def _math_surface(text: Any) -> dict[str, Any]:
-        """
-        Structural mathematical-surface analysis.
-
-        Numbers, signs and formula notation remain ordinary user text. This method
-        only determines whether the text can be presented mathematically. It does
-        not choose an operation, topic, provider or renderer.
-        """
-        source = str(text or "")
-        stripped = source.strip()
-        if not stripped:
-            return {
-                "present": False, "kind": "", "has_number": False,
-                "has_math_operator": False, "has_formula_relation": False,
-                "katex": False, "color": "", "clean": True,
-                "wrapper": "", "source": "structural_math_surface",
-                "lexical_trigger": False,
-            }
-
-        number_pattern = r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?(?:[eE][+-]?\d+)?(?![\w.])"
-        numbers = re.findall(number_pattern, stripped)
-        operators = re.findall(r"[+\-*/×÷=<>≤≥±^]", stripped)
-        formula_relation = bool(
-            re.search(r"(?<![\w])(?:[A-Za-zА-Яа-яЁёЇїІіЄєҐґ]\s*)=", stripped)
-            or re.search(r"\\(?:frac|sqrt|sum|int|prod|alpha|beta|gamma|theta|pi)\b", stripped)
-        )
-        has_number = bool(numbers)
-        has_math_operator = bool(operators)
-        has_symbolic_operand = bool(
-            re.search(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ]", stripped)
-        )
-        math_surface = bool(
-            has_number
-            or formula_relation
-            or (has_math_operator and has_symbolic_operand)
-        )
-
-        if formula_relation or (has_math_operator and len(numbers) >= 2):
-            kind = "formula"
-        elif has_number:
-            kind = "scalar"
-        elif math_surface:
-            kind = "mathematical_text"
-        else:
-            kind = ""
-
-        return {
-            "present": math_surface,
-            "kind": kind,
-            "has_number": has_number,
-            "number_count": len(numbers),
-            "has_math_operator": has_math_operator,
-            "has_formula_relation": formula_relation,
-            "numbers": numbers[:32],
-            "katex": math_surface,
-            "color": "green" if math_surface else "",
-            "clean": True,
-            "wrapper": "",
-            "strip_redundant_outer_wrappers": True,
-            "preserve_internal_grouping": True,
-            "source": "structural_math_surface",
-            "lexical_trigger": False,
-        }
-
-    @staticmethod
-    def _clean_math_surface_text(text: Any) -> str:
-        """
-        Remove only redundant outer wrappers/punctuation. Internal mathematical
-        grouping remains untouched.
-        """
-        value = re.sub(r"\s+", " ", str(text or "").strip())
-        if not value:
-            return ""
-
-        if value.startswith("```") and value.endswith("```"):
-            parts = value.splitlines()
-            if len(parts) >= 3:
-                value = "\n".join(parts[1:-1]).strip()
-
-        pairs = (("(", ")"), ("[", "]"), ("{", "}"))
-        changed = True
-        while changed and len(value) >= 2:
-            changed = False
-            for left, right in pairs:
-                if not (value.startswith(left) and value.endswith(right)):
-                    continue
-                depth = 0
-                balanced = True
-                closes_early = False
-                for idx, char in enumerate(value):
-                    if char == left:
-                        depth += 1
-                    elif char == right:
-                        depth -= 1
-                        if depth == 0 and idx != len(value) - 1:
-                            closes_early = True
-                            break
-                        if depth < 0:
-                            balanced = False
-                            break
-                if balanced and not closes_early and depth == 0:
-                    inner = value[1:-1].strip()
-                    if inner:
-                        value = inner
-                        changed = True
-                        break
-
-        value = value.strip()
-        value = re.sub(r"^[,:;]+\s*", "", value)
-        value = re.sub(r"\s*[,:;]+$", "", value)
-        return value
-
-    @staticmethod
     def _semantic_focus_text(text: str) -> str:
         lines = []
         for line in str(text or "").splitlines():
@@ -3484,14 +3371,7 @@ class QuantumInterpretationEngine:
             and (best_obj != "text" or structured_rep)
         )
 
-        math_surface = QuantumInterpretationEngine._math_surface(text)
         return {
-            "math_surface": bool(math_surface.get("present")),
-            "math_kind": str(math_surface.get("kind") or ""),
-            "math_katex": bool(math_surface.get("katex")),
-            "math_color": str(math_surface.get("color") or ""),
-            "math_clean": bool(math_surface.get("clean", True)),
-            "math_presentation": math_surface,
             "visual_action": bool(visual_operation and (visual_rep or visual_object)),
             "explain_action": bool(best_op == "explain"),
             "geometry_object": bool(
@@ -5960,7 +5840,6 @@ class QuantumInterpretationEngine:
             and text_schema_score >= 0.15
             and p.get("best_operation") in {"build", "present", "answer", "explain", "list", "modify"}
         )
-        math_presentation = self._math_surface(text)
         semantic_task={
             "operation":p["best_operation"],"object":p["best_object"],"goal":p["best_goal"],
             "representation":production,
@@ -5968,8 +5847,7 @@ class QuantumInterpretationEngine:
             "visual_schema_confidence":visual_schema_confidence,
             "ascii_schema_advisory": ascii_schema_advisory,
             "ascii_schema_score": float(p.get("request_features", {}).get("ascii_schema_score", 0.0) or 0.0),
-            "operation_scores":p["operation_scores"],"object_scores":p["object_scores"],"goal_scores":p["goal_scores"],
-            "math_presentation": math_presentation
+            "operation_scores":p["operation_scores"],"object_scores":p["object_scores"],"goal_scores":p["goal_scores"]
         }
         presentation_recommendations = self._presentation_recommendations(
             text, p, production, locked=locked, continuation=continuation,
@@ -5992,17 +5870,6 @@ class QuantumInterpretationEngine:
             "signals":[x["renderer_signal"] for x in presentation_recommendations],
             "recommendations": presentation_recommendations,
             "scene_plan": [x["scene_recommendation"] for x in presentation_recommendations],
-            "math_presentation": {
-                **math_presentation,
-                "presentation_layer": "text_block",
-                "engine": "katex",
-                "color": "green" if math_presentation.get("present") else "",
-                "clean_solution": True,
-                "no_decorative_wrappers": True,
-                "no_extra_brackets": True,
-                "preserve_semantic_dialogue_decision": True,
-                "decision_owner": DECISION_OWNER,
-            },
         }
         if ascii_schema_advisory:
             presentation["format_advisory"] = {
@@ -6134,7 +6001,6 @@ class QuantumInterpretationEngine:
             "resolved_scene":resolved_scene,
             "reference_resolution":reference_resolution,
             "presentation_transport":presentation,"presentation_signal":presentation,
-            "math_presentation": presentation.get("math_presentation", {}),
             "presentation_recommendations":presentation_recommendations,
             "presentation_signals":presentation["signals"],
             "scene_recommendations":[x["scene_recommendation"] for x in presentation_recommendations],
