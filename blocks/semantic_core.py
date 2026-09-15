@@ -1265,6 +1265,14 @@ def analyze(text: str, state: dict=None, history: list=None,
     # candidates are preserved separately and never become renderer commands.
     result["requested_representation"] = fusion["requested_representation"]
     result["production_representation"] = fusion["production_representation"]
+    # Transport the single visual-production class selected by Interpretation.
+    # Semantic Core never recalculates renderer choices and never upgrades a
+    # diagram into image generation on its own.
+    result["visual_production_mode"] = interpreted.get("visual_production_mode") or "none"
+    result["visual_production"] = interpreted.get("visual_production") if isinstance(interpreted.get("visual_production"), dict) else {}
+    result["image_generation_request"] = bool(interpreted.get("image_generation_request"))
+    result["lightweight_visual_request"] = bool(interpreted.get("lightweight_visual_request"))
+    result["complex_image_generation"] = bool(interpreted.get("complex_image_generation"))
     result["production_representation_source"] = fusion["production_representation_source"]
     result["production_representation_confident"] = fusion["production_representation_confident"]
     result["representation_posteriors"] = fusion["representation_posteriors"]
@@ -1369,28 +1377,10 @@ def analyze(text: str, state: dict=None, history: list=None,
         interpreted.get("dialog_act") or requested
     )
 
-    # Image generation intent is a canonical semantic result produced upstream
-    # by Interpretation. Semantic Core must preserve it, not erase it.
-    image_generation_request = bool(interpreted.get("image_generation_request"))
-    result["image_generation_request"] = image_generation_request
-    result["visual_generation_needed"] = bool(
-        interpreted.get("visual_generation_needed", image_generation_request)
-    )
-    result["explicit_visual_generation"] = bool(
-        interpreted.get("explicit_visual_generation", image_generation_request)
-    )
-    result["explicit_image_generation_only"] = bool(
-        interpreted.get("explicit_image_generation_only", image_generation_request)
-    )
-    result["avoid_image_generation_fallback"] = not image_generation_request
-    if image_generation_request:
-        result["requested_representation"] = "image"
-        result["production_representation"] = "image"
-        result["production_representation_source"] = "semantic_image_generation_resolution"
-        result["semantic_representation_signal"] = "image"
-        result["semantic_representation_unresolved"] = False
-        result["requested_representations"] = ["image"]
-        result["required_representations"] = ["image"]
+    # Image/visual measurements remain evidence. Image generation authority is
+    # outside Semantic Core.
+    result["visual_generation_needed"] = False
+    result["explicit_image_generation_only"] = False
 
     result["should_execute"]=False  # execution authority remains downstream
     result["response_mode"] = "evidence"
@@ -1409,8 +1399,7 @@ def analyze(text: str, state: dict=None, history: list=None,
         "production_representation_preservation_source":result.get(
             "production_representation_preservation_source", ""
         ),
-        "requested_outputs": (["image"] if image_generation_request else ([requested] if requested else [])),
-        "image_generation_request": image_generation_request,
+        "requested_outputs": [requested],
         "format_advisory": result.get("format_advisory"),
         "evidence_representations": list(evidence_candidates),
         "representation_posteriors": dict(fusion["representation_posteriors"]),
