@@ -40,6 +40,7 @@ from blocks.router_system import decide_action
 from blocks.state_manager import get_state, update_dialog_context, update_scene_context, query_dynamic_memory, is_dialogue_visible_scene, persist_state
 from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_machine_scene, build_scene_contract
 from blocks.provider_router import generate_text
+from blocks.C_APRIL_IMAGES_GENERATOR import generate_from_spec
 from blocks.energy_manager import (build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration)
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.image_system import scan_image, render_visual_answer, NANO_PRINTER_VERSION
@@ -7712,6 +7713,132 @@ def _validate_quantum_release(request: MachineRequest) -> None:
     if not isinstance(identity_scope, dict) or not identity_scope.get("user_id"):
         raise RuntimeError("Quantum release blocked: identity scope missing")
 
+async def _materialize_provider_image(
+    response: MachineResponse,
+    request: MachineRequest,
+    state: dict,
+    *,
+    user_id: Any,
+) -> MachineResponse:
+    """Consume the Provider image plan and render it locally as PNG pixels."""
+    requested = {_s(x).lower() for x in list(getattr(request, "requested_outputs", []) or []) if _s(x)}
+    if "image" not in requested:
+        return response
+
+    metadata = getattr(response, "metadata", {}) or {}
+    spec = metadata.get("image_generation_spec")
+    if not isinstance(spec, dict):
+        metadata.update({
+            "image_generation_status": "missing_provider_spec",
+            "image_generation_error": "IMAGE_GENERATION_SPEC_MISSING",
+        })
+        response.metadata = metadata
+        print("🖼 IMAGE GENERATION: provider spec missing")
+        return response
+
+    try:
+        result = await generate_from_spec(spec, variant="provider_spec")
+        if not result.get("success") or not result.get("image_bytes"):
+            raise RuntimeError("IMAGE_ENGINE_EMPTY_RESULT")
+
+        image_bytes = result["image_bytes"]
+        artifact = result.get("artifact") or {}
+        contract = result.get("contract")
+        ap = artifact.get("payload") if isinstance(artifact, dict) else {}
+        payload = {
+            "kind": "generated_image",
+            "mime_type": "image/png",
+            "width": result.get("width"),
+            "height": result.get("height"),
+            "image_base64": ap.get("image_base64") if isinstance(ap, dict) else None,
+            "image_data_uri": ap.get("image_data_uri") if isinstance(ap, dict) else None,
+            "prompt": result.get("prompt") or spec.get("prompt") or "",
+            "engine": "April Images Generation",
+            "backend": result.get("backend"),
+            "render_spec": spec,
+        }
+        image_block = {
+            "type": "image",
+            "artifact_type": "image",
+            "renderer": "GalleryBlock",
+            "viewer": "GalleryBlock",
+            "payload": payload,
+            "artifact": artifact,
+            "scene_contract": True,
+            "human_visible": True,
+            "provider_payload": False,
+            "canonical_provider_payload": True,
+            "source": "C_APRIL_IMAGES_GENERATOR",
+            "image_engine": "April Images Generation",
+        }
+
+        kept = []
+        for block in list(getattr(response, "render_blocks", []) or []):
+            if not isinstance(block, dict):
+                continue
+            kind = _s(block.get("type") or block.get("artifact_type") or block.get("representation")).lower()
+            if kind == "image":
+                continue
+            kept.append(block)
+        response.render_blocks = [image_block, *kept]
+        response.artifacts_payload = list(getattr(response, "artifacts_payload", []) or [])
+        response.artifacts_payload.append(artifact)
+
+        state["image_current"] = image_bytes
+        state["image_generation_spec"] = _quantum_snapshot(spec)
+        state["image_artifact"] = _quantum_snapshot(artifact)
+        state["image_render_signal"] = _quantum_snapshot(
+            artifact.get("render_signal") if isinstance(artifact, dict) else {}
+        )
+        state["last_image_png"] = image_bytes
+
+        try:
+            from blocks.state_manager import set_last_entity as _set_last_entity
+            _set_last_entity(
+                user_id,
+                {
+                    "type": "image",
+                    "data": image_bytes,
+                    "source": "C_APRIL_IMAGES_GENERATOR",
+                    "artifact": artifact,
+                    "contract": contract,
+                    "renderer_expected": True,
+                },
+            )
+        except Exception as state_error:
+            print("🖼 IMAGE META SAVE ERROR:", state_error)
+
+        metadata.update({
+            "image_generation_status": "success",
+            "image_generation_engine": "C_APRIL_IMAGES_GENERATOR",
+            "image_generation_backend": result.get("backend"),
+            "image_generation_mime_type": "image/png",
+            "image_generation_width": result.get("width"),
+            "image_generation_height": result.get("height"),
+            "image_generation_provider_calls_added": 0,
+            "image_generation_spec_consumed": True,
+        })
+        response.metadata = metadata
+        print("🖼 IMAGE GENERATION MATERIALIZED:", {
+            "engine": "C_APRIL_IMAGES_GENERATOR",
+            "backend": result.get("backend"),
+            "mime": "image/png",
+            "width": result.get("width"),
+            "height": result.get("height"),
+        })
+        return response
+    except Exception as exc:
+        metadata.update({
+            "image_generation_status": "failed",
+            "image_generation_engine": "C_APRIL_IMAGES_GENERATOR",
+            "image_generation_provider_calls_added": 0,
+            "image_generation_error": str(exc),
+        })
+        response.metadata = metadata
+        print("🖼 IMAGE GENERATION ERROR:", exc)
+        return response
+
+
 async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwargs):
     print("🧬 APRIL EXECUTOR BUILD:", PROCESSOR_VERSION)
     print("🧬 APRIL PROCESSOR MODE: CASCADED_SINGLE_STREAM")
@@ -8634,6 +8761,14 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
     })
 
     response = _response(provider_result, request)
+    # One Provider call is complete. Consume its structured image plan locally
+    # in C_APRIL_IMAGES_GENERATOR and continue on the same canonical route.
+    response = await _materialize_provider_image(
+        response,
+        request,
+        state,
+        user_id=user_id,
+    )
     received_blocks = [
         _scene_block_kind(block)
         for block in list(getattr(response, "render_blocks", []) or [])
@@ -8645,6 +8780,20 @@ async def execute(user_id, chat_id=None, text="", run_with_activity=None, **kwar
         "received_count": len(received_blocks),
         "answer_present": bool(_s(getattr(response, "answer", "") or getattr(response, "content", ""))),
     })
+    if isinstance(response.metadata, dict) and response.metadata.get("image_generation_status"):
+        _record_engine_handoff(
+            state,
+            "IMAGE_GENERATION",
+            {
+                "requested": "image" in list(request.requested_outputs or []),
+                "status": response.metadata.get("image_generation_status"),
+                "engine": "C_APRIL_IMAGES_GENERATOR",
+                "provider_calls": 0,
+                "output_format": "image/png",
+            },
+            consumes=("PROVIDER", "CONTROL_PLANE"),
+        )
+
     _record_engine_handoff(
         state, "OUTPUT_UNDERSTANDING",
         {
