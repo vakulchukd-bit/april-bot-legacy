@@ -1,4 +1,5 @@
 # blocks/image_engine.py
+# Image generation is routed exclusively through C_APRIL_IMAGES_GENERATOR.
 
 import asyncio
 import tempfile
@@ -173,7 +174,7 @@ async def generate(
                 "type": "error",
 
                 "data":
-                    "⚠️ Генерация изображений временно отключена во время Gemini migration"
+                    "⚠️ Внутренний April Images Generation не смог создать изображение"
             }
 
         # 🔥 SAVE BYTES
@@ -244,16 +245,8 @@ async def edit(
     try:
 
         print(
-            "🛑 IMAGE EDIT DISABLED FOR GEMINI TEST MODE"
+            "🧠 ENGINE: April Images Generation edit route active"
         )
-
-        return {
-
-            "type": "error",
-
-            "data":
-                "⚠️ Редактирование изображений временно отключено во время Gemini migration"
-        }
 
         print(
             "🧠 ENGINE EDIT START"
