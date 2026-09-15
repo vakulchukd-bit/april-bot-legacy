@@ -228,8 +228,8 @@ STRUCTURED_REPRESENTATIONS = tuple(x for x in REPRESENTATION_UNIVERSE if x != "t
 
 OPERATION_HYPOTHESES = {
     "answer": "ответить объяснить рассказать сообщить дать информацию",
-    "build": "создать построить сформировать нарисовать начертить изобразить результат",
-    "present": "показать отобразить продемонстрировать вывести представить результат",
+    "build": "создать построить сформировать нарисовать начертить сгенерировать сгенерируй генерировать генерация создание рисунок",
+    "present": "показать покажи показывать отобразить отображать продемонстрировать вывести представить предъявить",
 
     "compare": "сравнить сопоставить различия сходства",
     "modify": "изменить исправить обновить переделать дополнить",
@@ -4522,7 +4522,23 @@ class QuantumInterpretationEngine:
             "best_representation":rep[0][0] if rep else "text",
             "best_representation_score":float(rep[0][1]) if rep else 0.0,
             "representation_margin":float(rep[0][1]-rep[1][1]) if len(rep)>1 else (float(rep[0][1]) if rep else 0.0),
-            "best_operation":ops[0][0] if ops else "answer",
+            "best_operation":(
+                "analyze"
+                if float(scores["operation"].get("analyze", 0.0) or 0.0)
+                    >= max(
+                        float(scores["operation"].get("build", 0.0) or 0.0),
+                        float(scores["operation"].get("present", 0.0) or 0.0),
+                    ) + 0.02
+                else (
+                    "present"
+                    if ops
+                    and "present" in scores["operation"]
+                    and "build" in scores["operation"]
+                    and float(scores["operation"].get("present", 0.0) or 0.0)
+                        >= float(scores["operation"].get("build", 0.0) or 0.0) - 0.02
+                    else (ops[0][0] if ops else "answer")
+                )
+            ),
             "best_object":objs[0][0] if objs else "text",
             "best_goal":goals[0][0] if goals else "understand",
             "source":"quantum_matrix_semantic_measurement_v3",
@@ -5605,6 +5621,16 @@ class QuantumInterpretationEngine:
         current_task_production_request = current_task_operation in {
             "build", "modify", "present", "calculate"
         }
+        # A present/show operation should preserve an explicitly requested image
+        # as the output representation, but it must never imply generation.
+        if (
+            current_task_operation == "present"
+            and "image" in {str(x).lower() for x in (complete_outputs or [])}
+            and not image_generation_request
+        ):
+            production = "image"
+            source = "semantic_presentation_image"
+            locked = True
         current_explicit_structured = bool(
             explicit
             or (
