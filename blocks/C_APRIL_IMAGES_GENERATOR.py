@@ -280,6 +280,182 @@ class AprilImagesGenerator:
         rng.shuffle(palette)
         return tuple(palette)
 
+    @staticmethod
+    def _hex_color(value: Any, default: tuple[int, int, int] = (128, 128, 128)) -> tuple[int, int, int]:
+        try:
+            text = str(value or "").strip().lstrip("#")
+            if len(text) == 6:
+                return tuple(int(text[i:i+2], 16) for i in (0, 2, 4))
+        except Exception:
+            pass
+        return default
+
+    @staticmethod
+    def _norm_point(point: Any, width: int, height: int) -> tuple[int, int] | None:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            return None
+        try:
+            x = max(0.0, min(1.0, float(point[0])))
+            y = max(0.0, min(1.0, float(point[1])))
+            return int(round(x * (width - 1))), int(round(y * (height - 1)))
+        except Exception:
+            return None
+
+    @classmethod
+    def _structured_pixel_image(
+        cls,
+        spec: dict[str, Any],
+        width: int,
+        height: int,
+    ) -> Image.Image:
+        """Render the Provider scene model directly into raster pixels."""
+        background = spec.get("background") if isinstance(spec.get("background"), dict) else {}
+        top = cls._hex_color(background.get("top"), (110, 175, 235))
+        bottom = cls._hex_color(background.get("bottom"), (235, 215, 165))
+
+        image = Image.new("RGB", (width, height), top)
+        px = image.load()
+        for y in range(height):
+            t = y / max(1, height - 1)
+            row_color = tuple(int(top[i] * (1.0 - t) + bottom[i] * t) for i in range(3))
+            for x in range(width):
+                px[x, y] = row_color
+
+        draw = ImageDraw.Draw(image, "RGBA")
+        layers = spec.get("layers") if isinstance(spec.get("layers"), list) else []
+
+        for layer in layers[:96]:
+            if not isinstance(layer, dict):
+                continue
+            kind = str(layer.get("kind") or "").strip().lower()
+            color = cls._hex_color(layer.get("color"), (255, 255, 255))
+            try:
+                opacity = max(0, min(255, int(float(layer.get("opacity", 1.0)) * 255)))
+            except Exception:
+                opacity = 255
+            fill = (*color, opacity)
+
+            if kind == "gradient":
+                box = layer.get("box")
+                if isinstance(box, (list, tuple)) and len(box) == 4:
+                    vals = [max(0.0, min(1.0, float(v))) for v in box]
+                    y0p, y1p = int(vals[1]*(height-1)), int(vals[3]*(height-1))
+                    c0 = cls._hex_color(layer.get("color_top"), color)
+                    c1 = cls._hex_color(layer.get("color_bottom"), color)
+                    for yy in range(min(y0p, y1p), max(y0p, y1p)+1):
+                        tt = (yy-y0p) / max(1, y1p-y0p)
+                        c = tuple(int(c0[i]*(1-tt)+c1[i]*tt) for i in range(3)) + (opacity,)
+                        draw.line((0, yy, width, yy), fill=c, width=1)
+                continue
+
+            if kind in {"polygon", "polyline"}:
+                pts = [q for q in (cls._norm_point(pt, width, height) for pt in (layer.get("points") or [])) if q]
+                if len(pts) >= 2:
+                    if kind == "polygon":
+                        draw.polygon(pts, fill=fill)
+                    else:
+                        stroke = max(1, int(float(layer.get("width", 0.003)) * min(width, height)))
+                        draw.line(pts, fill=fill, width=stroke, joint="curve")
+                continue
+
+            if kind in {"ellipse", "sun", "rect"}:
+                box = layer.get("box")
+                if isinstance(box, (list, tuple)) and len(box) == 4:
+                    vals = [max(0.0, min(1.0, float(v))) for v in box]
+                    bbox = (
+                        int(vals[0]*(width-1)), int(vals[1]*(height-1)),
+                        int(vals[2]*(width-1)), int(vals[3]*(height-1)),
+                    )
+                    if kind in {"ellipse", "sun"}:
+                        draw.ellipse(bbox, fill=fill)
+                    else:
+                        draw.rectangle(bbox, fill=fill)
+                continue
+
+            if kind == "line":
+                p1 = cls._norm_point(layer.get("p1"), width, height)
+                p2 = cls._norm_point(layer.get("p2"), width, height)
+                if p1 and p2:
+                    stroke = max(1, int(float(layer.get("width", 0.0025)) * min(width, height)))
+                    draw.line((p1, p2), fill=fill, width=stroke)
+                continue
+
+            if kind == "wave":
+                y = max(0.0, min(1.0, float(layer.get("y", 0.62)))) * (height - 1)
+                amp = max(1.0, min(0.15*height, float(layer.get("amplitude", 0.012)) * height))
+                cycles = max(1.0, min(8.0, float(layer.get("cycles", 3.0))))
+                pts = []
+                for i in range(101):
+                    x = (i/100.0) * (width-1)
+                    yy = y + math.sin(i/100.0*math.tau*cycles) * amp
+                    pts.append((int(x), int(yy)))
+                stroke = max(1, int(float(layer.get("width", 0.002)) * min(width, height)))
+                draw.line(pts, fill=fill, width=stroke)
+
+        return ImageOps.autocontrast(image.convert("RGB")).convert("RGB")
+
+    @classmethod
+    def _validate_render_spec(cls, spec: Any) -> dict[str, Any]:
+        if not isinstance(spec, dict):
+            raise ValueError("APRIL_IMAGES_INVALID_SPEC")
+        if spec.get("schema") != "april_image_spec_v1":
+            raise ValueError("APRIL_IMAGES_INVALID_SPEC_SCHEMA")
+        try:
+            requested_size = f"{int(spec.get('width', cls.DEFAULT_SIZE[0]))}x{int(spec.get('height', cls.DEFAULT_SIZE[1]))}"
+        except Exception:
+            requested_size = f"{cls.DEFAULT_SIZE[0]}x{cls.DEFAULT_SIZE[1]}"
+        width, height = cls._parse_size(requested_size)
+        return {
+            "schema": "april_image_spec_v1",
+            "prompt": cls._clean_prompt(spec.get("prompt") or ""),
+            "width": width,
+            "height": height,
+            "style": str(spec.get("style") or "illustration")[:64],
+            "background": dict(spec.get("background") or {}),
+            "layers": list(spec.get("layers") or [])[:96],
+            "negative": [str(x)[:120] for x in (spec.get("negative") or [])[:24]],
+            "seed": spec.get("seed"),
+        }
+
+    @classmethod
+    async def generate_from_spec(
+        cls,
+        spec: dict[str, Any],
+        *,
+        variant: str = "provider_spec",
+    ) -> dict[str, Any]:
+        """Render one Provider-issued plan into real PNG bytes without another model call."""
+        clean = cls._validate_render_spec(spec)
+        width, height = cls._parse_size(f"{clean['width']}x{clean['height']}")
+        image = await __import__("asyncio").to_thread(
+            cls._structured_pixel_image,
+            clean,
+            width,
+            height,
+        )
+        image_bytes = cls._png_bytes(image)
+        prompt = clean["prompt"] or "April generated image"
+        artifact, contract = cls.build_artifact(
+            image_bytes=image_bytes,
+            prompt=prompt,
+            width=width,
+            height=height,
+            backend="structured_pixels",
+            variant=variant,
+        )
+        artifact["render_spec"] = clean
+        artifact["payload"]["render_spec"] = clean
+        return cls._result_dict(ImageGenerationResult(
+            image_bytes=image_bytes,
+            mime_type="image/png",
+            width=width,
+            height=height,
+            backend="structured_pixels",
+            prompt=prompt,
+            artifact=artifact,
+            contract=contract,
+        ))
+
     @classmethod
     def _procedural_image(
         cls,
@@ -670,6 +846,18 @@ class AprilImagesGenerator:
 april_images_generator = AprilImagesGenerator()
 
 
+async def generate_from_spec(
+    spec: dict[str, Any],
+    *,
+    variant: str = "provider_spec",
+) -> dict[str, Any]:
+    """Render a Provider-issued image spec locally; no external model call."""
+    return await april_images_generator.generate_from_spec(
+        spec,
+        variant=variant,
+    )
+
+
 async def generate_image(
     prompt: str,
     size: str = "1024x1024",
@@ -728,6 +916,7 @@ __all__ = [
     "april_images_generator",
     "generate_image",
     "generate_image_result",
+    "generate_from_spec",
     "edit_image",
     "edit_image_result",
 ]
