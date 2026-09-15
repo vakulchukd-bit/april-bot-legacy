@@ -342,6 +342,11 @@ def _canonical_action(
     if clarification:
         return "clarify"
 
+    # The canonical semantic state already decided that the current operation
+    # is image generation. This is a logical handoff, not a lexical trigger.
+    if _b(semantic.get("image_generation_request")):
+        return "generate"
+
     scene_state = _d(cognition.get("scene_semantic_state") or semantic.get("scene_semantic_state"))
     task_phase = _s(scene_state.get("task_phase")).lower()
     scene_relation = _d(semantic.get("dialogue_relation"))
