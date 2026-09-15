@@ -5576,6 +5576,23 @@ class QuantumInterpretationEngine:
                 production = best_context_rep
                 source = "context_task_matrix_resolution"
                 locked = True
+
+        # Image generation is resolved from the completed semantic task vector.
+        # A current image-analysis turn is excluded because it has visual input.
+        current_visual_input_present = bool(
+            state.get("_incoming_visual_evidence")
+            if isinstance(state, dict)
+            else False
+        )
+        image_generation_request = bool(
+            "image" in context_outputs
+            and op_name in {"build", "create", "modify"}
+            and not current_visual_input_present
+        )
+        if image_generation_request:
+            production = "image"
+            source = "semantic_image_generation_resolution"
+            locked = True
         continuation = bool(
             sequential_relation == "CONTINUE"
             or dialogue_vector.get("relation") == "CONTINUE_TOPIC"
@@ -5598,7 +5615,12 @@ class QuantumInterpretationEngine:
                 )
             )
         )
-        if continuation and not current_task_production_request and not current_explicit_structured:
+        if (
+            continuation
+            and not current_task_production_request
+            and not current_explicit_structured
+            and not image_generation_request
+        ):
             production = "text"
             source = "continuation_answer_without_new_representation"
             locked = True
@@ -5931,6 +5953,11 @@ class QuantumInterpretationEngine:
                 p["object_scores"].get(production,0.0),
                 p["goal_scores"].get("visualize" if production in {"graph","diagram","image","gallery"} else "present",0.0)
             ),
+            "image_generation_request": image_generation_request,
+            "visual_generation_needed": image_generation_request,
+            "explicit_visual_generation": image_generation_request,
+            "explicit_image_generation_only": image_generation_request,
+            "avoid_image_generation_fallback": False if image_generation_request else True,
             "representation_evidence":evidence,
             "quantum_representation_measurement":{
                 "measurements":evidence,"production_representation":production,
@@ -5943,6 +5970,15 @@ class QuantumInterpretationEngine:
             "turn_structure_understanding": turn_structure_understanding,
             "task_understanding": task_understanding,
             "scene_composition": deepcopy(scene_composition),
+            "image_generation_request": image_generation_request,
+            "visual_generation_needed": image_generation_request,
+            "explicit_visual_generation": image_generation_request,
+            "explicit_image_generation_only": image_generation_request,
+            "avoid_image_generation_fallback": False if image_generation_request else True,
+            "image_generation_transport": (
+                "OPENAI_STRUCTURED_SPEC_TO_C_APRIL_IMAGES_GENERATOR"
+                if image_generation_request else ""
+            ),
             "turn_meaning_transition": deepcopy(transition),
             "sequential_dialogue": deepcopy(sequential_dialogue),
             "last_turn_meaning": deepcopy(last_turn_meaning or {}),
