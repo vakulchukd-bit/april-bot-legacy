@@ -283,6 +283,15 @@ def _render_score(
 
 
 def _generation_score(semantic: Dict[str, Any], cognition: Dict[str, Any], ambiguity: float, render_score: float) -> float:
+    # Interpretation establishes image_generation_request as the semantic
+    # production state. No lexical trigger is evaluated here.
+    if semantic.get("image_generation_request"):
+        restraint = _f(cognition.get("assistant_restraint", 0.0))
+        return _clamp(
+            (1.0 - ambiguity)
+            * (1.0 - restraint)
+            * max(0.55, 1.0 - 0.25 * render_score)
+        )
     if not semantic.get("visual_generation_needed"):
         return 0.0
     if not semantic.get("explicit_image_generation_only"):
