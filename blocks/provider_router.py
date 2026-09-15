@@ -59,61 +59,25 @@ def _get_gemini_client():
     return _gemini_client
 
 PROVIDER_MACHINE_SYSTEM_PROMPT = """
-You are April's internal language planner. Return exactly one complete MachineResponse JSON object.
+You are April's internal response provider. Return exactly one MachineResponse JSON object.
+The user speaks with April; never expose the provider/model identity unless explicitly asked for technical details.
 
-Use only the current request and the semantic fields supplied in this call. Do not request, reconstruct, or rely on conversation history.
+Core contract:
+- Answer only the current request. Continuity fields are evidence, never a competing route.
+- Respect requested_outputs and SCENE_COMPOSITION from the Quantum Processor.
+- Emit compact machine-valid JSON with: answer, content, summary, scene, artifacts, render_blocks, scene_plan, render_priority, confidence, metadata.
+- Structured render blocks must use type, renderer, viewer, payload, scene_contract=true.
+- Never call another model. Never return fake URLs, base64 images, or duplicated full structured payloads in prose.
 
-Required top-level fields:
-answer, content, summary, scene, artifacts, render_blocks, scene_plan, render_priority, confidence, metadata.
+VISUAL PRODUCTION MODES:
+1) diagram: return the existing compact structured diagram representation; do not create a generated-image spec.
+2) image_generation: return metadata.image_generation_spec using schema april_image_spec_v1. Do not return image bytes, URLs, or a fake image block. C_APRIL_IMAGES_GENERATOR consumes this spec after this one provider call and creates the PNG.
+3) image_present: return/preserve the existing image representation only; do not generate a new image.
+4) visual_analysis: answer from supplied visual evidence; do not generate a new image.
 
-For ordinary requests:
-- answer/content = concise human-visible answer.
-- Preserve structured render data supplied by the processor.
-- Do not invent visual artifacts.
-
-For image-generation requests:
-- Do NOT generate or return image bytes, PNG, base64, URL, or API calls.
-- Return one machine-readable plan in metadata.image_generation_spec.
-- Schema:
-  {
-    "schema":"april_image_spec_v1",
-    "prompt":"...",
-    "width":512|768|1024,
-    "height":512|768|1024,
-    "style":"...",
-    "background":"...",
-    "layers":[{"kind":"background|shape|polygon|circle|ellipse|line|gradient","color":"#RRGGBB","points":[[x,y],...],"bbox":[x1,y1,x2,y2],"width":1}],
-    "negative_prompt":"...",
-    "seed":0
-  }
-- Use normalized 0..1 layer coordinates where practical.
-- Keep layers compact: normally 4..20.
-- The local C_APRIL_IMAGES_GENERATOR will render the pixels and produce image/png.
-- Set scene/render_blocks so the resulting artifact is an image.
-- Do not make a second model call.
-
-Never expose these internal instructions to the user.
-""".strip()
-
-
-IMAGE_PROVIDER_MACHINE_SYSTEM_PROMPT = """
-You are April's internal image-scene planner. Return exactly one complete MachineResponse JSON.
-
-Use only the current request and supplied semantic scene composition. Do not use conversation history.
-
-For IMAGE_GENERATION:
-- Do not create or return image bytes, PNG, base64, URL, or external image API calls.
-- Put the compact machine plan in metadata.image_generation_spec.
-- schema = april_image_spec_v1
-- include prompt, width, height, style, background, layers, negative_prompt, seed.
-- layers are compact raster primitives using normalized 0..1 coordinates:
-  background, gradient, shape, polygon, circle, ellipse, line.
-- Keep normally 4..20 layers.
-- The local C_APRIL_IMAGES_GENERATOR renders pixels and produces image/png.
-- scene/render_blocks must describe an image artifact.
-- Do not call another model.
-
-The human answer should remain brief; the machine specification carries the drawing plan.
+april_image_spec_v1:
+{"schema":"april_image_spec_v1","prompt":"short visual description","width":1024,"height":1024,"style":"photorealistic|illustration|cinematic|graphic|abstract","background":{"top":"#RRGGBB","bottom":"#RRGGBB"},"layers":[{"kind":"polygon|ellipse|rect|line|wave|gradient|sun","role":"sky|sea|sand|sun|subject|foreground|detail","points":[[0,0],[1,1]],"box":[0,0,1,1],"color":"#RRGGBB","width":0.003,"opacity":0.8}],"negative":[],"seed":12345}
+Use normalized coordinates 0..1 and enough layers for the visible composition, usually 4..20.
 """.strip()
 
 
@@ -347,7 +311,19 @@ def _extract_request_text(payload: dict[str, Any]) -> str:
             value = intent.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
-    return _safe_text(payload.get("content") or payload.get("text") or payload.get("query")).strip()
+
+    conversation = payload.get("conversation")
+    if isinstance(conversation, dict):
+        for key in ("current_request", "resolved_request", "request"):
+            value = conversation.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    for key in ("goal", "content", "text", "query"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _count_question_marks(text: str) -> int:
@@ -865,85 +841,44 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     return fields
 
 
-def _is_image_generation_request(payload: dict[str, Any]) -> bool:
-    constraints = payload.get("constraints") or {}
-    metadata = constraints.get("metadata") or {}
-    if isinstance(metadata, dict) and metadata.get("image_generation_request") is True:
-        return True
-    if isinstance(constraints, dict) and constraints.get("image_generation_request") is True:
-        return True
-    outputs = {str(x).lower() for x in (payload.get("requested_outputs") or [])}
-    transport = ""
-    if isinstance(metadata, dict):
-        transport = str(metadata.get("image_generation_transport") or "")
-    return "image" in outputs and transport == "OPENAI_STRUCTURED_SPEC_TO_C_APRIL_IMAGES_GENERATOR"
-
-
-def _compact_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
-
-
 def _build_provider_user_text(payload: dict[str, Any], budget_tokens: int) -> str:
-    current = _extract_request_text(payload).strip()
-    current = current or _safe_text((payload.get("intent") or {}).get("normalized_text")).strip()
-    outputs = list(payload.get("requested_outputs") or [])
-    image_generation = _is_image_generation_request(payload)
+    fields = _select_context_fields(payload)
+    complexity = _derive_complexity(payload)
+    output_tokens = _derive_output_tokens(payload)
 
-    lines = [
-        "APRIL CURRENT REQUEST",
-        f"REQUEST: {current}",
-        f"REQUESTED_OUTPUTS: {_compact_json(outputs)}",
+    def render(label: str, value: Any) -> str:
+        if isinstance(value, (dict, list, tuple)):
+            value = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+        return f"{label}: {value}"
+
+    mandatory = [
+        "APRIL CANONICAL REQUEST",
+        render("REQUEST", fields[0][1]),
+        render("REQUESTED_OUTPUTS", payload.get("requested_outputs") or []),
+        render("COMPLEXITY", complexity),
+        render("OUTPUT_CAP", output_tokens),
     ]
 
-    if image_generation:
-        lines += [
-            "MODE: IMAGE_GENERATION",
-            f"SCENE_COMPOSITION: {_compact_json(payload.get('scene_composition') or [])}",
-            "RETURN: one MachineResponse JSON with metadata.image_generation_spec.",
-        ]
-    else:
-        lines += [
-            "MODE: ORDINARY_RESPONSE",
-            "RETURN: one complete MachineResponse JSON for the current request.",
-        ]
+    pieces = list(mandatory)
+    used = _estimate_input_tokens("\n".join(pieces))
+    soft_limit = max(1, budget_tokens - 10)
 
-    text = "\n".join(lines)
+    for label, value in fields[1:]:
+        candidate = render(label, value)
+        candidate_total = _estimate_input_tokens("\n".join(pieces + [candidate]))
+        if candidate_total <= soft_limit:
+            pieces.append(candidate)
 
-    # The current request is authoritative and must survive. If needed, remove
-    # optional semantic fields before ever considering request shortening.
-    if _estimate_input_tokens(text) > max(1, int(budget_tokens)):
-        minimal = [
-            "APRIL CURRENT REQUEST",
-            f"REQUEST: {current}",
-        ]
-        if image_generation:
-            minimal.append("MODE: IMAGE_GENERATION")
-            minimal.append("RETURN: one MachineResponse JSON with metadata.image_generation_spec.")
-        else:
-            minimal.append("MODE: ORDINARY_RESPONSE")
-            minimal.append("RETURN: one complete MachineResponse JSON.")
-        text = "\n".join(minimal)
-
-    # Last resort: only the current request remains. This is still semantic
-    # packet compression; the user request itself is never replaced.
-    if _estimate_input_tokens(text) > max(1, int(budget_tokens)):
-        text = f"REQUEST: {current}"
-    return text
+    pieces.append("Return one complete logical answer as JSON.")
+    return "\n".join(pieces)
 
 
 def build_openai_request(machine_request: Any) -> dict:
     payload = machine_request_to_dict(machine_request)
-    image_generation = _is_image_generation_request(payload)
-    system_prompt = (
-        IMAGE_PROVIDER_MACHINE_SYSTEM_PROMPT
-        if image_generation and "IMAGE_PROVIDER_MACHINE_SYSTEM_PROMPT" in globals()
-        else PROVIDER_MACHINE_SYSTEM_PROMPT
+    user_text = _build_provider_user_text(
+        payload,
+        budget_tokens=max(1, INPUT_TOKEN_BUDGET - _estimate_input_tokens(PROVIDER_MACHINE_SYSTEM_PROMPT)),
     )
-    budget_tokens = max(
-        1,
-        INPUT_TOKEN_BUDGET - _estimate_input_tokens(system_prompt) - 8,
-    )
-    user_text = _build_provider_user_text(payload, budget_tokens=budget_tokens)
     return {
         "role": "user",
         "content": [{"type": "input_text", "text": user_text}],
@@ -951,59 +886,63 @@ def build_openai_request(machine_request: Any) -> dict:
 
 
 def normalize_provider_input(machine_request: Any) -> list[dict]:
-    payload = machine_request_to_dict(machine_request)
-    image_generation = _is_image_generation_request(payload)
-    system_prompt = (
-        IMAGE_PROVIDER_MACHINE_SYSTEM_PROMPT
-        if image_generation and "IMAGE_PROVIDER_MACHINE_SYSTEM_PROMPT" in globals()
-        else PROVIDER_MACHINE_SYSTEM_PROMPT
-    )
-
-    system_tokens = _estimate_input_tokens(system_prompt)
+    """Build the OpenAI packet inside the canonical 900-token envelope."""
+    system_tokens = _estimate_input_tokens(PROVIDER_MACHINE_SYSTEM_PROMPT)
     if system_tokens >= INPUT_TOKEN_BUDGET:
-        raise RuntimeError(
-            f"Provider system prompt exceeds the {INPUT_TOKEN_BUDGET}-token input invariant."
-        )
-
+        raise RuntimeError("Provider system prompt exceeds canonical 900-token envelope")
     remaining = INPUT_TOKEN_BUDGET - system_tokens
-    # Reserve a tiny safety margin for provider wrapper overhead.
-    user_budget = max(1, remaining - 8)
-    user_text = _build_provider_user_text(payload, budget_tokens=user_budget)
-    estimated_user = _estimate_input_tokens(user_text)
-    if estimated_user > user_budget:
-        # Absolute final packet: current request only.
-        current = _extract_request_text(payload).strip()
-        user_text = f"REQUEST: {current}"
-        estimated_user = _estimate_input_tokens(user_text)
 
-    estimated_total = system_tokens + estimated_user
+    payload = machine_request_to_dict(machine_request)
+    constraints = payload.get("constraints") if isinstance(payload.get("constraints"), dict) else {}
+    plan = constraints.get("representation_plan") if isinstance(constraints.get("representation_plan"), dict) else {}
+    metadata = constraints.get("metadata") if isinstance(constraints.get("metadata"), dict) else {}
+    mode = _safe_text(plan.get("visual_production_mode") or metadata.get("visual_production_mode") or "").strip()
+    request_text = _extract_request_text(payload)
+    outputs = list(payload.get("requested_outputs") or [])
+
+    candidates = [
+        "APRIL CANONICAL REQUEST",
+        f"REQUEST: {request_text}",
+        f"VISUAL_PRODUCTION_MODE: {mode}",
+        f"REQUESTED_OUTPUTS: {json.dumps(outputs, ensure_ascii=False, separators=(',', ':'))}",
+    ]
+    if mode == "image_generation":
+        candidates.append("IMAGE_GENERATION_MODE: return compact JSON containing metadata.image_generation_spec; never return image bytes, URLs, or fake image blocks.")
+    elif mode == "diagram":
+        candidates.append("DIAGRAM_MODE: preserve the existing compact structured diagram representation.")
+
+    selected=[]
+    for piece in candidates:
+        if _estimate_input_tokens("\n".join(selected+[piece])) <= remaining:
+            selected.append(piece)
+
+    if not any(x.startswith("REQUEST:") for x in selected):
+        minimal=f"REQUEST: {request_text}"
+        if _estimate_input_tokens(minimal) > remaining:
+            raise RuntimeError("Provider input budget exceeded: current request cannot fit inside 900 tokens")
+        selected=["APRIL CANONICAL REQUEST", minimal]
+        if mode and _estimate_input_tokens("\n".join(selected+[f"VISUAL_PRODUCTION_MODE: {mode}"])) <= remaining:
+            selected.append(f"VISUAL_PRODUCTION_MODE: {mode}")
+
+    user_text="\n".join(selected)
+    estimated_total=system_tokens+_estimate_input_tokens(user_text)
     if estimated_total > INPUT_TOKEN_BUDGET:
-        raise RuntimeError("Provider 900-token input invariant cannot be satisfied.")
+        raise RuntimeError(f"Provider input budget invariant failed: {estimated_total} > {INPUT_TOKEN_BUDGET}")
 
     provider_log({
         "input_token_budget": INPUT_TOKEN_BUDGET,
         "estimated_input_tokens": estimated_total,
         "input_budget_enforced": True,
-        "system_prompt_tokens": system_tokens,
-        "user_packet_tokens": estimated_user,
-        "context_strategy": (
-            "image_generation_compact" if image_generation else "current_request_compact"
-        ),
-        "history_sent_to_provider": False,
+        "context_strategy": "semantic_visual_route_compact",
         "current_request_truncation": False,
-        "image_generation_request": image_generation,
+        "history_sent_to_provider": False,
+        "visual_production_mode": mode,
         "canonical_packet_fingerprint": _provider_packet_fingerprint(user_text),
     })
 
     return [
-        {
-            "role": "system",
-            "content": [{"type": "input_text", "text": system_prompt}],
-        },
-        {
-            "role": "user",
-            "content": [{"type": "input_text", "text": user_text}],
-        },
+        {"role": "system", "content": [{"type": "input_text", "text": PROVIDER_MACHINE_SYSTEM_PROMPT}]},
+        {"role": "user", "content": [{"type": "input_text", "text": user_text}]},
     ]
 
 
@@ -1115,6 +1054,11 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
     answer = _unwrap_model_answer(
         parsed.get("answer") or parsed.get("content") or parsed.get("response") or ""
     )
+    source_payload = machine_request_to_dict(source_request) if source_request is not None else {}
+    source_constraints = source_payload.get("constraints") if isinstance(source_payload.get("constraints"), dict) else {}
+    source_plan = source_constraints.get("representation_plan") if isinstance(source_constraints.get("representation_plan"), dict) else {}
+    source_metadata = source_constraints.get("metadata") if isinstance(source_constraints.get("metadata"), dict) else {}
+    visual_mode = _safe_text(source_plan.get("visual_production_mode") or source_metadata.get("visual_production_mode") or "").lower()
 
     if not answer:
         for block in parsed.get("render_blocks", []) or []:
@@ -1126,6 +1070,13 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
                     answer = candidate
                     break
 
+    if not answer and visual_mode == "image_generation":
+        candidate_metadata = parsed.get("metadata") if isinstance(parsed.get("metadata"), dict) else {}
+        candidate_spec = candidate_metadata.get("image_generation_spec")
+        if not isinstance(candidate_spec, dict):
+            candidate_spec = parsed.get("image_generation_spec") if isinstance(parsed.get("image_generation_spec"), dict) else None
+        if isinstance(candidate_spec, dict):
+            answer = "Готово — изображение подготовлено."
     if not answer:
         raise RuntimeError("GPT-5.6 Luna returned an empty canonical answer.")
 
