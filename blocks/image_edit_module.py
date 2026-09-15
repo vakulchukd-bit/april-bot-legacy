@@ -180,51 +180,50 @@ def get_limit_message():
     return random.choice(messages)
 
 # =====================================================
-# 🔥 IMAGE EDIT STUBS
+# INTERNAL APRIL IMAGES GENERATION EDIT BRIDGE
 # =====================================================
+
+from blocks.C_APRIL_IMAGES_GENERATOR import edit_image_result
 
 async def edit_image(
     image_path,
     prompt
 ):
+    try:
+        with open(image_path, "rb") as handle:
+            image_bytes = handle.read()
 
-    log_image_edit_event(
-
-        "legacy_edit_blocked",
-
-        {
-            "mode":
-                "path_edit"
-        }
-    )
-
-    safe_patch_log(
-        "LEGACY PATH EDIT BLOCKED"
-    )
-
-    return None
+        result = await edit_image_result(
+            image_bytes,
+            prompt,
+            quality="high",
+        )
+        return result.get("image_bytes") if result.get("success") else None
+    except Exception as exc:
+        log_image_edit_event(
+            "april_images_edit_error",
+            {"mode": "path_edit", "error": str(exc)},
+        )
+        return None
 
 
 async def edit_image_bytes(
     image_bytes,
     prompt
 ):
-
-    log_image_edit_event(
-
-        "legacy_edit_blocked",
-
-        {
-            "mode":
-                "byte_edit"
-        }
-    )
-
-    safe_patch_log(
-        "LEGACY BYTE EDIT BLOCKED"
-    )
-
-    return None
+    try:
+        result = await edit_image_result(
+            image_bytes,
+            prompt,
+            quality="high",
+        )
+        return result.get("image_bytes") if result.get("success") else None
+    except Exception as exc:
+        log_image_edit_event(
+            "april_images_edit_error",
+            {"mode": "byte_edit", "error": str(exc)},
+        )
+        return None
 
 # =====================================================
 # 🔥 LIMIT INCREMENT
