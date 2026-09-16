@@ -80,7 +80,7 @@ class AprilImagesGenerator:
     """
 
     ENGINE_NAME = "April Images Generation"
-    ENGINE_VERSION = "1.0.0"
+    ENGINE_VERSION = "1.1.0"
 
     DEFAULT_SIZE = (1024, 1024)
     MIN_SIZE = 256
@@ -298,8 +298,48 @@ class AprilImagesGenerator:
             x = max(0.0, min(1.0, float(point[0])))
             y = max(0.0, min(1.0, float(point[1])))
             return int(round(x * (width - 1))), int(round(y * (height - 1)))
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return None
+
+    @staticmethod
+    def _norm_box(box: Any) -> tuple[float, float, float, float] | None:
+        """Normalize a fractional box and guarantee x1>=x0, y1>=y0."""
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            return None
+        try:
+            x0, y0, x1, y1 = (float(v) for v in box)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+        if not all(math.isfinite(v) for v in (x0, y0, x1, y1)):
+            return None
+
+        x0, x1 = sorted((x0, x1))
+        y0, y1 = sorted((y0, y1))
+
+        return (
+            max(0.0, min(1.0, x0)),
+            max(0.0, min(1.0, y0)),
+            max(0.0, min(1.0, x1)),
+            max(0.0, min(1.0, y1)),
+        )
+
+    @staticmethod
+    def _safe_opacity(value: Any, default: int = 255) -> int:
+        try:
+            return max(0, min(255, int(float(value) * 255)))
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+    @staticmethod
+    def _safe_width(value: Any, base: int, default_fraction: float) -> int:
+        try:
+            fraction = float(value)
+        except (TypeError, ValueError, OverflowError):
+            fraction = default_fraction
+        if not math.isfinite(fraction):
+            fraction = default_fraction
+        return max(1, int(abs(fraction) * base))
 
     @classmethod
     def _structured_pixel_image(
@@ -308,7 +348,11 @@ class AprilImagesGenerator:
         width: int,
         height: int,
     ) -> Image.Image:
-        """Render the Provider scene model directly into raster pixels."""
+        """Render the Provider scene model directly into raster pixels.
+
+        Geometry is normalized before it reaches Pillow so malformed provider
+        coordinates cannot create invalid rectangles or inverted ranges.
+        """
         background = spec.get("background") if isinstance(spec.get("background"), dict) else {}
         top = cls._hex_color(background.get("top"), (110, 175, 235))
         bottom = cls._hex_color(background.get("bottom"), (235, 215, 165))
@@ -327,44 +371,64 @@ class AprilImagesGenerator:
         for layer in layers[:96]:
             if not isinstance(layer, dict):
                 continue
+
             kind = str(layer.get("kind") or "").strip().lower()
             color = cls._hex_color(layer.get("color"), (255, 255, 255))
-            try:
-                opacity = max(0, min(255, int(float(layer.get("opacity", 1.0)) * 255)))
-            except Exception:
-                opacity = 255
+            opacity = cls._safe_opacity(layer.get("opacity", 1.0))
             fill = (*color, opacity)
 
             if kind == "gradient":
-                box = layer.get("box")
-                if isinstance(box, (list, tuple)) and len(box) == 4:
-                    vals = [max(0.0, min(1.0, float(v))) for v in box]
-                    y0p, y1p = int(vals[1]*(height-1)), int(vals[3]*(height-1))
+                box = cls._norm_box(layer.get("box"))
+                if box is not None:
+                    x0, y0, x1, y1 = box
+                    px0 = int(round(x0 * (width - 1)))
+                    py0 = int(round(y0 * (height - 1)))
+                    px1 = int(round(x1 * (width - 1)))
+                    py1 = int(round(y1 * (height - 1)))
+                    if px1 < px0:
+                        px0, px1 = px1, px0
+                    if py1 < py0:
+                        py0, py1 = py1, py0
+
                     c0 = cls._hex_color(layer.get("color_top"), color)
                     c1 = cls._hex_color(layer.get("color_bottom"), color)
-                    for yy in range(min(y0p, y1p), max(y0p, y1p)+1):
-                        tt = (yy-y0p) / max(1, y1p-y0p)
-                        c = tuple(int(c0[i]*(1-tt)+c1[i]*tt) for i in range(3)) + (opacity,)
-                        draw.line((0, yy, width, yy), fill=c, width=1)
+                    span = max(1, py1 - py0)
+                    for yy in range(py0, py1 + 1):
+                        tt = (yy - py0) / span
+                        c = tuple(int(c0[i] * (1 - tt) + c1[i] * tt) for i in range(3)) + (opacity,)
+                        draw.line((px0, yy, px1, yy), fill=c, width=1)
                 continue
 
             if kind in {"polygon", "polyline"}:
-                pts = [q for q in (cls._norm_point(pt, width, height) for pt in (layer.get("points") or [])) if q]
+                pts = [
+                    q
+                    for q in (
+                        cls._norm_point(pt, width, height)
+                        for pt in (layer.get("points") or [])
+                    )
+                    if q
+                ]
                 if len(pts) >= 2:
                     if kind == "polygon":
                         draw.polygon(pts, fill=fill)
                     else:
-                        stroke = max(1, int(float(layer.get("width", 0.003)) * min(width, height)))
+                        stroke = cls._safe_width(
+                            layer.get("width", 0.003),
+                            min(width, height),
+                            0.003,
+                        )
                         draw.line(pts, fill=fill, width=stroke, joint="curve")
                 continue
 
             if kind in {"ellipse", "sun", "rect"}:
-                box = layer.get("box")
-                if isinstance(box, (list, tuple)) and len(box) == 4:
-                    vals = [max(0.0, min(1.0, float(v))) for v in box]
+                box = cls._norm_box(layer.get("box"))
+                if box is not None:
+                    x0, y0, x1, y1 = box
                     bbox = (
-                        int(vals[0]*(width-1)), int(vals[1]*(height-1)),
-                        int(vals[2]*(width-1)), int(vals[3]*(height-1)),
+                        int(round(x0 * (width - 1))),
+                        int(round(y0 * (height - 1))),
+                        int(round(x1 * (width - 1))),
+                        int(round(y1 * (height - 1))),
                     )
                     if kind in {"ellipse", "sun"}:
                         draw.ellipse(bbox, fill=fill)
@@ -376,20 +440,42 @@ class AprilImagesGenerator:
                 p1 = cls._norm_point(layer.get("p1"), width, height)
                 p2 = cls._norm_point(layer.get("p2"), width, height)
                 if p1 and p2:
-                    stroke = max(1, int(float(layer.get("width", 0.0025)) * min(width, height)))
+                    stroke = cls._safe_width(
+                        layer.get("width", 0.0025),
+                        min(width, height),
+                        0.0025,
+                    )
                     draw.line((p1, p2), fill=fill, width=stroke)
                 continue
 
             if kind == "wave":
-                y = max(0.0, min(1.0, float(layer.get("y", 0.62)))) * (height - 1)
-                amp = max(1.0, min(0.15*height, float(layer.get("amplitude", 0.012)) * height))
-                cycles = max(1.0, min(8.0, float(layer.get("cycles", 3.0))))
+                try:
+                    y_value = float(layer.get("y", 0.62))
+                    amplitude_value = float(layer.get("amplitude", 0.012))
+                    cycles_value = float(layer.get("cycles", 3.0))
+                except (TypeError, ValueError, OverflowError):
+                    y_value, amplitude_value, cycles_value = 0.62, 0.012, 3.0
+
+                if not all(math.isfinite(v) for v in (y_value, amplitude_value, cycles_value)):
+                    y_value, amplitude_value, cycles_value = 0.62, 0.012, 3.0
+
+                y_value = max(0.0, min(1.0, y_value))
+                amp = max(1.0, min(0.15 * height, abs(amplitude_value) * height))
+                cycles = max(1.0, min(8.0, abs(cycles_value)))
+
+                y = y_value * (height - 1)
                 pts = []
                 for i in range(101):
-                    x = (i/100.0) * (width-1)
-                    yy = y + math.sin(i/100.0*math.tau*cycles) * amp
-                    pts.append((int(x), int(yy)))
-                stroke = max(1, int(float(layer.get("width", 0.002)) * min(width, height)))
+                    x = (i / 100.0) * (width - 1)
+                    yy = y + math.sin(i / 100.0 * math.tau * cycles) * amp
+                    yy = max(0.0, min(height - 1, yy))
+                    pts.append((int(round(x)), int(round(yy))))
+
+                stroke = cls._safe_width(
+                    layer.get("width", 0.002),
+                    min(width, height),
+                    0.002,
+                )
                 draw.line(pts, fill=fill, width=stroke)
 
         return ImageOps.autocontrast(image.convert("RGB")).convert("RGB")
@@ -400,11 +486,62 @@ class AprilImagesGenerator:
             raise ValueError("APRIL_IMAGES_INVALID_SPEC")
         if spec.get("schema") != "april_image_spec_v1":
             raise ValueError("APRIL_IMAGES_INVALID_SPEC_SCHEMA")
+
         try:
             requested_size = f"{int(spec.get('width', cls.DEFAULT_SIZE[0]))}x{int(spec.get('height', cls.DEFAULT_SIZE[1]))}"
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             requested_size = f"{cls.DEFAULT_SIZE[0]}x{cls.DEFAULT_SIZE[1]}"
+
         width, height = cls._parse_size(requested_size)
+
+        raw_layers = spec.get("layers")
+        layers = []
+        if isinstance(raw_layers, list):
+            for raw_layer in raw_layers[:96]:
+                if not isinstance(raw_layer, dict):
+                    continue
+
+                layer = dict(raw_layer)
+                kind = str(layer.get("kind") or "").strip().lower()
+
+                # Canonicalize all box-based primitives once at the boundary.
+                if "box" in layer:
+                    box = cls._norm_box(layer.get("box"))
+                    if box is not None:
+                        layer["box"] = list(box)
+                    else:
+                        layer.pop("box", None)
+
+                if kind in {"polygon", "polyline"}:
+                    points = []
+                    for point in layer.get("points") or []:
+                        normalized = cls._norm_point(point, width, height)
+                        if normalized is None:
+                            continue
+                        points.append([
+                            normalized[0] / max(1, width - 1),
+                            normalized[1] / max(1, height - 1),
+                        ])
+                    if points:
+                        layer["points"] = points
+                    else:
+                        layer.pop("points", None)
+
+                if kind == "line":
+                    p1 = layer.get("p1")
+                    p2 = layer.get("p2")
+                    if cls._norm_point(p1, width, height) is None or cls._norm_point(p2, width, height) is None:
+                        continue
+
+                if "opacity" in layer:
+                    try:
+                        opacity = float(layer["opacity"])
+                        layer["opacity"] = max(0.0, min(1.0, opacity)) if math.isfinite(opacity) else 1.0
+                    except (TypeError, ValueError, OverflowError):
+                        layer["opacity"] = 1.0
+
+                layers.append(layer)
+
         return {
             "schema": "april_image_spec_v1",
             "prompt": cls._clean_prompt(spec.get("prompt") or ""),
@@ -412,7 +549,7 @@ class AprilImagesGenerator:
             "height": height,
             "style": str(spec.get("style") or "illustration")[:64],
             "background": dict(spec.get("background") or {}),
-            "layers": list(spec.get("layers") or [])[:96],
+            "layers": layers,
             "negative": [str(x)[:120] for x in (spec.get("negative") or [])[:24]],
             "seed": spec.get("seed"),
         }
@@ -445,6 +582,7 @@ class AprilImagesGenerator:
         )
         artifact["render_spec"] = clean
         artifact["payload"]["render_spec"] = clean
+        artifact["images"] = list(artifact["payload"].get("images") or [])
         return cls._result_dict(ImageGenerationResult(
             image_bytes=image_bytes,
             mime_type="image/png",
@@ -623,16 +761,42 @@ class AprilImagesGenerator:
                 },
                 "payload": {
                     "kind": "generated_image",
+                    "artifact_type": "image",
                     "mime_type": "image/png",
                     "width": width,
                     "height": height,
                     "image_base64": data_base64,
                     "image_data_uri": data_uri,
+                    "src": data_uri,
+                    "url": data_uri,
                     "prompt": prompt,
                     "engine": cls.ENGINE_NAME,
                     "engine_version": cls.ENGINE_VERSION,
                     "backend": backend,
                     "variant": variant,
+                    "presentation": {
+                        "mode": "gallery",
+                        "renderer": "GalleryBlock",
+                        "viewer": "GalleryBlock",
+                        "payload_type": "image",
+                        "mime_type": "image/png",
+                    },
+                    # GalleryBlock's canonical input is an image collection.
+                    # Keep one deterministic item so both simple and complex
+                    # image producers arrive through the same Web contract.
+                    "images": [
+                        {
+                            "src": data_uri,
+                            "url": data_uri,
+                            "image": data_uri,
+                            "mime_type": "image/png",
+                            "width": width,
+                            "height": height,
+                            "title": "Image",
+                            "alt": prompt,
+                            "caption": prompt,
+                        }
+                    ],
                 },
             },
         )
@@ -643,6 +807,15 @@ class AprilImagesGenerator:
 
         contract = build_universal_contract(artifact)
         artifact_data = dict(artifact.data or {})
+
+        # Contract invariant: every image artifact must expose the exact
+        # Gallery-consumable source under payload.images[0].src.
+        payload = artifact_data.get("payload") if isinstance(artifact_data.get("payload"), dict) else {}
+        images = payload.get("images") if isinstance(payload.get("images"), list) else []
+        if not images or not isinstance(images[0], dict) or not images[0].get("src"):
+            raise RuntimeError("APRIL_IMAGES_GALLERY_CONTRACT_INVALID")
+
+        artifact_data["images"] = list(images)
         return artifact_data, contract
 
     @classmethod
