@@ -433,7 +433,29 @@ def normalize_blocks(blocks):
     for index, block in enumerate(blocks):
         if not isinstance(block, dict):
             continue
-        normalized.append({'type': block.get('type', 'text'), 'content': block.get('content'), 'graph': block.get('graph'), 'formula': block.get('formula'), 'scene': block.get('scene'), 'layout': block.get('layout'), 'visual': block.get('visual'), 'gallery': block.get('gallery'), 'image': block.get('image'), 'table': block.get('table'), 'continuation': block.get('continuation', False), 'topic_group': block.get('topic_group'), 'sequence_index': block.get('sequence_index', index)})
+        normalized.append({
+            'type': block.get('type', 'text'),
+            'artifact_type': block.get('artifact_type'),
+            'content': block.get('content'),
+            'text': block.get('text'),
+            'renderer': block.get('renderer'),
+            'viewer': block.get('viewer'),
+            'payload': block.get('payload'),
+            'signal': block.get('signal'),
+            'presentation': block.get('presentation'),
+            'artifact': block.get('artifact'),
+            'graph': block.get('graph'),
+            'formula': block.get('formula'),
+            'scene': block.get('scene'),
+            'layout': block.get('layout'),
+            'visual': block.get('visual'),
+            'gallery': block.get('gallery'),
+            'image': block.get('image'),
+            'table': block.get('table'),
+            'continuation': block.get('continuation', False),
+            'topic_group': block.get('topic_group'),
+            'sequence_index': block.get('sequence_index', index),
+        })
     return normalized
 
 def organize_multimodal_response(result):
@@ -459,15 +481,31 @@ async def process_april_request(user_id, text):
     scene_contract = result.get('scene_contract')
     if not isinstance(scene_contract, dict):
         raise RuntimeError('Canonical CPU SceneContract is required.')
-    visible_answer = (scene_contract.get('answer') or scene_contract.get('content') or '').strip()
+    visible_answer = _human_text_only(
+        scene_contract.get('answer'),
+        scene_contract.get('content'),
+        scene_contract.get('final_text'),
+    )
     if text:
-        add_dialog(user_id, 'user', text, metadata={'source': 'april_legacy', 'modality': 'text', 'human_turn': True})
+        add_dialog(
+            user_id,
+            'user',
+            text,
+            metadata={'source': 'april_legacy', 'modality': 'text', 'human_turn': True},
+        )
     if visible_answer:
-        add_dialog(user_id, 'assistant', visible_answer, metadata={'source': 'april_legacy', 'modality': 'text', 'human_turn': True})
-    visible_answer = _human_text_only(scene_contract.get('answer'), scene_contract.get('content'))
+        add_dialog(
+            user_id,
+            'assistant',
+            visible_answer,
+            metadata={
+                'source': 'april_legacy',
+                'modality': 'text',
+                'human_turn': True,
+                'canonical_scene': True,
+            },
+        )
     canonical = {'type': result.get('type', 'text'), 'content': visible_answer, 'answer': visible_answer, 'summary': scene_contract.get('summary'), 'blocks': normalize_blocks(scene_contract.get('render_blocks', [])), 'final_text': visible_answer, 'graph': scene_contract.get('graph'), 'formula': scene_contract.get('formula'), 'scene': scene_contract.get('scene'), 'layout': scene_contract.get('layout'), 'visual': scene_contract.get('visual'), 'table': scene_contract.get('table'), 'gallery': scene_contract.get('gallery'), 'links': scene_contract.get('links', []), 'scene_contract': scene_contract, 'gateway_transport': result.get('gateway_transport') or scene_contract, 'render_blocks': scene_contract.get('render_blocks', []), 'active_visual_scene': result.get('active_visual_scene'), 'renderer_state': scene_contract.get('renderer_state'), 'machine_scene': scene_contract.get('machine_scene'), 'scene_plan': scene_contract.get('scene_plan')}
-    if visible_answer:
-        add_dialog(user_id, 'assistant', visible_answer, metadata={'source': 'april_web', 'modality': 'text'})
     if canonical.get('render_blocks'):
         synchronize_scene_continuity(user_id, canonical)
     return canonical
