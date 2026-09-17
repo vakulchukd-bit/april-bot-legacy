@@ -2684,6 +2684,7 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
     render_blocks = contract.get("render_blocks") or contract.get("blocks") or []
     block_types = []
     presentation_types = []
+    render_signal_inventory = []
     for block in render_blocks:
         if isinstance(block, dict):
             block_type = str(
@@ -2705,6 +2706,31 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
                 ).lower()
                 if pkind and pkind not in presentation_types:
                     presentation_types.append(pkind)
+            signal = block.get("presentation") if isinstance(block.get("presentation"), dict) else block.get("signal")
+            if isinstance(signal, dict):
+                render_signal_inventory.append({
+                    "block_id": safe_trim_text(
+                        block.get("block_id") or block.get("render_id") or "",
+                        120,
+                    ),
+                    "type": block_type,
+                    "renderer": safe_trim_text(
+                        signal.get("web_renderer")
+                        or signal.get("renderer")
+                        or block.get("renderer")
+                        or "",
+                        120,
+                    ),
+                    "fallback_renderer": safe_trim_text(
+                        signal.get("fallback_renderer") or "MessageTextBlock",
+                        120,
+                    ),
+                    "sequence_index": block.get("sequence_index"),
+                    "signal_channel": safe_trim_text(
+                        signal.get("signal_channel") or "canonical_web_render_signal_v2",
+                        120,
+                    ),
+                })
 
     current_request_text = str(current_request or "").strip()
     answer_text = str(answer or "").strip()[:4000]
@@ -2728,6 +2754,7 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
             for block in render_blocks
             if isinstance(block, dict) and isinstance(block.get("presentation"), dict)
         ],
+        "render_signal_inventory": deepcopy(render_signal_inventory),
         "current_request": current_request_text,
         "answer": answer_text,
         "scene_id": str(contract.get("scene_id") or ""),
@@ -2847,6 +2874,7 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
             for block in render_blocks
             if isinstance(block, dict) and isinstance(block.get("presentation"), dict)
         ],
+        "render_signal_inventory": deepcopy(render_signal_inventory),
         "semantic_state": deepcopy(semantic_scene_state),
         "dialogue_vector": deepcopy(state_obj.get("dialogue_vector", {})),
         "turn_progression": deepcopy(state_obj.get("turn_progression", {})),
@@ -2918,10 +2946,14 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
     # compact USER↔APRIL unit. This is the durable fallback for semantic recall.
     day0 = state_obj["memory_timeline"]["day_0"]
     pairs = day0.setdefault("dialog_pairs", [])
+    turn_key = f"{conversation_id}:{state_obj['visual_scene_version']}"
     pair = {
         "record_type": "dialog_pair",
+        "turn_key": turn_key,
         "user_id": str(user_id),
         "conversation_id": conversation_id,
+        "user_request": safe_trim_text(current_request_text, 1200),
+        "april_answer": safe_trim_text(answer_text, 2200),
         "user_meaning": safe_trim_text(current_request_text, 800),
         "april_meaning": safe_trim_text(answer_text, 1400),
         "answer_summary": safe_trim_text(contract.get("summary") or answer_text, 1000),
@@ -2936,6 +2968,16 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         ),
         "visual_scene_id": scene_id,
         "continuation": is_continuation,
+        "render_block_types": list(block_types),
+        "presentation_types": list(presentation_types),
+        "render_signal_inventory": deepcopy(render_signal_inventory),
+        "current_turn": {
+            "user": safe_trim_text(current_request_text, 1200),
+            "april": safe_trim_text(answer_text, 2200),
+            "scene_id": scene_id,
+            "relation": resolved_relation,
+            "renderer_signals": deepcopy(render_signal_inventory),
+        },
         "created_at": time.time(),
         "expires_after_days": MEMORY_DAYS,
     }
