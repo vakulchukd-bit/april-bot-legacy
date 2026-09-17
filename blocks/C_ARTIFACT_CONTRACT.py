@@ -312,6 +312,43 @@ def _normalize_diagram_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def _normalize_image_gallery_payload(structured_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize one image source into the exact GalleryBlock image-item contract."""
+    payload = dict(structured_payload or {})
+    existing = payload.get("images") or payload.get("items") or payload.get("gallery") or payload.get("sources")
+    if isinstance(existing, list) and existing:
+        return payload
+
+    direct = (
+        payload.get("src")
+        or payload.get("url")
+        or payload.get("image")
+        or payload.get("image_data_uri")
+        or payload.get("data_uri")
+        or ""
+    )
+    base64_value = payload.get("image_base64") or payload.get("base64") or ""
+    mime = str(payload.get("mime_type") or "image/png").strip() or "image/png"
+    if not direct and base64_value:
+        direct = f"data:{mime};base64,{base64_value}"
+    if not direct:
+        return payload
+
+    item = {
+        "src": direct,
+        "url": direct,
+        "image": direct,
+        "mime_type": mime,
+        "width": payload.get("width"),
+        "height": payload.get("height"),
+        "title": payload.get("title") or "Image",
+        "alt": payload.get("alt") or payload.get("prompt") or payload.get("description") or "April image",
+        "caption": payload.get("caption") or payload.get("prompt") or payload.get("description") or "",
+    }
+    payload["images"] = [item]
+    return payload
+
+
 def _canonicalize_artifact_data(
     data: Dict[str, Any],
     *,
@@ -338,7 +375,9 @@ def _canonicalize_artifact_data(
 
     if not isinstance(structured_payload, dict):
         structured_payload = {}
-    if artifact_type == "table":
+    if artifact_type in {"image", "gallery", "scene", "visual_context"}:
+        structured_payload = _normalize_image_gallery_payload(structured_payload)
+    elif artifact_type == "table":
         structured_payload = _normalize_table_payload(structured_payload)
     elif artifact_type == "diagram":
         structured_payload = _normalize_diagram_payload(structured_payload)
@@ -476,26 +515,32 @@ class BaseArtifact:
 # artifact_type identifies the produced representation; renderer identifies
 # the concrete Web viewer for this particular artifact. One room may therefore
 # produce multiple concrete renderers without creating a second route.
-ARTIFACT_BLOCK_MAP = {
-    "text": "MessageTextBlock",
-    "markdown": "MessageTextBlock",
-    "graph": "GraphBlock",
-    "formula": "MessageTextBlock",
-    "table": "TableBlock",
-    "diagram": "MessageTextBlock",   # default for textual/schematic diagrams
-    "code": "CodeBlock",
-    "link": "LinkCard",
-    "gallery": "GalleryBlock",
-    "image": "GalleryBlock",
-    "file": "LinkCard",
-    "audio": "MessageTextBlock",
-    "video": "MessageTextBlock",
-    "action": "MessageTextBlock",
-    "scene": "GalleryBlock",
-    "memory": "MessageTextBlock",
-    "visual_context": "GalleryBlock",
-    "function": "FunctionBlock",
+WEB_RENDERER_REGISTRY_VERSION = "2.0"
+
+# Exact renderer contract mirrored from the actual April Web RenderMessage
+# registry. This describes the destination component; it never performs routing.
+WEB_RENDERER_REGISTRY = {
+    "text": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["content", "text", "answer"]},
+    "markdown": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["content", "text", "markdown"]},
+    "formula": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["formula", "equation", "expression", "math", "content"], "mode": "force_math"},
+    "graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["series", "x_axis", "data_table", "points"]},
+    "table": {"renderer": "TableBlock", "viewer": "TableBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["rows", "columns", "headers", "data", "values", "items"]},
+    "diagram": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["elements", "svg", "geometry", "points"], "specialized_renderers": ["SvgBlock", "ArithmeticDiagram"]},
+    "image": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["images", "src", "url", "image", "image_data_uri", "image_base64"]},
+    "gallery": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["images", "items", "gallery", "sources"]},
+    "scene": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["elements", "svg", "images", "objects"]},
+    "visual_context": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["images", "elements", "svg", "context"]},
+    "code": {"renderer": "CodeBlock", "viewer": "CodeBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["code", "content", "language"]},
+    "link": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "MessageTextBlock", "payload_keys": ["url", "href", "title", "description"]},
+    "file": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "MessageTextBlock", "payload_keys": ["url", "href", "path", "name"]},
+    "audio": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["url", "src", "path", "content"]},
+    "video": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["url", "src", "path", "content"]},
+    "action": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["action", "target", "parameters", "content"]},
+    "memory": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["content", "summary", "memory"]},
 }
+
+ARTIFACT_BLOCK_MAP = {kind: spec["renderer"] for kind, spec in WEB_RENDERER_REGISTRY.items()}
+ARTIFACT_BLOCK_MAP["function"] = "MessageTextBlock"
 
 # Concrete renderers that are allowed to cross the artifact/Fiber boundary.
 SUPPORTED_RENDERERS = {
@@ -511,9 +556,9 @@ ARTIFACT_RENDERER_ALIASES = {
     "markdown": "MessageTextBlock",
     "message": "MessageTextBlock",
     "message_text": "MessageTextBlock",
-    "diagram": "MessageTextBlock",
-    "diagramblock": "MessageTextBlock",
-    "schematic": "MessageTextBlock",
+    "diagram": "GalleryBlock",
+    "diagramblock": "GalleryBlock",
+    "schematic": "GalleryBlock",
     "gallery": "GalleryBlock",
     "image": "GalleryBlock",
     "figure": "GalleryBlock",
@@ -693,11 +738,25 @@ def _render_signal_metadata(
     presentation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return only transport metadata; payload stays structured and untouched."""
+    registration = WEB_RENDERER_REGISTRY.get(
+        str(artifact_type or "").strip().lower(),
+        WEB_RENDERER_REGISTRY["text"],
+    )
+    exact_renderer = str(registration.get("renderer") or renderer or "MessageTextBlock")
+    fallback_renderer = str(registration.get("fallback_renderer") or "MessageTextBlock")
+    candidates = [exact_renderer]
+    if fallback_renderer and fallback_renderer not in candidates:
+        candidates.append(fallback_renderer)
     return {
         "type": artifact_type,
         "payload_type": artifact_type,
-        "renderer": renderer,
-        "viewer": renderer,
+        "renderer": exact_renderer,
+        "viewer": str(registration.get("viewer") or exact_renderer),
+        "web_renderer": exact_renderer,
+        "fallback_renderer": fallback_renderer,
+        "renderer_candidates": candidates,
+        "web_registry_version": WEB_RENDERER_REGISTRY_VERSION,
+        "signal_channel": "canonical_web_render_signal_v2",
         "source_room": room_source,
         "version": UNIFIED_RENDER_SIGNAL_VERSION,
         "content_present": bool(content),
@@ -706,6 +765,7 @@ def _render_signal_metadata(
         "layout": layout,
         "scene_contract": True,
         "presentation": dict(presentation or {}),
+        "payload_contract_keys": list(registration.get("payload_keys") or []),
     }
 
 
@@ -1576,12 +1636,19 @@ class UniversalArtifactContract:
 
 
 def build_presentation_hint(artifact_type: str, complexity: str = "balanced") -> dict:
-    renderer = SCENE_BLOCK_REGISTRY.get(artifact_type, "TextBlock")
+    registration = get_web_renderer_registration(artifact_type)
+    renderer = registration.get("renderer", "MessageTextBlock")
+    fallback = registration.get("fallback_renderer", "MessageTextBlock")
     return {
         "payload_type": artifact_type,
         "scene_block": artifact_type,
         "renderer": renderer,
-        "viewer": renderer,
+        "viewer": registration.get("viewer", renderer),
+        "web_renderer": renderer,
+        "fallback_renderer": fallback,
+        "renderer_candidates": [renderer] + ([fallback] if fallback != renderer else []),
+        "web_registry_version": WEB_RENDERER_REGISTRY_VERSION,
+        "signal_channel": "canonical_web_render_signal_v2",
         "priority": 100,
         "complexity": complexity,
         "layout": "single" if complexity == "compact" else "adaptive",
@@ -1613,22 +1680,8 @@ SUPPORTED_PAYLOAD_TYPES = {
 }
 
 SCENE_BLOCK_REGISTRY = {
-    "text": "TextBlock",
-    "markdown": "MarkdownBlock",
-    "table": "TableBlock",
-    "formula": "FormulaBlock",
-    "graph": "GraphBlock",
-    # Default schematic view. Concrete geometry uses the artifact renderer
-    # signal (GalleryBlock/SvgBlock/ArithmeticDiagram) and is not flattened here.
-    "diagram": "MessageTextBlock",
-    "image": "ImageBlock",
-    "gallery": "GalleryBlock",
-    "code": "CodeBlock",
-    "link": "LinkCard",
-    "file": "FileBlock",
-    "audio": "AudioBlock",
-    "video": "VideoBlock",
-    "action": "ActionBlock",
+    kind: spec["renderer"]
+    for kind, spec in WEB_RENDERER_REGISTRY.items()
 }
 
 @dataclass
@@ -1694,6 +1747,12 @@ class MachineResponse:
     scene_plan: List[str] = field(default_factory=lambda:["text"])
     render_priority: List[str] = field(default_factory=lambda:["text"])
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+def get_web_renderer_registration(payload_type: str) -> Dict[str, Any]:
+    """Return the exact April Web registration for a payload type."""
+    key = str(payload_type or "").strip().lower()
+    return dict(WEB_RENDERER_REGISTRY.get(key) or WEB_RENDERER_REGISTRY["text"])
+
 
 @dataclass
 class MachineScene:
@@ -1787,7 +1846,10 @@ __all__ = [
     "validate_universal_contract",
     "build_machine_scene",
     "build_presentation_hint",
+    "get_web_renderer_registration",
     "SUPPORTED_RENDERERS",
+    "WEB_RENDERER_REGISTRY",
+    "WEB_RENDERER_REGISTRY_VERSION",
     "ARTIFACT_RENDERER_ALIASES",
     "UNIFIED_RENDER_SIGNAL_VERSION",
     "build_scene_contract",
