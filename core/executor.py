@@ -30,7 +30,7 @@ from blocks.intent_resolver import resolve_input, build_focus_intent_state
 from blocks.router import route_request
 from blocks.router_system import decide_action
 from blocks.state_manager import get_state, update_dialog_context, update_scene_context, query_dynamic_memory, is_dialogue_visible_scene, persist_state
-from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_machine_scene, build_scene_contract
+from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_machine_scene, build_scene_contract, WEB_RENDERER_REGISTRY, WEB_RENDERER_REGISTRY_VERSION
 from blocks.provider_router import generate_text
 from blocks.C_APRIL_IMAGES_GENERATOR import generate_from_spec
 from blocks.energy_manager import build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration
@@ -43,6 +43,7 @@ OUTPUT_MIN_TOKENS = 16
 OUTPUT_MAX_TOKENS = 8000
 DIALOGUE_ENGINE_VERSION = 'quantum_dialogue_vector_engine_v2'
 RENDER_ENGINE_VERSION = 'quantum_render_integrity_engine_v1'
+CANONICAL_WEB_RENDER_SIGNAL_VERSION = 'canonical_web_render_signal_v2'
 QUANTUM_CORE_COUNT = 8
 QUANTUM_LANE_COUNT = 8
 QUANTUM_CORES = tuple((f'core_{i + 1}' for i in range(QUANTUM_CORE_COUNT)))
@@ -2415,12 +2416,32 @@ class QuantumRenderIntegrityEngine:
         if kind in {'formula', 'math'}:
             return (nonempty_text(payload.get('formula'), payload.get('expression'), payload.get('value'), block.get('content'), block.get('text')), 'formula_payload' if nonempty_text(payload.get('formula'), payload.get('expression'), payload.get('value'), block.get('content'), block.get('text')) else 'formula_payload_empty')
         if kind in {'image', 'annotated_image'}:
-            if nonempty_text(payload.get('url'), payload.get('src'), payload.get('source_path'), payload.get('path'), payload.get('data'), payload.get('base64'), block.get('source_path')):
+            if nonempty_text(
+                payload.get('url'),
+                payload.get('src'),
+                payload.get('source_path'),
+                payload.get('path'),
+                payload.get('data'),
+                payload.get('base64'),
+                payload.get('image_data_uri'),
+                payload.get('image_base64'),
+                block.get('source_path'),
+            ):
                 return (True, 'image_source')
+            items = payload.get('images')
+            if isinstance(items, list) and any(
+                isinstance(item, dict) and nonempty_text(item.get('src'), item.get('url'), item.get('image'))
+                for item in items
+            ):
+                return (True, 'image_gallery_item')
             return (False, 'image_source_empty')
         if kind in {'gallery'}:
             items = payload.get('items') or payload.get('images') or payload.get('sources')
-            if isinstance(items, list) and items:
+            if isinstance(items, list) and any(
+                isinstance(item, dict)
+                and nonempty_text(item.get('src'), item.get('url'), item.get('image'))
+                for item in items
+            ):
                 return (True, 'gallery_items')
             return (False, 'gallery_empty')
         if kind == 'link':
@@ -2843,50 +2864,220 @@ def _formula_values_from_payload(payload: dict) -> list[dict]:
     return values
 
 def _presentation_signal_for_block(block: dict, request: MachineRequest | None=None) -> dict:
-    """Build one canonical signal that tells April Web exactly which engine to use."""
+    """Build one canonical Web-facing signal from the current block payload.
+
+    Renderer identity is taken from the exact April Web registry. The signal
+    carries ordered renderer/fallback metadata but never creates a second route.
+    """
     source = dict(block or {})
     payload = _canonical_block_payload(source)
-    kind = _s(source.get('type') or source.get('artifact_type') or source.get('representation') or 'text').lower()
-    kind = {'markdown': 'text', 'plot': 'graph', 'chart': 'graph', 'scene': 'diagram', 'layout': 'diagram', 'visual': 'diagram'}.get(kind, kind)
+    raw_kind = _s(
+        source.get('type')
+        or source.get('artifact_type')
+        or source.get('representation')
+        or 'text'
+    ).lower()
+    kind = {
+        'markdown': 'text',
+        'plot': 'graph',
+        'chart': 'graph',
+        'line_chart': 'graph',
+        'function_plot': 'graph',
+        'data_table': 'table',
+        'scene': 'diagram',
+        'layout': 'diagram',
+        'visual': 'diagram',
+    }.get(raw_kind, raw_kind)
+    registry = WEB_RENDERER_REGISTRY.get(kind) or WEB_RENDERER_REGISTRY['text']
+    web_renderer = _s(registry.get('renderer') or 'MessageTextBlock')
+    fallback_renderer = _s(registry.get('fallback_renderer') or 'MessageTextBlock')
+    renderer_candidates = [web_renderer]
+    if fallback_renderer and fallback_renderer not in renderer_candidates:
+        renderer_candidates.append(fallback_renderer)
+
     math_policy = _math_presentation_policy(request)
-    signal = {'version': 'presentation_signal_v4', 'kind': kind, 'renderer': '', 'engine': '', 'producer': 'QUANTUM_PROCESSOR', 'route': 'canonical', 'preserve_payload': True, 'payload_unchanged': True, 'payload_contract': _presentation_payload_contract(source, kind), 'block_id': _canonical_block_id(source, int(source.get('sequence_index') or 0)), 'sequence_index': int(source.get('sequence_index') or 0), 'related_block_ids': list(source.get('related_block_ids') or []), 'presentation_stream': _quantum_snapshot(source.get('presentation_stream') or {})}
+    sequence_index = int(source.get('sequence_index') or 0)
+    signal = {
+        'version': 'presentation_signal_v4',
+        'signal_channel': CANONICAL_WEB_RENDER_SIGNAL_VERSION,
+        'web_registry_version': WEB_RENDERER_REGISTRY_VERSION,
+        'kind': kind,
+        'renderer': web_renderer,
+        'viewer': _s(registry.get('viewer') or web_renderer),
+        'web_renderer': web_renderer,
+        'fallback_renderer': fallback_renderer,
+        'renderer_candidates': renderer_candidates,
+        'engine': '',
+        'producer': 'QUANTUM_PROCESSOR',
+        'route': 'canonical',
+        'preserve_payload': True,
+        'payload_unchanged': True,
+        'payload_contract': _presentation_payload_contract(source, kind),
+        'payload_contract_keys': list(registry.get('payload_keys') or []),
+        'block_id': _canonical_block_id(source, sequence_index),
+        'sequence_index': sequence_index,
+        'related_block_ids': list(source.get('related_block_ids') or []),
+        'presentation_stream': _quantum_snapshot(source.get('presentation_stream') or {}),
+    }
     meta = source.get('metadata') if isinstance(source.get('metadata'), dict) else {}
     for name in ('continuation', 'topic_group', 'flow_id', 'render_id', 'scene_id', 'turn_id'):
         value = source.get(name) or meta.get(name)
         if value not in (None, ''):
             signal[name] = _quantum_snapshot(value)
+
     if kind == 'text':
         content = source.get('content') or source.get('text') or source.get('value') or ''
         segmented = _presentation_segments(content, math_policy=math_policy)
-        signal.update({'kind': 'mixed' if segmented.get('mode') == 'mixed' else 'structured' if segmented.get('mode') == 'structured' else 'text', 'renderer': 'mcdowell', 'engine': 'presentation_matrix', 'text_engine': 'mcdowell', 'formula_engine': 'katex', 'presentation': _mcdowell_block_contract(source, segmented), 'spans': segmented.get('spans', []), 'segments': segmented.get('segments', []), 'blocks': segmented.get('blocks', []), 'analysis': segmented.get('analysis', {}), 'layout': segmented.get('layout', 'mcdowell_document'), 'delegated_segments': bool(segmented.get('spans') or segmented.get('blocks')), 'math_policy': _quantum_snapshot(math_policy)})
+        signal.update({
+            'kind': 'text',
+            'presentation_mode': segmented.get('mode', 'text'),
+            'renderer': 'MessageTextBlock',
+            'viewer': 'MessageTextBlock',
+            'web_renderer': 'MessageTextBlock',
+            'fallback_renderer': 'MessageTextBlock',
+            'renderer_candidates': ['MessageTextBlock'],
+            'engine': 'presentation_matrix',
+            'text_engine': 'mcdowell',
+            'formula_engine': 'katex',
+            'presentation': _mcdowell_block_contract(source, segmented),
+            'spans': segmented.get('spans', []),
+            'segments': segmented.get('segments', []),
+            'blocks': segmented.get('blocks', []),
+            'analysis': segmented.get('analysis', {}),
+            'layout': segmented.get('layout', 'mcdowell_document'),
+            'delegated_segments': bool(segmented.get('spans') or segmented.get('blocks')),
+            'math_policy': _quantum_snapshot(math_policy),
+        })
     elif kind == 'formula':
         formulas = _formula_values_from_payload(payload)
         value = _s(source.get('content') or source.get('text') or source.get('value'))
         if not formulas and value:
             formulas = [{'label': '', 'value': value, 'latex': _math_normalize_provider_fragment(value), 'display': True}]
-        signal.update({'kind': 'formula', 'renderer': 'mcdowell', 'engine': 'katex', 'text_engine': 'mcdowell', 'formula_engine': 'katex', 'layout': 'mcdowell_document', 'presentation': {'enabled': bool(formulas), 'mode': 'formula', 'renderer': 'mcdowell', 'math_engine': 'katex', 'layout': 'mcdowell_document', 'formulas': formulas, 'payload_preserved': True}, 'spans': [{'start': 0, 'end': len(f['value']), 'role': 'formula', 'renderer': 'mcdowell', 'engine': 'katex', 'latex': f['latex'], 'value': f['value'], 'display': bool(f.get('display'))} for f in formulas]})
+        signal.update({
+            'kind': 'formula',
+            'renderer': 'MessageTextBlock',
+            'viewer': 'MessageTextBlock',
+            'web_renderer': 'MessageTextBlock',
+            'fallback_renderer': 'MessageTextBlock',
+            'renderer_candidates': ['MessageTextBlock'],
+            'engine': 'katex',
+            'text_engine': 'mcdowell',
+            'formula_engine': 'katex',
+            'layout': 'mcdowell_document',
+            'presentation': {'enabled': bool(formulas), 'mode': 'formula', 'renderer': 'MessageTextBlock', 'math_engine': 'katex', 'layout': 'mcdowell_document', 'formulas': formulas, 'payload_preserved': True},
+            'spans': [{'start': 0, 'end': len(f['value']), 'role': 'formula', 'renderer': 'MessageTextBlock', 'engine': 'katex', 'latex': f['latex'], 'value': f['value'], 'display': bool(f.get('display'))} for f in formulas],
+        })
     elif kind == 'table':
-        signal.update({'kind': 'table', 'renderer': 'table', 'engine': 'table', 'layout': 'table_document', 'cell_text_engine': 'mcdowell', 'cell_math_engine': 'katex', 'caption_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'artifact_payload': _presentation_payload_contract(source, 'table')})
+        signal.update({
+            'kind': 'table',
+            'renderer': 'TableBlock',
+            'viewer': 'TableBlock',
+            'web_renderer': 'TableBlock',
+            'fallback_renderer': 'MessageTextBlock',
+            'renderer_candidates': ['TableBlock', 'MessageTextBlock'],
+            'engine': 'table',
+            'layout': 'table_document',
+            'cell_text_engine': 'mcdowell',
+            'cell_math_engine': 'katex',
+            'caption_text_engine': 'mcdowell',
+            'description_text_engine': 'mcdowell',
+            'artifact_payload': _presentation_payload_contract(source, 'table'),
+        })
     elif kind == 'graph':
-        signal.update({'kind': 'graph', 'renderer': 'graph', 'engine': 'graph', 'layout': 'graph_document', 'label_text_engine': 'mcdowell', 'label_math_engine': 'katex', 'caption_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'axis_text_engine': 'mcdowell', 'axis_math_engine': 'katex', 'artifact_payload': _presentation_payload_contract(source, 'graph')})
+        signal.update({
+            'kind': 'graph',
+            'renderer': 'GraphBlock',
+            'viewer': 'GraphBlock',
+            'web_renderer': 'GraphBlock',
+            'fallback_renderer': 'MessageTextBlock',
+            'renderer_candidates': ['GraphBlock', 'MessageTextBlock'],
+            'engine': 'graph',
+            'layout': 'graph_document',
+            'label_text_engine': 'mcdowell',
+            'label_math_engine': 'katex',
+            'caption_text_engine': 'mcdowell',
+            'description_text_engine': 'mcdowell',
+            'axis_text_engine': 'mcdowell',
+            'axis_math_engine': 'katex',
+            'artifact_payload': _presentation_payload_contract(source, 'graph'),
+        })
     elif kind == 'diagram':
-        signal.update({'kind': 'diagram', 'renderer': 'diagram', 'engine': 'diagram', 'layout': 'diagram_document', 'label_text_engine': 'mcdowell', 'label_math_engine': 'katex', 'caption_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'artifact_payload': _presentation_payload_contract(source, 'diagram')})
+        specialized = []
+        if _s(payload.get('svg') or payload.get('markup')):
+            specialized.append('SvgBlock')
+        if any(isinstance(payload.get(key), list) and payload.get(key) for key in ('left_group', 'right_group', 'result')):
+            specialized.append('ArithmeticDiagram')
+        signal.update({
+            'kind': 'diagram',
+            'renderer': 'GalleryBlock',
+            'viewer': 'GalleryBlock',
+            'web_renderer': 'GalleryBlock',
+            'fallback_renderer': 'MessageTextBlock',
+            'renderer_candidates': ['GalleryBlock', *specialized, 'MessageTextBlock'],
+            'specialized_renderers': specialized,
+            'engine': 'diagram',
+            'layout': 'diagram_document',
+            'label_text_engine': 'mcdowell',
+            'label_math_engine': 'katex',
+            'caption_text_engine': 'mcdowell',
+            'description_text_engine': 'mcdowell',
+            'artifact_payload': _presentation_payload_contract(source, 'diagram'),
+        })
+    elif kind in {'image', 'gallery', 'scene', 'visual_context'}:
+        signal.update({
+            'kind': kind,
+            'renderer': 'GalleryBlock',
+            'viewer': 'GalleryBlock',
+            'web_renderer': 'GalleryBlock',
+            'fallback_renderer': 'MessageTextBlock',
+            'renderer_candidates': ['GalleryBlock', 'MessageTextBlock'],
+            'engine': 'media',
+            'layout': f'{kind}_document',
+            'caption_text_engine': 'mcdowell',
+            'description_text_engine': 'mcdowell',
+            'artifact_payload': _presentation_payload_contract(source, kind),
+        })
     elif kind == 'link':
-        signal.update({'kind': 'link', 'renderer': 'link', 'engine': 'link_card', 'layout': 'link_card_document', 'title_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'inline_math_engine': 'katex', 'href_preserved': True, 'artifact_payload': _presentation_payload_contract(source, 'link')})
+        signal.update({
+            'kind': 'link',
+            'renderer': 'LinkCard',
+            'viewer': 'LinkCard',
+            'web_renderer': 'LinkCard',
+            'fallback_renderer': 'MessageTextBlock',
+            'renderer_candidates': ['LinkCard', 'MessageTextBlock'],
+            'engine': 'link_card',
+            'layout': 'link_card_document',
+            'title_text_engine': 'mcdowell',
+            'description_text_engine': 'mcdowell',
+            'inline_math_engine': 'katex',
+            'href_preserved': True,
+            'artifact_payload': _presentation_payload_contract(source, 'link'),
+        })
     elif kind == 'code':
-        signal.update({'kind': 'code', 'renderer': 'code', 'engine': 'syntax', 'layout': 'code_document', 'caption_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'language': _s(source.get('language') or payload.get('language'))})
-    elif kind == 'gallery':
-        signal.update({'kind': 'gallery', 'renderer': 'gallery', 'engine': 'media', 'layout': 'gallery_document', 'caption_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'artifact_payload': _presentation_payload_contract(source, 'gallery')})
-    elif kind in {'audio', 'video'}:
-        signal.update({'kind': kind, 'renderer': kind, 'engine': 'media', 'layout': f'{kind}_document', 'caption_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'artifact_payload': _presentation_payload_contract(source, kind)})
-    elif kind == 'file':
-        signal.update({'kind': 'file', 'renderer': 'file', 'engine': 'file_card', 'layout': 'file_card_document', 'title_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'artifact_payload': _presentation_payload_contract(source, 'file')})
-    elif kind == 'action':
-        signal.update({'kind': 'action', 'renderer': 'action', 'engine': 'action', 'layout': 'action_document', 'label_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'artifact_payload': _presentation_payload_contract(source, 'action')})
-    elif kind == 'memory':
-        signal.update({'kind': 'memory', 'renderer': 'memory', 'engine': 'memory', 'layout': 'memory_document', 'label_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'artifact_payload': _presentation_payload_contract(source, 'memory')})
+        signal.update({
+            'kind': 'code',
+            'renderer': 'CodeBlock',
+            'viewer': 'CodeBlock',
+            'web_renderer': 'CodeBlock',
+            'fallback_renderer': 'MessageTextBlock',
+            'renderer_candidates': ['CodeBlock', 'MessageTextBlock'],
+            'engine': 'syntax',
+            'layout': 'code_document',
+            'caption_text_engine': 'mcdowell',
+            'description_text_engine': 'mcdowell',
+            'language': _s(source.get('language') or payload.get('language')),
+        })
     else:
-        signal.update({'kind': kind, 'renderer': 'mcdowell', 'engine': 'markdown', 'layout': 'mcdowell_document', 'inline_math_engine': 'katex', 'description_text_engine': 'mcdowell', 'artifact_payload': _presentation_payload_contract(source, kind)})
+        signal.update({
+            'renderer': web_renderer,
+            'viewer': _s(registry.get('viewer') or web_renderer),
+            'web_renderer': web_renderer,
+            'fallback_renderer': fallback_renderer,
+            'renderer_candidates': renderer_candidates,
+            'engine': 'media' if kind in {'audio', 'video'} else kind or 'markdown',
+            'layout': f'{kind}_document' if kind else 'mcdowell_document',
+            'artifact_payload': _presentation_payload_contract(source, kind),
+        })
     signal['math_policy'] = _quantum_snapshot(math_policy)
     return signal
 
@@ -3601,8 +3792,57 @@ async def _materialize_provider_image(response: MachineResponse, request: Machin
         artifact = result.get('artifact') or {}
         contract = result.get('contract')
         ap = artifact.get('payload') if isinstance(artifact, dict) else {}
-        payload = {'kind': 'generated_image', 'mime_type': 'image/png', 'width': result.get('width'), 'height': result.get('height'), 'image_base64': ap.get('image_base64') if isinstance(ap, dict) else None, 'image_data_uri': ap.get('image_data_uri') if isinstance(ap, dict) else None, 'prompt': result.get('prompt') or spec.get('prompt') or '', 'engine': 'April Images Generation', 'backend': result.get('backend'), 'render_spec': spec}
-        image_block = {'type': 'image', 'artifact_type': 'image', 'renderer': 'GalleryBlock', 'viewer': 'GalleryBlock', 'payload': payload, 'artifact': artifact, 'scene_contract': True, 'human_visible': True, 'provider_payload': False, 'canonical_provider_payload': True, 'source': 'C_APRIL_IMAGES_GENERATOR', 'image_engine': 'April Images Generation'}
+        base64_value = ap.get('image_base64') if isinstance(ap, dict) else None
+        data_uri_value = ap.get('image_data_uri') if isinstance(ap, dict) else None
+        if not data_uri_value and isinstance(base64_value, str) and base64_value:
+            data_uri_value = f"data:image/png;base64,{base64_value}"
+        prompt_value = result.get('prompt') or spec.get('prompt') or ''
+        image_item = {
+            'src': data_uri_value or base64_value or '',
+            'url': data_uri_value or base64_value or '',
+            'image': data_uri_value or base64_value or '',
+            'mime_type': 'image/png',
+            'width': result.get('width'),
+            'height': result.get('height'),
+            'title': 'Image',
+            'alt': prompt_value,
+            'caption': prompt_value,
+        }
+        payload = {
+            'kind': 'generated_image',
+            'artifact_type': 'image',
+            'mime_type': 'image/png',
+            'width': result.get('width'),
+            'height': result.get('height'),
+            'src': data_uri_value or '',
+            'url': data_uri_value or '',
+            'image': data_uri_value or '',
+            'image_base64': base64_value,
+            'image_data_uri': data_uri_value,
+            'images': [image_item] if image_item['src'] else [],
+            'prompt': prompt_value,
+            'engine': 'April Images Generation',
+            'backend': result.get('backend'),
+            'render_spec': spec,
+        }
+        image_block = {
+            'type': 'image',
+            'artifact_type': 'image',
+            'renderer': 'GalleryBlock',
+            'viewer': 'GalleryBlock',
+            'payload': payload,
+            'artifact': artifact,
+            'presentation': _presentation_signal_for_block({'type': 'image', 'payload': payload, 'sequence_index': 0}, request=request),
+            'scene_contract': True,
+            'human_visible': True,
+            'provider_payload': False,
+            'canonical_provider_payload': True,
+            'source': 'C_APRIL_IMAGES_GENERATOR',
+            'image_engine': 'April Images Generation',
+        }
+        ok, integrity_reason = QUANTUM_RENDER_INTEGRITY_ENGINE.validate(image_block)
+        if not ok:
+            raise RuntimeError(f'IMAGE_WEB_ARTIFACT_CONTRACT_INVALID:{integrity_reason}')
         kept = []
         for block in list(getattr(response, 'render_blocks', []) or []):
             if not isinstance(block, dict):
