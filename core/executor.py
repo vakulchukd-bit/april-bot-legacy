@@ -15,7 +15,7 @@ import threading
 from copy import deepcopy
 from typing import Any
 from blocks.context_system import build_deephub_context, build_executor_context_packet
-from blocks.interpretation_layer import interpret_request, build_processor_execution_context, build_turn_meaning_state, QUANTUM_EVIDENCE_FUSION, QUANTUM_DIALOGUE_ENGINE
+from blocks.interpretation_layer import interpret_request, build_processor_execution_context, build_turn_meaning_state, build_scene_blueprint, QUANTUM_EVIDENCE_FUSION, QUANTUM_DIALOGUE_ENGINE
 from blocks.semantic_core import analyze as semantic_analyze
 from blocks.reasoning_state import build_reasoning_state
 from blocks.cognitive_core import analyze_cognition
@@ -36,7 +36,7 @@ from blocks.C_APRIL_IMAGES_GENERATOR import generate_from_spec
 from blocks.energy_manager import build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.image_system import scan_image, render_visual_answer, NANO_PRINTER_VERSION
-PROCESSOR_VERSION = 'april_quantum_processor_quantum64_v51_lossless_scene_presentation_v1'
+PROCESSOR_VERSION = 'april_quantum_processor_quantum64_scene_composer_v52_single_signal_v1'
 SINGLE_ROUTE = True
 PROVIDER_CALLS = 1
 OUTPUT_MIN_TOKENS = 16
@@ -1553,50 +1553,59 @@ def _canonical_geometry_contract(semantic: dict, text: str) -> dict:
     return {'version': 'geometry_contract_v1', 'representation': 'diagram', 'operation': operation or 'create', 'object': object_name, 'dimensions_optional': True, 'dimensions_required_for_rendering': False, 'dimension_values_must_be_explicit': True, 'do_not_invent_unspecified_measurements': True, 'coordinate_system': 'svg_viewbox', 'payload_modes': ['svg', 'elements'], 'element_kinds': ['line', 'polyline', 'polygon', 'rect', 'circle', 'ellipse', 'path', 'text', 'dimension', 'dimension_line', 'arrow', 'label', 'angle', 'arc', 'point'], 'supports': {'open_or_closed_shapes': True, 'composite_figures': True, 'labels': True, 'measurements': True, 'angles': True, 'construction_lines': True}, 'source': 'INTERPRETATION_CANONICAL'}
 
 def _canonical_requested_outputs(text: str, semantic: dict, decision: dict, mode: str) -> tuple[list[str], str]:
-    """Collapse output transport to the semantic production contract.
+    """Collapse transport metadata without collapsing the semantic scene.
 
-    One production representation is emitted unless Interpretation explicitly
-    declares a multi-output request. Internal transport/interpretation kinds are
-    never visible outputs.
+    `preferred_representation` remains one compatibility value, while
+    `requested_outputs` carries the complete current-turn scene. The Processor
+    is the only component allowed to compose the final one-scene signal.
     """
     semantic = _as_dict(semantic)
     decision = _as_dict(decision)
     internal = {'interpretation_canonical', 'production_signal', 'signal', 'quantum_signal', 'transport'}
     aliases = {'markdown': 'text', 'renderer_scene': 'diagram', 'visual': 'diagram', 'chart': 'graph', 'plot': 'graph', 'scene': 'diagram'}
+    universe = {'text','table','graph','diagram','formula','image','gallery','code','link','file','audio','video','action','memory','visual_context'}
 
-    def clean(values):
-        result = []
+    def clean(values: Any) -> list[str]:
+        result: list[str] = []
         for raw in _as_list(values):
-            name = aliases.get(_s(raw).lower(), _s(raw).lower())
-            if name and name not in internal and (name not in result):
+            raw_name = _s(raw).lower()
+            name = aliases.get(raw_name, raw_name)
+            if name and name not in internal and name in universe and name not in result:
                 result.append(name)
         return result
+
+    blueprint = _as_dict(semantic.get('scene_blueprint'))
+    scene_outputs = clean(blueprint.get('representations'))
+    if not scene_outputs:
+        scene_outputs = clean(
+            semantic.get('scene_representations')
+            or semantic.get('requested_outputs')
+            or semantic.get('required_outputs')
+            or semantic.get('requested_representations')
+            or semantic.get('required_representations')
+            or decision.get('requested_outputs')
+            or decision.get('required_outputs')
+        )
+    if scene_outputs and any(item != 'text' for item in scene_outputs) and 'text' not in scene_outputs:
+        scene_outputs.insert(0, 'text')
+    if not scene_outputs:
+        scene_outputs = ['text']
+
     visual_mode = _s(semantic.get('visual_production_mode') or decision.get('visual_production_mode')).lower()
-    canonical = _s('image' if visual_mode == 'image_generation' else 'diagram' if visual_mode == 'diagram' else semantic.get('production_representation') or semantic.get('resolved_representation') or semantic.get('requested_representation') or semantic.get('preferred_representation') or decision.get('preferred_representation')).lower()
-    canonical = aliases.get(canonical, canonical)
-    composed = []
-    for item in _as_list(semantic.get('scene_composition')):
-        if not isinstance(item, dict):
-            continue
-        name = _clean_representation(item.get('representation'))
-        if name and name not in composed:
-            composed.append(name)
-    declared = clean(composed + _as_list(semantic.get('requested_outputs')) + _as_list(semantic.get('required_outputs')) + _as_list(semantic.get('requested_representations')) + _as_list(semantic.get('required_representations')))
-    decision_declared = clean(decision.get('requested_outputs') or decision.get('required_outputs'))
-    multi = []
-    for name in [*declared, *decision_declared]:
-        if name not in multi:
-            multi.append(name)
-    if canonical and canonical not in internal:
-        if canonical in multi and len(multi) > 1:
-            outputs = [canonical] + [x for x in multi if x != canonical]
-        else:
-            outputs = [canonical]
-    elif multi:
-        outputs = multi[:]
-    else:
-        outputs = ['text']
-    return (list(dict.fromkeys(outputs)), canonical or outputs[0])
+    if visual_mode == 'image_generation' and 'image' not in scene_outputs:
+        scene_outputs.append('image')
+    elif visual_mode == 'diagram' and 'diagram' not in scene_outputs:
+        scene_outputs.append('diagram')
+    scene_outputs = list(dict.fromkeys(scene_outputs))
+
+    preferred = clean([
+        blueprint.get('preferred_representation'),
+        semantic.get('production_representation'),
+        semantic.get('resolved_representation'),
+        decision.get('preferred_representation'),
+    ])
+    preferred_representation = preferred[0] if preferred else scene_outputs[0]
+    return scene_outputs, preferred_representation
 
 def _build_processor_control_plane(*, text: str, semantic: dict, cognition: dict, decision: dict, state: dict, dynamic_memory: dict | None=None, memory_understanding: dict | None=None) -> dict:
     """
@@ -1638,7 +1647,7 @@ def _build_processor_control_plane(*, text: str, semantic: dict, cognition: dict
     resolved_memory_reference = bool(memory_resolved and _s(memory_scene.get('scene_id')) and (_s(_as_dict(_best_visual_context(state)).get('scene_id')) == _s(memory_scene.get('scene_id'))) and memory_reference.get('target'))
     memory_context_evidence = {'active': memory_active, 'continuation': memory_continuation, 'reference_resolved': memory_resolved, 'resolved_reference_matches_active_scene': resolved_memory_reference, 'target': _s(memory_reference.get('target')), 'scene_id': _s(memory_scene.get('scene_id')), 'resolved_request': memory_resolved_request}
     outputs, preferred = _canonical_requested_outputs(text, semantic, decision, mode)
-    representation_state = {'outputs': list(outputs), 'preferred': preferred, 'selection_method': 'semantic_scene_composition', 'scene_composition': _quantum_snapshot(_as_list(semantic.get('scene_composition')))}
+    representation_state = {'outputs': list(outputs), 'preferred': preferred, 'selection_method': 'semantic_scene_blueprint', 'scene_composition': _quantum_snapshot(_as_list(semantic.get('scene_composition'))), 'scene_blueprint': _quantum_snapshot(_as_dict(semantic.get('scene_blueprint'))), 'single_scene': True, 'one_signal': True}
     outputs, preferred, continuity_representation = _preserve_semantic_visual_representation(text, semantic, mode if mode != 'SAME_TOPIC' else relation, state, outputs, preferred)
     representation_state['visual_continuity'] = continuity_representation
     constraints = _representation_constraints(semantic, cognition, decision)
@@ -1652,7 +1661,7 @@ def _build_processor_control_plane(*, text: str, semantic: dict, cognition: dict
                 value = _s(value)
                 if value and value not in capabilities:
                     capabilities.append(value)
-    control = {'version': 'QUANTUM_CONTROL_PLANE_V1', 'authority': {'dialogue': 'processor_context_binding', 'representation': 'semantic_decision', 'capabilities': 'semantic_cognition', 'memory': 'state_manager', 'production': 'executor_specialized_engines', 'presentation': 'executor_presentation_matrix', 'rendering': 'april_web'}, 'mode': mode, 'relation': mode, 'scene_relation': relation, 'continuation': continuation, 'reference_to_previous': reference_to_previous, 'context_dependency': context_dependency, 'resolved_scene': resolved_scene, 'active_topic': topic, 'visual_continuity': continuity_representation, 'scene_composition': _quantum_snapshot(_as_list(semantic.get('scene_composition'))), 'active_goal': goal, 'dialogue_evidence': evidence, 'requested_outputs': outputs, 'preferred_representation': preferred, 'representation_state': representation_state, 'representation_constraints': constraints, 'geometry_contract': _canonical_geometry_contract(semantic, text) if preferred == 'diagram' or 'diagram' in outputs else {}, 'capabilities': capabilities[:12], 'dynamic_memory': dynamic_memory if isinstance(dynamic_memory, dict) else {}, 'memory_understanding': _quantum_snapshot(memory_understanding or {}), 'resolved_request': _s(canonical_dialogue.get('resolved_request') or text), 'resolved_context_evidence': _quantum_snapshot(memory_context_evidence), 'context_binding': _quantum_snapshot(state.get('_canonical_processor_dialogue', {})), 'history_required': bool(_as_dict(state.get('_canonical_processor_dialogue', {})).get('history_required')), 'incomplete_request_evidence': bool(_as_dict(state.get('_canonical_processor_dialogue', {})).get('incomplete_request_evidence')), 'resolved_reference': _quantum_snapshot(memory_reference if reference_to_previous else {}), 'single_route': True, 'provider_calls': 1, 'triggers': False, 'score_routing': False}
+    control = {'version': 'QUANTUM_CONTROL_PLANE_V1', 'authority': {'dialogue': 'processor_context_binding', 'representation': 'semantic_decision', 'capabilities': 'semantic_cognition', 'memory': 'state_manager', 'production': 'executor_specialized_engines', 'presentation': 'executor_presentation_matrix', 'rendering': 'april_web'}, 'mode': mode, 'relation': mode, 'scene_relation': relation, 'continuation': continuation, 'reference_to_previous': reference_to_previous, 'context_dependency': context_dependency, 'resolved_scene': resolved_scene, 'active_topic': topic, 'visual_continuity': continuity_representation, 'scene_composition': _quantum_snapshot(_as_list(semantic.get('scene_composition'))), 'scene_blueprint': _quantum_snapshot(_as_dict(semantic.get('scene_blueprint'))), 'scene_representations': list(outputs), 'scene_relations': _quantum_snapshot(_as_list(_as_dict(semantic.get('scene_blueprint')).get('relations'))), 'active_goal': goal, 'dialogue_evidence': evidence, 'requested_outputs': outputs, 'preferred_representation': preferred, 'representation_state': representation_state, 'representation_constraints': constraints, 'geometry_contract': _canonical_geometry_contract(semantic, text) if preferred == 'diagram' or 'diagram' in outputs else {}, 'capabilities': capabilities[:12], 'dynamic_memory': dynamic_memory if isinstance(dynamic_memory, dict) else {}, 'memory_understanding': _quantum_snapshot(memory_understanding or {}), 'resolved_request': _s(canonical_dialogue.get('resolved_request') or text), 'resolved_context_evidence': _quantum_snapshot(memory_context_evidence), 'context_binding': _quantum_snapshot(state.get('_canonical_processor_dialogue', {})), 'history_required': bool(_as_dict(state.get('_canonical_processor_dialogue', {})).get('history_required')), 'incomplete_request_evidence': bool(_as_dict(state.get('_canonical_processor_dialogue', {})).get('incomplete_request_evidence')), 'resolved_reference': _quantum_snapshot(memory_reference if reference_to_previous else {}), 'single_route': True, 'provider_calls': 1, 'triggers': False, 'score_routing': False}
     state['_quantum_control_plane'] = _quantum_snapshot(control)
     semantic['quantum_control_plane'] = _quantum_snapshot(control)
     return control
@@ -1707,7 +1716,7 @@ def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, st
     request_goal = _s(control.get('active_goal')) or text
     if history_task_context.get('required'):
         request_goal = _s(dialogue_contract.get('resolved_request') or interpretation_evidence.get('resolved_request') or request_goal)
-    request = MachineRequest(goal=request_goal, intent={'type': _s(semantic.get('intent')) or ('self_identification' if semantic.get('identity_request') else 'dialogue'), 'normalized_text': _s(text), 'dialogue_state': mode, 'coherence': round(coherence, 4), 'dialog_act': dialogue_contract['dialog_act'], 'history_dependent_task': bool(history_task_context.get('required')), 'resolved_operands': list(history_task_context.get('resolved_operands') or [])}, conversation={'current_request': _s(text), 'dialogue_contract': dialogue_contract, 'response_guidance': response_guidance, 'current_visual_evidence': current_visual_evidence, 'dialogue_vector': deepcopy(semantic.get('canonical_dialogue_frozen') or state.get('_canonical_interpretation_dialogue') or semantic.get('dialogue_vector') or {}), 'dialogue_delta': deepcopy(semantic.get('dialogue_delta') or {}), 'render_continuity': deepcopy(semantic.get('render_continuity') or {}), 'scene_composition': deepcopy(_as_list(semantic.get('scene_composition'))), 'turn_meaning_transition': deepcopy(semantic.get('turn_meaning_transition') or {}), 'visual_schema': _s(semantic.get('visual_schema')), 'visual_schema_confidence': float(semantic.get('visual_schema_confidence') or 0.0), 'context_mode': mode, 'context_dependency': bool(control.get('context_dependency')), 'resolved_request': _s(dialogue_contract.get('resolved_request') or dialogue_contract_source.get('resolved_request') or text), 'previous_user_turn': _s(dialogue_contract_source.get('previous_user_turn') or evidence.get('previous_user')), 'previous_april_turn': _s(dialogue_contract_source.get('previous_april_turn') or evidence.get('previous_april')), 'resolved_scene': _as_dict(control.get('resolved_scene') or dialogue_contract.get('resolved_scene')), 'recent_dialogue_pairs': deepcopy(_recent_canonical_dialogue_pairs(state, limit=10) or _as_dict(semantic.get('quantum_interpretation_evidence')).get('recent_dialogue_pairs') or evidence.get('recent_dialogue_pairs') or []), 'history_dependent_task': bool(history_task_context.get('required')), 'history_task_context': _quantum_snapshot(history_task_context), 'resolved_operands': list(history_task_context.get('resolved_operands') or []), 'provider_history_context': _quantum_snapshot({'required': bool(history_task_context.get('required')), 'operation': history_task_context.get('operation', ''), 'resolved_operands': list(history_task_context.get('resolved_operands') or []), 'selected_results': list(history_task_context.get('selected_results') or []), 'instruction': 'Use the resolved historical results as the operands for the current task. Do not ask the user to repeat values that are already present.' if history_task_context.get('required') else ''}), **({'active_topic': _clip(_s(control.get('active_topic')), 300), 'active_goal': _clip(_s(control.get('active_goal')), 500)} if mode != 'INDEPENDENT' else {}), **({'recent_dialogue': context.get('recent_dialogue', []) or list(_as_dict(control.get('dialogue_evidence')).get('recent_dialogue_pairs') or [])} if bool(control.get('context_dependency') or _as_dict(control).get('history_required') or _as_dict(control).get('mode') in {'CONTINUATION', 'SAME_TOPIC', 'ARTIFACT_REFERENCE', 'MEMORY_QUERY'} or _as_dict(control).get('incomplete_request_evidence')) else {})}, memory={'active_topic': _clip(_s(control.get('active_topic')), 300), 'active_goal': _clip(_s(control.get('active_goal')), 500), 'active_scene_id': _s(_as_dict(dialogue_evidence.get('scene_continuity')).get('scene_id') or _as_dict(_best_visual_context(state)).get('scene_id')), 'retrieval_mode': 'memory_query' if mode == 'MEMORY_QUERY' else 'semantic', 'dynamic_memory': dynamic_memory_evidence if mode in {'CONTINUATION', 'SAME_TOPIC', 'ARTIFACT_REFERENCE', 'MEMORY_QUERY'} or bool(control.get('reference_to_previous')) else {'available': bool(dynamic_memory_evidence.get('matches'))}} if mode != 'INDEPENDENT' else {'active_scene_id': _s(_as_dict(_best_visual_context(state)).get('scene_id'))}, visual_context={'current_input': current_visual_evidence, 'historical_reference': visual if isinstance(visual, dict) else {}, 'source': 'QUANTUM_PROCESSOR', 'decision_owner': 'QUANTUM_PROCESSOR'} if current_visual_evidence else visual if isinstance(visual, dict) and mode in {'CONTINUATION', 'SAME_TOPIC', 'ARTIFACT_REFERENCE', 'MEMORY_QUERY'} else {}, available_tools=list(control.get('capabilities') or []), requested_outputs=requested_outputs, required_competencies=list(control.get('capabilities') or []), required_artifacts=requested_outputs, routing={'single_route': True, 'processor': PROCESSOR_VERSION, 'measured_state': mode, 'identity_scope': deepcopy(scope)}, constraints={'one_provider_call': True, 'one_visible_answer': True, 'canonical_scene': True, 'dialogue_coherence': round(coherence, 4), 'quantum_state': {'dialogue': dialogue_state, 'representation': control.get('representation_state', {}), 'measured_output': measured_output, 'response_guidance': response_guidance, 'current_visual_input': bool(current_visual_evidence)}, 'provider_input_token_budget': 900, 'provider_context_strategy': 'provider_router_semantic_field_selection', 'current_request_must_remain_intact': True, 'identity_scope': deepcopy(scope), 'presentation_plan': presentation_plan, 'quantum_context_diagnostic': _quantum_snapshot(semantic.get('quantum_context_diagnostic') or {}), 'scene_composition': deepcopy(_as_list(semantic.get('scene_composition'))), 'turn_meaning_transition': deepcopy(semantic.get('turn_meaning_transition') or {}), 'representation_plan': {'requested_outputs': requested_outputs, 'preferred_representation': measured_output, 'visual_production_mode': _s(semantic.get('visual_production_mode') or decision.get('visual_production_mode')).lower(), 'geometry_contract': control.get('geometry_contract', {}) if measured_output == 'diagram' or 'diagram' in requested_outputs else {}, 'visual_schema': _s(semantic.get('visual_schema')), 'visual_schema_confidence': float(semantic.get('visual_schema_confidence') or 0.0), 'dialogue_relation': _s(semantic.get('dialogue_relation')) or 'NEW_TOPIC', 'dialogue_subtype': _s(semantic.get('dialogue_subtype')) or 'NEW_TOPIC', 'avoid_repeat': True, 'constraints': representation_constraints, 'audit': representation_audit, 'current_request_authoritative': True}, 'metadata': request_metadata})
+    request = MachineRequest(goal=request_goal, intent={'type': _s(semantic.get('intent')) or ('self_identification' if semantic.get('identity_request') else 'dialogue'), 'normalized_text': _s(text), 'dialogue_state': mode, 'coherence': round(coherence, 4), 'dialog_act': dialogue_contract['dialog_act'], 'history_dependent_task': bool(history_task_context.get('required')), 'resolved_operands': list(history_task_context.get('resolved_operands') or [])}, conversation={'current_request': _s(text), 'dialogue_contract': dialogue_contract, 'response_guidance': response_guidance, 'current_visual_evidence': current_visual_evidence, 'dialogue_vector': deepcopy(semantic.get('canonical_dialogue_frozen') or state.get('_canonical_interpretation_dialogue') or semantic.get('dialogue_vector') or {}), 'dialogue_delta': deepcopy(semantic.get('dialogue_delta') or {}), 'render_continuity': deepcopy(semantic.get('render_continuity') or {}), 'scene_composition': deepcopy(_as_list(semantic.get('scene_composition'))), 'scene_blueprint': deepcopy(_as_dict(semantic.get('scene_blueprint'))), 'scene_representations': list(control.get('requested_outputs') or []), 'scene_relations': deepcopy(_as_list(_as_dict(semantic.get('scene_blueprint')).get('relations'))), 'turn_meaning_transition': deepcopy(semantic.get('turn_meaning_transition') or {}), 'visual_schema': _s(semantic.get('visual_schema')), 'visual_schema_confidence': float(semantic.get('visual_schema_confidence') or 0.0), 'context_mode': mode, 'context_dependency': bool(control.get('context_dependency')), 'resolved_request': _s(dialogue_contract.get('resolved_request') or dialogue_contract_source.get('resolved_request') or text), 'previous_user_turn': _s(dialogue_contract_source.get('previous_user_turn') or evidence.get('previous_user')), 'previous_april_turn': _s(dialogue_contract_source.get('previous_april_turn') or evidence.get('previous_april')), 'resolved_scene': _as_dict(control.get('resolved_scene') or dialogue_contract.get('resolved_scene')), 'recent_dialogue_pairs': deepcopy(_recent_canonical_dialogue_pairs(state, limit=10) or _as_dict(semantic.get('quantum_interpretation_evidence')).get('recent_dialogue_pairs') or evidence.get('recent_dialogue_pairs') or []), 'history_dependent_task': bool(history_task_context.get('required')), 'history_task_context': _quantum_snapshot(history_task_context), 'resolved_operands': list(history_task_context.get('resolved_operands') or []), 'provider_history_context': _quantum_snapshot({'required': bool(history_task_context.get('required')), 'operation': history_task_context.get('operation', ''), 'resolved_operands': list(history_task_context.get('resolved_operands') or []), 'selected_results': list(history_task_context.get('selected_results') or []), 'instruction': 'Use the resolved historical results as the operands for the current task. Do not ask the user to repeat values that are already present.' if history_task_context.get('required') else ''}), **({'active_topic': _clip(_s(control.get('active_topic')), 300), 'active_goal': _clip(_s(control.get('active_goal')), 500)} if mode != 'INDEPENDENT' else {}), **({'recent_dialogue': context.get('recent_dialogue', []) or list(_as_dict(control.get('dialogue_evidence')).get('recent_dialogue_pairs') or [])} if bool(control.get('context_dependency') or _as_dict(control).get('history_required') or _as_dict(control).get('mode') in {'CONTINUATION', 'SAME_TOPIC', 'ARTIFACT_REFERENCE', 'MEMORY_QUERY'} or _as_dict(control).get('incomplete_request_evidence')) else {})}, memory={'active_topic': _clip(_s(control.get('active_topic')), 300), 'active_goal': _clip(_s(control.get('active_goal')), 500), 'active_scene_id': _s(_as_dict(dialogue_evidence.get('scene_continuity')).get('scene_id') or _as_dict(_best_visual_context(state)).get('scene_id')), 'retrieval_mode': 'memory_query' if mode == 'MEMORY_QUERY' else 'semantic', 'dynamic_memory': dynamic_memory_evidence if mode in {'CONTINUATION', 'SAME_TOPIC', 'ARTIFACT_REFERENCE', 'MEMORY_QUERY'} or bool(control.get('reference_to_previous')) else {'available': bool(dynamic_memory_evidence.get('matches'))}} if mode != 'INDEPENDENT' else {'active_scene_id': _s(_as_dict(_best_visual_context(state)).get('scene_id'))}, visual_context={'current_input': current_visual_evidence, 'historical_reference': visual if isinstance(visual, dict) else {}, 'source': 'QUANTUM_PROCESSOR', 'decision_owner': 'QUANTUM_PROCESSOR'} if current_visual_evidence else visual if isinstance(visual, dict) and mode in {'CONTINUATION', 'SAME_TOPIC', 'ARTIFACT_REFERENCE', 'MEMORY_QUERY'} else {}, available_tools=list(control.get('capabilities') or []), requested_outputs=requested_outputs, required_competencies=list(control.get('capabilities') or []), required_artifacts=requested_outputs, routing={'single_route': True, 'processor': PROCESSOR_VERSION, 'measured_state': mode, 'identity_scope': deepcopy(scope)}, constraints={'one_provider_call': True, 'one_visible_answer': True, 'canonical_scene': True, 'dialogue_coherence': round(coherence, 4), 'quantum_state': {'dialogue': dialogue_state, 'representation': control.get('representation_state', {}), 'measured_output': measured_output, 'response_guidance': response_guidance, 'current_visual_input': bool(current_visual_evidence)}, 'provider_input_token_budget': 900, 'provider_context_strategy': 'provider_router_semantic_field_selection', 'current_request_must_remain_intact': True, 'identity_scope': deepcopy(scope), 'presentation_plan': presentation_plan, 'quantum_context_diagnostic': _quantum_snapshot(semantic.get('quantum_context_diagnostic') or {}), 'scene_composition': deepcopy(_as_list(semantic.get('scene_composition'))), 'turn_meaning_transition': deepcopy(semantic.get('turn_meaning_transition') or {}), 'representation_plan': {'requested_outputs': requested_outputs, 'preferred_representation': measured_output, 'scene_blueprint': deepcopy(_as_dict(semantic.get('scene_blueprint'))), 'scene_nodes': deepcopy(_as_list(_as_dict(semantic.get('scene_blueprint')).get('nodes'))), 'scene_relations': deepcopy(_as_list(_as_dict(semantic.get('scene_blueprint')).get('relations'))), 'single_scene': True, 'one_response': True, 'visual_production_mode': _s(semantic.get('visual_production_mode') or decision.get('visual_production_mode')).lower(), 'geometry_contract': control.get('geometry_contract', {}) if measured_output == 'diagram' or 'diagram' in requested_outputs else {}, 'visual_schema': _s(semantic.get('visual_schema')), 'visual_schema_confidence': float(semantic.get('visual_schema_confidence') or 0.0), 'dialogue_relation': _s(semantic.get('dialogue_relation')) or 'NEW_TOPIC', 'dialogue_subtype': _s(semantic.get('dialogue_subtype')) or 'NEW_TOPIC', 'avoid_repeat': True, 'constraints': representation_constraints, 'audit': representation_audit, 'current_request_authoritative': True}, 'metadata': request_metadata})
     print('🧠 PROVIDER SIGNAL BRIDGE:', {'current_visual_input': bool(current_visual_evidence), 'visual_status': current_visual_evidence.get('attachment_status') if current_visual_evidence else 'not_present', 'visual_confidence': current_visual_evidence.get('confidence', 0.0) if current_visual_evidence else 0.0, 'dialogue_mode': mode, 'continuation': bool(dialogue_contract.get('continuation')), 'reference': bool(dialogue_contract.get('reference_to_previous')), 'requested_outputs': requested_outputs, 'response_guidance': response_guidance.get('mode'), 'provider_calls': 1})
     response_budget = max(OUTPUT_MIN_TOKENS, min(OUTPUT_MAX_TOKENS, int(response_budget or OUTPUT_MIN_TOKENS)))
     request.response_complexity = complexity
@@ -3958,7 +3967,25 @@ async def execute(user_id, chat_id=None, text='', run_with_activity=None, **kwar
         if isinstance(representation_field, dict):
             interpretation['quantum_representation_measurement'] = representation_field
     semantic = semantic_analyze(text=text, state=state, history=history, active_flow=active_flow, dialog_state=dialog_state, interpreted=interpretation_authority) or {}
-    _record_engine_handoff(state, 'SEMANTIC', semantic, consumes=('INTERPRETATION',))
+    if not isinstance(semantic.get('scene_blueprint'), dict):
+        semantic['scene_blueprint'] = build_scene_blueprint(
+            text=text,
+            requested_outputs=semantic.get('requested_outputs') or semantic.get('required_representations') or [],
+            scene_composition=semantic.get('scene_composition') or [],
+            production_representation=semantic.get('production_representation') or 'text',
+            active_topic=semantic.get('active_topic') or '',
+            active_goal=semantic.get('active_goal') or '',
+            subject=semantic.get('best_object') or '',
+            semantic_summary=text,
+            dialogue=semantic.get('dialogue_contract') if isinstance(semantic.get('dialogue_contract'), dict) else {},
+            flow_id=state.get('flow_id') if isinstance(state, dict) else '',
+        )
+    semantic['scene_representations'] = list(semantic.get('scene_blueprint', {}).get('representations') or ['text'])
+    semantic['scene_nodes'] = deepcopy(semantic.get('scene_blueprint', {}).get('nodes') or [])
+    semantic['scene_relations'] = deepcopy(semantic.get('scene_blueprint', {}).get('relations') or [])
+    semantic['one_scene'] = True
+    semantic['one_signal'] = True
+    _record_engine_handoff(state, 'SEMANTIC', {'scene_blueprint': semantic.get('scene_blueprint'), 'scene_representations': semantic.get('scene_representations'), 'scene_nodes': semantic.get('scene_nodes'), 'scene_relations': semantic.get('scene_relations')}, consumes=('INTERPRETATION',))
     reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
     _record_engine_handoff(state, 'REASONING', reasoning, consumes=('SEMANTIC',))
     cognition = analyze_cognition(text=text, semantic=semantic, reasoning=reasoning, state=state) or {}
@@ -4071,9 +4098,13 @@ async def execute(user_id, chat_id=None, text='', run_with_activity=None, **kwar
     semantic['provider_calls'] = 0
     semantic['parallel_route'] = False
     semantic['quantum_processor_version'] = PROCESSOR_VERSION
+    semantic['quantum_scene_blueprint'] = _quantum_snapshot(semantic.get('scene_blueprint') or {})
+    semantic['quantum_scene_representations'] = list(semantic.get('scene_representations') or [])
     semantic['semantic_decision_owner'] = 'QUANTUM_PROCESSOR'
     quantum_cascade = QUANTUM_CASCADE_ENGINE.build(text=text, interpretation=interpretation, semantic=semantic, reasoning=reasoning, cognition=cognition, intent=intent, intent_ai=intent_ai, resolver=resolver, router=router_evidence, visual=visual, goal=goal_evidence, decision=decision, memory_understanding=memory_understanding, state=state)
     quantum_cascade['context_binding'] = _quantum_snapshot(state.get('_canonical_processor_dialogue', {}))
+    quantum_cascade['scene_blueprint'] = _quantum_snapshot(semantic.get('scene_blueprint') or {})
+    quantum_cascade['scene_representations'] = list(semantic.get('scene_representations') or [])
     quantum_cascade['stages']['4_CONTEXT_BINDING']['status'] = 'complete'
     quantum_cascade['stages']['4_CONTEXT_BINDING']['signal'] = _quantum_snapshot(state.get('_canonical_processor_dialogue', {}))
     quantum_cascade['stages']['8_PROVIDER_CONTEXT']['history_required'] = bool(_as_dict(state.get('_canonical_processor_dialogue', {})).get('history_required'))
@@ -4092,6 +4123,11 @@ async def execute(user_id, chat_id=None, text='', run_with_activity=None, **kwar
     request.quantum_state['evidence_field'] = quantum_field
     request_meta = _request_metadata(request)
     request_meta.update({'dynamic_memory_available': bool(dynamic_memory.get('matches')), 'dynamic_memory_match_count': len(dynamic_memory.get('matches') or []), 'quantum_evidence_channels': 16, 'quantum_evidence_field_version': PROCESSOR_VERSION, 'provider_calls_per_request': 1, 'single_route': True, 'requested_outputs': list(request.requested_outputs), 'dialogue_vector': _quantum_snapshot(interpretation.get('dialogue_vector', {})), 'dialogue_vector_matrix': _quantum_snapshot(semantic.get('quantum_dialogue_vector_matrix', {})), 'dialogue_delta': _quantum_snapshot(interpretation.get('dialogue_delta', {})), 'render_continuity': _quantum_snapshot(interpretation.get('render_continuity', {})), 'representation_plan': _quantum_snapshot(request.constraints.get('representation_plan', {})), 'representation_audit': _quantum_snapshot(request.constraints.get('representation_plan', {}).get('audit', {})), 'processor_context': processor_context, 'memory_understanding': _quantum_snapshot(memory_understanding), 'quantum_context_diagnostic': _quantum_snapshot(semantic.get('quantum_context_diagnostic') or {})})
+    request_meta['scene_blueprint'] = _quantum_snapshot(semantic.get('scene_blueprint') or {})
+    request_meta['scene_representations'] = list(semantic.get('scene_representations') or [])
+    request_meta['one_scene'] = True
+    request_meta['one_response'] = True
+    request_meta['one_signal'] = True
     request.constraints['metadata'] = request_meta
     energy_profile = build_quantum_acceleration_profile(user_id, flow_id=(state.get('flow_id') if isinstance(state, dict) else '') or '', semantic=semantic, cognition=cognition, decision=decision, state=state, outputs=request.requested_outputs, visual=visual)
     request = apply_quantum_acceleration(request, energy_profile)
