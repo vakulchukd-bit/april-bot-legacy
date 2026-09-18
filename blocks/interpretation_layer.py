@@ -61,7 +61,7 @@ RESPONSE_COMPLEXITY_HIGH = 'HIGH'
 DECISION_OWNER = 'QUANTUM_PROCESSOR'
 VISUAL_PRODUCTION_HYPOTHESES = {'image_generation': 'Пользователь просит именно сгенерировать, создать или получить новое отдельное изображение, фотографию, иллюстрацию или визуальную сцену по описанию; результатом должны стать новые пиксели, а не показ существующего файла и не простая схема.', 'diagram': 'Пользователь просит нарисовать, изобразить или построить простой визуальный объект, эскиз, схему, примитивную иллюстрацию или базовую форму, которую можно выразить структурированными диаграммными примитивами без отдельной генеративной фотосцены.', 'image_present': 'Пользователь просит показать, вывести, отобразить или повторно использовать уже существующую картинку, фотографию или визуальный артефакт, а не создавать новый.', 'visual_analysis': 'Пользователь просит исследовать, понять, описать, сравнить или проанализировать существующее изображение или визуальный артефакт.'}
 TRANSPORT_NAME = 'transport_state'
-INTERPRETATION_ENGINE_VERSION = 'quantum_interpretation_engine_v17_sequential_dialogue_state_v3'
+INTERPRETATION_ENGINE_VERSION = 'quantum_interpretation_engine_v18_scene_blueprint_single_signal_v1'
 print('🧠 APRIL INTERPRETATION BUILD:', INTERPRETATION_ENGINE_VERSION)
 SEMANTIC_MODEL_NAME = os.getenv('APRIL_SENTENCE_MODEL', 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
 NLI_MODEL_NAME = os.getenv('APRIL_ZERO_SHOT_MODEL', 'MoritzLaurer/mDeBERTa-v3-base-mnli-xnli')
@@ -91,6 +91,207 @@ def _clean_representation(value: Any) -> str:
     value = str(value or '').strip().lower()
     value = REPRESENTATION_ALIASES.get(value, value)
     return value if value in REPRESENTATION_UNIVERSE else ''
+
+
+# ----------------------------------------------------------------
+# Canonical Scene Blueprint
+# ----------------------------------------------------------------
+# Interpretation owns semantic meaning and the ordered set of semantic
+# representations. It does NOT execute renderers. The blueprint is the
+# hand-off puzzle that the Quantum Processor later composes into one scene.
+SCENE_RENDERER_MAP = {
+    'text': 'MessageTextBlock',
+    'markdown': 'MessageTextBlock',
+    'formula': 'MessageTextBlock',
+    'table': 'TableBlock',
+    'graph': 'GraphBlock',
+    'diagram': 'GalleryBlock',
+    'image': 'GalleryBlock',
+    'gallery': 'GalleryBlock',
+    'code': 'CodeBlock',
+    'link': 'LinkCard',
+    'file': 'LinkCard',
+    'audio': 'MessageTextBlock',
+    'video': 'MessageTextBlock',
+    'action': 'MessageTextBlock',
+    'scene': 'GalleryBlock',
+    'memory': 'MessageTextBlock',
+    'visual_context': 'GalleryBlock',
+}
+
+SCENE_ROLE_MAP = {
+    'text': 'answer',
+    'formula': 'quantitative_model',
+    'table': 'source_data',
+    'graph': 'data_visualization',
+    'diagram': 'structural_visualization',
+    'image': 'visualization',
+    'gallery': 'visual_collection',
+    'code': 'implementation',
+    'link': 'resource',
+    'file': 'resource',
+    'audio': 'media',
+    'video': 'media',
+    'action': 'interaction',
+    'scene': 'composite_visual',
+    'memory': 'context_reference',
+    'visual_context': 'visual_evidence',
+}
+
+
+def _scene_clean_outputs(values: Any) -> list[str]:
+    """Normalize semantic outputs once, preserving first-seen order."""
+    result: list[str] = []
+    aliases = {'markdown': 'text', 'chart': 'graph', 'plot': 'graph', 'schematic': 'diagram', 'math': 'formula', 'url': 'link'}
+    for raw in values or []:
+        key = aliases.get(_clean_representation(raw), _clean_representation(raw))
+        if not key or key not in REPRESENTATION_UNIVERSE:
+            continue
+        if key not in result:
+            result.append(key)
+    # A specialized visual/structured result remains one answer only when a
+    # human-readable text node is part of the same scene. It is a companion,
+    # never a second response.
+    if result and any(item != 'text' for item in result) and 'text' not in result:
+        result.insert(0, 'text')
+    return result or ['text']
+
+
+def build_scene_blueprint(
+    *,
+    text: str,
+    requested_outputs: list[str] | None = None,
+    scene_composition: list[dict[str, Any]] | None = None,
+    production_representation: str = 'text',
+    active_topic: str = '',
+    active_goal: str = '',
+    subject: str = '',
+    semantic_summary: str = '',
+    entities: list[Any] | None = None,
+    relations: list[Any] | None = None,
+    dimensions: dict[str, Any] | None = None,
+    dialogue: dict[str, Any] | None = None,
+    flow_id: str = '',
+) -> dict[str, Any]:
+    """Create the single semantic scene blueprint consumed by the Processor.
+
+    This function only assembles semantic relationships and presentation
+    expectations. No renderer is executed and no provider call is performed.
+    """
+    composition = scene_composition or []
+    source_outputs: list[str] = []
+    for item in composition:
+        if isinstance(item, dict):
+            source_outputs.append(_clean_representation(item.get('representation')))
+    source_outputs.extend(requested_outputs or [])
+    if production_representation:
+        source_outputs.append(production_representation)
+    outputs = _scene_clean_outputs(source_outputs)
+
+    # Preserve explicit segment ordering when available, then append missing
+    # outputs deterministically. This prevents graph/table/image from replacing
+    # each other just because one representation has the highest score.
+    ordered: list[str] = []
+    segment_map: dict[str, dict[str, Any]] = {}
+    for item in composition:
+        if not isinstance(item, dict):
+            continue
+        rep = _clean_representation(item.get('representation'))
+        if rep:
+            segment_map.setdefault(rep, item)
+            if rep not in ordered:
+                ordered.append(rep)
+    for rep in outputs:
+        if rep not in ordered:
+            ordered.append(rep)
+    outputs = _scene_clean_outputs(ordered)
+
+    nodes: list[dict[str, Any]] = []
+    for index, rep in enumerate(outputs):
+        source = segment_map.get(rep, {})
+        role = SCENE_ROLE_MAP.get(rep, 'supporting')
+        node = {
+            'block_id': f'scene_node_{index + 1}',
+            'render_id': f'scene_render_{index + 1}',
+            'type': rep,
+            'representation': rep,
+            'role': role,
+            'renderer': SCENE_RENDERER_MAP.get(rep, 'MessageTextBlock'),
+            'sequence_index': index,
+            'segment_index': int(source.get('segment_index', index + 1) or index + 1),
+            'semantic_source': source.get('semantic_source') or 'canonical_scene_blueprint',
+            'segment_text': str(source.get('segment_text') or '').strip(),
+            'continuation': bool((dialogue or {}).get('continuation')),
+            'topic_group': str(active_topic or '').strip(),
+            'flow_id': str(flow_id or '').strip(),
+        }
+        node['content_role'] = 'human_answer' if rep == 'text' else 'specialized_result'
+        node['presentation'] = {
+            'renderer': node['renderer'],
+            'engine': 'McDowell' if node['renderer'] == 'MessageTextBlock' else 'specialized_scene_renderer',
+            'math_engine': 'KaTeX' if rep == 'formula' else None,
+            'shared_scene': True,
+            'payload_owned_by_processor': True,
+        }
+        nodes.append(node)
+
+    node_by_type = {node['type']: node['block_id'] for node in nodes}
+    scene_relations: list[dict[str, Any]] = []
+    text_id = node_by_type.get('text')
+    for node in nodes:
+        rep = node['type']
+        if rep == 'text' or not text_id:
+            continue
+        scene_relations.append({'from': text_id, 'relation': 'explains', 'to': node['block_id']})
+    if 'table' in node_by_type and 'graph' in node_by_type:
+        scene_relations.append({'from': node_by_type['table'], 'relation': 'feeds', 'to': node_by_type['graph']})
+    if 'formula' in node_by_type and 'graph' in node_by_type:
+        scene_relations.append({'from': node_by_type['formula'], 'relation': 'describes', 'to': node_by_type['graph']})
+    if 'diagram' in node_by_type and 'text' in node_by_type:
+        scene_relations.append({'from': node_by_type['diagram'], 'relation': 'illustrates', 'to': text_id})
+    if 'image' in node_by_type and 'graph' in node_by_type:
+        scene_relations.append({'from': node_by_type['image'], 'relation': 'complements', 'to': node_by_type['graph']})
+    if 'gallery' in node_by_type and 'text' in node_by_type:
+        scene_relations.append({'from': node_by_type['gallery'], 'relation': 'illustrates', 'to': text_id})
+
+    semantic_entities = [x for x in (entities or []) if x not in (None, '', {})][:24]
+    semantic_relations = [x for x in (relations or []) if x not in (None, '', {})][:32]
+    return {
+        'version': 'scene_blueprint_v1',
+        'scene_kind': 'composite' if len(outputs) > 1 else outputs[0],
+        'root': 'current_turn',
+        'topic_group': str(active_topic or '').strip(),
+        'flow_id': str(flow_id or '').strip(),
+        'goal': str(active_goal or '').strip(),
+        'subject': str(subject or '').strip(),
+        'semantic_summary': str(semantic_summary or text or '').strip()[:4000],
+        'representations': outputs,
+        'preferred_representation': _clean_representation(production_representation) or outputs[0],
+        'nodes': nodes,
+        'relations': scene_relations,
+        'semantic_entities': semantic_entities,
+        'semantic_relations': semantic_relations,
+        'dimensions': deepcopy(dimensions or {}),
+        'dialogue': deepcopy(dialogue or {}),
+        'layout': {
+            'mode': 'flow',
+            'density': 'adaptive',
+            'shared_scene': True,
+            'free_width': True,
+            'allow_inline_text': True,
+            'allow_wide_visuals': True,
+            'frames_are_optional': True,
+        },
+        'ownership': {
+            'semantic_owner': 'INTERPRETATION_LAYER',
+            'composition_owner': 'QUANTUM_PROCESSOR',
+            'renderer_owner': 'APRIL_WEB',
+            'one_response': True,
+            'one_scene': True,
+            'one_signal': True,
+        },
+    }
+
 
 class QuantumTurnMeaningEngine:
     """
@@ -2409,7 +2610,18 @@ class QuantumInterpretationEngine:
         text_schema_score = float(p.get('request_features', {}).get('ascii_schema_score', 0.0) or 0.0)
         ascii_schema_advisory = bool(production == 'text' and text_schema_score >= 0.15 and (p.get('best_operation') in {'build', 'present', 'answer', 'explain', 'list', 'modify'}))
         semantic_task = {'operation': p['best_operation'], 'object': p['best_object'], 'goal': p['best_goal'], 'representation': production, 'visual_schema': visual_schema, 'visual_schema_confidence': visual_schema_confidence, 'ascii_schema_advisory': ascii_schema_advisory, 'ascii_schema_score': float(p.get('request_features', {}).get('ascii_schema_score', 0.0) or 0.0), 'operation_scores': p['operation_scores'], 'object_scores': p['object_scores'], 'goal_scores': p['goal_scores']}
+        # Canonical scene outputs are the complete current-turn semantic plan.
+        # Never collapse them to the single highest-scoring representation.
+        canonical_scene_outputs = _scene_clean_outputs(complete_outputs)
+        if visual_mode == 'image_generation' and 'image' not in canonical_scene_outputs:
+            canonical_scene_outputs.insert(0, 'image')
+        elif visual_mode == 'diagram' and 'diagram' not in canonical_scene_outputs:
+            canonical_scene_outputs.insert(0, 'diagram')
+        if len(canonical_scene_outputs) > 1 and 'text' not in canonical_scene_outputs:
+            canonical_scene_outputs.insert(0, 'text')
+        complete_outputs = list(dict.fromkeys(canonical_scene_outputs))
         presentation_recommendations = self._presentation_recommendations(text, p, production, locked=locked, continuation=continuation, previous_scene=previous_scene, explicit=explicit, requested_outputs=complete_outputs)
+
         presentation = {'version': 'quantum_interpretation_transport_v4', 'decision_owner': DECISION_OWNER, 'single_route': True, 'production_representation': production, 'recommendation_policy': {'generated_after_interpretation': True, 'current_request_authoritative': True, 'multiple_representations_allowed': True, 'multiple_renderer_recommendations_allowed': True, 'scene_recommendation_per_representation': True, 'text_intro_renderer': 'MessageTextBlock', 'text_explanation_renderer': 'MessageTextBlock', 'stale_context_cannot_upgrade_current_representation': True}, 'signals': [x['renderer_signal'] for x in presentation_recommendations], 'recommendations': presentation_recommendations, 'scene_plan': [x['scene_recommendation'] for x in presentation_recommendations]}
         if ascii_schema_advisory:
             presentation['format_advisory'] = {'format': 'ascii', 'scope': 'text_block', 'mode': 'optional', 'reason': 'semantic_text_schema_request'}
@@ -2430,7 +2642,30 @@ class QuantumInterpretationEngine:
         structured_requested = [x for x in complete_outputs if x in REPRESENTATION_UNIVERSE and x != 'number']
         if production and production not in structured_requested:
             structured_requested.insert(0, production)
-        result.update({'type': p['dialogue_best'], 'subtype': production, 'scene_type': production, 'normalized': text, 'required_domains': domains, 'candidate_domains': domains, 'required_representations': structured_requested or [production], 'candidate_representations': structured_requested or [production], 'requested_representations': structured_requested or [production], 'requested_representation': production, 'production_representation': production, 'production_representation_locked': locked, 'production_representation_source': source, 'production_representation_confidence': max(p['representation_scores'].get(production, 0.0), p['object_scores'].get(production, 0.0), p['goal_scores'].get('visualize' if production in {'graph', 'diagram', 'image', 'gallery'} else 'present', 0.0)), 'visual_production_mode': visual_mode, 'visual_production': deepcopy(p.get('visual_production') or {}), 'image_generation_request': image_generation_request, 'lightweight_visual_request': lightweight_visual_request, 'complex_image_generation': complex_image_generation, 'visual_generation_needed': image_generation_request, 'explicit_visual_generation': image_generation_request, 'explicit_image_generation_only': image_generation_request, 'avoid_image_generation_fallback': False if image_generation_request else True, 'representation_evidence': evidence, 'quantum_representation_measurement': {'measurements': evidence, 'production_representation': production, 'production_representation_locked': locked, 'scene_matrix': matrix}, 'semantic_task': semantic_task, 'context_understanding': context_understanding, 'topic_understanding': topic_understanding, 'entity_understanding': entities_understanding, 'turn_structure_understanding': turn_structure_understanding, 'task_understanding': task_understanding, 'scene_composition': deepcopy(scene_composition), 'visual_production_mode': visual_mode, 'visual_production': deepcopy(p.get('visual_production') or {}), 'image_generation_request': image_generation_request, 'lightweight_visual_request': lightweight_visual_request, 'complex_image_generation': complex_image_generation, 'visual_generation_needed': image_generation_request, 'explicit_visual_generation': image_generation_request, 'explicit_image_generation_only': image_generation_request, 'avoid_image_generation_fallback': False if image_generation_request else True, 'image_generation_transport': 'OPENAI_STRUCTURED_SPEC_TO_C_APRIL_IMAGES_GENERATOR' if image_generation_request else '', 'turn_meaning_transition': deepcopy(transition), 'sequential_dialogue': deepcopy(sequential_dialogue), 'last_turn_meaning': deepcopy(last_turn_meaning or {}), 'last_completed_semantic_state': deepcopy(last_turn_meaning.get('dialogue_state', {}) if isinstance(last_turn_meaning, dict) else {}), 'dialogue_state': deepcopy({'version': QuantumDialogueStateEngine.VERSION, 'current_turn': {'user_request': text, 'operation': p.get('best_operation'), 'object': p.get('best_object'), 'goal': p.get('best_goal'), 'representation': production}, 'previous': deepcopy(semantic_context_packet.get('previous') or {}), 'relation': 'CONTINUE' if sequential_relation == 'CONTINUE' else 'RECALL' if sequential_relation == 'RECALL' else 'NEW', 'resolved_reference': resolved_reference, 'source': 'next_turn_semantic_state'}), 'semantic_context_packet': deepcopy(semantic_context_packet), 'active_dialogue_state': deepcopy(semantic_context_packet.get('previous') or {}), 'previous_response_contract': deepcopy(last_turn_meaning.get('response_contract', {}) if isinstance(last_turn_meaning, dict) else {}), 'topic_owner': topic_owner, 'semantic_ownership': {'relation': transition_relation or 'NEW_TOPIC', 'owner': topic_owner, 'stale_state_topic_ignored': topic_owner == 'current_request', 'immediate_turn_first': True, 'historical_memory_is_evidence_only': True}, 'scene_graph': {'root': 'current_request', 'parts': deepcopy(scene_composition), 'representation_order': [item.get('representation') for item in scene_composition if isinstance(item, dict)], 'semantic_source': 'current_turn_scene_composition'}, 'ascii_schema_advisory': ascii_schema_advisory, 'resolved_scene': resolved_scene, 'reference_resolution': reference_resolution, 'presentation_transport': presentation, 'presentation_signal': presentation, 'presentation_recommendations': presentation_recommendations, 'presentation_signals': presentation['signals'], 'scene_recommendations': [x['scene_recommendation'] for x in presentation_recommendations], 'scene_plan': [x['scene_recommendation'] for x in presentation_recommendations], 'dialogue_memory_window': self._recent_dialogue_pairs(history, limit=10), 'dialogue_vector': {**dict(dialogue_vector or {}), 'reference_resolution': reference_resolution, 'resolved_reference': resolved_reference, 'resolved_request': resolved_request, 'history_dependent_task': bool(history_task_context.get('required')), 'history_window_size': len(self._recent_dialogue_pairs(history, limit=10)), 'history_task_context': history_task_context, 'requested_outputs': complete_outputs, 'output_segments': task_understanding.get('output_segments', []), 'turn_meaning_transition': deepcopy(transition), 'sequential_dialogue': deepcopy(sequential_dialogue), 'selected_meaning_anchor': transition.get('anchor')}, 'dialogue_delta': {'mode': dialogue_vector.get('delta_mode'), 'shared_tokens': dialogue_vector.get('shared_tokens', []), 'new_tokens': dialogue_vector.get('new_tokens', []), 'avoid_repeat': True}, 'render_continuity': {'mode': 'extend' if continuation else 'start', 'avoid_repeat': True, 'reuse_existing_scene': bool(dialogue_vector.get('reuse_existing_scene')), 'previous_scene_id': dialogue_vector.get('previous_scene_id', ''), 'previous_render_types': dialogue_vector.get('previous_render_types', []), 'previous_block_ids': dialogue_vector.get('previous_block_ids', [])}, 'dialogue_contract': {'dialog_act': d['label'], 'current_request': text, 'continuation': continuation, 'reference_to_previous': reference, 'previous_april_turn': last_a, 'previous_user_turn': last_u, 'reply_to': reply_to, 'active_goal': active_goal, 'active_topic': active_topic, 'reference_resolution': reference_resolution, 'resolved_reference': resolved_reference, 'artifact_reference_evidence': bool(dialogue_vector.get('artifact_reference_evidence')), 'artifact_reference_answer': bool(dialogue_vector.get('artifact_reference_answer')), 'visual_scene_similarity': float(dialogue_vector.get('visual_scene_similarity', 0.0) or 0.0), 'resolved_request': resolved_request, 'context_topic': active_topic, 'context_relation': topic_understanding.get('relation'), 'context_reference_entities': [item.get('entity') for item in entities_understanding.get('coreference') or [{}] if isinstance(item, dict) for item in item.get('candidates') or [] if item.get('entity')][:8], 'local_current_turn_structure': local_turn_reference, 'history_dependent_task': bool(history_task_context.get('required')), 'history_task_context': history_task_context, 'requested_outputs': complete_outputs, 'output_segments': task_understanding.get('output_segments', []), 'context_dependency': 'continuation' if dialogue_vector.get('three_way_relation') == 'CONTINUE' else 'recall' if dialogue_vector.get('three_way_relation') == 'RECALL' else 'independent', 'three_way_relation': dialogue_vector.get('three_way_relation') or ('CONTINUE' if continuation else 'RECALL' if reference else 'NEW'), 'selected_memory_operand': dialogue_vector.get('selected_memory_operand') or {}, 'relation': dialogue_vector.get('relation', 'NEW_TOPIC'), 'subtype': dialogue_vector.get('subtype', 'NEW_TOPIC'), 'turn_meaning_transition': deepcopy(transition), 'last_turn_meaning': deepcopy(last_turn_meaning or {}), 'avoid_repeat': True, 'canonical': True, 'version': 'quantum_dialogue_field_v4'}, 'context_resolution': {'depends_on_previous_dialogue': bool(continuation or reference or memory or history_task_context.get('required')), 'history_dependent_task': bool(history_task_context.get('required')), 'history_task_context': history_task_context, 'resolved_scene': resolved_scene, 'active_topic': active_topic, 'active_goal': active_goal}, 'semantic_profile': {'active_topic': active_topic, 'active_goal': active_goal, 'context_topic_state': topic_understanding, 'context_entity_state': entities_understanding, 'context_task_state': task_understanding, 'previous_april_turn': last_a, 'representation_scores': p['representation_scores'], 'domain_scores': p['domain_scores'], 'capability_scores': p['capability_scores'], 'operation_scores': p['operation_scores'], 'object_scores': p['object_scores'], 'goal_scores': p['goal_scores'], 'context_scores': p['context_scores'], 'semantic_task': semantic_task, 'history_dependent_task': bool(history_task_context.get('required')), 'history_task_context': history_task_context, 'scene_composition': deepcopy(scene_composition), 'turn_meaning_transition': deepcopy(transition), 'engine': 'quantum_interpretation_engine_v9'}, 'quantum_interpretation_field': {'linguistic': self._linguistic(text), 'dialogue': d, 'representation': evidence, 'domain': [{'domain': k, 'score': float(v)} for k, v in p['domain_scores'].items()], 'context_vectors': p['context_scores'], 'semantic_task': semantic_task, 'production': presentation, 'profile': p, 'scene_matrix': matrix, 'decision_owner': DECISION_OWNER, 'evidence_only': True, 'engine': 'quantum_interpretation_engine_v3'}, 'quantum_matrix': matrix, 'matrix_scene': matrix['best_scene'], 'matrix_confidence': matrix['best_score'], 'decision_owner': DECISION_OWNER, 'routing_owner': DECISION_OWNER, 'renderer_owner': DECISION_OWNER, 'provider_calls': 0, 'canonical_transport': TRANSPORT_NAME, 'semantic_authority': True, 'semantic_decision_source': source, 'representation_resolution': 'task_object_goal', 'legacy_keyword_matching': False, 'avoid_trigger_execution': True, 'machine_only': True, 'single_route': True, 'renderer_intent': production != 'text', 'render_intent': production != 'text', 'prefer_renderer': production != 'text', 'renderer_scene_object': production != 'text', 'visual_routing': production in {'graph', 'diagram', 'image', 'gallery'}, 'possible_capability': 'renderer' if production != 'text' else None, 'possible_output': production, 'possible_scene_type': production, 'current_representation': production, 'unresolved_intent': not locked, 'memory_query': memory, 'continuation': d['continuation_score'], 'continuation_target': last_a or active_topic, 'dialogue_relation': dialogue_vector.get('relation', 'NEW_TOPIC'), 'dialogue_subtype': dialogue_vector.get('subtype', 'NEW_TOPIC'), 'visual_schema': visual_schema, 'visual_schema_confidence': visual_schema_confidence, 'required_capabilities': ['semantic_interpretation', 'dialogue_context'], 'required_outputs': structured_requested or [production], 'requested_outputs': complete_outputs or structured_requested or [production], 'response_mode': 'structured' if production != 'text' else 'talk', 'renderer_first': production != 'text', 'discussion_mode': p['capability_scores'].get('discussion', 0.0) >= 0.6, 'space_discussion': p['capability_scores'].get('space', 0.0) >= 0.6, 'exploration': p['capability_scores'].get('exploration', 0.0), 'web_context': p['capability_scores'].get('web', 0.0), 'explicit_image_generation': p['representation_scores'].get('image', 0.0), 'lightweight_visual': production in {'graph', 'diagram', 'image', 'gallery'}, 'contains_object': bool(text), 'contains_explanation': p['capability_scores'].get('information', 0.0) >= 0.6, 'contains_analysis': p['capability_scores'].get('exploration', 0.0) >= 0.6, 'content_role': 'explanation' if p['capability_scores'].get('information', 0.0) >= 0.6 else 'analysis' if p['capability_scores'].get('exploration', 0.0) >= 0.6 else None, 'artifact_contract': {'contract': 'scene_artifact', 'transport': TRANSPORT_NAME, 'scene_type': production, 'representation': [production], 'decision_owner': DECISION_OWNER}, 'semantic_engine_diagnostics': {'engine': 'quantum_interpretation_engine_v4', 'domain_representation_gates': False, 'capability_representation_gates': False, 'lexical_routing': False, 'token_overlap_context': False, 'production_resolution': 'task_object_goal', 'single_route': True, 'decision_owner': DECISION_OWNER}})
+        scene_blueprint = build_scene_blueprint(
+            text=text,
+            requested_outputs=complete_outputs,
+            scene_composition=scene_composition,
+            production_representation=production,
+            active_topic=active_topic,
+            active_goal=active_goal,
+            subject=p.get('best_object') or '',
+            semantic_summary=self.normalize(f"{p.get('best_operation', 'answer')}: {p.get('best_object', '')} -> {p.get('best_goal', '')}"),
+            entities=entities_understanding.get('current') if isinstance(entities_understanding, dict) else [],
+            relations=entities_understanding.get('relations') if isinstance(entities_understanding, dict) else [],
+            dimensions=(p.get('request_features', {}) if isinstance(p.get('request_features'), dict) else {}).get('dimensions', {}),
+            dialogue={
+                'relation': dialogue_vector.get('relation', 'NEW_TOPIC'),
+                'continuation': bool(continuation),
+                'reference_to_previous': bool(reference),
+                'context_dependency': 'continuation' if continuation else 'reference' if reference else 'independent',
+                'previous_scene_id': str(resolved_scene.get('scene_id') or '').strip() if isinstance(resolved_scene, dict) else '',
+                'resolved_reference': resolved_reference,
+            },
+            flow_id=state.get('flow_id') if isinstance(state, dict) else '',
+        )
+        result.update({'type': p['dialogue_best'], 'subtype': production, 'scene_type': scene_blueprint.get('scene_kind') or production, 'normalized': text,
+ 'required_domains': domains, 'candidate_domains': domains, 'required_representations': list(scene_blueprint['representations']), 'candidate_representations': list(scene_blueprint['representations']), 'requested_representations': list(scene_blueprint['representations']), 'requested_representation': production, 'production_representation': production, 'production_representation_locked': locked, 'scene_blueprint': deepcopy(scene_blueprint), 'scene_representations': list(scene_blueprint['representations']), 'scene_nodes': deepcopy(scene_blueprint['nodes']), 'scene_relations': deepcopy(scene_blueprint['relations']), 'production_representation_source': source, 'production_representation_confidence': max(p['representation_scores'].get(production, 0.0), p['object_scores'].get(production, 0.0), p['goal_scores'].get('visualize' if production in {'graph', 'diagram', 'image', 'gallery'} else 'present', 0.0)), 'visual_production_mode': visual_mode, 'visual_production': deepcopy(p.get('visual_production') or {}), 'image_generation_request': image_generation_request, 'lightweight_visual_request': lightweight_visual_request, 'complex_image_generation': complex_image_generation, 'visual_generation_needed': image_generation_request, 'explicit_visual_generation': image_generation_request, 'explicit_image_generation_only': image_generation_request, 'avoid_image_generation_fallback': False if image_generation_request else True, 'representation_evidence': evidence, 'quantum_representation_measurement': {'measurements': evidence, 'production_representation': production, 'production_representation_locked': locked, 'scene_matrix': matrix}, 'semantic_task': semantic_task, 'context_understanding': context_understanding, 'topic_understanding': topic_understanding, 'entity_understanding': entities_understanding, 'turn_structure_understanding': turn_structure_understanding, 'task_understanding': task_understanding, 'scene_composition': deepcopy(scene_composition), 'visual_production_mode': visual_mode, 'visual_production': deepcopy(p.get('visual_production') or {}), 'image_generation_request': image_generation_request, 'lightweight_visual_request': lightweight_visual_request, 'complex_image_generation': complex_image_generation, 'visual_generation_needed': image_generation_request, 'explicit_visual_generation': image_generation_request, 'explicit_image_generation_only': image_generation_request, 'avoid_image_generation_fallback': False if image_generation_request else True, 'image_generation_transport': 'OPENAI_STRUCTURED_SPEC_TO_C_APRIL_IMAGES_GENERATOR' if image_generation_request else '', 'turn_meaning_transition': deepcopy(transition), 'sequential_dialogue': deepcopy(sequential_dialogue), 'last_turn_meaning': deepcopy(last_turn_meaning or {}), 'last_completed_semantic_state': deepcopy(last_turn_meaning.get('dialogue_state', {}) if isinstance(last_turn_meaning, dict) else {}), 'dialogue_state': deepcopy({'version': QuantumDialogueStateEngine.VERSION, 'current_turn': {'user_request': text, 'operation': p.get('best_operation'), 'object': p.get('best_object'), 'goal': p.get('best_goal'), 'representation': production}, 'previous': deepcopy(semantic_context_packet.get('previous') or {}), 'relation': 'CONTINUE' if sequential_relation == 'CONTINUE' else 'RECALL' if sequential_relation == 'RECALL' else 'NEW', 'resolved_reference': resolved_reference, 'source': 'next_turn_semantic_state'}), 'semantic_context_packet': deepcopy(semantic_context_packet), 'active_dialogue_state': deepcopy(semantic_context_packet.get('previous') or {}), 'previous_response_contract': deepcopy(last_turn_meaning.get('response_contract', {}) if isinstance(last_turn_meaning, dict) else {}), 'topic_owner': topic_owner, 'semantic_ownership': {'relation': transition_relation or 'NEW_TOPIC', 'owner': topic_owner, 'stale_state_topic_ignored': topic_owner == 'current_request', 'immediate_turn_first': True, 'historical_memory_is_evidence_only': True}, 'scene_graph': {'root': 'current_request', 'parts': deepcopy(scene_composition), 'representation_order': list(scene_blueprint['representations']), 'nodes': deepcopy(scene_blueprint['nodes']), 'relations': deepcopy(scene_blueprint['relations']), 'semantic_source': 'canonical_scene_blueprint'}, 'ascii_schema_advisory': ascii_schema_advisory, 'resolved_scene': resolved_scene, 'reference_resolution': reference_resolution, 'presentation_transport': presentation, 'presentation_signal': presentation, 'presentation_recommendations': presentation_recommendations, 'presentation_signals': presentation['signals'], 'scene_recommendations': [x['scene_recommendation'] for x in presentation_recommendations], 'scene_plan': [x['scene_recommendation'] for x in presentation_recommendations], 'dialogue_memory_window': self._recent_dialogue_pairs(history, limit=10), 'dialogue_vector': {**dict(dialogue_vector or {}), 'reference_resolution': reference_resolution, 'resolved_reference': resolved_reference, 'resolved_request': resolved_request, 'history_dependent_task': bool(history_task_context.get('required')), 'history_window_size': len(self._recent_dialogue_pairs(history, limit=10)), 'history_task_context': history_task_context, 'requested_outputs': complete_outputs, 'output_segments': task_understanding.get('output_segments', []), 'turn_meaning_transition': deepcopy(transition), 'sequential_dialogue': deepcopy(sequential_dialogue), 'selected_meaning_anchor': transition.get('anchor')}, 'dialogue_delta': {'mode': dialogue_vector.get('delta_mode'), 'shared_tokens': dialogue_vector.get('shared_tokens', []), 'new_tokens': dialogue_vector.get('new_tokens', []), 'avoid_repeat': True}, 'render_continuity': {'mode': 'extend' if continuation else 'start', 'avoid_repeat': True, 'reuse_existing_scene': bool(dialogue_vector.get('reuse_existing_scene')), 'previous_scene_id': dialogue_vector.get('previous_scene_id', ''), 'previous_render_types': dialogue_vector.get('previous_render_types', []), 'previous_block_ids': dialogue_vector.get('previous_block_ids', [])}, 'dialogue_contract': {'dialog_act': d['label'], 'current_request': text, 'continuation': continuation, 'reference_to_previous': reference, 'previous_april_turn': last_a, 'previous_user_turn': last_u, 'reply_to': reply_to, 'active_goal': active_goal, 'active_topic': active_topic, 'reference_resolution': reference_resolution, 'resolved_reference': resolved_reference, 'artifact_reference_evidence': bool(dialogue_vector.get('artifact_reference_evidence')), 'artifact_reference_answer': bool(dialogue_vector.get('artifact_reference_answer')), 'visual_scene_similarity': float(dialogue_vector.get('visual_scene_similarity', 0.0) or 0.0), 'resolved_request': resolved_request, 'context_topic': active_topic, 'context_relation': topic_understanding.get('relation'), 'context_reference_entities': [item.get('entity') for item in entities_understanding.get('coreference') or [{}] if isinstance(item, dict) for item in item.get('candidates') or [] if item.get('entity')][:8], 'local_current_turn_structure': local_turn_reference, 'history_dependent_task': bool(history_task_context.get('required')), 'history_task_context': history_task_context, 'requested_outputs': complete_outputs, 'output_segments': task_understanding.get('output_segments', []), 'context_dependency': 'continuation' if dialogue_vector.get('three_way_relation') == 'CONTINUE' else 'recall' if dialogue_vector.get('three_way_relation') == 'RECALL' else 'independent', 'three_way_relation': dialogue_vector.get('three_way_relation') or ('CONTINUE' if continuation else 'RECALL' if reference else 'NEW'), 'selected_memory_operand': dialogue_vector.get('selected_memory_operand') or {}, 'relation': dialogue_vector.get('relation', 'NEW_TOPIC'), 'subtype': dialogue_vector.get('subtype', 'NEW_TOPIC'), 'turn_meaning_transition': deepcopy(transition), 'last_turn_meaning': deepcopy(last_turn_meaning or {}), 'avoid_repeat': True, 'canonical': True, 'version': 'quantum_dialogue_field_v4'}, 'context_resolution': {'depends_on_previous_dialogue': bool(continuation or reference or memory or history_task_context.get('required')), 'history_dependent_task': bool(history_task_context.get('required')), 'history_task_context': history_task_context, 'resolved_scene': resolved_scene, 'active_topic': active_topic, 'active_goal': active_goal}, 'semantic_profile': {'active_topic': active_topic, 'active_goal': active_goal, 'context_topic_state': topic_understanding, 'context_entity_state': entities_understanding, 'context_task_state': task_understanding, 'previous_april_turn': last_a, 'representation_scores': p['representation_scores'], 'domain_scores': p['domain_scores'], 'capability_scores': p['capability_scores'], 'operation_scores': p['operation_scores'], 'object_scores': p['object_scores'], 'goal_scores': p['goal_scores'], 'context_scores': p['context_scores'], 'semantic_task': semantic_task, 'history_dependent_task': bool(history_task_context.get('required')), 'history_task_context': history_task_context, 'scene_composition': deepcopy(scene_composition), 'turn_meaning_transition': deepcopy(transition), 'engine': 'quantum_interpretation_engine_v9'}, 'quantum_interpretation_field': {'linguistic': self._linguistic(text), 'dialogue': d, 'representation': evidence, 'domain': [{'domain': k, 'score': float(v)} for k, v in p['domain_scores'].items()], 'context_vectors': p['context_scores'], 'semantic_task': semantic_task, 'production': presentation, 'profile': p, 'scene_matrix': matrix, 'decision_owner': DECISION_OWNER, 'evidence_only': True, 'engine': 'quantum_interpretation_engine_v3'}, 'quantum_matrix': matrix, 'matrix_scene': matrix['best_scene'], 'matrix_confidence': matrix['best_score'], 'decision_owner': DECISION_OWNER, 'routing_owner': DECISION_OWNER, 'renderer_owner': DECISION_OWNER, 'provider_calls': 0, 'canonical_transport': TRANSPORT_NAME, 'semantic_authority': True, 'semantic_decision_source': source, 'representation_resolution': 'task_object_goal', 'legacy_keyword_matching': False, 'avoid_trigger_execution': True, 'machine_only': True, 'single_route': True, 'renderer_intent': production != 'text', 'render_intent': production != 'text', 'prefer_renderer': production != 'text', 'renderer_scene_object': production != 'text', 'visual_routing': production in {'graph', 'diagram', 'image', 'gallery'}, 'possible_capability': 'renderer' if production != 'text' else None, 'possible_output': production, 'possible_scene_type': production, 'current_representation': production, 'unresolved_intent': not locked, 'memory_query': memory, 'continuation': d['continuation_score'], 'continuation_target': last_a or active_topic, 'dialogue_relation': dialogue_vector.get('relation', 'NEW_TOPIC'), 'dialogue_subtype': dialogue_vector.get('subtype', 'NEW_TOPIC'), 'visual_schema': visual_schema, 'visual_schema_confidence': visual_schema_confidence, 'required_capabilities': ['semantic_interpretation', 'dialogue_context'], 'required_outputs': structured_requested or [production], 'requested_outputs': complete_outputs or structured_requested or [production], 'response_mode': 'structured' if production != 'text' else 'talk', 'renderer_first': production != 'text', 'discussion_mode': p['capability_scores'].get('discussion', 0.0) >= 0.6, 'space_discussion': p['capability_scores'].get('space', 0.0) >= 0.6, 'exploration': p['capability_scores'].get('exploration', 0.0), 'web_context': p['capability_scores'].get('web', 0.0), 'explicit_image_generation': p['representation_scores'].get('image', 0.0), 'lightweight_visual': production in {'graph', 'diagram', 'image', 'gallery'}, 'contains_object': bool(text), 'contains_explanation': p['capability_scores'].get('information', 0.0) >= 0.6, 'contains_analysis': p['capability_scores'].get('exploration', 0.0) >= 0.6, 'content_role': 'explanation' if p['capability_scores'].get('information', 0.0) >= 0.6 else 'analysis' if p['capability_scores'].get('exploration', 0.0) >= 0.6 else None, 'artifact_contract': {'contract': 'scene_artifact', 'transport': TRANSPORT_NAME, 'scene_type': production, 'representation': [production], 'decision_owner': DECISION_OWNER}, 'semantic_engine_diagnostics': {'engine': 'quantum_interpretation_engine_v4', 'domain_representation_gates': False, 'capability_representation_gates': False, 'lexical_routing': False, 'token_overlap_context': False, 'production_resolution': 'task_object_goal', 'single_route': True, 'decision_owner': DECISION_OWNER}})
         result['evidence'] = {'representation': evidence, 'domain': [{'domain': k, 'score': float(v)} for k, v in p['domain_scores'].items()], 'math': p['representation_scores'].get('formula', 0.0), 'code': p['representation_scores'].get('code', 0.0), 'web': p['capability_scores'].get('web', 0.0), 'image': p['representation_scores'].get('image', 0.0), 'continuation': d['continuation_score'], 'exploration': p['capability_scores'].get('exploration', 0.0), 'information': p['capability_scores'].get('information', 0.0), 'dialogue': result['dialogue_contract']}
         result['interpretation_state'] = synchronize_interpretation_context(build_interpretation_state(), result)
         result['transport_state'] = export_transport_state(result['interpretation_state'], result)
