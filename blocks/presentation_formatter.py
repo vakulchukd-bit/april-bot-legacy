@@ -1,2760 +1,509 @@
-"""April Quantum Processor — balanced single-route executor.
+"""April — canonical scene presentation layer.
 
-This is a quantum-inspired processor, not a physical quantum computer.
-It evaluates independent evidence channels, consolidates compatible evidence,
-then collapses it to ONE dialogue state, ONE request and ONE scene contract.
-There is exactly one Provider call per user turn.
+This module owns presentation formatting only.
+
+Architecture law
+----------------
+Quantum Processor -> Scene Blueprint -> C_ARTIFACT_CONTRACT ->
+this formatter -> one SceneSignal -> April Web.
+
+It MUST NOT:
+* call the Provider;
+* inspect or decide dialogue intent;
+* select a renderer from user keywords;
+* create a second response;
+* create fallback render routes;
+* duplicate a scene block already present in the canonical scene.
+
+Renderer identity is an input from the semantic scene / artifact contract.
+This module only makes that already-decided block display-safe and preserves
+relationships, order and scene continuity.
 """
 from __future__ import annotations
-import ast
+
+import hashlib
 import json
 import re
-import hashlib
-import threading
 from copy import deepcopy
-from typing import Any
-from blocks.context_system import build_deephub_context, build_executor_context_packet
-from blocks.interpretation_layer import interpret_request, build_processor_execution_context, QUANTUM_EVIDENCE_FUSION, QUANTUM_DIALOGUE_ENGINE
-from blocks.semantic_core import analyze as semantic_analyze
-from blocks.reasoning_state import build_reasoning_state
-from blocks.cognitive_core import analyze_cognition
-from blocks.response_decision import build_response_decision
-from blocks.visual_reference_system import build_visual_reference
-from blocks.experience import build_experience_evidence
-from blocks.experience_manager import get_experience
-from blocks.goal_engine import build_goal_evidence
-from blocks.intent_system import detect_intent
-from blocks.intent_ai import detect_intent_ai
-from blocks.intent_resolver import resolve_input, build_focus_intent_state
-from blocks.router import route_request
-from blocks.router_system import decide_action
-from blocks.state_manager import get_state, update_dialog_context, update_scene_context, query_dynamic_memory, is_dialogue_visible_scene, persist_state
-from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, build_machine_scene, build_scene_contract
-from blocks.provider_router import generate_text
-from blocks.energy_manager import build_quantum_acceleration_profile, apply_quantum_acceleration, validate_quantum_acceleration
-from blocks.april_personality import APRIL_IDENTITY
-PROCESSOR_VERSION = 'april_quantum_processor_quantum64_v36_canonical_visible_stream_visual_context_v4'
-SINGLE_ROUTE = True
-PROVIDER_CALLS = 1
-OUTPUT_MIN_TOKENS = 1
-OUTPUT_MAX_TOKENS = 8000
-QUANTUM_CORE_COUNT = 8
-QUANTUM_LANE_COUNT = 8
-QUANTUM_CORES = tuple((f'core_{i + 1}' for i in range(QUANTUM_CORE_COUNT)))
-QUANTUM_LANES = tuple((f'lane_{i + 1}' for i in range(QUANTUM_LANE_COUNT)))
+from typing import Any, Iterable
 
-def _quantum_snapshot(value: Any, _active: set[int] | None=None) -> Any:
-    """
-    Convert runtime evidence into a detached, JSON-safe snapshot.
 
-    Quantum evidence may contain shared references because multiple engines
-    contribute the same dicts. Shared references are fine; live back-references
-    are not. This helper detaches every branch so the persisted user state
-    cannot become a self-referential object graph.
-    """
-    active = _active if _active is not None else set()
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    oid = id(value)
-    if oid in active:
-        return {'__cycle__': True}
-    if isinstance(value, dict):
-        active.add(oid)
-        try:
-            result = {str(k): _quantum_snapshot(v, active) for k, v in value.items()}
-        finally:
-            active.remove(oid)
-        return result
-    if isinstance(value, (list, tuple, set)):
-        active.add(oid)
-        try:
-            result = [_quantum_snapshot(v, active) for v in value]
-        finally:
-            active.remove(oid)
-        return result
-    return _s(value)
+APRIL_FILE_ID = "APRIL_PRESENTATION_FORMATTER_SCENE_V3"
+PRESENTATION_ENGINE_VERSION = "april_scene_presentation_v3"
+PRESENTATION_SIGNAL_VERSION = "scene_presentation_signal_v3"
+MATH_ENGINE = "KaTeX"
+MARKDOWN_ENGINE = "McDowell"
 
-def _s(v: Any) -> str:
-    return str(v or '').strip()
+RENDERER_ALIASES = {
+    "text": "MessageTextBlock",
+    "markdown": "MessageTextBlock",
+    "message": "MessageTextBlock",
+    "message_text": "MessageTextBlock",
+    "graph": "GraphBlock",
+    "chart": "GraphBlock",
+    "plot": "GraphBlock",
+    "table": "TableBlock",
+    "diagram": "GalleryBlock",
+    "schematic": "GalleryBlock",
+    "image": "GalleryBlock",
+    "gallery": "GalleryBlock",
+    "code": "CodeBlock",
+    "link": "LinkCard",
+    "formula": "MessageTextBlock",
+    "math": "MessageTextBlock",
+}
 
-def _as_dict(value: Any) -> dict:
+TYPE_ALIASES = {
+    "markdown": "text",
+    "chart": "graph",
+    "plot": "graph",
+    "schematic": "diagram",
+    "math": "formula",
+}
+
+TEXT_TYPES = {"text", "markdown", "formula"}
+
+
+def _s(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _d(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
-def _as_list(value: Any) -> list:
-    if isinstance(value, str):
-        return [value] if value else []
-    if isinstance(value, (list, tuple, set)):
+
+def _l(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, tuple):
         return list(value)
     return []
 
-def _unique_strings(values: Any) -> list[str]:
-    result: list[str] = []
-    for value in _as_list(values):
-        value = _s(value).lower()
-        if value and value not in result:
-            result.append(value)
-    return result
 
-def _user_scope(state: dict, user_id: Any) -> dict:
-    """Canonical identity scope carried through the one route and scene contract."""
-    uid = _s(user_id)
-    if not uid:
-        raise RuntimeError('Quantum release blocked: authenticated user_id missing')
-    conversation_id = _s(state.get('conversation_id') or state.get('memory_scope', {}).get('conversation_id') or '')
-    if not conversation_id:
-        conversation_id = f"april-{hashlib.sha256(uid.encode('utf-8')).hexdigest()[:24]}"
-        state['conversation_id'] = conversation_id
-    scope = {'user_id': uid, 'conversation_id': conversation_id, 'identity_bound': True, 'scope_version': 'USER_SCOPED_SCENE_V1'}
-    state['memory_scope'] = dict(scope)
-    return scope
+def normalize_type(value: Any) -> str:
+    key = _s(value).lower()
+    return TYPE_ALIASES.get(key, key or "text")
 
-def _merge_evidence_fields(target: dict, sources: tuple[dict, ...]) -> dict:
-    """
-    Merge only machine evidence into the canonical semantic packet.
 
-    Current request and authoritative semantic fields are never replaced.
-    Multi-valued representation/capability evidence is unioned. Scalar
-    signals are retained under quantum_evidence_sources so no room can
-    overwrite another room's signal.
-    """
-    target = _as_dict(target)
-    representations: list[str] = []
-    domains: list[str] = []
-    capabilities: list[str] = []
-    candidates: list[dict] = []
-    for source in sources:
-        source = _as_dict(source)
-        for key in ('required_representations', 'candidate_representations', 'requested_outputs', 'required_outputs', 'render_types', 'artifact_types', 'representations'):
-            for value in _as_list(source.get(key)):
-                name = _s(value).lower()
-                if name and name not in representations:
-                    representations.append(name)
-        for key in ('required_domains', 'candidate_domains', 'required_competencies'):
-            for value in _as_list(source.get(key)):
-                name = _s(value).lower()
-                if name and name not in domains:
-                    domains.append(name)
-        for key in ('required_capabilities', 'available_tools'):
-            for value in _as_list(source.get(key)):
-                name = _s(value).lower()
-                if name and name not in capabilities:
-                    capabilities.append(name)
-        for item in _as_list(source.get('candidate_signals')):
-            if isinstance(item, dict):
-                candidates.append(dict(item))
-    if representations:
-        target['required_representations'] = _unique_strings(_as_list(target.get('required_representations')) + representations)
-        target['candidate_representations'] = _unique_strings(_as_list(target.get('candidate_representations')) + representations)
-    if domains:
-        target['required_domains'] = _unique_strings(_as_list(target.get('required_domains')) + domains)
-        target['candidate_domains'] = _unique_strings(_as_list(target.get('candidate_domains')) + domains)
-    if capabilities:
-        target['required_capabilities'] = _unique_strings(_as_list(target.get('required_capabilities')) + capabilities)
-    target['quantum_candidate_signals'] = candidates
-    return target
-ORDINALS = {'первый': 1, 'первая': 1, 'первое': 1, 'второй': 2, 'вторая': 2, 'второе': 2, 'третий': 3, 'третья': 3, 'третье': 3, 'четвертый': 4, 'четвёртый': 4, 'четвертая': 4, 'четвёртая': 4, 'пятый': 5, 'пятая': 5, 'пятое': 5, 'шестой': 6, 'шестая': 6, 'шестое': 6, 'седьмой': 7, 'седьмая': 7, 'седьмое': 7, 'восьмой': 8, 'восьмая': 8, 'восьмое': 8, 'девятый': 9, 'девятая': 9, 'девятое': 9, 'десятый': 10, 'десятая': 10, 'десятое': 10, 'первый пункт': 1, 'второй пункт': 2, 'третий пункт': 3, 'четвертый пункт': 4, 'четвёртый пункт': 4, 'пятый пункт': 5, 'шестой пункт': 6, 'седьмой пункт': 7, 'восьмой пункт': 8, 'first': 1, 'second': 2, 'third': 3, 'fourth': 4, 'fifth': 5, 'sixth': 6, 'seventh': 7, 'eighth': 8, 'ninth': 9, 'tenth': 10}
-LAST_WORDS = {'последний': -1, 'последняя': -1, 'последнее': -1, 'предпоследний': -2, 'предпоследняя': -2, 'предпоследнее': -2, 'last': -1, 'second-last': -2, 'second-to-last': -2}
-REFERENCE_RE = re.compile('(?:\\b(?:этот|эта|это|этим|этого|эту|тот|та|то|тем|того|ту|он|она|они|его|её|ее|их|ему|ей|им|про него|про неё|про нее|по нему|по ней|по ним|выше|ниже|предыдущий|предыдущая|предыдущее|previous|this|that|above|below)\\b)|(?:\\b(?:пункт|пункта|элемент|элемента|позиция|позицию|item|point|element|entry|block|блок|график|таблица|table|graph|chart)\\b)|(?:\\b(?:первый|второй|третий|четвертый|четвёртый|пятый|шестой|седьмой|восьмой|девятый|десятый|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\\b)|(?:\\b\\d{1,3}\\s*[.)]\\b)', re.I)
-NUMBERED_RE = re.compile('^\\s*(\\d{1,3})\\s*[.)]\\s*(.+?)\\s*$')
-BULLET_RE = re.compile('^\\s*[-*•]\\s+(.+?)\\s*$')
-HEADING_RE = re.compile('^\\s*#{1,6}\\s+(.+?)\\s*$')
+def normalize_renderer(value: Any, block_type: str) -> str:
+    requested = _s(value).lower()
+    if requested in RENDERER_ALIASES:
+        return RENDERER_ALIASES[requested]
+    if requested:
+        return requested
+    return RENDERER_ALIASES.get(normalize_type(block_type), "MessageTextBlock")
 
-def _text(value: Any, limit: int=1800) -> str:
-    value = str(value or '').strip()
-    return value[:limit]
 
-def _tokens(value: Any) -> set[str]:
-    return set(re.findall('[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+', str(value or '').lower()))
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    return _s(value)
 
-def _clip(value: Any, limit: int=900) -> str:
-    return _text(value, limit)
 
-class QuantumMemoryUnderstandingEngine:
-    VERSION = 'quantum_memory_understanding_v2'
+def _fingerprint(value: Any) -> str:
+    raw = json.dumps(_json_safe(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
 
-    @staticmethod
-    def _extract_ordinals(text: str) -> list[int]:
-        source = str(text or '').lower()
-        found: list[tuple[int, int]] = []
-        for phrase, value in sorted(ORDINALS.items(), key=lambda x: len(x[0]), reverse=True):
-            pos = source.find(phrase)
-            if pos >= 0:
-                found.append((pos, int(value)))
-        found.sort(key=lambda x: x[0])
-        result: list[int] = []
-        for _, value in found:
-            if value not in result:
-                result.append(value)
-        return result
+def stable_block_id(scene_id: str, block: dict[str, Any], index: int) -> str:
+    existing = _s(block.get("block_id") or block.get("id"))
+    if existing:
+        return existing
+    material = {
+        "scene_id": scene_id,
+        "type": normalize_type(block.get("type") or block.get("artifact_type") or block.get("representation")),
+        "role": _s(block.get("role") or block.get("text_role")),
+        "index": index,
+        "payload": block.get("payload"),
+        "content": block.get("content") or block.get("text") or "",
+    }
+    return f"block_{_fingerprint(material)}"
 
-    @staticmethod
-    def _extract_last_reference(text: str) -> int | None:
-        source = str(text or '').lower()
-        for phrase, value in LAST_WORDS.items():
-            if re.search(f'\\b{re.escape(phrase)}\\b', source):
-                return value
-        return None
 
-    @staticmethod
-    def _structural_items(previous_assistant: str) -> list[dict[str, Any]]:
-        """Extract generic document structure while attaching continuation lines to list items."""
-        source_text = str(previous_assistant or '').strip()
-        numbered_segments = list(re.finditer('(?:^|\\s)(\\d{1,3})\\s*[.)]\\s+(.+?)(?=(?:\\s+\\d{1,3}\\s*[.)]\\s+)|$)', source_text, flags=re.S))
-        if len(numbered_segments) >= 2:
-            compact_items = []
-            for match in numbered_segments[:80]:
-                idx = int(match.group(1))
-                content = re.sub('\\s+', ' ', match.group(2)).strip()
-                title = re.split('[—:–]', content, maxsplit=1)[0].strip()
-                compact_items.append({'kind': 'numbered_item', 'index': idx, 'title': title[:240], 'content': content[:1800], 'source': 'previous_assistant_text_compact'})
-            return compact_items
-        lines = [line.rstrip() for line in source_text.splitlines()]
-        items: list[dict[str, Any]] = []
-        paragraph: list[str] = []
-        current_item: dict[str, Any] | None = None
-        next_auto_index = 0
+def stable_render_id(scene_id: str, block_id: str, renderer: str) -> str:
+    return f"render_{_fingerprint({'scene_id': scene_id, 'block_id': block_id, 'renderer': renderer})}"
 
-        def flush_paragraph() -> None:
-            nonlocal paragraph, next_auto_index
-            if not paragraph:
-                return
-            text = ' '.join((x.strip() for x in paragraph if x.strip())).strip()
-            if text:
-                next_auto_index += 1
-                items.append({'kind': 'paragraph', 'index': next_auto_index, 'title': text[:180], 'content': text, 'source': 'previous_assistant_text'})
-            paragraph = []
 
-        def flush_item() -> None:
-            nonlocal current_item, next_auto_index
-            if current_item is None:
-                return
-            current_item['content'] = _clip(current_item.get('content', ''), 1800)
-            items.append(current_item)
-            next_auto_index = max(next_auto_index, int(current_item.get('index') or 0))
-            current_item = None
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                if current_item is not None:
-                    continue
-                flush_paragraph()
-                continue
-            match = NUMBERED_RE.match(line)
-            if match:
-                flush_item()
-                flush_paragraph()
-                idx = int(match.group(1))
-                content = match.group(2).strip()
-                title = re.split('[—:–]', content, maxsplit=1)[0].strip()
-                current_item = {'kind': 'numbered_item', 'index': idx, 'title': title[:240], 'content': content, 'source': 'previous_assistant_text'}
-                continue
-            match = BULLET_RE.match(line)
-            if match:
-                flush_item()
-                flush_paragraph()
-                next_auto_index += 1
-                content = match.group(1).strip()
-                current_item = {'kind': 'bullet_item', 'index': next_auto_index, 'title': content[:240], 'content': content, 'source': 'previous_assistant_text'}
-                continue
-            match = HEADING_RE.match(line)
-            if match:
-                flush_item()
-                flush_paragraph()
-                next_auto_index += 1
-                content = match.group(1).strip()
-                items.append({'kind': 'heading', 'index': next_auto_index, 'title': content[:240], 'content': content, 'source': 'previous_assistant_text'})
-                continue
-            if current_item is not None:
-                current_item['content'] = f"{current_item.get('content', '')} {stripped}".strip()
-            else:
-                paragraph.append(stripped)
-        flush_item()
-        flush_paragraph()
-        return items[:80]
-
-    @staticmethod
-    def _visual_blocks(scene: dict[str, Any]) -> list[dict[str, Any]]:
-        blocks: list[dict[str, Any]] = []
-        raw_blocks = scene.get('render_blocks') if isinstance(scene, dict) else None
-        if isinstance(raw_blocks, list):
-            for idx, block in enumerate(raw_blocks):
-                if not isinstance(block, dict):
-                    continue
-                payload = block.get('payload') if isinstance(block.get('payload'), dict) else {}
-                content_parts = [block.get('type'), block.get('renderer'), block.get('title'), block.get('label'), block.get('text'), block.get('content'), payload.get('title'), payload.get('label'), payload.get('x_label'), payload.get('y_label'), payload.get('series'), payload.get('name')]
-                blocks.append({'kind': 'render_block', 'index': idx + 1, 'block_id': block.get('block_id') or block.get('id') or '', 'type': block.get('type') or block.get('block_type') or '', 'renderer': block.get('renderer') or '', 'content': _clip(' '.join((str(x) for x in content_parts if x)), 1200), 'payload': deepcopy(payload), 'source': 'visual_scene'})
-        return blocks[:24]
-
-    @staticmethod
-    def _scene_text(scene: dict[str, Any]) -> str:
-        if not isinstance(scene, dict):
-            return ''
-        parts = [scene.get('topic'), scene.get('summary'), scene.get('user_request'), scene.get('current_request'), scene.get('april_answer'), scene.get('answer')]
-        for block in QuantumMemoryUnderstandingEngine._visual_blocks(scene):
-            parts.extend([block.get('type'), block.get('renderer'), block.get('content')])
-        return _clip(' '.join((str(x) for x in parts if x)), 3200)
-
-    @staticmethod
-    def _lexical_score(left: str, right: str) -> float:
-        a, b = (_tokens(left), _tokens(right))
-        if not a or not b:
-            return 0.0
-        return len(a & b) / max(1, len(a | b))
-
-    @staticmethod
-    def _semantic_score(query: str, candidates: list[str]) -> tuple[dict[str, float], str]:
-        """Measure semantic similarity through the shared quantum embedding engine.
-
-        This helper has no per-instance state, so it is a static operation. That
-        keeps instance and classmethod call sites on one coherent measurement
-        primitive and prevents an implicit ``self`` from being required when the
-        historical-pair selector executes through ``cls``.
-        """
-        if not query or not candidates:
-            return ({}, 'none')
-        try:
-            from blocks.interpretation_layer import QUANTUM_EMBEDDING_ENGINE
-            values = QUANTUM_EMBEDDING_ENGINE.similarities(query, candidates)
-            return (values, 'shared_quantum_embedding')
-        except Exception:
-            return ({c: QuantumMemoryUnderstandingEngine._lexical_score(query, c) for c in candidates}, 'lexical_fallback')
-
-    def _need_memory(self, current: str, previous_user: str, previous_assistant: str, scene: dict[str, Any], dialogue_measurement: dict[str, Any] | None=None) -> dict[str, Any]:
-        """Measure whether memory is semantically required for this turn.
-
-        No lexical trigger list, topic vocabulary, ordinal regex, or local
-        routing threshold is used. The shared QUANTUM_DIALOGUE_ENGINE owns the
-        discourse relation; the visual scene is structured evidence.
-        """
-        active = bool(previous_user or previous_assistant or scene)
-        dialogue_label = ''
-        dialogue_relation = ''
-        measured = {}
-        if active and previous_assistant:
-            try:
-                measured = QUANTUM_DIALOGUE_ENGINE.dialogue(current, previous_assistant=previous_assistant, previous_user=previous_user, active_goal='', active_topic='') or {}
-                md = measured.get('dialogue') if isinstance(measured, dict) else {}
-                if isinstance(md, dict):
-                    dialogue_label = _s(md.get('label')).lower()
-                    dialogue_relation = _s(md.get('relation') or md.get('state')).upper()
-            except Exception:
-                measured = {}
-        dialogue_anchor = dialogue_label in {'continuation', 'reformulation', 'correction', 'reference', 'affirmation', 'rejection', 'memory_query'} or dialogue_relation in {'CONTINUATION', 'ARTIFACT_REFERENCE', 'SAME_TOPIC', 'MEMORY_QUERY'}
-        measured_vector = dialogue_measurement if isinstance(dialogue_measurement, dict) else {}
-        canonical_relation = _s(measured_vector.get('relation') or measured_vector.get('dialogue_relation')).upper()
-        canonical_continuation = bool(measured_vector.get('continuation'))
-        canonical_reference = bool(measured_vector.get('reference_to_previous'))
-        if canonical_relation in {'INDEPENDENT', 'NEW_TOPIC', 'SAME_TOPIC'} and (not canonical_continuation) and (not canonical_reference):
-            dialogue_anchor = False
-            dialogue_relation = canonical_relation
-            dialogue_label = canonical_relation.lower()
-        elif canonical_relation in {'CONTINUE_TOPIC', 'CONTINUATION', 'ARTIFACT_REFERENCE', 'MEMORY_QUERY'}:
-            dialogue_anchor = True
-            dialogue_relation = canonical_relation
-            dialogue_label = canonical_relation.lower()
-        if canonical_continuation or canonical_reference:
-            dialogue_anchor = True
-        return {'needed': bool(active and dialogue_anchor), 'structural_reference': dialogue_label == 'reference' or dialogue_relation == 'ARTIFACT_REFERENCE', 'ordinal_targets': [], 'relative_target': None, 'short_followup': False, 'semantic_anchor': bool(dialogue_anchor), 'reference_anchor': dialogue_label == 'reference' or dialogue_relation == 'ARTIFACT_REFERENCE', 'dialogue_anchor': bool(dialogue_anchor), 'dialogue_label': dialogue_label, 'dialogue_relation': dialogue_relation, 'lexical_previous_assistant': 0.0, 'lexical_visual_scene': 0.0, 'dialogue_measurement': _quantum_snapshot(measured)}
-
-    def _candidate_scores(self, current: str, candidates: list[dict[str, Any]], ordinal: int | None, relative: int | None) -> list[dict[str, Any]]:
-        texts = [f"{c.get('title', '')} {c.get('content', '')}" for c in candidates]
-        semantic, semantic_source = self._semantic_score(current, texts)
-        ranked: list[dict[str, Any]] = []
-        for idx, candidate in enumerate(candidates):
-            text = texts[idx]
-            sem = float(semantic.get(text, 0.0))
-            lex = self._lexical_score(current, text)
-            structural = 0.0
-            if ordinal is not None and int(candidate.get('index') or -999) == ordinal:
-                structural = 1.0
-            if relative is not None:
-                target_index = relative if relative > 0 else len(candidates) + relative + 1
-                if int(candidate.get('index') or -999) == target_index:
-                    structural = max(structural, 1.0)
-            score = min(1.0, 0.62 * structural + 0.24 * sem + 0.14 * lex)
-            ranked.append({'candidate': candidate, 'score': round(score, 6), 'semantic': round(sem, 6), 'lexical': round(lex, 6), 'structural': round(structural, 6), 'semantic_source': semantic_source})
-        ranked.sort(key=lambda x: x['score'], reverse=True)
-        return ranked
-
-    @staticmethod
-    def _entity_candidates(*texts: str) -> list[str]:
-        """Extract generic name-like spans without topic-specific vocabulary."""
-        out: list[str] = []
-        seen: set[str] = set()
-        for source in texts:
-            source = str(source or '')
-            patterns = ('\\b(?:[А-ЯЁA-Z][а-яёa-z]+(?:\\s+[А-ЯЁA-Z][а-яёa-z]+){1,4})\\b', '\\b[А-ЯЁA-Z][а-яёa-z]{2,}\\b')
-            for pattern in patterns:
-                for match in re.finditer(pattern, source):
-                    value = re.sub('\\s+', ' ', match.group(0)).strip()
-                    if not value:
-                        continue
-                    if len(value.split()) == 1 and match.start() > 0:
-                        prefix = source[max(0, match.start() - 2):match.start()]
-                        if prefix not in {'', '. ', '! ', '? ', '\n ', '\r '}:
-                            continue
-                    key = value.lower()
-                    if key not in seen:
-                        seen.add(key)
-                        out.append(value)
-        return out[:24]
-
-    @staticmethod
-    def _shared_content_terms(user_text: str, assistant_text: str) -> list[str]:
-        """Find content terms shared by the previous user request and answer."""
-        stop = {'что', 'это', 'такое', 'как', 'кто', 'когда', 'где', 'который', 'которая', 'которые', 'про', 'мне', 'тебя', 'тебе', 'ты', 'вы', 'он', 'она', 'они', 'его', 'её', 'ее', 'их', 'ему', 'ей', 'им', 'можно', 'нужно', 'пожалуйста', 'расскажи', 'рассказать', 'объясни', 'объяснить', 'there', 'what', 'this', 'that', 'how', 'who', 'the', 'and'}
-        a = _tokens(user_text)
-        b = _tokens(assistant_text)
-        terms = [x for x in a & b if len(x) >= 3 and x not in stop and (not x.isdigit())]
-        return sorted(terms, key=lambda x: (-len(x), x))[:12]
-
-    @staticmethod
-    def _pair_quality(user_text: str, assistant_text: str) -> float:
-        """Score whether a prior USER↔APRIL pair is substantive enough to anchor reference resolution."""
-        user = str(user_text or '').strip()
-        answer = str(assistant_text or '').strip()
-        if not user or not answer:
-            return 0.0
-        tokens = _tokens(answer)
-        paragraphs = max(1, len(re.split('\\n\\s*\\n', answer)))
-        sentences = max(1, len(re.findall('[^.!?]+[.!?]', answer)))
-        questions = len(re.findall('[?!]', answer))
-        numbered = len(re.findall('(?:^|\\s)\\d{1,3}\\s*[.)]\\s+', answer))
-        entities = len(QuantumMemoryUnderstandingEngine._entity_candidates(user, answer))
-        length_score = min(1.0, len(answer) / 900.0)
-        lexical_richness = min(1.0, len(tokens) / 140.0)
-        structure = min(1.0, numbered / 3.0 + max(0, paragraphs - 1) * 0.1)
-        declarative = 1.0 - min(1.0, questions / max(1, sentences))
-        entity_score = min(1.0, entities / 3.0)
-        score = 0.4 * length_score + 0.2 * lexical_richness + 0.15 * structure + 0.15 * declarative + 0.1 * entity_score
-        if len(answer) < 320 and numbered == 0 and (paragraphs == 1) and questions:
-            score *= 0.45
-        return max(0.0, min(1.0, score))
-
-    @classmethod
-    def _historical_pairs(cls, dialog_history: list[dict[str, Any]] | None, memory_timeline: dict[str, Any] | None=None) -> list[dict[str, Any]]:
-        pairs: list[dict[str, Any]] = []
-        history = dialog_history if isinstance(dialog_history, list) else []
-        for index in range(len(history) - 1):
-            left = history[index]
-            right = history[index + 1]
-            if not isinstance(left, dict) or not isinstance(right, dict):
-                continue
-            left_role = str(left.get('role') or '').lower()
-            right_role = str(right.get('role') or '').lower()
-            if left_role in {'user', 'human'} and right_role in {'assistant', 'april', 'bot'}:
-                pairs.append({'user': str(left.get('content') or left.get('text') or ''), 'assistant': str(right.get('content') or right.get('text') or right.get('answer') or ''), 'source': 'dialog_history'})
-        timeline = memory_timeline if isinstance(memory_timeline, dict) else {}
-        for day in timeline.values():
-            if not isinstance(day, dict):
-                continue
-            for item in day.get('dialog_pairs', []) or []:
-                if not isinstance(item, dict):
-                    continue
-                user = str(item.get('user_meaning') or item.get('user') or '')
-                assistant = str(item.get('april_meaning') or item.get('answer_summary') or item.get('assistant') or '')
-                if user and assistant:
-                    pairs.append({'user': user, 'assistant': assistant, 'source': 'dialog_pair_memory'})
-        result: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
-        for pair in reversed(pairs):
-            key = (pair['user'].strip(), pair['assistant'].strip())
-            if key in seen:
-                continue
-            seen.add(key)
-            result.append(pair)
-        return list(reversed(result))
-
-    @classmethod
-    def _select_reference_pair(cls, current: str, previous_user: str, previous_assistant: str, dialog_history: list[dict[str, Any]] | None, memory_timeline: dict[str, Any] | None=None, dialogue_measurement: dict[str, Any] | None=None) -> tuple[str, str, str, float]:
-        """Select the immediate canonical USER↔APRIL pair first.
-
-        Historical memory is evidence only. It must never replace the current
-        conversation anchor merely because an old answer has lexical overlap.
-        The semantic dialogue engine decides whether the current request is
-        related; this selector only supplies the nearest authoritative pair.
-        """
-        if previous_user and previous_assistant:
-            pairs = cls._historical_pairs(dialog_history, memory_timeline)
-            measured = dialogue_measurement if isinstance(dialogue_measurement, dict) else {}
-            measured_relation = _s(measured.get('relation') or measured.get('dialogue_relation')).upper()
-            measured_continuation = bool(measured.get('continuation'))
-            measured_reference = bool(measured.get('reference_to_previous'))
-            memory_authorized = bool(measured_continuation or measured_reference or measured_relation in {'CONTINUE_TOPIC', 'CONTINUATION', 'ARTIFACT_REFERENCE', 'MEMORY_QUERY'})
-            immediate_quality = cls._pair_quality(previous_user, previous_assistant)
-            if pairs and immediate_quality < 0.38 and memory_authorized:
-                candidates = pairs[-8:]
-                texts = [f"{pair.get('user', '')} {pair.get('assistant', '')}" for pair in candidates]
-                semantic, _ = cls._semantic_score(current, texts)
-                best_idx = -1
-                best_score = 0.0
-                for idx, pair in enumerate(candidates):
-                    score = float(semantic.get(texts[idx], 0.0) or 0.0)
-                    score *= max(0.25, cls._pair_quality(pair.get('user', ''), pair.get('assistant', '')))
-                    if score > best_score:
-                        best_score = score
-                        best_idx = idx
-                if best_idx >= 0 and best_score >= 0.12:
-                    pair = candidates[best_idx]
-                    quality = cls._pair_quality(pair.get('user', ''), pair.get('assistant', ''))
-                    if quality > immediate_quality:
-                        return (str(pair.get('user') or ''), str(pair.get('assistant') or ''), 'semantic_history_pair', float(quality))
-            return (previous_user, previous_assistant, 'immediate_scene', 1.0)
-        pairs = cls._historical_pairs(dialog_history, memory_timeline)
-        if not pairs:
-            return (previous_user, previous_assistant, 'none', 0.0)
-        pair = pairs[-1]
-        quality = cls._pair_quality(pair.get('user', ''), pair.get('assistant', ''))
-        return (str(pair.get('user') or ''), str(pair.get('assistant') or ''), str(pair.get('source') or 'history'), float(quality))
-
-    @staticmethod
-    def _active_scene_from_history(memory_timeline: dict[str, Any] | None, state_scene: dict[str, Any] | None) -> dict[str, Any]:
-        if isinstance(state_scene, dict) and state_scene:
-            return deepcopy(state_scene)
-        timeline = memory_timeline if isinstance(memory_timeline, dict) else {}
-        candidates: list[dict[str, Any]] = []
-        for day in timeline.values():
-            if not isinstance(day, dict):
-                continue
-            for scene in day.get('visual_scenes', []) or []:
-                if isinstance(scene, dict):
-                    candidates.append(scene)
-        return deepcopy(candidates[-1]) if candidates else {}
-
-    def analyze(self, current_request: str, *, previous_user: str='', previous_assistant: str='', active_topic: str='', active_goal: str='', visual_scene: dict[str, Any] | None=None, dialog_history: list[dict[str, Any]] | None=None, dynamic_memory: dict[str, Any] | None=None, dialogue_measurement: dict[str, Any] | None=None, semantic_profile: dict[str, Any] | None=None, visual_reference: dict[str, Any] | None=None) -> dict[str, Any]:
-        current = _text(current_request, 2200)
-        previous_user = _text(previous_user, 1800)
-        previous_assistant = _text(previous_assistant, 5000)
-        scene = deepcopy(visual_scene) if isinstance(visual_scene, dict) else {}
-        selected_user, selected_assistant, selected_source, pair_score = self._select_reference_pair(current, previous_user, previous_assistant, dialog_history, (dynamic_memory or {}).get('memory_timeline') if isinstance(dynamic_memory, dict) else None, dialogue_measurement=dialogue_measurement)
-        if selected_user and selected_assistant:
-            previous_user, previous_assistant = (selected_user, selected_assistant)
-        gate = self._need_memory(current, previous_user, previous_assistant, scene, dialogue_measurement=dialogue_measurement)
-        measured_vector = dialogue_measurement if isinstance(dialogue_measurement, dict) else {}
-        canonical_relation = _s(measured_vector.get('relation') or measured_vector.get('dialogue_relation')).upper()
-        canonical_reference = bool(measured_vector.get('reference_to_previous')) or canonical_relation == 'ARTIFACT_REFERENCE'
-        canonical_continuation = bool(measured_vector.get('continuation')) or canonical_relation in {'CONTINUE_TOPIC', 'CONTINUATION'}
-        scene_hint_score = 0.0
-        visual_reference_candidate = False
-        explicit_visual_evidence = False
-        if isinstance(visual_reference, dict) and visual_reference:
-            reference_flags = (visual_reference.get('reference'), visual_reference.get('resolved'), visual_reference.get('reference_resolved'), visual_reference.get('artifact_reference'), visual_reference.get('visual_reference'), visual_reference.get('candidate'), visual_reference.get('candidate_present'))
-            explicit_visual_evidence = any((bool(v) for v in reference_flags))
-            if not explicit_visual_evidence:
-                for key in ('scene_id', 'target', 'target_id', 'active_scene_id', 'resolved_scene_id'):
-                    if _s(visual_reference.get(key)):
-                        explicit_visual_evidence = True
-                        break
-        if scene:
-            visual_text_for_gate = self._scene_text(scene)
-            if visual_text_for_gate:
-                similarity_map, _ = self._semantic_score(current, [visual_text_for_gate])
-                scene_hint_score = float(next(iter(similarity_map.values()), 0.0)) if similarity_map else 0.0
-                visual_reference_candidate = bool(self._visual_blocks(scene) and (explicit_visual_evidence or scene_hint_score >= 0.34))
-        dependency_authorized = bool(canonical_reference or canonical_continuation or canonical_relation == 'MEMORY_QUERY' or visual_reference_candidate)
-        gate = {**gate, 'needed': bool(gate.get('needed') or visual_reference_candidate), 'visual_reference_candidate': visual_reference_candidate, 'explicit_visual_reference_evidence': explicit_visual_evidence, 'visual_scene_similarity': round(scene_hint_score, 6), 'reference_anchor': bool(gate.get('reference_anchor') or visual_reference_candidate), 'dialogue_anchor': bool(gate.get('dialogue_anchor') or visual_reference_candidate)}
-        base = {'version': self.VERSION, 'engine': 'QUANTUM_MEMORY_UNDERSTANDING_ENGINE', 'decision_owner': 'QUANTUM_PROCESSOR', 'active': False, 'needed': bool(gate['needed']), 'relation': 'INDEPENDENT', 'reference': {'resolved': False, 'target': '', 'confidence': 0.0}, 'visual_context': {}, 'dialogue_context': {'previous_user': previous_user, 'previous_assistant': previous_assistant, 'active_topic': _text(active_topic, 500), 'active_goal': _text(active_goal, 700)}, 'gate': gate, 'memory_sources': {'dialogue': bool(previous_user or previous_assistant), 'visual_scene': bool(scene), 'dynamic_memory': bool(dynamic_memory and dynamic_memory.get('matches')), 'history': bool(dialog_history), 'selected_pair_source': selected_source, 'selected_pair_score': round(pair_score, 6), 'canonical_dialogue_source': 'processor_dialogue_measurement'}, 'evidence': [], 'provider_hint': {}, 'generation_strategy': 'independent_request', 'lexical_triggers': False, 'renderer_control': False, 'render_signal_mutation': False}
-        if not current or not gate['needed']:
-            return base
-        structural_items = self._structural_items(previous_assistant)
-        visual_blocks = self._visual_blocks(scene)
-        all_candidates = structural_items + visual_blocks
-        antecedents = self._entity_candidates(previous_user, previous_assistant)
-        shared_terms = self._shared_content_terms(previous_user, previous_assistant)
-        known = {x.casefold() for x in antecedents}
-        for term in shared_terms:
-            if term.casefold() not in known:
-                antecedents.append(term)
-                known.add(term.casefold())
-        scene_topic = _s(scene.get('topic') or '')
-        for term in self._shared_content_terms(scene_topic, previous_assistant):
-            if term.casefold() not in known:
-                antecedents.append(term)
-                known.add(term.casefold())
-        if antecedents and (gate['structural_reference'] or gate['short_followup']):
-            for idx, name in enumerate(antecedents[:8], start=1):
-                all_candidates.append({'kind': 'entity_reference', 'index': idx, 'title': name, 'content': _clip(f'{previous_user} {previous_assistant}', 1800), 'source': 'substantive_dialogue_pair'})
-        ordinal = None
-        relative = None
-        ranked = self._candidate_scores(current, all_candidates, ordinal, relative) if all_candidates else []
-        best = ranked[0] if ranked else None
-        second = ranked[1] if len(ranked) > 1 else None
-        best_score = float(best['score']) if best else 0.0
-        margin = best_score - float(second['score']) if second else best_score
-        visual_text = self._scene_text(scene)
-        if visual_text:
-            scene_similarity = float(gate.get('visual_scene_similarity', 0.0) or 0.0)
-            scene_source = 'shared_quantum_embedding'
-        else:
-            scene_similarity = 0.0
-            scene_source = 'none'
-        topic_similarity = self._lexical_score(current, active_topic)
-        structural_target = None
-        if dependency_authorized and (gate.get('reference_anchor') or gate.get('dialogue_anchor')) and visual_blocks:
-            semantic_profile = semantic_profile if isinstance(semantic_profile, dict) else {}
-            rep_scores = semantic_profile.get('representation_scores') if isinstance(semantic_profile.get('representation_scores'), dict) else {}
-            obj_scores = semantic_profile.get('object_scores') if isinstance(semantic_profile.get('object_scores'), dict) else {}
-            best_rep = _s(semantic_profile.get('best_representation')).lower()
-            best_obj = _s(semantic_profile.get('best_object')).lower()
-            ranked_visuals = []
-            for candidate in visual_blocks:
-                rep = _s(candidate.get('representation')).lower()
-                payload = candidate.get('payload') if isinstance(candidate.get('payload'), dict) else {}
-                has_data = bool(candidate.get('has_structured_data')) or any((payload.get(key) not in (None, [], {}, '') for key in ('categories', 'labels', 'x', 'x_values', 'points', 'series', 'data', 'rows', 'items')))
-                semantic_support = max(float(rep_scores.get(rep, 0.0) or 0.0), float(obj_scores.get(rep, 0.0) or 0.0))
-                alignment = 1.0 if rep in {best_rep, best_obj} and rep else 0.0
-                score = 0.55 * semantic_support + 0.3 * alignment + 0.15 * (1.0 if has_data else 0.0)
-                ranked_visuals.append((score, candidate))
-            ranked_visuals.sort(key=lambda item: item[0], reverse=True)
-            if ranked_visuals:
-                structural_target = deepcopy(ranked_visuals[0][1])
-        target = deepcopy(structural_target or (best['candidate'] if best and best_score >= 0.55 else {}))
-        target_kind = str(target.get('kind') or '')
-        if not target and gate.get('dialogue_anchor'):
-            target = {'kind': 'dialogue_context', 'index': None, 'title': _text(previous_user, 300) or _text(scene.get('topic'), 300), 'content': _clip(previous_assistant, 1800), 'source': 'dialogue_measurement'}
-            target_kind = 'dialogue_context'
-        explicit_reference = bool(gate.get('reference_anchor'))
-        reference_resolved = bool(dependency_authorized and (canonical_reference or visual_reference_candidate) and target and (target_kind != 'dialogue_context') and (structural_target is not None))
-        continuation = bool(canonical_continuation or reference_resolved or (not canonical_relation and gate.get('dialogue_anchor') and (scene_similarity >= 0.48 or topic_similarity >= 0.18)))
-        if reference_resolved:
-            relation = 'ARTIFACT_REFERENCE'
-        elif canonical_continuation:
-            relation = 'CONTINUE_TOPIC'
-        else:
-            relation = canonical_relation if canonical_relation in {'SAME_TOPIC', 'NEW_TOPIC', 'INDEPENDENT'} else 'INDEPENDENT'
-        confidence = min(1.0, max(best_score, 0.58 * scene_similarity + 0.42 * topic_similarity))
-        if structural_target is not None:
-            confidence = max(confidence, 0.96)
-        elif reference_resolved:
-            confidence = max(confidence, min(1.0, 0.72 + 0.22 * best_score))
-        previous_scene_id = str(scene.get('scene_id') or '')
-        visual_context = {'scene_id': previous_scene_id, 'visual_source': _s(scene.get('memory_source') or scene.get('source') or 'visual_scene'), 'topic': _text(scene.get('topic') or active_topic, 500), 'summary': _clip(scene.get('summary') or scene.get('april_answer') or scene.get('answer'), 1000), 'render_block_types': list(scene.get('render_block_types') or []), 'render_blocks': visual_blocks, 'scene_similarity': round(scene_similarity, 6), 'source': scene_source}
-        resolved_request = current
-        if reference_resolved:
-            target_title = _text(target.get('title') or target.get('type') or target.get('block_id'), 300)
-            target_content = _clip(target.get('content') or '', 1800)
-            target_payload = target.get('payload') if isinstance(target.get('payload'), dict) else {}
-            payload_text = _clip(json.dumps(target_payload, ensure_ascii=False), 5000) if target_payload else '{}'
-            resolved_request = f"{current}\n\nThe canonical memory engine resolved the current request to the active previous response object.\nTarget kind: {target_kind}. Target index: {target.get('index')}. Target title: {target_title}.\nTarget content: {target_content}\nTarget payload: {payload_text}\nAnswer the current request from this resolved context. Do not ask the user to repeat data already present in the target."
-        base.update({'active': True, 'relation': relation, 'continuation': continuation, 'reference': {'resolved': reference_resolved, 'target': target_title if reference_resolved else '', 'target_kind': target_kind if reference_resolved else '', 'target_index': target.get('index') if reference_resolved else None, 'target_id': target.get('block_id') if reference_resolved else '', 'target_payload': deepcopy(target.get('payload') if reference_resolved and isinstance(target.get('payload'), dict) else {}), 'confidence': round(confidence, 6), 'candidate_count': len(all_candidates)}, 'visual_context': visual_context, 'dialogue_context': {**base['dialogue_context'], 'scene_similarity': round(scene_similarity, 6), 'topic_similarity': round(topic_similarity, 6)}, 'selected_evidence': ranked[:5], 'resolved_request': resolved_request, 'generation_strategy': 'create_new_artifact_with_continued_meaning' if relation in {'CONTINUE_TOPIC', 'ARTIFACT_REFERENCE'} else 'independent_request', 'provider_hint': {'context_dependency': relation != 'INDEPENDENT', 'resolved_scene_id': previous_scene_id if relation != 'INDEPENDENT' else '', 'reference_target': target_title if reference_resolved else '', 'reference_content': _clip(target.get('content') if reference_resolved else '', 1600), 'reference_payload': deepcopy(target.get('payload') if reference_resolved and isinstance(target.get('payload'), dict) else {}), 'resolved_request': resolved_request}, 'evidence': [{'channel': 'structure', 'score': round(float(best.get('structural', 0.0)) if best else 0.0, 6)}, {'channel': 'semantic', 'score': round(float(best.get('semantic', 0.0)) if best else 0.0, 6)}, {'channel': 'lexical', 'score': round(float(best.get('lexical', 0.0)) if best else 0.0, 6)}, {'channel': 'visual_scene', 'score': round(scene_similarity, 6)}, {'channel': 'topic', 'score': round(topic_similarity, 6)}, {'channel': 'visual_reference_bridge', 'score': round(scene_similarity if visual_reference_candidate else 0.0, 6)}, {'channel': 'reference', 'score': round(confidence if reference_resolved else 0.0, 6)}], 'collapse': {'relation': relation, 'confidence': round(confidence, 6), 'margin': round(margin, 6), 'target': target_title if reference_resolved else '', 'target_kind': target_kind if reference_resolved else '', 'scene_id': previous_scene_id}})
-        return base
-QUANTUM_MEMORY_UNDERSTANDING_ENGINE = QuantumMemoryUnderstandingEngine()
-
-def _build_quantum_field(*, user_id: Any, text: str, state: dict, context: dict, interpretation: dict, semantic: dict, cognition: dict, intent: dict, intent_ai: dict, resolver: dict, router: dict, router_system: dict, decision: dict, experience: dict, experience_manager: dict, goal: dict, visual_reference: dict, memory_understanding: dict | None=None) -> dict:
-    """Build the one canonical evidence field for Quantum collapse."""
-    return {'version': PROCESSOR_VERSION, 'user_id': _s(user_id), 'current_request': _s(text), 'current_request_authoritative': True, 'decision_owner': 'QUANTUM_PROCESSOR', 'identity_scope': _quantum_snapshot(state.get('memory_scope', {})), 'single_route': True, 'provider_calls': 0, 'parallel_route': False, 'sources': {'context_system': _quantum_snapshot(_as_dict(context)), 'interpretation_layer': _quantum_snapshot(_as_dict(interpretation)), 'semantic_core': _quantum_snapshot(_as_dict(semantic)), 'cognitive_core': _quantum_snapshot(_as_dict(cognition)), 'intent_system': _quantum_snapshot(_as_dict(intent)), 'intent_ai': _quantum_snapshot(_as_dict(intent_ai)), 'intent_resolver': _quantum_snapshot(_as_dict(resolver)), 'router': _quantum_snapshot(_as_dict(router)), 'router_system': _quantum_snapshot(_as_dict(router_system)), 'response_decision': _quantum_snapshot(_as_dict(decision)), 'experience': _quantum_snapshot(_as_dict(experience)), 'experience_manager': _quantum_snapshot(_as_dict(experience_manager)), 'goal_engine': _quantum_snapshot(_as_dict(goal)), 'visual_reference_system': _quantum_snapshot(_as_dict(visual_reference)), 'quantum_memory_understanding': _quantum_snapshot(_as_dict(memory_understanding))}, 'evidence_channels': 15, 'representations': _unique_strings(_as_list(semantic.get('required_representations')) + _as_list(interpretation.get('required_representations')) + _as_list(intent.get('renderer_subtype')) + _as_list(decision.get('required_representations'))), 'candidate_signals': _quantum_snapshot(_as_list(intent.get('candidate_signals')) + _as_list(intent_ai.get('quantum_evidence', {}).get('candidates')) + _as_list(router.get('quantum_evidence', {}).get('signals')) + _as_list(router_system.get('candidate_signals'))), 'semantic_engines': {'dialogue': _quantum_snapshot(semantic.get('quantum_dialogue_measurement', {})), 'representation': _quantum_snapshot(semantic.get('quantum_representation_measurement', {})), 'representation_candidates': _quantum_snapshot(semantic.get('quantum_representation_candidates', [])), 'decision_owner': 'QUANTUM_PROCESSOR', 'word_trigger_routing': False, 'fallback_semantics': False}, 'trajectory': _quantum_snapshot({'resolver': _as_dict(resolver), 'active_flow': _as_dict(state.get('active_flow')), 'context': _as_dict(context.get('quantum_evidence'))}), 'arbitration': {'dialogue': 'processor', 'representation': 'processor', 'room': 'delegated', 'renderer': 'delegated', 'execution': 'delegated'}}
-
-def _field(sources: tuple[dict, ...], names: tuple[str, ...]) -> Any:
-    for src in sources:
-        if not isinstance(src, dict):
-            continue
-        for name in names:
-            if src.get(name) not in (None, '', [], {}):
-                return src[name]
-    return ''
-
-def _scene_continuity_engine(*, text: str, state: dict, history: list) -> dict:
-    """
-    Canonical immediate-scene interpretation engine.
-
-    It does not inspect words or maintain a trigger list. It feeds the existing
-    QUANTUM_DIALOGUE_ENGINE with the most recent canonical USER↔APRIL scene
-    when the hot dialog list is empty or incomplete. The engine's own semantic
-    dialogue label remains the sole authority for continuation/reference state.
-
-    This repairs the exact failure where current_visual_scene existed, but the
-    Executor discarded it because state["dialog"] was empty.
-    """
-    current_scene = {}
-    if isinstance(state, dict):
-        candidate = state.get('current_visual_scene') or state.get('active_visual_scene') or state.get('active_scene_contract')
-        if isinstance(candidate, dict) and is_dialogue_visible_scene(candidate):
-            current_scene = candidate
-    previous_user = ''
-    previous_april = ''
-    active_topic = ''
-    active_goal = ''
-    scene_id = ''
-    if isinstance(history, list):
-        for item in reversed(history):
-            if not isinstance(item, dict):
-                continue
-            role = _s(item.get('role')).lower()
-            if not previous_april and role in {'assistant', 'april'}:
-                previous_april = _s(item.get('content') or item.get('answer') or item.get('summary'))
-            if not previous_user and role == 'user':
-                previous_user = _s(item.get('content'))
-            if previous_user and previous_april:
-                break
-    if current_scene:
-        if not previous_user:
-            previous_user = _s(current_scene.get('user_request') or current_scene.get('current_request') or current_scene.get('user'))
-        if not previous_april:
-            previous_april = _s(current_scene.get('april_answer') or current_scene.get('answer') or current_scene.get('content') or current_scene.get('summary'))
-        active_topic = _s(current_scene.get('topic') or current_scene.get('active_topic') or previous_user)
-        active_goal = _s(current_scene.get('active_goal') or current_scene.get('goal') or current_scene.get('resolved_request'))
-        scene_id = _s(current_scene.get('scene_id') or current_scene.get('id'))
-    measured: dict[str, Any] = {}
-    if previous_april:
-        try:
-            measured = QUANTUM_DIALOGUE_ENGINE.dialogue(text, previous_assistant=previous_april, previous_user=previous_user, active_goal=active_goal, active_topic=active_topic) or {}
-        except Exception:
-            measured = {}
-    dialogue = _as_dict(measured.get('dialogue'))
-    label = _s(dialogue.get('label')).lower()
-    label_to_state = {'continuation': ('CONTINUATION', True, True), 'reformulation': ('CONTINUATION', True, True), 'correction': ('CONTINUATION', True, True), 'reference': ('ARTIFACT_REFERENCE', True, True), 'affirmation': ('SAME_TOPIC', True, False), 'rejection': ('SAME_TOPIC', True, False), 'memory_query': ('MEMORY_QUERY', True, False), 'new_topic': ('NEW_TOPIC', False, False), 'independent': ('INDEPENDENT', False, False)}
-    mode, continuation, reference = label_to_state.get(label, ('INDEPENDENT', False, False))
-    return {'engine': 'quantum_scene_continuity_engine', 'decision_owner': 'QUANTUM_PROCESSOR', 'canonical': True, 'scene_id': scene_id, 'previous_user': previous_user, 'previous_april': previous_april, 'active_topic': active_topic, 'active_goal': active_goal, 'dialogue_measurement': _quantum_snapshot(measured), 'dialogue_label': label, 'mode': mode, 'continuation': continuation, 'reference_to_previous': reference, 'history_available': bool(history), 'hot_scene_available': bool(current_scene), 'source': 'QUANTUM_DIALOGUE_ENGINE', 'lexical_triggers': False, 'score_routing': False}
-
-def _latest_canonical_dialogue_pair(state: dict) -> tuple[str, str, Any, str]:
-    """Return the newest adjacent USER→APRIL pair in the current conversation.
-
-    The pair is resolved structurally from the hot dialog. Historical memory can
-    support recall but can never replace this immediate dialogue anchor.
-    """
-    if not isinstance(state, dict):
-        return ('', '', None, 'none')
-    current_scene = state.get('current_visual_scene')
-    if isinstance(current_scene, dict):
-        user = _s(current_scene.get('user_request') or current_scene.get('current_request'))
-        assistant = _s(current_scene.get('april_answer') or current_scene.get('answer'))
-        if user and assistant:
-            return (user, assistant, current_scene.get('turn_id'), 'current_visual_scene')
-    dialog = state.get('dialog', [])
-    if isinstance(dialog, list):
-        for idx in range(len(dialog) - 2, -1, -1):
-            left = dialog[idx] if isinstance(dialog[idx], dict) else {}
-            right = dialog[idx + 1] if idx + 1 < len(dialog) and isinstance(dialog[idx + 1], dict) else {}
-            left_role = _s(left.get('role')).lower()
-            right_role = _s(right.get('role')).lower()
-            if left_role in {'user', 'human'} and right_role in {'assistant', 'april', 'bot'}:
-                user = _s(left.get('content') or left.get('text'))
-                assistant = _s(right.get('content') or right.get('answer') or right.get('text'))
-                if user and assistant:
-                    return (user, assistant, right.get('turn_id') or left.get('turn_id'), 'dialog_adjacent_pair')
-    return (_s(state.get('last_user_turn')), _s(state.get('last_april_turn')), None, 'state_last_turn_fallback')
-
-def _usable_visual_scene(state: dict) -> dict:
-    """Return the best usable structured visual scene without losing prior art."""
-    if not isinstance(state, dict):
-        return {}
-    ranked: list[tuple[int, int, str, dict]] = []
-    order = (('current_visual_scene', 0), ('active_visual_scene', 1), ('active_scene_contract', 2), ('last_successful_visual_scene', 3))
-    for key, priority in order:
-        candidate = state.get(key)
-        if not isinstance(candidate, dict):
-            continue
-        blocks = candidate.get('render_blocks')
-        if not isinstance(blocks, list):
-            continue
-        usable_blocks = []
-        for block in blocks:
-            if not isinstance(block, dict):
-                continue
-            btype = _s(block.get('type') or block.get('artifact_type') or block.get('representation')).lower()
-            payload = block.get('payload') if isinstance(block.get('payload'), dict) else {}
-            status = _s(payload.get('status') or block.get('status')).lower()
-            if btype not in {'', 'text', 'markdown'} and status not in {'unavailable', 'pending_data', 'incomplete', 'error'}:
-                usable_blocks.append(block)
-        if usable_blocks:
-            turn_id = int(candidate.get('turn_id') or 0)
-            ranked.append((turn_id, -priority, key, candidate))
-    if not ranked:
-        return {}
-    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    _, _, key, candidate = ranked[0]
-    result = deepcopy(candidate)
-    result['_selection_source'] = key
-    result['_visual_scene_usable'] = True
-    return result
-
-def _best_visual_context(state: dict) -> dict:
-    """Return structured visual evidence first, without falling back to empty text scenes."""
-    usable = _usable_visual_scene(state)
-    if usable:
-        return usable
-    if not isinstance(state, dict):
-        return {}
-    for key in ('active_scene_contract', 'current_visual_scene', 'active_visual_scene'):
-        candidate = state.get(key)
-        if not isinstance(candidate, dict):
-            continue
-        blocks = candidate.get('render_blocks') or candidate.get('blocks')
-        if not isinstance(blocks, list):
-            continue
-        if any((isinstance(block, dict) and _s(block.get('type') or block.get('artifact_type') or block.get('representation')).lower() not in {'', 'text', 'markdown'} for block in blocks)):
-            result = deepcopy(candidate)
-            result['render_blocks'] = list(blocks)
-            result['_selection_source'] = key
-            result['_visual_scene_usable'] = True
-            return result
-    return {}
-
-def _quantum_context_diagnostic(*, text: str, semantic: dict, decision: dict, dialogue_evidence: dict, memory_understanding: dict, state: dict) -> dict:
-    """Pre-provider invariant check. It diagnoses contradictions before release."""
-    qmu = _as_dict(memory_understanding)
-    qref = _as_dict(qmu.get('reference'))
-    qvisual = _as_dict(qmu.get('visual_context'))
-    render_types = [str(x).lower() for x in _as_list(qvisual.get('render_block_types'))]
-    mode = _s(dialogue_evidence.get('mode')).upper()
-    memory_relation = _s(qmu.get('relation')).upper()
-    semantic_rep = _s(semantic.get('production_representation') or semantic.get('requested_representation') or semantic.get('possible_output')).lower()
-    decision_action = _s(decision.get('action')).lower()
-    requested = [_s(x).lower() for x in _as_list(decision.get('requested_outputs') or semantic.get('requested_outputs')) if _s(x)]
-    contradictions = []
-    if memory_relation in {'CONTINUE_TOPIC', 'ARTIFACT_REFERENCE'} and mode in {'INDEPENDENT', 'NEW_TOPIC'}:
-        contradictions.append('memory_vs_dialogue_mode')
-    if 'graph' in requested and decision_action in {'talk', 'clarify'}:
-        contradictions.append('graph_request_vs_action')
-    if qref.get('resolved') and (not qvisual.get('scene_id')):
-        contradictions.append('resolved_reference_without_visual_scene')
-    structured_previous = {value for value in render_types if value not in {'', 'text', 'markdown'}}
-    if mode in {'CONTINUATION', 'ARTIFACT_REFERENCE'} and structured_previous and requested and (not structured_previous.intersection(requested)) and (semantic_rep not in structured_previous):
-        contradictions.append('continuation_lost_structured_representation')
-    if 'graph' in render_types and 'graph' not in requested and (semantic_rep not in {'graph', ''}):
-        contradictions.append('visual_payload_without_graph_request')
-    stale_history_detected = False
-    old_dialogue = _as_dict(state.get('_quantum_context_anchor'))
-    current_user = _s(old_dialogue.get('previous_user'))
-    selected_user = _s(dialogue_evidence.get('previous_user'))
-    if current_user and selected_user and (current_user != selected_user):
-        stale_history_detected = True
-        contradictions.append('dialogue_anchor_mismatch')
-    return {'version': 'QUANTUM_CONTEXT_DIAGNOSTIC_V1', 'preflight': True, 'request': _clip(text, 500), 'mode': mode, 'memory_relation': memory_relation, 'memory_reference_resolved': bool(qref.get('resolved')), 'memory_target': _s(qref.get('target')), 'visual_scene_id': _s(qvisual.get('scene_id')), 'visual_block_types': render_types, 'semantic_representation': semantic_rep, 'decision_action': decision_action, 'requested_outputs': requested, 'contradictions': contradictions, 'stale_history_detected': stale_history_detected, 'ready_for_provider': not [item for item in contradictions if item != 'continuation_lost_structured_representation'], 'decision_owner': 'QUANTUM_PROCESSOR', 'triggering': False, 'score_routing': False}
-
-def _dialogue_evidence(text: str, semantic: dict, cognition: dict, decision: dict, state: dict) -> dict:
-    """Collapse dialogue evidence around one immediate canonical pair."""
-    previous_user, previous_april, last_turn_id, pair_source = _latest_canonical_dialogue_pair(state)
-    dialog = state.get('dialog', []) if isinstance(state, dict) else []
-    scene_continuity = _as_dict(semantic.get('quantum_scene_continuity'))
-    if not scene_continuity:
-        scene_continuity = _scene_continuity_engine(text=text, state=state, history=dialog)
-    if not previous_user:
-        previous_user = _s(scene_continuity.get('previous_user'))
-    if not previous_april:
-        previous_april = _s(scene_continuity.get('previous_april'))
-    if not last_turn_id:
-        last_turn_id = _as_dict(state.get('current_visual_scene')).get('turn_id')
-    interpretation_packet = _as_dict(semantic.get('quantum_interpretation_evidence'))
-    dialogue_contract = _as_dict(interpretation_packet.get('dialogue_contract'))
-    if not dialogue_contract:
-        dialogue_contract = _as_dict(semantic.get('dialogue_context_field'))
-    mode = _s(dialogue_contract.get('context_mode') or dialogue_contract.get('dialogue_state') or dialogue_contract.get('relation') or dialogue_contract.get('request_relation') or semantic.get('dialogue_state') or decision.get('dialogue_state')).upper()
-    if mode not in {'INDEPENDENT', 'NEW_TOPIC', 'SAME_TOPIC', 'CONTINUATION', 'ARTIFACT_REFERENCE', 'MEMORY_QUERY'}:
-        mode = ''
-    if not mode:
-        mode = _s(scene_continuity.get('mode')).upper() or 'INDEPENDENT'
-    state['_quantum_context_anchor'] = {'previous_user': previous_user, 'previous_april': previous_april, 'source': pair_source, 'last_turn_id': last_turn_id}
-    active_topic = _s(dialogue_contract.get('active_topic') or semantic.get('active_topic') or decision.get('active_topic') or scene_continuity.get('active_topic') or state.get('active_topic') or state.get('topic') or previous_user)
-    active_goal = _s(dialogue_contract.get('active_goal') or semantic.get('active_goal') or cognition.get('active_goal') or decision.get('active_goal') or scene_continuity.get('active_goal') or state.get('active_goal'))
-    explicit_dependency = _s(dialogue_contract.get('context_dependency')).lower()
-    context_dependency = explicit_dependency not in {'', 'independent', 'none', 'false', '0'}
-    continuation = bool(dialogue_contract.get('continuation') if dialogue_contract.get('continuation') is not None else scene_continuity.get('continuation'))
-    reference_to_previous = bool(dialogue_contract.get('reference_to_previous') if dialogue_contract.get('reference_to_previous') is not None else scene_continuity.get('reference_to_previous'))
-    if not explicit_dependency:
-        context_dependency = bool(continuation or reference_to_previous or mode in {'CONTINUATION', 'ARTIFACT_REFERENCE', 'SAME_TOPIC', 'MEMORY_QUERY'})
-    resolved_scene = _as_dict(dialogue_contract.get('resolved_scene'))
-    if not resolved_scene and scene_continuity.get('scene_id'):
-        resolved_scene = {'scene_id': _s(scene_continuity.get('scene_id')), 'relation': 'current_scene' if continuation or reference_to_previous else 'same_topic' if mode == 'SAME_TOPIC' else 'new_topic' if mode == 'NEW_TOPIC' else 'independent', 'source': 'quantum_scene_continuity_engine'}
-    dialog_act = _s(dialogue_contract.get('dialog_act') or scene_continuity.get('dialogue_label') or semantic.get('dialog_act') or decision.get('dialog_act') or 'statement')
-    return {'mode': mode, 'previous_user': previous_user, 'previous_april': previous_april, 'last_turn_id': last_turn_id, 'active_topic': active_topic, 'active_goal': active_goal, 'context_dependency': context_dependency, 'continuation': continuation, 'reference_to_previous': reference_to_previous, 'dialog_act': dialog_act, 'reply_to': _s(dialogue_contract.get('reply_to') or dialogue_contract.get('previous_turn_id')), 'scene_continuity': scene_continuity, 'source': 'QUANTUM_DIALOGUE_ENGINE'}
-
-def _collapse_dialogue(e: dict[str, Any]) -> tuple[str, dict[str, float], float]:
-    """Compatibility bridge: no local score collapse; semantic engines own the state."""
-    mode = _s(e.get('mode')).upper() or 'INDEPENDENT'
-    states = {'INDEPENDENT': 1.0 if mode == 'INDEPENDENT' else 0.0, 'NEW_TOPIC': 1.0 if mode == 'NEW_TOPIC' else 0.0, 'SAME_TOPIC': 1.0 if mode == 'SAME_TOPIC' else 0.0, 'CONTINUATION': 1.0 if mode == 'CONTINUATION' else 0.0, 'ARTIFACT_REFERENCE': 1.0 if mode == 'ARTIFACT_REFERENCE' else 0.0, 'MEMORY_QUERY': 1.0 if mode == 'MEMORY_QUERY' else 0.0}
-    return (mode, states, 1.0)
-
-def _representation_constraints(*sources: dict) -> dict:
-    """Merge explicit representation constraints without local scoring or triggers."""
-    positive: list[str] = []
-    negative: list[str] = []
-    for src in sources:
-        if not isinstance(src, dict):
-            continue
-        constraints = src.get('representation_constraints')
-        if isinstance(constraints, dict):
-            for key, target in (('positive', positive), ('negative', negative)):
-                values = constraints.get(key) or []
-                if isinstance(values, str):
-                    values = [values]
-                for value in values:
-                    name = _s(value).lower()
-                    if name and name not in target:
-                        target.append(name)
-        preferred = _s(src.get('preferred_representation')).lower()
-        if preferred and preferred not in positive:
-            positive.append(preferred)
-        authority = _s(src.get('representation_authority')).lower()
-        if authority and authority not in {'', 'adaptive'} and (authority not in positive):
-            positive.append(authority)
-    blocked = set(negative)
-    positive = [item for item in positive if item not in blocked]
-    return {'positive': positive, 'negative': negative, 'blocked': sorted(blocked), 'current_request_authoritative': True}
-
-def _representation_audit(requested_outputs: list[str], measured_output: str, constraints: dict) -> dict:
-    requested = list(dict.fromkeys(requested_outputs or []))
-    blocked = set(constraints.get('negative', []) or [])
-    return {'requested_outputs': requested, 'preferred_representation': measured_output, 'blocked_outputs': sorted(blocked), 'multi_output': len(requested) > 1, 'table_requested': 'table' in requested, 'graph_requested': 'graph' in requested, 'code_requested': 'code' in requested, 'representation_gap': bool(requested and (not set(requested).issubset(blocked | set(requested)))), 'canonical': True}
-
-def _structural_request_signals(text: str) -> dict:
-    """Measure syntax-level representation evidence; no lexical trigger map."""
-    source = _s(text)
-    urls = re.findall('https?://[^\\s)\\]}>,]+', source, flags=re.I)
-    markdown_links = re.findall('\\[[^\\]]+\\]\\(https?://[^)]+\\)', source, flags=re.I)
-    code_fences = bool(re.search('```[\\s\\S]*?```', source))
-    table_rows = len(re.findall('(?m)^\\s*\\|.+\\|\\s*$', source))
-    return {'url_count': len(urls), 'markdown_link_count': len(markdown_links), 'code_fence': code_fences, 'table_row_count': table_rows, 'link_signal': bool(urls or markdown_links), 'code_signal': code_fences, 'table_signal': table_rows >= 2}
-
-def _requested_outputs(text: str, semantic: dict, cognition: dict, decision: dict, *, independent_turn: bool=False) -> list[str]:
-    """Collapse explicit semantic and structural evidence into one output plan."""
-    constraints = _representation_constraints(semantic, cognition, decision)
-    blocked = set(constraints['negative'])
-    names: list[str] = []
-    aliases = {'markdown': 'text', 'renderer_scene': 'diagram', 'visual': 'graph', 'image_generate': 'image', 'plot': 'graph', 'chart': 'graph'}
-
-    def add(value: Any) -> None:
-        values = [value] if isinstance(value, str) else list(value) if isinstance(value, (list, tuple, set)) else []
-        for raw in values:
-            name = aliases.get(_s(raw).lower(), _s(raw).lower())
-            if name and name not in blocked and (name not in names):
-                names.append(name)
-    for src in (decision, semantic):
-        if isinstance(src, dict):
-            add(src.get('requested_outputs'))
-            add(src.get('required_outputs'))
-    add(constraints['positive'])
-    if not names:
-        for src in (semantic, cognition, decision):
-            if not isinstance(src, dict):
-                continue
-            for key in ('required_representations', 'requested_representations', 'candidate_representations', 'artifact_types', 'render_types', 'representations', 'renderer_subtype'):
-                add(src.get(key))
-            add(src.get('preferred_representation'))
-    structural = _structural_request_signals(text)
-    if structural['link_signal'] and 'link' not in blocked and ('link' not in names):
-        names.append('link')
-    if structural['code_signal'] and 'code' not in blocked and ('code' not in names):
-        names.append('code')
-    if structural['table_signal'] and 'table' not in blocked and ('table' not in names):
-        names.append('table')
-    return names or ['text']
-
-def _representation_consensus(outputs: list[str], semantic: dict, decision: dict) -> tuple[str, dict[str, Any]]:
-    """Select the declared preferred representation without local scoring."""
-    plan = list(dict.fromkeys(outputs or ['text']))
-    preferred = _s(decision.get('preferred_representation') or semantic.get('preferred_representation') or (plan[0] if plan else 'text')).lower()
-    if preferred not in plan:
-        preferred = plan[0] if plan else 'text'
-    return (preferred, {'outputs': plan, 'preferred': preferred, 'selection_method': 'declared_semantic_plan', 'scoring': False, 'triggers': False})
-
-def _preserve_semantic_visual_representation(text: str, semantic: dict, control_relation: str, state: dict, requested_outputs: list[str], preferred: str) -> tuple[list[str], str, dict[str, Any]]:
-    """Preserve a current visual representation across semantic continuations.
-
-    The previous scene is consulted only after Interpretation has already
-    resolved the dialogue relation.  The scene supplies structured evidence,
-    never a lexical trigger.  This keeps a modification such as adding
-    dimensions on the same geometric drawing instead of collapsing it to text.
-    """
-    relation = _s(control_relation).upper()
-    if relation not in {'CONTINUE_TOPIC', 'ARTIFACT_REFERENCE', 'MEMORY_QUERY'}:
-        return (list(dict.fromkeys(requested_outputs or ['text'])), preferred, {'preserved': False, 'source': 'current_turn_only'})
-    scene = _as_dict(_best_visual_context(state))
-    if not scene:
-        return (list(dict.fromkeys(requested_outputs or ['text'])), preferred, {'preserved': False, 'source': 'no_current_visual_scene'})
-    structured: list[str] = []
-    raw_types = list(scene.get('render_block_types') or [])
-    for raw in raw_types:
-        name = _s(raw).lower()
-        if name in {'text', 'markdown', ''}:
-            continue
-        if name not in structured:
-            structured.append(name)
-    if not structured:
-        for block in scene.get('render_blocks', []) or []:
-            if not isinstance(block, dict):
-                continue
-            name = _s(block.get('type') or block.get('artifact_type') or block.get('representation')).lower()
-            if name in {'text', 'markdown', ''}:
-                continue
-            if name not in structured:
-                structured.append(name)
-    if not structured:
-        return (list(dict.fromkeys(requested_outputs or ['text'])), preferred, {'preserved': False, 'source': 'current_scene_has_no_structured_representation'})
-    operation = _s(_as_dict(semantic.get('semantic_task')).get('operation') or semantic.get('best_operation')).lower()
-    allowed_operations = {'build', 'modify', 'present', 'analyze', 'list', 'explain', 'retrieve'}
-    current_structured = [_s(x).lower() for x in requested_outputs if _s(x).lower() not in {'', 'text', 'markdown'}]
-    dialogue_contract = _as_dict(_as_dict(semantic.get('quantum_interpretation_evidence')).get('dialogue_contract'))
-    artifact_reference_answer = bool(semantic.get('artifact_reference_answer') or dialogue_contract.get('artifact_reference_answer'))
-    should_preserve = relation in {'ARTIFACT_REFERENCE', 'MEMORY_QUERY'} and (not artifact_reference_answer) or (operation in allowed_operations and (not artifact_reference_answer))
-    if not should_preserve:
-        return (list(dict.fromkeys(requested_outputs or ['text'])), preferred, {'preserved': False, 'source': 'semantic_operation_does_not_depend_on_visual_scene', 'operation': operation})
-    chosen = current_structured[0] if current_structured else structured[0]
-    if chosen not in structured:
-        chosen = structured[0]
-    outputs = list(dict.fromkeys([*list(requested_outputs or []), chosen]))
-    if chosen != preferred:
-        preferred = chosen
-    return (outputs or [chosen], preferred, {'preserved': True, 'source': 'current_visual_scene_semantic_continuity', 'scene_id': _s(scene.get('scene_id')), 'representation': chosen, 'operation': operation, 'artifact_reference_answer': artifact_reference_answer, 'existing_types': structured})
-
-def _complexity(semantic: dict, cognition: dict, decision: dict, text: str) -> str:
-    """Carry the semantic complexity declaration without local score tiers."""
-    explicit = _s(semantic.get('response_complexity') or cognition.get('response_complexity') or decision.get('response_complexity')).upper()
-    return explicit if explicit in {'LOW', 'MEDIUM', 'HIGH'} else 'ADAPTIVE'
-
-def _quantum_64_field(text: str, semantic: dict, cognition: dict, decision: dict) -> dict:
-    """Build a 64-lane structural measurement field without score weighting or triggers."""
-    outputs = list(dict.fromkeys(_as_list(semantic.get('requested_outputs') or semantic.get('required_outputs') or decision.get('requested_outputs'))))
-    artifacts = _as_list(semantic.get('required_artifacts') or decision.get('required_artifacts'))
-    domains = _as_list(semantic.get('required_domains') or semantic.get('required_competencies') or cognition.get('required_domains'))
-    parts = max(1, len(semantic.get('task_parts') or semantic.get('subtasks') or semantic.get('requested_tasks') or []))
-    word_count = len(_tokens(text))
-    field = {'meaning': {'request_length': word_count, 'has_context': bool(semantic.get('active_topic') or semantic.get('context')), 'has_goal': bool(semantic.get('active_goal') or decision.get('active_goal')), 'semantic_state': _s(semantic.get('dialogue_state') or semantic.get('dialog_act')), 'declared_complexity': _complexity(semantic, cognition, decision, text), 'measured': True, 'source': 'semantic_engines', 'scoring': False, 'triggering': False}, 'intent': {'intent': _s(semantic.get('intent') or decision.get('intent')), 'dialogue_state': _s(semantic.get('dialogue_state')), 'dialog_act': _s(semantic.get('dialog_act') or decision.get('dialog_act')), 'goal_present': bool(decision.get('active_goal') or semantic.get('active_goal')), 'measured': True, 'scoring': False, 'triggering': False}, 'context': {'history_present': bool(semantic.get('history_present')), 'continuation': bool(semantic.get('continuation')), 'reference_to_previous': bool(semantic.get('reference_to_previous')), 'context_dependency': bool(semantic.get('context_dependency')), 'topic': _s(semantic.get('active_topic') or decision.get('active_topic')), 'goal': _s(semantic.get('active_goal') or decision.get('active_goal')), 'measured': True, 'scoring': False, 'triggering': False}, 'structure': {'requested_outputs': outputs, 'artifact_types': list(dict.fromkeys(map(_s, artifacts))), 'domains': list(dict.fromkeys(map(_s, domains))), 'task_parts': parts, 'word_count': word_count, 'measured': True, 'scoring': False, 'triggering': False}, 'evidence': {'semantic_evidence_present': bool(semantic), 'cognition_evidence_present': bool(cognition), 'decision_evidence_present': bool(decision), 'measured': True, 'scoring': False, 'triggering': False}, 'representation': {'requested_outputs': outputs or ['text'], 'preferred': _s(decision.get('preferred_representation') or semantic.get('preferred_representation') or 'text'), 'constraints': _representation_constraints(semantic, cognition, decision), 'measured': True, 'scoring': False, 'triggering': False}, 'economy': {'input_text_chars': len(text), 'word_count': word_count, 'requested_output_count': len(outputs), 'artifact_count': len(artifacts), 'domain_count': len(domains), 'measured': True, 'scoring': False, 'triggering': False}, 'completion': {'requested_output_count': len(outputs), 'artifact_count': len(artifacts), 'task_parts': parts, 'measured': True, 'scoring': False, 'triggering': False}}
-    return {'cores': field, 'core_count': QUANTUM_CORE_COUNT, 'lane_count': QUANTUM_LANE_COUNT, 'signal_count': QUANTUM_CORE_COUNT * QUANTUM_LANE_COUNT, 'measurement_mode': 'structural_no_trigger_no_score', 'request_word_count': word_count, 'requested_output_count': len(outputs), 'artifact_count': len(artifacts), 'domain_count': len(domains), 'task_parts': parts, 'scoring': False, 'triggering': False}
-
-def _representation_budget_profile(kind: str) -> dict:
-    """Canonical output-shape budget for every Web-facing representation."""
-    profiles = {'text': {'base': 420, 'block': 320, 'payload': 0}, 'formula': {'base': 980, 'block': 620, 'payload': 900}, 'table': {'base': 900, 'block': 760, 'payload': 1100}, 'graph': {'base': 1200, 'block': 900, 'payload': 1500}, 'diagram': {'base': 1500, 'block': 980, 'payload': 1900}, 'link': {'base': 700, 'block': 520, 'payload': 700}, 'code': {'base': 1100, 'block': 700, 'payload': 1300}, 'gallery': {'base': 1200, 'block': 720, 'payload': 1600}, 'image': {'base': 1200, 'block': 720, 'payload': 1600}, 'audio': {'base': 900, 'block': 620, 'payload': 1100}, 'video': {'base': 1100, 'block': 700, 'payload': 1300}, 'file': {'base': 900, 'block': 620, 'payload': 1100}, 'action': {'base': 900, 'block': 620, 'payload': 1100}, 'memory': {'base': 800, 'block': 540, 'payload': 900}, 'scene': {'base': 1500, 'block': 980, 'payload': 1900}}
-    return profiles.get(kind, profiles['text'])
-
-def _quantum_budget_from_64(field: dict, *, minimum: int=OUTPUT_MIN_TOKENS, maximum: int=OUTPUT_MAX_TOKENS) -> int:
-    """Representation-aware Provider capacity. Never budgets structured output as plain text."""
-    cores = field.get('cores', {}) if isinstance(field, dict) else {}
-    economy = cores.get('economy', {}) if isinstance(cores, dict) else {}
-    structure = cores.get('structure', {}) if isinstance(cores, dict) else {}
-    word_count = max(1, int(economy.get('word_count', field.get('request_word_count', 1)) or 1))
-    output_count = max(1, int(economy.get('requested_output_count', field.get('requested_output_count', 1)) or 1))
-    artifact_count = max(0, int(economy.get('artifact_count', field.get('artifact_count', 0)) or 0))
-    domain_count = max(0, int(economy.get('domain_count', field.get('domain_count', 0)) or 0))
-    parts = max(1, int(structure.get('task_parts', field.get('task_parts', 1)) or 1))
-    outputs = [_s(x).lower() for x in _as_list(structure.get('requested_outputs')) if _s(x)] or ['text']
-    answer_capacity = 160 + min(1500, word_count * 8) + min(1600, parts * 220)
-    structural_capacity = 0
-    for kind in dict.fromkeys(outputs):
-        profile = _representation_budget_profile(kind)
-        structural_capacity += profile['base'] + profile['block'] + profile['payload']
-    envelope = 950 + output_count * 180 + artifact_count * 260 + domain_count * 90
-    reserve = 420
-    return int(max(minimum, min(maximum, answer_capacity + structural_capacity + envelope + reserve)))
-
-def _adaptive_output_budget(text: str, semantic: dict, cognition: dict, decision: dict) -> int:
-    """Continuous structural capacity with representation-specific envelopes."""
-    return _quantum_budget_from_64(_quantum_64_field(text, semantic, cognition, decision))
-
-def _compact_context(text: str, state: dict, mode: str, topic: str, goal: str) -> dict:
-    dialog = state.get('dialog', []) if isinstance(state, dict) else []
-    recent = []
-    for turn in dialog[-8:]:
-        if not isinstance(turn, dict):
-            continue
-        role = _s(turn.get('role')).lower()
-        if role == 'user':
-            recent.append({'user': _clip(turn.get('content'), 450), 'april': ''})
-        elif role in {'assistant', 'april'}:
-            recent.append({'user': '', 'april': _clip(turn.get('content') or turn.get('answer') or turn.get('summary'), 700)})
-        else:
-            recent.append({'user': _clip(turn.get('user'), 450), 'april': _clip((turn.get('april') or {}).get('answer') if isinstance(turn.get('april'), dict) else turn.get('april') or turn.get('content', ''), 700)})
-    data = {'current_request': text, 'context_mode': mode}
-    if mode != 'INDEPENDENT':
-        if topic:
-            data['active_topic'] = _clip(topic, 300)
-        if goal:
-            data['active_goal'] = _clip(goal, 500)
-        data['recent_dialogue'] = recent
-    if mode in {'CONTINUATION', 'ARTIFACT_REFERENCE'}:
-        visual = _best_visual_context(state)
-        if visual:
-            data['visual_context'] = _quantum_snapshot(visual)
-    return data
-
-def _canonical_geometry_contract(semantic: dict, text: str) -> dict:
-    """Canonical geometry transport contract for all diagram-capable turns.
-
-    Geometry is structured data. Dimensions are optional attributes, never a
-    condition for rendering. The provider may choose the concrete coordinates,
-    but the transport shape is stable for Web/SceneContract.
-    """
-    semantic = _as_dict(semantic)
-    visual_schema = _as_dict(semantic.get('visual_schema'))
-    scene_state = _as_dict(semantic.get('scene_semantic_state'))
-    object_name = _s(semantic.get('best_object') or visual_schema.get('object') or scene_state.get('object')).lower()
-    operation = _s(_as_dict(semantic.get('semantic_task')).get('operation') or semantic.get('best_operation') or semantic.get('operation')).lower()
-    return {'version': 'geometry_contract_v1', 'representation': 'diagram', 'operation': operation or 'create', 'object': object_name, 'dimensions_optional': True, 'dimensions_required_for_rendering': False, 'dimension_values_must_be_explicit': True, 'do_not_invent_unspecified_measurements': True, 'coordinate_system': 'svg_viewbox', 'payload_modes': ['svg', 'elements'], 'element_kinds': ['line', 'polyline', 'polygon', 'rect', 'circle', 'ellipse', 'path', 'text', 'dimension', 'dimension_line', 'arrow', 'label', 'angle', 'arc', 'point'], 'supports': {'open_or_closed_shapes': True, 'composite_figures': True, 'labels': True, 'measurements': True, 'angles': True, 'construction_lines': True}, 'source': 'INTERPRETATION_CANONICAL'}
-
-def _canonical_requested_outputs(text: str, semantic: dict, decision: dict, mode: str) -> tuple[list[str], str]:
-    """Collapse output transport to the semantic production contract.
-
-    One production representation is emitted unless Interpretation explicitly
-    declares a multi-output request. Internal transport/interpretation kinds are
-    never visible outputs.
-    """
-    semantic = _as_dict(semantic)
-    decision = _as_dict(decision)
-    internal = {'interpretation_canonical', 'production_signal', 'signal', 'quantum_signal', 'transport'}
-    aliases = {'markdown': 'text', 'renderer_scene': 'diagram', 'visual': 'diagram', 'chart': 'graph', 'plot': 'graph', 'scene': 'diagram'}
-
-    def clean(values):
-        result = []
-        for raw in _as_list(values):
-            name = aliases.get(_s(raw).lower(), _s(raw).lower())
-            if name and name not in internal and (name not in result):
-                result.append(name)
-        return result
-    canonical = _s(semantic.get('production_representation') or semantic.get('resolved_representation') or semantic.get('requested_representation') or semantic.get('preferred_representation') or decision.get('preferred_representation')).lower()
-    canonical = aliases.get(canonical, canonical)
-    declared = clean(semantic.get('requested_outputs') or semantic.get('required_outputs') or semantic.get('requested_representations') or semantic.get('required_representations'))
-    decision_declared = clean(decision.get('requested_outputs') or decision.get('required_outputs'))
-    multi = []
-    for name in [*declared, *decision_declared]:
-        if name not in multi:
-            multi.append(name)
-    if canonical and canonical not in internal:
-        if canonical in multi and len(multi) > 1:
-            outputs = [canonical] + [x for x in multi if x != canonical]
-        else:
-            outputs = [canonical]
-    elif multi:
-        outputs = multi[:]
-    else:
-        outputs = ['text']
-    return (list(dict.fromkeys(outputs)), canonical or outputs[0])
-
-def _build_processor_control_plane(*, text: str, semantic: dict, cognition: dict, decision: dict, state: dict, dynamic_memory: dict | None=None, memory_understanding: dict | None=None) -> dict:
-    """
-    Build ONE authoritative post-interpretation control plane.
-
-    Authority:
-      dialogue/context -> canonical Interpretation dialogue_contract
-      representation   -> current semantic/decision plan
-      capabilities     -> semantic/cognition union
-      memory           -> already queried dynamic memory
-      presentation     -> produced only after Provider response
-
-    Other engines contribute evidence; this function collapses their compatible
-    signals into one executable state. It does not invent a second route,
-    trigger map, or score-based arbitration.
-    """
-    evidence = _dialogue_evidence(text, semantic, cognition, decision, state)
-    interpretation_packet = _as_dict(semantic.get('quantum_interpretation_evidence'))
-    memory_packet = _as_dict(memory_understanding)
-    memory_reference = _as_dict(memory_packet.get('reference'))
-    memory_dialogue = _as_dict(memory_packet.get('dialogue_context'))
-    memory_scene = _as_dict(memory_packet.get('visual_context'))
-    memory_resolved_request = _s(memory_packet.get('resolved_request'))
-    memory_active = bool(memory_packet.get('active'))
-    memory_continuation = bool(memory_packet.get('continuation'))
-    memory_resolved = bool(memory_reference.get('resolved'))
-    canonical_dialogue = _as_dict(interpretation_packet.get('dialogue_contract') or semantic.get('dialogue_context_field'))
-    mode = _s(evidence.get('mode')).upper() or 'INDEPENDENT'
-    continuation = bool(evidence.get('continuation'))
-    reference_to_previous = bool(evidence.get('reference_to_previous'))
-    context_dependency = bool(evidence.get('context_dependency'))
-    current_visual_scene = _as_dict(_best_visual_context(state))
-    memory_scene_id = _s(memory_scene.get('scene_id'))
-    current_scene_id = _s(current_visual_scene.get('scene_id'))
-    resolved_memory_reference = bool(memory_resolved and memory_scene_id and current_scene_id and (memory_scene_id == current_scene_id) and memory_reference.get('target'))
-    if resolved_memory_reference:
-        mode = 'ARTIFACT_REFERENCE'
-        continuation = True
-        reference_to_previous = True
-        context_dependency = True
-    resolved_scene = _as_dict(canonical_dialogue.get('resolved_scene'))
-    if not (reference_to_previous or continuation):
-        resolved_scene = {}
-    elif reference_to_previous and memory_scene.get('scene_id'):
-        current_scene = _as_dict(state.get('current_visual_scene'))
-        if _s(current_scene.get('scene_id')) == _s(memory_scene.get('scene_id')):
-            resolved_scene = {**resolved_scene, 'scene_id': _s(memory_scene.get('scene_id')), 'relation': 'current_scene', 'source': 'current_visual_scene'}
-    relation = _s(resolved_scene.get('relation'))
-    if not relation:
-        relation = 'current_scene' if continuation or reference_to_previous or mode == 'MEMORY_QUERY' else 'new_topic' if mode == 'NEW_TOPIC' else 'independent'
-    outputs, preferred = _canonical_requested_outputs(text, semantic, decision, mode)
-    representation_state = {'outputs': list(outputs), 'preferred': preferred, 'selection_method': 'interpretation_canonical_production', 'scoring': False, 'triggers': False}
-    outputs, preferred, continuity_representation = _preserve_semantic_visual_representation(text, semantic, mode if mode != 'SAME_TOPIC' else relation, state, outputs, preferred)
-    representation_state['visual_continuity'] = continuity_representation
-    constraints = _representation_constraints(semantic, cognition, decision)
-    topic = _s((memory_reference.get('target') if reference_to_previous else '') or (memory_dialogue.get('active_topic') if reference_to_previous else '') or canonical_dialogue.get('active_topic') or _field((semantic, decision, state), ('active_topic', 'topic', 'current_topic')))
-    goal = _s((memory_resolved_request if reference_to_previous else '') or canonical_dialogue.get('active_goal') or _field((decision, cognition, semantic), ('active_goal', 'resolved_request', 'goal'))) or text
-    capabilities: list[str] = []
-    for source in (semantic, cognition):
-        for key in ('required_capabilities', 'required_domains', 'available_tools'):
-            values = source.get(key, []) if isinstance(source, dict) else []
-            for value in _as_list(values):
-                value = _s(value)
-                if value and value not in capabilities:
-                    capabilities.append(value)
-    control = {'version': 'QUANTUM_CONTROL_PLANE_V1', 'authority': {'dialogue': 'interpretation', 'representation': 'semantic_decision', 'capabilities': 'semantic_cognition', 'memory': 'state_manager', 'production': 'executor_specialized_engines', 'presentation': 'executor_presentation_matrix', 'rendering': 'april_web'}, 'mode': mode, 'relation': relation, 'continuation': continuation, 'reference_to_previous': reference_to_previous, 'context_dependency': context_dependency, 'resolved_scene': resolved_scene, 'active_topic': topic, 'visual_continuity': continuity_representation, 'active_goal': goal, 'dialogue_evidence': evidence, 'requested_outputs': outputs, 'preferred_representation': preferred, 'representation_state': representation_state, 'representation_constraints': constraints, 'geometry_contract': _canonical_geometry_contract(semantic, text) if preferred == 'diagram' or 'diagram' in outputs else {}, 'capabilities': capabilities[:12], 'dynamic_memory': dynamic_memory if isinstance(dynamic_memory, dict) else {}, 'memory_understanding': _quantum_snapshot(memory_understanding or {}), 'resolved_request': memory_resolved_request if reference_to_previous else _s(text), 'resolved_reference': _quantum_snapshot(memory_reference if reference_to_previous else {}), 'single_route': True, 'provider_calls': 1, 'triggers': False, 'score_routing': False}
-    state['_quantum_control_plane'] = _quantum_snapshot(control)
-    semantic['quantum_control_plane'] = _quantum_snapshot(control)
-    return control
-
-def _make_request(text: str, semantic: dict, cognition: dict, decision: dict, state: dict, visual: dict, control: dict | None=None) -> MachineRequest:
-    """Create the single canonical MachineRequest from the processor control plane."""
-    scope = _user_scope(state, state.get('_request_user_id') or state.get('user_id'))
-    control = control or _build_processor_control_plane(text=text, semantic=semantic, cognition=cognition, decision=decision, state=state, dynamic_memory=_as_dict(semantic.get('quantum_dynamic_memory_evidence')))
-    evidence = _as_dict(control.get('dialogue_evidence'))
-    mode = _s(control.get('mode')).upper() or 'INDEPENDENT'
-    dialogue_state = {name: 1.0 if mode == name else 0.0 for name in ('INDEPENDENT', 'NEW_TOPIC', 'SAME_TOPIC', 'CONTINUATION', 'ARTIFACT_REFERENCE', 'MEMORY_QUERY')}
-    coherence = 1.0
-    dialogue_contract_source = _as_dict(_as_dict(semantic.get('quantum_interpretation_evidence')).get('dialogue_contract'))
-    dialogue_contract = {'dialog_act': _s(dialogue_contract_source.get('dialog_act') or _field((semantic, decision, cognition), ('dialog_act', 'dialogue_act'))) or 'statement', 'continuation': bool(control.get('continuation')), 'reference_to_previous': bool(control.get('reference_to_previous')), 'context_dependency': _s(dialogue_contract_source.get('context_dependency')) or ('continuation' if mode == 'CONTINUATION' else 'reference' if mode == 'ARTIFACT_REFERENCE' else 'independent' if mode == 'INDEPENDENT' else 'topic'), 'reply_to': _s(_field((dialogue_contract_source, semantic, decision), ('reply_to', 'previous_turn_id'))), 'previous_user_turn': _s(dialogue_contract_source.get('previous_user_turn') or evidence.get('previous_user')), 'previous_april_turn': _s(dialogue_contract_source.get('previous_april_turn') or evidence.get('previous_april')), 'active_goal': _s(dialogue_contract_source.get('active_goal')) or _s(control.get('active_goal')), 'active_topic': _s(dialogue_contract_source.get('active_topic')) or _s(control.get('active_topic')), 'resolved_scene': _as_dict(dialogue_contract_source.get('resolved_scene')), 'current_request': _s(text)}
-    memory_packet = _as_dict(control.get('memory_understanding'))
-    memory_reference = _as_dict(memory_packet.get('reference'))
-    memory_dialogue = _as_dict(memory_packet.get('dialogue_context'))
-    memory_resolved_request = _s(memory_packet.get('resolved_request'))
-    context = _compact_context(text, state, mode, _s(control.get('active_topic')), _s(control.get('active_goal')))
-    dialogue_evidence = _as_dict(control.get('dialogue_evidence'))
-    previous_scene_user = _s(evidence.get('previous_user'))
-    previous_scene_april = _s(evidence.get('previous_april'))
-    if mode in {'CONTINUATION', 'SAME_TOPIC', 'ARTIFACT_REFERENCE', 'MEMORY_QUERY'}:
-        recent = list(context.get('recent_dialogue', []) or [])
-        if previous_scene_user or previous_scene_april:
-            recent.insert(0, {'user': _clip(previous_scene_user, 700), 'april': _clip(previous_scene_april, 1000), 'source': 'current_visual_scene'})
-        context['recent_dialogue'] = recent[-8:]
-    dynamic_memory_evidence = _as_dict(control.get('dynamic_memory'))
-    complexity = _complexity(semantic, cognition, decision, text)
-    quantum_budget_field = _quantum_64_field(text, semantic, cognition, decision)
-    response_budget = _quantum_budget_from_64(quantum_budget_field)
-    representation_constraints = _as_dict(control.get('representation_constraints'))
-    requested_outputs = list(control.get('requested_outputs') or ['text'])
-    measured_output = _s(control.get('preferred_representation')) or 'text'
-    representation_audit = _representation_audit(requested_outputs=requested_outputs, measured_output=measured_output, constraints=representation_constraints)
-    presentation_plan = {'version': 'quantum_presentation_plan_v2', 'math_mode': 'explicit_math' if measured_output in {'formula', 'math'} or 'formula' in requested_outputs or 'math' in requested_outputs else 'structural', 'promote_math_numbers': bool(measured_output in {'formula', 'math'} or 'formula' in requested_outputs or 'math' in requested_outputs), 'promote_variable_labels': bool(measured_output in {'formula', 'math'} or 'formula' in requested_outputs or 'math' in requested_outputs), 'source': 'QUANTUM_PROCESSOR'}
-    request_metadata = {'processor_version': PROCESSOR_VERSION, 'assistant_identity': deepcopy(APRIL_IDENTITY), 'assistant_identity_name': APRIL_IDENTITY.get('name', 'April'), 'identity_request': bool(semantic.get('identity_request')), 'single_route': True, 'provider_calls_per_request': 1, 'context_mode': mode, 'dialogue_coherence': round(coherence, 4), 'identity_scope': deepcopy(scope), 'control_plane_version': control.get('version')}
-    if isinstance(state, dict):
-        active_flow = state.get('active_flow') if isinstance(state.get('active_flow'), dict) else {}
-        flow_id = state.get('flow_id') or active_flow.get('flow_id')
-        if flow_id:
-            request_metadata['flow_id'] = flow_id
-    request = MachineRequest(goal=_s(control.get('active_goal')) or text, intent={'type': _s(semantic.get('intent')) or ('self_identification' if semantic.get('identity_request') else 'dialogue'), 'normalized_text': _s(text), 'dialogue_state': mode, 'coherence': round(coherence, 4), 'dialog_act': dialogue_contract['dialog_act']}, conversation={'current_request': _s(text), 'dialogue_contract': dialogue_contract, 'dialogue_vector': deepcopy(semantic.get('dialogue_vector') or {}), 'dialogue_delta': deepcopy(semantic.get('dialogue_delta') or {}), 'render_continuity': deepcopy(semantic.get('render_continuity') or {}), 'visual_schema': _s(semantic.get('visual_schema')), 'visual_schema_confidence': float(semantic.get('visual_schema_confidence') or 0.0), 'context_mode': mode, 'context_dependency': bool(control.get('context_dependency')), 'resolved_request': _s(dialogue_contract.get('resolved_request') or dialogue_contract_source.get('resolved_request') or text), 'previous_user_turn': _s(dialogue_contract_source.get('previous_user_turn') or evidence.get('previous_user')), 'previous_april_turn': _s(dialogue_contract_source.get('previous_april_turn') or evidence.get('previous_april')), 'resolved_scene': _as_dict(dialogue_contract.get('resolved_scene') or dialogue_contract_source.get('resolved_scene') or control.get('resolved_scene')), **({'active_topic': _clip(_s(control.get('active_topic')), 300), 'active_goal': _clip(_s(control.get('active_goal')), 500)} if mode != 'INDEPENDENT' else {}), **({'recent_dialogue': context.get('recent_dialogue', [])} if mode in {'CONTINUATION', 'SAME_TOPIC', 'ARTIFACT_REFERENCE', 'MEMORY_QUERY'} or bool(control.get('context_dependency')) else {})}, memory={'active_topic': _clip(_s(control.get('active_topic')), 300), 'active_goal': _clip(_s(control.get('active_goal')), 500), 'active_scene_id': _s(_as_dict(dialogue_evidence.get('scene_continuity')).get('scene_id') or _as_dict(_best_visual_context(state)).get('scene_id')), 'retrieval_mode': 'memory_query' if mode == 'MEMORY_QUERY' else 'semantic', 'dynamic_memory': dynamic_memory_evidence if mode in {'CONTINUATION', 'SAME_TOPIC', 'ARTIFACT_REFERENCE', 'MEMORY_QUERY'} or bool(control.get('reference_to_previous')) else {'available': bool(dynamic_memory_evidence.get('matches'))}} if mode != 'INDEPENDENT' else {'active_scene_id': _s(_as_dict(_best_visual_context(state)).get('scene_id'))}, visual_context=visual if isinstance(visual, dict) and (mode in {'CONTINUATION', 'SAME_TOPIC', 'ARTIFACT_REFERENCE', 'MEMORY_QUERY'} or bool(_best_visual_context(state))) else {}, available_tools=list(control.get('capabilities') or []), requested_outputs=requested_outputs, required_competencies=list(control.get('capabilities') or []), required_artifacts=requested_outputs, routing={'single_route': True, 'processor': PROCESSOR_VERSION, 'measured_state': mode, 'identity_scope': deepcopy(scope)}, constraints={'one_provider_call': True, 'one_visible_answer': True, 'canonical_scene': True, 'dialogue_coherence': round(coherence, 4), 'quantum_state': {'dialogue': dialogue_state, 'representation': control.get('representation_state', {}), 'measured_output': measured_output}, 'provider_input_token_budget': 900, 'provider_context_strategy': 'provider_router_semantic_field_selection', 'current_request_must_remain_intact': True, 'identity_scope': deepcopy(scope), 'presentation_plan': presentation_plan, 'quantum_context_diagnostic': _quantum_snapshot(semantic.get('quantum_context_diagnostic') or {}), 'representation_plan': {'requested_outputs': requested_outputs, 'preferred_representation': measured_output, 'geometry_contract': control.get('geometry_contract', {}) if measured_output == 'diagram' or 'diagram' in requested_outputs else {}, 'visual_schema': _s(semantic.get('visual_schema')), 'visual_schema_confidence': float(semantic.get('visual_schema_confidence') or 0.0), 'dialogue_relation': _s(semantic.get('dialogue_relation')) or 'NEW_TOPIC', 'dialogue_subtype': _s(semantic.get('dialogue_subtype')) or 'NEW_TOPIC', 'avoid_repeat': True, 'constraints': representation_constraints, 'audit': representation_audit, 'current_request_authoritative': True}, 'metadata': request_metadata})
-    request.response_complexity = complexity
-    request.response_output_tokens = response_budget
-    request.max_output_tokens = response_budget
-    request.quantum_state = {'dialogue': dialogue_state, 'representation': control.get('representation_state', {}), 'measured_output': measured_output, 'geometry_contract': control.get('geometry_contract', {}) if measured_output == 'diagram' or 'diagram' in requested_outputs else {}, 'context_dependency': bool(control.get('context_dependency')), 'reference_to_previous': bool(control.get('reference_to_previous')), 'continuation': bool(control.get('continuation')), 'scene_continuity': _quantum_snapshot(control.get('dialogue_evidence', {}).get('scene_continuity', {})), 'evidence_channels': len(evidence), 'coherence': round(coherence, 4), 'response_budget': response_budget, 'response_budget_min': OUTPUT_MIN_TOKENS, 'response_budget_max': OUTPUT_MAX_TOKENS, 'response_budget_mode': 'continuous_64_signal_scale', 'quantum_cores': QUANTUM_CORE_COUNT, 'quantum_lanes': QUANTUM_LANE_COUNT, 'quantum_signal_count': QUANTUM_CORE_COUNT * QUANTUM_LANE_COUNT, 'quantum_budget_field': quantum_budget_field, 'response_budget_logical': True, 'response_budget_compression_ceiling': OUTPUT_MAX_TOKENS, 'control_plane': _quantum_snapshot(control)}
-    request.dialogue_contract = dialogue_contract
-    request.response_decision = decision
-    request.single_route = True
-    request.provider_calls_allowed = 1
-    request.constraints['metadata'].update({'processor_version': PROCESSOR_VERSION, 'visual_context_evidence': bool(visual), 'single_route': True, 'provider_calls_per_request': 1, 'context_mode': mode, 'dialogue_coherence': round(coherence, 4), 'response_budget': response_budget, 'response_budget_min': OUTPUT_MIN_TOKENS, 'response_budget_max': OUTPUT_MAX_TOKENS, 'response_budget_mode': 'continuous_64_signal_scale', 'quantum_cores': QUANTUM_CORE_COUNT, 'quantum_lanes': QUANTUM_LANE_COUNT, 'quantum_signal_count': QUANTUM_CORE_COUNT * QUANTUM_LANE_COUNT, 'quantum_budget_field': quantum_budget_field, 'requested_outputs': requested_outputs, 'identity_scope': deepcopy(scope), 'control_plane': _quantum_snapshot(control), 'presentation_plan': _quantum_snapshot(request.constraints.get('presentation_plan', {})), 'representation_plan': _quantum_snapshot(request.constraints.get('representation_plan', {}))})
-    return request
-
-def _request_metadata(request: MachineRequest) -> dict:
-    constraints = getattr(request, 'constraints', {})
-    if not isinstance(constraints, dict):
-        constraints = {}
-    metadata = constraints.get('metadata', {})
-    if not isinstance(metadata, dict):
-        metadata = {}
-    return metadata
-
-def _repair_machine_json_escapes(text: str) -> str:
-    """Repair only invalid JSON backslashes while preserving real JSON escapes.
-
-    Provider responses sometimes contain JSON-shaped envelopes with LaTeX such
-    as ``\\( ... \\sqrt{...} \\)``. Those backslashes are valid payload text but
-    are not valid JSON escapes unless doubled for the JSON parser. This engine
-    normalizes the transport encoding only; it does not alter the decoded human
-    answer.
-    """
-    return re.sub('\\\\\\\\(?!["\\\\\\\\/bfnrtu])', '\\\\\\\\\\\\\\\\', text)
-
-def _decode_json_envelope(value: Any, *, max_depth: int=5) -> Any:
-    """Recursively unwrap serialized machine envelopes without creating a route.
-
-    The decoder accepts:
-      * normal JSON,
-      * JSON-shaped Provider payloads containing LaTeX backslashes,
-      * Python-literal style dicts using single quotes.
-
-    The repair is transport-level only. It never rewrites the decoded answer.
-    """
-    current = value
-    for _ in range(max_depth):
-        if isinstance(current, MachineResponse):
-            current = {name: getattr(current, name) for name in current.__dataclass_fields__}
-            continue
-        if not isinstance(current, str):
-            break
-        text = current.strip()
-        if not (text.startswith('{') and text.endswith('}')):
-            break
-        parsed = None
-        try:
-            candidate = json.loads(text)
-            if isinstance(candidate, dict):
-                parsed = candidate
-        except Exception:
-            pass
-        if parsed is None:
-            repaired = _repair_machine_json_escapes(text)
-            try:
-                candidate = json.loads(repaired)
-                if isinstance(candidate, dict):
-                    parsed = candidate
-            except Exception:
-                pass
-            if parsed is None:
-                try:
-                    candidate = ast.literal_eval(repaired)
-                    if isinstance(candidate, dict):
-                        parsed = candidate
-                except Exception:
-                    pass
-        if parsed is None:
-            break
-        current = parsed
-    return current
-
-def _clean_text_value(value: Any) -> str:
-    """Return only the final human-readable text from a Provider field."""
-    current = _decode_json_envelope(value)
-    if isinstance(current, dict):
-        for key in ('answer', 'content', 'response', 'text', 'message', 'final_text'):
-            if current.get(key) not in (None, '', [], {}):
-                nested = _decode_json_envelope(current.get(key))
-                if isinstance(nested, str):
-                    return nested.strip()
-                if isinstance(nested, dict):
-                    resolved = _clean_text_value(nested)
-                    if resolved:
-                        return resolved
-        return ''
-    return _s(current)
-
-def _clean_render_blocks(blocks: Any) -> list[dict]:
-    """Decode nested machine envelopes and retain every embedded artifact block."""
-    result: list[dict] = []
-    queue = list(blocks or []) if isinstance(blocks, (list, tuple)) else []
-    while queue:
-        block = queue.pop(0)
-        if not isinstance(block, dict):
-            continue
-        btype = _s(block.get('type') or block.get('artifact_type') or block.get('representation')).lower()
-        content = block.get('content')
-        decoded_content = _decode_json_envelope(content)
-        if isinstance(decoded_content, dict) and any((k in decoded_content for k in ('answer', 'content', 'summary', 'render_blocks', 'blocks', 'artifacts', 'artifacts_payload'))):
-            nested_answer = _clean_text_value(decoded_content.get('answer') or decoded_content.get('content'))
-            if nested_answer:
-                clean_block = dict(block)
-                clean_block['content'] = nested_answer
-                clean_block['text'] = nested_answer
-                clean_block.setdefault('type', 'text')
-                result.append(clean_block)
-            nested = []
-            nested.extend(_as_list(decoded_content.get('render_blocks')))
-            nested.extend(_as_list(decoded_content.get('blocks')))
-            nested.extend(_as_list(decoded_content.get('artifacts')))
-            nested.extend(_as_list(decoded_content.get('artifacts_payload')))
-            if nested:
-                queue = nested + queue
-            continue
-        clean_block = dict(block)
-        if btype in {'text', 'markdown'}:
-            clean_text = _clean_text_value(block.get('content') or block.get('text') or block.get('value'))
-            if clean_text:
-                clean_block['content'] = clean_text
-                clean_block['text'] = clean_text
-        result.append(clean_block)
-    return result
-
-def _promote_embedded_structured_blocks(blocks: list[dict]) -> list[dict]:
-    """Turn structurally explicit URLs into link blocks without keyword routing."""
-    result: list[dict] = []
-    url_re = re.compile('https?://[^\\s)\\]}>,]+', flags=re.I)
-    for block in blocks:
-        if not isinstance(block, dict):
-            continue
-        kind = _s(block.get('type') or block.get('artifact_type') or block.get('representation')).lower()
-        if kind not in {'text', 'markdown'}:
-            result.append(block)
-            continue
-        text = _s(block.get('content') or block.get('text') or block.get('value'))
-        urls = url_re.findall(text)
-        if not urls:
-            result.append(block)
-            continue
-        remaining = text
-        first = True
-        for url in urls:
-            before, sep, after = remaining.partition(url)
-            if before.strip():
-                tb = dict(block)
-                tb['content'] = before.strip()
-                tb['text'] = tb['content']
-                if not first:
-                    tb.pop('block_id', None)
-                result.append(tb)
-            lb = {'type': 'link', 'renderer': 'link', 'viewer': 'link_card', 'payload': {'url': url, 'href': url}, 'scene_contract': True}
-            result.append(lb)
-            remaining = after
-            first = False
-        if remaining.strip():
-            tb = dict(block)
-            tb['content'] = remaining.strip()
-            tb['text'] = tb['content']
-            tb.pop('block_id', None)
-            result.append(tb)
-    return result
-
-def _decode_provider_payload(value: Any) -> dict:
-    """Fully decode the Provider envelope while preserving every structured field.
-
-    The Provider may return:
-      1) a dict,
-      2) a MachineResponse dataclass,
-      3) a JSON string containing either,
-      4) an answer/content field that itself contains another JSON envelope.
-
-    Nested canonical fields must WIN over the outer serialized wrapper.  We
-    therefore merge metadata first and canonical inner fields second, instead
-    of letting the raw outer ``answer`` overwrite the decoded answer.
-    """
-    decoded = _decode_json_envelope(value)
-    if isinstance(decoded, MachineResponse):
-        decoded = {name: getattr(decoded, name) for name in decoded.__dataclass_fields__}
-    if not isinstance(decoded, dict):
-        return {'answer': _clean_text_value(decoded)}
-
-    def merge_nested(base: dict, nested: dict, source_key: str) -> dict:
-        outer = {k: v for k, v in base.items() if k != source_key}
-        merged = {**outer, **nested}
-        for key in ('render_blocks', 'blocks', 'artifacts', 'artifacts_payload', 'scene', 'scene_plan', 'renderer_state', 'metadata', 'active_scene', 'supported_payloads', 'links', 'graph', 'formula', 'table', 'gallery', 'layout', 'visual'):
-            if key not in nested and key in base:
-                merged[key] = base[key]
-        return merged
-    payload = dict(decoded)
-    embedded = _decode_json_envelope(payload.get('machine_response'))
-    if isinstance(embedded, dict):
-        payload = merge_nested(payload, embedded, 'machine_response')
-    for _ in range(4):
-        changed = False
-        for key in ('answer', 'content', 'response', 'payload', 'data'):
-            nested = _decode_json_envelope(payload.get(key))
-            if isinstance(nested, dict) and any((k in nested for k in ('answer', 'content', 'response', 'summary', 'render_blocks', 'artifacts', 'machine_response'))):
-                payload = merge_nested(payload, nested, key)
-                changed = True
-                break
-        if not changed:
-            break
-    payload['render_blocks'] = _clean_render_blocks(payload.get('render_blocks') or payload.get('blocks') or [])
-    if isinstance(payload.get('summary'), str):
-        payload['summary'] = _clean_text_value(payload.get('summary'))
-    answer = _clean_text_value(payload.get('answer')) or _clean_text_value(payload.get('content')) or _clean_text_value(payload.get('response'))
-    if answer:
-        payload['answer'] = answer
-        payload['content'] = answer
-    return payload
-
-def _math_structure_profile(value: Any) -> dict:
-    """Measure mathematical notation structurally for the unified presentation engine.
-
-    Ordinary prose numbers are not promoted to math. Ordered-list markers,
-    dates, counters and other plain numeric prose remain text unless they are
-    part of an explicit/structural mathematical expression.
-    """
-    source = _s(value)
-    if not source:
-        return {'present': False, 'confidence': 0.0, 'ranges': [], 'notation': [], 'operator_density': 0.0, 'measurement_mode': 'structural_notation_matrix', 'lexical_triggers': False}
-    ranges: list[dict] = []
-    notation: list[str] = []
-    occupied: list[tuple[int, int]] = []
-
-    def add_range(start: int, end: int, source_name: str, *, display: bool=False) -> None:
-        start = max(0, int(start))
-        end = min(len(source), int(end))
-        while end > start and source[end - 1].isspace():
-            end -= 1
-        while start < end and source[start].isspace():
-            start += 1
-        if end <= start:
-            return
-        if any((start < b and end > a for a, b in occupied)):
-            return
-        occupied.append((start, end))
-        ranges.append({'start': start, 'end': end, 'kind': 'formula', 'renderer': 'mcdowell', 'engine': 'katex', 'source': source_name, 'display': bool(display)})
-        notation.append(source_name)
-    delimiter_patterns = (('\\\\\\((.+?)\\\\\\)', 'inline_latex', False), ('\\\\\\[(.+?)\\\\\\]', 'display_latex', True), ('\\$\\$(.+?)\\$\\$', 'display_dollar', True), ('(?<!\\$)\\$(?!\\$)(.+?)(?<!\\$)\\$(?!\\$)', 'inline_dollar', False))
-    for pattern, label, display in delimiter_patterns:
-        for match in re.finditer(pattern, source, flags=re.DOTALL):
-            add_range(*match.span(), label, display=display)
-    frac_atom = '\\\\(?:frac|dfrac|tfrac)\\s*\\{[^{}\\n]{1,120}\\}\\s*\\{[^{}\\n]{1,120}\\}'
-    sqrt_atom = '\\\\sqrt\\s*(?:\\[[^\\]\\n]{1,24}\\])?\\s*\\{[^{}\\n]{1,120}\\}'
-    command_atom = '\\\\(?:operatorname|mathrm|text)\\s*\\{[^{}\\n]{1,80}\\}'
-    radical_value = '[A-Za-zА-Яа-яЁёΑ-Ωα-ω0-9_]+(?:[.,]\\d+)?'
-    unicode_sqrt_atom = f'√\\s*(?:\\([^()\\n]{{1,120}}\\)|{radical_value})'
-    unicode_cbrt_atom = f'∛\\s*(?:\\([^()\\n]{{1,120}}\\)|{radical_value})'
-    unicode_qrtrt_atom = f'∜\\s*(?:\\([^()\\n]{{1,120}}\\)|{radical_value})'
-    numeric_atom = '[-+−]?\\d+(?:[.,]\\d+)?(?:[eE][-+−]?\\d+)?'
-    symbol_atom = '[A-Za-zΑ-Ωα-ω]\\w*(?:\\^[-+]?\\d+|[²³⁴⁵⁶⁷⁸⁹])?'
-    paren_atom = '\\([^()\\n]{1,120}\\)'
-    atom = f'(?:{numeric_atom}|{symbol_atom}|{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|{unicode_qrtrt_atom}|{command_atom}|{paren_atom})'
-    operator = '(?:\\\\(?:cdot|times|div|pm|mp|approx|leq|geq|neq|sim|cong|simeq|equiv|to)|[+\\-−*/=<>×÷≈≤≥≠±·])'
-    chain_re = re.compile(f'(?P<expr>{atom}(?:\\s*{operator}\\s*{atom})+)')
-    for match in chain_re.finditer(source):
-        add_range(*match.span('expr'), 'raw_math_structure', display=False)
-    standalone_re = re.compile(f'(?:{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|{unicode_qrtrt_atom})(?:\\s*{operator}\\s*(?:{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|{unicode_qrtrt_atom}|{numeric_atom}|{symbol_atom}|{paren_atom}))*')
-    for match in standalone_re.finditer(source):
-        add_range(*match.span(), 'radical_structure', display=False)
-    relation_re = re.compile(f'(?P<expr>{atom}\\s*(?:=|≈|≃|≅|≤|≥|≠)\\s*{atom}(?:\\s*{operator}\\s*{atom})*)')
-    for match in relation_re.finditer(source):
-        add_range(*match.span('expr'), 'relation_structure', display=False)
-    list_prefixes: list[tuple[int, int]] = []
-    offset = 0
-    for raw_line in source.splitlines(keepends=True):
-        line = raw_line.rstrip('\r\n')
-        m = re.match('^\\s*\\d+[.)]\\s+', line)
-        if m:
-            list_prefixes.append((offset + m.start(), offset + m.end()))
-        offset += len(raw_line)
-    ranges.sort(key=lambda item: (item['start'], item['end']))
-    merged: list[dict] = []
-    for item in ranges:
-        if not merged or item['start'] >= merged[-1]['end']:
-            merged.append(dict(item))
-        elif item['end'] > merged[-1]['end']:
-            merged[-1]['end'] = item['end']
-            merged[-1]['display'] = bool(merged[-1].get('display') or item.get('display'))
-            if item.get('source') not in notation:
-                notation.append(item.get('source', 'structural'))
-    operator_count = len(re.findall('[=≈≃≅≤≥±·×÷/*^_√∛∜]', source))
-    numeric_count = len(re.findall('\\d', source))
-    density = (operator_count + min(numeric_count, 12)) / max(len(source), 1)
-    structural_strength = 0.0
-    if merged:
-        structural_strength = min(1.0, 0.55 + 0.12 * min(len(merged), 3) + min(0.2, density * 6.0))
-    return {'present': bool(merged), 'confidence': round(structural_strength, 6), 'ranges': merged, 'notation': sorted(set((x for x in notation if x))), 'operator_density': round(density, 6), 'measurement_mode': 'structural_notation_matrix', 'lexical_triggers': False, 'numeric_policy': 'structural_only', 'list_numbering_protected': True}
-
-def _math_presentation_policy(request: MachineRequest | None=None) -> dict:
-    """Return one canonical math-display policy for the current turn.
-
-    The policy is derived from the already-collapsed request contract. It never
-    performs lexical routing. In explicit mathematical turns, numbers/units
-    that belong to mathematical expressions are promoted to KaTeX, while
-    ordinary prose remains Markdown.
-    """
-    if request is None:
-        return {'version': 'math_presentation_policy_v2', 'mode': 'structural', 'promote_math_numbers': False, 'promote_variable_labels': False, 'source': 'QUANTUM_PROCESSOR'}
-    qstate = getattr(request, 'quantum_state', {}) or {}
-    rep = qstate.get('representation', {}) if isinstance(qstate, dict) else {}
-    measured = _s(qstate.get('measured_output')) if isinstance(qstate, dict) else ''
-    outputs = list(getattr(request, 'requested_outputs', []) or [])
-    explicit_formula = measured in {'formula', 'math'} or 'formula' in outputs or 'math' in outputs
-    plan = getattr(request, 'constraints', {}) or {}
-    presentation_plan = plan.get('presentation_plan', {}) if isinstance(plan, dict) else {}
-    explicit_numbers = bool(presentation_plan.get('promote_math_numbers') or presentation_plan.get('all_math_numbers'))
-    mode = 'explicit_math' if explicit_formula or explicit_numbers else 'structural'
-    return {'version': 'math_presentation_policy_v2', 'mode': mode, 'promote_math_numbers': bool(explicit_numbers or explicit_formula), 'promote_variable_labels': bool(explicit_numbers or explicit_formula), 'source': 'QUANTUM_PROCESSOR'}
-
-def _math_structure_profile_v2(value: Any, *, policy: dict | None=None) -> dict:
-    """Extended structural math parser for Provider output.
-
-    This is intentionally structure-driven:
-      * explicit TeX delimiters remain authoritative;
-      * relation/assignment/operator chains form one expression;
-      * units attached to numeric expressions remain part of that expression;
-      * explicit math turns can additionally promote standalone numbers and
-        variable labels that are clearly part of assignment/list notation;
-      * ordinary prose is never globally converted to math.
-    """
-    source = _s(value)
-    policy = policy if isinstance(policy, dict) else {}
-    promote_numbers = bool(policy.get('promote_math_numbers'))
-    promote_variables = bool(policy.get('promote_variable_labels'))
-    if not source:
-        return {'present': False, 'confidence': 0.0, 'ranges': [], 'notation': [], 'operator_density': 0.0, 'measurement_mode': 'structural_notation_matrix_v2', 'lexical_triggers': False, 'numeric_policy': 'explicit_math_only', 'math_policy': policy}
-    ranges: list[dict] = []
-    occupied: list[tuple[int, int]] = []
-    notation: list[str] = []
-
-    def overlaps(start: int, end: int) -> bool:
-        return any((start < b and end > a for a, b in occupied))
-
-    def add_range(start: int, end: int, source_name: str, *, display: bool=False) -> None:
-        start = max(0, int(start))
-        end = min(len(source), int(end))
-        while end > start and source[end - 1].isspace():
-            end -= 1
-        while start < end and source[start].isspace():
-            start += 1
-        if end <= start or overlaps(start, end):
-            return
-        occupied.append((start, end))
-        ranges.append({'start': start, 'end': end, 'kind': 'formula', 'renderer': 'mcdowell', 'engine': 'katex', 'source': source_name, 'display': bool(display)})
-        notation.append(source_name)
-    delimiter_patterns = (('\\\\\\((.+?)\\\\\\)', 'inline_latex', False), ('\\\\\\[(.+?)\\\\\\]', 'display_latex', True), ('\\$\\$(.+?)\\$\\$', 'display_dollar', True), ('(?<!\\$)\\$(?!\\$)(.+?)(?<!\\$)\\$(?!\\$)', 'inline_dollar', False))
-    for pattern, label, display in delimiter_patterns:
-        for match in re.finditer(pattern, source, flags=re.DOTALL):
-            add_range(*match.span(), label, display=display)
-    frac_atom = '\\\\(?:frac|dfrac|tfrac)\\s*\\{[^{}\\n]{1,160}\\}\\s*\\{[^{}\\n]{1,160}\\}'
-    sqrt_atom = '\\\\sqrt\\s*(?:\\[[^\\]\\n]{1,24}\\])?\\s*\\{[^{}\\n]{1,160}\\}'
-    command_atom = '\\\\(?:operatorname|mathrm|text)\\s*\\{[^{}\\n]{1,100}\\}'
-    radical_value = '[A-Za-zА-Яа-яЁёΑ-Ωα-ω0-9_]+(?:[.,]\\d+)?'
-    unicode_sqrt_atom = f'√\\s*(?:\\([^()\\n]{{1,160}}\\)|{radical_value})'
-    unicode_cbrt_atom = f'∛\\s*(?:\\([^()\\n]{{1,160}}\\)|{radical_value})'
-    unicode_qrtrt_atom = f'∜\\s*(?:\\([^()\\n]{{1,160}}\\)|{radical_value})'
-    numeric_atom = '[-+−]?\\d+(?:[.,]\\d+)?(?:[eE][-+−]?\\d+)?(?:\\s*(?:[A-Za-zА-Яа-яЁё]{1,6}|%|°))?'
-    symbol_atom = '[A-Za-zΑ-Ωα-ω]\\w*(?:\\^[-+]?\\d+|[²³⁴⁵⁶⁷⁸⁹])?'
-    paren_atom = '\\([^()\\n]{1,160}\\)'
-    atom = f'(?:{numeric_atom}|{symbol_atom}|{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|{unicode_qrtrt_atom}|{command_atom}|{paren_atom})'
-    operator = '(?:\\\\(?:cdot|times|div|pm|mp|approx|leq|geq|neq|sim|cong|simeq|equiv|to)|[+\\-−*/=<>×÷≈≤≥≠±·])'
-    chain_re = re.compile(f'(?P<expr>{atom}(?:\\s*{operator}\\s*{atom})+)')
-    for match in chain_re.finditer(source):
-        add_range(*match.span('expr'), 'raw_math_structure', display=False)
-    relation_re = re.compile(f'(?P<expr>{atom}\\s*(?:=|≈|≃|≅|≤|≥|≠)\\s*{atom}(?:\\s*{operator}\\s*{atom})*)')
-    for match in relation_re.finditer(source):
-        add_range(*match.span('expr'), 'relation_structure', display=False)
-    standalone_re = re.compile(f'(?:{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|{unicode_qrtrt_atom})(?:\\s*{operator}\\s*(?:{frac_atom}|{sqrt_atom}|{unicode_sqrt_atom}|{unicode_cbrt_atom}|{unicode_qrtrt_atom}|{numeric_atom}|{symbol_atom}|{paren_atom}))*')
-    for match in standalone_re.finditer(source):
-        add_range(*match.span(), 'radical_structure', display=False)
-    if promote_numbers or promote_variables:
-        line_offset = 0
-        for raw_line in source.splitlines(keepends=True):
-            line = raw_line.rstrip('\r\n')
-            stripped = line.strip()
-            line_start = line_offset
-            line_end = line_start + len(line)
-            line_offset += len(raw_line)
-            if not stripped:
-                continue
-            line_math = bool(re.search('(?:=|≈|≃|≅|≤|≥|≠|×|÷|\\*|/|\\^|²|³|√|∛|∜|\\\\(?:frac|sqrt|cdot|times|div))', line) or re.match('^\\s*(?:[A-Za-zΑ-Ωα-ω]\\w*|[A-Za-zА-Яа-яЁё]\\w*)\\s*=', line))
-            if not line_math:
-                line_math = bool(promote_variables and re.match('^\\s*[-*+]\\s+\\*\\*[A-Za-zΑ-Ωα-ωА-Яа-яЁё]\\w*(?:\\^[-+]?\\d+|[²³⁴⁵⁶⁷⁸⁹])?\\*\\*\\s*[—-]', line))
-            if not line_math:
-                continue
-            if promote_variables:
-                for match in re.finditer('\\*\\*(?P<var>[A-Za-zΑ-Ωα-ωА-Яа-яЁё]\\w*(?:\\^[-+]?\\d+|[²³⁴⁵⁶⁷⁸⁹])?)\\*\\*', line):
-                    start = line_start + match.start('var')
-                    end = line_start + match.end('var')
-                    add_range(start, end, 'math_variable_label', display=False)
-            if promote_numbers:
-                for match in re.finditer('(?<![\\wА-Яа-яЁё])[-+]?\\d+(?:[.,]\\d+)?(?:\\s*(?:[A-Za-zА-Яа-яЁё]{1,8}|%|°))?(?![\\wА-Яа-яЁё])', line):
-                    start = line_start + match.start()
-                    end = line_start + match.end()
-                    if not overlaps(start, end):
-                        add_range(start, end, 'explicit_math_number', display=False)
-    list_prefixes: list[tuple[int, int]] = []
-    offset = 0
-    for raw_line in source.splitlines(keepends=True):
-        line = raw_line.rstrip('\r\n')
-        m = re.match('^\\s*\\d+[.)]\\s+', line)
-        if m:
-            list_prefixes.append((offset + m.start(), offset + m.end()))
-        offset += len(raw_line)
-    ranges.sort(key=lambda item: (item['start'], item['end']))
-    merged: list[dict] = []
-    for item in ranges:
-        if any((item['start'] >= a and item['end'] <= b for a, b in list_prefixes)):
-            continue
-        if not merged or item['start'] >= merged[-1]['end']:
-            merged.append(dict(item))
-        elif item['end'] > merged[-1]['end']:
-            merged[-1]['end'] = item['end']
-            merged[-1]['display'] = bool(merged[-1].get('display') or item.get('display'))
-            if item.get('source') not in notation:
-                notation.append(item.get('source', 'structural'))
-    operator_count = len(re.findall('[=≈≃≅≤≥±·×÷/*^_√∛∜]', source))
-    numeric_count = len(re.findall('\\d', source))
-    density = (operator_count + min(numeric_count, 16)) / max(len(source), 1)
-    structural_strength = 0.0
-    if merged:
-        structural_strength = min(1.0, 0.55 + 0.11 * min(len(merged), 4) + min(0.24, density * 6.0))
-    return {'present': bool(merged), 'confidence': round(structural_strength, 6), 'ranges': merged, 'notation': sorted(set((x for x in notation if x))), 'operator_density': round(density, 6), 'measurement_mode': 'structural_notation_matrix_v2', 'lexical_triggers': False, 'numeric_policy': 'explicit_math_and_structural', 'math_policy': policy, 'list_numbering_protected': True}
-
-def _math_normalize_provider_fragment(fragment: str) -> str:
-    """Normalize common Provider TeX fragments into stable KaTeX source."""
-    value = _presentation_latex(fragment)
-    value = value.replace('\\text{кг}', '\\mathrm{кг}')
-    value = value.replace('\\text{г}', '\\mathrm{г}')
-    value = value.replace('\\text{м}', '\\mathrm{м}')
-    value = value.replace('\\text{с}', '\\mathrm{с}')
-    value = re.sub('\\\\text\\{([^{}]{1,40})\\}', '\\\\mathrm{\\1}', value)
-    value = value.replace('\\cdot', '\\times')
-    return value
-
-def _canonical_semantic_block_key(block: dict) -> str:
-    """Semantic identity used only to collapse true transport duplicates."""
-    source = _as_dict(block)
-    btype = _s(source.get('type') or source.get('artifact_type') or source.get('representation') or 'text').lower()
-    parts = []
-    for key in ('content', 'text', 'value', 'title', 'description'):
-        val = source.get(key)
-        if isinstance(val, (str, int, float)):
-            normalized = re.sub('\\s+', ' ', _s(val)).strip().lower()
-            if normalized:
-                parts.append(f'{key}:{normalized}')
-    payload = _canonical_block_payload(source)
-    if payload:
-        try:
-            parts.append('payload:' + json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str))
-        except Exception:
-            parts.append('payload:' + repr(payload))
-    return hashlib.sha256((btype + '|' + '|'.join(parts)).encode('utf-8')).hexdigest()
-
-def _canonical_answer_composer(blocks: Any, answer: str='') -> list[dict]:
-    """Compose one logical visible stream from Provider's heterogeneous blocks.
-
-    The composer removes only true duplicates. Distinct blocks are preserved in
-    Provider order and linked under one answer stream.
-    """
-    canonical = _canonicalize_render_stream(blocks)
-    if not canonical and answer:
-        canonical = [{'type': 'text', 'artifact_type': 'text', 'content': answer, 'text': answer, 'renderer': 'TextBlock', 'viewer': 'TextBlock', 'source': 'quantum_processor'}]
-    result: list[dict] = []
-    seen: dict[str, dict] = {}
-    stream_id = hashlib.sha256(_s(answer).encode('utf-8')).hexdigest()[:20] if answer else 'stream'
-    for raw in canonical:
+def _blueprint_indexes(blueprint: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    nodes = {}
+    for raw in _l(blueprint.get("nodes")):
         if not isinstance(raw, dict):
             continue
-        block = dict(raw)
-        semantic_key = _canonical_semantic_block_key(block)
-        existing = seen.get(semantic_key)
-        if existing is not None:
-            existing.setdefault('duplicate_block_ids', [])
-            if block.get('block_id') not in existing['duplicate_block_ids']:
-                existing['duplicate_block_ids'].append(block.get('block_id'))
-            continue
-        seen[semantic_key] = block
-        result.append(block)
-    stream_ids = []
-    for idx, block in enumerate(result):
-        old_id = _s(block.get('block_id'))
-        if not old_id:
-            old_id = f'quantum-block-{idx}'
-        block['block_id'] = old_id
-        block['sequence_index'] = idx
-        stream_ids.append(old_id)
-    for idx, block in enumerate(result):
-        related = list(block.get('related_block_ids') or [])
-        prev_id = stream_ids[idx - 1] if idx > 0 else ''
-        next_id = stream_ids[idx + 1] if idx + 1 < len(stream_ids) else ''
-        for rid in (prev_id, next_id):
-            if rid and rid not in related:
-                related.append(rid)
-        block['related_block_ids'] = related
-        block['presentation_stream'] = {'version': 'quantum_presentation_stream_v2', 'answer_stream_id': stream_id, 'stream_ids': stream_ids, 'source_block_id': block.get('block_id'), 'sequence_index': idx, 'single_visible_stream': True, 'duplicate_blocks_collapsed': bool(block.get('duplicate_block_ids'))}
-    return result
+        node_id = _s(raw.get("block_id") or raw.get("id"))
+        if node_id:
+            nodes[node_id] = dict(raw)
+    order = {}
+    for idx, raw in enumerate(_l(blueprint.get("order"))):
+        key = _s(raw)
+        if key:
+            order[key] = idx
+    return nodes, order
 
-def _ensure_visible_text_block(blocks: Any, answer: str, *, source: str='quantum_processor') -> list[dict]:
-    """Guarantee one canonical human-visible MessageTextBlock in the stream.
 
-    The top-level ``answer`` is the semantic text value; this helper mirrors it
-    into exactly one text render block so every Web-facing representation has a
-    visible textual companion.  Structured renderer blocks remain intact.
-    """
-    canonical = _canonicalize_render_stream(blocks)
-    answer_text = _clean_text_value(answer)
-    text_indexes = []
-    for idx, block in enumerate(canonical):
-        if not isinstance(block, dict):
-            continue
-        kind = _s(block.get('type') or block.get('artifact_type') or block.get('representation') or 'text').lower()
-        if kind in {'text', 'markdown'}:
-            content = _clean_text_value(block.get('content') or block.get('text') or block.get('value'))
-            if content:
-                text_indexes.append((idx, content, block))
-    if text_indexes:
-        first_idx, first_content, first_block = text_indexes[0]
-        if answer_text and first_content != answer_text:
-            first_block['content'] = answer_text
-            first_block['text'] = answer_text
-        first_block['type'] = 'text'
-        first_block['artifact_type'] = 'text'
-        first_block.setdefault('renderer', 'TextBlock')
-        first_block.setdefault('viewer', 'TextBlock')
-        kept = []
-        seen_text = False
-        for block in canonical:
-            kind = _s(block.get('type') or block.get('artifact_type') or block.get('representation') or 'text').lower()
-            if kind in {'text', 'markdown'}:
-                if seen_text:
-                    continue
-                seen_text = True
-            kept.append(block)
-        return kept
-    if not answer_text:
-        return canonical
-    text_block = {'type': 'text', 'artifact_type': 'text', 'content': answer_text, 'text': answer_text, 'renderer': 'TextBlock', 'viewer': 'TextBlock', 'scene_contract': True, 'human_visible': True, 'presentation_role': 'answer', 'source': source}
-    return [text_block, *canonical]
-
-def _quantum_visible_render_policy(blocks: Any, answer: str='', request: MachineRequest | None=None) -> list[dict]:
-    """Collapse Provider output into one canonical human-visible stream.
-
-    ``MessageTextBlock`` is part of the canonical render contract, not a
-    duplicate of ``MachineResponse.answer``.  Specialized renderers are kept
-    alongside the text companion and only internal transport signals are
-    discarded.
-    """
-    source = _canonicalize_render_stream(blocks)
-    requested: list[str] = []
-    if request is not None:
-        requested.extend((_s(value).lower() for value in list(getattr(request, 'requested_outputs', []) or []) if _s(value)))
-        constraints = _as_dict(getattr(request, 'constraints', {}) or {})
-        plan = _as_dict(constraints.get('representation_plan'))
-        requested.extend((_s(value).lower() for value in list(plan.get('requested_outputs', []) or []) if _s(value)))
-        for key in ('preferred_representation', 'measured_output', 'production_representation'):
-            value = _s(plan.get(key)).lower()
-            if value:
-                requested.append(value)
-    aliases = {'markdown': 'text', 'line_chart': 'graph', 'function_plot': 'graph', 'function': 'graph', 'chart': 'graph', 'data_table': 'table', 'galleryblock': 'gallery', 'imageblock': 'image'}
-    requested_set = {aliases.get(item, item) for item in requested if item}
-    internal_kinds = {'production_signal', 'signal', 'quantum_signal', 'transport', 'interpretation_canonical'}
-
-    def kind_of(block: dict) -> str:
-        presentation = _as_dict(block.get('presentation'))
-        raw = _s(block.get('type') or block.get('artifact_type') or block.get('representation') or presentation.get('kind') or 'text').lower()
-        return aliases.get(raw, raw)
-    visible: list[dict] = []
-    for raw in source:
+def _relation_map(blueprint: dict[str, Any]) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for raw in _l(blueprint.get("relations")):
         if not isinstance(raw, dict):
             continue
-        block = dict(raw)
-        kind = kind_of(block)
-        if kind in internal_kinds:
+        source = _s(raw.get("from") or raw.get("source"))
+        target = _s(raw.get("to") or raw.get("target"))
+        if not source or not target:
             continue
-        block['type'] = kind or 'text'
-        if kind in {'markdown', 'text'}:
-            content = _clean_text_value(block.get('content') or block.get('text') or block.get('value'))
-            if content:
-                block['content'] = content
-                block['text'] = content
-            block['human_visible'] = True
-        visible.append(block)
-    structured = [block for block in visible if kind_of(block) not in {'text', 'markdown'}]
-    requested_structured = {item for item in requested_set if item not in {'text', 'production_signal', 'signal', 'quantum_signal', 'transport', 'interpretation_canonical'}}
-    authorized = requested_structured or ({kind_of(structured[0])} if structured else set())
-    chosen: list[dict] = []
-    seen_kinds: set[str] = set()
-    for block in structured:
-        kind = kind_of(block)
-        if kind not in authorized or kind in seen_kinds:
+        result.setdefault(source, []).append(target)
+        result.setdefault(target, [])
+    return result
+
+
+def _content(block: dict[str, Any]) -> str:
+    for key in ("content", "text", "answer", "summary", "display_text"):
+        value = block.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def canonicalize_scene_blocks(
+    blocks: Iterable[Any] | None,
+    *,
+    scene_id: str = "",
+    turn_id: str = "",
+    flow_id: str = "",
+    blueprint: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Normalize and deduplicate blocks without changing their semantics.
+
+    The deduplication key is block identity first and exact canonical payload
+    second. This prevents old repair layers from creating repeated visible
+    nodes while keeping legitimately different renderers of the same scene.
+    """
+    blueprint = _d(blueprint)
+    bp_nodes, bp_order = _blueprint_indexes(blueprint)
+    relation_targets = _relation_map(blueprint)
+
+    normalized: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_signatures: set[str] = set()
+
+    raw_blocks = [b for b in blocks or [] if isinstance(b, dict)]
+    for index, raw in enumerate(raw_blocks):
+        block = deepcopy(raw)
+        block_type = normalize_type(block.get("type") or block.get("artifact_type") or block.get("representation"))
+        block["type"] = block_type
+        block.setdefault("artifact_type", block_type)
+
+        block_id = stable_block_id(scene_id, block, index)
+        bp_node = bp_nodes.get(block_id, {})
+        # Blueprint metadata can enrich presentation but never overwrite a
+        # concrete payload already produced by a room.
+        for key in ("role", "purpose", "parent_block_id", "text_role"):
+            if key not in block and bp_node.get(key) is not None:
+                block[key] = deepcopy(bp_node[key])
+
+        renderer = normalize_renderer(block.get("renderer") or block.get("viewer"), block_type)
+        block["renderer"] = renderer
+        block["viewer"] = _s(block.get("viewer")) or renderer
+        block["block_id"] = block_id
+        block["render_id"] = _s(block.get("render_id")) or stable_render_id(scene_id, block_id, renderer)
+        block["scene_id"] = _s(block.get("scene_id")) or scene_id
+        block["turn_id"] = _s(block.get("turn_id")) or turn_id
+        block["flow_id"] = _s(block.get("flow_id")) or flow_id
+        block["topic_group"] = _s(block.get("topic_group")) or _s(blueprint.get("topic_group"))
+        block["continuation"] = bool(block.get("continuation", blueprint.get("continuation", False)))
+        block["sequence_index"] = bp_order.get(block_id, index)
+        block["scene_contract"] = True
+
+        related = []
+        for value in _l(block.get("related_block_ids")):
+            key = _s(value)
+            if key and key not in related:
+                related.append(key)
+        for value in relation_targets.get(block_id, []):
+            if value and value not in related:
+                related.append(value)
+        block["related_block_ids"] = related
+
+        signature = _fingerprint({
+            "type": block_type,
+            "renderer": renderer,
+            "content": _content(block),
+            "payload": block.get("payload", {}),
+        })
+        if block_id in seen_ids or signature in seen_signatures:
             continue
-        seen_kinds.add(kind)
-        chosen.append(block)
-    existing_text = [block for block in visible if kind_of(block) in {'text', 'markdown'}]
-    combined = existing_text[:1] + chosen
-    return _ensure_visible_text_block(combined, answer)
+        seen_ids.add(block_id)
+        seen_signatures.add(signature)
+        normalized.append(block)
 
-def _finalize_quantum_visible_stream(blocks: Any, answer: str='', request: MachineRequest | None=None) -> list[dict]:
-    """Final canonical visible stream before SceneContract/Web."""
-    collapsed = _quantum_visible_render_policy(blocks, answer=answer, request=request)
-    return _ensure_presentation_signals(collapsed, request=request)
+    normalized.sort(key=lambda item: int(item.get("sequence_index", 0)))
+    for index, block in enumerate(normalized):
+        block["sequence_index"] = index
+    return normalized
 
-def _presentation_latex(fragment: str) -> str:
-    """Convert recognized notation to KaTeX source without changing payload text."""
-    text = _s(fragment)
+
+def ensure_scene_text_block(
+    blocks: Iterable[Any] | None,
+    answer: Any,
+    *,
+    scene_id: str = "",
+    turn_id: str = "",
+    flow_id: str = "",
+    blueprint: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Add the scene's single human text node only when it is genuinely absent.
+
+    This is scene composition, not a renderer fallback: a text node is a normal
+    peer of graph/table/image/etc. and is never used to replace those nodes.
+    """
+    result = canonicalize_scene_blocks(
+        blocks,
+        scene_id=scene_id,
+        turn_id=turn_id,
+        flow_id=flow_id,
+        blueprint=blueprint,
+    )
+    text = _s(answer)
     if not text:
-        return ''
-    if text.startswith('\\(') and text.endswith('\\)'):
-        return text[2:-2].strip()
-    if text.startswith('\\[') and text.endswith('\\]'):
-        return text[2:-2].strip()
-    if text.startswith('$$') and text.endswith('$$'):
-        return text[2:-2].strip()
-    if text.startswith('$') and text.endswith('$'):
-        return text[1:-1].strip()
-    value = text
-    value = re.sub('\\\\begin\\{(?:equation|align|gather)\\*?\\}', '', value)
-    value = re.sub('\\\\end\\{(?:equation|align|gather)\\*?\\}', '', value)
-    value = value.replace('≈', '\\approx')
-    value = value.replace('≃', '\\simeq')
-    value = value.replace('≅', '\\cong')
-    value = value.replace('≤', '\\leq')
-    value = value.replace('≥', '\\geq')
-    value = value.replace('±', '\\pm')
-    value = value.replace('×', '\\times')
-    value = value.replace('÷', '\\div')
-    value = value.replace('−', '-')
-    value = re.sub('√\\s*\\(([^()]{1,96})\\)', lambda m: '\\sqrt{' + m.group(1).strip() + '}', value)
-    value = re.sub('√\\s*([A-Za-zА-Яа-яЁёΑ-Ωα-ω0-9_]+(?:[.]\\d+)?)', lambda m: '\\sqrt{' + m.group(1).strip() + '}', value)
-    value = re.sub('∛\\s*\\(([^()]{1,96})\\)', lambda m: '\\sqrt[3]{' + m.group(1).strip() + '}', value)
-    value = re.sub('∛\\s*([A-Za-zА-Яа-яЁёΑ-Ωα-ω0-9_]+(?:[.]\\d+)?)', lambda m: '\\sqrt[3]{' + m.group(1).strip() + '}', value)
-    value = re.sub('∜\\s*\\(([^()]{1,96})\\)', lambda m: '\\sqrt[4]{' + m.group(1).strip() + '}', value)
-    value = re.sub('∜\\s*([A-Za-zА-Яа-яЁёΑ-Ωα-ω0-9_]+(?:[.]\\d+)?)', lambda m: '\\sqrt[4]{' + m.group(1).strip() + '}', value)
-    return value
+        return result
+    if any(normalize_type(b.get("type")) in TEXT_TYPES and _content(b) for b in result):
+        return result
 
-def _markdown_line_kind(line: str) -> tuple[str, str]:
-    """Classify existing Markdown structure only; never infer from words."""
-    stripped = line.strip()
-    if not stripped:
-        return ('blank', '')
-    if re.match('^#{1,6}\\s+', stripped):
-        return ('heading', stripped)
-    if re.match('^(?:[-*+])\\s+', stripped):
-        return ('list_item', stripped)
-    if re.match('^\\d+[.)]\\s+', stripped):
-        return ('list_item', stripped)
-    if stripped.startswith('>'):
-        return ('quote', stripped[1:].lstrip())
-    if re.match('^(?:---+|\\*\\*\\*+|___+)\\s*$', stripped):
-        return ('divider', stripped)
-    return ('paragraph', line)
+    node = {
+        "type": "text",
+        "artifact_type": "text",
+        "renderer": "MessageTextBlock",
+        "viewer": "MessageTextBlock",
+        "content": text,
+        "text": text,
+        "role": "answer",
+        "scene_id": scene_id,
+        "turn_id": turn_id,
+        "flow_id": flow_id,
+        "topic_group": _s(_d(blueprint).get("topic_group")),
+        "continuation": bool(_d(blueprint).get("continuation", False)),
+        "scene_contract": True,
+    }
+    # Text is first in the scene only when the blueprint does not explicitly
+    # place another node before it.
+    result.insert(0, node)
+    for index, block in enumerate(result):
+        block["sequence_index"] = index
+        block["block_id"] = stable_block_id(scene_id, block, index)
+        block["render_id"] = stable_render_id(scene_id, block["block_id"], _s(block.get("renderer")) or "MessageTextBlock")
+    return result
 
-def _presentation_segments(content: Any, *, math_policy: dict | None=None) -> dict:
-    """Build the canonical McDowell layout while preserving the exact payload.
 
-    McDowell owns text layout. KaTeX owns mathematical spans inside that layout.
-    The function exposes paragraphs/headings/lists/quotes as structural segments
-    and formulas as delegated spans. No second route or rewritten answer is made.
+def build_presentation_contract(
+    *,
+    scene_id: str = "",
+    turn_id: str = "",
+    flow_id: str = "",
+    topic_group: str = "",
+    continuation: bool = False,
+    layout_mode: str = "flow",
+) -> dict[str, Any]:
+    """Describe how Web should lay out the already-decided scene.
+
+    There are no card/fallback routes here. The layout is intentionally
+    adaptive and full-width so a graph, table or image is not squeezed into
+    the dimensions of a text card.
     """
-    source = _s(content)
-    profile = _math_structure_profile_v2(source, policy=math_policy)
-    ranges = list(profile.get('ranges', []) if isinstance(profile, dict) else [])
-    if not source:
-        return {'mode': 'text', 'layout': 'mcdowell_document', 'spans': [], 'segments': [], 'blocks': [], 'analysis': profile, 'renderer': 'mcdowell', 'text_engine': 'mcdowell', 'math_engine': 'katex', 'payload_preserved': True}
-    line_blocks: list[dict] = []
-    offset = 0
-    for raw_line in source.splitlines(keepends=True):
-        line = raw_line.rstrip('\r\n')
-        start = offset
-        end = start + len(line)
-        offset += len(raw_line)
-        kind, value = _markdown_line_kind(line)
-        line_blocks.append({'kind': kind, 'start': start, 'end': end, 'value': value})
-    if not line_blocks:
-        line_blocks = [{'kind': 'paragraph', 'start': 0, 'end': len(source), 'value': source}]
-    spans: list[dict] = []
-    segments: list[dict] = []
-    layout_blocks: list[dict] = []
+    return {
+        "version": PRESENTATION_ENGINE_VERSION,
+        "signal_version": PRESENTATION_SIGNAL_VERSION,
+        "engine": MARKDOWN_ENGINE,
+        "math_engine": MATH_ENGINE,
+        "scene_id": scene_id,
+        "turn_id": turn_id,
+        "flow_id": flow_id,
+        "topic_group": topic_group,
+        "continuation": bool(continuation),
+        "single_response": True,
+        "single_signal": True,
+        "layout": {
+            "mode": layout_mode or "flow",
+            "container": "adaptive_full_width",
+            "frames": False,
+            "cards": False,
+            "allow_wide_visuals": True,
+            "allow_inline_text": True,
+            "preserve_order": True,
+            "preserve_relationships": True,
+        },
+        "markdown": {
+            "engine": MARKDOWN_ENGINE,
+            "gfm": True,
+            "math_parser": "remark-math",
+            "math_renderer": "rehype-katex",
+            "payload_preserved": True,
+        },
+        "answer_render_policy": "render_from_scene_blocks_only",
+        "renderer_selection_owner": "QUANTUM_PROCESSOR",
+    }
 
-    def append_text(start: int, end: int, *, kind: str='text', role: str='text') -> None:
-        if end <= start:
-            return
-        segments.append({'kind': kind, 'start': start, 'end': end, 'role': role, 'renderer': 'mcdowell', 'engine': 'markdown', 'value': source[start:end], 'preserve_payload': True})
-    for block in line_blocks:
-        kind = block['kind']
-        start = block['start']
-        end = block['end']
-        if kind == 'blank':
-            layout_blocks.append({'kind': 'spacer', 'start': start, 'end': end, 'renderer': 'mcdowell', 'engine': 'layout'})
-            continue
-        if kind in {'heading', 'list_item', 'quote', 'divider'}:
-            layout_blocks.append({'kind': kind, 'start': start, 'end': end, 'renderer': 'mcdowell', 'engine': 'markdown', 'value': source[start:end], 'preserve_payload': True})
-        else:
-            layout_blocks.append({'kind': 'paragraph', 'start': start, 'end': end, 'renderer': 'mcdowell', 'engine': 'markdown', 'value': source[start:end], 'preserve_payload': True})
-        local_ranges = [item for item in ranges if int(item['start']) < end and int(item['end']) > start]
-        cursor = start
-        for item in sorted(local_ranges, key=lambda x: (x['start'], x['end'])):
-            item_start = max(start, int(item['start']))
-            item_end = min(end, int(item['end']))
-            if item_end <= item_start:
-                continue
-            if item_start > cursor:
-                append_text(cursor, item_start, kind='text', role=kind)
-            original = source[item_start:item_end]
-            latex = _math_normalize_provider_fragment(original)
-            display = bool(item.get('display'))
-            line_body = source[start:end].strip()
-            formula_body = original.strip()
-            if line_body == formula_body and kind in {'paragraph', 'list_item'}:
-                display = True
-            span = {'start': item_start, 'end': item_end, 'role': 'formula', 'renderer': 'mcdowell', 'engine': 'katex', 'latex': latex, 'value': original, 'display': display, 'preserve_payload': True}
-            spans.append(span)
-            segments.append({'kind': 'formula', 'start': item_start, 'end': item_end, 'role': 'formula', 'renderer': 'mcdowell', 'engine': 'katex', 'latex': latex, 'value': original, 'display': display, 'preserve_payload': True})
-            cursor = max(cursor, item_end)
-        if cursor < end:
-            append_text(cursor, end, kind='text', role=kind)
-    if not segments:
-        append_text(0, len(source))
-    segments.sort(key=lambda x: (int(x.get('start', 0)), int(x.get('end', 0)), x.get('kind', '')))
-    has_formula = bool(spans)
-    has_structured_layout = any((block.get('kind') in {'heading', 'list_item', 'quote', 'divider', 'spacer'} for block in layout_blocks))
-    return {'mode': 'mixed' if has_formula else 'structured' if has_structured_layout else 'text', 'layout': 'mcdowell_document', 'spans': spans, 'segments': segments, 'blocks': layout_blocks, 'analysis': profile, 'renderer': 'mcdowell', 'text_engine': 'mcdowell', 'math_engine': 'katex', 'payload_preserved': True}
 
-def _mcdowell_block_contract(source: dict, segmented: dict) -> dict:
-    """Expose stable presentation metadata for McDowell without a new route."""
-    return {'renderer': 'mcdowell', 'engine': 'presentation_matrix', 'layout': segmented.get('layout', 'mcdowell_document'), 'text_engine': 'mcdowell', 'math_engine': 'katex', 'payload_preserved': True, 'segments': segmented.get('segments', []), 'spans': segmented.get('spans', []), 'blocks': segmented.get('blocks', []), 'source_type': _s(source.get('type') or source.get('artifact_type') or source.get('representation') or 'text').lower()}
+def _presentation_for_block(block: dict[str, Any], scene_presentation: dict[str, Any]) -> dict[str, Any]:
+    block_type = normalize_type(block.get("type"))
+    renderer = normalize_renderer(block.get("renderer"), block_type)
+    return {
+        "version": PRESENTATION_SIGNAL_VERSION,
+        "engine": MARKDOWN_ENGINE,
+        "math_engine": MATH_ENGINE,
+        "kind": block_type,
+        "renderer": renderer,
+        "renderer_authority": "SCENE_CONTRACT",
+        "scene_id": _s(block.get("scene_id")) or _s(scene_presentation.get("scene_id")),
+        "block_id": _s(block.get("block_id")),
+        "render_id": _s(block.get("render_id")),
+        "payload_unchanged": True,
+        "layout_mode": _d(scene_presentation.get("layout")).get("mode", "flow"),
+        "container": "adaptive_full_width",
+    }
 
-def _presentation_payload_contract(source: dict, kind: str) -> dict:
-    """Expose the complete structured payload; never whitelist away renderer data."""
-    raw = _canonical_block_payload(source)
-    payload = _quantum_snapshot(raw) if isinstance(raw, dict) else {}
-    passthrough = {'title', 'label', 'caption', 'description', 'url', 'href', 'x', 'y', 'x_axis', 'y_axis', 'axes', 'series', 'data', 'columns', 'headers', 'rows', 'cells', 'values', 'nodes', 'edges', 'elements', 'items', 'target', 'alt', 'alt_text', 'language', 'source', 'file', 'steps', 'expression', 'equation', 'formula', 'math', 'content', 'text', 'mime', 'duration', 'thumbnail', 'actions', 'parameters', 'path', 'size', 'domain', 'icon'}
-    for key, value in source.items():
-        if key in {'payload', 'presentation', 'metadata'} or value in (None, '', [], {}):
-            continue
-        if key in passthrough and key not in payload:
-            payload[key] = _quantum_snapshot(value)
-    return {'kind': kind, 'payload': payload, 'payload_preserved': True}
 
-def _canonical_block_payload(block: dict) -> dict:
-    """Return the block's canonical structured payload without changing it."""
-    source = _as_dict(block)
-    payload = source.get('payload')
-    if isinstance(payload, dict):
-        return payload
-    artifact = source.get('artifact')
-    if isinstance(artifact, dict):
-        nested = artifact.get('payload')
-        if isinstance(nested, dict):
-            return nested
-        return artifact
-    return {}
-
-def _canonical_block_id(block: dict, index: int) -> str:
-    """Stable identity for one logical renderer block in the single stream."""
-    source = _as_dict(block)
-    payload = _canonical_block_payload(source)
-    explicit = _s(source.get('block_id') or source.get('render_id') or payload.get('block_id'))
-    if explicit:
-        return explicit
-    btype = _s(source.get('type') or source.get('artifact_type') or source.get('representation') or 'text').lower()
-    return f'quantum-{btype}-{index}'
-
-def _payload_fingerprint(block: dict) -> str:
-    """Fingerprint logical payload to prevent artifact/block double rendering."""
-    source = _as_dict(block)
-    payload = _canonical_block_payload(source)
-    btype = _s(source.get('type') or source.get('artifact_type') or source.get('representation') or 'text').lower()
-    normalized = {'type': btype, 'payload': payload}
-    try:
-        return hashlib.sha256(json.dumps(normalized, ensure_ascii=False, sort_keys=True, default=str).encode('utf-8')).hexdigest()
-    except Exception:
-        return hashlib.sha256(repr(normalized).encode('utf-8')).hexdigest()
-
-def _materialize_provider_blocks(payload: dict) -> list[dict]:
-    """Merge Provider render_blocks and artifact collections into one block stream."""
-    candidates: list[dict] = []
-    for block in _as_list(payload.get('render_blocks') or payload.get('blocks')):
-        if isinstance(block, dict):
-            candidates.append(dict(block))
-    for key in ('artifacts', 'artifacts_payload'):
-        for artifact in _as_list(payload.get(key)):
-            if not isinstance(artifact, dict):
-                continue
-            item = dict(artifact)
-            if not item.get('type'):
-                item['type'] = item.get('artifact_type') or item.get('representation') or 'text'
-            candidates.append(item)
-    return candidates
-
-def _canonicalize_render_stream(blocks: Any) -> list[dict]:
-    """Create one canonical visible stream while preserving structured payloads."""
-    if not isinstance(blocks, list):
-        return []
-    result: list[dict] = []
-    by_id: dict[str, dict] = {}
-    by_fp: dict[str, dict] = {}
-    for index, raw in enumerate(blocks):
+def attach_presentation_signals(
+    blocks: Iterable[Any] | None,
+    *,
+    scene_presentation: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Attach presentation metadata once per canonical block."""
+    result = []
+    for raw in blocks or []:
         if not isinstance(raw, dict):
             continue
-        block = dict(raw)
-        block_id = _canonical_block_id(block, index)
-        block['block_id'] = block_id
-        block['sequence_index'] = index
-        fp = _payload_fingerprint(block)
-        existing = by_id.get(block_id) or by_fp.get(fp)
-        if existing is not None:
-            if not _canonical_block_payload(existing) and _canonical_block_payload(block):
-                existing['payload'] = deepcopy(_canonical_block_payload(block))
-            for key in ('title', 'description', 'caption', 'renderer', 'viewer', 'language'):
-                if not existing.get(key) and block.get(key):
-                    existing[key] = block[key]
-            continue
+        block = deepcopy(raw)
+        block["presentation"] = _presentation_for_block(block, scene_presentation)
         result.append(block)
-        by_id[block_id] = block
-        by_fp[fp] = block
-    stream_ids = [b.get('block_id') for b in result]
-    for pos, block in enumerate(result):
-        related = list(block.get('related_block_ids') or [])
-        for idx in (pos - 1, pos + 1):
-            if 0 <= idx < len(result):
-                rid = result[idx].get('block_id')
-                if rid and rid not in related:
-                    related.append(rid)
-        block['related_block_ids'] = related
-        block['presentation_stream'] = {'version': 'quantum_presentation_stream_v2', 'stream_ids': stream_ids, 'source_block_id': block.get('block_id'), 'sequence_index': pos, 'single_visible_stream': True}
     return result
 
-def _formula_values_from_payload(payload: dict) -> list[dict]:
-    """Build KaTeX formula entries from a formula payload, including step arrays."""
-    values: list[dict] = []
-    steps = payload.get('steps') if isinstance(payload, dict) else None
-    if isinstance(steps, list):
-        for step in steps:
-            if not isinstance(step, dict):
-                continue
-            expression = _s(step.get('expression') or step.get('latex') or step.get('formula') or step.get('value'))
-            if expression:
-                values.append({'label': _s(step.get('label') or step.get('title')), 'value': expression, 'latex': _math_normalize_provider_fragment(expression), 'display': True})
-    else:
-        expression = _s(payload.get('formula') or payload.get('equation') or payload.get('expression') or payload.get('math') or payload.get('content')) if isinstance(payload, dict) else ''
-        if expression:
-            values.append({'label': '', 'value': expression, 'latex': _math_normalize_provider_fragment(expression), 'display': True})
-    return values
 
-def _presentation_signal_for_block(block: dict, request: MachineRequest | None=None) -> dict:
-    """Build one canonical signal that tells April Web exactly which engine to use."""
-    source = dict(block or {})
-    payload = _canonical_block_payload(source)
-    kind = _s(source.get('type') or source.get('artifact_type') or source.get('representation') or 'text').lower()
-    kind = {'markdown': 'text', 'plot': 'graph', 'chart': 'graph', 'scene': 'diagram', 'layout': 'diagram', 'visual': 'diagram', 'image': 'gallery', 'media': 'gallery'}.get(kind, kind)
-    math_policy = _math_presentation_policy(request)
-    signal = {'version': 'presentation_signal_v4', 'kind': kind, 'renderer': '', 'engine': '', 'producer': 'QUANTUM_PROCESSOR', 'route': 'canonical', 'preserve_payload': True, 'payload_unchanged': True, 'payload_contract': _presentation_payload_contract(source, kind), 'block_id': _canonical_block_id(source, int(source.get('sequence_index') or 0)), 'sequence_index': int(source.get('sequence_index') or 0), 'related_block_ids': list(source.get('related_block_ids') or []), 'presentation_stream': _quantum_snapshot(source.get('presentation_stream') or {})}
-    meta = source.get('metadata') if isinstance(source.get('metadata'), dict) else {}
-    for name in ('continuation', 'topic_group', 'flow_id', 'render_id', 'scene_id', 'turn_id'):
-        value = source.get(name) or meta.get(name)
-        if value not in (None, ''):
-            signal[name] = _quantum_snapshot(value)
-    if kind == 'text':
-        content = source.get('content') or source.get('text') or source.get('value') or ''
-        segmented = _presentation_segments(content, math_policy=math_policy)
-        signal.update({'kind': 'mixed' if segmented.get('mode') == 'mixed' else 'structured' if segmented.get('mode') == 'structured' else 'text', 'renderer': 'mcdowell', 'engine': 'presentation_matrix', 'text_engine': 'mcdowell', 'formula_engine': 'katex', 'presentation': _mcdowell_block_contract(source, segmented), 'spans': segmented.get('spans', []), 'segments': segmented.get('segments', []), 'blocks': segmented.get('blocks', []), 'analysis': segmented.get('analysis', {}), 'layout': segmented.get('layout', 'mcdowell_document'), 'delegated_segments': bool(segmented.get('spans') or segmented.get('blocks')), 'math_policy': _quantum_snapshot(math_policy)})
-    elif kind == 'formula':
-        formulas = _formula_values_from_payload(payload)
-        value = _s(source.get('content') or source.get('text') or source.get('value'))
-        if not formulas and value:
-            formulas = [{'label': '', 'value': value, 'latex': _math_normalize_provider_fragment(value), 'display': True}]
-        signal.update({'kind': 'formula', 'renderer': 'mcdowell', 'engine': 'katex', 'text_engine': 'mcdowell', 'formula_engine': 'katex', 'layout': 'mcdowell_document', 'presentation': {'enabled': bool(formulas), 'mode': 'formula', 'renderer': 'mcdowell', 'math_engine': 'katex', 'layout': 'mcdowell_document', 'formulas': formulas, 'payload_preserved': True}, 'spans': [{'start': 0, 'end': len(f['value']), 'role': 'formula', 'renderer': 'mcdowell', 'engine': 'katex', 'latex': f['latex'], 'value': f['value'], 'display': bool(f.get('display'))} for f in formulas]})
-    elif kind == 'table':
-        signal.update({'kind': 'table', 'renderer': 'table', 'engine': 'table', 'layout': 'table_document', 'cell_text_engine': 'mcdowell', 'cell_math_engine': 'katex', 'caption_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'artifact_payload': _presentation_payload_contract(source, 'table')})
-    elif kind == 'graph':
-        signal.update({'kind': 'graph', 'renderer': 'graph', 'engine': 'graph', 'layout': 'graph_document', 'label_text_engine': 'mcdowell', 'label_math_engine': 'katex', 'caption_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'axis_text_engine': 'mcdowell', 'axis_math_engine': 'katex', 'artifact_payload': _presentation_payload_contract(source, 'graph')})
-    elif kind == 'diagram':
-        signal.update({'kind': 'diagram', 'renderer': 'diagram', 'engine': 'diagram', 'layout': 'diagram_document', 'label_text_engine': 'mcdowell', 'label_math_engine': 'katex', 'caption_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'artifact_payload': _presentation_payload_contract(source, 'diagram')})
-    elif kind == 'link':
-        signal.update({'kind': 'link', 'renderer': 'link', 'engine': 'link_card', 'layout': 'link_card_document', 'title_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'inline_math_engine': 'katex', 'href_preserved': True, 'artifact_payload': _presentation_payload_contract(source, 'link')})
-    elif kind == 'code':
-        signal.update({'kind': 'code', 'renderer': 'code', 'engine': 'syntax', 'layout': 'code_document', 'caption_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'language': _s(source.get('language') or payload.get('language'))})
-    elif kind == 'gallery':
-        signal.update({'kind': 'gallery', 'renderer': 'gallery', 'engine': 'media', 'layout': 'gallery_document', 'caption_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'artifact_payload': _presentation_payload_contract(source, 'gallery')})
-    elif kind in {'audio', 'video'}:
-        signal.update({'kind': kind, 'renderer': kind, 'engine': 'media', 'layout': f'{kind}_document', 'caption_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'artifact_payload': _presentation_payload_contract(source, kind)})
-    elif kind == 'file':
-        signal.update({'kind': 'file', 'renderer': 'file', 'engine': 'file_card', 'layout': 'file_card_document', 'title_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'artifact_payload': _presentation_payload_contract(source, 'file')})
-    elif kind == 'action':
-        signal.update({'kind': 'action', 'renderer': 'action', 'engine': 'action', 'layout': 'action_document', 'label_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'artifact_payload': _presentation_payload_contract(source, 'action')})
-    elif kind == 'memory':
-        signal.update({'kind': 'memory', 'renderer': 'memory', 'engine': 'memory', 'layout': 'memory_document', 'label_text_engine': 'mcdowell', 'description_text_engine': 'mcdowell', 'artifact_payload': _presentation_payload_contract(source, 'memory')})
-    else:
-        signal.update({'kind': kind, 'renderer': 'mcdowell', 'engine': 'markdown', 'layout': 'mcdowell_document', 'inline_math_engine': 'katex', 'description_text_engine': 'mcdowell', 'artifact_payload': _presentation_payload_contract(source, kind)})
-    signal['math_policy'] = _quantum_snapshot(math_policy)
-    return signal
+def build_scene_presentation(
+    scene: dict[str, Any] | Any,
+    *,
+    blocks: Iterable[Any] | None = None,
+) -> dict[str, Any]:
+    """Build the Web-facing presentation view of one canonical scene."""
+    scene_map = scene if isinstance(scene, dict) else getattr(scene, "__dict__", {})
+    scene_map = _d(scene_map)
+    blueprint = _d(scene_map.get("scene_blueprint") or scene_map.get("blueprint"))
+    metadata = _d(scene_map.get("metadata"))
 
-def _attach_presentation_signals(blocks: Any, request: MachineRequest | None=None) -> list[dict]:
-    enriched: list[dict] = []
-    canonical_blocks = _canonicalize_render_stream(blocks)
-    for block in canonical_blocks if isinstance(canonical_blocks, list) else []:
-        if not isinstance(block, dict):
+    scene_id = _s(scene_map.get("scene_id") or metadata.get("scene_id"))
+    turn_id = _s(scene_map.get("turn_id") or metadata.get("turn_id"))
+    flow_id = _s(scene_map.get("flow_id") or metadata.get("flow_id"))
+    topic_group = _s(scene_map.get("topic_group") or blueprint.get("topic_group") or metadata.get("topic_group"))
+    continuation = bool(scene_map.get("continuation", blueprint.get("continuation", metadata.get("continuation", False))))
+    answer = _s(scene_map.get("answer") or metadata.get("answer"))
+
+    source_blocks = blocks if blocks is not None else scene_map.get("render_blocks") or scene_map.get("blocks") or []
+    canonical_blocks = ensure_scene_text_block(
+        source_blocks,
+        answer,
+        scene_id=scene_id,
+        turn_id=turn_id,
+        flow_id=flow_id,
+        blueprint=blueprint,
+    )
+    presentation = build_presentation_contract(
+        scene_id=scene_id,
+        turn_id=turn_id,
+        flow_id=flow_id,
+        topic_group=topic_group,
+        continuation=continuation,
+        layout_mode=_s(_d(metadata.get("presentation")).get("layout_mode")) or "flow",
+    )
+    presented_blocks = attach_presentation_signals(canonical_blocks, scene_presentation=presentation)
+
+    relations = []
+    for raw in _l(blueprint.get("relations")):
+        if not isinstance(raw, dict):
             continue
-        clean = dict(block)
-        presentation = _presentation_signal_for_block(clean, request=request)
-        clean['presentation'] = presentation
-        enriched.append(clean)
-    return enriched
+        source = _s(raw.get("from") or raw.get("source"))
+        target = _s(raw.get("to") or raw.get("target"))
+        relation = _s(raw.get("relation") or raw.get("type") or "related")
+        if source and target:
+            relations.append({"from": source, "to": target, "relation": relation})
+    if not relations:
+        for block in presented_blocks:
+            for target in _l(block.get("related_block_ids")):
+                if _s(target):
+                    relations.append({"from": _s(block.get("block_id")), "to": _s(target), "relation": "related"})
 
-def _ensure_presentation_signals(blocks: Any, request: MachineRequest | None=None) -> list[dict]:
-    """Recompute the canonical signal from the current block payload.
+    order = [_s(block.get("block_id")) for block in presented_blocks if _s(block.get("block_id"))]
 
-    An existing presentation_signal_v3 is metadata, not an authority. Rebuilding
-    it here prevents stale/partial Provider or persisted signals from bypassing
-    the Quantum Processor's current McDowell/KaTeX and artifact render contract.
-    """
-    result: list[dict] = []
-    canonical_blocks = _canonicalize_render_stream(blocks)
-    for block in canonical_blocks if isinstance(canonical_blocks, list) else []:
-        if not isinstance(block, dict):
-            continue
-        clean = dict(block)
-        clean['presentation'] = _presentation_signal_for_block(clean, request=request)
-        result.append(clean)
-    return result
+    return {
+        "signal_type": "scene",
+        "signal_version": PRESENTATION_SIGNAL_VERSION,
+        "scene_id": scene_id,
+        "turn_id": turn_id,
+        "flow_id": flow_id,
+        "topic_group": topic_group,
+        "continuation": continuation,
+        "single_response": True,
+        "single_signal": True,
+        "answer_render_policy": "render_from_scene_blocks_only",
+        "answer": answer,
+        "blocks": presented_blocks,
+        "render_blocks": presented_blocks,
+        "relations": relations,
+        "order": order,
+        "presentation": presentation,
+    }
 
-def _extract_visual_point_signature(scene: dict[str, Any]) -> list[tuple[str, float]]:
-    """Read structured points from an existing visual graph without semantic guessing."""
-    result: list[tuple[str, float]] = []
-    if not isinstance(scene, dict):
-        return result
-    blocks = scene.get('render_blocks')
-    if not isinstance(blocks, list):
-        return result
-    for block in blocks:
-        if not isinstance(block, dict):
-            continue
-        kind = _s(block.get('type') or block.get('artifact_type') or block.get('representation')).lower()
-        if kind != 'graph':
-            continue
-        payload = block.get('payload') if isinstance(block.get('payload'), dict) else {}
-        series = payload.get('series') if isinstance(payload.get('series'), list) else []
-        x_values = _as_list(_as_dict(payload.get('x_axis')).get('values'))
-        for series_item in series:
-            if not isinstance(series_item, dict):
-                continue
-            points = series_item.get('points')
-            if isinstance(points, list):
-                for point in points:
-                    if isinstance(point, dict):
-                        x = point.get('x')
-                        y = as_f = point.get('y')
-                        try:
-                            y_num = float(y)
-                        except Exception:
-                            continue
-                        if x not in (None, ''):
-                            result.append((_s(x), y_num))
-            values = series_item.get('values')
-            if isinstance(values, list) and x_values:
-                for idx, value in enumerate(values):
-                    if idx >= len(x_values):
-                        break
-                    try:
-                        result.append((_s(x_values[idx]), float(value)))
-                    except Exception:
-                        continue
-    return result
 
-def _structured_payload_relation(current_text: str, previous_scene: dict[str, Any]) -> dict[str, Any]:
-    """Measure whether the current turn contains a materially different explicit data set.
+def build_scene_signal(scene: dict[str, Any] | Any, *, blocks: Iterable[Any] | None = None) -> dict[str, Any]:
+    """Compatibility alias used by the canonical artifact boundary."""
+    return build_scene_presentation(scene, blocks=blocks)
 
-    This is structural evidence, not a lexical trigger. A full new set of explicit
-    label/value pairs outranks an older visual scene when the two data signatures do
-    not substantially overlap. A short update (for example one new point) is left
-    eligible for continuation/reference handling.
-    """
-    current_pairs = _extract_label_value_pairs(current_text)
-    prior_pairs = _extract_visual_point_signature(previous_scene)
-    if len(current_pairs) < 3 or len(prior_pairs) < 3:
-        return {'new_dataset': False, 'current_pair_count': len(current_pairs), 'prior_point_count': len(prior_pairs), 'label_overlap': 0.0, 'value_overlap': 0.0, 'reason': 'insufficient_structured_evidence'}
-    current_map = {str(label).casefold().strip(): float(value) for label, value, _ in current_pairs}
-    prior_map = {str(label).casefold().strip(): float(value) for label, value in prior_pairs}
-    shared = set(current_map) & set(prior_map)
-    label_overlap = len(shared) / max(1, min(len(current_map), len(prior_map)))
-    exact_pairs = sum((1 for key in shared if abs(current_map[key] - prior_map[key]) <= max(1e-09, abs(prior_map[key]) * 1e-09)))
-    value_overlap = exact_pairs / max(1, len(shared)) if shared else 0.0
-    new_dataset = bool(len(current_pairs) >= 3 and (label_overlap < 0.6 or (label_overlap >= 0.6 and value_overlap < 0.6)))
-    return {'new_dataset': new_dataset, 'current_pair_count': len(current_pairs), 'prior_point_count': len(prior_pairs), 'label_overlap': round(label_overlap, 6), 'value_overlap': round(value_overlap, 6), 'reason': 'material_structured_difference' if new_dataset else 'compatible_structured_signature'}
 
-def _apply_new_dataset_dialogue_boundary(interpretation: dict[str, Any], current_text: str, state: dict[str, Any]) -> dict[str, Any]:
-    """Make a materially new explicit data set an authoritative new turn.
+# ---------------------------------------------------------------------------
+# Math / Markdown formatting helpers. They preserve source text; they do not
+# decide whether a formula is semantically required.
+# ---------------------------------------------------------------------------
 
-    Existing continuation/reference machinery remains untouched for compatible or
-    short incremental updates. The override only collapses a demonstrably new
-    structured payload, preventing an older visual scene from contaminating it.
-    """
-    scene = _as_dict(state.get('last_successful_visual_scene') or state.get('active_visual_scene') or state.get('current_visual_scene') or state.get('active_scene_contract'))
-    relation = _structured_payload_relation(current_text, scene)
-    if not relation.get('new_dataset'):
-        return {'applied': False, 'measurement': relation}
-    vector = _as_dict(interpretation.get('dialogue_vector'))
-    vector.update({'relation': 'INDEPENDENT', 'subtype': 'NEW_STRUCTURED_DATASET', 'continuation_score': 0.0, 'independent_score': 1.0, 'relation_strength': 1.0, 'continuation': False, 'reference_to_previous': False, 'delta_mode': 'start', 'avoid_repeat': False, 'reuse_existing_scene': False, 'previous_scene_id': '', 'previous_render_types': [], 'previous_block_ids': [], 'reference_resolution': {'resolved': False, 'target': '', 'confidence': 1.0, 'source': 'QUANTUM_STRUCTURED_PAYLOAD_BOUNDARY'}, 'resolved_reference': '', 'resolved_request': current_text, 'source': 'quantum_structured_payload_boundary_v1', 'decision_owner': 'QUANTUM_PROCESSOR'})
-    interpretation['dialogue_vector'] = vector
-    interpretation['render_continuity'] = {'relation': 'NEW_TOPIC', 'reuse_existing_scene': False, 'previous_scene_id': '', 'previous_render_types': [], 'avoid_repeat': False}
-    interpretation['dialogue_contract'] = {**_as_dict(interpretation.get('dialogue_contract')), 'context_mode': 'INDEPENDENT', 'dialogue_state': 'INDEPENDENT', 'continuation': False, 'reference_to_previous': False, 'context_dependency': 'independent', 'current_request': current_text, 'resolved_request': current_text, 'active_topic': '', 'active_goal': current_text, 'resolved_scene': {}}
-    interpretation['quantum_scene_continuity'] = {**_as_dict(interpretation.get('quantum_scene_continuity')), 'canonical': True, 'mode': 'INDEPENDENT', 'continuation': False, 'reference_to_previous': False, 'dialogue_label': 'independent', 'scene_id': '', 'previous_user': '', 'previous_april': '', 'source': 'QUANTUM_STRUCTURED_PAYLOAD_BOUNDARY', 'structured_payload_relation': relation}
-    return {'applied': True, 'measurement': relation}
+_MATH_SPAN_RE = re.compile(r"(?<!\\)(\\\\\(|\\\\\[|\$\$?|\\begin\{[^}]+\}).*?(?<!\\)(?:\\\\\)|\\\\\]|\$\$?|\\end\{[^}]+\})", re.S)
 
-def _extract_label_value_pairs(text: str) -> list[tuple[str, float, str]]:
-    """Extract explicit label/value pairs from user/provider text structurally."""
-    source = _s(text)
-    if not source:
+
+def normalize_markdown_math(value: Any) -> str:
+    """Preserve TeX delimiters while removing transport-only wrappers."""
+    text = _s(value)
+    if not text:
+        return ""
+    return text.replace("\\r\\n", "\\n").replace("\\x00", "")
+
+
+def split_markdown_segments(value: Any) -> list[dict[str, Any]]:
+    """Return text/math segments for MessageTextBlock without rewriting TeX."""
+    text = normalize_markdown_math(value)
+    if not text:
         return []
-    pairs: list[tuple[str, float, str]] = []
-    month_names = ('январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь')
-    month_pattern = '(?i)\\b(' + '|'.join(month_names) + ')\\b\\s*(?:[—–:-]\\s*)?\\$?\\s*(-?\\d+(?:[.,]\\d+)?)\\s*(%|°\\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?'
-    for match in re.finditer(month_pattern, source):
-        label = match.group(1)
-        try:
-            value = float(match.group(2).replace(',', '.'))
-        except Exception:
-            continue
-        unit = _s(match.group(3))
-        pairs.append((label, value, unit))
-    year_pattern = '\\b((?:19|20)\\d{2})\\b\\s*(?:[—–:-]\\s*)?[$€£]?\\s*(-?\\d+(?:[.,]\\d+)?)\\s*(%|°\\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?'
-    for match in re.finditer(year_pattern, source):
-        label = match.group(1)
-        try:
-            value = float(match.group(2).replace(',', '.'))
-        except Exception:
-            continue
-        unit = _s(match.group(3))
-        pairs.append((label, value, unit))
-    generic_pattern = '(?m)^\\s*(?:[-*•]\\s*)?([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9 _]{1,30}?)\\s*(?:[—–:-])\\s*\\$?\\s*(-?\\d+(?:[.,]\\d+)?)\\s*(%|°\\s*[CF]|[A-Za-zА-Яа-яЁё$€£]+)?\\s*$'
-    for match in re.finditer(generic_pattern, source):
-        label = _s(match.group(1)).strip(' .,;')
-        if not label:
-            continue
-        try:
-            value = float(match.group(2).replace(',', '.'))
-        except Exception:
-            continue
-        unit = _s(match.group(3))
-        candidate = (label, value, unit)
-        if candidate not in pairs:
-            pairs.append(candidate)
-    seen = set()
-    result = []
-    for item in pairs:
-        key = (item[0].casefold(), item[1], item[2].casefold())
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(item)
-    return result[:60]
+    segments = []
+    last = 0
+    for match in _MATH_SPAN_RE.finditer(text):
+        if match.start() > last:
+            segments.append({"kind": "text", "value": text[last:match.start()]})
+        segments.append({"kind": "math", "value": match.group(0)})
+        last = match.end()
+    if last < len(text):
+        segments.append({"kind": "text", "value": text[last:]})
+    return segments or [{"kind": "text", "value": text}]
 
-def _graph_payload_from_pairs(pairs: list[tuple[str, float, str]], *, existing: dict[str, Any] | None=None) -> dict[str, Any]:
-    """Create a canonical graph payload from explicit structured points."""
-    base = deepcopy(existing) if isinstance(existing, dict) else {}
-    if not pairs and (not base):
-        return {}
-    categories = list(base.get('categories') or [])
-    values: list[float] = []
-    series = base.get('series') if isinstance(base.get('series'), list) else []
-    if series and isinstance(series[0], dict):
-        values = [float(v) for v in series[0].get('values') or [] if isinstance(v, (int, float)) or str(v).replace('.', '', 1).replace('-', '', 1).isdigit()]
-    if not categories and isinstance(base.get('points'), list):
-        for point in base['points']:
-            if isinstance(point, (list, tuple)) and len(point) >= 2:
-                categories.append(str(point[0]))
-                try:
-                    values.append(float(point[1]))
-                except Exception:
-                    pass
-    unit = ''
-    for label, value, parsed_unit in pairs:
-        if parsed_unit:
-            unit = parsed_unit
-        if label in categories:
-            idx = categories.index(label)
-            if idx < len(values):
-                values[idx] = value
-            else:
-                while len(values) < idx:
-                    values.append(0.0)
-                values.append(value)
-        else:
-            categories.append(label)
-            values.append(value)
-    if len(categories) != len(values):
-        n = min(len(categories), len(values))
-        categories = categories[:n]
-        values = values[:n]
-    if not categories or not values:
-        return base
-    series_name = 'Значение'
-    if series and isinstance(series[0], dict):
-        series_name = _s(series[0].get('name') or series[0].get('label')) or series_name
-    y_label = _s(base.get('y_label')) or ('Стоимость' if any(('$' in u for _, _, u in pairs)) else 'Значение' if not unit else unit)
-    x_label = _s(base.get('x_label')) or ('Год' if all((re.fullmatch('(?:19|20)\\d{2}', c) for c in categories)) else 'Категория')
-    result = {**base, 'categories': categories, 'series': [{**(series[0] if series and isinstance(series[0], dict) else {}), 'name': series_name, 'values': values}], 'x_label': x_label, 'y_label': y_label, 'markers': bool(base.get('markers', True))}
-    if not result.get('title'):
-        result['title'] = 'Линейный график'
-    return result
 
-def _ensure_quantum_structured_outputs(response: MachineResponse, request: MachineRequest | None) -> MachineResponse:
-    """Enforce typed output consistency before SceneContract release.
-
-    This is a processor invariant, not a topic/word trigger. A declared graph
-    request must result in a graph block when explicit structured data exists
-    in the current request/answer or a valid previous visual artifact.
-    """
-    if request is None:
-        return response
-    requested = {_s(x).lower() for x in list(getattr(request, 'requested_outputs', []) or []) if _s(x)}
-    if 'graph' not in requested:
-        return response
-    blocks = list(getattr(response, 'render_blocks', []) or [])
-    graph_block = next((b for b in blocks if isinstance(b, dict) and _s(b.get('type') or b.get('artifact_type') or b.get('representation')).lower() == 'graph'), None)
-
-    def _usable_graph_payload(payload: Any) -> bool:
-        if not isinstance(payload, dict):
-            return False
-        series = payload.get('series')
-        if isinstance(series, list):
-            x_values = payload.get('x_axis', {}).get('values') if isinstance(payload.get('x_axis'), dict) else []
-            for item in series:
-                if not isinstance(item, dict):
-                    continue
-                points = item.get('points')
-                if isinstance(points, list) and any((isinstance(p, dict) and p.get('x') not in (None, '') and (p.get('y') not in (None, '')) for p in points)):
-                    return True
-                values = item.get('values')
-                if isinstance(values, list) and isinstance(x_values, list) and (min(len(values), len(x_values)) >= 2):
-                    return True
-        table = payload.get('data_table')
-        if isinstance(table, list) and len(table) >= 2:
-            return any((isinstance(row, dict) and len(row) >= 2 for row in table))
-        return False
-    existing_valid = False
-    if isinstance(graph_block, dict):
-        existing_payload = graph_block.get('payload') if isinstance(graph_block.get('payload'), dict) else {}
-        existing_valid = _usable_graph_payload(existing_payload)
-    if graph_block is not None and existing_valid:
-        return response
-    if graph_block is not None and (not existing_valid):
-        blocks = [block for block in blocks if not (isinstance(block, dict) and _s(block.get('type') or block.get('artifact_type') or block.get('representation')).lower() == 'graph')]
-    current_text = _s(request.conversation.get('current_request') if isinstance(request.conversation, dict) else '')
-    answer_text = _s(getattr(response, 'answer', '') or getattr(response, 'content', ''))
-    pairs = _extract_label_value_pairs(current_text)
-    if not pairs:
-        pairs = _extract_label_value_pairs(answer_text)
-    existing_payload = {}
-    visual = getattr(request, 'visual_context', {})
-    contextual_mode = _s((getattr(request, 'dialogue_contract', {}) or {}).get('context_dependency')).lower()
-    allow_previous_visual = bool(contextual_mode not in {'', 'independent', 'none', 'false', '0'})
-    if allow_previous_visual and isinstance(visual, dict):
-        candidate_blocks = visual.get('render_blocks')
-        if isinstance(candidate_blocks, list):
-            for block in candidate_blocks:
-                if not isinstance(block, dict):
-                    continue
-                if _s(block.get('type') or block.get('artifact_type') or block.get('representation')).lower() != 'graph':
-                    continue
-                payload = block.get('payload') if isinstance(block.get('payload'), dict) else {}
-                status = _s(payload.get('status')).lower()
-                if status not in {'unavailable', 'pending_data', 'error', 'incomplete'}:
-                    existing_payload = deepcopy(payload)
-                    break
-    payload = _graph_payload_from_pairs(pairs, existing=existing_payload)
-    if not payload:
-        return response
-    graph = {'type': 'graph', 'artifact_type': 'graph', 'renderer': 'line_chart', 'viewer': 'line_chart', 'content': '', 'text': '', 'payload': payload, 'artifact': {'type': 'graph', 'renderer': 'line_chart', 'viewer': 'chart', 'scene_contract': True, 'payload': deepcopy(payload)}, 'scene_contract': True, 'provider_payload': True, 'canonical_provider_payload': True, 'source': 'QUANTUM_STRUCTURED_OUTPUT_ENGINE'}
-    blocks.append(graph)
-    response.render_blocks = blocks
-    meta = dict(getattr(response, 'metadata', {}) or {})
-    meta['quantum_structured_output_engine'] = {'version': 'V1', 'materialized': ['graph'], 'source': 'explicit_structured_data_and_visual_context', 'natural_language_triggering': False, 'payload_preserved': True}
-    response.metadata = meta
-    return response
-
-def _response(value: Any, request: MachineRequest | None=None) -> MachineResponse:
-    """Decode Provider output and materialize all structured artifacts into one stream."""
-    payload = _decode_provider_payload(value)
-    fields = MachineResponse.__dataclass_fields__
-    allowed = {k: v for k, v in payload.items() if k in fields}
-    answer = _clean_text_value(payload.get('answer') or payload.get('content') or payload.get('response'))
-    blocks = _materialize_provider_blocks(payload)
-    blocks = _promote_embedded_structured_blocks(blocks)
-    if answer and (not any((isinstance(b, dict) and _s(b.get('type') or b.get('artifact_type')).lower() in {'text', 'markdown'} for b in blocks))):
-        blocks.insert(0, {'type': 'text', 'content': answer, 'text': answer, 'renderer': 'TextBlock', 'viewer': 'TextBlock', 'scene_contract': True})
-    blocks = _finalize_quantum_visible_stream(_clean_render_blocks(blocks), answer=answer, request=request)
-    if answer and (not any((isinstance(block, dict) and _s(block.get('type') or block.get('artifact_type')).lower() in {'text', 'markdown'} for block in blocks))):
-        blocks = _ensure_visible_text_block(blocks, answer)
-    allowed['render_blocks'] = blocks
-    if answer:
-        allowed['answer'] = answer
-        allowed['content'] = answer
-    metadata = dict(allowed.get('metadata') or {}) if isinstance(allowed.get('metadata'), dict) else {}
-    metadata['quantum_matrix'] = {'owner': 'QUANTUM_PROCESSOR', 'version': PROCESSOR_VERSION, 'block_types': [_s(b.get('type') or b.get('artifact_type')).lower() for b in blocks if isinstance(b, dict)], 'render_block_count': len(blocks), 'composer_engine': 'quantum_canonical_answer_composer_v2', 'information_preserved': True, 'machine_fields_transport_only': True, 'scoring': False, 'triggers': False}
-    allowed['metadata'] = metadata
-    response = MachineResponse(**allowed)
-    response = _ensure_quantum_structured_outputs(response, request)
-    return response
-
-def _persist_structured_scene_payload(user_id: str, state: dict, contract: Any, render_blocks: list[dict]) -> None:
-    """Persist the canonical structured render payload after state_manager.
-
-    The existing state-manager scene summary intentionally stores a compact
-    inventory and therefore may omit the actual render_blocks payload. The
-    Web-facing scene, however, needs the structured artifact itself available
-    for the *next* semantic turn. This bridge copies only the already-finalized
-    render stream; it does not classify, route, regenerate, or alter payloads.
-
-    Text-only turns are left untouched. For structured turns, the same payload
-    is mirrored into the immediate active scene and the latest durable visual
-    history entry, then persisted through the existing state_manager.
-    """
-    if not isinstance(state, dict) or not isinstance(render_blocks, list):
-        return
-    structured_blocks: list[dict] = []
-    for block in render_blocks:
-        if not isinstance(block, dict):
-            continue
-        kind = _s(block.get('type') or block.get('artifact_type') or block.get('representation')).lower()
-        if kind in {'', 'text', 'markdown'}:
-            continue
-        structured_blocks.append(deepcopy(block))
-    if not structured_blocks:
-        return
-    contract_dict = {}
-    if isinstance(contract, dict):
-        contract_dict = contract
-    elif hasattr(contract, '__dict__'):
-        contract_dict = dict(contract.__dict__)
-    block_types: list[str] = []
-    presentation_types: list[str] = []
-    for block in structured_blocks:
-        kind = _s(block.get('type') or block.get('artifact_type') or block.get('representation')).lower()
-        if kind and kind not in block_types:
-            block_types.append(kind)
-        presentation = block.get('presentation')
-        if isinstance(presentation, dict):
-            pkind = _s(presentation.get('kind') or presentation.get('renderer') or presentation.get('mode')).lower()
-            if pkind and pkind not in presentation_types:
-                presentation_types.append(pkind)
-    scene_payload = {'render_blocks': deepcopy(structured_blocks), 'render_block_types': block_types, 'presentation_types': presentation_types, 'renderer_state': {'block_types': list(block_types), 'presentation_types': list(presentation_types), 'structured_payload_preserved': True, 'source': 'QUANTUM_PROCESSOR'}}
-    for key in ('current_visual_scene', 'active_visual_scene', 'active_visual_scene_turn'):
-        scene = state.get(key)
-        if isinstance(scene, dict):
-            scene.update(deepcopy(scene_payload))
-    active_contract = state.get('active_scene_contract')
-    if isinstance(active_contract, dict):
-        active_contract.update({'render_blocks': deepcopy(structured_blocks), 'blocks': deepcopy(structured_blocks), 'render_block_types': list(block_types), 'presentation_types': list(presentation_types), 'renderer_state': deepcopy(scene_payload['renderer_state']), 'scene_id': _s(active_contract.get('scene_id') or contract_dict.get('scene_id')), 'active_scene': _s(active_contract.get('active_scene') or contract_dict.get('active_scene'))})
-    timeline = state.get('memory_timeline')
-    if isinstance(timeline, dict):
-        day0 = timeline.get('day_0')
-        if isinstance(day0, dict):
-            scenes = day0.get('visual_scenes')
-            if isinstance(scenes, list) and scenes:
-                latest = scenes[-1]
-                if isinstance(latest, dict):
-                    latest.update(deepcopy(scene_payload))
-            state['memory_timeline'] = timeline
-    visual_history = state.get('visual_scene_history')
-    if isinstance(visual_history, list) and visual_history:
-        latest = visual_history[-1]
-        if isinstance(latest, dict):
-            latest.update(deepcopy(scene_payload))
-    try:
-        persist_state(user_id)
-    except Exception:
-        pass
-
-def _canonicalize(user_id: str, response: MachineResponse, state: dict, semantic: dict, cognition: dict, decision: dict, request: MachineRequest, internal_context: bool=False) -> dict:
-    answer = _clean_text_value(response.answer) or _clean_text_value(response.content) or _clean_text_value(response.response)
-    if not answer:
-        raise RuntimeError('Quantum canonicalization blocked: empty MachineResponse answer')
-    decoded_answer = _decode_json_envelope(answer)
-    if isinstance(decoded_answer, dict):
-        answer = _clean_text_value(decoded_answer)
-    answer = _s(answer)
-    if not answer:
-        raise RuntimeError('Quantum canonicalization blocked: decoded answer is empty')
-    response.answer = answer
-    response.content = answer
-    response.summary = _clean_text_value(response.summary)
-    response.render_blocks = _finalize_quantum_visible_stream(_clean_render_blocks(list(getattr(response, 'render_blocks', []) or [])), answer=answer, request=request)
-    response.render_blocks = _ensure_visible_text_block(response.render_blocks, answer)
-    scope = _user_scope(state, user_id)
-    response.metadata = dict(response.metadata or {})
-    response.metadata.update({'processor_version': PROCESSOR_VERSION, 'single_route': True, 'provider_calls_per_request': 1, 'visible_answer_guaranteed': True, 'artifact_preservation': True, 'trigger_routing': False, 'score_routing': False, 'identity_scope': deepcopy(scope)})
-    response.quantum_state = request.quantum_state
-    response.conversation_space = {'identity_scope': deepcopy(scope), 'current_turn': {'user': _s(request.conversation.get('current_request')), 'april': {'answer': answer, 'render_blocks': response.render_blocks, 'artifacts': list(getattr(response, 'artifacts', []) or []), 'summary': response.summary}}}
-    response.executor_semantic = semantic
-    response.executor_cognition = cognition
-    response.executor_response_decision = decision
-    response.render_blocks = _ensure_visible_text_block(response.render_blocks, answer)
-    scene = build_machine_scene(response)
-    provider_blocks = _ensure_visible_text_block(_finalize_quantum_visible_stream(list(getattr(response, 'render_blocks', []) or []), answer=answer, request=request), answer)
-    response.render_blocks = provider_blocks
-    try:
-        scene.blocks = provider_blocks
-        scene.contract.blocks = provider_blocks
-        scene.contract.render_blocks = list(provider_blocks)
-        scene.contract.metadata = dict(scene.contract.metadata or {})
-        scene.contract.metadata['identity_scope'] = deepcopy(scope)
-        scene.contract.metadata['renderer_state'] = {'active_scene': scene.contract.active_scene, 'block_types': [_s(block.get('type') or block.get('artifact_type') or block.get('representation')).lower() for block in provider_blocks if isinstance(block, dict)], 'continuation': bool(request.quantum_state.get('continuation')), 'decision_owner': 'QUANTUM_PROCESSOR', 'single_route': True}
-        if hasattr(scene.contract, 'supported_payloads'):
-            supported = list(getattr(scene.contract, 'supported_payloads', []) or [])
-            for artifact in list(getattr(response, 'artifacts', []) or []):
-                if artifact not in supported:
-                    supported.append(artifact)
-            scene.contract.supported_payloads = supported
-    except Exception:
-        pass
-    contract = build_scene_contract(scene)
-    try:
-        contract.answer = answer
-        contract.content = answer
-        contract.summary = response.summary
-        contract.render_blocks = _ensure_visible_text_block(list(getattr(contract, 'render_blocks', []) or provider_blocks), answer)
-        contract.blocks = list(contract.render_blocks)
-    except Exception:
-        pass
-    render_blocks = _ensure_visible_text_block(list(getattr(contract, 'render_blocks', []) or provider_blocks), answer)
-    try:
-        contract.render_blocks = list(render_blocks)
-        contract.blocks = list(render_blocks)
-    except Exception:
-        pass
-    if not internal_context:
-        update_dialog_context(user_id, semantic)
-    update_scene_context(user_id, contract, current_request=_s(request.conversation.get('current_request')), answer=answer, internal_context=internal_context)
-    _persist_structured_scene_payload(user_id, state, contract, render_blocks)
-    request_meta = _request_metadata(request)
-    stream = [{'block_id': _s(block.get('block_id')), 'type': _s(block.get('type') or block.get('artifact_type') or 'text').lower(), 'sequence_index': int(block.get('sequence_index') or i), 'related_block_ids': list(block.get('related_block_ids') or [])} for i, block in enumerate(render_blocks) if isinstance(block, dict)]
-    try:
-        contract.metadata = dict(contract.metadata or {})
-        contract.metadata['presentation_stream'] = {'version': 'quantum_presentation_stream_v1', 'nodes': stream, 'single_visible_stream': True, 'answer_is_fallback': True}
-    except Exception:
-        pass
-    try:
-        contract.metadata = dict(contract.metadata or {})
-        contract.metadata['quantum_visible_stream_policy'] = {'version': 'quantum_visible_stream_v3', 'single_logical_answer': True, 'visible_block_count': len(render_blocks), 'visible_block_types': [_s(block.get('type') or block.get('artifact_type') or block.get('representation')).lower() for block in render_blocks if isinstance(block, dict)], 'internal_signals_hidden': True, 'structured_outputs_authorized_by_request': True, 'duplicate_renderer_instances_collapsed': True}
-    except Exception:
-        pass
-    return {'transport_contract': 'scene_first', 'provider_contract': 'fiber_v3_quantum', 'machine_request': request, 'machine_response': response, 'machine_scene': scene, 'scene_contract': contract, 'answer': answer, 'content': answer, 'summary': response.summary, 'render_blocks': render_blocks, 'artifacts': list(getattr(response, 'artifacts', []) or []), 'single_route': True, 'provider_calls_per_request': 1, 'quantum_state': request.quantum_state, 'energy_acceleration': request_meta.get('energy_acceleration', {}), 'visible_answer_guaranteed': True, 'artifact_preservation': True, 'identity_scope': deepcopy(scope)}
-
-def _validate_quantum_release(request: MachineRequest) -> None:
-    constraints = getattr(request, 'constraints', {})
-    if not isinstance(constraints, dict):
-        raise RuntimeError('Quantum release blocked: constraints missing')
-    if constraints.get('one_provider_call') is not True:
-        raise RuntimeError('Quantum release blocked: one_provider_call invariant failed')
-    if constraints.get('provider_input_token_budget') != 900:
-        raise RuntimeError('Quantum release blocked: provider input budget invariant failed')
-    response_budget = getattr(request, 'response_output_tokens', 0)
-    if not isinstance(response_budget, int) or not OUTPUT_MIN_TOKENS <= response_budget <= OUTPUT_MAX_TOKENS:
-        raise RuntimeError('Quantum release blocked: adaptive response budget invariant failed')
-    if getattr(request, 'provider_calls_allowed', 1) != 1:
-        raise RuntimeError('Quantum release blocked: provider call count invariant failed')
-    if getattr(request, 'single_route', True) is not True:
-        raise RuntimeError('Quantum release blocked: single_route invariant failed')
-    metadata = constraints.get('metadata')
-    if not isinstance(metadata, dict):
-        raise RuntimeError('Quantum release blocked: metadata bridge missing')
-    identity_scope = metadata.get('identity_scope')
-    if not isinstance(identity_scope, dict) or not identity_scope.get('user_id'):
-        raise RuntimeError('Quantum release blocked: identity scope missing')
-
-async def execute(user_id, chat_id=None, text='', run_with_activity=None, **kwargs):
-    print('🧬 APRIL EXECUTOR BUILD:', PROCESSOR_VERSION)
-    '\n    ONE ROUTE / UNIFIED MATRIX PROCESSOR / ONE COLLAPSE / ONE PROVIDER CALL.\n\n    The ten quantumized modules are not ten routes. They are ten independent\n    evidence lenses feeding one processor field. The processor arbitrates the\n    combined field, creates one MachineRequest, then uses the existing Provider\n    path once and the existing C-Artifact/SceneContract path once.\n    '
-    state = get_state(user_id)
-    state = state if isinstance(state, dict) else {}
-    state['user_id'] = _s(user_id)
-    internal_context = bool(kwargs.get('internal_context') or kwargs.get('internal_turn') or str(kwargs.get('request_source') or '').strip().lower() in {'internal_visual', 'internal_visual_analysis', 'passive_visual_helper'})
-    scope = _user_scope(state, user_id)
-    state['_request_user_id'] = _s(user_id)
-    history = state.get('dialog', []) if isinstance(state.get('dialog'), list) else []
-    active_flow = state.get('active_flow') if isinstance(state.get('active_flow'), dict) else {}
-    dialog_state = state.get('scene_state') if isinstance(state.get('scene_state'), dict) else {}
-    build_deephub_context(user_id, text, state)
-    context_packet = state.get('_executor_context_packet')
-    if not isinstance(context_packet, dict):
-        context_packet = build_executor_context_packet(state)
-    context_evidence = state.get('_machine_context', {}).get('quantum_evidence', {})
-    if not isinstance(context_evidence, dict):
-        context_evidence = {}
-    active_flow = state.get('active_flow') if isinstance(state.get('active_flow'), dict) else {}
-    dialog_state = state.get('scene_state') if isinstance(state.get('scene_state'), dict) else {}
-    history = state.get('dialog', []) if isinstance(state.get('dialog'), list) else []
-    interpretation = interpret_request(text, cognition=state.get('cognition', {}) if isinstance(state.get('cognition'), dict) else {}, semantic={}, history=history, state=state) or {}
-    structured_boundary = _apply_new_dataset_dialogue_boundary(interpretation, text, state)
-    interpretation['quantum_structured_payload_boundary'] = _quantum_snapshot(structured_boundary)
-    scene_continuity = _scene_continuity_engine(text=text, state=state, history=history)
-    if structured_boundary.get('applied'):
-        scene_continuity = {**scene_continuity, 'mode': 'INDEPENDENT', 'continuation': False, 'reference_to_previous': False, 'dialogue_label': 'independent', 'scene_id': '', 'source': 'QUANTUM_STRUCTURED_PAYLOAD_BOUNDARY', 'structured_payload_relation': structured_boundary.get('measurement', {})}
-    interpretation['quantum_scene_continuity'] = _quantum_snapshot(scene_continuity)
-    if isinstance(interpretation.get('dialogue_vector'), dict):
-        interpretation['quantum_dialogue_vector'] = _quantum_snapshot(interpretation['dialogue_vector'])
-        state['_quantum_dialogue_vector'] = _quantum_snapshot(interpretation['dialogue_vector'])
-    field = interpretation.get('quantum_interpretation_field', {})
-    if isinstance(field, dict):
-        dialogue_field = field.get('dialogue')
-        representation_field = field.get('representation')
-        if isinstance(dialogue_field, dict) and isinstance(dialogue_field.get('semantic_measurement'), dict):
-            interpretation['quantum_dialogue_measurement'] = dialogue_field['semantic_measurement']
-        if isinstance(representation_field, dict):
-            interpretation['quantum_representation_measurement'] = representation_field
-    semantic = semantic_analyze(text=text, state=state, history=history, active_flow=active_flow, dialog_state=dialog_state, interpreted=interpretation) or {}
-    reasoning = build_reasoning_state(text=text, semantic=semantic, state=state)
-    cognition = analyze_cognition(text=text, semantic=semantic, reasoning=reasoning, state=state) or {}
-    interpretation['cognition'] = _quantum_snapshot(cognition)
-    _merge_evidence_fields(semantic, (interpretation,))
-    semantic['quantum_interpretation_evidence'] = interpretation
-    if isinstance(interpretation.get('quantum_representation_measurement'), dict):
-        semantic['quantum_representation_measurement'] = _quantum_snapshot(interpretation['quantum_representation_measurement'])
-    if isinstance(interpretation.get('quantum_dialogue_measurement'), dict):
-        semantic['quantum_dialogue_measurement'] = _quantum_snapshot(interpretation['quantum_dialogue_measurement'])
-    intent = detect_intent(text, state) or {}
-    intent_ai = await detect_intent_ai(text, state)
-    intent_ai = intent_ai if isinstance(intent_ai, dict) else {}
-    resolver = resolve_input(history, state) or {}
-    focus_intent = build_focus_intent_state(text, state) or {}
-    intent_ai['provider_calls'] = 0
-    intent_ai['decision_owner'] = 'QUANTUM_PROCESSOR'
-    _merge_evidence_fields(semantic, (intent, intent_ai, resolver))
-    semantic['quantum_intent_evidence'] = {'intent_system': intent, 'intent_ai': intent_ai, 'intent_resolver': resolver, 'focus': focus_intent}
-    router_context = {'semantic': semantic, 'cognition': cognition, 'reasoning': reasoning, 'response_decision': {}, 'visual_reference': {}, 'state': state, 'quantum_evidence': {'context': context_evidence, 'interpretation': interpretation, 'intent': intent, 'intent_ai': intent_ai, 'resolver': resolver}}
-    router_hint = await route_request(text, router_context)
-    router_evidence = semantic.get('quantum_router_evidence', {})
-    if not isinstance(router_evidence, dict):
-        router_evidence = {}
-    router_system = decide_action(text, history) or {}
-    _merge_evidence_fields(semantic, (router_evidence, router_system))
-    semantic['quantum_router_evidence'] = {'router': router_evidence, 'router_system': router_system, 'compatibility_hint': router_hint}
-    visual = build_visual_reference(semantic=semantic, cognition=cognition, text=text, state=state) or {}
-    experience = build_experience_evidence(text=text, state=state) or {}
-    experience_manager_state = get_experience(user_id) or {}
-    experience_manager_evidence = {'user_id': _s(experience_manager_state.get('user_id') or user_id), 'latest': _quantum_snapshot(experience_manager_state.get('latest', {})), 'has_experience': bool(experience_manager_state.get('events')), 'temporary': True, 'machine_only': True, 'decision_owner': 'QUANTUM_PROCESSOR', 'provider_calls': 0}
-    goal_evidence = build_goal_evidence(text=text, state=state, semantic=semantic) or {}
-    decision = build_response_decision(semantic=semantic, cognition=cognition, state=state, visual_reference=visual) or {}
-    retrieval_mode = 'memory_query' if _s(interpretation.get('dialog_act')).lower() == 'memory_query' else 'semantic'
-    dynamic_memory = query_dynamic_memory(user_id, text, limit=8, retrieval_mode=retrieval_mode)
-    if not isinstance(dynamic_memory, dict):
-        dynamic_memory = {}
-    semantic['quantum_dynamic_memory_evidence'] = _quantum_snapshot(dynamic_memory)
-    semantic['dynamic_memory_available'] = bool(dynamic_memory.get('matches'))
-    previous_pair_evidence = _dialogue_evidence(text, semantic, cognition, decision, state)
-    previous_user = _s(previous_pair_evidence.get('previous_user') or state.get('last_user_turn'))
-    previous_april = _s(previous_pair_evidence.get('previous_april') or state.get('last_april_turn'))
-    visual_scene = _as_dict(_best_visual_context(state))
-    memory_understanding = QUANTUM_MEMORY_UNDERSTANDING_ENGINE.analyze(text, previous_user=previous_user, previous_assistant=previous_april, active_topic=_s(state.get('active_topic') or state.get('current_topic')), active_goal=_s(state.get('active_goal')), visual_scene=visual_scene, dialog_history=history, dynamic_memory={**dynamic_memory, 'memory_timeline': state.get('memory_timeline', {})}, dialogue_measurement=_as_dict(interpretation.get('dialogue_vector')), semantic_profile=_as_dict(semantic.get('semantic_profile') or {}), visual_reference=_as_dict(visual)) or {}
-    semantic['memory_understanding'] = _quantum_snapshot(memory_understanding)
-    semantic['quantum_memory_understanding'] = _quantum_snapshot(memory_understanding)
-    state['_quantum_memory_understanding'] = _quantum_snapshot(memory_understanding)
-    memory_vector = _as_dict(interpretation.get('dialogue_vector'))
-    canonical_reference = bool(memory_vector.get('reference_to_previous')) or _s(memory_vector.get('request_relation')).upper() == 'ARTIFACT_REFERENCE'
-    canonical_continuation = bool(memory_vector.get('continuation')) or _s(memory_vector.get('relation')).upper() in {'CONTINUE_TOPIC', 'CONTINUATION'}
-    memory_application = {'applied': bool(memory_understanding.get('active') and (canonical_reference or canonical_continuation)), 'mode': 'reference' if canonical_reference else 'continuation' if canonical_continuation else 'evidence_only', 'current_interpretation_authoritative': True, 'mutated_interpretation': False, 'resolved_request_source': 'interpretation' if not canonical_reference else 'memory_reference', 'scene_source': 'current_visual_scene_only' if canonical_reference else 'none'}
-    semantic['quantum_memory_application'] = _quantum_snapshot(memory_application)
-    print('🧠 QUANTUM MEMORY UNDERSTANDING:', {'active': bool(memory_understanding.get('active')), 'relation': _s(memory_understanding.get('relation')), 'target': _s(_as_dict(memory_understanding.get('reference')).get('target')), 'confidence': float(_as_dict(memory_understanding.get('reference')).get('confidence', 0.0) or 0.0), 'scene_id': _s(_as_dict(memory_understanding.get('visual_context')).get('scene_id'))})
-    memory_diag = _quantum_context_diagnostic(text=text, semantic=semantic, decision=decision, dialogue_evidence=previous_pair_evidence, memory_understanding=memory_understanding, state=state)
-    semantic['quantum_context_diagnostic'] = memory_diag
-    print('🧭 QUANTUM CONTEXT DIAGNOSTIC:', memory_diag)
-    control_plane = _build_processor_control_plane(text=text, semantic=semantic, cognition=cognition, decision=decision, state=state, dynamic_memory=dynamic_memory, memory_understanding=memory_understanding)
-    print('🧠 QUANTUM MEMORY MATRIX:', {'window': dynamic_memory.get('window_days'), 'matches': len(dynamic_memory.get('matches', []) or []), 'matrix_version': dynamic_memory.get('matrix_version'), 'decision_owner': 'QUANTUM_PROCESSOR', 'memory_role': 'evidence_only'})
-    state['_turn_dialogue_relation'] = {'relation': _s(control_plane.get('relation')), 'scene_id': _s(_as_dict(control_plane.get('resolved_scene')).get('scene_id')), 'continuation': bool(control_plane.get('continuation')), 'reference_to_previous': bool(control_plane.get('reference_to_previous')), 'same_scene': bool(control_plane.get('relation') == 'current_scene' and _as_dict(control_plane.get('resolved_scene')).get('scene_id')), 'context_dependency': bool(control_plane.get('context_dependency'))}
-    processor_context = build_processor_execution_context({'state': state, 'context': context_evidence, 'semantic': semantic, 'cognition': cognition, 'interpretation': interpretation, 'intent': intent, 'intent_ai': intent_ai, 'resolver': resolver, 'router': router_evidence, 'router_system': router_system, 'decision': decision, 'experience': experience, 'experience_manager': experience_manager_evidence, 'goal': goal_evidence, 'visual_reference': visual, 'dynamic_memory': dynamic_memory, 'memory_understanding': memory_understanding, 'control_plane': control_plane})
-    quantum_field = _build_quantum_field(user_id=user_id, text=text, state=state, context=context_evidence, interpretation=interpretation, semantic=semantic, cognition=cognition, intent=intent, intent_ai=intent_ai, resolver={**resolver, 'focus': focus_intent}, router=router_evidence, router_system=router_system, decision=decision, experience=experience, experience_manager=experience_manager_evidence, goal=goal_evidence, visual_reference=visual, memory_understanding=memory_understanding)
-    detached_quantum_field = _quantum_snapshot(quantum_field)
-    state['_quantum_evidence_field'] = detached_quantum_field
-    state['_quantum_processor_context'] = _quantum_snapshot(processor_context)
-    semantic['quantum_evidence_field'] = _quantum_snapshot(quantum_field)
-    semantic['processor_context'] = _quantum_snapshot(processor_context)
-    semantic['decision_owner'] = 'QUANTUM_PROCESSOR'
-    semantic['provider_calls'] = 0
-    semantic['parallel_route'] = False
-    semantic['quantum_processor_version'] = PROCESSOR_VERSION
-    semantic['semantic_decision_owner'] = 'QUANTUM_PROCESSOR'
-    request = _make_request(text, semantic, cognition, decision, state, visual, control=control_plane)
-    request.quantum_state['evidence_channels'] = 15
-    request.quantum_state['evidence_field'] = quantum_field
-    request_meta = _request_metadata(request)
-    request_meta.update({'dynamic_memory_available': bool(dynamic_memory.get('matches')), 'dynamic_memory_match_count': len(dynamic_memory.get('matches') or []), 'quantum_evidence_channels': 15, 'quantum_evidence_field_version': PROCESSOR_VERSION, 'provider_calls_per_request': 1, 'single_route': True, 'requested_outputs': list(request.requested_outputs), 'dialogue_vector': _quantum_snapshot(interpretation.get('dialogue_vector', {})), 'dialogue_delta': _quantum_snapshot(interpretation.get('dialogue_delta', {})), 'render_continuity': _quantum_snapshot(interpretation.get('render_continuity', {})), 'representation_plan': _quantum_snapshot(request.constraints.get('representation_plan', {})), 'representation_audit': _quantum_snapshot(request.constraints.get('representation_plan', {}).get('audit', {})), 'processor_context': processor_context, 'memory_understanding': _quantum_snapshot(memory_understanding), 'quantum_context_diagnostic': _quantum_snapshot(semantic.get('quantum_context_diagnostic') or {})})
-    request.constraints['metadata'] = request_meta
-    energy_profile = build_quantum_acceleration_profile(user_id, flow_id=(state.get('flow_id') if isinstance(state, dict) else '') or '', semantic=semantic, cognition=cognition, decision=decision, state=state, outputs=request.requested_outputs, visual=visual)
-    request = apply_quantum_acceleration(request, energy_profile)
-    acceleration_check = validate_quantum_acceleration(request, energy_profile)
-    if not acceleration_check.get('ok'):
-        raise RuntimeError('Quantum energy acceleration invariant failed')
-    _validate_quantum_release(request)
-    representation_plan = request.constraints.get('representation_plan', {})
-    requested_outputs = list(getattr(request, 'requested_outputs', []) or [])
-    if representation_plan.get('current_request_authoritative') is not True:
-        raise RuntimeError('Quantum release blocked: representation authority invariant failed')
-    blocked_outputs = set((representation_plan.get('constraints') or {}).get('negative', []) or [])
-    if any((output in blocked_outputs for output in requested_outputs)):
-        raise RuntimeError('Quantum release blocked: contradictory representation plan')
-    quantum_budget_field = (getattr(request, 'quantum_state', {}) or {}).get('quantum_budget_field', {})
-    if not isinstance(quantum_budget_field, dict):
-        raise RuntimeError('Quantum release blocked: canonical 64-signal budget field missing')
-    request.constraints.setdefault('metadata', {})['quantum_release_audit'] = {'evidence_channels': 15, 'decision_owner': 'QUANTUM_PROCESSOR', 'single_route': True, 'provider_calls': 1, 'response_budget': getattr(request, 'response_output_tokens', 0), 'response_budget_range': [OUTPUT_MIN_TOKENS, OUTPUT_MAX_TOKENS], 'response_budget_canonical': True, 'quantum_cores': 8, 'quantum_lanes_per_core': 8, 'quantum_signal_count': 64, 'response_budget_mode': 'continuous_64_signal_scale', 'input_budget': 900, 'input_budget_mode': 'logical_compaction', 'quantum_semantic_engines': ['spacy_linguistic', 'sentence_transformers_embedding', 'transformers_nli', 'context_vector_fusion'], 'word_trigger_routing': False, 'fallback_semantics': False, 'quantum_budget_field': quantum_budget_field, 'experience': True, 'experience_manager': True, 'goal_engine': True, 'visual_reference_system': True, 'control_plane_version': control_plane.get('version'), 'control_plane_single_route': bool(control_plane.get('single_route'))}
-    provider_result = await generate_text(request, max_output_tokens=request.response_output_tokens)
-    response = _response(provider_result, request)
-    requested_structured = [_s(x).lower() for x in list(getattr(request, 'requested_outputs', []) or []) if _s(x).lower() not in {'', 'text', 'markdown', 'production_signal'}]
-    delivered_types = [_s(b.get('type') or b.get('artifact_type') or b.get('representation')).lower() for b in list(getattr(response, 'render_blocks', []) or []) if isinstance(b, dict)]
-    print('🧭 QUANTUM OUTPUT PREFLIGHT:', {'requested_structured': requested_structured, 'delivered_types': delivered_types, 'missing': [x for x in requested_structured if x not in delivered_types], 'processor_repair': bool(requested_structured and any((x not in delivered_types for x in requested_structured)))})
-    presentation_blocks = []
-    for block in list(getattr(response, 'render_blocks', []) or []):
-        if isinstance(block, dict):
-            presentation = block.get('presentation')
-            if isinstance(presentation, dict):
-                presentation_blocks.append({'type': _s(block.get('type') or block.get('artifact_type') or 'text'), 'kind': _s(presentation.get('kind')), 'renderer': _s(presentation.get('renderer')), 'engine': _s(presentation.get('engine')), 'spans': len(presentation.get('spans') or []), 'segments': len(presentation.get('segments') or []), 'math_engine': _s(presentation.get('math_engine') or presentation.get('formula_engine')), 'payload_unchanged': bool(presentation.get('payload_unchanged', False))})
-    request.constraints.setdefault('metadata', {})['presentation_matrix_audit'] = {'version': 'presentation_signal_v3', 'decision_owner': 'QUANTUM_PROCESSOR', 'math_engine_version': 'quantum_math_structure_engine_v2', 'composer_engine_version': 'quantum_canonical_answer_composer_v1', 'blocks': presentation_blocks, 'signal_count': len(presentation_blocks), 'payload_preserved': True}
-    response.render_blocks = _ensure_visible_text_block(list(getattr(response, 'render_blocks', []) or []), _s(response.answer or response.content or response.response))
-    if _s(response.answer or response.content or response.response) and (not any((isinstance(block, dict) and _s(block.get('type') or block.get('artifact_type')).lower() in {'text', 'markdown'} for block in response.render_blocks))):
-        raise RuntimeError('Quantum release blocked: MessageTextBlock invariant failed')
-    request.constraints.setdefault('metadata', {})['visible_answer_audit'] = {'answer_present': bool(_s(response.answer) or _s(response.content) or _s(response.response)), 'render_blocks_before_canonicalize': len(getattr(response, 'render_blocks', []) or []), 'artifacts_preserved': len(getattr(response, 'artifacts', []) or []), 'text_block_guaranteed': any((isinstance(block, dict) and _s(block.get('type') or block.get('artifact_type')).lower() in {'text', 'markdown'} for block in getattr(response, 'render_blocks', []) or []))}
-    return _canonicalize(user_id, response, state, semantic, cognition, decision, request, internal_context=internal_context)
+__all__ = [
+    "APRIL_FILE_ID",
+    "PRESENTATION_ENGINE_VERSION",
+    "PRESENTATION_SIGNAL_VERSION",
+    "canonicalize_scene_blocks",
+    "ensure_scene_text_block",
+    "build_presentation_contract",
+    "attach_presentation_signals",
+    "build_scene_presentation",
+    "build_scene_signal",
+    "normalize_markdown_math",
+    "split_markdown_segments",
+    "stable_block_id",
+    "stable_render_id",
+]
