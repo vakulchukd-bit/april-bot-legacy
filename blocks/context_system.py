@@ -197,6 +197,48 @@ def _state_dict(state: Any) -> Dict[str, Any]:
 def _dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
+def _active_scene_evidence(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Return active-scene evidence without deciding continuity or renderers."""
+    state = _state_dict(state)
+    scene = _dict(state.get("scene_state") or state.get("active_scene"))
+    blueprint = _dict(
+        state.get("scene_blueprint")
+        or scene.get("scene_blueprint")
+        or _dict(state.get("active_scene")).get("scene_blueprint")
+    )
+    return {
+        "scene_id": normalize_text(
+            blueprint.get("scene_id")
+            or scene.get("active_scene_id")
+            or scene.get("scene_id")
+        ),
+        "topic_group": normalize_text(
+            blueprint.get("topic_group")
+            or scene.get("active_topic")
+            or scene.get("trajectory")
+        ),
+        "goal": safe_slice(
+            blueprint.get("goal")
+            or scene.get("goal")
+            or scene.get("active_goal"),
+            MAX_GOAL_LENGTH,
+        ),
+        "representations": list(blueprint.get("representations") or [])[:12],
+        "nodes": list(blueprint.get("nodes") or [])[:24],
+        "relations": list(blueprint.get("relations") or [])[:32],
+        "order": [
+            normalize_text(x)
+            for x in list(
+                blueprint.get("order")
+                or blueprint.get("representation_order")
+                or []
+            )[:24]
+            if normalize_text(x)
+        ],
+        "one_scene": bool(blueprint),
+    }
+
+
 def build_scene_focus_snapshot(state: Dict[str, Any]) -> Dict[str, Any]:
     scene = _dict(state.get("active_scene") or state.get("scene_state"))
     return {
@@ -244,6 +286,11 @@ def build_machine_context_payload(
         "trajectory": trajectory,
         "scene_state": scene,
         "active_flow": _dict(active_flow),
+        "scene_evidence": _active_scene_evidence({
+            "scene_state": scene,
+            "active_scene": scene,
+            "scene_blueprint": scene.get("scene_blueprint"),
+        }),
         "visual_scene": _dict(visual_scene),
         "visual_focus": _dict(scene.get("visual_focus")),
         "machine_only": True,
@@ -648,6 +695,7 @@ def build_user_space(state: Dict[str, Any]) -> Dict[str, Any]:
         "goal_hierarchy": _dict(state.get("goal_hierarchy")),
         "active_flow": _dict(state.get("active_flow")),
         "memory_timeline": _dict(state.get("memory_timeline")),
+        "scene_evidence": _active_scene_evidence(state),
         "visual_summary": _dict(state.get("visual_summary")),
         "memory_summary": state.get("memory_summary", ""),
         "renderer_state": _dict(state.get("renderer_state")),
@@ -681,10 +729,12 @@ def build_workspace_summary(state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def build_executor_context_packet(state: Dict[str, Any]) -> Dict[str, Any]:
+    scene_evidence = _active_scene_evidence(state)
     return {
         "user_space": build_user_space(state),
         "workspace_summary": build_workspace_summary(state),
         "scene_contract": build_scene_contract(state),
+        "scene_evidence": scene_evidence,
         "context_role": "EVIDENCE_ONLY",
         "decision_owner": "QUANTUM_PROCESSOR",
     }
@@ -824,6 +874,7 @@ def build_quantum_context_evidence(
             "goal": safe_slice(scene.get("goal", ""), MAX_GOAL_LENGTH),
             "active_room": scene.get("active_room", ""),
             "active_scene_id": scene.get("active_scene_id", ""),
+            "scene_evidence": _active_scene_evidence(state),
         },
         "focus": {
             "primary": focus.get("primary_focus") or focus.get("active_topic", ""),
@@ -845,6 +896,8 @@ def build_quantum_context_evidence(
         "renderer_owner": "QUANTUM_PROCESSOR",
         "route_owner": "QUANTUM_PROCESSOR",
         "provider_calls": 0,
+        "topic_shift_measured_only": True,
+        "scene_lifecycle_mutation": False,
     }
 
 def build_context_text(user_id: Any, text: Any, state: Dict[str, Any]) -> str:
@@ -857,17 +910,11 @@ def build_context_text(user_id: Any, text: Any, state: Dict[str, Any]) -> str:
     text = normalize_text(text)
     state["current_request"] = text
 
-    shifted = _v7_clear_stale_scene(state, text)
+    # Context collection is evidence-only. Topic changes, continuation and
+    # scene lifetime are decided by the Quantum Processor after semantic fusion.
     scene = _dict(state.get("scene_state"))
     flow = state.get("active_flow")
-
-    if detect_topic_shift(text, flow, scene) and not _is_reference(text):
-        if flow:
-            archive_completed_flow(state, flow)
-        state["active_flow"] = None
-        flow = None
-
-    stabilize_active_flow(state, scene)
+    shifted = detect_topic_shift(text, flow, scene)
 
     relevant = build_relevant_dialog(
         state.get("dialog", []),
@@ -878,8 +925,18 @@ def build_context_text(user_id: Any, text: Any, state: Dict[str, Any]) -> str:
 
     # Context collection never decides that a short turn is independent. Keep
     # the dialogue/visual field intact; the processor will later select relevance.
+    scene_evidence = _active_scene_evidence(state)
     blocks = [
         build_base_context(), build_current_request(text, scene), build_scene_block(scene),
+        "ACTIVE SCENE EVIDENCE:\n" + safe_slice(
+            repr({
+                "scene_id": scene_evidence.get("scene_id"),
+                "topic_group": scene_evidence.get("topic_group"),
+                "goal": scene_evidence.get("goal"),
+                "representations": scene_evidence.get("representations"),
+                "one_scene": scene_evidence.get("one_scene"),
+            }), 2400
+        ),
         build_dynamic_focus_block(state), build_dialog_focus_block(state, text),
         build_visual_scene_block(state.get("active_visual_scene")), build_visual_focus_block(state),
         build_visual_summary_block(state), build_visual_memory_block(state), build_memory_timeline_block(state),
