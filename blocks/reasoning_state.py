@@ -133,6 +133,89 @@ def reasoning_future(
     return None
 
 
+def _as_dict(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value):
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return []
+
+
+def _text(value, limit=5000):
+    return str(value or "").strip()[:limit]
+
+
+def _scene_evidence(state, semantic):
+    state = state if isinstance(state, dict) else {}
+    semantic = semantic if isinstance(semantic, dict) else {}
+    blueprint = _as_dict(
+        semantic.get("scene_blueprint")
+        or _as_dict(semantic.get("semantic_scene")).get("blueprint")
+        or state.get("scene_blueprint")
+        or _as_dict(state.get("active_scene")).get("scene_blueprint")
+    )
+    representations = []
+    for value in _as_list(
+        blueprint.get("representations")
+        or semantic.get("scene_representations")
+        or _as_dict(semantic.get("semantic_scene")).get("representations")
+    ):
+        value = _text(value, 80).lower()
+        if value and value not in representations:
+            representations.append(value)
+
+    nodes = [dict(item) for item in _as_list(
+        blueprint.get("nodes") or semantic.get("scene_nodes")
+    ) if isinstance(item, dict)]
+    relations = [dict(item) for item in _as_list(
+        blueprint.get("relations") or semantic.get("scene_relations")
+    ) if isinstance(item, dict)]
+
+    scene_state = _as_dict(state.get("scene_state"))
+    active_scene = _as_dict(state.get("active_scene"))
+    return {
+        "scene_id": _text(
+            blueprint.get("scene_id")
+            or scene_state.get("active_scene_id")
+            or active_scene.get("scene_id")
+        , 200),
+        "topic_group": _text(
+            blueprint.get("topic_group")
+            or scene_state.get("trajectory")
+            or scene_state.get("active_topic")
+        , 500),
+        "goal": _text(
+            blueprint.get("goal")
+            or scene_state.get("goal")
+            or scene_state.get("active_goal")
+        , 700),
+        "representations": representations or ["text"],
+        "nodes": nodes,
+        "relations": relations,
+        "order": [
+            _text(item, 120)
+            for item in _as_list(
+                blueprint.get("order")
+                or blueprint.get("representation_order")
+            )
+            if _text(item, 120)
+        ][:32],
+        "scene_kind": _text(
+            blueprint.get("scene_kind")
+            or ("composite" if len(representations) > 1 else "text"),
+            120,
+        ),
+        "present": bool(blueprint or nodes or representations),
+        "one_scene": True,
+        "one_response": True,
+        "one_signal": True,
+    }
+
+
 # =====================================================
 # 🔥 MAIN REASONING STATE
 # =====================================================
@@ -207,6 +290,9 @@ def build_reasoning_state(
         {}
     )
 
+    scene_evidence = _scene_evidence(state, semantic)
+    scene_blueprint = _as_dict(semantic.get("scene_blueprint"))
+
     # =================================================
     # 🔥 SCENE
     # =================================================
@@ -223,22 +309,28 @@ def build_reasoning_state(
         "confirmed_direction"
     )
 
-    scene_continuity = scene_state.get(
-        "continuity",
-        True
+    scene_continuity = bool(
+        scene_state.get(
+            "continuity",
+            scene_evidence.get("present") or bool(active_scene),
+        )
     )
 
     # =================================================
     # 🔥 LIGHTWEIGHT SEMANTIC
     # =================================================
 
-    continuation = semantic.get(
-        "continuation",
-        False
+    dialogue_contract = _as_dict(semantic.get("dialogue_contract"))
+    continuation = bool(
+        semantic.get("continuation", False)
+        or dialogue_contract.get("continuation", False)
     )
 
-    continuation_target = semantic.get(
-        "continuation_target"
+    continuation_target = (
+        semantic.get("continuation_target")
+        or dialogue_contract.get("reply_to")
+        or scene_evidence.get("scene_id")
+        or scene_evidence.get("topic_group")
     )
 
     execution_pressure = semantic.get(
@@ -288,19 +380,18 @@ def build_reasoning_state(
 
     last_user = None
 
-    for msg in reversed(dialog[-5:]):
-
+    for msg in reversed(dialog[-8:]):
+        if not isinstance(msg, dict):
+            continue
         if msg.get("role") == "user":
-
             content = (
                 msg.get("content")
+                or msg.get("text")
+                or msg.get("answer")
                 or ""
             ).strip()
-
-            if content != text:
-
+            if content and content != text:
                 last_user = content
-
                 break
 
     # =================================================
@@ -309,16 +400,19 @@ def build_reasoning_state(
 
     last_assistant = None
 
-    for msg in reversed(dialog[-4:]):
-
-        if msg.get("role") == "assistant":
-
+    for msg in reversed(dialog[-6:]):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") in {"assistant", "april", "bot"}:
             last_assistant = (
                 msg.get("content")
+                or msg.get("answer")
+                or msg.get("summary")
+                or msg.get("text")
                 or ""
-            )
-
-            break
+            ).strip()
+            if last_assistant:
+                break
 
     # =================================================
     # 🔥 TRAJECTORY
@@ -331,9 +425,11 @@ def build_reasoning_state(
     )
 
     trajectory_locked = bool(
-
         continuation
-        or scene_continuity
+        or (
+            scene_continuity
+            and bool(scene_trajectory or scene_evidence.get("present"))
+        )
     )
 
     # =================================================
@@ -441,6 +537,33 @@ def build_reasoning_state(
         "active_scene":
             active_scene,
 
+        "scene_blueprint":
+            scene_blueprint,
+
+        "scene_evidence":
+            scene_evidence,
+
+        "scene_representations":
+            list(scene_evidence.get("representations") or ["text"]),
+
+        "scene_nodes":
+            list(scene_evidence.get("nodes") or []),
+
+        "scene_relations":
+            list(scene_evidence.get("relations") or []),
+
+        "scene_order":
+            list(scene_evidence.get("order") or []),
+
+        "one_scene":
+            True,
+
+        "one_response":
+            True,
+
+        "one_signal":
+            True,
+
         "visual_continuity":
             visual_continuity,
 
@@ -528,6 +651,18 @@ def build_reasoning_state(
         # =====================================================
 
         "web_ready": True,
+
+        "scene_composition_ready":
+            bool(scene_evidence.get("present")),
+
+        "scene_relationships_preserved":
+            bool(scene_evidence.get("relations")),
+
+        "scene_layout_mode":
+            _as_dict(scene_blueprint.get("layout")).get("mode", "flow"),
+
+        "scene_free_width":
+            bool(_as_dict(scene_blueprint.get("layout")).get("free_width", True)),
 
         "machine_context_safe": True,
 
