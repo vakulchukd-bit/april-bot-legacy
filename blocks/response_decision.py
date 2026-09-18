@@ -112,6 +112,88 @@ def _unique(values: Iterable[Any]) -> List[Any]:
     return result
 
 
+def _scene_snapshot(semantic: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+    """Read the already-built scene without creating new renderer decisions.
+
+    Scene ownership remains upstream (Interpretation/Semantic + Quantum Processor).
+    This helper only carries the canonical scene puzzle into the decision packet.
+    """
+    blueprint = _d(semantic.get("scene_blueprint"))
+    if not blueprint:
+        blueprint = _d(semantic.get("semantic_scene")).get("blueprint")
+    if not blueprint:
+        blueprint = _d(state.get("scene_blueprint"))
+    if not blueprint:
+        blueprint = _d(_d(state.get("active_scene")).get("scene_blueprint"))
+
+    nodes = blueprint.get("nodes") or semantic.get("scene_nodes") or []
+    relations = blueprint.get("relations") or semantic.get("scene_relations") or []
+    representations = blueprint.get("representations") or semantic.get("scene_representations") or []
+
+    nodes = [dict(x) for x in nodes if isinstance(x, dict)]
+    relations = [dict(x) for x in relations if isinstance(x, dict)]
+    representations = _unique(
+        _s(x).lower() for x in representations if _s(x)
+    )
+
+    node_ids = {
+        _s(node.get("block_id") or node.get("id"))
+        for node in nodes
+        if _s(node.get("block_id") or node.get("id"))
+    }
+    normalized_relations = []
+    for relation in relations:
+        source = _s(relation.get("from") or relation.get("source"))
+        target = _s(relation.get("to") or relation.get("target"))
+        rel = _s(relation.get("relation") or relation.get("type")) or "related"
+        if source and target:
+            normalized_relations.append({
+                "from": source,
+                "relation": rel,
+                "to": target,
+            })
+
+    order = []
+    for node in sorted(
+        nodes,
+        key=lambda item: _f(item.get("sequence_index"), 0.0),
+    ):
+        block_id = _s(node.get("block_id") or node.get("id"))
+        if block_id and block_id in node_ids and block_id not in order:
+            order.append(block_id)
+
+    scene_id = (
+        _s(blueprint.get("scene_id"))
+        or _s(_d(state.get("active_scene")).get("active_scene_id"))
+        or _s(_d(state.get("active_scene")).get("scene_id"))
+    )
+    topic_group = _s(blueprint.get("topic_group"))
+    flow_id = _s(blueprint.get("flow_id") or state.get("flow_id"))
+    dialogue = _d(blueprint.get("dialogue"))
+    multi = len(representations) > 1 or len(nodes) > 1
+
+    return {
+        "present": bool(blueprint or nodes or representations),
+        "scene_id": scene_id,
+        "flow_id": flow_id,
+        "topic_group": topic_group,
+        "goal": _s(blueprint.get("goal")),
+        "subject": _s(blueprint.get("subject")),
+        "scene_kind": _s(blueprint.get("scene_kind") or ("composite" if multi else "text")),
+        "representations": representations or ["text"],
+        "nodes": nodes,
+        "relations": normalized_relations,
+        "order": order,
+        "dialogue": dialogue,
+        "one_scene": True,
+        "one_response": True,
+        "one_signal": True,
+        "renderer_commands": [],
+        "renderer_selection_owner": "QUANTUM_PROCESSOR",
+        "source": "canonical_scene_blueprint",
+    }
+
+
 def _representation_set(semantic: Dict[str, Any], representation: Dict[str, Any]) -> List[str]:
     values = []
     for key in ("required_representations", "candidate_representations"):
@@ -431,11 +513,12 @@ def build_response_decision(
     representation = _representation_signals(semantic, cognition)
     continuity = _continuity_signals(cognition, state)
     dialogue = _dialogue_signals(semantic, cognition)
+    scene = _scene_snapshot(semantic, state)
 
     ambiguity = _clamp(semantic.get("ambiguity_level", 0.0))
     scene_continuity = _d(state.get("visual_continuity_summary"))
     active_scene = _d(state.get("active_scene"))
-    scene_has_visual = bool(visual_reference or scene_continuity or active_scene)
+    scene_has_visual = bool(visual_reference or scene_continuity)
 
     clarification, missing = _clarification_required(
         semantic, cognition, scene_has_visual
@@ -626,6 +709,9 @@ def build_response_decision(
         "visual_continuity": scene_continuity,
         "scene_driven_response": True,
         "renderer_intelligence_enabled": True,
+        "multi_representation_scene": bool(len(scene.get("representations") or []) > 1),
+        "scene_relationships_preserved": bool(scene.get("relations")),
+        "scene_payload_owner": "QUANTUM_PROCESSOR",
 
         "task_requires_clarification": clarification,
         "missing_information_type": missing,
@@ -645,7 +731,22 @@ def build_response_decision(
 
         "artifact_bundle": artifact_bundle,
         "artifact_scene": artifact_scene,
-        "scene_composition_ready": bool(artifact_scene),
+        "scene_composition_ready": bool(artifact_scene or scene.get("present")),
+
+        # Canonical Scene Puzzle. This is carried intact; no renderer is selected here.
+        "scene_blueprint": scene,
+        "scene_representations": list(scene.get("representations") or ["text"]),
+        "scene_nodes": list(scene.get("nodes") or []),
+        "scene_relations": list(scene.get("relations") or []),
+        "scene_order": list(scene.get("order") or []),
+        "scene_id": scene.get("scene_id", ""),
+        "scene_flow_id": scene.get("flow_id", ""),
+        "scene_topic_group": scene.get("topic_group", ""),
+        "scene_composition": list(scene.get("nodes") or []),
+        "single_scene": True,
+        "one_scene": True,
+        "one_response": True,
+        "one_signal": True,
 
         # Canonical dialogue contract — one machine object, no second route.
         "dialogue_contract": contract,
@@ -674,6 +775,14 @@ def build_response_decision(
         # final arbitration across the whole factory.
         "quantum_evidence": {
             "current_request": semantic.get("normalized_text"),
+            "scene": {
+                "scene_id": scene.get("scene_id", ""),
+                "representations": list(scene.get("representations") or ["text"]),
+                "node_count": len(scene.get("nodes") or []),
+                "relation_count": len(scene.get("relations") or []),
+                "order": list(scene.get("order") or []),
+                "one_scene": True,
+            },
             "representation": representation,
             "required_outputs": _unique(required),
             "blocked_representations": sorted(blocked),
