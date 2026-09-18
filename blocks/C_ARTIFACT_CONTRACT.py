@@ -1,8 +1,10 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from copy import deepcopy
 import uuid
 import time
+import hashlib
 
 # =====================================================
 # ARTIFACT METADATA
@@ -515,28 +517,28 @@ class BaseArtifact:
 # artifact_type identifies the produced representation; renderer identifies
 # the concrete Web viewer for this particular artifact. One room may therefore
 # produce multiple concrete renderers without creating a second route.
-WEB_RENDERER_REGISTRY_VERSION = "2.0"
+WEB_RENDERER_REGISTRY_VERSION = "3.0"
 
 # Exact renderer contract mirrored from the actual April Web RenderMessage
 # registry. This describes the destination component; it never performs routing.
 WEB_RENDERER_REGISTRY = {
-    "text": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["content", "text", "answer"]},
-    "markdown": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["content", "text", "markdown"]},
-    "formula": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["formula", "equation", "expression", "math", "content"], "mode": "force_math"},
-    "graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["series", "x_axis", "data_table", "points"]},
-    "table": {"renderer": "TableBlock", "viewer": "TableBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["rows", "columns", "headers", "data", "values", "items"]},
-    "diagram": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["elements", "svg", "geometry", "points"], "specialized_renderers": ["SvgBlock", "ArithmeticDiagram"]},
-    "image": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["images", "src", "url", "image", "image_data_uri", "image_base64"]},
-    "gallery": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["images", "items", "gallery", "sources"]},
-    "scene": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["elements", "svg", "images", "objects"]},
-    "visual_context": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["images", "elements", "svg", "context"]},
-    "code": {"renderer": "CodeBlock", "viewer": "CodeBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["code", "content", "language"]},
-    "link": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "MessageTextBlock", "payload_keys": ["url", "href", "title", "description"]},
-    "file": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "MessageTextBlock", "payload_keys": ["url", "href", "path", "name"]},
-    "audio": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["url", "src", "path", "content"]},
-    "video": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["url", "src", "path", "content"]},
-    "action": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["action", "target", "parameters", "content"]},
-    "memory": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["content", "summary", "memory"]},
+    "text": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "answer"]},
+    "markdown": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "markdown"]},
+    "formula": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["formula", "equation", "expression", "math", "content"], "mode": "force_math"},
+    "graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["series", "x_axis", "data_table", "points"]},
+    "table": {"renderer": "TableBlock", "viewer": "TableBlock", "fallback_renderer": "", "payload_keys": ["rows", "columns", "headers", "data", "values", "items"]},
+    "diagram": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["elements", "svg", "geometry", "points"], "specialized_renderers": ["SvgBlock", "ArithmeticDiagram"]},
+    "image": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "src", "url", "image", "image_data_uri", "image_base64"]},
+    "gallery": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "items", "gallery", "sources"]},
+    "scene": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["elements", "svg", "images", "objects"]},
+    "visual_context": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "elements", "svg", "context"]},
+    "code": {"renderer": "CodeBlock", "viewer": "CodeBlock", "fallback_renderer": "", "payload_keys": ["code", "content", "language"]},
+    "link": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "", "payload_keys": ["url", "href", "title", "description"]},
+    "file": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "", "payload_keys": ["url", "href", "path", "name"]},
+    "audio": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["url", "src", "path", "content"]},
+    "video": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["url", "src", "path", "content"]},
+    "action": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["action", "target", "parameters", "content"]},
+    "memory": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "summary", "memory"]},
 }
 
 ARTIFACT_BLOCK_MAP = {kind: spec["renderer"] for kind, spec in WEB_RENDERER_REGISTRY.items()}
@@ -723,7 +725,7 @@ def build_diagram_room_payload(
 # =====================================================
 # CANONICAL RENDER SIGNAL
 # =====================================================
-UNIFIED_RENDER_SIGNAL_VERSION = "1.0"
+UNIFIED_RENDER_SIGNAL_VERSION = "3.0"
 
 
 def _render_signal_metadata(
@@ -745,8 +747,6 @@ def _render_signal_metadata(
     exact_renderer = str(registration.get("renderer") or renderer or "MessageTextBlock")
     fallback_renderer = str(registration.get("fallback_renderer") or "MessageTextBlock")
     candidates = [exact_renderer]
-    if fallback_renderer and fallback_renderer not in candidates:
-        candidates.append(fallback_renderer)
     return {
         "type": artifact_type,
         "payload_type": artifact_type,
@@ -986,64 +986,8 @@ def _text_companion_blocks(
     data: Dict[str, Any],
     presentation: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Create MessageTextBlock companions for specialized renderers.
-
-    Interpretation prescribes a narrative layer around specialized output:
-    introduction -> specialized result -> explanation. The artifact contract
-    carries that narrative explicitly, without mutating the specialized payload.
-    """
-    data = dict(data or {})
-    presentation = dict(presentation or data.get("presentation") or {})
-    if bool(data.get("machine_only", False)) or data.get("human_visible") is False:
-        return []
-
-    intro = str(
-        data.get("introduction")
-        or data.get("intro")
-        or data.get("request_essence")
-        or content
-        or ""
-    ).strip()
-    explanation = str(
-        data.get("explanation")
-        or data.get("result_explanation")
-        or ""
-    ).strip()
-
-    blocks: List[Dict[str, Any]] = []
-    priority = int(data.get("priority", 100))
-    if intro:
-        blocks.append({
-            "type": "text",
-            "artifact_type": "text",
-            "renderer": "MessageTextBlock",
-            "viewer": "MessageTextBlock",
-            "content": intro,
-            "text": intro,
-            "text_role": "introduction",
-            "parent_representation": artifact_type,
-            "priority": priority - 1,
-            "presentation": presentation,
-            "scene_contract": True,
-            "executor_generated": False,
-        })
-    if explanation and explanation != intro:
-        blocks.append({
-            "type": "text",
-            "artifact_type": "text",
-            "renderer": "MessageTextBlock",
-            "viewer": "MessageTextBlock",
-            "content": explanation,
-            "text": explanation,
-            "text_role": "explanation",
-            "parent_representation": artifact_type,
-            "priority": priority + 1,
-            "presentation": presentation,
-            "scene_contract": True,
-            "executor_generated": False,
-        })
-    return blocks
-
+    """Legacy compatibility hook. Scene-level composition owns text nodes now."""
+    return []
 
 def _artifact_canonical_render_blocks(artifact: BaseArtifact) -> List[Dict[str, Any]]:
     """Project one artifact into lossless canonical render blocks.
@@ -1136,11 +1080,10 @@ def _artifact_canonical_render_blocks(artifact: BaseArtifact) -> List[Dict[str, 
         "text_companion_required": bool(data.get("text_companion_required", True)),
     }
 
-    # Text-like representations are themselves the MessageTextBlock.
-    # Specialized representations receive a separate text companion.
-    if renderer == "MessageTextBlock":
-        return _text_companion_blocks(artifact_type, content, data, presentation) or [specialized_block]
-    return _text_companion_blocks(artifact_type, content, data, presentation) + [specialized_block]
+    # A room artifact is exactly one scene node. Narrative text is composed once
+    # at SceneContract level, so an artifact never manufactures duplicate text
+    # companions of its own.
+    return [specialized_block]
 
 def _ensure_artifact_render_signal(artifact: BaseArtifact) -> BaseArtifact:
     """Ensure a room artifact has exactly one lossless render signal."""
@@ -1645,13 +1588,15 @@ def build_presentation_hint(artifact_type: str, complexity: str = "balanced") ->
         "renderer": renderer,
         "viewer": registration.get("viewer", renderer),
         "web_renderer": renderer,
-        "fallback_renderer": fallback,
-        "renderer_candidates": [renderer] + ([fallback] if fallback != renderer else []),
+        "fallback_renderer": "",
+        "renderer_candidates": [renderer],
         "web_registry_version": WEB_RENDERER_REGISTRY_VERSION,
         "signal_channel": "canonical_web_render_signal_v2",
         "priority": 100,
         "complexity": complexity,
-        "layout": "single" if complexity == "compact" else "adaptive",
+        "layout": "flow" if complexity != "compact" else "flow",
+        "frames": False,
+        "cards": False,
     }
 
 
@@ -1686,11 +1631,21 @@ SCENE_BLOCK_REGISTRY = {
 
 @dataclass
 class SceneContract:
-    scene_version: str = "2.0"
+    """Canonical one-response scene. All visible renderers are children of it."""
+    scene_version: str = "3.0"
+    scene_id: str = ""
+    turn_id: str = ""
+    flow_id: str = ""
+    topic_group: str = ""
+    continuation: bool = False
     blocks: List[Dict[str, Any]] = field(default_factory=list)
     render_blocks: List[Dict[str, Any]] = field(default_factory=list)
+    relations: List[Dict[str, Any]] = field(default_factory=list)
+    order: List[str] = field(default_factory=list)
     active_scene: str = ""
     space_continuity: Dict[str, Any] = field(default_factory=dict)
+    scene_blueprint: Dict[str, Any] = field(default_factory=dict)
+    signal: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
     supported_payloads: List[str] = field(
         default_factory=lambda: sorted(SUPPORTED_PAYLOAD_TYPES)
@@ -1741,9 +1696,18 @@ class MachineResponse:
     summary: str = ""
     explanation: str = ""
 
+    # One scene identity follows the complete route.
+    scene_id: str = ""
+    turn_id: str = ""
+    flow_id: str = ""
+    topic_group: str = ""
+    continuation: bool = False
     render_blocks: List[Dict[str, Any]] = field(default_factory=list)
     artifacts_payload: List[Dict[str, Any]] = field(default_factory=list)
     scene: Dict[str, Any] = field(default_factory=dict)
+    scene_blueprint: Dict[str, Any] = field(default_factory=dict)
+    scene_relations: List[Dict[str, Any]] = field(default_factory=list)
+    scene_order: List[str] = field(default_factory=list)
     scene_plan: List[str] = field(default_factory=lambda:["text"])
     render_priority: List[str] = field(default_factory=lambda:["text"])
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -1758,9 +1722,16 @@ def get_web_renderer_registration(payload_type: str) -> Dict[str, Any]:
 class MachineScene:
     fiber: FiberCoreContract = field(default_factory=FiberCoreContract)
     scene_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    scene_version: str = "1.0"
+    scene_version: str = "3.0"
     active_scene: str = ""
+    turn_id: str = ""
+    flow_id: str = ""
+    topic_group: str = ""
+    continuation: bool = False
     blocks: List[Dict[str, Any]] = field(default_factory=list)
+    relations: List[Dict[str, Any]] = field(default_factory=list)
+    order: List[str] = field(default_factory=list)
+    scene_blueprint: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
     contract: SceneContract = field(default_factory=SceneContract)
 
@@ -1853,6 +1824,9 @@ __all__ = [
     "ARTIFACT_RENDERER_ALIASES",
     "UNIFIED_RENDER_SIGNAL_VERSION",
     "build_scene_contract",
+    "build_scene_signal",
+    "CANONICAL_SCENE_VERSION",
+    "ANSWER_RENDER_POLICY",
     "FACTORY_ROOM_PROFILES",
     "get_factory_room_profile",
     "build_diagram_room_payload",
@@ -1925,268 +1899,379 @@ def add_room_contribution(response: MachineResponse, room: str, payload: Dict[st
 # =====================================================
 
 
-def build_machine_scene(response: MachineResponse) -> MachineScene:
-    """Canonical MachineResponse -> MachineScene transformation.
-    The Factory owns Scene construction; Executor only invokes it.
-    """
-    scene = create_default_machine_scene()
+CANONICAL_SCENE_VERSION = "3.0"
+CANONICAL_SCENE_SIGNAL_TYPE = "scene"
+ANSWER_RENDER_POLICY = "render_from_scene_blocks_only"
 
-    # Preserve Fiber ownership.
-    scene.fiber = response.fiber
 
-    response_metadata = getattr(response, "metadata", {}) or {}
+def _scene_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
 
-    # Carry metadata when available.
-    scene.metadata = {
-        "confidence": getattr(response, "confidence", 0.0),
-        "diagnostics": getattr(response, "diagnostics", {}),
-        "quality": getattr(response, "quality", {}),
-        "routing_decision": getattr(response, "routing_decision", {}),
-        "machine_only": bool(response_metadata.get("machine_only", False)),
-        "human_visible": response_metadata.get("human_visible", True),
+
+def _scene_list(value: Any) -> List[Any]:
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, tuple):
+        return list(value)
+    return []
+
+
+def _scene_text(value: Any) -> str:
+    for key in ("answer", "content", "summary", "text", "display_text"):
+        candidate = value.get(key) if isinstance(value, dict) else getattr(value, key, None)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
+def _scene_hash(value: Any) -> str:
+    try:
+        raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        raw = repr(value)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+
+
+def _scene_block_type(block: Dict[str, Any]) -> str:
+    return str(block.get("type") or block.get("artifact_type") or block.get("representation") or "text").strip().lower()
+
+
+def _scene_block_renderer(block: Dict[str, Any]) -> str:
+    renderer = str(block.get("renderer") or block.get("viewer") or "").strip()
+    if renderer:
+        return renderer
+    return ARTIFACT_BLOCK_MAP.get(_scene_block_type(block), "MessageTextBlock")
+
+
+def _scene_blueprint_blocks(blueprint: Dict[str, Any], *, scene_id: str, turn_id: str, flow_id: str) -> List[Dict[str, Any]]:
+    nodes = []
+    for index, raw in enumerate(_scene_list(blueprint.get("nodes"))):
+        if not isinstance(raw, dict):
+            continue
+        block = dict(raw)
+        block_id = str(block.get("block_id") or block.get("id") or f"block_{index + 1}").strip()
+        block_type = _scene_block_type(block)
+        block["block_id"] = block_id
+        block["type"] = block_type
+        block["renderer"] = _scene_block_renderer(block)
+        block["viewer"] = str(block.get("viewer") or block["renderer"])
+        block["scene_id"] = scene_id
+        block["turn_id"] = turn_id
+        block["flow_id"] = flow_id
+        block.setdefault("payload", {})
+        block["sequence_index"] = index
+        block["render_id"] = str(block.get("render_id") or f"render_{_scene_hash({'scene': scene_id, 'block': block_id, 'renderer': block['renderer']})}")
+        block["scene_contract"] = True
+        nodes.append(block)
+    return nodes
+
+
+def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
+    """Produce one ordered, identity-bound render stream for the scene."""
+    try:
+        from blocks.presentation_formatter import ensure_scene_text_block
+    except Exception:
+        ensure_scene_text_block = None
+
+    blueprint = dict(scene.scene_blueprint or {})
+    blocks = list(scene.blocks or [])
+    if not blocks and blueprint:
+        blocks = _scene_blueprint_blocks(
+            blueprint,
+            scene_id=scene.scene_id,
+            turn_id=scene.turn_id,
+            flow_id=scene.flow_id,
+        )
+
+    # Artifacts contribute one node each; never append a second narrative copy.
+    existing_artifact_ids = {
+        str(block.get("artifact_id"))
+        for block in blocks
+        if isinstance(block, dict) and block.get("artifact_id")
+    }
+    for artifact in list(getattr(scene, "artifacts", []) or []):
+        if not isinstance(artifact, BaseArtifact):
+            continue
+        artifact_id = str(getattr(artifact.metadata, "artifact_id", "") or "")
+        if artifact_id and artifact_id in existing_artifact_ids:
+            continue
+        artifact_blocks = _artifact_canonical_render_blocks(artifact)
+        for block in artifact_blocks[:1]:
+            block = dict(block)
+            block["scene_id"] = scene.scene_id
+            block["turn_id"] = scene.turn_id
+            block["flow_id"] = scene.flow_id
+            block["artifact_id"] = artifact_id
+            blocks.append(block)
+            if artifact_id:
+                existing_artifact_ids.add(artifact_id)
+
+    # The answer is a single normal text node in the same scene, not a fallback.
+    answer = _scene_text(scene)
+    if ensure_scene_text_block is not None:
+        blocks = ensure_scene_text_block(
+            blocks,
+            answer,
+            scene_id=scene.scene_id,
+            turn_id=scene.turn_id,
+            flow_id=scene.flow_id,
+            blueprint=blueprint,
+        )
+    elif answer and not any(_scene_block_type(b) in {"text", "markdown", "formula"} and _scene_text(b) for b in blocks if isinstance(b, dict)):
+        blocks.insert(0, {
+            "type": "text",
+            "artifact_type": "text",
+            "renderer": "MessageTextBlock",
+            "viewer": "MessageTextBlock",
+            "content": answer,
+            "text": answer,
+        })
+
+    order = [str(x).strip() for x in _scene_list(blueprint.get("order")) if str(x).strip()]
+    order_pos = {value: idx for idx, value in enumerate(order)}
+    normalized: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_signatures: set[str] = set()
+
+    for index, raw in enumerate(blocks):
+        if not isinstance(raw, dict):
+            continue
+        block = dict(raw)
+        block_type = _scene_block_type(block)
+        renderer = _scene_block_renderer(block)
+        block["type"] = block_type
+        block["artifact_type"] = str(block.get("artifact_type") or block_type)
+        block["renderer"] = renderer
+        block["viewer"] = str(block.get("viewer") or renderer)
+        block_id = str(block.get("block_id") or block.get("id") or f"block_{index + 1}").strip()
+        block["block_id"] = block_id
+        block["scene_id"] = scene.scene_id
+        block["turn_id"] = scene.turn_id
+        block["flow_id"] = scene.flow_id
+        block["topic_group"] = str(block.get("topic_group") or scene.topic_group or blueprint.get("topic_group") or "").strip()
+        block["continuation"] = bool(block.get("continuation", scene.continuation))
+        block["render_id"] = str(block.get("render_id") or f"render_{_scene_hash({'scene': scene.scene_id, 'block': block_id, 'renderer': renderer})}")
+        block["sequence_index"] = order_pos.get(block_id, index)
+        block["scene_contract"] = True
+        block["signal_version"] = UNIFIED_RENDER_SIGNAL_VERSION
+        related = [str(x).strip() for x in _scene_list(block.get("related_block_ids")) if str(x).strip()]
+        block["related_block_ids"] = list(dict.fromkeys(related))
+        signature = _scene_hash({
+            "type": block_type,
+            "renderer": renderer,
+            "content": _scene_text(block),
+            "payload": block.get("payload", {}),
+        })
+        if block_id in seen_ids or signature in seen_signatures:
+            continue
+        seen_ids.add(block_id)
+        seen_signatures.add(signature)
+        normalized.append(block)
+
+    normalized.sort(key=lambda b: int(b.get("sequence_index", 0)))
+    for idx, block in enumerate(normalized):
+        block["sequence_index"] = idx
+    return normalized
+
+
+def _canonical_scene_relations(scene: MachineScene, blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    blueprint = dict(scene.scene_blueprint or {})
+    relations: List[Dict[str, Any]] = []
+    for raw in _scene_list(blueprint.get("relations")):
+        if not isinstance(raw, dict):
+            continue
+        source = str(raw.get("from") or raw.get("source") or "").strip()
+        target = str(raw.get("to") or raw.get("target") or "").strip()
+        if not source or not target:
+            continue
+        relations.append({
+            "from": source,
+            "to": target,
+            "relation": str(raw.get("relation") or raw.get("type") or "related").strip(),
+        })
+    if not relations:
+        for block in blocks:
+            source = str(block.get("block_id") or "").strip()
+            for target in block.get("related_block_ids") or []:
+                if source and str(target).strip():
+                    relations.append({"from": source, "to": str(target).strip(), "relation": "related"})
+    unique: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in relations:
+        key = f"{item['from']}|{item['relation']}|{item['to']}"
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique
+
+
+def build_scene_signal(contract: SceneContract) -> Dict[str, Any]:
+    """Create the ONE Web signal for the whole scene."""
+    return {
+        "signal_type": CANONICAL_SCENE_SIGNAL_TYPE,
+        "signal_version": UNIFIED_RENDER_SIGNAL_VERSION,
+        "scene_id": contract.scene_id,
+        "turn_id": contract.turn_id,
+        "flow_id": contract.flow_id,
+        "topic_group": contract.topic_group,
+        "continuation": contract.continuation,
+        "single_response": True,
+        "single_signal": True,
+        "answer_render_policy": ANSWER_RENDER_POLICY,
+        "answer": str(contract.metadata.get("answer") or ""),
+        "order": list(contract.order),
+        "relations": deepcopy(contract.relations),
+        "blocks": deepcopy(contract.render_blocks),
+        "presentation": deepcopy((contract.metadata.get("presentation") or {})),
     }
 
-    # Reuse render blocks if Executor already materialized them.
-    blocks = list(getattr(response, "render_blocks", []) or [])
-    scene.blocks = blocks
-    scene.contract.blocks = blocks
 
-    # Stage 2: carry canonical transport fields into the scene.
-    # Carry canonical response payload.
-    scene.metadata.update({
-        "answer": getattr(response, "answer", ""),
-        "content": getattr(response, "content", ""),
-        "summary": getattr(response, "summary", ""),
+def build_machine_scene(response: MachineResponse) -> MachineScene:
+    """Canonical MachineResponse -> one MachineScene transformation."""
+    scene = create_default_machine_scene()
+    scene.fiber = response.fiber
+    metadata = dict(getattr(response, "metadata", {}) or {})
+    source_scene = dict(getattr(response, "scene", {}) or {})
+    blueprint = dict(
+        getattr(response, "scene_blueprint", {})
+        or source_scene.get("scene_blueprint")
+        or source_scene.get("blueprint")
+        or {}
+    )
+
+    scene.scene_id = str(getattr(response, "scene_id", "") or source_scene.get("scene_id") or metadata.get("scene_id") or scene.scene_id)
+    scene.turn_id = str(getattr(response, "turn_id", "") or source_scene.get("turn_id") or metadata.get("turn_id") or "")
+    scene.flow_id = str(getattr(response, "flow_id", "") or source_scene.get("flow_id") or metadata.get("flow_id") or "")
+    scene.topic_group = str(getattr(response, "topic_group", "") or blueprint.get("topic_group") or metadata.get("topic_group") or "")
+    scene.continuation = bool(getattr(response, "continuation", False) or blueprint.get("continuation", False) or metadata.get("continuation", False))
+    scene.active_scene = str(source_scene.get("active_scene") or metadata.get("active_scene") or "")
+    scene.scene_blueprint = blueprint
+
+    scene.metadata = {
+        "confidence": getattr(response, "confidence", 0.0),
+        "diagnostics": dict(getattr(response, "diagnostics", {}) or {}),
+        "quality": dict(getattr(response, "quality", {}) or {}),
+        "routing_decision": dict(getattr(response, "routing_decision", {}) or {}),
+        "machine_only": bool(metadata.get("machine_only", False)),
+        "human_visible": metadata.get("human_visible", True),
+        "answer": str(getattr(response, "answer", "") or ""),
+        "content": str(getattr(response, "content", "") or ""),
+        "summary": str(getattr(response, "summary", "") or ""),
         "contributions": dict(getattr(response, "contributions", {}) or {}),
         "executor_hints": dict(getattr(response, "executor_hints", {}) or {}),
-    })
+        "scene_id": scene.scene_id,
+        "turn_id": scene.turn_id,
+        "flow_id": scene.flow_id,
+        "topic_group": scene.topic_group,
+        "continuation": scene.continuation,
+        "scene_blueprint": deepcopy(blueprint),
+    }
 
+    scene.blocks = list(getattr(response, "render_blocks", []) or [])
+    scene.relations = list(getattr(response, "scene_relations", []) or blueprint.get("relations", []) or [])
+    scene.order = list(getattr(response, "scene_order", []) or blueprint.get("order", []) or [])
     setattr(scene, "artifacts", list(getattr(response, "artifacts", []) or []))
     setattr(scene, "answer", getattr(response, "answer", ""))
     setattr(scene, "content", getattr(response, "content", ""))
     setattr(scene, "summary", getattr(response, "summary", ""))
 
-    # Preserve optional runtime context.
     if hasattr(response, "conversation_space"):
         setattr(scene, "conversation_space", getattr(response, "conversation_space"))
-
     return scene
 
-
-# =====================================================
-# STAGE 3 PRESENTATION TRANSPORT (TEST)
-# =====================================================
-
-
-
-
-def _materialize_scene_artifacts(scene: Any, blocks: list) -> list:
-    """Project plain response artifacts into canonical render blocks once."""
-    normalized = list(blocks or [])
-    artifacts = list(getattr(scene, "artifacts", []) or [])
-    if not artifacts:
-        return normalized
-
-    existing_ids = {
-        str(block.get("artifact_id") or "")
-        for block in normalized
-        if isinstance(block, dict) and block.get("artifact_id")
-    }
-    for artifact in artifacts:
-        if not isinstance(artifact, dict):
-            continue
-        artifact_type = str(
-            artifact.get("artifact_type")
-            or artifact.get("type")
-            or ""
-        ).strip().lower()
-        if not artifact_type:
-            continue
-        artifact_id = str(
-            artifact.get("artifact_id")
-            or (artifact.get("metadata") or {}).get("artifact_id")
-            or ""
-        ).strip()
-        if artifact_id and artifact_id in existing_ids:
-            continue
-
-        data = artifact.get("data") if isinstance(artifact.get("data"), dict) else artifact
-        payload = (
-            artifact.get("payload")
-            if isinstance(artifact.get("payload"), dict)
-            else data.get("payload")
-            if isinstance(data, dict) and isinstance(data.get("payload"), dict)
-            else {}
-        )
-        renderer = (
-            artifact.get("renderer")
-            or (artifact.get("render_signal") or {}).get("renderer")
-            or ARTIFACT_BLOCK_MAP.get(artifact_type, "FunctionBlock")
-        )
-        content = str(
-            artifact.get("content")
-            or artifact.get("answer")
-            or artifact.get("summary")
-            or (artifact.get("render_signal") or {}).get("content")
-            or ""
-        ).strip()
-        normalized.append({
-            "type": artifact_type,
-            "artifact_type": artifact_type,
-            "renderer": renderer,
-            "viewer": artifact.get("viewer") or renderer,
-            "content": content,
-            "text": content,
-            "payload": payload,
-            "artifact": artifact,
-            "artifact_id": artifact_id,
-            "scene_contract": True,
-            "provider_payload": True,
-            "canonical_provider_payload": True,
-            "presentation": dict(
-                artifact.get("presentation")
-                or (artifact.get("render_signal") or {}).get("presentation")
-                or (data.get("presentation") if isinstance(data, dict) else {})
-                or {}
-            ),
-        })
-        if artifact_id:
-            existing_ids.add(artifact_id)
-    return normalized
-
-
-def build_canonical_scene_blocks(scene):
-    """
-    Stage 3 (test):
-    Build a default render block from presentation hints when
-    no render_blocks were produced upstream.
-    """
-    if _scene_is_internal_only(scene):
-        return []
-
-    blocks = _materialize_scene_artifacts(scene, list(scene.blocks or []))
-    if blocks:
-        return blocks
-
-    metadata = scene.metadata or {}
-    presentation = metadata.get("presentation", {})
-
-    payload_type = presentation.get("payload_type", "text")
-    renderer = presentation.get(
-        "renderer",
-        SCENE_BLOCK_REGISTRY.get(payload_type, "TextBlock")
-    )
-
-    content = _scene_text_fallback(scene)
-
-    if not content:
-        return []
-
-    return [{
-        "type": payload_type,
-        "renderer": renderer,
-        "viewer": presentation.get("viewer", renderer),
-        "content": content,
-        "priority": presentation.get("priority", 100),
-        "presentation": presentation,
-        "scene_contract": True,
-    }]
-
-
-def _ensure_visible_text_block(scene: Any, blocks: list) -> list:
-    """Guarantee one canonical visible answer without duplicating structured blocks."""
-    normalized = list(blocks or [])
-    if _scene_is_internal_only(scene):
-        return normalized
-
-    content = _scene_text_fallback(scene)
-    if not content:
-        return normalized
-
-    has_visible_text = any(
-        isinstance(block, dict)
-        and str(block.get("type") or block.get("artifact_type") or "").lower() in {"text", "markdown"}
-        and str(block.get("content") or block.get("text") or block.get("answer") or "").strip()
-        for block in normalized
-    )
-    if has_visible_text:
-        return normalized
-
-    metadata = getattr(scene, "metadata", {}) or {}
-    presentation = metadata.get("presentation", {}) or {}
-    return [{
-        "type": "text",
-        "renderer": "TextBlock",
-        "viewer": "TextBlock",
-        "content": content,
-        "text": content,
-        "priority": presentation.get("priority", 100),
-        "presentation": presentation,
-        "scene_contract": True,
-    }, *normalized]
-
-
 def build_scene_contract(scene: MachineScene) -> SceneContract:
-    # Stage 3: finalize the canonical SceneContract from MachineScene.
-    """Canonical SceneContract builder from MachineScene."""
-    contract = scene.contract or create_default_scene_contract()
+    """Finalize the one canonical SceneContract and one Web scene signal."""
+    contract = scene.contract if isinstance(scene.contract, SceneContract) else create_default_scene_contract()
+    contract.scene_version = CANONICAL_SCENE_VERSION
+    contract.scene_id = scene.scene_id
+    contract.turn_id = scene.turn_id
+    contract.flow_id = scene.flow_id
+    contract.topic_group = scene.topic_group
+    contract.continuation = scene.continuation
+    contract.active_scene = scene.active_scene
+    contract.scene_blueprint = deepcopy(scene.scene_blueprint or {})
 
-    # One canonical transport path: MachineResponse -> MachineScene ->
-    # SceneContract. Never let an empty renderer list erase an existing answer.
-    canonical_blocks = build_canonical_scene_blocks(scene)
-    canonical_blocks = _ensure_visible_text_block(scene, canonical_blocks)
+    canonical_blocks = _canonical_scene_blocks(scene)
+    relations = _canonical_scene_relations(scene, canonical_blocks)
+    order = [str(block.get("block_id") or "").strip() for block in canonical_blocks if str(block.get("block_id") or "").strip()]
 
-    # Interpretation parity: a human-visible specialized renderer is never
-    # allowed to suppress its narrative MessageTextBlock companion.
-    if not _scene_is_internal_only(scene) and canonical_blocks:
-        specialized_present = any(
-            isinstance(block, dict)
-            and str(block.get("renderer") or "") not in {"", "MessageTextBlock", "TextBlock", "MarkdownBlock"}
-            for block in canonical_blocks
-        )
-        has_text_companion = any(
-            isinstance(block, dict)
-            and str(block.get("renderer") or "") in {"MessageTextBlock", "TextBlock", "MarkdownBlock"}
-            and str(block.get("content") or block.get("text") or "").strip()
-            for block in canonical_blocks
-        )
-        if specialized_present and not has_text_companion:
-            canonical_blocks = _ensure_visible_text_block(scene, canonical_blocks)
     contract.blocks = canonical_blocks
     contract.render_blocks = list(canonical_blocks)
-    contract.metadata.update(scene.metadata or {})
-    # Canonical transport fields must always reflect the latest scene state.
-    canonical_text = _scene_text_fallback(scene)
-    contract.metadata["answer"] = canonical_text
-    contract.metadata["content"] = canonical_text
-    contract.metadata["summary"] = canonical_text
-    contract.metadata["artifact_count"] = len(getattr(scene, "artifacts", []) or [])
-    contract.metadata["transport_stage"] = "artifact_contract_stage2"
-    contract.metadata["canonical_scene_contract"] = True
-    contract.metadata["machine_only"] = bool(contract.metadata.get("machine_only", False) or _scene_is_internal_only(scene))
-    contract.metadata["human_visible"] = bool(contract.metadata.get("human_visible", not contract.metadata["machine_only"]))
-    if contract.metadata["machine_only"]:
+    contract.relations = relations
+    contract.order = order
+    contract.metadata = dict(scene.metadata or {})
+    contract.metadata.update({
+        "scene_id": scene.scene_id,
+        "turn_id": scene.turn_id,
+        "flow_id": scene.flow_id,
+        "topic_group": scene.topic_group,
+        "continuation": scene.continuation,
+        "artifact_count": len(getattr(scene, "artifacts", []) or []),
+        "transport_stage": "artifact_contract_scene_v3",
+        "canonical_scene_contract": True,
+        "single_response": True,
+        "single_signal": True,
+        "answer_render_policy": ANSWER_RENDER_POLICY,
+        "machine_only": bool(contract.metadata.get("machine_only", False) or _scene_is_internal_only(scene)),
+        "human_visible": bool(contract.metadata.get("human_visible", not contract.metadata.get("machine_only", False))),
+    })
+
+    answer = _scene_text(scene)
+    if contract.metadata.get("machine_only"):
         contract.metadata["answer"] = ""
         contract.metadata["content"] = ""
         contract.metadata["summary"] = ""
-    contract.active_scene = getattr(scene, "active_scene", "")
+    else:
+        contract.metadata["answer"] = answer
+        contract.metadata["content"] = answer
+        contract.metadata["summary"] = answer
+
+    # Presentation is generated once for the canonical scene, never once per
+    # renderer. This keeps all renderers in one visual stream.
+    try:
+        from blocks.presentation_formatter import build_presentation_contract, attach_presentation_signals
+        presentation = build_presentation_contract(
+            scene_id=scene.scene_id,
+            turn_id=scene.turn_id,
+            flow_id=scene.flow_id,
+            topic_group=scene.topic_group,
+            continuation=scene.continuation,
+            layout_mode="flow",
+        )
+        contract.render_blocks = attach_presentation_signals(contract.render_blocks, scene_presentation=presentation)
+        contract.blocks = list(contract.render_blocks)
+    except Exception:
+        presentation = {
+            "version": "presentation_unavailable",
+            "engine": "McDowell",
+            "math_engine": "KaTeX",
+            "single_response": True,
+            "single_signal": True,
+            "layout": {"mode": "flow", "container": "adaptive_full_width", "frames": False, "cards": False},
+        }
+    contract.metadata["presentation"] = presentation
+    contract.metadata["renderer_instances"] = list(dict.fromkeys(
+        str(block.get("renderer") or "MessageTextBlock") for block in contract.render_blocks if isinstance(block, dict)
+    ))
     contract.space_continuity = {
         **dict(contract.space_continuity or {}),
         "active_scene": contract.active_scene,
-        "render_blocks": contract.render_blocks,
-        "renderer_state": dict(
-            contract.metadata.get("renderer_state", {})
-            if isinstance(contract.metadata, dict) else {}
-        ),
+        "scene_id": contract.scene_id,
+        "turn_id": contract.turn_id,
+        "flow_id": contract.flow_id,
+        "relations": deepcopy(contract.relations),
+        "order": list(contract.order),
     }
-    # Final transport invariant: visible text and render_blocks must agree.
-    if canonical_text and not contract.metadata.get("machine_only") and not contract.render_blocks:
-        contract.render_blocks = _ensure_visible_text_block(scene, [])
-        contract.blocks = list(contract.render_blocks)
+    contract.signal = build_scene_signal(contract)
+    contract.metadata["scene_signal"] = deepcopy(contract.signal)
 
     scene.contract = contract
+    scene.blocks = list(contract.render_blocks)
+    scene.relations = list(contract.relations)
+    scene.order = list(contract.order)
     return contract
-
 
 
 # =====================================================
