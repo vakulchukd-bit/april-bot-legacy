@@ -16,12 +16,14 @@ Design law:
 No parallel route. No provider call. No renderer trigger.
 """
 
-from blocks.interpretation_layer import interpret_request
+from blocks.interpretation_layer import interpret_request, build_scene_blueprint
 import math
 import re
+from copy import deepcopy
+from typing import Any
 
 APRIL_FILE_ID = "APRIL_SEMANTIC_CORE"
-SEMANTIC_ENGINE_VERSION = "quantum_evidence_v5_canonical_interpretation_continuity_safe"
+SEMANTIC_ENGINE_VERSION = "quantum_evidence_v6_canonical_scene_blueprint_v1"
 SEMANTIC_MACHINE_CHANNEL = {
     "type": "semantic_core",
     "mode": "quantum_evidence_unified",
@@ -1138,6 +1140,74 @@ def _dialogue_context_matrix(text, signals, interpreted):
     }
 
 
+
+def _semantic_scene_from_interpretation(
+    *,
+    text: str,
+    interpreted: dict,
+    result: dict,
+) -> dict[str, Any]:
+    """Validate/normalize the Interpretation-owned scene blueprint.
+
+    Semantic Core never selects a new renderer. It only preserves all semantic
+    representations and adds a compact, renderer-neutral semantic summary.
+    """
+    interpreted = interpreted if isinstance(interpreted, dict) else {}
+    blueprint = interpreted.get('scene_blueprint')
+    if not isinstance(blueprint, dict):
+        blueprint = build_scene_blueprint(
+            text=text,
+            requested_outputs=interpreted.get('requested_outputs') or interpreted.get('required_representations') or [],
+            scene_composition=interpreted.get('scene_composition') or [],
+            production_representation=interpreted.get('production_representation') or 'text',
+            active_topic=interpreted.get('active_topic') or '',
+            active_goal=interpreted.get('active_goal') or '',
+            subject=interpreted.get('best_object') or '',
+            semantic_summary=text,
+            dialogue=interpreted.get('dialogue_contract') if isinstance(interpreted.get('dialogue_contract'), dict) else {},
+        )
+    reps = []
+    for item in blueprint.get('representations') or []:
+        rep = _clean_representation(item)
+        if rep and rep not in reps:
+            reps.append(rep)
+    if reps and any(rep != 'text' for rep in reps) and 'text' not in reps:
+        reps.insert(0, 'text')
+    blueprint['representations'] = reps or ['text']
+    blueprint['scene_kind'] = 'composite' if len(blueprint['representations']) > 1 else blueprint['representations'][0]
+    blueprint['preferred_representation'] = _clean_representation(
+        blueprint.get('preferred_representation') or result.get('production_representation') or 'text'
+    ) or blueprint['representations'][0]
+    blueprint['ownership'] = {
+        **dict(blueprint.get('ownership') or {}),
+        'semantic_owner': 'SEMANTIC_CORE',
+        'composition_owner': 'QUANTUM_PROCESSOR',
+        'renderer_owner': 'APRIL_WEB',
+        'one_response': True,
+        'one_scene': True,
+        'one_signal': True,
+        'renderer_selection_in_semantic_core': False,
+    }
+    semantic_scene = {
+        'version': 'semantic_scene_v1',
+        'blueprint': blueprint,
+        'scene_id': str(blueprint.get('scene_id') or '').strip(),
+        'topic_group': str(blueprint.get('topic_group') or '').strip(),
+        'subject': str(blueprint.get('subject') or '').strip(),
+        'goal': str(blueprint.get('goal') or '').strip(),
+        'semantic_summary': str(blueprint.get('semantic_summary') or text).strip()[:4000],
+        'representations': list(blueprint['representations']),
+        'nodes': list(blueprint.get('nodes') or []),
+        'relations': list(blueprint.get('relations') or []),
+        'dialogue': dict(blueprint.get('dialogue') or {}),
+        'dimensions': dict(blueprint.get('dimensions') or {}),
+        'renderer_commands': [],
+        'decision_owner': 'QUANTUM_PROCESSOR',
+        'evidence_only': True,
+    }
+    return semantic_scene
+
+
 def analyze(text: str, state: dict=None, history: list=None,
             active_flow: dict=None, dialog_state: dict=None,
             interpreted: dict=None):
@@ -1166,6 +1236,7 @@ def analyze(text: str, state: dict=None, history: list=None,
         ) or {}
 
     fusion=_signal_fusion(text, signals, interpreted)
+    interpreted_scene_blueprint = interpreted.get('scene_blueprint') if isinstance(interpreted.get('scene_blueprint'), dict) else {}
     dialogue_context = _dialogue_context_matrix(
         text, signals, interpreted
     )
@@ -1307,17 +1378,32 @@ def analyze(text: str, state: dict=None, history: list=None,
         if x not in blocked
     ]
 
-    result["required_representations"] = [production] if production else []
-    result["candidate_representations"] = evidence_candidates
-    result["requested_representations"] = [production] if production else []
+    # Multi-representation scene survives Semantic Core as one semantic object.
+    # Build the canonical scene first, then mirror its representation vector into
+    # the legacy compatibility fields. This prevents the old single-output
+    # production signal from overwriting a scene such as text+table+graph.
+    result['scene_blueprint'] = deepcopy(interpreted_scene_blueprint) if interpreted_scene_blueprint else _semantic_scene_from_interpretation(text=text, interpreted=interpreted, result=result).get('blueprint', {})
+    result['semantic_scene'] = _semantic_scene_from_interpretation(text=text, interpreted={**interpreted, 'scene_blueprint': result['scene_blueprint']}, result=result)
+    result['scene_representations'] = list(result['semantic_scene'].get('representations') or [production or 'text'])
+    result['scene_nodes'] = deepcopy(result['semantic_scene'].get('nodes') or [])
+    result['scene_relations'] = deepcopy(result['semantic_scene'].get('relations') or [])
+
+    semantic_scene_outputs = list(result.get('scene_representations') or [])
+    if not semantic_scene_outputs:
+        semantic_scene_outputs = [production] if production else ['text']
+        result['scene_representations'] = list(semantic_scene_outputs)
+
+    result["required_representations"] = list(semantic_scene_outputs)
+    result["candidate_representations"] = list(dict.fromkeys(semantic_scene_outputs + evidence_candidates))
+    result["requested_representations"] = list(semantic_scene_outputs)
 
     result["production_representation"] = production
     result["production_representation_preserved"] = False
     result["production_representation_preservation_source"] = ""
 
-    result["requested_outputs"] = [production] if production else []
-    result["required_outputs"] = [production] if production else []
-    result["requested_representation"] = production or None
+    result["requested_outputs"] = list(semantic_scene_outputs)
+    result["required_outputs"] = list(semantic_scene_outputs)
+    result["requested_representation"] = production or (semantic_scene_outputs[0] if semantic_scene_outputs else None)
 
     ascii_schema_advisory = bool(
         interpreted.get("ascii_schema_advisory")
@@ -1403,7 +1489,9 @@ def analyze(text: str, state: dict=None, history: list=None,
         "format_advisory": result.get("format_advisory"),
         "evidence_representations": list(evidence_candidates),
         "representation_posteriors": dict(fusion["representation_posteriors"]),
-        "multi_output": False,
+        "multi_output": len(result.get("scene_representations") or []) > 1,
+        "one_scene_many_representations": True,
+        "scene_blueprint_version": "semantic_scene_v1",
         "decision_owner":"QUANTUM_PROCESSOR",
     }
 
@@ -1437,6 +1525,8 @@ def analyze(text: str, state: dict=None, history: list=None,
         "transport":"transport_state",
         "evidence":result["semantic_evidence"],
         "capabilities":list(result["required_representations"]),
+        "scene_representations": list(result.get("scene_representations") or []),
+        "scene_blueprint": result.get("scene_blueprint") or {},
         "domains":result["required_domains"],
         "decision_owner":"QUANTUM_PROCESSOR",
         "single_route":True,
