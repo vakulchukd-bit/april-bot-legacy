@@ -495,11 +495,9 @@ def scene_contract_view(contract):
 
     view = dict(contract)
 
-    if "render_blocks" not in view or view.get("render_blocks") in (None, ""):
-        view["render_blocks"] = view.get("blocks", []) or []
-
-    if "blocks" not in view:
-        view["blocks"] = view.get("render_blocks", []) or []
+    # One canonical visible list. Never revive a second/legacy blocks source.
+    view["render_blocks"] = list(view.get("render_blocks") or [])
+    view["blocks"] = view["render_blocks"]
 
     view.setdefault("active_scene", "")
     view.setdefault("space_continuity", {})
@@ -588,12 +586,9 @@ def build_gateway_transport_payload(result):
     machine = result.get("machine_response")
     machine = machine if isinstance(machine, dict) else {}
 
-    render_blocks = (
-        scene.get("render_blocks")
-        or result.get("render_blocks")
-        or machine.get("render_blocks")
-        or []
-    )
+    # Web receives exactly the SceneContract render stream. No fallback source
+    # may replace or merge it in the Gateway.
+    render_blocks = list(scene.get("render_blocks") or [])
 
     # SceneContract is already canonical. Transport must not choose between
     # answer/content/summary or manufacture a new human text field.
