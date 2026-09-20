@@ -2648,7 +2648,7 @@ def _scene_has_successful_visual(scene):
     return any(_visual_block_has_payload(block) for block in blocks)
 
 
-def update_scene_context(user_id, scene_contract, current_request="", answer="", *, internal_context=False):
+def update_scene_context(user_id, scene_contract, current_request="", answer="", *, internal_context=False, persist=True):
     """
     One canonical dialogue-scene update.
 
@@ -2676,7 +2676,8 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
             "created_at": time.time(),
             "internal_context": True,
         }
-        persist_state(user_id)
+        if persist:
+            persist_state(user_id)
         return state_obj.get("active_scene_contract")
     if not contract and hasattr(scene_contract, "__dict__"):
         contract = dict(scene_contract.__dict__)
@@ -3007,7 +3008,8 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
     state_obj["stored_visual_scene_turn"] = None
 
     state_obj["active_scene"] = QUANTUM_MEMORY_ENGINE.refresh_scene(state_obj)
-    persist_state(user_id)
+    if persist:
+        persist_state(user_id)
     return state_obj["active_scene_contract"]
 
 def update_dialog_context(user_id, semantic_result):
