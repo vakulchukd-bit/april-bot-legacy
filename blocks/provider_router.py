@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import asyncio
 import hashlib
 import json
 import os
@@ -63,10 +64,12 @@ You are April's internal response provider. Return exactly one MachineResponse J
 The user speaks with April; never expose the provider/model identity unless explicitly asked for technical details.
 
 Core contract:
-- Answer only the current request. Continuity fields are evidence, never a competing route.
-- Respect requested_outputs and SCENE_COMPOSITION from the Quantum Processor.
+- The Quantum Processor is the sole owner of interpretation, dialogue relation, representation and resolved task. Treat these fields as authoritative.
+- Answer only the resolved current request. For CONTINUATION/PENDING/ARTIFACT_REFERENCE, never interpret the user's latest short phrase in isolation.
+- Respect requested_outputs and SCENE_COMPOSITION from the Quantum Processor. Never invent another representation.
 - Emit compact machine-valid JSON with: answer, content, summary, scene, artifacts, render_blocks, scene_plan, render_priority, confidence, metadata.
 - Structured render blocks must use type, renderer, viewer, payload, scene_contract=true.
+- `render_blocks` is the provider's only structured output list. Do not duplicate a semantic block.
 - Never call another model. Never return fake URLs, base64 images, or duplicated full structured payloads in prose.
 
 VISUAL PRODUCTION MODES:
@@ -906,6 +909,34 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         f"VISUAL_PRODUCTION_MODE: {mode}",
         f"REQUESTED_OUTPUTS: {json.dumps(outputs, ensure_ascii=False, separators=(',', ':'))}",
     ]
+
+    # The Processor owns interpretation. For continuation/pending/reference turns
+    # send only compact live state so Luna resolves the task in context without
+    # re-running a second semantic classifier.
+    dialogue = payload.get("dialogue_contract") if isinstance(payload.get("dialogue_contract"), dict) else {}
+    if dialogue.get("continuation") or dialogue.get("reference_to_previous") or str(dialogue.get("context_dependency") or "").lower() == "pending":
+        compact_context = {
+            "relation": dialogue.get("relation"),
+            "context_dependency": dialogue.get("context_dependency"),
+            "active_task": dialogue.get("active_task"),
+            "pending_task": dialogue.get("pending_task"),
+            "resolved_request": dialogue.get("resolved_request"),
+        }
+        candidates.append(
+            "LIVE_DIALOGUE_STATE: " + json.dumps(_compact_value(compact_context), ensure_ascii=False, separators=(',', ':'))
+        )
+        candidates.append("PROCESSOR_AUTHORITY: relation, task, representation and resolved_request are authoritative; do not reinterpret them.")
+
+    visual_context = payload.get("visual_context")
+    if isinstance(visual_context, dict) and visual_context:
+        compact_visual = _compact_value(visual_context, max_depth=2, max_items=3, max_keys=12)
+        candidates.append(
+            "VISUAL_CONTEXT: " + json.dumps(compact_visual, ensure_ascii=False, separators=(',', ':'))
+        )
+
+    candidates.append(
+        "OUTPUT_CONTRACT: return exactly the requested representation(s); never add graph/diagram/image/link blocks that are not in REQUESTED_OUTPUTS."
+    )
     if mode == "image_generation":
         candidates.append("IMAGE_GENERATION_MODE: return compact JSON containing metadata.image_generation_spec; never return image bytes, URLs, or fake image blocks.")
     elif mode == "diagram":
@@ -1364,7 +1395,9 @@ async def generate_text(messages: Any, temperature: Any = None,
             "no_model_escalation": True,
         })
 
-        response = _get_openai_client().responses.create(**request)
+        # OpenAI's synchronous SDK would block the async Web/Telegram event loop.
+        # Offload this single call to a worker thread; provider count remains 1.
+        response = await asyncio.to_thread(_get_openai_client().responses.create, **request)
         usage = _extract_usage(response)
         raw_text = _extract_openai_text(response)
         if not raw_text:
