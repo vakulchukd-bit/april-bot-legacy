@@ -166,6 +166,34 @@ def _content(block: dict[str, Any]) -> str:
     return ""
 
 
+def _semantic_visual_key(block: dict[str, Any]) -> str:
+    """Return a stable key for transport duplicates of the same visual node."""
+    block_type = normalize_type(block.get("type") or block.get("artifact_type") or block.get("representation"))
+    payload = _d(block.get("payload"))
+
+    if block_type in {"link", "file"}:
+        url = _s(block.get("url") or block.get("href") or payload.get("url") or payload.get("href"))
+        if url:
+            return f"link:{url.split('#', 1)[0].rstrip('/').lower()}"
+
+    # graph_data is an internal data carrier for graph artifacts, not a second
+    # human-visible scene node.
+    if block_type == "graph_data":
+        name = _s(block.get("name") or payload.get("name"))
+        return f"internal:graph_data:{name or _fingerprint(payload)}"
+
+    return ""
+
+
+def _prefer_block(existing: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    existing_renderer = _s(existing.get("renderer")).lower()
+    candidate_renderer = _s(candidate.get("renderer")).lower()
+    if "linkcard" in candidate_renderer and "message" in existing_renderer:
+        return candidate
+    if "linkcard" in existing_renderer and "message" in candidate_renderer:
+        return existing
+    return existing
+
 def canonicalize_scene_blocks(
     blocks: Iterable[Any] | None,
     *,
@@ -187,6 +215,7 @@ def canonicalize_scene_blocks(
     normalized: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     seen_signatures: set[str] = set()
+    semantic_index: dict[str, int] = {}
 
     raw_blocks = [b for b in blocks or [] if isinstance(b, dict)]
     for index, raw in enumerate(raw_blocks):
@@ -194,6 +223,11 @@ def canonicalize_scene_blocks(
         block_type = normalize_type(block.get("type") or block.get("artifact_type") or block.get("representation"))
         block["type"] = block_type
         block.setdefault("artifact_type", block_type)
+
+        if block_type == "graph_data":
+            # Preserve structured graph data inside its owning graph payload,
+            # but do not expose it as a second visible Web block.
+            continue
 
         block_id = stable_block_id(scene_id, block, index)
         bp_node = bp_nodes.get(block_id, {})
@@ -232,10 +266,19 @@ def canonicalize_scene_blocks(
             "content": _content(block),
             "payload": block.get("payload", {}),
         })
+        semantic_key = _semantic_visual_key(block)
+        if semantic_key and semantic_key in semantic_index:
+            previous_index = semantic_index[semantic_key]
+            preferred = _prefer_block(normalized[previous_index], block)
+            if preferred is not normalized[previous_index]:
+                normalized[previous_index] = preferred
+            continue
         if block_id in seen_ids or signature in seen_signatures:
             continue
         seen_ids.add(block_id)
         seen_signatures.add(signature)
+        if semantic_key:
+            semantic_index[semantic_key] = len(normalized)
         normalized.append(block)
 
     normalized.sort(key=lambda item: int(item.get("sequence_index", 0)))
