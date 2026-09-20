@@ -1945,6 +1945,25 @@ def _scene_block_renderer(block: Dict[str, Any]) -> str:
     return ARTIFACT_BLOCK_MAP.get(_scene_block_type(block), "MessageTextBlock")
 
 
+def _canonical_visual_dedupe_key(block: Dict[str, Any]) -> str:
+    block_type = _scene_block_type(block)
+    if block_type in {"link", "file"}:
+        payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+        url = str(block.get("url") or block.get("href") or payload.get("url") or payload.get("href") or "").strip()
+        if url:
+            return f"link:{url.split('#', 1)[0].rstrip('/').lower()}"
+    if block_type == "graph_data":
+        return f"internal:graph_data:{str(block.get('name') or '')}"
+    return ""
+
+
+def _prefer_canonical_visual_block(existing: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
+    existing_renderer = str(existing.get("renderer") or "").lower()
+    candidate_renderer = str(candidate.get("renderer") or "").lower()
+    if "linkcard" in candidate_renderer and "message" in existing_renderer:
+        return candidate
+    return existing
+
 def _scene_blueprint_blocks(blueprint: Dict[str, Any], *, scene_id: str, turn_id: str, flow_id: str) -> List[Dict[str, Any]]:
     nodes = []
     for index, raw in enumerate(_scene_list(blueprint.get("nodes"))):
@@ -2034,12 +2053,15 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
     normalized: List[Dict[str, Any]] = []
     seen_ids: set[str] = set()
     seen_signatures: set[str] = set()
+    semantic_index: Dict[str, int] = {}
 
     for index, raw in enumerate(blocks):
         if not isinstance(raw, dict):
             continue
         block = dict(raw)
         block_type = _scene_block_type(block)
+        if block_type == "graph_data":
+            continue
         renderer = _scene_block_renderer(block)
         block["type"] = block_type
         block["artifact_type"] = str(block.get("artifact_type") or block_type)
@@ -2064,10 +2086,17 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
             "content": _scene_text(block),
             "payload": block.get("payload", {}),
         })
+        semantic_key = _canonical_visual_dedupe_key(block)
+        if semantic_key and semantic_key in semantic_index:
+            previous_index = semantic_index[semantic_key]
+            normalized[previous_index] = _prefer_canonical_visual_block(normalized[previous_index], block)
+            continue
         if block_id in seen_ids or signature in seen_signatures:
             continue
         seen_ids.add(block_id)
         seen_signatures.add(signature)
+        if semantic_key:
+            semantic_index[semantic_key] = len(normalized)
         normalized.append(block)
 
     normalized.sort(key=lambda b: int(b.get("sequence_index", 0)))
