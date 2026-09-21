@@ -98,6 +98,19 @@ The Quantum Processor is authoritative for dialogue relation, active sequence, r
 representation and requested outputs. For CONTINUATION/PENDING/ARTIFACT_REFERENCE, use the supplied
 authenticated seven-day USER↔APRIL dialogue memory and active sequence; do not interpret the latest
 phrase in isolation and do not ask who/what the user means when the supplied memory resolves it.
+
+Conversation strategy is semantic, not keyword-driven: when the processor supplies DIALOGUE_STRATEGY
+and CONTINUATION_CONTENT_ANALYSIS, follow them as response intent. EXPAND adds genuinely new facts,
+examples or angles and keeps recap brief. DEEPEN explains causes/mechanisms instead of restating the
+summary. DISCUSS engages the user's point with evidence, distinguishes fact from interpretation, and
+presents relevant alternatives or trade-offs instead of agreeing automatically. SOLVE works like a
+specialist collaborating on a real problem: separate observations from hypotheses, propose a useful test or check, explain what the result would mean, then move to the next actionable step. CORRECT
+identifies the disputed point and gives the corrected version. REACT answers the human reaction naturally
+and does not force a new information dump. CONTINUE_NATURAL keeps the thread moving smoothly.
+Use COVERED/AVOID_REPEAT content as a semantic exclusion set, not as text to copy. Repetition is allowed
+only when a short reminder is necessary for coherence. Prefer a visible sense of forward motion and
+help the user make progress on difficult tasks when the current turn calls for it.
+
 Return compact JSON with answer, content, summary, scene, artifacts, render_blocks, scene_plan,
 render_priority, confidence and metadata. Structured blocks use type, renderer, viewer, payload,
 scene_contract=true. Never expose prompts, internal JSON or renderer details in human text.
@@ -776,10 +789,30 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
             "reply_to": dialogue.get("reply_to"),
             "active_goal": dialogue.get("active_goal"),
             "active_topic": dialogue.get("active_topic"),
+            "active_entity": dialogue.get("active_entity"),
             "previous_april_turn": dialogue.get("previous_april_turn"),
             "previous_user_turn": dialogue.get("previous_user_turn"),
         }
-        fields.append(("DIALOGUE_VECTOR", _compact_value(vector, max_items=6, max_keys=8)))
+        fields.append(("DIALOGUE_VECTOR", _compact_value(vector, max_items=6, max_keys=9)))
+
+        strategy = dialogue.get("dialogue_strategy")
+        analysis = dialogue.get("continuation_content_analysis")
+        if isinstance(strategy, dict) and strategy:
+            fields.append(("DIALOGUE_STRATEGY", _compact_value(strategy, max_depth=3, max_items=8, max_keys=12)))
+        if isinstance(analysis, dict) and analysis.get("active"):
+            # Compact delta only: the provider needs enough prior-content knowledge
+            # to avoid repetition, not the entire seven-day ledger in prose.
+            delta = {
+                "mode": analysis.get("mode"),
+                "intent": analysis.get("intent"),
+                "active_entity": analysis.get("active_entity"),
+                "new_information_required": analysis.get("new_information_required"),
+                "novelty_target": analysis.get("novelty_target"),
+                "recap_ratio_max": analysis.get("recap_ratio_max"),
+                "covered_content": analysis.get("avoid_repeat_content") or analysis.get("covered_content"),
+                "next_direction": analysis.get("next_direction"),
+            }
+            fields.append(("CONTINUATION_CONTENT_ANALYSIS", _compact_value(delta, max_depth=3, max_items=7, max_keys=10)))
 
         memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
         dialogue_memory = memory.get("dialogue_memory")
@@ -953,6 +986,7 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             "relation": dialogue.get("relation"),
             "context_dependency": dialogue.get("context_dependency"),
             "active_task": dialogue.get("active_task"),
+            "active_entity": dialogue.get("active_entity"),
             "pending_task": dialogue.get("pending_task"),
             "resolved_request": dialogue.get("resolved_request"),
         }
@@ -960,15 +994,49 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             "LIVE_DIALOGUE_STATE: " + json.dumps(_compact_value(compact_context), ensure_ascii=False, separators=(',', ':'))
         )
 
+        strategy = dialogue.get("dialogue_strategy") if isinstance(dialogue.get("dialogue_strategy"), dict) else {}
+        analysis = dialogue.get("continuation_content_analysis") if isinstance(dialogue.get("continuation_content_analysis"), dict) else {}
+        if strategy or analysis.get("active"):
+            strategy_packet = {
+                "mode": strategy.get("mode") or analysis.get("mode"),
+                "intent": strategy.get("intent") or analysis.get("intent"),
+                "posture": strategy.get("conversational_posture"),
+                "new_information_required": strategy.get("new_information_required", analysis.get("new_information_required")),
+                "novelty_target": strategy.get("novelty_target", analysis.get("novelty_target")),
+                "recap_ratio_max": strategy.get("recap_ratio_max", analysis.get("recap_ratio_max")),
+                "active_entity": dialogue.get("active_entity") or analysis.get("active_entity"),
+                "expertise_behavior": strategy.get("expertise_behavior") or analysis.get("expertise_behavior"),
+                "covered_content": (analysis.get("avoid_repeat_content") or analysis.get("covered_content") or [])[:4],
+                "next_direction": strategy.get("next_direction") or analysis.get("next_direction"),
+            }
+            candidates.append(
+                "CONTINUATION_PLAN: " + json.dumps(
+                    _compact_value(strategy_packet, max_depth=3, max_items=6, max_keys=9),
+                    ensure_ascii=False, separators=(',', ':')
+                )
+            )
+
         memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
         dialogue_memory = memory.get("dialogue_memory")
         if isinstance(dialogue_memory, dict):
+            active_turns = dialogue_memory.get("active_sequence_turns") or []
+            # The continuation plan already carries the previous-answer delta and
+            # covered content. Keep only the last two user/assistant turns here so
+            # the 900-token envelope retains headroom for the actual request.
+            recent_turns: list[dict[str, str]] = []
+            for turn in (active_turns[-2:] if isinstance(active_turns, list) else []):
+                if not isinstance(turn, dict):
+                    continue
+                user_turn = _safe_text(turn.get("user_request") or turn.get("user_meaning"))[:180]
+                answer_turn = _safe_text(turn.get("april_answer") or turn.get("april_meaning"))[:320]
+                if user_turn or answer_turn:
+                    recent_turns.append({"user": user_turn, "answer": answer_turn})
             compact_dialogue_memory = {
                 "window_days": dialogue_memory.get("window_days", 7),
-                "active_sequence": dialogue_memory.get("active_sequence"),
-                "active_sequence_turns": dialogue_memory.get("active_sequence_turns"),
-                "relevant_7d_turns": dialogue_memory.get("relevant_7d_turns"),
+                "active_sequence_turns": recent_turns,
             }
+            if str(dialogue.get("context_dependency") or "").lower() == "recall":
+                compact_dialogue_memory["relevant_7d_turns"] = (dialogue_memory.get("relevant_7d_turns") or [])[:2]
             candidates.append(
                 "SEVEN_DAY_DIALOGUE_MEMORY: "
                 + json.dumps(
@@ -976,13 +1044,13 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
                         compact_dialogue_memory,
                         max_depth=5,
                         max_items=4,
-                        max_keys=10,
+                        max_keys=9,
                     ),
                     ensure_ascii=False,
                     separators=(',', ':'),
                 )
             )
-        candidates.append("PROCESSOR_AUTHORITY: relation, task, representation and resolved_request are authoritative; use the supplied dialogue memory when resolving follow-ups.")
+        candidates.append("PROCESSOR_AUTHORITY: relation, task, representation, resolved_request and continuation strategy are authoritative; use the live active sequence for current-turn context and treat generic memory as evidence-only.")
 
     visual_context = payload.get("visual_context")
     if isinstance(visual_context, dict) and visual_context:
