@@ -157,6 +157,7 @@ def build_memory_day():
         "topics": [],
         "objects": [],
         "intent_signals": [],
+        "dialog_pairs": [],
         "created_at": time.time(),
     }
 
@@ -240,6 +241,21 @@ def build_default_state():
             "authoritative": False,
             "updated_at": None,
         },
+        "active_dialogue_sequence": {
+            "version": "april_dialogue_sequence_v1",
+            "sequence_id": None,
+            "topic": None,
+            "status": "inactive",
+            "user_id": None,
+            "conversation_id": None,
+            "turn_count": 0,
+            "started_at": None,
+            "last_turn_at": None,
+            "last_user_request": "",
+            "last_april_answer": "",
+            "relation": "NEW",
+        },
+        "dialogue_sequence_version": "APRIL-DIALOGUE-SEQUENCE-7D-V1",
         "focus_snapshot": {},
         "focus_state": {
             "active_topic": None,
@@ -329,6 +345,7 @@ class QuantumMemoryEngine:
                 "authoritative": False,
                 "updated_at": None,
             }
+        self._ensure_active_dialogue_sequence(state_obj)
         return state_obj
 
     def normalize_timeline(self, state_obj):
@@ -344,7 +361,7 @@ class QuantumMemoryEngine:
             for slot in TOPIC_CLASSES:
                 if not isinstance(canonical[key].get(slot), list):
                     canonical[key][slot] = []
-            for field in ("visual_scenes", "topics", "objects", "intent_signals"):
+            for field in ("visual_scenes", "topics", "objects", "intent_signals", "dialog_pairs"):
                 if not isinstance(canonical[key].get(field), list):
                     canonical[key][field] = []
 
@@ -687,6 +704,197 @@ class QuantumMemoryEngine:
         state_obj["active_visual_scene_turn"] = None
         state_obj["stored_visual_scene_turn"] = None
         state_obj["active_visual_topic"] = None
+
+    @staticmethod
+    def _ensure_active_dialogue_sequence(state_obj):
+        """Recover/normalize the authenticated user's active 7-day vector."""
+        if not isinstance(state_obj, dict):
+            return {}
+
+        scope = state_obj.get("memory_scope") if isinstance(state_obj.get("memory_scope"), dict) else {}
+        user_id = str(scope.get("user_id") or state_obj.get("user_id") or "").strip()
+        conversation_id = str(
+            scope.get("conversation_id")
+            or state_obj.get("conversation_id")
+            or ""
+        ).strip()
+
+        current = state_obj.get("active_dialogue_sequence")
+        if not isinstance(current, dict):
+            current = {}
+
+        sequence_id = str(current.get("sequence_id") or "").strip()
+        current_user = str(current.get("user_id") or "").strip()
+        current_conversation = str(current.get("conversation_id") or "").strip()
+
+        try:
+            current_last_turn = float(current.get("last_turn_at") or 0.0)
+        except (TypeError, ValueError):
+            current_last_turn = 0.0
+        sequence_expired = bool(
+            current_last_turn
+            and (time.time() - current_last_turn) >= USER_CONTENT_RETENTION_SECONDS
+        )
+
+        if sequence_id and not sequence_expired and (
+            (not current_user or current_user == user_id)
+            and (not current_conversation or current_conversation == conversation_id)
+        ):
+            current.update({
+                "version": "april_dialogue_sequence_v1",
+                "sequence_id": sequence_id,
+                "user_id": user_id or current_user,
+                "conversation_id": conversation_id or current_conversation,
+                "status": "active",
+                "relation": str(current.get("relation") or "CONTINUE").upper(),
+            })
+            state_obj["active_dialogue_sequence"] = current
+            return current
+
+        # Restore from the newest authenticated dialog pair in the seven-day window.
+        pairs = []
+        timeline = state_obj.get("memory_timeline") if isinstance(state_obj.get("memory_timeline"), dict) else {}
+        now = time.time()
+        for day_index in range(MEMORY_DAYS):
+            day = timeline.get(f"day_{day_index}")
+            if not isinstance(day, dict):
+                continue
+            for item in day.get("dialog_pairs", []):
+                if not isinstance(item, dict):
+                    continue
+                if user_id and str(item.get("user_id") or "") != user_id:
+                    continue
+                if conversation_id and str(item.get("conversation_id") or "") not in {"", conversation_id}:
+                    continue
+                try:
+                    created = float(item.get("created_at") or item.get("timestamp") or 0.0)
+                except Exception:
+                    created = 0.0
+                if created and now - created >= USER_CONTENT_RETENTION_SECONDS:
+                    continue
+                if item.get("sequence_id"):
+                    pairs.append(item)
+
+        pairs.sort(key=lambda item: float(item.get("created_at") or item.get("timestamp") or 0.0))
+        if pairs:
+            last = pairs[-1]
+            topic = str(last.get("topic") or last.get("canonical_topic") or "").strip()
+            restored = {
+                "version": "april_dialogue_sequence_v1",
+                "sequence_id": str(last.get("sequence_id") or "").strip(),
+                "topic": topic or None,
+                "status": "active",
+                "user_id": user_id or str(last.get("user_id") or ""),
+                "conversation_id": conversation_id or str(last.get("conversation_id") or ""),
+                "turn_count": len([p for p in pairs if str(p.get("sequence_id") or "") == str(last.get("sequence_id") or "")]),
+                "started_at": next(
+                    (
+                        p.get("created_at")
+                        for p in pairs
+                        if str(p.get("sequence_id") or "") == str(last.get("sequence_id") or "")
+                    ),
+                    None,
+                ),
+                "last_turn_at": last.get("created_at") or last.get("timestamp"),
+                "last_user_request": str(last.get("user_request") or last.get("user_meaning") or ""),
+                "last_april_answer": str(last.get("april_answer") or last.get("april_meaning") or ""),
+                "relation": str(last.get("dialogue_relation") or "CONTINUE").upper(),
+                "restored": True,
+            }
+            state_obj["active_dialogue_sequence"] = restored
+            return restored
+
+        # No pair means no live sequence. Do not manufacture one yet.
+        empty = {
+            "version": "april_dialogue_sequence_v1",
+            "sequence_id": None,
+            "topic": None,
+            "status": "inactive",
+            "user_id": user_id or None,
+            "conversation_id": conversation_id or None,
+            "turn_count": 0,
+            "started_at": None,
+            "last_turn_at": None,
+            "last_user_request": "",
+            "last_april_answer": "",
+            "relation": "NEW",
+        }
+        state_obj["active_dialogue_sequence"] = empty
+        return empty
+
+    @staticmethod
+    def _advance_active_dialogue_sequence(
+        state_obj,
+        user_id,
+        relation,
+        current_request,
+        answer,
+        dialogue_vector=None,
+        selected_operand=None,
+    ):
+        """Advance or create exactly one active dialogue vector for this user."""
+        dialogue_vector = dialogue_vector if isinstance(dialogue_vector, dict) else {}
+        selected_operand = selected_operand if isinstance(selected_operand, dict) else {}
+        relation = str(relation or "NEW").strip().upper()
+        scope = state_obj.get("memory_scope") if isinstance(state_obj.get("memory_scope"), dict) else {}
+        conversation_id = str(
+            scope.get("conversation_id")
+            or state_obj.get("conversation_id")
+            or ""
+        )
+
+        current = state_obj.get("active_dialogue_sequence")
+        current = current if isinstance(current, dict) else {}
+        current_id = str(current.get("sequence_id") or "").strip()
+
+        target_id = str(dialogue_vector.get("target_sequence_id") or dialogue_vector.get("sequence_id") or "").strip()
+        if relation == "RECALL":
+            target_id = str(selected_operand.get("sequence_id") or target_id or current_id).strip()
+
+        topic = str(
+            dialogue_vector.get("canonical_topic")
+            or dialogue_vector.get("active_topic")
+            or selected_operand.get("topic")
+            or current.get("topic")
+            or ""
+        ).strip()
+
+        if relation == "NEW" or not current_id or (target_id and target_id != current_id and relation == "RECALL"):
+            if not target_id or (relation == "NEW" and target_id == current_id):
+                raw = f"{user_id}|{conversation_id}|{time.time_ns()}|{current_request}|{topic}"
+                target_id = "seq-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+            sequence = {
+                "version": "april_dialogue_sequence_v1",
+                "sequence_id": target_id,
+                "topic": topic or None,
+                "status": "active",
+                "user_id": str(user_id),
+                "conversation_id": conversation_id,
+                "turn_count": 0,
+                "started_at": time.time(),
+                "last_turn_at": None,
+                "last_user_request": "",
+                "last_april_answer": "",
+                "relation": "NEW",
+            }
+        else:
+            sequence = deepcopy(current)
+            sequence["version"] = "april_dialogue_sequence_v1"
+            sequence["sequence_id"] = current_id
+            sequence["user_id"] = str(user_id)
+            sequence["conversation_id"] = conversation_id
+            sequence["status"] = "active"
+            if topic:
+                sequence["topic"] = topic
+
+        sequence["turn_count"] = int(sequence.get("turn_count") or 0) + 1
+        sequence["last_turn_at"] = time.time()
+        sequence["last_user_request"] = str(current_request or "").strip()[:1200]
+        sequence["last_april_answer"] = str(answer or "").strip()[:2200]
+        sequence["relation"] = relation
+        sequence["restored"] = False
+        state_obj["active_dialogue_sequence"] = sequence
+        return sequence
 
     def ensure_runtime(self, state_obj):
         self.ensure(state_obj)
@@ -1675,9 +1883,14 @@ def _archive_dialog_pair(state_obj, user_id, user_msg, april_msg):
     timeline = state_obj.get("memory_timeline") or build_memory_timeline()
     day0 = timeline.setdefault("day_0", build_memory_day())
     dialog_pairs = day0.setdefault("dialog_pairs", [])
+    sequence = state_obj.get("active_dialogue_sequence") if isinstance(state_obj.get("active_dialogue_sequence"), dict) else {}
     record = {
         "record_type": "dialog_pair",
         "user_id": str(user_id),
+        "conversation_id": str(state_obj.get("conversation_id") or ""),
+        "sequence_id": str(sequence.get("sequence_id") or ""),
+        "sequence_turn_index": int(sequence.get("turn_count") or 0),
+        "sequence_topic": safe_trim_text(sequence.get("topic") or "", 240),
         "user_meaning": safe_trim_text(user_msg, 800),
         "april_meaning": safe_trim_text(april_msg, 1400),
         "answer_summary": safe_trim_text(april_msg, 1000),
@@ -2193,11 +2406,104 @@ def build_memory_context(user_id):
         "window_days": MEMORY_DAYS,
         "memory_cleanup": deepcopy(state_obj.get("memory_cleanup", {})),
         "memory_matrix": deepcopy(state_obj.get("memory_matrix", {})),
+        "active_dialogue_sequence": deepcopy(state_obj.get("active_dialogue_sequence", {})),
     }
 
 
 def build_executor_memory_bridge(user_id, query=""):
     return QUANTUM_MEMORY_ENGINE.build_executor_bridge(get_state(user_id), query=query)
+
+
+def build_dialogue_memory_bridge(user_id, query="", limit=8):
+    """Build compact authenticated-user dialogue memory for interpretation/provider."""
+    state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
+    user_key = str(user_id)
+    conversation_id = str(state_obj.get("conversation_id") or "")
+    active = deepcopy(state_obj.get("active_dialogue_sequence") or {})
+
+    records = []
+    now = time.time()
+    timeline = state_obj.get("memory_timeline") if isinstance(state_obj.get("memory_timeline"), dict) else {}
+    for day_index in range(MEMORY_DAYS):
+        day = timeline.get(f"day_{day_index}")
+        if not isinstance(day, dict):
+            continue
+        for item in day.get("dialog_pairs", []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("user_id") or "") != user_key:
+                continue
+            item_conversation = str(item.get("conversation_id") or "")
+            if item_conversation and item_conversation != conversation_id:
+                continue
+            try:
+                created = float(item.get("created_at") or item.get("timestamp") or 0.0)
+            except (TypeError, ValueError):
+                created = 0.0
+            if not created or (now - created) >= USER_CONTENT_RETENTION_SECONDS:
+                continue
+            record = {
+                "sequence_id": item.get("sequence_id"),
+                "sequence_turn_index": item.get("sequence_turn_index"),
+                "sequence_topic": item.get("sequence_topic") or item.get("topic"),
+                "user_request": item.get("user_request") or item.get("user_meaning"),
+                "april_answer": item.get("april_answer") or item.get("april_meaning"),
+                "answer_summary": item.get("answer_summary") or item.get("april_meaning"),
+                "dialogue_relation": item.get("dialogue_relation"),
+                "visual_scene_id": item.get("visual_scene_id"),
+                "created_at": created,
+            }
+            records.append(record)
+
+    records.sort(key=lambda item: float(item.get("created_at") or 0.0))
+    active_id = str(active.get("sequence_id") or "")
+    active_turns = [item for item in records if str(item.get("sequence_id") or "") == active_id]
+    active_turns = active_turns[-max(1, min(int(limit or 8), 8)):]
+
+    # Cross-vector recall evidence is intentionally tiny and never becomes
+    # routing authority. The processor has already decided CONTINUE/RECALL/NEW.
+    relevant = []
+    if str(query or "").strip():
+        candidates = []
+        for item in records:
+            if str(item.get("sequence_id") or "") == active_id:
+                continue
+            source = " ".join(
+                str(item.get(key) or "")
+                for key in ("sequence_topic", "user_request", "april_answer", "answer_summary")
+            )
+            candidates.append((item, source))
+        if candidates:
+            scores = QUANTUM_MEMORY_ENGINE.semantic_scores(
+                str(query),
+                [source for _, source in candidates],
+            )
+            ranked = sorted(
+                (
+                    (float(scores.get(source, 0.0)), item)
+                    for item, source in candidates
+                ),
+                key=lambda pair: pair[0],
+                reverse=True,
+            )
+            relevant = [
+                {**item, "relevance": round(score, 6)}
+                for score, item in ranked[:3]
+                if score >= 0.30
+            ]
+
+    return {
+        "version": "april_dialogue_memory_bridge_v1",
+        "window_days": MEMORY_DAYS,
+        "user_id": user_key,
+        "conversation_id": conversation_id,
+        "active_sequence": active,
+        "active_sequence_turns": active_turns,
+        "relevant_7d_turns": relevant,
+        "turn_count_7d": len(records),
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "evidence_only": True,
+    }
 
 
 def ensure_memory_runtime(user_id):
@@ -2810,6 +3116,24 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         except (TypeError, ValueError):
             selected_index = -1
 
+    dialogue_vector = (
+        state_obj.get("dialogue_vector")
+        if isinstance(state_obj.get("dialogue_vector"), dict)
+        else {}
+    )
+
+    # The dialogue vector, not the visual-artifact pointer, owns sequence
+    # continuity. A new vector is the only transition that creates a sequence.
+    active_sequence = QUANTUM_MEMORY_ENGINE._advance_active_dialogue_sequence(
+        state_obj,
+        user_id,
+        resolved_relation,
+        current_request_text,
+        answer_text,
+        dialogue_vector=dialogue_vector,
+        selected_operand=selected_operand,
+    )
+
     previous_scene_id = ""
     if resolved_relation == "CONTINUE" and isinstance(current_scene, dict):
         previous_scene_id = str(current_scene.get("scene_id") or "")
@@ -2835,14 +3159,19 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "scene_type": str(contract.get("active_scene") or "dialogue"),
         "topic": safe_trim_text(
             (
-                current_scene.get("topic")
-                if is_continuation and isinstance(current_scene, dict)
+                active_sequence.get("topic")
+                if is_continuation
                 else (
-                    contract.get("active_topic")
-                    or contract.get("topic")
-                    or state_obj.get("current_topic")
-                    or state_obj.get("focus_state", {}).get("active_topic")
-                    or current_request_text
+                    selected_operand.get("topic")
+                    if is_recall and isinstance(selected_operand, dict) and selected_operand.get("topic")
+                    else (
+                        contract.get("active_topic")
+                        or contract.get("topic")
+                        or active_sequence.get("topic")
+                        or state_obj.get("current_topic")
+                        or state_obj.get("focus_state", {}).get("active_topic")
+                        or current_request_text
+                    )
                 )
             ),
             500,
@@ -2879,6 +3208,9 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "semantic_state": deepcopy(semantic_scene_state),
         "dialogue_vector": deepcopy(state_obj.get("dialogue_vector", {})),
         "turn_progression": deepcopy(state_obj.get("turn_progression", {})),
+        "sequence_id": active_sequence.get("sequence_id"),
+        "sequence_turn_index": active_sequence.get("turn_count", 0),
+        "sequence_topic": active_sequence.get("topic"),
         "render_continuity": {
             "relation": resolved_relation,
             "reuse_existing_scene": bool(resolved_relation == "CONTINUE" and previous_scene_id),
@@ -2898,6 +3230,7 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
     }
 
     state_obj["semantic_scene_state"] = deepcopy(semantic_scene_state)
+    state_obj["current_topic"] = scene_record.get("topic") or active_sequence.get("topic") or state_obj.get("current_topic")
     state_obj["current_visual_scene"] = deepcopy(scene_record)
 
     # Separate the latest dialogue turn from the latest successful visual
@@ -2960,6 +3293,9 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "answer_summary": safe_trim_text(contract.get("summary") or answer_text, 1000),
         "semantic_state": deepcopy(semantic_scene_state),
         "dialogue_relation": resolved_relation,
+        "sequence_id": active_sequence.get("sequence_id"),
+        "sequence_turn_index": active_sequence.get("turn_count", 0),
+        "sequence_topic": active_sequence.get("topic"),
         "selected_memory_index": selected_index,
         "selected_memory_operand": deepcopy(selected_operand),
         "development_state": deepcopy(
