@@ -17,6 +17,7 @@ from blocks.C_ARTIFACT_CONTRACT import (
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.provider_router import generate_text
 from blocks.state_manager import get_state, update_scene_context, persist_state
+from blocks.internal_interpretation import AprilInternalInterpretation
 
 PROCESSOR_VERSION = "april_sequential_processor_v1_fast_memory_scene"
 PROCESSOR_MODE = "SEQUENTIAL_INTERPRETATION_MEMORY_PROVIDER_SCENE"
@@ -355,11 +356,53 @@ class ProcessorScene:
         self.state = state
         self.user_id = _text(user_id)
         self.request = _text(request)
+        # Canonical semantic owner. SequentialInterpretation remains only as a
+        # compatibility intent mapper; it no longer decides dialogue relation.
+        self.internal_interpreter = AprilInternalInterpretation()
         self.interpreter = SequentialInterpretation()
 
     def prepare(self) -> MachineRequest:
-        dialogue = self.interpreter.dialogue(self.request, self.state)
+        # Internal interpretation reconstructs the conversation trajectory
+        # before intent/representation mapping. No lexical trigger is allowed
+        # to decide CONTINUE.
+        internal_packet = self.internal_interpreter.interpret(self.request, self.state)
+        understanding = internal_packet["understanding"]
+        relation = str(understanding.get("relation") or "NEW").upper()
+
+        pending = self.state.get("april_pending_task")
+        pending_active = isinstance(pending, dict) and bool(pending.get("active"))
+        if pending_active and relation == "NEW" and not understanding.get("current", {}).get("generic"):
+            relation = "CONTINUE"
+            understanding["reason"] = "pending_task_dependency"
+            understanding["confidence"] = max(float(understanding.get("confidence") or 0.0), 0.8)
+
+        dialogue = {
+            "relation": relation,
+            "continuation": relation == "CONTINUE",
+            "reference": bool(understanding.get("reference", {}).get("present")),
+            "dependency": (
+                "pending" if pending_active and relation == "CONTINUE"
+                else "reference" if understanding.get("reference", {}).get("present")
+                else "semantic_thread" if relation == "CONTINUE"
+                else "independent"
+            ),
+            "anchor": (
+                "pending_task" if pending_active and relation == "CONTINUE"
+                else "semantic_anchor" if relation == "CONTINUE"
+                else "none"
+            ),
+            "pending_resolved": bool(pending_active and relation == "CONTINUE"),
+            "internal_understanding": understanding,
+        }
         intent = self.interpreter.intent(self.request, self.state, dialogue)
+        # Resolve pronouns/short references into the semantic object whenever
+        # the internal layer has a concrete anchor.
+        reference_target = _text((understanding.get("reference") or {}).get("target"))
+        if relation == "CONTINUE" and reference_target:
+            intent["object"] = reference_target
+            intent["topic"] = reference_target
+        intent["attributes"] = dict(intent.get("attributes") or {})
+        intent["attributes"]["internal_understanding"] = _compact(understanding)
         relation = dialogue["relation"]
 
         requested_outputs = ["text"]
@@ -381,7 +424,7 @@ class ProcessorScene:
         active_task = self.state.get("april_active_task") if isinstance(self.state.get("april_active_task"), dict) else {}
         pending_task = self.state.get("april_pending_task") if isinstance(self.state.get("april_pending_task"), dict) else {}
 
-        resolved_request = self.request
+        resolved_request = _text(understanding.get("resolved_request")) or self.request
         if dialogue["pending_resolved"] and pending_task:
             base_topic = _text(pending_task.get("topic") or pending_task.get("representation"))
             resolved_request = f"Продолжение задания: {base_topic}. Ответ пользователя: {self.request}"
@@ -396,6 +439,10 @@ class ProcessorScene:
             "pending_task": _compact(pending_task),
             "last_user_turn": _compact(self.state.get("last_user_turn", "")),
             "last_april_turn": _compact(self.state.get("last_april_turn", "")),
+            "internal_understanding": _compact(understanding),
+            "active_thread": _compact(understanding.get("active_thread")),
+            "open_loops": _compact(understanding.get("open_loops")),
+            "next_natural_actions": _compact(understanding.get("next_natural_actions")),
         }
 
         visual_mode = _text(intent["attributes"].get("visual_production_mode"))
@@ -417,6 +464,8 @@ class ProcessorScene:
             "active_task": _compact(active_task),
             "pending_task": _compact(pending_task),
             "resolved_request": resolved_request,
+            "internal_understanding": _compact(understanding),
+            "next_natural_actions": _compact(understanding.get("next_natural_actions")),
         }
 
         memory_packet = {
@@ -426,6 +475,9 @@ class ProcessorScene:
             "active_task": _compact(active_task),
             "pending_task": _compact(pending_task),
             "last_artifact_type": _state_artifact_type(self.state),
+            "internal_understanding": _compact(understanding),
+            "active_thread": _compact(understanding.get("active_thread")),
+            "open_loops": _compact(understanding.get("open_loops")),
         }
 
         request = MachineRequest(
@@ -486,7 +538,8 @@ class ProcessorScene:
             "dependency": dialogue["dependency"],
             "provider_calls": 1,
             "single_route": True,
-            "interpretation_owned_by": "QUANTUM_PROCESSOR",
+            "interpretation_owned_by": "INTERNAL_INTERPRETATION_LAYER",
+            "internal_understanding": _compact(understanding),
         })
 
         return request
@@ -641,7 +694,13 @@ def _set_live_state(state: dict, request: MachineRequest, response: MachineRespo
     representation = _text(request.intent.get("type")).lower() or "text"
     operation = _text(request.intent.get("operation")) or "answer"
     goal = _text(request.intent.get("goal")) or "answer"
-    topic = _text(request.intent.get("object") or representation)
+    internal = request.dialogue_contract.get("internal_understanding") if isinstance(request.dialogue_contract, dict) else {}
+    active_thread = internal.get("active_thread") if isinstance(internal, dict) else {}
+    topic = _text(
+        request.intent.get("object")
+        or (active_thread.get("topic") if isinstance(active_thread, dict) else "")
+        or representation
+    )
 
     state["april_turn_id"] = int(state.get("april_turn_id") or 0) + 1
     state["last_user_turn"] = request.conversation.get("current_request", "")
@@ -681,6 +740,21 @@ def _set_live_state(state: dict, request: MachineRequest, response: MachineRespo
             "block_id": _text(blocks[-1].get("block_id")),
             "payload": _compact(blocks[-1].get("payload") or {}),
         }
+
+    # Persist semantic meaning of the completed turn so the next turn can
+    # reason from the actual result instead of reconstructing it from keywords.
+    try:
+        from blocks.interpretation_layer import build_turn_meaning_state
+        state["april_last_turn_meaning"] = build_turn_meaning_state(
+            _text(request.conversation.get("current_request")),
+            response.answer,
+            render_blocks=blocks,
+            summary=_text(response.summary),
+            turn_id=state.get("april_turn_id"),
+            scene_id=_text(getattr(contract, "scene_id", "")),
+        )
+    except Exception as exc:
+        print("⚠️ APRIL TURN MEANING:", exc)
 
     state["april_live_context"] = {
         "version": "april_live_context_v1",
