@@ -103,6 +103,28 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _person_entity_from_answer(text: str) -> str:
+    """Keep the latest human entity visible to the authenticated dialogue state."""
+    value = _text(text)
+    if not value:
+        return ""
+    candidates = []
+    patterns = (
+        r"\b(?:[А-ЯЁ][а-яё-]{2,}\s+){1,3}[А-ЯЁ][а-яё-]{2,}\b",
+        r"\b[А-ЯЁ][а-яё-]{3,}\b",
+    )
+    ignored = {"Михаил", "Михаила", "Сергей", "Сергеевич", "Россия", "СССР", "Советский", "Президент", "Генеральный"}
+    for pattern in patterns:
+        for match in re.finditer(pattern, value):
+            candidate = re.sub(r"\s+", " ", match.group(0)).strip(' ,.;:()"')
+            if not candidate or candidate in ignored:
+                continue
+            # Avoid title-like fragments; prefer full person-name sequences.
+            if len(candidate.split()) >= 2:
+                candidates.append(candidate)
+    return candidates[-1] if candidates else ""
+
+
 def _tokens(value: str) -> List[str]:
     return re.findall(r"[a-zа-яё0-9_]+", value.lower())
 
@@ -192,6 +214,17 @@ class SequentialInterpretation:
         if not dependency:
             dependency = "pending" if pending_resolved else "recall" if reference else "continuation" if relation == "CONTINUE" else "independent"
         anchor = "pending_task" if pending_resolved else "last_turn" if relation == "CONTINUE" else "memory" if reference else "none"
+        continuation_analysis = self.semantic_result.get("continuation_content_analysis")
+        continuation_analysis = continuation_analysis if isinstance(continuation_analysis, dict) else {}
+        dialogue_strategy = self.semantic_result.get("dialogue_strategy")
+        dialogue_strategy = dialogue_strategy if isinstance(dialogue_strategy, dict) else {}
+        resolved_entity = _text(
+            self.semantic_result.get("resolved_entity")
+            or contract.get("resolved_entity")
+            or vector.get("resolved_entity")
+            or continuation_analysis.get("active_entity")
+        )
+
         return {
             "relation": relation,
             "continuation": relation == "CONTINUE",
@@ -201,6 +234,30 @@ class SequentialInterpretation:
             "pending_resolved": pending_resolved,
             "resolved_request": _text(self.semantic_result.get("resolved_request") or contract.get("resolved_request") or request),
             "resolved_reference": _text(self.semantic_result.get("resolved_reference") or contract.get("resolved_reference")),
+            "resolved_entity": resolved_entity,
+            "resolved_entity_source": _text(
+                self.semantic_result.get("resolved_entity_source")
+                or contract.get("resolved_entity_source")
+                or continuation_analysis.get("active_entity_source")
+            ),
+            "active_entity": resolved_entity,
+            "continuation_content_analysis": continuation_analysis,
+            "dialogue_strategy": dialogue_strategy,
+            "continuation_authority": _text(
+                self.semantic_result.get("continuation_authority")
+                or contract.get("continuation_authority")
+                or "active_dialogue_sequence"
+            ),
+            "previous_user_turn": _text(
+                self.semantic_result.get("previous_user_turn")
+                or contract.get("previous_user_turn")
+                or continuation_analysis.get("previous_user_turn")
+            ),
+            "previous_april_turn": _text(
+                self.semantic_result.get("previous_april_turn")
+                or contract.get("previous_april_turn")
+                or continuation_analysis.get("previous_answer")
+            ),
             "selected_memory_index": self.semantic_result.get("selected_memory_index", vector.get("selected_memory_index", -1)),
             "selected_memory_operand": vector.get("selected_memory_operand") or contract.get("selected_memory_operand") or {},
             "trajectory": trajectory,
@@ -219,12 +276,6 @@ class SequentialInterpretation:
                 or contract.get("target_sequence_id")
                 or vector.get("sequence_id")
                 or contract.get("sequence_id")
-            ),
-            "continuation_content_analysis": (
-                vector.get("continuation_content_analysis")
-                or contract.get("continuation_content_analysis")
-                or self.semantic_result.get("continuation_content_analysis")
-                or {}
             ),
             "semantic_result": self.semantic_result,
         }
@@ -263,12 +314,20 @@ class SequentialInterpretation:
             goal = _text(semantic_task.get("goal")).lower()
         else:
             goal = self._goal(operation, representation)
-        semantic_object = _text(semantic_task.get("object")).lower()
-        if dialogue["continuation"] and active and semantic_object in {"", "action", "text", representation}:
-            object_name = _text(active.get("object")) or self._object(text, representation)
+        semantic_object = _text(semantic_task.get("object"))
+        semantic_topic = _text(
+            semantic_task.get("topic")
+            or semantic_result.get("canonical_topic")
+            or semantic_result.get("active_topic")
+        )
+        generic_objects = {"", "action", "text", representation}
+        if dialogue["continuation"] and active and semantic_object.lower() in generic_objects:
+            object_name = _text(active.get("object")) or semantic_topic or self._object(text, representation)
+        elif semantic_object and semantic_object.lower() not in generic_objects:
+            object_name = semantic_object
         else:
-            object_name = self._object(text, representation)
-        topic = object_name or _text(request)[:120]
+            object_name = semantic_topic or self._object(text, representation)
+        topic = semantic_topic or object_name or _text(request)[:120]
         attributes: Dict[str, Any] = {}
 
         if representation == "image":
@@ -425,14 +484,37 @@ class ProcessorScene:
             limit=8,
         )
 
+        semantic_result = dialogue.get("semantic_result") if isinstance(dialogue.get("semantic_result"), dict) else {}
+        continuation_analysis = semantic_result.get("continuation_content_analysis") if isinstance(semantic_result.get("continuation_content_analysis"), dict) else {}
+        dialogue_strategy = semantic_result.get("dialogue_strategy") if isinstance(semantic_result.get("dialogue_strategy"), dict) else {}
+        resolved_entity = _text(
+            semantic_result.get("resolved_entity")
+            or continuation_analysis.get("active_entity")
+            or dialogue.get("resolved_reference")
+            or self.state.get("april_active_entity")
+        )
+
+        # For NEW turns, the current semantic task is authoritative; do not reuse
+        # the previous topic as the provider-facing active task.
+        turn_active_task = active_task if relation in {"CONTINUE", "RECALL"} else {
+            "operation": intent.get("operation"),
+            "object": intent.get("object"),
+            "representation": intent.get("representation"),
+            "goal": intent.get("goal"),
+            "topic": dialogue.get("canonical_topic") or intent.get("topic") or intent.get("object"),
+        }
+
         context = {
             "relation": relation,
             "continuation": bool(dialogue["continuation"]),
             "reference": bool(dialogue["reference"]),
             "dependency": dialogue["dependency"],
             "anchor": dialogue["anchor"],
-            "active_task": _compact(active_task),
+            "active_task": _compact(turn_active_task),
             "pending_task": _compact(pending_task),
+            "active_entity": resolved_entity,
+            "continuation_content_analysis": _compact(continuation_analysis, max_depth=4, max_items=8),
+            "dialogue_strategy": _compact(dialogue_strategy, max_depth=3, max_items=8),
             "last_user_turn": _compact(self.state.get("last_user_turn", "")),
             "last_april_turn": _compact(self.state.get("last_april_turn", "")),
             "canonical_topic": _compact(dialogue.get("canonical_topic")),
@@ -454,11 +536,6 @@ class ProcessorScene:
                 max_depth=5,
                 max_items=8,
             ),
-            "continuation_content_analysis": _compact(
-                dialogue.get("continuation_content_analysis") or {},
-                max_depth=4,
-                max_items=8,
-            ),
         }
 
         visual_mode = _text(intent["attributes"].get("visual_production_mode"))
@@ -477,8 +554,11 @@ class ProcessorScene:
             "continuation": bool(dialogue["continuation"]),
             "reference_to_previous": bool(dialogue["reference"]),
             "context_dependency": dialogue["dependency"],
-            "active_task": _compact(active_task),
+            "active_task": _compact(turn_active_task),
             "pending_task": _compact(pending_task),
+            "active_entity": resolved_entity,
+            "continuation_content_analysis": _compact(continuation_analysis, max_depth=4, max_items=8),
+            "dialogue_strategy": _compact(dialogue_strategy, max_depth=3, max_items=8),
             "resolved_request": resolved_request,
             "canonical_topic": _compact(dialogue.get("canonical_topic")),
             "sequence_id": _text(dialogue.get("sequence_id")),
@@ -486,11 +566,6 @@ class ProcessorScene:
             "resolved_reference": _compact(dialogue.get("resolved_reference")),
             "selected_memory_index": dialogue.get("selected_memory_index", -1),
             "selected_memory_operand": _compact(dialogue.get("selected_memory_operand") or {}),
-            "continuation_content_analysis": _compact(
-                dialogue.get("continuation_content_analysis") or {},
-                max_depth=4,
-                max_items=8,
-            ),
             "trajectory": _compact(dialogue.get("trajectory") or {}),
             "active_dialogue_sequence": _compact(
                 dialogue_memory.get("active_sequence") or {},
@@ -507,11 +582,6 @@ class ProcessorScene:
                 max_depth=5,
                 max_items=8,
             ),
-            "continuation_content_analysis": _compact(
-                dialogue.get("continuation_content_analysis") or {},
-                max_depth=4,
-                max_items=8,
-            ),
             "semantic_authority": True,
         }
 
@@ -519,7 +589,7 @@ class ProcessorScene:
             "mode": "live_state",
             "active_topic": self.state.get("april_active_topic", ""),
             "active_goal": self.state.get("april_active_goal", ""),
-            "active_task": _compact(active_task),
+            "active_task": _compact(turn_active_task),
             "pending_task": _compact(pending_task),
             "last_artifact_type": _state_artifact_type(self.state),
             "dialogue_sequence": _compact(dialogue_memory.get("active_sequence") or {}),
@@ -547,7 +617,7 @@ class ProcessorScene:
                 "resolved_request": resolved_request,
                 "dialogue_contract": dialogue_contract,
                 "turn_meaning": context,
-                "active_task": _compact(active_task),
+                "active_task": _compact(turn_active_task),
                 "pending_task": _compact(pending_task),
             },
             memory=memory_packet,
@@ -594,6 +664,9 @@ class ProcessorScene:
             "selected_memory_operand": _compact(dialogue.get("selected_memory_operand") or {}),
             "trajectory": _compact(dialogue.get("trajectory") or {}),
             "sequence_id": _text(dialogue.get("sequence_id")),
+            "active_entity": resolved_entity,
+            "continuation_content_analysis": _compact(continuation_analysis, max_depth=4, max_items=8),
+            "dialogue_strategy": _compact(dialogue_strategy, max_depth=3, max_items=8),
             "sequence_continuation_authorized": bool(dialogue.get("sequence_continuation_authorized")),
             "provider_calls": 1,
             "single_route": True,
@@ -759,6 +832,13 @@ def _set_live_state(state: dict, request: MachineRequest, response: MachineRespo
     state["last_april_turn"] = response.answer
     state["april_active_topic"] = topic
     state["april_active_goal"] = goal
+    # The entity in the completed answer becomes the next-turn discourse anchor.
+    # This is intentionally separate from the broader topic: a conversation can
+    # stay on "Горбачёв" while the active entity becomes "Раиса Горбачёва".
+    entity = _person_entity_from_answer(response.answer)
+    if not entity:
+        entity = _text(dialogue.get("resolved_entity") or dialogue.get("resolved_reference") or topic)
+    state["april_active_entity"] = entity
     state["april_active_task"] = {
         "operation": operation,
         "object": topic,
@@ -827,6 +907,9 @@ def _set_live_state(state: dict, request: MachineRequest, response: MachineRespo
         "pending_task": _compact(state.get("april_pending_task")),
         "last_user_turn": _text(state.get("last_user_turn")),
         "last_april_turn": _text(state.get("last_april_turn")),
+        "active_entity": _text(state.get("april_active_entity")),
+        "dialogue_strategy": _compact(dialogue.get("dialogue_strategy") if isinstance(dialogue, dict) else {}),
+        "continuation_content_analysis": _compact(dialogue.get("continuation_content_analysis") if isinstance(dialogue, dict) else {}),
         "scene_id": _text(getattr(contract, "scene_id", "")),
         "render_types": [_text(b.get("type")).lower() for b in blocks if isinstance(b, dict)],
     }
