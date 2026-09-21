@@ -220,6 +220,12 @@ class SequentialInterpretation:
                 or vector.get("sequence_id")
                 or contract.get("sequence_id")
             ),
+            "continuation_content_analysis": (
+                vector.get("continuation_content_analysis")
+                or contract.get("continuation_content_analysis")
+                or self.semantic_result.get("continuation_content_analysis")
+                or {}
+            ),
             "semantic_result": self.semantic_result,
         }
 
@@ -448,6 +454,11 @@ class ProcessorScene:
                 max_depth=5,
                 max_items=8,
             ),
+            "continuation_content_analysis": _compact(
+                dialogue.get("continuation_content_analysis") or {},
+                max_depth=4,
+                max_items=8,
+            ),
         }
 
         visual_mode = _text(intent["attributes"].get("visual_production_mode"))
@@ -475,6 +486,11 @@ class ProcessorScene:
             "resolved_reference": _compact(dialogue.get("resolved_reference")),
             "selected_memory_index": dialogue.get("selected_memory_index", -1),
             "selected_memory_operand": _compact(dialogue.get("selected_memory_operand") or {}),
+            "continuation_content_analysis": _compact(
+                dialogue.get("continuation_content_analysis") or {},
+                max_depth=4,
+                max_items=8,
+            ),
             "trajectory": _compact(dialogue.get("trajectory") or {}),
             "active_dialogue_sequence": _compact(
                 dialogue_memory.get("active_sequence") or {},
@@ -489,6 +505,11 @@ class ProcessorScene:
             "relevant_7d_turns": _compact(
                 dialogue_memory.get("relevant_7d_turns") or [],
                 max_depth=5,
+                max_items=8,
+            ),
+            "continuation_content_analysis": _compact(
+                dialogue.get("continuation_content_analysis") or {},
+                max_depth=4,
                 max_items=8,
             ),
             "semantic_authority": True,
