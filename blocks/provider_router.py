@@ -357,39 +357,15 @@ def _derive_complexity(payload: dict[str, Any]) -> str:
     return "LOW"
 
 def _derive_output_tokens(payload: dict[str, Any], requested: Any = None) -> int:
-    """Resolve the single canonical output budget produced by Quantum Processor.
+    """Return the single April response ceiling.
 
-    ``requested`` is retained only for signature compatibility with older callers
-    and is deliberately ignored. Provider must never let a compatibility argument
-    replace the processor's continuous budget with an old fixed ceiling.
+    Input remains separately limited to 900 tokens. Output is intentionally
+    independent of representation/renderer/complexity: the model may produce
+    any amount required by the current answer up to 8000 tokens, and the whole
+    provider result is forwarded to SceneContract and AprilWeb.
     """
-    del requested
-
-    sources = (
-        payload.get("response_output_tokens"),
-        ((payload.get("constraints") or {}).get("metadata") or {}).get("response_budget")
-            if isinstance(payload.get("constraints"), dict) else None,
-        (payload.get("quantum_state") or {}).get("response_budget")
-            if isinstance(payload.get("quantum_state"), dict) else None,
-    )
-    for value in sources:
-        if isinstance(value, int) and value > 0:
-            cap = min(max(int(value), MIN_OUTPUT_TOKENS), MAX_OUTPUT_TOKENS)
-            package = str(
-                payload.get("package")
-                or payload.get("plan")
-                or ((payload.get("metadata") or {}).get("package") if isinstance(payload.get("metadata"), dict) else "")
-                or ((payload.get("metadata") or {}).get("plan") if isinstance(payload.get("metadata"), dict) else "")
-                or ((payload.get("constraints") or {}).get("package") if isinstance(payload.get("constraints"), dict) else "")
-                or ((payload.get("constraints") or {}).get("plan") if isinstance(payload.get("constraints"), dict) else "")
-                or ""
-            ).strip().lower()
-            complexity = str(payload.get("response_complexity") or "").strip().upper()
-            if package == "free" and complexity == "LOW":
-                cap = min(cap, 480)
-            return cap
-
-    return MIN_OUTPUT_TOKENS
+    del payload, requested
+    return MAX_OUTPUT_TOKENS
 
 
 def _render_block_renderer(block_type: str) -> str:
@@ -1333,11 +1309,13 @@ def _extract_usage(response: Any) -> dict[str, int]:
     }
 
 
+# Standard OpenAI API pricing for GPT-5.6 Luna (September 2026).
+# Fast service tier is NOT selected by this route, so the standard rates apply.
 _MODEL_PRICING_PER_MTOK = {
     APRIL_QUANTUM_PROVIDER_MODEL: {
-        "input": 1.00,
-        "cached_input": 0.10,
-        "output": 6.00,
+        "input": 0.20,
+        "cached_input": 0.02,
+        "output": 1.20,
     }
 }
 
