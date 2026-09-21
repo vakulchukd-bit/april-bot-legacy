@@ -453,21 +453,6 @@ def _force_new_turn_state(result: dict[str, Any], current_text: str) -> None:
     result["history_dependent_task"] = False
     result["current_turn_authority"] = True
     result["historical_memory_is_evidence_only"] = True
-    inactive_content_plan = {
-        "version": _CONTINUATION_CONTENT_VERSION,
-        "active": False,
-        "mode": "NONE",
-        "mode_score": 0.0,
-        "new_information_required": False,
-        "already_covered": [],
-        "covered_content": [],
-        "covered_content_count": 0,
-        "recap_ratio_max": 0.0,
-        "novelty_target": 0.0,
-        "instruction": "",
-        "source": "current_turn_no_continuation",
-    }
-    result["continuation_content_analysis"] = inactive_content_plan
 
     vector = _dialogue_vector(result)
     if vector:
@@ -486,7 +471,6 @@ def _force_new_turn_state(result: dict[str, Any], current_text: str) -> None:
                 "request_operand_source": "current_user_turn",
                 "current_turn_authority": True,
                 "historical_memory_is_evidence_only": True,
-                "continuation_content_analysis": inactive_content_plan,
                 "forced_new_topic": True,
                 "forced_new_topic_reason": (
                     "self_contained_without_reference_evidence"
@@ -592,6 +576,7 @@ def _remove_stale_structured_representation(
 def _repair_interpretation_result(
     result: Any,
     current_text: str,
+    state: dict[str, Any] | None = None,
 ) -> Any:
     if not isinstance(result, dict):
         return result
@@ -608,8 +593,83 @@ def _repair_interpretation_result(
     # Plain informational turns cannot inherit an unrelated old renderer.
     _remove_stale_structured_representation(result, current)
 
+    # For CONTINUE, the authenticated live sequence is the authority. Generic
+    # seven-day recall remains evidence-only and may not replace the current
+    # dialogue turn. This directly prevents stale operands such as an old
+    # "Официальный" record from becoming the active conversational context.
+    _apply_active_sequence_authority(result, state)
+
+    relation = _clean_text(
+        result.get("dialogue_relation")
+        or result.get("relation")
+        or (result.get("dialogue_vector") or {}).get("three_way_relation")
+    ).upper()
+    if relation in {"CONTINUE", "RECALL"}:
+        continuation_analysis = _build_continuation_content_analysis(
+            current,
+            {
+                "relation": relation,
+                "reference": bool(result.get("reference_to_previous") or result.get("reference")),
+                "active_sequence": (
+                    result.get("active_sequence")
+                    if isinstance(result.get("active_sequence"), dict)
+                    else (state or {}).get("active_dialogue_sequence") if isinstance(state, dict) else {}
+                ),
+                "previous_user_turn": result.get("previous_user_turn"),
+                "previous_april_turn": result.get("previous_april_turn"),
+                "active_topic": result.get("active_topic") or result.get("canonical_topic"),
+                "topic_similarity": result.get("topic_similarity", 0.0),
+                "sequence_pairs": result.get("sequence_pairs") or [],
+            },
+            state=state,
+            operation=_clean_text(result.get("operation") or result.get("best_operation")),
+        )
+        result["continuation_content_analysis"] = continuation_analysis
+        result["dialogue_strategy"] = {
+            "mode": continuation_analysis.get("mode", "NONE"),
+            "intent": continuation_analysis.get("intent", ""),
+            "new_information_required": bool(continuation_analysis.get("new_information_required")),
+            "conversational_posture": continuation_analysis.get("conversational_posture", "CONVERSE"),
+            "next_direction": continuation_analysis.get("next_direction", "advance_the_current_thread_naturally"),
+            "novelty_target": continuation_analysis.get("novelty_target", 0.0),
+            "recap_ratio_max": continuation_analysis.get("recap_ratio_max", 1.0),
+            "active_entity": continuation_analysis.get("active_entity", ""),
+            "expertise_behavior": continuation_analysis.get("expertise_behavior", "answer_with_domain_appropriate_reasoning"),
+            "source": "semantic_continuation_analysis",
+        }
+        result["resolved_entity"] = continuation_analysis.get("active_entity", "")
+        result["resolved_entity_source"] = continuation_analysis.get("active_entity_source", "")
+        # A pronoun/reference may point to a child entity of the broader topic
+        # (e.g. topic=Горбачёв, active entity=Раиса Горбачёва). Keep the broader
+        # topic stable, but expose the resolved discourse entity to downstream
+        # consumers as the current reference.
+        if result.get("resolved_entity"):
+            result["resolved_reference"] = result["resolved_entity"]
+
+        vector = result.get("dialogue_vector")
+        if isinstance(vector, dict):
+            vector.update({
+                "continuation_content_analysis": continuation_analysis,
+                "dialogue_strategy": result["dialogue_strategy"],
+                "resolved_entity": result.get("resolved_entity", ""),
+                "resolved_entity_source": result.get("resolved_entity_source", ""),
+                "continuation_authority": result.get("continuation_authority", "active_dialogue_sequence"),
+            })
+
+        contract = result.get("dialogue_contract")
+        if isinstance(contract, dict):
+            contract.update({
+                "continuation_content_analysis": continuation_analysis,
+                "dialogue_strategy": result["dialogue_strategy"],
+                "resolved_entity": result.get("resolved_entity", ""),
+                "resolved_entity_source": result.get("resolved_entity_source", ""),
+                "continuation_authority": result.get("continuation_authority", "active_dialogue_sequence"),
+                "previous_user_turn": continuation_analysis.get("previous_user_turn", contract.get("previous_user_turn", "")),
+                "previous_april_turn": continuation_analysis.get("previous_answer", contract.get("previous_april_turn", "")),
+            })
+
     result["interpretation_compatibility"] = {
-        "version": "2026-09-21-lazy-engine-current-turn-fence-v2",
+        "version": "2026-09-22-dialogue-content-semantics-v3",
         "canonical_engine_discovery": bool(
             _load_canonical_engine_module() is not None
         ),
@@ -618,6 +678,9 @@ def _repair_interpretation_result(
         "historical_memory_evidence_only": True,
         "false_continue_fence": True,
         "stale_representation_fence": True,
+        "continuation_content_analysis": True,
+        "active_sequence_authority": True,
+        "semantic_dialogue_strategy": True,
     }
 
     return result
@@ -1011,381 +1074,6 @@ def _new_vector_id(state: dict[str, Any], topic: str, text: str) -> str:
     return "seq-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
-
-# ---------------------------------------------------------------------------
-# Continuation content analysis
-# ---------------------------------------------------------------------------
-#
-# This layer does not create a trigger route.  It measures the semantic delta
-# between the current request and the content already delivered in the active
-# authenticated USER↔APRIL sequence, then publishes a compact continuation
-# contract for the existing provider route.
-#
-# Design goals:
-#   - keep the seven-day memory window and active sequence authoritative;
-#   - allow natural contextual repetition when it helps continuity;
-#   - strongly prefer genuinely new material for expansion follow-ups;
-#   - avoid a second model/provider call;
-#   - keep the packet small enough for the existing 900-token input envelope.
-#
-
-_CONTINUATION_CONTENT_VERSION = "continuation_content_analysis_v1"
-_EXPANSION_LANGUAGE = (
-    "что ещё",
-    "что еще",
-    "а что ещё",
-    "а что еще",
-    "что-нибудь ещё",
-    "что-нибудь еще",
-    "что нибудь ещё",
-    "что нибудь еще",
-    "расскажи ещё",
-    "расскажи еще",
-    "расскажи что-нибудь",
-    "есть ещё",
-    "есть еще",
-    "что интересного ещё",
-    "что интересного еще",
-    "что можешь ещё",
-    "что можешь еще",
-    "что ты ещё",
-    "что ты еще",
-    "а что ты ещё",
-    "а что ты еще",
-    "какие ещё",
-    "какие еще",
-    "какие есть ещё",
-    "какие есть еще",
-    "что-нибудь дополнительно",
-    "что нибудь дополнительно",
-)
-_DEEPENING_LANGUAGE = (
-    "подробнее",
-    "подробней",
-    "детальнее",
-    "более подробно",
-    "расскажи подробнее",
-    "объясни подробнее",
-    "расскажи детальнее",
-)
-_CLARIFICATION_LANGUAGE = (
-    "уточни",
-    "уточнить",
-    "что это значит",
-    "что ты имеешь в виду",
-    "не понял",
-    "не понимаю",
-)
-_CORRECTION_LANGUAGE = (
-    "исправь",
-    "исправить",
-    "это не так",
-    "ошибка",
-    "неправильно",
-    "верно ли",
-)
-_RECAP_LANGUAGE = (
-    "напомни",
-    "напомни ещё раз",
-    "напомни еще раз",
-    "повтори",
-    "повторить",
-    "снова расскажи",
-)
-
-
-def _sentence_units(value: Any) -> list[str]:
-    """Split prior assistant content into compact semantic units."""
-    text = _clean_text(value)
-    if not text:
-        return []
-
-    # Keep common punctuation as boundaries while avoiding a hard dependency
-    # on an NLP package.  Lists/headings are accepted as units too.
-    raw_units = re.split(r"(?<=[.!?…])\s+|\n+", text)
-    units: list[str] = []
-    seen: set[str] = set()
-
-    for raw in raw_units:
-        unit = re.sub(r"\s+", " ", _clean_text(raw)).strip(" -•\t")
-        if len(unit) < 35:
-            continue
-
-        # Keep the source wording, but cap it so the continuation packet stays
-        # inexpensive.  The beginning of an informational sentence usually
-        # preserves enough meaning for the provider to recognize what was
-        # already covered.
-        unit = unit[:150].rstrip()
-        key = re.sub(r"[^a-zа-яё0-9]+", " ", unit.lower()).strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        units.append(unit)
-
-    return units
-
-
-def _phrase_evidence(text: str, phrases: tuple[str, ...]) -> float:
-    """Soft linguistic evidence used as one component of semantic intent."""
-    low = _clean_text(text).lower().replace("ё", "е")
-    phrases = tuple(str(phrase).lower().replace("ё", "е") for phrase in phrases)
-    if not low:
-        return 0.0
-
-    hits = sum(1 for phrase in phrases if phrase in low)
-    if hits <= 0:
-        return 0.0
-
-    # Saturating evidence: multiple compatible cues strengthen a mode, but
-    # there is no exact keyword-to-route trigger.
-    return min(1.0, 0.52 + 0.16 * (hits - 1))
-
-
-def _token_coverage_score(current: Any, prior_units: list[str]) -> float:
-    """How much of the request is semantically grounded in prior content."""
-    current_tokens = _dialogue_tokens(current)
-    if not current_tokens or not prior_units:
-        return 0.0
-
-    prior_tokens: set[str] = set()
-    for unit in prior_units:
-        prior_tokens.update(_dialogue_tokens(unit))
-
-    if not prior_tokens:
-        return 0.0
-
-    return round(
-        min(1.0, len(current_tokens & prior_tokens) / max(1, len(current_tokens))),
-        6,
-    )
-
-
-def _dedupe_content_units(
-    units: list[str],
-    *,
-    max_units: int = 5,
-) -> list[str]:
-    """Select representative, semantically distinct prior-answer units."""
-    selected: list[str] = []
-
-    for unit in units:
-        if not unit:
-            continue
-
-        # Drop near duplicates of units already selected.
-        if any(_semantic_similarity(unit, existing) >= 0.82 for existing in selected):
-            continue
-
-        selected.append(unit)
-        if len(selected) >= max_units:
-            break
-
-    return selected
-
-
-def _continuation_content_analysis(
-    current_text: str,
-    relation: dict[str, Any],
-) -> dict[str, Any]:
-    """
-    Measure the semantic continuation delta for the current active sequence.
-
-    This is an interpretation result, not a router.  The provider remains the
-    only generation step.  The layer tells it what the user is asking for
-    relative to what April has already said.
-    """
-    relation_name = _clean_text(relation.get("relation")).upper()
-    if relation_name not in {"CONTINUE", "RECALL"}:
-        return {
-            "version": _CONTINUATION_CONTENT_VERSION,
-            "active": False,
-            "mode": "NONE",
-            "new_information_required": False,
-            "already_covered": [],
-            "instruction": "",
-        }
-
-    current = _clean_text(current_text)
-    previous_user = _clean_text(relation.get("previous_user_turn"))
-    previous_april = _clean_text(relation.get("previous_april_turn"))
-    sequence_pairs = relation.get("sequence_pairs")
-    if not isinstance(sequence_pairs, list):
-        sequence_pairs = []
-
-    # The active sequence is the canonical content scope.  Historical RECALL
-    # remains evidence-only; it must not become the "already covered" source
-    # for a live continuation.
-    sequence_answers: list[str] = []
-    for pair in sequence_pairs:
-        if not isinstance(pair, dict):
-            continue
-        answer = _clean_text(
-            pair.get("april_answer")
-            or pair.get("april_meaning")
-            or pair.get("answer_summary")
-        )
-        if answer:
-            sequence_answers.append(answer)
-
-    if previous_april and (
-        not sequence_answers
-        or _semantic_similarity(previous_april, sequence_answers[-1]) < 0.98
-    ):
-        sequence_answers.append(previous_april)
-
-    all_units: list[str] = []
-    for answer in sequence_answers:
-        all_units.extend(_sentence_units(answer))
-
-    covered_units = _dedupe_content_units(all_units, max_units=5)
-
-    topic_similarity = _semantic_similarity(
-        current,
-        relation.get("active_topic") or relation.get("target_topic") or "",
-    )
-    answer_similarity = _semantic_similarity(current, previous_april)
-    coverage = _token_coverage_score(current, covered_units)
-    reference_signal = 1.0 if bool(relation.get("reference")) else 0.0
-
-    expansion = _phrase_evidence(current, _EXPANSION_LANGUAGE)
-    deepening = _phrase_evidence(current, _DEEPENING_LANGUAGE)
-    clarification = _phrase_evidence(current, _CLARIFICATION_LANGUAGE)
-    correction = _phrase_evidence(current, _CORRECTION_LANGUAGE)
-    recap = _phrase_evidence(current, _RECAP_LANGUAGE)
-
-    # A natural continuation still gets a continuation prior.  The actual mode
-    # is selected from several signals instead of a single phrase trigger.
-    continuity_prior = 0.12 if previous_april else 0.0
-
-    # A content mode must be driven primarily by its own semantic evidence.
-    # Continuity/reference only supplies light contextual support; it must never
-    # turn an arbitrary follow-up into EXPAND.
-    expansion_score = min(
-        1.0,
-        continuity_prior
-        + 0.70 * expansion
-        + 0.10 * max(topic_similarity, reference_signal)
-        + 0.08 * (1.0 - answer_similarity),
-    )
-    deepening_score = min(
-        1.0,
-        continuity_prior
-        + 0.70 * deepening
-        + 0.10 * answer_similarity
-        + 0.08 * topic_similarity,
-    )
-    clarification_score = min(
-        1.0,
-        continuity_prior
-        + 0.70 * clarification
-        + 0.10 * answer_similarity
-        + 0.08 * reference_signal,
-    )
-    correction_score = min(
-        1.0,
-        continuity_prior
-        + 0.70 * correction
-        + 0.10 * answer_similarity
-        + 0.08 * reference_signal,
-    )
-    recap_score = min(
-        1.0,
-        continuity_prior
-        + 0.70 * recap
-        + 0.10 * answer_similarity
-        + 0.08 * reference_signal,
-    )
-
-    scored_modes = {
-        "EXPAND": expansion_score,
-        "DEEPEN": deepening_score,
-        "CLARIFY": clarification_score,
-        "CORRECT": correction_score,
-        "RECAP": recap_score,
-    }
-    mode = max(scored_modes, key=scored_modes.get)
-    mode_score = float(scored_modes[mode])
-
-    # Expansion has a distinct semantic requirement: previously covered content
-    # is context, while the response should introduce information outside it.
-    new_information_required = bool(
-        relation_name == "CONTINUE"
-        and mode == "EXPAND"
-        and bool(previous_april)
-        and expansion >= 0.50
-        and mode == "EXPAND"
-        and mode_score >= 0.42
-    )
-
-    # For a normal continuation without an explicit expansion/deepening request,
-    # keep the layer descriptive and let the provider naturally decide how much
-    # context is needed.
-    if not new_information_required and mode_score < 0.42:
-        mode = "CONTINUE_NATURAL"
-    elif mode == "EXPAND" and expansion < 0.50:
-        mode = "CONTINUE_NATURAL"
-
-    instruction = (
-        "Continue naturally from the established dialogue. "
-        "Use the previous answer as context; do not restate it wholesale. "
-        "Keep useful contextual wording when it makes the answer flow."
-    )
-    if new_information_required:
-        instruction = (
-            "Continue the established topic with genuinely new information. "
-            "Treat the covered content as already known to this user. "
-            "A brief contextual reference is allowed, but the main body should "
-            "add facts, angles, or details that were not already covered."
-        )
-    elif mode == "DEEPEN":
-        instruction = (
-            "Continue from the previous answer and deepen the same point. "
-            "Do not restart the explanation; add detail to the established context."
-        )
-    elif mode == "CLARIFY":
-        instruction = (
-            "Use the previous answer as context and clarify the specific point "
-            "the user is asking about without replaying the whole explanation."
-        )
-    elif mode == "CORRECT":
-        instruction = (
-            "Use the previous answer as the baseline and address the correction "
-            "directly. Preserve the surrounding context instead of restarting."
-        )
-    elif mode == "RECAP":
-        instruction = (
-            "The user is asking for a recap. Reuse the established context as "
-            "needed and keep the recap focused rather than repeating unrelated detail."
-        )
-
-    return {
-        "version": _CONTINUATION_CONTENT_VERSION,
-        "active": True,
-        "mode": mode,
-        "mode_score": round(mode_score, 4),
-        "new_information_required": new_information_required,
-        "topic_similarity": round(topic_similarity, 4),
-        "reference_signal": round(reference_signal, 4),
-        "previous_answer_similarity": round(answer_similarity, 4),
-        "request_coverage_of_previous_content": coverage,
-        "covered_turns": len(sequence_answers),
-        "covered_content": covered_units,
-        "covered_content_count": len(covered_units),
-        "recap_ratio_max": 0.18 if new_information_required else 0.35,
-        "novelty_target": 0.72 if new_information_required else 0.45,
-        "instruction": instruction,
-        "source": "active_authenticated_dialogue_sequence",
-        "historical_memory_role": "evidence_only",
-        "semantic_evidence": {
-            "expansion": round(expansion, 4),
-            "deepening": round(deepening, 4),
-            "clarification": round(clarification, 4),
-            "correction": round(correction, 4),
-            "recap": round(recap, 4),
-        },
-    }
-
-
 def _best_historical_pair(
     current_text: str,
     pairs: list[dict[str, Any]],
@@ -1409,6 +1097,393 @@ def _best_historical_pair(
     return best_index, best_record, best_score
 
 
+# ---------------------------------------------------------------------------
+# Continuation content semantics (no routing triggers)
+# ---------------------------------------------------------------------------
+
+_EXPAND_CUES = (
+    "что ещё", "что еще", "а что еще", "а что ещё", "какие ещё",
+    "какие еще", "что можешь ещё", "что можешь еще", "расскажи ещё",
+    "расскажи еще", "добавь", "ещё факты", "еще факты", "интересного",
+)
+_DEEPEN_CUES = (
+    "почему", "зачем", "как так", "как получилось", "как это произошло",
+    "что именно", "подробнее", "подробней", "объясни подробнее",
+    "в чём причина", "в чем причина",
+)
+_DISCUSS_CUES = (
+    "как думаешь", "что думаешь", "мне кажется", "по-твоему", "по твоему",
+    "согласен", "согласна", "правда ли", "можно ли считать", "обсудим",
+    "поговорим", "я считаю", "мне кажется",
+)
+_SOLVE_CUES = (
+    "что делать", "как исправить", "как решить", "помоги решить", "помоги разобраться",
+    "разберись", "разберёмся", "разберемся", "как проверить", "как диагностировать",
+    "в чём проблема", "в чем проблема", "не работает", "сломалось",
+)
+_CORRECT_CUES = (
+    "исправь", "поправь", "я ошибся", "я ошиблась", "это неверно",
+    "ты ошибся", "ты ошиблась", "исправление", "неправильно сказал",
+    "неправильно написал", "неправильно понял",
+)
+_REACTION_CUES = (
+    "жалко", "понятно", "ага", "да", "ясно", "ого", "круто", "интересно",
+    "печально", "жаль", "понял", "понятно",
+)
+
+
+def _sentence_units(text: Any, limit: int = 8) -> list[str]:
+    value = re.sub(r"\s+", " ", _clean_text(text)).strip()
+    if not value:
+        return []
+    units = re.split(r"(?<=[.!?])\s+|\n+", value)
+    result: list[str] = []
+    for unit in units:
+        unit = unit.strip(" \t\n-•")
+        if not unit:
+            continue
+        if len(unit) > 260:
+            unit = unit[:257].rstrip() + "..."
+        if not any(_semantic_similarity(unit, prev) >= 0.88 for prev in result):
+            result.append(unit)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _person_candidates(text: Any, limit: int = 10) -> list[str]:
+    """Extract likely person-name spans while ignoring discourse pronouns/titles."""
+    value = _clean_text(text)
+    if not value:
+        return []
+
+    ignored = {
+        "Его", "Её", "Ее", "Он", "Она", "Они", "Это", "Этот", "Эта", "Такие",
+        "Михаил", "Михаила", "Сергей", "Сергеевич", "Президент", "Генеральный",
+        "Советский", "Советская", "Россия", "СССР", "КПСС",
+    }
+    found: list[str] = []
+    patterns = (
+        r"\b(?:[А-ЯЁ][а-яё-]{2,}\s+){1,3}[А-ЯЁ][а-яё-]{2,}\b",
+        r"\b[А-ЯЁ][а-яё-]{3,}\b",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, value):
+            candidate = re.sub(r"\s+", " ", match.group(0)).strip(' ,.;:()"')
+            if not candidate or candidate in ignored:
+                continue
+            words = candidate.split()
+            if len(words) >= 2:
+                # Reject obvious title-role phrases.
+                if words[0] in {"Последний", "Единственный", "Лондонский", "Советский", "Российский", "Английский"}:
+                    continue
+                if candidate not in found:
+                    found.append(candidate)
+            elif len(words) == 1 and candidate not in ignored:
+                found.append(candidate)
+            if len(found) >= limit:
+                return found
+    return found
+
+
+def _person_gender_hint(candidate: str) -> str:
+    """Cheap morphological hint used only to resolve pronouns, never as a fact classifier."""
+    low = _clean_text(candidate).lower()
+    words = low.split()
+    first = words[0] if words else ""
+    last = words[-1] if words else ""
+    if re.search(r"(вна|чна|вну|чну)$", last) or re.search(r"(?:[ая]|у)$", first):
+        return "feminine"
+    if re.search(r"(?:евич|ович|ич)$", last) or re.search(r"[ъйьшжчц]$", last):
+        return "masculine"
+    # Common inflected feminine surnames/names in Russian discourse.
+    if re.search(r"(?:ову|еву|ину|ину|ой|ей)$", last) and re.search(r"(?:у|ой|ей)$", first):
+        return "feminine"
+    return "unknown"
+
+
+def _pronoun_profile(text: Any) -> str:
+    low = _clean_text(text).lower()
+    if re.search(r"\b(?:она|её|ее|ей|ней|неё|ею)\b", low):
+        return "feminine"
+    if re.search(r"\b(?:он|его|ему|ним|него|нему|нём|нем)\b", low):
+        return "masculine"
+    if re.search(r"\b(?:они|их|им|ними)\b", low):
+        return "plural"
+    if re.search(r"\b(?:это|этот|эта|эти|такой|такая|такие)\b", low):
+        return "demonstrative"
+    return "none"
+
+
+def _entity_from_relation_context(
+    current_text: str,
+    previous_answer: str,
+    active_topic: str,
+    state: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Resolve the current discourse entity from the live turn and prior answer."""
+    profile = _pronoun_profile(current_text)
+    previous_candidates = _person_candidates(previous_answer, limit=10)
+    topic_candidates = _person_candidates(active_topic, limit=5)
+    live_entity = _clean_text(state.get("april_active_entity")) if isinstance(state, dict) else ""
+
+    def _best(candidates: list[str]) -> str:
+        # Prefer the most informative span (full name over a bare first/last name).
+        return max(candidates, key=lambda value: (len(value.split()), len(value))) if candidates else ""
+
+    if profile == "masculine":
+        matches = [c for c in previous_candidates if _person_gender_hint(c) == "masculine"]
+        if matches:
+            return _best(matches), "previous_answer_person_candidate"
+        matches = [c for c in topic_candidates if _person_gender_hint(c) == "masculine"]
+        if matches:
+            return _best(matches), "active_topic_person_candidate"
+        if live_entity and _person_gender_hint(live_entity) == "masculine":
+            return live_entity, "live_active_entity"
+        # Do not fall back to a feminine live entity for a masculine pronoun.
+        return _clean_text(active_topic), "active_topic"
+
+    if profile == "feminine":
+        matches = [c for c in previous_candidates if _person_gender_hint(c) == "feminine"]
+        if matches:
+            return _best(matches), "previous_answer_person_candidate"
+        if live_entity and _person_gender_hint(live_entity) == "feminine":
+            return live_entity, "live_active_entity"
+        return _clean_text(active_topic), "active_topic"
+
+    if profile in {"plural", "demonstrative"} and previous_candidates:
+        return _best(previous_candidates), "previous_answer_person_candidate"
+
+    if live_entity:
+        return live_entity, "live_active_entity"
+    if topic_candidates:
+        return _best(topic_candidates), "active_topic_person_candidate"
+    return _clean_text(active_topic), "active_topic"
+
+
+def _infer_dialogue_mode(
+    current_text: str,
+    relation: str,
+    operation: str = "",
+    reference: bool = False,
+    previous_answer: str = "",
+    topic_similarity: float = 0.0,
+) -> dict[str, Any]:
+    """Infer a conversational response mode from semantics and dialogue state."""
+    low = _clean_text(current_text).lower()
+    if relation not in {"CONTINUE", "RECALL"}:
+        return {
+            "mode": "NEW",
+            "intent": "independent_request",
+            "new_information_required": False,
+            "conversational_posture": "ANSWER",
+            "next_direction": "answer_current_request",
+            "novelty_target": 0.0,
+            "recap_ratio_max": 1.0,
+        }
+
+    if any(cue in low for cue in _CORRECT_CUES):
+        mode, intent, posture = "CORRECT", "correct_previous_content", "CLARIFY"
+        next_direction = "identify_and_correct_the_specific_previous_claim"
+        novelty = 0.55
+        recap = 0.20
+    elif any(cue in low for cue in _SOLVE_CUES) or operation in {"modify", "calculate"}:
+        mode, intent, posture = "SOLVE", "solve_task", "COLLABORATE"
+        next_direction = "diagnose_reason_and_move_to_the_next_actionable_step"
+        novelty = 0.78
+        recap = 0.12
+    elif any(cue in low for cue in _DISCUSS_CUES):
+        mode, intent, posture = "DISCUSS", "discuss_claim_or_interpretation", "DISCUSS"
+        next_direction = "address_the_users_point_with_evidence_nuance_and_a_useful_follow_up"
+        novelty = 0.72
+        recap = 0.15
+    elif any(cue in low for cue in _DEEPEN_CUES):
+        mode, intent, posture = "DEEPEN", "deepen_understanding", "EXPLAIN"
+        next_direction = "explain_the_underlying_cause_or_mechanism_without_repeating_the_summary"
+        novelty = 0.78
+        recap = 0.15
+    elif any(cue in low for cue in _EXPAND_CUES):
+        mode, intent, posture = "EXPAND", "request_additional_information", "INFORM"
+        next_direction = "add_new_information_examples_or_angles_not_already_covered"
+        novelty = 0.82
+        recap = 0.12
+    elif any(cue in low for cue in _REACTION_CUES) and len(_dialogue_tokens(current_text)) <= 4:
+        mode, intent, posture = "REACT", "natural_user_reaction", "CONVERSE"
+        next_direction = "respond_naturally_and_keep_the_dialogue_open_without_forcing_more_information"
+        novelty = 0.35
+        recap = 0.10
+    elif reference or _pronoun_profile(current_text) != "none":
+        mode, intent, posture = "CONTINUE_NATURAL", "continue_active_thread", "CONVERSE"
+        next_direction = "answer_the_current_turn_using_the_live_active_entity_and_existing_context"
+        novelty = 0.62
+        recap = 0.15
+    else:
+        mode, intent, posture = "CONTINUE_NATURAL", "continue_active_thread", "CONVERSE"
+        next_direction = "advance_the_current_thread_naturally"
+        novelty = 0.58
+        recap = 0.18
+
+    # A highly similar current turn should not erase the expansion/deepening mode;
+    # similarity is only a supporting signal, never the decision owner.
+    return {
+        "mode": mode,
+        "intent": intent,
+        "new_information_required": mode in {"EXPAND", "DEEPEN", "DISCUSS", "SOLVE"},
+        "conversational_posture": posture,
+        "next_direction": next_direction,
+        "novelty_target": novelty,
+        "recap_ratio_max": recap,
+        "topic_similarity": round(float(topic_similarity or 0.0), 6),
+        "reference_driven": bool(reference),
+        "expertise_behavior": {
+            "EXPAND": "provide_specific_new_information_and_useful_angles",
+            "DEEPEN": "explain_mechanism_causality_and_distinctions",
+            "DISCUSS": "separate_facts_from_interpretation_and_engage_with_alternatives",
+            "SOLVE": "separate_observations_hypotheses_tests_and_next_action",
+            "CORRECT": "locate_the_specific_claim_and_state_the_corrected_version",
+            "REACT": "respond_humanly_and_only_extend_when_it_fits",
+            "CONTINUE_NATURAL": "advance_the_thread_without_forcing_a_template",
+        }.get(mode, "answer_with_domain_appropriate_reasoning"),
+        "analysis_basis": "live_authenticated_dialogue_semantics",
+    }
+
+
+def _build_continuation_content_analysis(
+    current_text: str,
+    relation: dict[str, Any],
+    state: dict[str, Any] | None = None,
+    operation: str = "",
+) -> dict[str, Any]:
+    """Build a compact, provider-ready delta between prior and current dialogue turns."""
+    relation_name = _clean_text(relation.get("relation")).upper()
+    if relation_name not in {"CONTINUE", "RECALL"}:
+        return {
+            "version": "continuation_content_analysis_v2",
+            "active": False,
+            "mode": "NONE",
+            "new_information_required": False,
+        }
+
+    active = relation.get("active_sequence") if isinstance(relation.get("active_sequence"), dict) else {}
+    previous_answer = _clean_text(
+        active.get("last_april_answer")
+        or relation.get("previous_april_turn")
+        or (state or {}).get("last_april_turn")
+    )
+    previous_user = _clean_text(
+        active.get("last_user_request")
+        or relation.get("previous_user_turn")
+        or (state or {}).get("last_user_turn")
+    )
+    topic = _clean_text(
+        active.get("topic")
+        or relation.get("active_topic")
+        or relation.get("target_topic")
+    )
+    entity, entity_source = _entity_from_relation_context(
+        current_text,
+        previous_answer,
+        topic,
+        state=state,
+    )
+    strategy = _infer_dialogue_mode(
+        current_text,
+        relation_name,
+        operation=operation,
+        reference=bool(relation.get("reference")),
+        previous_answer=previous_answer,
+        topic_similarity=float(relation.get("topic_similarity") or 0.0),
+    )
+
+    covered = _sentence_units(previous_answer, limit=6)
+    prior_user_context = _sentence_units(previous_user, limit=3)
+    sequence_pairs = relation.get("sequence_pairs") if isinstance(relation.get("sequence_pairs"), list) else []
+    recent_turns: list[dict[str, Any]] = []
+    for pair in sequence_pairs[-4:]:
+        if not isinstance(pair, dict):
+            continue
+        user_turn = _clean_text(pair.get("user_request") or pair.get("user_meaning"))
+        answer_turn = _clean_text(pair.get("april_answer") or pair.get("april_meaning"))
+        if answer_turn and _semantic_similarity(answer_turn, previous_answer) >= 0.92:
+            continue
+        recent_turns.append({
+            "user": user_turn[:180],
+            "answer": answer_turn[:220],
+        })
+
+    avoid_repeat = covered[:5]
+    analysis = {
+        "version": "continuation_content_analysis_v2",
+        "active": True,
+        "mode": strategy["mode"],
+        "intent": strategy["intent"],
+        "new_information_required": strategy["new_information_required"],
+        "conversational_posture": strategy["conversational_posture"],
+        "next_direction": strategy["next_direction"],
+        "novelty_target": strategy["novelty_target"],
+        "recap_ratio_max": strategy["recap_ratio_max"],
+        "expertise_behavior": strategy.get("expertise_behavior", "answer_with_domain_appropriate_reasoning"),
+        "active_topic": topic,
+        "active_entity": entity,
+        "active_entity_source": entity_source,
+        "previous_user_turn": previous_user[:300],
+        "previous_answer": previous_answer[:1400],
+        "covered_content": covered,
+        "avoid_repeat_content": avoid_repeat,
+        "recent_sequence_turns": recent_turns,
+        "user_turn_is_reaction": strategy["mode"] == "REACT",
+        "source": "active_dialogue_sequence",
+    }
+    return analysis
+
+
+def _apply_active_sequence_authority(
+    result: dict[str, Any],
+    state: dict[str, Any] | None,
+) -> None:
+    """Make the authenticated live sequence authoritative for CONTINUE turns."""
+    if not isinstance(result, dict) or not isinstance(state, dict):
+        return
+
+    relation = _clean_text(
+        result.get("dialogue_relation")
+        or result.get("relation")
+        or (result.get("dialogue_vector") or {}).get("three_way_relation")
+    ).upper()
+    if relation not in {"CONTINUE", "CONTINUE_TOPIC"}:
+        return
+
+    active = state.get("active_dialogue_sequence")
+    if not isinstance(active, dict) or not active.get("sequence_id"):
+        return
+
+    active_id = _clean_text(active.get("sequence_id"))
+    active_topic = _clean_text(active.get("topic") or state.get("april_active_topic"))
+    last_user = _clean_text(active.get("last_user_request") or state.get("last_user_turn"))
+    last_answer = _clean_text(active.get("last_april_answer") or state.get("last_april_turn"))
+
+    # Never let an unrelated generic memory record become the active operand.
+    result["sequence_id"] = active_id
+    result["target_sequence_id"] = active_id
+    result["active_topic"] = active_topic
+    result["canonical_topic"] = active_topic or result.get("canonical_topic", "")
+    result["previous_user_turn"] = last_user
+    result["previous_april_turn"] = last_answer
+    result["selected_memory_index"] = -1
+    result["selected_memory_operand"] = {
+        "source": "active_dialogue_sequence",
+        "sequence_id": active_id,
+        "sequence_topic": active_topic,
+        "user_request": last_user,
+        "april_answer": last_answer,
+        "user_id": _clean_text(active.get("user_id") or state.get("user_id")),
+        "conversation_id": _clean_text(active.get("conversation_id") or state.get("conversation_id")),
+    }
+    result["continuation_authority"] = "active_dialogue_sequence"
+    result["historical_memory_is_evidence_only"] = True
+
+
+
 class QuantumInterpretationEngine:
     """
     Canonical dialogue-vector interpreter for the deployed ZIP.
@@ -1421,7 +1496,7 @@ class QuantumInterpretationEngine:
       transition is measured.
     """
 
-    VERSION = "quantum_dialogue_interpretation_7d_v2_continuation_content"
+    VERSION = "quantum_dialogue_interpretation_7d_v1"
 
     def _semantic_relation(
         self,
@@ -1440,8 +1515,22 @@ class QuantumInterpretationEngine:
         active_sequence_id = _clean_text(active.get("sequence_id"))
         active_topic = _clean_text(active.get("topic"))
 
+        # The authenticated active sequence wins over generic seven-day memory
+        # whenever it is live. The long-term timeline remains recall evidence.
         sequence_pairs = _sequence_pairs(pairs, active_sequence_id)
-        latest = sequence_pairs[-1] if sequence_pairs else (pairs[-1] if pairs else {})
+        live_last_user = _clean_text(active.get("last_user_request")) if isinstance(active, dict) else ""
+        live_last_answer = _clean_text(active.get("last_april_answer")) if isinstance(active, dict) else ""
+        if live_last_user or live_last_answer:
+            latest = {
+                "sequence_id": active_sequence_id,
+                "topic": active_topic,
+                "user_request": live_last_user,
+                "april_answer": live_last_answer,
+                "sequence_turn_index": active.get("turn_count"),
+                "source": "active_dialogue_sequence",
+            }
+        else:
+            latest = sequence_pairs[-1] if sequence_pairs else (pairs[-1] if pairs else {})
         latest_user = _clean_text(
             latest.get("user_request")
             or latest.get("user_meaning")
@@ -1543,58 +1632,6 @@ class QuantumInterpretationEngine:
         if relation == "RECALL" and recall_record:
             selected = dict(recall_record)
             selected_index = recall_index
-        elif relation == "CONTINUE":
-            # CONTINUE is bound to the authenticated user's active sequence.
-            # Never fall back to an unrelated cross-vector memory item merely
-            # because the seven-day pair ledger is temporarily incomplete.
-            if sequence_pairs:
-                selected = dict(sequence_pairs[-1])
-                selected_index = next(
-                    (
-                        index
-                        for index in range(len(pairs) - 1, -1, -1)
-                        if isinstance(pairs[index], dict)
-                        and (
-                            (
-                                selected.get("turn_key")
-                                and pairs[index].get("turn_key") == selected.get("turn_key")
-                            )
-                            or (
-                                selected.get("created_at")
-                                and pairs[index].get("created_at") == selected.get("created_at")
-                                and pairs[index].get("user_request") == selected.get("user_request")
-                            )
-                        )
-                    ),
-                    -1,
-                )
-            elif active_sequence_id:
-                # Hot active-sequence state is authoritative even when the pair
-                # ledger has not yet been restored/populated.
-                selected = {
-                    "record_type": "dialog_pair",
-                    "sequence_id": active_sequence_id,
-                    "topic": active_topic,
-                    "user_id": _clean_text(active.get("user_id") or state.get("user_id")),
-                    "conversation_id": _clean_text(
-                        active.get("conversation_id") or state.get("conversation_id")
-                    ),
-                    "user_request": _clean_text(
-                        active.get("last_user_request") or state.get("last_user_turn")
-                    ),
-                    "april_answer": _clean_text(
-                        active.get("last_april_answer") or state.get("last_april_turn")
-                    ),
-                    "sequence_turn_index": active.get("turn_count"),
-                    "created_at": active.get("last_turn_at"),
-                    "active_sequence_hot_state": True,
-                }
-                selected_index = -1
-            elif latest:
-                # No active sequence exists; this path should be rare because
-                # relation CONTINUE normally requires an active vector.
-                selected = dict(latest)
-                selected_index = max(0, len(pairs) - 1)
         elif sequence_pairs:
             selected = dict(sequence_pairs[-1])
             selected_index = next(
@@ -1636,17 +1673,11 @@ class QuantumInterpretationEngine:
             )
 
         resolved_reference = ""
-        if reference and selected:
-            if relation == "CONTINUE":
-                # For live continuation, resolve references against the active
-                # sequence object/topic, not an unrelated historical operand.
-                resolved_reference = _clean_text(
-                    selected.get("topic")
-                    or active_topic
-                    or selected.get("user_request")
-                    or selected.get("user_meaning")
-                )
-            else:
+        if reference:
+            active_entity = _clean_text(state.get("april_active_entity")) if isinstance(state, dict) else ""
+            if active_entity:
+                resolved_reference = active_entity
+            elif selected:
                 resolved_reference = _clean_text(
                     selected.get("user_request")
                     or selected.get("user_meaning")
@@ -1756,10 +1787,6 @@ class QuantumInterpretationEngine:
         relation = self._semantic_relation(current, state, history)
         relation_name = relation["relation"]
 
-        # Analyze what has already been delivered in this user's active
-        # seven-day sequence before packaging the continuation contract.
-        continuation_content = _continuation_content_analysis(current, relation)
-
         raw_representation = self._infer_representation(current)
         active_sequence = relation.get("active_sequence") or {}
         active_sequence_pairs = relation.get("sequence_pairs") or []
@@ -1861,7 +1888,6 @@ class QuantumInterpretationEngine:
             "sequence_continuation_authorized": relation_name == "CONTINUE",
             "current_turn_authority": True,
             "historical_memory_is_evidence_only": True,
-            "continuation_content_analysis": continuation_content,
             "sequential_dialogue": {
                 "relation": relation_name,
                 "subtype": request_relation,
@@ -1871,7 +1897,6 @@ class QuantumInterpretationEngine:
                 "selected_pair": selected,
                 "selected_index": relation.get("selected_memory_index", -1),
                 "sequence_id": sequence_id,
-                "continuation_content_analysis": continuation_content,
                 "scores": {
                     "topic_similarity": relation.get("topic_similarity", 0.0),
                     "topic_novelty": relation.get("topic_novelty", 0.0),
@@ -1937,7 +1962,6 @@ class QuantumInterpretationEngine:
             "continuation_target": continuation_target,
             "selected_memory_index": relation.get("selected_memory_index", -1),
             "selected_memory_operand": selected,
-            "continuation_content_analysis": continuation_content,
             "dialogue_reference": (
                 {
                     "resolved": bool(relation.get("resolved_reference")),
@@ -1978,7 +2002,6 @@ class QuantumInterpretationEngine:
                 "resolved_request": current,
                 "resolved_reference": relation.get("resolved_reference", ""),
                 "previous_user_turn": relation.get("previous_user_turn", ""),
-                "continuation_content_analysis": continuation_content,
                 "previous_april_turn": relation.get("previous_april_turn", ""),
                 "selected_memory_index": relation.get("selected_memory_index", -1),
                 "selected_memory_operand": selected,
@@ -2004,10 +2027,6 @@ class QuantumInterpretationEngine:
                 "previous_scene_id": _clean_text(selected.get("visual_scene_id") or selected.get("scene_id")),
                 "previous_render_types": list(selected.get("render_block_types") or []),
                 "avoid_repeat": True,
-                "content_continuation_mode": continuation_content.get("mode"),
-                "new_information_required": bool(
-                    continuation_content.get("new_information_required")
-                ),
             },
             "compatibility_version": self.VERSION,
         }
@@ -2065,6 +2084,20 @@ class _FallbackInterpretationEngine:
             "normalized_text": current,
             "continuation": False,
             "reference_to_previous": False,
+            "continuation_content_analysis": {
+                "version": "continuation_content_analysis_v2",
+                "active": False,
+                "mode": "NONE",
+                "new_information_required": False,
+            },
+            "dialogue_strategy": {
+                "mode": "NEW",
+                "intent": "independent_request",
+                "new_information_required": False,
+                "conversational_posture": "ANSWER",
+                "next_direction": "answer_current_request",
+                "source": "fallback",
+            },
             "dialogue_relation": "NEW",
             "relation": "NEW_TOPIC",
             "request_dependency": "independent",
@@ -2157,7 +2190,7 @@ def interpret_request(
                 history=history,
                 state=state,
             )
-            return _repair_interpretation_result(result, text)
+            return _repair_interpretation_result(result, text, state=state)
 
     # The deployed ZIP currently contains no separate canonical interpretation
     # module, so the built-in seven-day engine is the canonical engine in this
@@ -2180,7 +2213,7 @@ def interpret_request(
             state=state,
         )
         result["local_engine_error"] = f"{type(exc).__name__}: {exc}"
-    return _repair_interpretation_result(result, text)
+    return _repair_interpretation_result(result, text, state=state)
 
 
 def _base_interpret_request(
@@ -2307,7 +2340,7 @@ def __getattr__(name: str) -> Any:
         "DECISION_OWNER": "QUANTUM_PROCESSOR",
         "TRANSPORT_NAME": "INTERPRETATION_TRANSPORT",
         "INTERPRETATION_COMPATIBILITY_VERSION":
-            "2026-09-21-continuation-content-v1",
+            "2026-09-21-lazy-engine-current-turn-fence-v3",
         "get_shared_semantic_encoder": get_shared_semantic_encoder,
         "QUANTUM_EMBEDDING_ENGINE": QUANTUM_EMBEDDING_ENGINE,
         "QUANTUM_EVIDENCE_FUSION": QUANTUM_EVIDENCE_FUSION,
@@ -2325,7 +2358,7 @@ def __getattr__(name: str) -> Any:
 
 
 INTERPRETATION_COMPATIBILITY_VERSION = (
-    "2026-09-21-seven-day-dialogue-continuation-content-v1"
+    "2026-09-21-seven-day-dialogue-vector-v1"
 )
 INTERPRETATION_REQUEST_OPERAND_POLICY = "CURRENT_USER_TURN_ONLY"
 INTERPRETATION_HISTORICAL_MEMORY_POLICY = "SEVEN_DAY_DIALOGUE_MEMORY_EVIDENCE"
