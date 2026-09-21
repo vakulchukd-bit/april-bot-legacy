@@ -1,45 +1,213 @@
 # -*- coding: utf-8 -*-
 """
-APRIL — canonical interpretation compatibility bridge
-======================================================
+APRIL — interpretation_layer compatibility + current-turn boundary
+==================================================================
 
-This file must live at:
+Deploy target:
     blocks/interpretation_layer.py
 
-It restores the public `interpret_request` entry point expected by
-`core/executor.py` and places the current-turn authority fence at the
-module boundary.
+What this file fixes:
+1. It NEVER imports a hard-coded
+   ``blocks.April_interpretation_layer_dialogue_synced`` at module import time.
+   That exact dependency caused the Railway crash on 2026-09-21.
+2. It preserves the public ``interpret_request`` API expected by executor.py.
+3. It lazily discovers an existing canonical Quantum interpretation engine.
+4. It keeps the current user turn authoritative for provider-facing request text.
+5. It blocks accidental CONTINUE state for a self-contained current request when
+   there is no explicit reference/anaphora/pending-input evidence.
+6. It prevents stale structured representation from silently upgrading a plain
+   informational request.
+7. If no canonical engine file is present in the deployed package, the service
+   remains importable and returns a conservative TEXT interpretation instead of
+   crashing the entire Railway container.
 
-The heavy semantic engine remains in:
-    blocks/April_interpretation_layer_dialogue_synced.py
-
-No second semantic engine is created here.
+Important:
+- No second semantic engine is created when a canonical engine is available.
+- Historical dialogue remains evidence; it is not injected into
+  ``resolved_request`` unless the canonical engine explicitly needs it.
 """
 
 from __future__ import annotations
 
 import importlib
 import re
-from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 
-_BASE_MODULE_NAME = (
-    f"{__package__}.April_interpretation_layer_dialogue_synced"
-    if __package__
-    else "April_interpretation_layer_dialogue_synced"
+# ---------------------------------------------------------------------------
+# Runtime discovery
+# ---------------------------------------------------------------------------
+
+_THIS_MODULE = __name__
+_THIS_FILE = Path(__file__).resolve()
+_PACKAGE_NAME = __package__ or "blocks"
+_PACKAGE_DIR = _THIS_FILE.parent
+
+# Deterministic candidates used by this project over time.
+# The CURRENT file is deliberately excluded to avoid recursive import.
+_KNOWN_ENGINE_MODULES = (
+    "blocks.blocks_interpretation_layer",
+    "blocks.interpretation_layer_v2",
+    "blocks.interpretation_layer_dialogue_semantic_boundary_fixed_v3",
+    "blocks.interpretation_layer_dialogue_fixed",
+    "blocks.interpretation_layer_dialogue_sequential_order_fixed_v10",
+    "blocks.interpretation_layer_dialogue_sequential_order_fixed_v5",
+    "blocks.interpretation_layer_quantum_matrix_final",
+    "blocks.interpretation_layer_quantum_matrix_context_engine",
+    "blocks.interpretation_layer_upgraded",
+    "blocks.Qvantium_interpretation_layer_context_v1",
+    "blocks.interpretation_layer_original",
 )
 
-_base = importlib.import_module(_BASE_MODULE_NAME)
+_ENGINE_MODULE: Any = None
+_ENGINE_OBJECT: Any = None
+_ENGINE_LOAD_ATTEMPTED = False
+_ENGINE_LOAD_ERRORS: list[str] = []
 
-# Re-export the complete public surface of the canonical engine.
-for _name in dir(_base):
-    if not _name.startswith("_"):
-        globals()[_name] = getattr(_base, _name)
+
+def _module_has_canonical_engine(module: Any) -> bool:
+    """Return True only for a module exposing the project's real engine."""
+    engine = getattr(module, "QUANTUM_INTERPRETATION_ENGINE", None)
+    return engine is not None and callable(getattr(engine, "interpret", None))
+
+
+def _safe_module_name_from_path(path: Path) -> str:
+    return f"{_PACKAGE_NAME}.{path.stem}"
+
+
+def _discover_source_candidates() -> list[str]:
+    """
+    Discover canonical engine files without importing arbitrary project modules.
+
+    A file becomes a candidate only when its source contains the canonical engine
+    class/object markers. This keeps discovery deterministic and avoids executing
+    unrelated modules just to find a name.
+    """
+    found: list[str] = []
+
+    try:
+        for path in sorted(_PACKAGE_DIR.glob("*.py")):
+            if path.resolve() == _THIS_FILE:
+                continue
+
+            stem = path.stem
+            low = stem.lower()
+
+            if low.startswith("_"):
+                continue
+
+            # Exclude obvious patcher/temp files.
+            if any(
+                marker in low
+                for marker in (
+                    "repair",
+                    "patched",
+                    "patch",
+                    "tmp",
+                    "backup",
+                    "test",
+                )
+            ):
+                continue
+
+            try:
+                source = path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+
+            if (
+                "QUANTUM_INTERPRETATION_ENGINE" in source
+                and "QuantumInterpretationEngine" in source
+                and ".interpret(" in source
+            ):
+                found.append(_safe_module_name_from_path(path))
+    except Exception:
+        pass
+
+    return found
+
+
+def _load_canonical_engine_module() -> Any:
+    """
+    Lazily resolve the real canonical interpretation module.
+
+    Crucially this function is NOT executed at module import time. The Railway
+    crash happened because the previous wrapper imported a nonexistent module
+    before executor.py could even load.
+    """
+    global _ENGINE_MODULE, _ENGINE_OBJECT, _ENGINE_LOAD_ATTEMPTED
+
+    if _ENGINE_LOAD_ATTEMPTED:
+        return _ENGINE_MODULE
+
+    _ENGINE_LOAD_ATTEMPTED = True
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    for name in _KNOWN_ENGINE_MODULES:
+        if name == _THIS_MODULE or name in seen:
+            continue
+        seen.add(name)
+        candidates.append(name)
+
+    for name in _discover_source_candidates():
+        if name == _THIS_MODULE or name in seen:
+            continue
+        seen.add(name)
+        candidates.append(name)
+
+    for module_name in candidates:
+        try:
+            module = importlib.import_module(module_name)
+
+            if _module_has_canonical_engine(module):
+                _ENGINE_MODULE = module
+                _ENGINE_OBJECT = module.QUANTUM_INTERPRETATION_ENGINE
+                return module
+
+        except Exception as exc:
+            _ENGINE_LOAD_ERRORS.append(
+                f"{module_name}: {type(exc).__name__}: {exc}"
+            )
+
+    return None
 
 
 # ---------------------------------------------------------------------------
-# Current-turn authority / contaminated request protection
+# Lazy compatibility proxy
+# ---------------------------------------------------------------------------
+
+class _LazyEngineProxy:
+    """
+    Compatibility object for code that accesses
+    ``interpretation_layer.QUANTUM_INTERPRETATION_ENGINE`` directly.
+    """
+
+    def __getattr__(self, name: str) -> Any:
+        module = _load_canonical_engine_module()
+        if module is not None:
+            engine = getattr(module, "QUANTUM_INTERPRETATION_ENGINE", None)
+            if engine is not None:
+                return getattr(engine, name)
+
+        return getattr(_FallbackInterpretationEngine(), name)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        module = _load_canonical_engine_module()
+        if module is not None:
+            engine = getattr(module, "QUANTUM_INTERPRETATION_ENGINE", None)
+            if callable(engine):
+                return engine(*args, **kwargs)
+        return _FallbackInterpretationEngine()(*args, **kwargs)
+
+
+QUANTUM_INTERPRETATION_ENGINE = _LazyEngineProxy()
+
+
+# ---------------------------------------------------------------------------
+# Current-turn safety fence
 # ---------------------------------------------------------------------------
 
 _INTERNAL_PROMPT_MARKERS = (
@@ -53,247 +221,211 @@ _INTERNAL_PROMPT_MARKERS = (
     "Resolved semantic referent:",
     "Use this referent as the object of the current request",
     "Use the resolved historical results as the operands for the current task",
+    "Contextual referent resolved from the immediately previous human exchange:",
 )
 
 
-def _clean_current_text(value: Any) -> str:
+def _clean_text(value: Any) -> str:
     text = str(value or "").strip()
     text = re.sub(r"\r\n?", "\n", text)
-    text = re.sub(r"[ \t]+\n", "\n", text)
     return text
 
 
-def _has_internal_prompt_material(value: Any) -> bool:
+def _contains_internal_prompt_material(value: Any) -> bool:
     text = str(value or "")
     return any(marker in text for marker in _INTERNAL_PROMPT_MARKERS)
 
 
-def _seq_payload(result: dict[str, Any]) -> dict[str, Any]:
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _dialogue_vector(result: dict[str, Any]) -> dict[str, Any]:
     vector = result.get("dialogue_vector")
-    if not isinstance(vector, dict):
-        return {}
-    sequential = vector.get("sequential_dialogue")
-    if isinstance(sequential, dict):
-        return sequential
-    return {}
+    return _as_dict(vector)
 
 
-def _trajectory_payload(result: dict[str, Any]) -> dict[str, Any]:
-    vector = result.get("dialogue_vector")
-    if not isinstance(vector, dict):
-        return {}
-    trajectory = vector.get("trajectory")
-    if isinstance(trajectory, dict):
-        return trajectory
-    sequential = vector.get("sequential_dialogue")
-    if isinstance(sequential, dict):
-        trajectory = sequential.get("trajectory")
-        if isinstance(trajectory, dict):
-            return trajectory
-    return {}
+def _nested_sequential(result: dict[str, Any]) -> dict[str, Any]:
+    vector = _dialogue_vector(result)
+    return _as_dict(vector.get("sequential_dialogue"))
 
 
-def _current_turn_is_independent(result: dict[str, Any]) -> bool:
+def _self_contained_without_reference(result: dict[str, Any]) -> bool:
     """
-    Detect the exact failure shape seen in the 2026-09-21 Railway log:
+    Exact protection for the regression seen in the Railway test:
 
-        CONTINUE
+        relation=CONTINUE
         self_contained=True
         explicit_reference=False
         grammatical_anaphora=False
         pending_input=False
         explicit_task=False
 
-    In that shape, the current user message owns the turn.
+    A genuine explicit continuation/reference is left untouched.
     """
-    sequential = _seq_payload(result)
-    trajectory = _trajectory_payload(result)
+    vector = _dialogue_vector(result)
+    sequential = _nested_sequential(result)
 
-    relation = str(
-        sequential.get("relation")
-        or result.get("dialogue_relation")
-        or result.get("relation")
-        or ""
-    ).upper()
+    candidates = (result, vector, sequential)
 
-    self_contained = bool(
-        trajectory.get("self_contained")
-        or sequential.get("self_contained")
-        or result.get("self_contained")
+    relation = ""
+    for source in candidates:
+        relation = str(
+            source.get("relation")
+            or source.get("request_relation")
+            or source.get("dialogue_relation")
+            or ""
+        ).upper()
+        if relation:
+            break
+
+    if relation not in {"CONTINUE", "CONTINUE_TOPIC"}:
+        return False
+
+    def _flag(*names: str) -> bool:
+        return any(bool(source.get(name)) for source in candidates for name in names)
+
+    self_contained = _flag("self_contained", "current_request_complete")
+
+    explicit_reference = _flag(
+        "explicit_reference",
+        "reference_to_previous",
+        "reference",
+        "artifact_reference_evidence",
     )
 
-    explicit_reference = bool(
-        trajectory.get("explicit_reference")
-        or sequential.get("explicit_reference")
-        or result.get("reference_to_previous")
+    grammatical_anaphora = _flag(
+        "grammatical_anaphora",
+        "anaphora",
     )
 
-    grammatical_anaphora = bool(
-        trajectory.get("grammatical_anaphora")
-        or sequential.get("grammatical_anaphora")
+    pending_input = _flag(
+        "pending_input",
+        "requires_previous_input",
     )
 
-    pending_input = bool(
-        trajectory.get("pending_input")
-        or sequential.get("pending_input")
+    explicit_task = _flag(
+        "explicit_task",
+        "task_explicit",
     )
 
-    explicit_task = bool(
-        trajectory.get("explicit_task")
-        or sequential.get("explicit_task")
-    )
-
-    no_reference_evidence = not (
-        explicit_reference
-        or grammatical_anaphora
-        or pending_input
-        or explicit_task
-    )
+    # If a field named current_request_complete exists, False means incomplete.
+    complete_fields = [
+        source.get("current_request_complete")
+        for source in candidates
+        if "current_request_complete" in source
+    ]
+    if complete_fields:
+        self_contained = self_contained or any(
+            value is True for value in complete_fields
+        )
 
     return bool(
-        relation in {"CONTINUE", "CONTINUE_TOPIC"}
-        and self_contained
-        and no_reference_evidence
+        self_contained
+        and not explicit_reference
+        and not grammatical_anaphora
+        and not pending_input
+        and not explicit_task
     )
 
 
-def _explicit_current_structured_request(text: str) -> bool:
+def _explicit_structured_request(text: str) -> bool:
     """
-    Only direct current-turn wording can authorize a structured representation.
-
-    This is deliberately narrow: historical renderer state never counts as
-    authorization.
+    Narrow current-turn check. This is NOT a command router; it only prevents
+    inherited renderer state from leaking into a plain informational request.
     """
-    low = _clean_current_text(text).lower()
+    low = _clean_text(text).lower()
 
-    direct_groups = (
-        # visual
-        "нарисуй", "изобрази", "покажи схему", "покажи график",
-        "построй график", "построй диаграмму", "сделай диаграмму",
-        "нарисовать", "изображение",
-        # mathematical structure
-        "формул", "формулу", "уравнен", "график функции",
-        "таблиц", "таблицу",
-        # code / structured output
-        "код", "python", "json", "markdown",
-        "ссылк", "видео", "аудио", "файл",
-        # explicit English requests
-        "draw ", "plot ", "chart ", "diagram ", "table ", "formula ",
-        "equation ", "show a graph", "show the graph",
+    tokens = (
+        "нарисуй",
+        "изобрази",
+        "покажи схему",
+        "покажи график",
+        "построй график",
+        "построй диаграмму",
+        "сделай диаграмму",
+        "нарисовать",
+        "изображение",
+        "формулу",
+        "формул",
+        "уравнение",
+        "график функции",
+        "таблицу",
+        "таблица",
+        "код",
+        "python",
+        "json",
+        "markdown",
+        "ссылку",
+        "видео",
+        "аудио",
+        "файл",
+        "draw ",
+        "plot ",
+        "chart ",
+        "diagram ",
+        "table ",
+        "formula ",
+        "equation ",
+        "show the graph",
     )
 
-    return any(token in low for token in direct_groups)
+    return any(token in low for token in tokens)
 
 
-def _force_text_representation_for_plain_information(
-    result: dict[str, Any],
-    current_text: str,
-) -> None:
+def _sanitize_provider_facing_fields(result: dict[str, Any], current_text: str) -> None:
     """
-    When the semantic layer accidentally inherited a structured representation
-    from an unrelated previous turn, erase that stale representation before the
-    result crosses the interpretation boundary.
-
-    This does not touch genuinely structured current-turn requests.
+    Internal historical prose belongs in structured evidence fields, not in the
+    provider-facing request operand.
     """
-    if _explicit_current_structured_request(current_text):
-        return
+    current = _clean_text(current_text)
 
-    # This is a plain information/explanation request when the current turn does
-    # not explicitly request a structured artifact. Historical structured state
-    # must not upgrade it.
-    text_like_operations = {
-        "answer", "explain", "analyze", "retrieve", "summarize",
-        "list", "present", "",
-    }
+    provider_fields = (
+        "resolved_request",
+        "provider_request",
+        "request_operand",
+        "prompt",
+        "current_request",
+    )
 
-    operation = str(
-        result.get("operation")
-        or result.get("active_operation")
-        or result.get("best_operation")
-        or ""
-    ).lower()
+    for key in provider_fields:
+        if key not in result:
+            continue
 
-    production = str(
-        result.get("representation")
-        or result.get("production")
-        or result.get("subtype")
-        or result.get("scene_type")
-        or ""
-    ).lower()
+        value = result.get(key)
+        if _contains_internal_prompt_material(value):
+            result[key] = current
 
-    # Do not reinterpret a genuinely explicit current structured request.
-    # For plain informational requests, stale structured output is unsafe.
-    if operation in text_like_operations or not operation:
-        stale_structured = production in {
-            "formula", "graph", "diagram", "image", "gallery", "table",
-            "code", "link", "audio", "video", "file", "action", "scene",
-            "memory", "visual_context",
-        }
-        if stale_structured:
-            result["representation"] = "text"
-            result["production"] = "text"
-            result["subtype"] = "text"
-            result["scene_type"] = "text"
-            result["visual_production_mode"] = "text"
-            result["requested_representations"] = ["text"]
-            result["requested_outputs"] = ["text"]
-
-            presentation = result.get("presentation")
-            if isinstance(presentation, dict):
-                presentation = dict(presentation)
-                presentation["production_representation"] = "text"
-                presentation["signals"] = []
-                presentation["recommendations"] = []
-                presentation["scene_plan"] = []
-                result["presentation"] = presentation
+    # `resolved_request` is the canonical operand used by the project's
+    # interpretation/provider bridge. Keep it bound to this user turn.
+    result["resolved_request"] = current
+    result["request_operand"] = current
+    result["request_operand_source"] = "current_user_turn"
+    result["request_operand_sanitized"] = True
 
 
-def _repair_result(result: Any, current_text: str) -> Any:
-    if not isinstance(result, dict):
-        return result
+def _force_new_turn_state(result: dict[str, Any], current_text: str) -> None:
+    """
+    Neutralize the exact false-CONTINUE shape without deleting the engine's
+    actual historical evidence.
+    """
+    current = _clean_text(current_text)
 
-    text = _clean_current_text(current_text)
-    if not text:
-        return result
+    result["continuation"] = False
+    result["reference_to_previous"] = False
+    result["dialogue_relation"] = "NEW"
+    result["relation"] = "NEW_TOPIC"
+    result["request_dependency"] = "independent"
+    result["context_dependency"] = "independent"
+    result["resolved_reference"] = ""
+    result["history_dependent_task"] = False
+    result["current_turn_authority"] = True
+    result["historical_memory_is_evidence_only"] = True
 
-    # ---------------------------------------------------------------
-    # 1. Absolute request-operand rule:
-    #    internal continuation prose must never leave this module.
-    # ---------------------------------------------------------------
-    resolved = result.get("resolved_request")
-    if _has_internal_prompt_material(resolved):
-        result["resolved_request"] = text
-        result["request_operand"] = text
-        result["request_operand_source"] = "current_user_turn"
-        result["request_operand_sanitized"] = True
-    else:
-        # Even for a clean result, keep the canonical operand equal to the
-        # current user request. Historical context belongs in structured fields.
-        result["resolved_request"] = text
-        result["request_operand"] = text
-        result["request_operand_source"] = "current_user_turn"
-
-    # ---------------------------------------------------------------
-    # 2. Exact Railway regression: false CONTINUE on a self-contained turn.
-    # ---------------------------------------------------------------
-    independent = _current_turn_is_independent(result)
-
-    if independent:
-        result["continuation"] = False
-        result["reference_to_previous"] = False
-        result["context_dependency"] = "independent"
-        result["dialogue_relation"] = "NEW"
-        result["relation"] = "NEW_TOPIC"
-        result["resolved_reference"] = ""
-        result["continuation_target"] = ""
-        result["reply_to"] = result.get("reply_to") if not result.get("reply_to") else ""
-        result["history_dependent_task"] = False
-
-        vector = result.get("dialogue_vector")
-        if isinstance(vector, dict):
-            vector = dict(vector)
-            vector.update({
+    vector = _dialogue_vector(result)
+    if vector:
+        vector.update(
+            {
                 "relation": "NEW_TOPIC",
                 "topic_relation": "NEW_TOPIC",
                 "request_relation": "NEW_TOPIC",
@@ -301,74 +433,254 @@ def _repair_result(result: Any, current_text: str) -> Any:
                 "continuation": False,
                 "reference_to_previous": False,
                 "three_way_relation": "NEW",
-                "selected_memory_operand": {},
-                "selected_memory_index": -1,
                 "resolved_reference": "",
-                "resolved_request": text,
-                "request_operand": text,
+                "resolved_request": current,
+                "request_operand": current,
                 "request_operand_source": "current_user_turn",
-                "historical_memory_is_evidence_only": True,
                 "current_turn_authority": True,
+                "historical_memory_is_evidence_only": True,
                 "forced_new_topic": True,
                 "forced_new_topic_reason": (
                     "self_contained_without_reference_evidence"
                 ),
-            })
+            }
+        )
 
-            sequential = vector.get("sequential_dialogue")
-            if isinstance(sequential, dict):
-                sequential = dict(sequential)
-                sequential["relation"] = "NEW"
-                sequential["subtype"] = "NEW_TOPIC"
-                sequential["selected_pair"] = {}
-                sequential["selected_memory_index"] = -1
-                sequential["resolved_reference"] = ""
-                sequential["confidence"] = max(
-                    float(sequential.get("confidence", 0.0) or 0.0),
-                    0.50,
-                )
-                vector["sequential_dialogue"] = sequential
+        sequential = _as_dict(vector.get("sequential_dialogue"))
+        if sequential:
+            sequential.update(
+                {
+                    "relation": "NEW",
+                    "subtype": "NEW_TOPIC",
+                    "continuation": False,
+                    "reference": False,
+                    "selected_pair": {},
+                    "resolved_reference": "",
+                }
+            )
+            vector["sequential_dialogue"] = sequential
 
-            result["dialogue_vector"] = vector
+        result["dialogue_vector"] = vector
 
-        # Historical scene must remain evidence only, not the new scene.
-        result["previous_scene_id"] = ""
-        result["reuse_existing_scene"] = False
-        result["render_continuity"] = {
-            "relation": "NEW",
-            "reuse_existing_scene": False,
-            "reuse_recalled_memory": False,
-            "selected_memory_index": -1,
-            "previous_scene_id": "",
-            "previous_render_types": [],
-            "avoid_repeat": True,
-        }
 
-    # ---------------------------------------------------------------
-    # 3. Never carry a stale renderer into a plain informational turn.
-    # ---------------------------------------------------------------
-    if independent:
-        _force_text_representation_for_plain_information(result, text)
+def _remove_stale_structured_representation(
+    result: dict[str, Any],
+    current_text: str,
+) -> None:
+    """
+    Do not let an old formula/graph/diagram/image state turn a plain information
+    request into a structured scene.
 
-    # ---------------------------------------------------------------
-    # 4. Structured historical context is still retained as evidence,
-    #    but not encoded into the provider-facing request.
-    # ---------------------------------------------------------------
-    if independent:
-        result["semantic_ownership"] = {
-            "relation": "NEW_TOPIC",
-            "owner": "current_request",
-            "current_turn_authoritative": True,
-            "stale_state_topic_ignored": True,
-            "historical_memory_is_evidence_only": True,
-            "request_operand_is_current_only": True,
-        }
+    This changes only explicit representation hints at the interpretation
+    boundary; it does not touch canonical historical evidence.
+    """
+    if _explicit_structured_request(current_text):
+        return
+
+    structured = {
+        "formula",
+        "graph",
+        "diagram",
+        "image",
+        "gallery",
+        "table",
+        "code",
+        "link",
+        "audio",
+        "video",
+        "file",
+        "scene",
+        "memory",
+        "visual_context",
+    }
+
+    operation = str(
+        result.get("operation")
+        or result.get("best_operation")
+        or result.get("active_operation")
+        or ""
+    ).lower()
+
+    representation = str(
+        result.get("production")
+        or result.get("representation")
+        or result.get("subtype")
+        or result.get("scene_type")
+        or ""
+    ).lower()
+
+    # Only scrub stale structured state for answer/explain/retrieve/list style
+    # operations, or where the engine exposes no operation at all.
+    text_operations = {
+        "",
+        "answer",
+        "explain",
+        "retrieve",
+        "list",
+        "analyze",
+        "present",
+    }
+
+    if representation in structured and operation in text_operations:
+        result["production"] = "text"
+        result["representation"] = "text"
+        result["subtype"] = "text"
+        result["scene_type"] = "text"
+        result["visual_production_mode"] = "text"
+        result["requested_representations"] = ["text"]
+        result["requested_outputs"] = ["text"]
+
+        presentation = result.get("presentation")
+        if isinstance(presentation, dict):
+            presentation = dict(presentation)
+            presentation["production_representation"] = "text"
+            presentation["signals"] = []
+            presentation["recommendations"] = []
+            presentation["scene_plan"] = []
+            presentation["stale_context_cannot_upgrade_current_representation"] = True
+            result["presentation"] = presentation
+
+
+def _repair_interpretation_result(
+    result: Any,
+    current_text: str,
+) -> Any:
+    if not isinstance(result, dict):
+        return result
+
+    current = _clean_text(current_text)
+
+    # Never allow an internal prompt to be carried as the user request.
+    _sanitize_provider_facing_fields(result, current)
+
+    # Exact Railway regression fence.
+    if _self_contained_without_reference(result):
+        _force_new_turn_state(result, current)
+
+    # Plain informational turns cannot inherit an unrelated old renderer.
+    _remove_stale_structured_representation(result, current)
+
+    result["interpretation_compatibility"] = {
+        "version": "2026-09-21-lazy-engine-current-turn-fence-v2",
+        "canonical_engine_discovery": bool(
+            _load_canonical_engine_module() is not None
+        ),
+        "current_turn_authoritative": True,
+        "provider_request_current_turn_only": True,
+        "historical_memory_evidence_only": True,
+        "false_continue_fence": True,
+        "stale_representation_fence": True,
+    }
 
     return result
 
 
 # ---------------------------------------------------------------------------
-# Public API required by executor.py
+# Conservative no-crash engine
+# ---------------------------------------------------------------------------
+
+class _FallbackInterpretationEngine:
+    """
+    Last-resort TEXT-only interpretation.
+
+    It exists solely so a deployment with a missing canonical engine file does
+    not crash during import. It does not invent a renderer or a second semantic
+    route.
+    """
+
+    VERSION = "fallback-text-only-compat-v1"
+
+    @staticmethod
+    def interpret(
+        text,
+        cognition=None,
+        semantic=None,
+        history=None,
+        state=None,
+    ) -> dict[str, Any]:
+        current = _clean_text(text)
+
+        return {
+            "type": "independent",
+            "subtype": "text",
+            "scene_type": "text",
+            "operation": "answer",
+            "best_operation": "answer",
+            "object": "text",
+            "best_object": "text",
+            "goal": "understand",
+            "best_goal": "understand",
+            "representation": "text",
+            "production": "text",
+            "visual_production_mode": "text",
+            "resolved_request": current,
+            "request_operand": current,
+            "request_operand_source": "current_user_turn",
+            "request_operand_sanitized": True,
+            "current_request": current,
+            "normalized": current,
+            "normalized_text": current,
+            "continuation": False,
+            "reference_to_previous": False,
+            "dialogue_relation": "NEW",
+            "relation": "NEW_TOPIC",
+            "request_dependency": "independent",
+            "context_dependency": "independent",
+            "history_dependent_task": False,
+            "requested_outputs": ["text"],
+            "requested_representations": ["text"],
+            "dialogue_vector": {
+                "relation": "NEW_TOPIC",
+                "topic_relation": "NEW_TOPIC",
+                "request_relation": "NEW_TOPIC",
+                "request_dependency": "independent",
+                "continuation": False,
+                "reference_to_previous": False,
+                "three_way_relation": "NEW",
+                "resolved_request": current,
+                "request_operand": current,
+                "request_operand_source": "current_user_turn",
+                "historical_memory_is_evidence_only": True,
+                "current_turn_authority": True,
+                "sequential_dialogue": {
+                    "relation": "NEW",
+                    "subtype": "NEW_TOPIC",
+                    "continuation": False,
+                    "reference": False,
+                    "selected_pair": {},
+                },
+            },
+            "presentation": {
+                "production_representation": "text",
+                "signals": [],
+                "recommendations": [],
+                "scene_plan": [],
+                "stale_context_cannot_upgrade_current_representation": True,
+            },
+            "fallback_interpretation_engine": True,
+            "fallback_reason": "canonical_engine_module_not_deployed",
+        }
+
+    def measure(self, text: Any) -> dict[str, Any]:
+        return {"text": _clean_text(text)}
+
+    def dialogue(self, text: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "dialogue": {
+                "label": "independent",
+                "continuation_score": 0.0,
+                "reference_score": 0.0,
+                "confidence": 1.0,
+                "topic_score": 0.0,
+            }
+        }
+
+
+_FALLBACK_ENGINE = _FallbackInterpretationEngine()
+
+
+# ---------------------------------------------------------------------------
+# Public API expected by executor.py
 # ---------------------------------------------------------------------------
 
 def interpret_request(
@@ -379,25 +691,60 @@ def interpret_request(
     state=None,
 ):
     """
-    Canonical compatibility entry point.
+    Public compatibility entrypoint.
 
-    All semantic work remains owned by the existing Quantum interpretation
-    engine. This wrapper only enforces the current-turn boundary immediately
-    after the engine returns.
+    Normal path:
+        blocks.interpretation_layer
+          -> lazily discovered canonical Quantum engine
+          -> repair/safety fence
+
+    Emergency path:
+        missing canonical module
+          -> conservative text-only result
     """
-    result = _base.QUANTUM_INTERPRETATION_ENGINE.interpret(
+    module = _load_canonical_engine_module()
+
+    if module is not None:
+        engine = getattr(module, "QUANTUM_INTERPRETATION_ENGINE", None)
+        if engine is not None and callable(getattr(engine, "interpret", None)):
+            result = engine.interpret(
+                text,
+                cognition=cognition,
+                semantic=semantic,
+                history=history,
+                state=state,
+            )
+            return _repair_interpretation_result(result, text)
+
+    result = _FALLBACK_ENGINE.interpret(
         text,
         cognition=cognition,
         semantic=semantic,
         history=history,
         state=state,
     )
-    return _repair_result(result, text)
+    return _repair_interpretation_result(result, text)
 
 
-# Public aliases expected by older callers.
-_base_interpret_request = interpret_request
+def _base_interpret_request(
+    text,
+    cognition=None,
+    semantic=None,
+    history=None,
+    state=None,
+):
+    return interpret_request(
+        text,
+        cognition=cognition,
+        semantic=semantic,
+        history=history,
+        state=state,
+    )
 
+
+# ---------------------------------------------------------------------------
+# Compatibility builders retained as thin views
+# ---------------------------------------------------------------------------
 
 def build_semantic_dialog_profile(
     text,
@@ -407,18 +754,20 @@ def build_semantic_dialog_profile(
     dialogue_history=None,
     vision_context=None,
 ):
+    cognition = _as_dict(cognition)
+    semantic = _as_dict(semantic)
+
     return {
-        "input_text": text,
+        "input_text": _clean_text(text),
         "assistant_response": assistant_response,
         "dialogue_history": dialogue_history or [],
         "vision_context": vision_context or {},
-        "active_goal": (cognition or {}).get("active_goal")
-            or (semantic or {}).get("active_goal"),
-        "active_topic": (cognition or {}).get("active_topic_slot")
-            or (semantic or {}).get("current_topic"),
-        "semantic_state": semantic or {},
+        "active_goal": cognition.get("active_goal") or semantic.get("active_goal"),
+        "active_topic": cognition.get("active_topic_slot")
+        or semantic.get("current_topic"),
+        "semantic_state": semantic,
         "requires_scene_builder": False,
-        "profile_version": "quantum_matrix_compat_v1",
+        "profile_version": "current_turn_boundary_v2",
     }
 
 
@@ -428,19 +777,22 @@ def build_scene_construction_profile(semantic_profile):
         "scene_type": "dialogue",
         "dialogue_mode": "semantic_unified",
         "context_source": "quantum_matrix",
-        "decision_owner": globals().get("DECISION_OWNER", "QUANTUM_INTERPRETATION"),
-        "profile_version": "quantum_matrix_compat_v1",
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "profile_version": "current_turn_boundary_v2",
     }
 
 
-def build_scene_artifact_contract(semantic_profile, scene_profile):
+def build_scene_artifact_contract(
+    semantic_profile,
+    scene_profile,
+):
     return {
         "contract": "scene_artifact",
-        "transport": globals().get("TRANSPORT_NAME", "INTERPRETATION_TRANSPORT"),
+        "transport": "INTERPRETATION_TRANSPORT",
         "semantic_profile": semantic_profile or {},
         "scene_profile": scene_profile or {},
         "representation": "processor_decides",
-        "profile_version": "quantum_matrix_compat_v1",
+        "profile_version": "current_turn_boundary_v2",
     }
 
 
@@ -471,22 +823,62 @@ def build_unified_scene_context(
         "memory_state": memory_state or {},
         "continuity_state": {
             "single_route": True,
-            "transport": globals().get("TRANSPORT_NAME", "INTERPRETATION_TRANSPORT"),
+            "transport": "INTERPRETATION_TRANSPORT",
             "scene_contract": "canonical",
         },
-        "profile_version": "quantum_matrix_compat_v1",
+        "profile_version": "current_turn_boundary_v2",
     }
 
 
-# Explicit compatibility marker for deploy diagnostics.
-INTERPRETATION_COMPATIBILITY_VERSION = "2026-09-21-current-turn-boundary-v1"
+# ---------------------------------------------------------------------------
+# Lazy module attribute delegation
+# ---------------------------------------------------------------------------
+
+def __getattr__(name: str) -> Any:
+    """
+    Preserve compatibility with legacy code importing helper symbols from this
+    module. Nothing is resolved until that symbol is actually requested.
+    """
+    module = _load_canonical_engine_module()
+
+    if module is not None and hasattr(module, name):
+        return getattr(module, name)
+
+    fallback_public = {
+        "normalize_text": lambda value: _clean_text(value),
+        "normalize_lower": lambda value: _clean_text(value).lower(),
+        "DECISION_OWNER": "QUANTUM_PROCESSOR",
+        "TRANSPORT_NAME": "INTERPRETATION_TRANSPORT",
+        "INTERPRETATION_COMPATIBILITY_VERSION":
+            "2026-09-21-lazy-engine-current-turn-fence-v2",
+    }
+
+    if name in fallback_public:
+        return fallback_public[name]
+
+    if hasattr(_FALLBACK_ENGINE, name):
+        return getattr(_FALLBACK_ENGINE, name)
+
+    raise AttributeError(
+        f"module {_THIS_MODULE!r} has no attribute {name!r}"
+    )
+
+
+INTERPRETATION_COMPATIBILITY_VERSION = (
+    "2026-09-21-lazy-engine-current-turn-fence-v2"
+)
 INTERPRETATION_REQUEST_OPERAND_POLICY = "CURRENT_USER_TURN_ONLY"
 INTERPRETATION_HISTORICAL_MEMORY_POLICY = "EVIDENCE_ONLY"
 
-
 __all__ = [
-    name
-    for name in globals()
-    if not name.startswith("_")
-    and name not in {"importlib", "re", "deepcopy", "Any"}
+    "interpret_request",
+    "_base_interpret_request",
+    "build_semantic_dialog_profile",
+    "build_scene_construction_profile",
+    "build_scene_artifact_contract",
+    "build_unified_scene_context",
+    "QUANTUM_INTERPRETATION_ENGINE",
+    "INTERPRETATION_COMPATIBILITY_VERSION",
+    "INTERPRETATION_REQUEST_OPERAND_POLICY",
+    "INTERPRETATION_HISTORICAL_MEMORY_POLICY",
 ]
