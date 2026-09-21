@@ -17,7 +17,7 @@ from blocks.C_ARTIFACT_CONTRACT import (
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.interpretation_layer import interpret_request
 from blocks.provider_router import generate_text
-from blocks.state_manager import get_state, update_scene_context, persist_state
+from blocks.state_manager import get_state, update_scene_context, persist_state, build_dialogue_memory_bridge
 
 PROCESSOR_VERSION = "april_sequential_processor_v1_fast_memory_scene"
 PROCESSOR_MODE = "SEQUENTIAL_INTERPRETATION_MEMORY_PROVIDER_SCENE"
@@ -205,6 +205,21 @@ class SequentialInterpretation:
             "selected_memory_operand": vector.get("selected_memory_operand") or contract.get("selected_memory_operand") or {},
             "trajectory": trajectory,
             "canonical_topic": canonical_topic,
+            "sequence_id": _text(
+                vector.get("sequence_id")
+                or contract.get("sequence_id")
+                or (
+                    (vector.get("trajectory") or {}).get("sequence_id")
+                    if isinstance(vector.get("trajectory"), dict)
+                    else ""
+                )
+            ),
+            "target_sequence_id": _text(
+                vector.get("target_sequence_id")
+                or contract.get("target_sequence_id")
+                or vector.get("sequence_id")
+                or contract.get("sequence_id")
+            ),
             "semantic_result": self.semantic_result,
         }
 
@@ -398,6 +413,12 @@ class ProcessorScene:
             base_topic = _text(pending_task.get("topic") or pending_task.get("representation"))
             resolved_request = f"Продолжение задания: {base_topic}. Ответ пользователя: {self.request}"
 
+        dialogue_memory = build_dialogue_memory_bridge(
+            self.user_id,
+            query=self.request,
+            limit=8,
+        )
+
         context = {
             "relation": relation,
             "continuation": bool(dialogue["continuation"]),
@@ -409,10 +430,24 @@ class ProcessorScene:
             "last_user_turn": _compact(self.state.get("last_user_turn", "")),
             "last_april_turn": _compact(self.state.get("last_april_turn", "")),
             "canonical_topic": _compact(dialogue.get("canonical_topic")),
+            "sequence_id": _text(dialogue.get("sequence_id")),
+            "target_sequence_id": _text(
+                dialogue.get("sequence_id") or dialogue.get("target_sequence_id")
+            ),
             "resolved_reference": _compact(dialogue.get("resolved_reference")),
             "selected_memory_index": dialogue.get("selected_memory_index", -1),
             "selected_memory_operand": _compact(dialogue.get("selected_memory_operand") or {}),
             "dialogue_trajectory": _compact(dialogue.get("trajectory") or {}),
+            "active_dialogue_sequence": _compact(dialogue_memory.get("active_sequence") or {}),
+            "seven_day_dialogue_memory": _compact(
+                dialogue_memory if relation in {"CONTINUE", "RECALL"} else {
+                    "active_sequence": dialogue_memory.get("active_sequence") or {},
+                    "window_days": 7,
+                    "evidence_only": True,
+                },
+                max_depth=5,
+                max_items=8,
+            ),
         }
 
         visual_mode = _text(intent["attributes"].get("visual_production_mode"))
@@ -435,10 +470,27 @@ class ProcessorScene:
             "pending_task": _compact(pending_task),
             "resolved_request": resolved_request,
             "canonical_topic": _compact(dialogue.get("canonical_topic")),
+            "sequence_id": _text(dialogue.get("sequence_id")),
+            "target_sequence_id": _text(dialogue.get("sequence_id") or dialogue.get("target_sequence_id")),
             "resolved_reference": _compact(dialogue.get("resolved_reference")),
             "selected_memory_index": dialogue.get("selected_memory_index", -1),
             "selected_memory_operand": _compact(dialogue.get("selected_memory_operand") or {}),
             "trajectory": _compact(dialogue.get("trajectory") or {}),
+            "active_dialogue_sequence": _compact(
+                dialogue_memory.get("active_sequence") or {},
+                max_depth=5,
+                max_items=8,
+            ),
+            "seven_day_memory_turns": _compact(
+                dialogue_memory.get("active_sequence_turns") or [],
+                max_depth=5,
+                max_items=8,
+            ),
+            "relevant_7d_turns": _compact(
+                dialogue_memory.get("relevant_7d_turns") or [],
+                max_depth=5,
+                max_items=8,
+            ),
             "semantic_authority": True,
         }
 
@@ -449,6 +501,13 @@ class ProcessorScene:
             "active_task": _compact(active_task),
             "pending_task": _compact(pending_task),
             "last_artifact_type": _state_artifact_type(self.state),
+            "dialogue_sequence": _compact(dialogue_memory.get("active_sequence") or {}),
+            "dialogue_memory": _compact(dialogue_memory),
+            "window_days": 7,
+            "authenticated_user_scope": {
+                "user_id": self.user_id,
+                "conversation_id": dialogue_memory.get("conversation_id"),
+            },
         }
 
         request = MachineRequest(
@@ -513,6 +572,8 @@ class ProcessorScene:
             "selected_memory_index": dialogue.get("selected_memory_index", -1),
             "selected_memory_operand": _compact(dialogue.get("selected_memory_operand") or {}),
             "trajectory": _compact(dialogue.get("trajectory") or {}),
+            "sequence_id": _text(dialogue.get("sequence_id")),
+            "sequence_continuation_authorized": bool(dialogue.get("sequence_continuation_authorized")),
             "provider_calls": 1,
             "single_route": True,
             "interpretation_owned_by": "QUANTUM_PROCESSOR",
@@ -710,6 +771,17 @@ def _set_live_state(state: dict, request: MachineRequest, response: MachineRespo
             "block_id": _text(blocks[-1].get("block_id")),
             "payload": _compact(blocks[-1].get("payload") or {}),
         }
+
+    state["dialogue_vector"] = {
+        **dict(state.get("dialogue_vector") or {}),
+        **dict(dialogue),
+        "three_way_relation": relation,
+        "sequence_id": dialogue.get("sequence_id"),
+        "target_sequence_id": dialogue.get("sequence_id"),
+        "sequence_continuation_authorized": bool(dialogue.get("continuation")),
+        "current_turn_authority": True,
+        "historical_memory_is_evidence_only": True,
+    }
 
     state["dialogue_resolution"] = {
         "authoritative": True,
