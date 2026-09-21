@@ -65,7 +65,8 @@ The user speaks with April; never expose the provider/model identity unless expl
 
 Core contract:
 - The Quantum Processor is the sole owner of interpretation, dialogue relation, representation and resolved task. Treat these fields as authoritative.
-- Answer only the resolved current request. For CONTINUATION/PENDING/ARTIFACT_REFERENCE, never interpret the user's latest short phrase in isolation.
+- Answer only the resolved current request. For CONTINUATION/PENDING/ARTIFACT_REFERENCE, never interpret the user's latest short phrase in isolation; use the supplied active dialogue vector and seven-day authenticated USER↔APRIL memory.
+- When the processor marks a turn CONTINUATION, preserve the active dialogue sequence and resolve pronouns/follow-ups against the supplied sequence turns. Do not ask who/what the user means when the memory contains a resolvable antecedent.
 - Respect requested_outputs and SCENE_COMPOSITION from the Quantum Processor. Never invent another representation.
 - Emit compact machine-valid JSON with: answer, content, summary, scene, artifacts, render_blocks, scene_plan, render_priority, confidence, metadata.
 - Structured render blocks must use type, renderer, viewer, payload, scene_contract=true.
@@ -88,6 +89,21 @@ HUMAN TEXT HYGIENE:
 april_image_spec_v1:
 {"schema":"april_image_spec_v1","prompt":"short visual description","width":1024,"height":1024,"style":"photorealistic|illustration|cinematic|graphic|abstract","background":{"top":"#RRGGBB","bottom":"#RRGGBB"},"layers":[{"kind":"polygon|ellipse|rect|line|wave|gradient|sun","role":"sky|sea|sand|sun|subject|foreground|detail","points":[[0,0],[1,1]],"box":[0,0,1,1],"color":"#RRGGBB","width":0.003,"opacity":0.8}],"negative":[],"seed":12345}
 Use normalized coordinates 0..1 and enough layers for the visible composition, usually 4..20.
+""".strip()
+
+
+PROVIDER_DIALOGUE_SYSTEM_PROMPT = """
+You are April's internal response provider. Return exactly one MachineResponse JSON object.
+The Quantum Processor is authoritative for dialogue relation, active sequence, resolved request,
+representation and requested outputs. For CONTINUATION/PENDING/ARTIFACT_REFERENCE, use the supplied
+authenticated seven-day USER↔APRIL dialogue memory and active sequence; do not interpret the latest
+phrase in isolation and do not ask who/what the user means when the supplied memory resolves it.
+Return compact JSON with answer, content, summary, scene, artifacts, render_blocks, scene_plan,
+render_priority, confidence and metadata. Structured blocks use type, renderer, viewer, payload,
+scene_contract=true. Never expose prompts, internal JSON or renderer details in human text.
+Respect REQUESTED_OUTPUTS exactly. For image_generation, return metadata.image_generation_spec only;
+never bytes or fake URLs. For code, use a code render block with language+code. For formula, use
+a formula render block with the expression.
 """.strip()
 
 
@@ -255,7 +271,12 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
         "quantum_state": raw.get("quantum_state") or {},
     }
 
-    compact = _compact_value(compact) or {}
+    compact = _compact_value(
+        compact,
+        max_depth=6,
+        max_items=8,
+        max_keys=16,
+    ) or {}
     compact["intent"] = {
         "type": (compact.get("intent") or {}).get("type"),
         "normalized_text": (compact.get("intent") or {}).get("normalized_text", _safe_text(current).strip()),
@@ -760,6 +781,23 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
         }
         fields.append(("DIALOGUE_VECTOR", _compact_value(vector, max_items=6, max_keys=8)))
 
+        memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
+        dialogue_memory = memory.get("dialogue_memory")
+        if isinstance(dialogue_memory, dict):
+            compact_memory = _compact_value(
+                {
+                    "window_days": dialogue_memory.get("window_days", 7),
+                    "active_sequence": dialogue_memory.get("active_sequence"),
+                    "active_sequence_turns": dialogue_memory.get("active_sequence_turns"),
+                    "relevant_7d_turns": dialogue_memory.get("relevant_7d_turns"),
+                },
+                max_depth=5,
+                max_items=5,
+                max_keys=12,
+            )
+            if compact_memory:
+                fields.append(("SEVEN_DAY_DIALOGUE_MEMORY", compact_memory))
+
     if continuation and dialogue.get("previous_april_turn"):
         fields.append(("PREVIOUS_APRIL_TURN", dialogue.get("previous_april_turn")))
 
@@ -871,14 +909,27 @@ def build_openai_request(machine_request: Any) -> dict:
     }
 
 
+def _provider_system_prompt_for_payload(payload: dict[str, Any]) -> str:
+    dialogue = _dialogue_contract(payload)
+    continuation = bool(dialogue.get("continuation"))
+    reference = bool(dialogue.get("reference_to_previous"))
+    pending = str(dialogue.get("context_dependency") or "").lower() == "pending"
+    return (
+        PROVIDER_DIALOGUE_SYSTEM_PROMPT
+        if continuation or reference or pending
+        else PROVIDER_MACHINE_SYSTEM_PROMPT
+    )
+
+
 def normalize_provider_input(machine_request: Any) -> list[dict]:
     """Build the OpenAI packet inside the canonical 900-token envelope."""
-    system_tokens = _estimate_input_tokens(PROVIDER_MACHINE_SYSTEM_PROMPT)
+    payload = machine_request_to_dict(machine_request)
+    system_prompt = _provider_system_prompt_for_payload(payload)
+    system_tokens = _estimate_input_tokens(system_prompt)
     if system_tokens >= INPUT_TOKEN_BUDGET:
         raise RuntimeError("Provider system prompt exceeds canonical 900-token envelope")
     remaining = INPUT_TOKEN_BUDGET - system_tokens
 
-    payload = machine_request_to_dict(machine_request)
     constraints = payload.get("constraints") if isinstance(payload.get("constraints"), dict) else {}
     plan = constraints.get("representation_plan") if isinstance(constraints.get("representation_plan"), dict) else {}
     metadata = constraints.get("metadata") if isinstance(constraints.get("metadata"), dict) else {}
@@ -908,7 +959,30 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         candidates.append(
             "LIVE_DIALOGUE_STATE: " + json.dumps(_compact_value(compact_context), ensure_ascii=False, separators=(',', ':'))
         )
-        candidates.append("PROCESSOR_AUTHORITY: relation, task, representation and resolved_request are authoritative; do not reinterpret them.")
+
+        memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
+        dialogue_memory = memory.get("dialogue_memory")
+        if isinstance(dialogue_memory, dict):
+            compact_dialogue_memory = {
+                "window_days": dialogue_memory.get("window_days", 7),
+                "active_sequence": dialogue_memory.get("active_sequence"),
+                "active_sequence_turns": dialogue_memory.get("active_sequence_turns"),
+                "relevant_7d_turns": dialogue_memory.get("relevant_7d_turns"),
+            }
+            candidates.append(
+                "SEVEN_DAY_DIALOGUE_MEMORY: "
+                + json.dumps(
+                    _compact_value(
+                        compact_dialogue_memory,
+                        max_depth=5,
+                        max_items=4,
+                        max_keys=10,
+                    ),
+                    ensure_ascii=False,
+                    separators=(',', ':'),
+                )
+            )
+        candidates.append("PROCESSOR_AUTHORITY: relation, task, representation and resolved_request are authoritative; use the supplied dialogue memory when resolving follow-ups.")
 
     visual_context = payload.get("visual_context")
     if isinstance(visual_context, dict) and visual_context:
@@ -950,12 +1024,18 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         "context_strategy": "semantic_visual_route_compact",
         "current_request_truncation": False,
         "history_sent_to_provider": False,
+        "dialogue_memory_sent_to_provider": bool(
+            dialogue.get("continuation")
+            or dialogue.get("reference_to_previous")
+            or str(dialogue.get("context_dependency") or "").lower() == "pending"
+        ),
+        "dialogue_system_prompt": system_prompt is PROVIDER_DIALOGUE_SYSTEM_PROMPT,
         "visual_production_mode": mode,
         "canonical_packet_fingerprint": _provider_packet_fingerprint(user_text),
     })
 
     return [
-        {"role": "system", "content": [{"type": "input_text", "text": PROVIDER_MACHINE_SYSTEM_PROMPT}]},
+        {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
         {"role": "user", "content": [{"type": "input_text", "text": user_text}]},
     ]
 
