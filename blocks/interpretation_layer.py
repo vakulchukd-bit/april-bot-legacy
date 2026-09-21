@@ -620,11 +620,46 @@ def _repair_interpretation_result(
                 "active_topic": result.get("active_topic") or result.get("canonical_topic"),
                 "topic_similarity": result.get("topic_similarity", 0.0),
                 "sequence_pairs": result.get("sequence_pairs") or [],
+                "resolved_entity": result.get("resolved_entity") or "",
+                "resolved_entity_source": result.get("resolved_entity_source") or "",
+                "artifact_reference": bool(
+                    result.get("artifact_reference")
+                    or _as_dict(result.get("thread_choice")).get("artifact_signal")
+                ),
+                "artifact_noun_signal": bool(
+                    result.get("artifact_noun_signal")
+                    or _as_dict(result.get("thread_choice")).get("artifact_noun_signal")
+                ),
+                "target_sequence": (
+                    result.get("target_sequence")
+                    if isinstance(result.get("target_sequence"), dict)
+                    else result.get("active_sequence")
+                    if isinstance(result.get("active_sequence"), dict)
+                    else {}
+                ),
+                "target_artifact": result.get("target_artifact") or {},
+                "resolved_reference_type": result.get("resolved_reference_type") or "",
             },
             state=state,
             operation=_clean_text(result.get("operation") or result.get("best_operation")),
         )
         result["continuation_content_analysis"] = continuation_analysis
+        result["artifact_reference"] = bool(
+            continuation_analysis.get("artifact_reference")
+            or continuation_analysis.get("artifact_noun_signal")
+            or result.get("artifact_reference")
+        )
+        result["artifact_noun_signal"] = bool(
+            continuation_analysis.get("artifact_noun_signal")
+            or result.get("artifact_noun_signal")
+        )
+        result["resolved_reference_type"] = (
+            "artifact"
+            if result.get("artifact_reference")
+            else "entity"
+            if result.get("resolved_entity")
+            else "none"
+        )
         result["dialogue_strategy"] = {
             "mode": continuation_analysis.get("mode", "NONE"),
             "intent": continuation_analysis.get("intent", ""),
@@ -639,6 +674,32 @@ def _repair_interpretation_result(
         }
         result["resolved_entity"] = continuation_analysis.get("active_entity", "")
         result["resolved_entity_source"] = continuation_analysis.get("active_entity_source", "")
+        result["resolved_reference_type"] = (
+            "artifact"
+            if continuation_analysis.get("artifact_reference")
+            else "entity"
+            if continuation_analysis.get("active_entity")
+            else "none"
+        )
+        result["memory_resolution"] = {
+            "engine": "QUANTUM-MEMORY-7D-V2",
+            "window": "day_0..day_6",
+            "source": "authenticated_user_memory",
+            "authority": (
+                "active_dialogue_sequence"
+                if relation == "CONTINUE" and (
+                    result.get("target_sequence_id") == result.get("active_sequence_id")
+                )
+                else "selected_dialogue_thread"
+            ),
+            "thread_transition": result.get("thread_transition", "ACTIVE"),
+            "historical_memory_role": "evidence_only",
+            "sequence_id": (
+                result.get("target_sequence_id")
+                or result.get("sequence_id")
+                or ""
+            ),
+        }
         # A pronoun/reference may point to a child entity of the broader topic
         # (e.g. topic=Горбачёв, active entity=Раиса Горбачёва). Keep the broader
         # topic stable, but expose the resolved discourse entity to downstream
@@ -653,6 +714,8 @@ def _repair_interpretation_result(
                 "dialogue_strategy": result["dialogue_strategy"],
                 "resolved_entity": result.get("resolved_entity", ""),
                 "resolved_entity_source": result.get("resolved_entity_source", ""),
+                "resolved_reference_type": result.get("resolved_reference_type", "none"),
+                "memory_resolution": result.get("memory_resolution", {}),
                 "continuation_authority": result.get("continuation_authority", "active_dialogue_sequence"),
             })
 
@@ -663,13 +726,15 @@ def _repair_interpretation_result(
                 "dialogue_strategy": result["dialogue_strategy"],
                 "resolved_entity": result.get("resolved_entity", ""),
                 "resolved_entity_source": result.get("resolved_entity_source", ""),
+                "resolved_reference_type": result.get("resolved_reference_type", "none"),
+                "memory_resolution": result.get("memory_resolution", {}),
                 "continuation_authority": result.get("continuation_authority", "active_dialogue_sequence"),
                 "previous_user_turn": continuation_analysis.get("previous_user_turn", contract.get("previous_user_turn", "")),
                 "previous_april_turn": continuation_analysis.get("previous_answer", contract.get("previous_april_turn", "")),
             })
 
     result["interpretation_compatibility"] = {
-        "version": "2026-09-22-dialogue-content-semantics-v3",
+        "version": "2026-09-22-dialogue-content-semantics-v4",
         "canonical_engine_discovery": bool(
             _load_canonical_engine_module() is not None
         ),
@@ -1187,18 +1252,38 @@ def _person_candidates(text: Any, limit: int = 10) -> list[str]:
 
 
 def _person_gender_hint(candidate: str) -> str:
-    """Cheap morphological hint used only to resolve pronouns, never as a fact classifier."""
+    """Morphological hint for discourse reference resolution."""
     low = _clean_text(candidate).lower()
     words = low.split()
     first = words[0] if words else ""
     last = words[-1] if words else ""
-    if re.search(r"(вна|чна|вну|чну)$", last) or re.search(r"(?:[ая]|у)$", first):
-        return "feminine"
-    if re.search(r"(?:евич|ович|ич)$", last) or re.search(r"[ъйьшжчц]$", last):
+
+    # Patronymics are stronger than surname morphology for Russian names.
+    if any(re.search(r"(евич|ович|евич|ич)$", word) for word in words[1:]):
         return "masculine"
-    # Common inflected feminine surnames/names in Russian discourse.
-    if re.search(r"(?:ову|еву|ину|ину|ой|ей)$", last) and re.search(r"(?:у|ой|ей)$", first):
+    if any(re.search(r"(вна|чна)$", word) for word in words[1:]):
         return "feminine"
+
+    # Common first-name endings/sets used only as a local discourse hint.
+    if first in {
+        "михаил", "сергей", "иван", "александр", "дмитрий", "николай",
+        "андрей", "владимир", "максим", "илон", "павел", "алексей",
+        "юрий", "виктор", "олег", "евгений",
+    }:
+        return "masculine"
+    if first in {
+        "раиса", "мария", "анна", "елена", "ольга", "ирина", "наталья",
+        "светлана", "евгения", "екатерина",
+    }:
+        return "feminine"
+
+    if re.search(r"(вна|чна|ая)$", last):
+        return "feminine"
+    if re.search(r"(евич|ович|ич)$", last):
+        return "masculine"
+    if re.search(r"(ов|ев|ин|ский|цкий|ый|ий)$", last):
+        return "masculine"
+
     return "unknown"
 
 
@@ -1215,51 +1300,938 @@ def _pronoun_profile(text: Any) -> str:
     return "none"
 
 
+
+# ---------------------------------------------------------------------------
+# User-scoped seven-day memory integration / dialogue-thread routing
+# ---------------------------------------------------------------------------
+
+_REFERENCE_ARTIFACT_VERBS = (
+    "продолжи", "продолжить", "продли", "продлить", "перепиши",
+    "переделай", "переделать", "измени", "изменить", "добавь",
+    "добавить", "убери", "убрать", "исправь", "исправить",
+)
+
+_ARTIFACT_NOUNS = (
+    "стих", "стихотворение", "четверостишие", "текст", "ответ",
+    "код", "скрипт", "таблица", "график", "диаграмма", "схема",
+    "рисунок", "картинка", "изображение", "файл", "формула",
+)
+
+_EXPLICIT_SUBJECT_PATTERNS = (
+    r"\b(?:про|об|о|насч[её]т|касательно)\s+(.+)$",
+    r"\bчто\s+(?:ты\s+)?знаешь\s+(?:об|о|про)\s+(.+)$",
+    r"\bрасскажи\s+(?:об|о|про)\s+(.+)$",
+    r"\bкто\s+(?:такой|такая|это)\s+(.+)$",
+)
+
+def _memory_timestamp_live(record: Any, now: float | None = None) -> bool:
+    if not isinstance(record, dict):
+        return False
+    now = float(now if now is not None else time.time())
+    value = (
+        record.get("created_at")
+        or record.get("timestamp")
+        or record.get("updated_at")
+        or 0.0
+    )
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return False
+    if ts <= 0:
+        return True
+    return (now - ts) < (7 * 24 * 60 * 60)
+
+
+def _memory_engine_runtime(state: dict[str, Any]) -> dict[str, Any]:
+    """
+    Connect Interpretation Layer to the already-existing QUANTUM-MEMORY-7D-V2
+    runtime. The import is lazy because State Manager itself imports the shared
+    interpretation encoder.
+    """
+    if not isinstance(state, dict):
+        return {}
+
+    try:
+        from blocks.state_manager import QUANTUM_MEMORY_ENGINE
+        runtime = QUANTUM_MEMORY_ENGINE.ensure_runtime(state)
+        return runtime if isinstance(runtime, dict) else state
+    except Exception:
+        # Interpretation remains usable in isolated tests/deployments.
+        return state
+
+
+def _build_user_memory_field(state: dict[str, Any]) -> dict[str, Any]:
+    """
+    Build one authenticated-user memory field for the interpretation pass.
+
+    Order of evidence:
+        current turn > selected active dialogue thread > day_0..day_6 pairs
+        > A-E topic evidence > live summary evidence.
+
+    This function only supplies memory evidence. It never decides a route.
+    """
+    state = _memory_engine_runtime(state)
+
+    scope = _as_dict(state.get("memory_scope"))
+    user_id = _clean_text(scope.get("user_id") or state.get("user_id"))
+    conversation_id = _clean_text(
+        scope.get("conversation_id") or state.get("conversation_id")
+    )
+
+    timeline = state.get("memory_timeline")
+    timeline = timeline if isinstance(timeline, dict) else {}
+
+    now = time.time()
+    pairs: list[dict[str, Any]] = []
+    topic_evidence: list[dict[str, Any]] = []
+
+    for day_index in range(7):
+        day = timeline.get(f"day_{day_index}")
+        if not isinstance(day, dict):
+            continue
+
+        for slot in ("A", "B", "C", "D", "E"):
+            for item in day.get(slot, []) or []:
+                if not isinstance(item, dict):
+                    continue
+                topic = _clean_text(item.get("topic"))
+                if topic:
+                    topic_evidence.append({
+                        "day_index": day_index,
+                        "slot": slot,
+                        "topic": topic[:300],
+                        "score": item.get("score"),
+                        "created_at": item.get("timestamp") or item.get("created_at"),
+                        "source": "A_E_topic_memory",
+                    })
+
+        for item in day.get("dialog_pairs", []) or []:
+            if not isinstance(item, dict):
+                continue
+            record_user = _clean_text(item.get("user_id"))
+            if user_id and record_user and record_user != user_id:
+                continue
+
+            item_conversation = _clean_text(item.get("conversation_id"))
+            if conversation_id and item_conversation and item_conversation != conversation_id:
+                continue
+
+            if not _memory_timestamp_live(item, now=now):
+                continue
+
+            pairs.append(dict(item))
+
+    pairs.sort(
+        key=lambda item: float(
+            item.get("created_at")
+            or item.get("timestamp")
+            or item.get("updated_at")
+            or 0.0
+        )
+    )
+
+    active_sequence = _as_dict(state.get("active_dialogue_sequence"))
+    active_id = _clean_text(active_sequence.get("sequence_id"))
+
+    active_pairs = [
+        item for item in pairs
+        if active_id and _clean_text(item.get("sequence_id")) == active_id
+    ]
+
+    sequence_map: dict[str, dict[str, Any]] = {}
+    for item in pairs:
+        sid = _clean_text(item.get("sequence_id"))
+        if not sid:
+            continue
+
+        profile = sequence_map.setdefault(
+            sid,
+            {
+                "sequence_id": sid,
+                "topic": _clean_text(
+                    item.get("sequence_topic") or item.get("topic")
+                ),
+                "user_turns": [],
+                "april_turns": [],
+                "turns": [],
+                "last_created_at": 0.0,
+                "source": "seven_day_dialogue_memory",
+            },
+        )
+
+        user_turn = _clean_text(
+            item.get("user_request") or item.get("user_meaning")
+        )
+        april_turn = _clean_text(
+            item.get("april_answer") or item.get("april_meaning")
+        )
+        if user_turn:
+            profile["user_turns"].append(user_turn[:1200])
+        if april_turn:
+            profile["april_turns"].append(april_turn[:2200])
+        profile["turns"].append(item)
+
+        try:
+            profile["last_created_at"] = max(
+                profile["last_created_at"],
+                float(
+                    item.get("created_at")
+                    or item.get("timestamp")
+                    or 0.0
+                ),
+            )
+        except (TypeError, ValueError):
+            pass
+
+    for profile in sequence_map.values():
+        profile["user_turns"] = profile["user_turns"][-8:]
+        profile["april_turns"] = profile["april_turns"][-8:]
+        profile["turns"] = profile["turns"][-8:]
+        profile["last_user_turn"] = (
+            profile["user_turns"][-1] if profile["user_turns"] else ""
+        )
+        profile["last_april_answer"] = (
+            profile["april_turns"][-1] if profile["april_turns"] else ""
+        )
+
+    summary = _clean_text(state.get("memory_summary"))
+    summary_meta = _as_dict(state.get("memory_summary_meta"))
+    if summary and summary_meta and not _memory_timestamp_live(summary_meta, now=now):
+        summary = ""
+
+    active_visual_scene = (
+        state.get("active_visual_scene")
+        if isinstance(state.get("active_visual_scene"), dict)
+        else state.get("current_visual_scene")
+        if isinstance(state.get("current_visual_scene"), dict)
+        else {}
+    )
+
+    return {
+        "version": "interpretation_user_memory_field_v2",
+        "engine": "QUANTUM-MEMORY-7D-V2",
+        "window": "day_0..day_6",
+        "user_id": user_id,
+        "conversation_id": conversation_id,
+        "active_sequence": dict(active_sequence),
+        "active_sequence_id": active_id,
+        "active_sequence_pairs": active_pairs[-8:],
+        "sequence_profiles": sequence_map,
+        "dialog_pairs_7d": pairs[-24:],
+        "topic_evidence_A_E": topic_evidence[-20:],
+        "memory_summary_evidence": summary[:1400],
+        "active_visual_scene": dict(active_visual_scene),
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "evidence_only": True,
+    }
+
+
+def _sequence_profile_text(profile: dict[str, Any]) -> str:
+    if not isinstance(profile, dict):
+        return ""
+    parts = [
+        profile.get("topic"),
+        *(profile.get("user_turns") or [])[-4:],
+        *(profile.get("april_turns") or [])[-3:],
+    ]
+    return " ".join(str(x) for x in parts if x)
+
+
+_REFERENCE_ONLY_SUBJECT_WORDS = {
+    "него", "нему", "ним", "ней", "неё", "нее", "ее", "её", "ему", "ей",
+    "он", "она", "они", "это", "этот", "эта", "эти",
+    "известно", "интересного", "интересное", "интересный",
+    "сказал", "сказала", "получился", "получилось", "получилась",
+    "последнее", "последний", "особенно", "дальше", "ещё", "еще",
+    "раньше", "тогда", "продолжи", "продолжим",
+}
+
+
+def _raw_subject_tokens(value: Any) -> list[str]:
+    return [
+        token.lower()
+        for token in re.findall(r"\b[А-ЯЁа-яёA-Z-a-z0-9_-]{2,}\b", _clean_text(value))
+    ]
+
+
+def _is_concrete_subject_phrase(value: Any) -> bool:
+    phrase = _clean_text(value)
+    if not phrase:
+        return False
+
+    raw_tokens = _raw_subject_tokens(phrase)
+    if not raw_tokens:
+        return False
+
+    # Do not let pronouns, discourse glue, or continuation words become a
+    # "new topic". This check deliberately uses raw tokens, not the stemmed
+    # shared semantic tokens.
+    concrete = [
+        token for token in raw_tokens
+        if token not in _REFERENCE_ONLY_SUBJECT_WORDS
+        and token not in _DIALOGUE_STOPWORDS
+    ]
+    return bool(concrete)
+
+
+def _explicit_subject(text: Any) -> str:
+    value = _clean_text(text)
+    if not value:
+        return ""
+
+    for pattern in _EXPLICIT_SUBJECT_PATTERNS:
+        match = re.search(pattern, value, flags=re.I)
+        if match:
+            candidate = _clean_text(match.group(1))
+            if _is_concrete_subject_phrase(candidate):
+                return candidate[:300]
+            return ""
+
+    # A turn containing a grammatical/anaphoric reference but no explicit
+    # concrete named subject is not evidence of a topic switch. Examples:
+    # "Как звали его жену?", "Что ещё про неё известно?",
+    # "Сможешь его продлить?".
+    if _pronoun_profile(value) != "none":
+        return ""
+
+    # Artifact follow-ups without a named subject are also not new topics.
+    if _artifact_noun_signal(value) or _artifact_reference_signal(value):
+        return ""
+
+    # Only use the lexical topic fallback for genuinely self-contained turns.
+    candidate = _extract_topic(value)
+    return candidate[:300] if _is_concrete_subject_phrase(candidate) else ""
+
+
+def _has_explicit_subject_signal(text: Any) -> bool:
+    value = _clean_text(text)
+    if not value:
+        return False
+
+    if _explicit_subject(value):
+        return True
+
+    # A single capitalized word at the start of a sentence (e.g. "Прикольный")
+    # is not enough to establish a new named subject. Require a multi-token
+    # proper-name shape to avoid turning ordinary adjectives into entities.
+    proper = [
+        token
+        for token in re.findall(r"\b[А-ЯЁA-Z][а-яёa-z-]{2,}\b", value)
+        if token.lower() not in _DIALOGUE_STOPWORDS
+    ]
+    return len(proper) >= 2
+
+
+def _artifact_reference_signal(text: Any) -> bool:
+    low = _clean_text(text).lower()
+    has_pronoun = bool(
+        re.search(
+            r"\b(?:это|этот|эта|эти|его|ее|её|него|нему|ним|ему|ей|ней|неё|он|она|они)\b",
+            low,
+        )
+    )
+    has_artifact_verb = any(word in low for word in _REFERENCE_ARTIFACT_VERBS)
+    has_artifact_noun = any(noun in low for noun in _ARTIFACT_NOUNS)
+    return bool(has_pronoun and (has_artifact_verb or has_artifact_noun))
+
+
+
+def _artifact_noun_signal(text: Any) -> bool:
+    low = _clean_text(text).lower()
+    return any(noun in low for noun in _ARTIFACT_NOUNS)
+
+
+def _sequence_has_artifact_context(
+    profile: dict[str, Any],
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    profile = profile if isinstance(profile, dict) else {}
+    active_sequence_state = (
+        state.get("active_dialogue_sequence")
+        if isinstance(state.get("active_dialogue_sequence"), dict)
+        else {}
+    )
+    profile_sid = _clean_text(profile.get("sequence_id"))
+    active_sid = _clean_text(active_sequence_state.get("sequence_id"))
+
+    # The persisted active visual scene is allowed to enrich ONLY the live
+    # active sequence. Historical sequences must derive their artifact state
+    # from their own stored turns, otherwise a poem/image from the current
+    # thread can falsely become the artifact of every old thread.
+    active_scene = {}
+    if profile_sid and active_sid and profile_sid == active_sid:
+        active_scene = (
+            state.get("active_visual_scene")
+            if isinstance(state.get("active_visual_scene"), dict)
+            else state.get("current_visual_scene")
+            if isinstance(state.get("current_visual_scene"), dict)
+            else {}
+        )
+
+    scene_answer = _clean_text(
+        active_scene.get("april_answer")
+        or active_scene.get("answer")
+        or active_scene.get("summary")
+    )
+    scene_request = _clean_text(
+        active_scene.get("user_request")
+        or active_scene.get("current_request")
+    )
+    scene_types = active_scene.get("render_block_types") or []
+    sequence_text = _sequence_profile_text(profile)
+
+    artifact_kind = ""
+    artifact_subject = ""
+
+    if scene_answer or scene_request:
+        low = f"{scene_request} {scene_answer}".lower()
+        if any(word in low for word in ("стих", "стихотворение", "четверостишие")):
+            artifact_kind = "poem"
+            artifact_subject = _clean_text(
+                active_scene.get("topic") or scene_request or "стих"
+            )
+        elif any(word in low for word in ("код", "python", "скрипт")):
+            artifact_kind = "code"
+            artifact_subject = _clean_text(
+                active_scene.get("topic") or scene_request
+            )
+        elif any(
+            word in low
+            for word in ("таблиц", "график", "диаграм", "схем", "формул")
+        ):
+            artifact_kind = (
+                "structured"
+                if not scene_types
+                else _clean_text(scene_types[0]).lower()
+            )
+            artifact_subject = _clean_text(
+                active_scene.get("topic") or scene_request
+            )
+
+    if not artifact_kind:
+        low_seq = sequence_text.lower()
+        if any(
+            word in low_seq
+            for word in ("стих", "стихотворение", "четверостишие")
+        ):
+            artifact_kind = "poem"
+            artifact_subject = _clean_text(profile.get("topic") or "стих")
+        elif any(word in low_seq for word in ("код", "python", "скрипт")):
+            artifact_kind = "code"
+            artifact_subject = _clean_text(profile.get("topic") or "код")
+
+    # A plain text dialogue scene is not automatically an artifact. Only an
+    # explicitly identified artifact kind (poem/code/structured media) should
+    # participate in pronoun→artifact resolution.
+    return {
+        "present": bool(artifact_kind),
+        "kind": artifact_kind,
+        "subject": artifact_subject or _clean_text(profile.get("topic")),
+        "previous_answer": scene_answer,
+        "previous_request": scene_request,
+        "render_types": list(scene_types) if isinstance(scene_types, list) else [],
+    }
+
+
+def _choose_dialogue_thread(
+    current_text: str,
+    memory_field: dict[str, Any],
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Select active thread, an older user-owned thread, or a new thread before
+    pronoun/entity resolution.
+
+    This is semantic evidence fusion, not a direct keyword trigger.
+    """
+    active = _as_dict(memory_field.get("active_sequence"))
+    active_id = _clean_text(active.get("sequence_id"))
+    profiles = (
+        memory_field.get("sequence_profiles")
+        if isinstance(memory_field.get("sequence_profiles"), dict)
+        else {}
+    )
+    active_profile = profiles.get(active_id, {}) if active_id else {}
+
+    current_topic = _explicit_subject(current_text)
+    subject_signal = _has_explicit_subject_signal(current_text)
+    reference_signal = _is_reference_turn(current_text)
+    artifact_signal = _artifact_reference_signal(current_text)
+    artifact_noun_signal = _artifact_noun_signal(current_text)
+    explicit_recall = _explicit_memory_recall(current_text)
+    explicit_new = _explicit_new_topic(current_text)
+
+    active_topic = _clean_text(
+        active.get("topic")
+        or active_profile.get("topic")
+        or state.get("april_active_topic")
+    )
+    active_last_user = _clean_text(
+        active.get("last_user_request")
+        or active_profile.get("last_user_turn")
+        or state.get("last_user_turn")
+    )
+    active_last_answer = _clean_text(
+        active.get("last_april_answer")
+        or active_profile.get("last_april_answer")
+        or state.get("last_april_turn")
+    )
+
+    active_score = max(
+        _semantic_similarity(current_text, active_topic),
+        _semantic_similarity(current_topic, active_topic)
+        if current_topic and active_topic else 0.0,
+        _semantic_similarity(current_text, active_last_user)
+        if active_last_user else 0.0,
+        _semantic_similarity(current_text, active_last_answer)
+        if active_last_answer else 0.0,
+    )
+
+    active_artifact = _sequence_has_artifact_context(active_profile, state)
+    if artifact_signal and active_artifact.get("present"):
+        active_score = max(active_score, 0.62)
+
+    candidates = []
+    for sid, profile in profiles.items():
+        if sid == active_id:
+            continue
+
+        profile_text = _sequence_profile_text(profile)
+        profile_topic = _clean_text(profile.get("topic"))
+        score = max(
+            _semantic_similarity(current_text, profile_topic),
+            _semantic_similarity(current_text, profile_text),
+            _semantic_similarity(current_topic, profile_topic)
+            if current_topic and profile_topic else 0.0,
+        )
+
+        artifact = _sequence_has_artifact_context(profile, state)
+        low = _clean_text(current_text).lower()
+
+        if artifact.get("present"):
+            if artifact.get("kind") == "poem":
+                if any(word in low for word in ("стих", "стихотворение", "четверостишие")):
+                    score = max(score, 0.82)
+                elif artifact_signal:
+                    # "его продлить" / "это продолжить" can refer to a stored
+                    # poem even when the noun "стих" is omitted in the current turn.
+                    score = max(score, 0.76)
+            elif artifact.get("kind") == "code":
+                if "код" in low or artifact_signal:
+                    score = max(score, 0.78)
+            elif artifact_signal and artifact_noun_signal:
+                score = max(score, 0.72)
+
+        candidates.append((score, sid, profile, artifact))
+
+    candidates.sort(
+        key=lambda item: (
+            float(item[0]),
+            float(item[2].get("last_created_at") or 0.0),
+        ),
+        reverse=True,
+    )
+
+    best_score = float(candidates[0][0]) if candidates else 0.0
+    best_sid = candidates[0][1] if candidates else ""
+    best_profile = candidates[0][2] if candidates else {}
+    best_artifact = candidates[0][3] if candidates else {}
+
+    # Strong concrete subject means "new" unless the same user explicitly
+    # points back to an older stored thread.
+    if explicit_new:
+        relation = "NEW"
+        reason = "explicit_new_topic"
+        confidence = 0.99
+    elif (
+        subject_signal
+        and current_topic
+        and active_id
+        and _semantic_similarity(current_topic, active_topic) < 0.34
+        and active_score < 0.48
+    ):
+        if (
+            best_sid
+            and best_score >= 0.58
+            and best_score > active_score + 0.16
+            and explicit_recall
+        ):
+            relation = "RECALL"
+            reason = "explicit_recall_to_older_user_sequence"
+            confidence = min(0.96, 0.68 + best_score * 0.28)
+        else:
+            relation = "NEW"
+            reason = "strong_new_subject_against_active_sequence"
+            confidence = min(0.96, 0.70 + (1.0 - active_score) * 0.24)
+    elif artifact_signal and active_artifact.get("present"):
+        relation = "CONTINUE"
+        reason = "reference_to_active_artifact"
+        confidence = max(0.82, min(0.97, active_score + 0.15))
+    elif artifact_signal and best_sid and best_artifact.get("present") and (
+        best_score >= 0.70 and best_score > active_score + 0.12
+    ):
+        # Re-activating an older user-owned thread is still a continuation of
+        # the user's dialogue. Keep "CONTINUE" as the conversational relation
+        # and expose the thread switch separately so downstream stages do not
+        # mistake "продли стих" for a memory-query operation.
+        relation = "CONTINUE"
+        reason = "reactivate_older_user_sequence_for_continuation"
+        confidence = max(0.76, min(0.97, best_score))
+    elif explicit_recall and best_sid and best_score >= 0.40:
+        relation = "RECALL"
+        reason = "explicit_memory_recall"
+        confidence = max(0.72, min(0.97, best_score))
+    elif (
+        best_sid
+        and best_score >= 0.58
+        and best_score > active_score + 0.18
+        and (
+            reference_signal
+            or artifact_signal
+            or (
+                artifact_noun_signal
+                and not subject_signal
+            )
+        )
+    ):
+        relation = "CONTINUE"
+        reason = "reactivate_older_matching_thread"
+        confidence = max(0.68, min(0.95, best_score))
+    elif not active_id:
+        relation = "NEW"
+        reason = "no_active_dialogue_sequence"
+        confidence = 0.99
+    elif reference_signal and not subject_signal:
+        # Once the thread has been selected, a pronoun/anaphoric turn without a
+        # concrete new subject is a continuation by discourse structure. The
+        # current turn does not become a new topic merely because token
+        # similarity is low.
+        relation = "CONTINUE"
+        reason = "anaphoric_continuation_on_selected_thread"
+        confidence = max(0.80, min(0.96, 0.78 + active_score * 0.22))
+    else:
+        relation = "CONTINUE"
+        reason = "active_sequence_semantic_continuation"
+        confidence = max(0.62, min(0.96, 0.62 + active_score * 0.30))
+        if reference_signal:
+            confidence = max(confidence, 0.78)
+
+    target_profile = active_profile
+    target_sid = active_id
+    if (
+        best_sid
+        and (
+            relation == "RECALL"
+            or reason.startswith("reactivate_")
+        )
+    ):
+        target_profile = best_profile
+        target_sid = best_sid
+
+    return {
+        "relation": relation,
+        "reason": reason,
+        "confidence": round(confidence, 6),
+        "active_sequence": active,
+        "active_profile": active_profile,
+        "target_sequence": target_profile,
+        "active_sequence_id": active_id,
+        "target_sequence_id": target_sid,
+        "active_topic": active_topic,
+        "current_topic": current_topic,
+        "active_score": round(active_score, 6),
+        "best_historical_score": round(best_score, 6),
+        "best_historical_sequence_id": best_sid,
+        "reference_signal": reference_signal,
+        "artifact_signal": artifact_signal,
+        "artifact_noun_signal": artifact_noun_signal,
+        "explicit_recall": explicit_recall,
+        "explicit_new": explicit_new,
+        "subject_signal": subject_signal,
+        "active_artifact": active_artifact,
+        "target_artifact": _sequence_has_artifact_context(target_profile, state),
+        "memory_field_version": memory_field.get("version"),
+    }
+
+
 def _entity_from_relation_context(
     current_text: str,
     previous_answer: str,
     active_topic: str,
     state: dict[str, Any] | None = None,
+    relation_context: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
-    """Resolve the current discourse entity from the live turn and prior answer."""
+    """
+    Resolve discourse references only after the dialogue thread is selected.
+
+    Reference targets may be people, artifacts, topics or the previous result.
+    """
+    state = state if isinstance(state, dict) else {}
+    relation_context = (
+        relation_context if isinstance(relation_context, dict) else {}
+    )
+
     profile = _pronoun_profile(current_text)
-    previous_candidates = _person_candidates(previous_answer, limit=10)
-    topic_candidates = _person_candidates(active_topic, limit=5)
-    live_entity = _clean_text(state.get("april_active_entity")) if isinstance(state, dict) else ""
+    low = _clean_text(current_text).lower()
+
+    target_profile = relation_context.get("target_sequence")
+    target_profile = (
+        target_profile if isinstance(target_profile, dict) else {}
+    )
+
+    target_answer = _clean_text(
+        target_profile.get("last_april_answer")
+        or previous_answer
+        or state.get("last_april_turn")
+    )
+    target_user = _clean_text(
+        target_profile.get("last_user_turn")
+        or state.get("last_user_turn")
+    )
+
+    artifact = relation_context.get("target_artifact")
+    artifact = artifact if isinstance(artifact, dict) else {}
+
+    active_scene = (
+        state.get("active_visual_scene")
+        if isinstance(state.get("active_visual_scene"), dict)
+        else state.get("current_visual_scene")
+        if isinstance(state.get("current_visual_scene"), dict)
+        else {}
+    )
+
+    scene_answer = _clean_text(
+        artifact.get("previous_answer")
+        or active_scene.get("april_answer")
+        or active_scene.get("answer")
+        or active_scene.get("summary")
+    )
+    scene_request = _clean_text(
+        artifact.get("previous_request")
+        or active_scene.get("user_request")
+        or active_scene.get("current_request")
+    )
+    artifact_kind = _clean_text(artifact.get("kind")).lower()
+
+    current_candidates = _person_candidates(current_text, limit=12)
+
+    artifact_continuation = bool(
+        (
+            _artifact_reference_signal(current_text)
+            or (
+                bool(artifact.get("present"))
+                and (
+                    any(word in low for word in _REFERENCE_ARTIFACT_VERBS)
+                    or _artifact_noun_signal(current_text)
+                )
+            )
+        )
+        and (
+            artifact.get("present")
+            or artifact_kind
+            or any(noun in low for noun in _ARTIFACT_NOUNS)
+        )
+    )
+
+    # "его продлить" / "это переделать" should resolve to the selected
+    # artifact before any stale person candidate is considered.
+    if artifact_continuation and (
+        any(word in low for word in _REFERENCE_ARTIFACT_VERBS)
+        or artifact_kind
+        or any(noun in low for noun in _ARTIFACT_NOUNS)
+    ):
+        subject = _clean_text(
+            artifact.get("subject")
+            or scene_request
+            or target_profile.get("topic")
+            or active_topic
+            or "предыдущий артефакт"
+        )
+        if artifact_kind == "poem" or any(
+            word in f"{scene_request} {target_user}".lower()
+            for word in ("стих", "стихотворение", "четверостишие")
+        ):
+            return subject or "стих", "active_dialogue_artifact"
+        return subject or "предыдущий артефакт", "active_dialogue_artifact"
+
+    # For anaphora we may need the entity established earlier in the selected
+    # thread, not only the immediately previous answer. This matters for turns
+    # such as "Как звали его жену?" where the latest answer mentions the wife
+    # but the masculine owner was established one turn earlier.
+    prior_thread_answers = []
+    prior_thread_users = []
+    for turn in (target_profile.get("turns") or [])[-6:]:
+        if not isinstance(turn, dict):
+            continue
+        answer_turn = _clean_text(
+            turn.get("april_answer")
+            or turn.get("april_meaning")
+            or turn.get("answer_summary")
+        )
+        user_turn = _clean_text(
+            turn.get("user_request")
+            or turn.get("user_meaning")
+        )
+        if answer_turn:
+            prior_thread_answers.append(answer_turn)
+        if user_turn:
+            prior_thread_users.append(user_turn)
+
+    previous_candidates = _person_candidates(target_answer, limit=12)
+    for source in reversed(prior_thread_answers):
+        for candidate in _person_candidates(source, limit=12):
+            if candidate not in previous_candidates:
+                previous_candidates.append(candidate)
+                if len(previous_candidates) >= 16:
+                    break
+        if len(previous_candidates) >= 16:
+            break
+
+    user_candidates = _person_candidates(target_user, limit=8)
+    for source in reversed(prior_thread_users):
+        for candidate in _person_candidates(source, limit=8):
+            if candidate not in user_candidates:
+                user_candidates.append(candidate)
+                if len(user_candidates) >= 12:
+                    break
+        if len(user_candidates) >= 12:
+            break
+
+    topic_candidates = _person_candidates(
+        active_topic,
+        limit=8,
+    )
 
     def _best(candidates: list[str]) -> str:
-        # Prefer the most informative span (full name over a bare first/last name).
-        return max(candidates, key=lambda value: (len(value.split()), len(value))) if candidates else ""
+        return max(
+            candidates,
+            key=lambda value: (len(value.split()), len(value)),
+        ) if candidates else ""
 
     if profile == "masculine":
-        matches = [c for c in previous_candidates if _person_gender_hint(c) == "masculine"]
+        # In "Как звали его жену?" the grammatical "его" points back to the
+        # male owner/person, not to the queried female object. Prefer the
+        # established male entity from the selected thread.
+        if re.search(r"\b(?:жена|жену|супруга|супругу|дочь|мать)\b", low):
+            matches = [
+                c for c in previous_candidates
+                if _person_gender_hint(c) == "masculine"
+            ]
+            if matches:
+                return _best(matches), "selected_thread_person_candidate"
+            matches = [
+                c for c in topic_candidates
+                if _person_gender_hint(c) == "masculine"
+            ]
+            if matches:
+                return _best(matches), "active_topic_person_candidate"
+
+        matches = [
+            c for c in current_candidates
+            if _person_gender_hint(c) == "masculine"
+        ]
         if matches:
-            return _best(matches), "previous_answer_person_candidate"
-        matches = [c for c in topic_candidates if _person_gender_hint(c) == "masculine"]
+            return _best(matches), "current_turn_person_candidate"
+
+        # Inflected Russian names such as "Илоне Маске" are often gender
+        # ambiguous to a tiny local morphology table. When the name is present
+        # in the current turn, it is safer to bind the pronoun to that current
+        # name than to an older memory entity.
+        if current_candidates:
+            return _best(current_candidates), "current_turn_person_candidate"
+
+        matches = [
+            c for c in previous_candidates
+            if _person_gender_hint(c) == "masculine"
+        ]
+        if matches:
+            return _best(matches), "selected_thread_person_candidate"
+
+        matches = [
+            c for c in user_candidates
+            if _person_gender_hint(c) == "masculine"
+        ]
+        if matches:
+            return _best(matches), "selected_thread_user_person_candidate"
+
+        matches = [
+            c for c in topic_candidates
+            if _person_gender_hint(c) == "masculine"
+        ]
         if matches:
             return _best(matches), "active_topic_person_candidate"
+
+        live_entity = _clean_text(state.get("april_active_entity"))
         if live_entity and _person_gender_hint(live_entity) == "masculine":
             return live_entity, "live_active_entity"
-        # Do not fall back to a feminine live entity for a masculine pronoun.
+
         return _clean_text(active_topic), "active_topic"
 
     if profile == "feminine":
-        matches = [c for c in previous_candidates if _person_gender_hint(c) == "feminine"]
+        matches = [
+            c for c in current_candidates
+            if _person_gender_hint(c) == "feminine"
+        ]
         if matches:
-            return _best(matches), "previous_answer_person_candidate"
+            return _best(matches), "current_turn_person_candidate"
+
+        if current_candidates:
+            return _best(current_candidates), "current_turn_person_candidate"
+
+        matches = [
+            c for c in previous_candidates
+            if _person_gender_hint(c) == "feminine"
+        ]
+        if matches:
+            return _best(matches), "selected_thread_person_candidate"
+
+        matches = [
+            c for c in user_candidates
+            if _person_gender_hint(c) == "feminine"
+        ]
+        if matches:
+            return _best(matches), "selected_thread_user_person_candidate"
+
+        live_entity = _clean_text(state.get("april_active_entity"))
         if live_entity and _person_gender_hint(live_entity) == "feminine":
             return live_entity, "live_active_entity"
+
         return _clean_text(active_topic), "active_topic"
 
-    if profile in {"plural", "demonstrative"} and previous_candidates:
-        return _best(previous_candidates), "previous_answer_person_candidate"
+    if profile == "plural":
+        if current_candidates:
+            return _best(current_candidates), "current_turn_person_candidate"
+        if previous_candidates:
+            return _best(previous_candidates), "selected_thread_person_candidate"
+        if user_candidates:
+            return _best(user_candidates), "selected_thread_user_person_candidate"
 
+    if profile == "demonstrative":
+        if artifact.get("present") or scene_answer:
+            return (
+                _clean_text(
+                    artifact.get("subject")
+                    or scene_request
+                    or active_topic
+                    or "предыдущий результат"
+                ),
+                "active_dialogue_artifact",
+            )
+        if previous_candidates:
+            return _best(previous_candidates), "selected_thread_person_candidate"
+
+    if current_candidates:
+        return _best(current_candidates), "current_turn_person_candidate"
+
+    live_entity = _clean_text(state.get("april_active_entity"))
     if live_entity:
         return live_entity, "live_active_entity"
+
     if topic_candidates:
         return _best(topic_candidates), "active_topic_person_candidate"
-    return _clean_text(active_topic), "active_topic"
 
+    return _clean_text(active_topic), "active_topic"
 
 def _infer_dialogue_mode(
     current_text: str,
@@ -1354,88 +2326,161 @@ def _build_continuation_content_analysis(
     state: dict[str, Any] | None = None,
     operation: str = "",
 ) -> dict[str, Any]:
-    """Build a compact, provider-ready delta between prior and current dialogue turns."""
+    """Build a provider-ready delta from the selected dialogue thread."""
     relation_name = _clean_text(relation.get("relation")).upper()
     if relation_name not in {"CONTINUE", "RECALL"}:
         return {
-            "version": "continuation_content_analysis_v2",
+            "version": "continuation_content_analysis_v3",
             "active": False,
             "mode": "NONE",
             "new_information_required": False,
         }
 
-    active = relation.get("active_sequence") if isinstance(relation.get("active_sequence"), dict) else {}
+    target_sequence = (
+        relation.get("target_sequence")
+        if isinstance(relation.get("target_sequence"), dict)
+        else relation.get("active_sequence")
+        if isinstance(relation.get("active_sequence"), dict)
+        else {}
+    )
+
     previous_answer = _clean_text(
-        active.get("last_april_answer")
+        target_sequence.get("last_april_answer")
         or relation.get("previous_april_turn")
         or (state or {}).get("last_april_turn")
     )
     previous_user = _clean_text(
-        active.get("last_user_request")
+        target_sequence.get("last_user_turn")
         or relation.get("previous_user_turn")
         or (state or {}).get("last_user_turn")
     )
     topic = _clean_text(
-        active.get("topic")
-        or relation.get("active_topic")
+        target_sequence.get("topic")
         or relation.get("target_topic")
+        or relation.get("active_topic")
     )
-    entity, entity_source = _entity_from_relation_context(
-        current_text,
-        previous_answer,
-        topic,
-        state=state,
+
+    entity = _clean_text(relation.get("resolved_entity"))
+    entity_source = _clean_text(relation.get("resolved_entity_source"))
+    target_artifact = (
+        relation.get("target_artifact")
+        if isinstance(relation.get("target_artifact"), dict)
+        else {}
     )
+    resolved_reference_type = _clean_text(
+        relation.get("resolved_reference_type")
+        or (
+            "artifact"
+            if target_artifact.get("present") and (
+                relation.get("artifact_reference")
+                or relation.get("reference")
+                or entity_source == "active_dialogue_artifact"
+            )
+            else ""
+        )
+    )
+
     strategy = _infer_dialogue_mode(
         current_text,
         relation_name,
         operation=operation,
-        reference=bool(relation.get("reference")),
+        reference=bool(
+            relation.get("reference")
+            or relation.get("artifact_reference")
+        ),
         previous_answer=previous_answer,
         topic_similarity=float(relation.get("topic_similarity") or 0.0),
     )
 
-    covered = _sentence_units(previous_answer, limit=6)
-    prior_user_context = _sentence_units(previous_user, limit=3)
-    sequence_pairs = relation.get("sequence_pairs") if isinstance(relation.get("sequence_pairs"), list) else []
-    recent_turns: list[dict[str, Any]] = []
-    for pair in sequence_pairs[-4:]:
+    pairs = relation.get("sequence_pairs")
+    pairs = pairs if isinstance(pairs, list) else []
+
+    covered: list[str] = []
+    seen = set()
+    for pair in pairs[-8:]:
         if not isinstance(pair, dict):
             continue
-        user_turn = _clean_text(pair.get("user_request") or pair.get("user_meaning"))
-        answer_turn = _clean_text(pair.get("april_answer") or pair.get("april_meaning"))
-        if answer_turn and _semantic_similarity(answer_turn, previous_answer) >= 0.92:
+
+        answer = _clean_text(
+            pair.get("april_answer")
+            or pair.get("april_meaning")
+            or pair.get("answer_summary")
+        )
+        for sentence in _sentence_units(answer, limit=6):
+            key = sentence.lower().strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            covered.append(sentence)
+            if len(covered) >= 12:
+                break
+        if len(covered) >= 12:
+            break
+
+    if previous_answer and not covered:
+        covered = _sentence_units(previous_answer, limit=8)
+
+    recent_turns: list[dict[str, Any]] = []
+    for pair in pairs[-6:]:
+        if not isinstance(pair, dict):
             continue
         recent_turns.append({
-            "user": user_turn[:180],
-            "answer": answer_turn[:220],
+            "user": _clean_text(
+                pair.get("user_request") or pair.get("user_meaning")
+            )[:220],
+            "answer": _clean_text(
+                pair.get("april_answer") or pair.get("april_meaning")
+            )[:280],
         })
 
-    avoid_repeat = covered[:5]
-    analysis = {
-        "version": "continuation_content_analysis_v2",
+    current_coverage = 0.0
+    if covered:
+        current_coverage = max(
+            _semantic_similarity(current_text, item)
+            for item in covered
+        )
+
+    return {
+        "version": "continuation_content_analysis_v3",
         "active": True,
         "mode": strategy["mode"],
-        "intent": strategy["intent"],
-        "new_information_required": strategy["new_information_required"],
-        "conversational_posture": strategy["conversational_posture"],
-        "next_direction": strategy["next_direction"],
+        "intent": strategy.get("intent"),
+        "new_information_required": bool(
+            strategy["new_information_required"]
+        ),
+        "conversational_posture": strategy.get(
+            "conversational_posture",
+            "CONVERSE",
+        ),
+        "next_direction": strategy.get("next_direction"),
         "novelty_target": strategy["novelty_target"],
         "recap_ratio_max": strategy["recap_ratio_max"],
-        "expertise_behavior": strategy.get("expertise_behavior", "answer_with_domain_appropriate_reasoning"),
+        "expertise_behavior": strategy.get("expertise_behavior"),
         "active_topic": topic,
         "active_entity": entity,
         "active_entity_source": entity_source,
-        "previous_user_turn": previous_user[:300],
-        "previous_answer": previous_answer[:1400],
+        "resolved_reference_type": resolved_reference_type,
+        "target_artifact": dict(target_artifact),
+        "previous_user_turn": previous_user[:500],
+        "previous_answer": previous_answer[:1800],
         "covered_content": covered,
-        "avoid_repeat_content": avoid_repeat,
+        "covered_content_count": len(covered),
+        "avoid_repeat_content": covered[:8],
         "recent_sequence_turns": recent_turns,
+        "request_coverage_of_previous_content": round(
+            float(current_coverage),
+            6,
+        ),
+        "reference_signal": bool(
+            relation.get("reference")
+            or relation.get("artifact_reference")
+        ),
+        "artifact_reference": bool(relation.get("artifact_reference")),
+        "artifact_noun_signal": bool(relation.get("artifact_noun_signal")),
         "user_turn_is_reaction": strategy["mode"] == "REACT",
-        "source": "active_dialogue_sequence",
+        "source": "active_authenticated_dialogue_sequence",
+        "memory_window": "day_0..day_6",
     }
-    return analysis
-
 
 def _apply_active_sequence_authority(
     result: dict[str, Any],
@@ -1458,6 +2503,17 @@ def _apply_active_sequence_authority(
         return
 
     active_id = _clean_text(active.get("sequence_id"))
+    target_id = _clean_text(
+        result.get("target_sequence_id")
+        or (result.get("dialogue_vector") or {}).get("target_sequence_id")
+        or active_id
+    )
+    # A CONTINUE can deliberately re-activate another user-owned thread. In
+    # that case the selected target thread is authoritative for this turn and
+    # must not be replaced by the older active sequence here.
+    if active_id and target_id and target_id != active_id:
+        return
+
     active_topic = _clean_text(active.get("topic") or state.get("april_active_topic"))
     last_user = _clean_text(active.get("last_user_request") or state.get("last_user_turn"))
     last_answer = _clean_text(active.get("last_april_answer") or state.get("last_april_turn"))
@@ -1504,213 +2560,255 @@ class QuantumInterpretationEngine:
         state: dict[str, Any],
         history: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        """
+        Sequential semantic pass:
+          1) scope authenticated user memory;
+          2) choose active/older/new dialogue thread;
+          3) resolve references inside that selected thread;
+          4) expose the selected evidence downstream.
+        """
         pairs = _collect_7d_dialogue(state)
-        if history:
-            # The provided history is a hot compatibility view, not a second
-            # memory store.  Canonical seven-day pairs remain authoritative.
-            if not pairs:
-                pairs = [h for h in history if isinstance(h, dict)]
+        if history and not pairs:
+            pairs = [h for h in history if isinstance(h, dict)]
 
-        active = _active_sequence(state, pairs)
-        active_sequence_id = _clean_text(active.get("sequence_id"))
-        active_topic = _clean_text(active.get("topic"))
+        memory_field = _build_user_memory_field(state)
+        if not memory_field.get("dialog_pairs_7d") and pairs:
+            memory_field["dialog_pairs_7d"] = pairs[-24:]
 
-        # The authenticated active sequence wins over generic seven-day memory
-        # whenever it is live. The long-term timeline remains recall evidence.
-        sequence_pairs = _sequence_pairs(pairs, active_sequence_id)
-        live_last_user = _clean_text(active.get("last_user_request")) if isinstance(active, dict) else ""
-        live_last_answer = _clean_text(active.get("last_april_answer")) if isinstance(active, dict) else ""
-        if live_last_user or live_last_answer:
-            latest = {
-                "sequence_id": active_sequence_id,
-                "topic": active_topic,
-                "user_request": live_last_user,
-                "april_answer": live_last_answer,
-                "sequence_turn_index": active.get("turn_count"),
-                "source": "active_dialogue_sequence",
-            }
-        else:
-            latest = sequence_pairs[-1] if sequence_pairs else (pairs[-1] if pairs else {})
+        choice = _choose_dialogue_thread(text, memory_field, state)
+        relation = choice["relation"]
+
+        active = choice.get("active_sequence") or {}
+        target_sequence = (
+            choice.get("target_sequence")
+            if isinstance(choice.get("target_sequence"), dict)
+            else active
+        )
+
+        active_id = _clean_text(choice.get("active_sequence_id"))
+        target_id = _clean_text(choice.get("target_sequence_id"))
+
+        active_profile = choice.get("active_profile") or {}
+        target_profile = target_sequence if isinstance(target_sequence, dict) else {}
+
+        # A NEW topic has no prior-thread operand. The old active sequence may
+        # influence the routing decision, but it must not leak into the
+        # provider-facing conversational memory fields.
+        if relation == "NEW":
+            target_profile = {}
+
         latest_user = _clean_text(
-            latest.get("user_request")
-            or latest.get("user_meaning")
+            target_profile.get("last_user_turn")
+            or target_profile.get("last_user_request")
+            or active.get("last_user_request")
             or state.get("last_user_turn")
         )
         latest_april = _clean_text(
-            latest.get("april_answer")
-            or latest.get("april_meaning")
+            target_profile.get("last_april_answer")
+            or active.get("last_april_answer")
             or state.get("last_april_turn")
         )
 
-        if not active_topic:
-            active_topic = (
-                _clean_text(latest.get("topic"))
-                or _extract_topic(latest_user)
-                or _extract_topic(text)
-                or ""
-            )
+        current_topic = _clean_text(choice.get("current_topic"))
+        active_topic = _clean_text(choice.get("active_topic"))
 
-        reference = _is_reference_turn(text)
-        explicit_new = _explicit_new_topic(text)
-        current_topic = _extract_topic(text)
-
-        topic_similarity = max(
-            _semantic_similarity(text, active_topic),
-            _semantic_similarity(current_topic, active_topic) if current_topic and active_topic else 0.0,
-            _semantic_similarity(text, latest_user) if latest_user else 0.0,
-            _semantic_similarity(text, latest_april) if latest_april else 0.0,
-        )
-
-        topic_novelty = _semantic_similarity(current_topic, active_topic) if (
-            current_topic and active_topic
-        ) else 0.0
-
-        low = text.lower()
-        explicit_object_change = bool(
-            re.search(r"\b(?:про|об|о)\s+[A-Za-zА-Яа-яЁё][\w-]*(?:\s+[A-Za-zА-Яа-яЁё][\w-]*)?", text)
-        )
-        proper_nouns = [
-            value for value in re.findall(r"\b[А-ЯЁA-Z][а-яёa-z-]{2,}\b", text)
-            if value.lower() not in _DIALOGUE_STOPWORDS
-        ]
-        proper_novelty = bool(proper_nouns and topic_similarity < 0.44)
-
-        # A historical recall is only meaningful when the utterance explicitly
-        # points backward.  It does not force a new topic by itself.
-        recall_index, recall_record, recall_score = _best_historical_pair(
-            text, pairs, active_sequence_id
-        )
-
-        explicit_recall = _explicit_memory_recall(text)
-        if explicit_new:
-            relation = "NEW"
-            reason = "explicit_new_topic"
-            confidence = 0.99
-        elif explicit_recall and recall_score >= 0.40 and recall_score > topic_similarity + 0.06 and recall_record:
-            relation = "RECALL"
-            reason = "explicit_memory_recall"
-            confidence = max(0.72, min(0.97, recall_score))
-        elif not active_sequence_id:
-            relation = "NEW"
-            reason = "no_active_dialogue_vector"
-            confidence = 0.99
-        elif (
-            explicit_object_change
-            and not reference
-            and topic_novelty < 0.34
-            and proper_novelty
-        ):
-            relation = "NEW"
-            reason = "strong_new_subject"
-            confidence = max(0.72, min(0.95, 1.0 - topic_novelty))
-        elif (
-            explicit_object_change
-            and not reference
-            and topic_novelty < 0.18
-            and len(_dialogue_tokens(current_topic)) >= 1
-            and topic_similarity < 0.30
-        ):
-            relation = "NEW"
-            reason = "new_object_phrase"
-            confidence = 0.86
-        else:
-            # Canonical default: an authenticated user's active sequence stays
-            # alive.  A new vector requires explicit topic change or strong
-            # semantic novelty evidence above.
-            relation = "CONTINUE"
-            reason = (
-                "reference_to_active_vector"
-                if reference
-                else "active_vector_default_continuation"
-            )
-            confidence = max(0.62, min(0.96, 0.62 + 0.30 * topic_similarity))
-            if any(marker in low for marker in _FOLLOWUP_MARKERS):
-                confidence = max(confidence, 0.78)
-
-        selected = {}
-        selected_index = -1
-        if relation == "RECALL" and recall_record:
-            selected = dict(recall_record)
-            selected_index = recall_index
-        elif sequence_pairs:
-            selected = dict(sequence_pairs[-1])
-            selected_index = next(
-                (
-                    index
-                    for index in range(len(pairs) - 1, -1, -1)
-                    if isinstance(pairs[index], dict)
-                    and (
-                        (
-                            selected.get("turn_key")
-                            and pairs[index].get("turn_key") == selected.get("turn_key")
-                        )
-                        or (
-                            selected.get("created_at")
-                            and pairs[index].get("created_at") == selected.get("created_at")
-                            and pairs[index].get("user_request") == selected.get("user_request")
-                        )
-                    )
-                ),
-                max(0, len(pairs) - 1),
-            )
-        elif latest:
-            selected = dict(latest)
-            selected_index = max(0, len(pairs) - 1)
-
-        selected_sequence_id = _clean_text(selected.get("sequence_id") or active_sequence_id)
-        selected_topic = _clean_text(
-            selected.get("topic")
+        target_topic = _clean_text(
+            target_profile.get("topic")
             or active_topic
             or current_topic
         )
 
-        target_sequence_id = selected_sequence_id or active_sequence_id
+        reference = bool(choice.get("reference_signal"))
+        explicit_recall = bool(choice.get("explicit_recall"))
+        explicit_new = bool(choice.get("explicit_new"))
+
+        topic_similarity = max(
+            _semantic_similarity(text, active_topic),
+            _semantic_similarity(current_topic, active_topic)
+            if current_topic and active_topic else 0.0,
+            _semantic_similarity(text, latest_user) if latest_user else 0.0,
+            _semantic_similarity(text, latest_april) if latest_april else 0.0,
+        )
+
+        selected = {}
+        if relation == "RECALL":
+            turns = target_profile.get("turns") or []
+            if isinstance(turns, list) and turns:
+                selected = dict(turns[-1])
+        elif relation == "CONTINUE":
+            if isinstance(target_profile, dict) and target_profile.get("turns"):
+                turns = target_profile.get("turns") or []
+                selected = dict(turns[-1]) if turns else {}
+            elif target_profile.get("sequence_id"):
+                selected = {
+                    "sequence_id": target_profile.get("sequence_id"),
+                    "sequence_topic": target_profile.get("topic"),
+                    "user_request": target_profile.get("last_user_turn"),
+                    "april_answer": target_profile.get("last_april_answer"),
+                    "sequence_turn_index": len(target_profile.get("turns") or []),
+                    "created_at": target_profile.get("last_created_at"),
+                    "source": "selected_dialogue_thread",
+                }
+            elif active.get("sequence_id"):
+                selected = {
+                    "sequence_id": active.get("sequence_id"),
+                    "sequence_topic": active.get("topic"),
+                    "user_request": active.get("last_user_request"),
+                    "april_answer": active.get("last_april_answer"),
+                    "sequence_turn_index": active.get("turn_count"),
+                    "created_at": active.get("last_turn_at"),
+                    "source": "active_dialogue_sequence",
+                }
+
+        sequence_pairs = (
+            target_profile.get("turns")
+            if relation in {"RECALL", "CONTINUE"}
+            else []
+        )
+        sequence_pairs = (
+            sequence_pairs if isinstance(sequence_pairs, list) else []
+        )
+
         if relation == "NEW":
-            target_sequence_id = _new_vector_id(
+            target_id = _new_vector_id(
                 state,
                 current_topic or _extract_topic(text) or text[:180],
                 text,
             )
 
-        resolved_reference = ""
-        if reference:
-            active_entity = _clean_text(state.get("april_active_entity")) if isinstance(state, dict) else ""
-            if active_entity:
-                resolved_reference = active_entity
-            elif selected:
-                resolved_reference = _clean_text(
-                    selected.get("user_request")
-                    or selected.get("user_meaning")
-                    or selected.get("topic")
-                )
+        selected_topic = _clean_text(
+            selected.get("sequence_topic")
+            or selected.get("topic")
+            or target_topic
+        )
+
+        entity, entity_source = _entity_from_relation_context(
+            text,
+            latest_april,
+            selected_topic,
+            state=state,
+            relation_context={
+                **choice,
+                "target_sequence": target_profile,
+            },
+        )
+
+        resolved_reference = (
+            entity
+            if reference or choice.get("artifact_signal")
+            else ""
+        )
+        target_artifact = choice.get("target_artifact") if isinstance(choice.get("target_artifact"), dict) else {}
+        resolved_reference_type = ""
+        if choice.get("artifact_signal") or (
+            isinstance(target_artifact, dict) and target_artifact.get("present")
+        ):
+            if target_artifact.get("kind") == "poem":
+                resolved_reference_type = "artifact"
+            elif target_artifact.get("kind"):
+                resolved_reference_type = "artifact"
+        elif resolved_reference:
+            resolved_reference_type = "entity"
 
         return {
             "relation": relation,
-            "confidence": round(confidence, 6),
-            "reason": reason,
+            "confidence": round(float(choice.get("confidence") or 0.0), 6),
+            "reason": choice.get("reason"),
             "active_sequence": active,
-            "active_sequence_id": active_sequence_id,
-            "target_sequence_id": target_sequence_id,
+            "target_sequence": target_profile,
+            "active_sequence_id": active_id,
+            "target_sequence_id": target_id,
+            "thread_transition": (
+                "REACTIVATED_OLDER"
+                if relation == "CONTINUE"
+                and target_id
+                and active_id
+                and target_id != active_id
+                else "ACTIVE"
+                if relation == "CONTINUE"
+                else "NEW"
+            ),
             "active_topic": active_topic,
             "target_topic": (
                 current_topic
                 if relation == "NEW"
                 else selected_topic
-                if relation == "RECALL"
+                if relation in {"RECALL", "CONTINUE"}
                 else active_topic or current_topic
             ),
             "current_topic": current_topic,
             "previous_user_turn": latest_user,
             "previous_april_turn": latest_april,
-            "topic_similarity": round(topic_similarity, 6),
-            "topic_novelty": round(topic_novelty, 6),
+            "topic_similarity": round(float(topic_similarity or 0.0), 6),
+            "topic_novelty": round(
+                _semantic_similarity(current_topic, active_topic)
+                if current_topic and active_topic else 0.0,
+                6,
+            ),
             "reference": reference,
             "explicit_recall": explicit_recall,
             "explicit_new": explicit_new,
-            "selected_memory_index": selected_index,
+            "artifact_reference": bool(
+                choice.get("artifact_signal")
+                or choice.get("artifact_noun_signal")
+            ),
+            "resolved_reference_type": resolved_reference_type,
+            "target_artifact": target_artifact,
+            "selected_memory_index": -1,
             "selected_memory_operand": selected,
             "resolved_reference": resolved_reference,
-            "sequence_pairs": sequence_pairs[-6:],
+            "resolved_entity": entity,
+            "resolved_entity_source": entity_source,
+            "sequence_pairs": sequence_pairs[-8:],
+            "memory_field": {
+                "engine": memory_field.get("engine"),
+                "window": memory_field.get("window"),
+                "user_id": memory_field.get("user_id"),
+                "conversation_id": memory_field.get("conversation_id"),
+                "active_sequence_id": active_id,
+                "target_sequence_id": target_id,
+                "active_turns": len(
+                    memory_field.get("active_sequence_pairs") or []
+                ),
+                "seven_day_turns": len(
+                    memory_field.get("dialog_pairs_7d") or []
+                ),
+                "topic_evidence_A_E": (
+                    memory_field.get("topic_evidence_A_E") or []
+                )[-8:],
+                "summary_available": bool(
+                    memory_field.get("memory_summary_evidence")
+                ),
+                "summary_preview": _clean_text(
+                    memory_field.get("memory_summary_evidence")
+                )[:600],
+                "a_e_topics_count": len(
+                    memory_field.get("topic_evidence_A_E") or []
+                ),
+                "evidence_only": True,
+            },
+            "thread_choice": {
+                "relation": relation,
+                "reason": choice.get("reason"),
+                "active_score": choice.get("active_score", 0.0),
+                "best_historical_score": choice.get("best_historical_score", 0.0),
+                "best_historical_sequence_id": choice.get(
+                    "best_historical_sequence_id",
+                    "",
+                ),
+                "reference_signal": reference,
+                "artifact_signal": bool(choice.get("artifact_signal")),
+                "artifact_noun_signal": bool(choice.get("artifact_noun_signal")),
+                "subject_signal": bool(choice.get("subject_signal")),
+                "target_sequence_id": target_id,
+                "target_artifact": target_artifact,
+                "resolved_reference_type": resolved_reference_type,
+                "thread_transition": (
+                    "REACTIVATED_OLDER"
+                    if target_id and active_id and target_id != active_id
+                    else "ACTIVE"
+                ),
+            },
         }
 
     @staticmethod
@@ -1821,7 +2919,10 @@ class QuantumInterpretationEngine:
         target_topic = _clean_text(relation.get("target_topic") or active_topic)
         if relation_name == "NEW":
             topic = _extract_topic(current) or target_topic or current[:180]
-        elif relation_name == "RECALL":
+        elif relation_name in {"RECALL", "CONTINUE"}:
+            # A CONTINUE may reactivate an older user-owned thread. In that case
+            # the selected target thread, not the previously active topic, owns
+            # the current topic/context.
             topic = target_topic or active_topic or _extract_topic(current)
         else:
             topic = active_topic or target_topic or _extract_topic(current)
@@ -1837,6 +2938,17 @@ class QuantumInterpretationEngine:
         )
 
         sequence_id = _clean_text(relation.get("target_sequence_id"))
+        target_sequence_id = _clean_text(
+            relation.get("target_sequence_id") or sequence_id
+        )
+        resolved_entity = _clean_text(
+            relation.get("resolved_entity")
+            or relation.get("resolved_reference")
+            or ""
+        )
+        entity_source = _clean_text(
+            relation.get("resolved_entity_source")
+        )
         request_relation = (
             "CONTINUE_TOPIC" if relation_name == "CONTINUE"
             else "ARTIFACT_REFERENCE" if relation_name == "RECALL" and relation.get("reference")
@@ -1881,6 +2993,23 @@ class QuantumInterpretationEngine:
             "previous_user_turn": relation.get("previous_user_turn", ""),
             "previous_april_turn": relation.get("previous_april_turn", ""),
             "resolved_reference": relation.get("resolved_reference", ""),
+            "artifact_reference": bool(
+                relation.get("artifact_reference")
+            ),
+            "artifact_noun_signal": bool(
+                relation.get("artifact_noun_signal")
+            ),
+            "resolved_entity": resolved_entity,
+            "resolved_entity_source": entity_source,
+            "resolved_reference_type": (
+                "artifact" if relation.get("artifact_reference")
+                else "entity" if resolved_entity
+                else "none"
+            ),
+            "memory_engine": "QUANTUM-MEMORY-7D-V2",
+            "memory_window": "day_0..day_6",
+            "memory_resolution": relation.get("memory_field") or {},
+            "thread_choice": relation.get("thread_choice") or {},
             "selected_memory_index": relation.get("selected_memory_index", -1),
             "selected_memory_operand": selected,
             "topic_similarity": relation.get("topic_similarity", 0.0),
@@ -1888,6 +3017,17 @@ class QuantumInterpretationEngine:
             "sequence_continuation_authorized": relation_name == "CONTINUE",
             "current_turn_authority": True,
             "historical_memory_is_evidence_only": True,
+            "memory_engine": "QUANTUM-MEMORY-7D-V2",
+            "memory_window": "day_0..day_6",
+            "target_sequence_id": target_sequence_id,
+            "resolved_entity": resolved_entity,
+            "resolved_entity_source": entity_source,
+            "resolved_reference_type": (
+                "artifact" if relation.get("artifact_reference")
+                else "entity" if resolved_entity
+                else "none"
+            ),
+            "memory_resolution": relation.get("memory_field") or {},
             "sequential_dialogue": {
                 "relation": relation_name,
                 "subtype": request_relation,
@@ -1946,6 +3086,25 @@ class QuantumInterpretationEngine:
             "active_topic": topic,
             "active_goal": goal,
             "canonical_topic": topic,
+            "active_sequence": relation.get("active_sequence") or {},
+            "target_sequence": relation.get("target_sequence") or {},
+            "active_sequence_id": _clean_text(relation.get("active_sequence_id")),
+            "sequence_id": sequence_id,
+            "target_sequence_id": target_sequence_id,
+            "thread_transition": relation.get("thread_transition", "ACTIVE"),
+            "resolved_entity": resolved_entity,
+            "resolved_entity_source": entity_source,
+            "resolved_reference_type": (
+                "artifact" if relation.get("artifact_reference")
+                else "entity" if resolved_entity
+                else "none"
+            ),
+            "artifact_reference": bool(relation.get("artifact_reference")),
+            "artifact_noun_signal": bool(relation.get("artifact_noun_signal")),
+            "target_artifact": relation.get("target_artifact") or {},
+            "thread_choice": relation.get("thread_choice") or {},
+            "memory_resolution": relation.get("memory_field") or {},
+            "target_sequence_id": target_sequence_id,
             "continuation": relation_name == "CONTINUE",
             "reference_to_previous": bool(relation_name == "RECALL" or relation.get("reference")),
             "dialogue_relation": relation_name,
@@ -1999,8 +3158,22 @@ class QuantumInterpretationEngine:
                 "active_goal": goal,
                 "canonical_topic": topic,
                 "sequence_id": sequence_id,
+                "target_sequence_id": target_sequence_id,
+                "resolved_entity": resolved_entity,
+                "resolved_entity_source": entity_source,
+                "resolved_reference_type": (
+                    "artifact" if relation.get("artifact_reference")
+                    else "entity" if resolved_entity
+                    else "none"
+                ),
+                "memory_engine": "QUANTUM-MEMORY-7D-V2",
+                "memory_window": "day_0..day_6",
+                "memory_resolution": relation.get("memory_field") or {},
+                "thread_choice": relation.get("thread_choice") or {},
                 "resolved_request": current,
                 "resolved_reference": relation.get("resolved_reference", ""),
+            "artifact_reference": bool(relation.get("artifact_reference")),
+            "artifact_noun_signal": bool(relation.get("artifact_noun_signal")),
                 "previous_user_turn": relation.get("previous_user_turn", ""),
                 "previous_april_turn": relation.get("previous_april_turn", ""),
                 "selected_memory_index": relation.get("selected_memory_index", -1),
@@ -2015,9 +3188,31 @@ class QuantumInterpretationEngine:
             },
             "trajectory": {
                 "sequence_id": sequence_id,
+                "target_sequence_id": target_sequence_id,
                 "topic": topic,
                 "relation_reason": relation.get("reason"),
                 "topic_similarity": relation.get("topic_similarity", 0.0),
+                "thread_choice": relation.get("thread_choice") or {},
+            },
+            "memory_integration": {
+                "engine": "QUANTUM-MEMORY-7D-V2",
+                "window": "day_0..day_6",
+                "user_scoped": True,
+                "active_sequence_id": relation.get("active_sequence_id", ""),
+                "target_sequence_id": target_sequence_id,
+                "authority_order": [
+                    "current_user_turn",
+                    "selected_dialogue_thread",
+                    "seven_day_user_memory",
+                    "A_E_topic_memory",
+                    "memory_summary_evidence",
+                ],
+                "summary_evidence_available": bool(
+                    (relation.get("memory_field") or {}).get(
+                        "summary_available"
+                    )
+                ),
+                "evidence_only": True,
             },
             "render_continuity": {
                 "relation": relation_name,
@@ -2358,7 +3553,7 @@ def __getattr__(name: str) -> Any:
 
 
 INTERPRETATION_COMPATIBILITY_VERSION = (
-    "2026-09-21-seven-day-dialogue-vector-v1"
+    "2026-09-22-seven-day-dialogue-vector-memory-thread-v2"
 )
 INTERPRETATION_REQUEST_OPERAND_POLICY = "CURRENT_USER_TURN_ONLY"
 INTERPRETATION_HISTORICAL_MEMORY_POLICY = "SEVEN_DAY_DIALOGUE_MEMORY_EVIDENCE"
