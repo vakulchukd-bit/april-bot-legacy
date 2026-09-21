@@ -394,16 +394,11 @@ class ProcessorScene:
         if not visual_mode:
             visual_mode = "text"
 
-        output_budget = {
-            "text": 900,
-            "code": 1400,
-            "formula": 900,
-            "graph": 1200,
-            "table": 1200,
-            "diagram": 1200,
-            "image": 1100,
-            "link": 700,
-        }.get(representation, 900)
+        # One continuous response budget for every representation.
+        # The processor must not predict answer length from the renderer.
+        # OpenAI may use any amount up to the canonical 8000-token ceiling;
+        # the complete result is then passed to SceneContract and Web.
+        output_budget = 8000
 
         dialogue_contract = {
             "version": "april_dialogue_contract_v1",
