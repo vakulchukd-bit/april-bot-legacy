@@ -15,8 +15,7 @@ from blocks.C_ARTIFACT_CONTRACT import (
     build_scene_contract,
 )
 from blocks.april_personality import APRIL_IDENTITY
-from blocks.interpretation_layer import build_turn_meaning_state
-from blocks.internal_interpretation import AprilInternalInterpretation
+from blocks.interpretation_layer import interpret_request
 from blocks.provider_router import generate_text
 from blocks.state_manager import get_state, update_scene_context, persist_state
 
@@ -43,6 +42,37 @@ _RENDERER_REGISTRY = {
 
 _STRUCTURED_TYPES = {"code", "graph", "table", "diagram", "image", "gallery", "formula", "link"}
 
+_NEW_TOPIC_MARKERS = (
+    "новая тема",
+    "другая тема",
+    "забудь это",
+)
+
+_FOLLOWUP_PREFIXES = (
+    "теперь",
+    "ещё",
+    "еще",
+    "дальше",
+    "сделай",
+    "покажи",
+    "нарисуй",
+    "измени",
+    "добавь",
+    "убери",
+    "продолжи",
+    "объясни",
+    "расскажи",
+    "уточни",
+    "а теперь",
+    "и ещё",
+    "и еще",
+)
+
+_SHORT_PENDING_WORDS = {
+    "официальный", "официальная", "официальное", "официально",
+    "канал", "чат", "пользователь", "аккаунт", "личный", "да", "нет",
+}
+
 _PERSIST_TASKS: Dict[str, asyncio.Task] = {}
 
 
@@ -53,6 +83,20 @@ def _consume_persist_result(task: asyncio.Task) -> None:
         if not isinstance(exc, asyncio.CancelledError):
             print("⚠️ APRIL BACKGROUND PERSIST:", exc)
 
+
+_ARTIFACT_REFERENCE_FORMS = (
+    "этот график",
+    "на графике",
+    "этот рисунок",
+    "эту картинку",
+    "на картинке",
+    "на схеме",
+    "этот файл",
+    "это",
+    "его",
+    "её",
+    "ее",
+)
 
 
 def _text(value: Any) -> str:
@@ -107,18 +151,227 @@ def _state_artifact_type(state: dict) -> str:
     return ""
 
 
+class SequentialInterpretation:
+    """Compatibility adapter; semantic interpretation owns dialogue relation."""
+
+    def __init__(self) -> None:
+        self.semantic_result: Dict[str, Any] = {}
+
+    def dialogue(self, request: str, state: dict) -> Dict[str, Any]:
+        state = state if isinstance(state, dict) else {}
+        history = state.get("dialog")
+        if not isinstance(history, list):
+            history = state.get("dialogue_history") if isinstance(state.get("dialogue_history"), list) else []
+        try:
+            semantic_result = interpret_request(request, history=history, state=state)
+        except Exception as exc:
+            print("⚠️ APRIL SEMANTIC DIALOGUE:", exc)
+            semantic_result = {}
+        self.semantic_result = semantic_result if isinstance(semantic_result, dict) else {}
+
+        vector = self.semantic_result.get("dialogue_vector") if isinstance(self.semantic_result.get("dialogue_vector"), dict) else {}
+        contract = self.semantic_result.get("dialogue_contract") if isinstance(self.semantic_result.get("dialogue_contract"), dict) else {}
+        relation = _text(vector.get("three_way_relation") or contract.get("three_way_relation") or contract.get("relation") or "NEW").upper()
+        relation = {
+            "CONTINUE_TOPIC": "CONTINUE",
+            "CONTINUATION": "CONTINUE",
+            "ARTIFACT_REFERENCE": "CONTINUE",
+            "NEW_TOPIC": "NEW",
+            "INDEPENDENT": "NEW",
+        }.get(relation, relation)
+        if relation not in {"CONTINUE", "RECALL", "NEW"}:
+            relation = "NEW"
+
+        trajectory = vector.get("trajectory") if isinstance(vector.get("trajectory"), dict) else self.semantic_result.get("dialogue_trajectory")
+        trajectory = trajectory if isinstance(trajectory, dict) else {}
+        canonical_topic = _text(vector.get("canonical_topic") or contract.get("canonical_topic") or self.semantic_result.get("canonical_topic"))
+        pending = state.get("april_pending_task") if isinstance(state.get("april_pending_task"), dict) else {}
+        pending_resolved = bool(pending.get("active") and relation == "CONTINUE")
+        reference = bool(relation == "RECALL" or contract.get("reference_to_previous"))
+        dependency = _text(contract.get("context_dependency"))
+        if not dependency:
+            dependency = "pending" if pending_resolved else "recall" if reference else "continuation" if relation == "CONTINUE" else "independent"
+        anchor = "pending_task" if pending_resolved else "last_turn" if relation == "CONTINUE" else "memory" if reference else "none"
+        return {
+            "relation": relation,
+            "continuation": relation == "CONTINUE",
+            "reference": reference,
+            "dependency": dependency,
+            "anchor": anchor,
+            "pending_resolved": pending_resolved,
+            "resolved_request": _text(self.semantic_result.get("resolved_request") or contract.get("resolved_request") or request),
+            "resolved_reference": _text(self.semantic_result.get("resolved_reference") or contract.get("resolved_reference")),
+            "selected_memory_index": self.semantic_result.get("selected_memory_index", vector.get("selected_memory_index", -1)),
+            "selected_memory_operand": vector.get("selected_memory_operand") or contract.get("selected_memory_operand") or {},
+            "trajectory": trajectory,
+            "canonical_topic": canonical_topic,
+            "semantic_result": self.semantic_result,
+        }
+
+    def intent(self, request: str, state: dict, dialogue: Dict[str, Any]) -> Dict[str, Any]:
+        text = request.lower()
+
+        active = state.get("april_active_task") if isinstance(state.get("april_active_task"), dict) else {}
+        pending = state.get("april_pending_task") if isinstance(state.get("april_pending_task"), dict) else {}
+
+        # Pending task owns the representation when the user resolves it.
+        if dialogue["pending_resolved"] and pending:
+            representation = _text(pending.get("representation") or "text").lower()
+            operation = _text(pending.get("operation") or "answer")
+            topic = _text(pending.get("topic") or representation)
+            attrs = {
+                "resolved_pending_input": request,
+                "pending_kind": _text(pending.get("expected_input_type")),
+            }
+            if pending.get("expected_input_type") == "telegram_target_kind":
+                attrs["telegram_target_kind"] = self._telegram_kind(text)
+            return self._make_intent(operation, pending.get("object") or representation, representation,
+                                     pending.get("goal") or "obtain", topic, attrs)
+
+        representation = self._representation(text)
+        semantic_result = dialogue.get("semantic_result") if isinstance(dialogue.get("semantic_result"), dict) else self.semantic_result
+        semantic_task = semantic_result.get("semantic_task") if isinstance(semantic_result.get("semantic_task"), dict) else {}
+        if dialogue["continuation"] and active and representation == "text":
+            representation = _text(active.get("representation") or semantic_task.get("representation") or "text").lower() or "text"
+
+        if dialogue["continuation"] and semantic_task.get("operation"):
+            operation = _text(semantic_task.get("operation")).lower()
+        else:
+            operation = self._operation(text, representation)
+        if dialogue["continuation"] and semantic_task.get("goal"):
+            goal = _text(semantic_task.get("goal")).lower()
+        else:
+            goal = self._goal(operation, representation)
+        semantic_object = _text(semantic_task.get("object")).lower()
+        if dialogue["continuation"] and active and semantic_object in {"", "action", "text", representation}:
+            object_name = _text(active.get("object")) or self._object(text, representation)
+        else:
+            object_name = self._object(text, representation)
+        topic = object_name or _text(request)[:120]
+        attributes: Dict[str, Any] = {}
+
+        if representation == "image":
+            attributes["visual_production_mode"] = "image_generation" if any(w in text for w in ("нарисуй", "сгенерируй", "создай")) else "image_present"
+        elif representation == "diagram":
+            attributes["visual_production_mode"] = "diagram"
+        elif representation == "graph":
+            attributes["visual_production_mode"] = "graph"
+        elif representation == "table":
+            attributes["visual_production_mode"] = "table"
+        elif representation == "code":
+            # Code is a structured presentation too. Keep it explicit so the
+            # provider is instructed to materialize a real CodeBlock instead
+            # of returning only a prose introduction.
+            attributes["visual_production_mode"] = "code"
+        elif representation == "formula":
+            # Formula follows the same explicit structured-output contract.
+            attributes["visual_production_mode"] = "formula"
+        elif representation == "link":
+            attributes["visual_production_mode"] = "link"
+
+        if representation == "link" and ("telegram" in text or "телеграм" in text) and not self._telegram_target_present(text):
+            attributes["telegram_pending"] = True
+            attributes["pending_question"] = "Какой Telegram нужен: официальный канал, чат или пользовательский аккаунт?"
+
+        return self._make_intent(operation, object_name, representation, goal, topic, attributes)
+
+    @staticmethod
+    def _make_intent(operation: str, object_name: str, representation: str, goal: str, topic: str, attributes: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "operation": _text(operation) or "answer",
+            "object": _text(object_name) or representation,
+            "representation": _text(representation) or "text",
+            "goal": _text(goal) or "answer",
+            "topic": _text(topic),
+            "attributes": attributes,
+        }
+
+    @staticmethod
+    def _representation(text: str) -> str:
+        if re.search(r"\b(код|python|пайтон|скрипт)\b", text):
+            return "code"
+        if re.search(r"\b(ссыл\w*|url|link)\b", text):
+            return "link"
+        if re.search(r"\b(нарисуй|изобрази|сгенерируй|создай)\b", text) or "картинк" in text or "изображени" in text or "портрет" in text:
+            return "image"
+        if re.search(r"\b(график|графика|кривую|кривая)\b", text):
+            return "graph"
+        if re.search(r"\b(таблиц\w*|табличк\w*)\b", text):
+            return "table"
+        if re.search(r"\b(схем\w*|блок-схем\w*)\b", text):
+            return "diagram"
+        if re.search(r"\b(формул\w*|уравнени\w*)\b", text):
+            return "formula"
+        return "text"
+
+    @staticmethod
+    def _operation(text: str, representation: str) -> str:
+        if representation == "link":
+            return "retrieve"
+        if any(w in text for w in ("измени", "исправь", "переделай", "добавь", "убери")):
+            return "modify"
+        if representation in _STRUCTURED_TYPES:
+            return "build"
+        if any(w in text for w in ("объясни", "расскажи", "почему", "что такое")):
+            return "explain"
+        return "answer"
+
+    @staticmethod
+    def _goal(operation: str, representation: str) -> str:
+        if operation == "retrieve":
+            return "obtain"
+        if representation in _STRUCTURED_TYPES:
+            return "present"
+        if operation == "explain":
+            return "understand"
+        return "answer"
+
+    @staticmethod
+    def _object(text: str, representation: str) -> str:
+        if representation == "link" and ("telegram" in text or "телеграм" in text):
+            return "telegram_link"
+        return {
+            "code": "source_code",
+            "image": "illustration",
+            "graph": "graph",
+            "table": "table",
+            "diagram": "diagram",
+            "formula": "formula",
+            "link": "link",
+        }.get(representation, "text")
+
+    @staticmethod
+    def _telegram_kind(text: str) -> str:
+        if "канал" in text:
+            return "channel"
+        if "чат" in text:
+            return "chat"
+        if "пользователь" in text or "аккаунт" in text:
+            return "user"
+        if "официаль" in text:
+            return "official"
+        return "unspecified"
+
+    @staticmethod
+    def _telegram_target_present(text: str) -> bool:
+        if re.search(r"https?://t\.me/[a-z0-9_]+", text):
+            return True
+        if re.search(r"@[a-z0-9_]{4,}", text):
+            return True
+        generic = {"дай", "ссылку", "на", "telegram", "телеграм"}
+        return bool(set(_tokens(text)) - generic)
+
+
 class ProcessorScene:
     def __init__(self, state: dict, user_id: str, request: str):
         self.state = state
         self.user_id = _text(user_id)
         self.request = _text(request)
-        self.interpreter = AprilInternalInterpretation()
+        self.interpreter = SequentialInterpretation()
 
     def prepare(self) -> MachineRequest:
-        interpretation = self.interpreter.interpret(self.request, self.state)
-        dialogue = interpretation["dialogue"]
-        intent = interpretation["intent"]
-        understanding = interpretation["understanding"]
+        dialogue = self.interpreter.dialogue(self.request, self.state)
+        intent = self.interpreter.intent(self.request, self.state, dialogue)
         relation = dialogue["relation"]
 
         requested_outputs = ["text"]
@@ -140,23 +393,26 @@ class ProcessorScene:
         active_task = self.state.get("april_active_task") if isinstance(self.state.get("april_active_task"), dict) else {}
         pending_task = self.state.get("april_pending_task") if isinstance(self.state.get("april_pending_task"), dict) else {}
 
-        resolved_request = _text(understanding.get("resolved_request")) or self.request
-        if dialogue.get("semantic_dependency_proven") and not resolved_request:
-            resolved_request = self.request
+        resolved_request = _text(dialogue.get("resolved_request") or self.request)
+        if dialogue["pending_resolved"] and pending_task and not dialogue.get("resolved_request"):
+            base_topic = _text(pending_task.get("topic") or pending_task.get("representation"))
+            resolved_request = f"Продолжение задания: {base_topic}. Ответ пользователя: {self.request}"
 
         context = {
             "relation": relation,
-            "continuation": bool(dialogue.get("continuation")),
-            "reference": bool(dialogue.get("reference_to_previous")),
-            "dependency": dialogue.get("context_dependency", "independent"),
-            "active_thread": _compact(dialogue.get("active_thread")),
-            "open_loops": _compact(dialogue.get("open_loops")),
-            "turn_trajectory": _compact(dialogue.get("turn_trajectory")),
-            "resolved_reference": _compact(dialogue.get("resolved_reference")),
+            "continuation": bool(dialogue["continuation"]),
+            "reference": bool(dialogue["reference"]),
+            "dependency": dialogue["dependency"],
+            "anchor": dialogue["anchor"],
             "active_task": _compact(active_task),
             "pending_task": _compact(pending_task),
             "last_user_turn": _compact(self.state.get("last_user_turn", "")),
             "last_april_turn": _compact(self.state.get("last_april_turn", "")),
+            "canonical_topic": _compact(dialogue.get("canonical_topic")),
+            "resolved_reference": _compact(dialogue.get("resolved_reference")),
+            "selected_memory_index": dialogue.get("selected_memory_index", -1),
+            "selected_memory_operand": _compact(dialogue.get("selected_memory_operand") or {}),
+            "dialogue_trajectory": _compact(dialogue.get("trajectory") or {}),
         }
 
         visual_mode = _text(intent["attributes"].get("visual_production_mode"))
@@ -170,24 +426,28 @@ class ProcessorScene:
         output_budget = 8000
 
         dialogue_contract = {
-            **dialogue,
-            "version": "april_dialogue_contract_v2_internal",
-            "continuation": bool(dialogue.get("continuation")),
-            "reference_to_previous": bool(dialogue.get("reference_to_previous")),
+            "version": "april_dialogue_contract_v2_semantic_trajectory",
+            "relation": relation,
+            "continuation": bool(dialogue["continuation"]),
+            "reference_to_previous": bool(dialogue["reference"]),
+            "context_dependency": dialogue["dependency"],
             "active_task": _compact(active_task),
             "pending_task": _compact(pending_task),
             "resolved_request": resolved_request,
+            "canonical_topic": _compact(dialogue.get("canonical_topic")),
+            "resolved_reference": _compact(dialogue.get("resolved_reference")),
+            "selected_memory_index": dialogue.get("selected_memory_index", -1),
+            "selected_memory_operand": _compact(dialogue.get("selected_memory_operand") or {}),
+            "trajectory": _compact(dialogue.get("trajectory") or {}),
+            "semantic_authority": True,
         }
 
         memory_packet = {
             "mode": "live_state",
-            "active_topic": understanding.get("active_thread", {}).get("topic") or self.state.get("april_active_topic", ""),
-            "active_goal": understanding.get("active_thread", {}).get("goal") or self.state.get("april_active_goal", ""),
+            "active_topic": self.state.get("april_active_topic", ""),
+            "active_goal": self.state.get("april_active_goal", ""),
             "active_task": _compact(active_task),
             "pending_task": _compact(pending_task),
-            "active_thread": _compact(understanding.get("active_thread")),
-            "open_loops": _compact(understanding.get("open_loops")),
-            "turn_trajectory": _compact(understanding.get("trajectory_forecast")),
             "last_artifact_type": _state_artifact_type(self.state),
         }
 
@@ -207,7 +467,6 @@ class ProcessorScene:
                 "resolved_request": resolved_request,
                 "dialogue_contract": dialogue_contract,
                 "turn_meaning": context,
-                "internal_understanding": _compact(understanding, max_depth=4, max_items=8),
                 "active_task": _compact(active_task),
                 "pending_task": _compact(pending_task),
             },
@@ -243,11 +502,17 @@ class ProcessorScene:
         setattr(request, "turn_meaning", context)
         setattr(request, "response_output_tokens", output_budget)
         setattr(request, "quantum_state", {
-            "version": "april_processor_v1",
+            "version": "april_processor_v2_semantic_trajectory",
             "relation": relation,
             "continuation": bool(dialogue["continuation"]),
             "reference": bool(dialogue["reference"]),
             "dependency": dialogue["dependency"],
+            "resolved_request": resolved_request,
+            "canonical_topic": dialogue.get("canonical_topic", ""),
+            "resolved_reference": dialogue.get("resolved_reference", ""),
+            "selected_memory_index": dialogue.get("selected_memory_index", -1),
+            "selected_memory_operand": _compact(dialogue.get("selected_memory_operand") or {}),
+            "trajectory": _compact(dialogue.get("trajectory") or {}),
             "provider_calls": 1,
             "single_route": True,
             "interpretation_owned_by": "QUANTUM_PROCESSOR",
@@ -405,30 +670,20 @@ def _set_live_state(state: dict, request: MachineRequest, response: MachineRespo
     representation = _text(request.intent.get("type")).lower() or "text"
     operation = _text(request.intent.get("operation")) or "answer"
     goal = _text(request.intent.get("goal")) or "answer"
-    topic = _text(
-        request.intent.get("topic")
-        or (request.conversation.get("internal_understanding") or {}).get("active_thread", {}).get("topic")
-        or request.intent.get("object")
-        or representation
-    )
+    topic = _text(dialogue.get("canonical_topic") or request.intent.get("object") or representation)
 
     state["april_turn_id"] = int(state.get("april_turn_id") or 0) + 1
     state["last_user_turn"] = request.conversation.get("current_request", "")
     state["last_april_turn"] = response.answer
     state["april_active_topic"] = topic
     state["april_active_goal"] = goal
-    internal = request.conversation.get("internal_understanding") if isinstance(request.conversation.get("internal_understanding"), dict) else {}
-    active_thread = internal.get("active_thread") if isinstance(internal.get("active_thread"), dict) else {}
     state["april_active_task"] = {
         "operation": operation,
-        "object": _text(request.intent.get("object") or representation),
+        "object": topic,
         "representation": representation,
         "goal": goal,
         "topic": topic,
-        "entity": _text((active_thread.get("entities") or [""])[0]),
-        "relation": relation,
     }
-    state["active_entity"] = _text((active_thread.get("entities") or [""])[0]) or state.get("active_entity") or ""
 
     attrs = dict(request.intent.get("attributes") or {})
     if attrs.get("telegram_pending"):
@@ -450,17 +705,25 @@ def _set_live_state(state: dict, request: MachineRequest, response: MachineRespo
 
     blocks = list(getattr(contract, "render_blocks", []) or [])
     if blocks:
-        artifact_blocks = [
-            block for block in blocks
-            if isinstance(block, dict) and _text(block.get("type")).lower() not in {"text", "markdown"}
-        ]
-        chosen_artifact = artifact_blocks[-1] if artifact_blocks else blocks[-1]
         state["last_artifact"] = {
-            "type": _text(chosen_artifact.get("type") or "text").lower(),
-            "block_id": _text(chosen_artifact.get("block_id")),
-            "payload": _compact(chosen_artifact.get("payload") or {}),
-            "content": _text(chosen_artifact.get("content") or chosen_artifact.get("text")),
+            "type": _text(blocks[-1].get("type") or "text").lower(),
+            "block_id": _text(blocks[-1].get("block_id")),
+            "payload": _compact(blocks[-1].get("payload") or {}),
         }
+
+    state["dialogue_resolution"] = {
+        "authoritative": True,
+        "relation": "CONTINUE" if relation == "CONTINUE" else "RECALL" if relation == "RECALL" else "NEW",
+        "continuation": bool(dialogue.get("continuation")),
+        "reference": bool(dialogue.get("reference_to_previous")),
+        "context_dependency": dialogue.get("context_dependency"),
+        "resolved_request": dialogue.get("resolved_request"),
+        "resolved_reference": dialogue.get("resolved_reference", ""),
+        "selected_memory_index": dialogue.get("selected_memory_index", -1),
+        "selected_memory_operand": dialogue.get("selected_memory_operand") or {},
+        "trajectory": dialogue.get("trajectory") or {},
+        "source": "semantic_interpretation_layer",
+    }
 
     state["april_live_context"] = {
         "version": "april_live_context_v1",
@@ -474,34 +737,6 @@ def _set_live_state(state: dict, request: MachineRequest, response: MachineRespo
         "scene_id": _text(getattr(contract, "scene_id", "")),
         "render_types": [_text(b.get("type")).lower() for b in blocks if isinstance(b, dict)],
     }
-
-    # Canonical semantic turn meaning becomes the next turn's authenticated
-    # anchor. This is the durable vector behind dialogue development; it is not
-    # a keyword-trigger cache.
-    try:
-        turn_meaning = build_turn_meaning_state(
-            request.conversation.get("current_request", ""),
-            response.answer,
-            render_blocks=blocks,
-            summary=response.summary,
-            turn_id=state.get("april_turn_id"),
-            scene_id=_text(getattr(contract, "scene_id", "")),
-        )
-        state["last_turn_meaning"] = deepcopy(turn_meaning)
-        state["april_last_turn_meaning"] = deepcopy(turn_meaning)
-        history = state.setdefault("turn_meaning_history", [])
-        if isinstance(history, list):
-            history.append(deepcopy(turn_meaning))
-            state["turn_meaning_history"] = history[-10:]
-        state["dialogue_trajectory"] = {
-            "version": "april_dialogue_trajectory_v1",
-            "active_thread": deepcopy(internal.get("active_thread") or {}),
-            "open_loops": deepcopy(internal.get("open_loops") or {}),
-            "next_natural_actions": deepcopy((internal.get("trajectory_forecast") or {}).get("next_natural_actions") or []),
-            "updated_at": time.time(),
-        }
-    except Exception as exc:
-        print("⚠️ APRIL SEMANTIC TURN STATE:", exc)
 
 
 
@@ -670,16 +905,6 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
     response.metadata["timing"] = {"provider_ms": provider_ms}
 
     _set_live_state(state, request, response, contract)
-    relation = _text(request.dialogue_contract.get("relation")).upper() or "NEW"
-    state["dialogue_resolution"] = {
-        "authoritative": True,
-        "relation": "CONTINUE" if relation == "CONTINUE" else "NEW",
-        "continuation": bool(request.dialogue_contract.get("continuation")),
-        "reference": bool(request.dialogue_contract.get("reference_to_previous")),
-        "context_dependency": request.dialogue_contract.get("context_dependency"),
-        "selected_memory_index": -1,
-        "selected_memory_operand": {},
-    }
 
     # One state/scene persistence call. `update_scene_context` is the canonical
     # memory writer; no semantic matrix or second persistence pass is called.
