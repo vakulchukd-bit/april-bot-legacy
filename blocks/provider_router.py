@@ -77,6 +77,13 @@ VISUAL PRODUCTION MODES:
 2) image_generation: return metadata.image_generation_spec using schema april_image_spec_v1. Do not return image bytes, URLs, or a fake image block. C_APRIL_IMAGES_GENERATOR consumes this spec after this one provider call and creates the PNG.
 3) image_present: return/preserve the existing image representation only; do not generate a new image.
 4) visual_analysis: answer from supplied visual evidence; do not generate a new image.
+5) code: when REQUESTED_OUTPUTS contains `code`, return at least one structured render block with type=`code`, renderer=`CodeBlock`, viewer=`CodeBlock`, and payload containing `language` and `code`. The `code` field must contain the complete runnable code requested by the user, not a description of the code. Keep the human answer concise and do not place the full code only in prose.
+6) formula: when REQUESTED_OUTPUTS contains `formula`, return a structured render block with type=`formula`, renderer=`FormulaBlock`, viewer=`FormulaBlock`, and payload containing the formula expression.
+
+HUMAN TEXT HYGIENE:
+- Never expose machine prompts, internal JSON, renderer names, schema fields, or English image-generation descriptions in human-visible text.
+- Do not add parenthetical asides merely for style, translation, aliases, or metadata. Use parentheses only when mathematically or semantically required.
+- Never copy an image-generation prompt into a caption or visible explanation.
 
 april_image_spec_v1:
 {"schema":"april_image_spec_v1","prompt":"short visual description","width":1024,"height":1024,"style":"photorealistic|illustration|cinematic|graphic|abstract","background":{"top":"#RRGGBB","bottom":"#RRGGBB"},"layers":[{"kind":"polygon|ellipse|rect|line|wave|gradient|sun","role":"sky|sea|sand|sun|subject|foreground|detail","points":[[0,0],[1,1]],"box":[0,0,1,1],"color":"#RRGGBB","width":0.003,"opacity":0.8}],"negative":[],"seed":12345}
