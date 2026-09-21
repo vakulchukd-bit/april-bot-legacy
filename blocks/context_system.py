@@ -740,12 +740,11 @@ def build_executor_context_packet(state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def build_memory_context_evidence(state: Dict[str, Any], text: Any) -> Dict[str, Any]:
-    """Expose only current-scene evidence; archived memory stays in storage.
+    """Expose compact seven-day dialogue evidence without making routing decisions.
 
-    Archived A-E/7D content is not injected into the Provider as raw text.
-    Dynamic recall is performed by the Quantum Processor when the measured
-    dialogue contract requires it. This prevents stale legacy summaries from
-    resurfacing as answers while preserving every stored record.
+    The active dialogue sequence is the hot semantic anchor for an authenticated
+    user. The full seven-day archive remains in State Manager; only a compact,
+    user-scoped evidence slice is exposed here.
     """
     dialog = state.get("dialog") or []
     substantive = _v7_latest_substantive_user_message(dialog)
@@ -758,6 +757,36 @@ def build_memory_context_evidence(state: Dict[str, Any], text: Any) -> Dict[str,
         scene.get("april_answer") or scene.get("answer") or scene.get("summary") or "",
         700,
     )
+
+    active_sequence = _dict(state.get("active_dialogue_sequence"))
+    sequence_id = str(active_sequence.get("sequence_id") or "")
+    user_id = str(state.get("user_id") or "")
+    conversation_id = str(state.get("conversation_id") or "")
+    recent_sequence_turns = []
+    timeline = _dict(state.get("memory_timeline"))
+    for day_index in range(7):
+        day = _dict(timeline.get(f"day_{day_index}"))
+        for item in day.get("dialog_pairs", []):
+            if not isinstance(item, dict):
+                continue
+            if user_id and str(item.get("user_id") or "") != user_id:
+                continue
+            item_conversation = str(item.get("conversation_id") or "")
+            if conversation_id and item_conversation and item_conversation != conversation_id:
+                continue
+            if sequence_id and str(item.get("sequence_id") or "") != sequence_id:
+                continue
+            recent_sequence_turns.append({
+                "sequence_id": item.get("sequence_id"),
+                "turn_index": item.get("sequence_turn_index"),
+                "topic": item.get("sequence_topic") or item.get("topic"),
+                "user": safe_slice(item.get("user_request") or item.get("user_meaning") or "", 420),
+                "april": safe_slice(item.get("april_answer") or item.get("april_meaning") or "", 650),
+                "relation": item.get("dialogue_relation"),
+                "created_at": item.get("created_at"),
+            })
+    recent_sequence_turns = recent_sequence_turns[-8:]
+
     return {
         "has_memory": bool(
             substantive
@@ -775,8 +804,20 @@ def build_memory_context_evidence(state: Dict[str, Any], text: Any) -> Dict[str,
         "dynamic_memory_available": bool(
             _dict(state.get("memory_timeline")).get("day_0")
         ),
+        "active_dialogue_sequence": {
+            "sequence_id": active_sequence.get("sequence_id"),
+            "topic": active_sequence.get("topic"),
+            "turn_count": active_sequence.get("turn_count", 0),
+            "status": active_sequence.get("status", "inactive"),
+        },
+        "seven_day_sequence_turns": recent_sequence_turns,
+        "dialogue_memory_window_days": 7,
+        "authenticated_scope": {
+            "user_id": user_id,
+            "conversation_id": conversation_id,
+        },
         "reference_request": False,
-        "archived_memory_role": "semantic_retrieval_only",
+        "archived_memory_role": "sequence_evidence_only",
     }
 
 def _v7_latest_substantive_user_message(dialog: List[Dict[str, Any]]) -> str:
@@ -867,6 +908,7 @@ def build_quantum_context_evidence(
                 or scene.get("goal")
                 or ""
             ),
+            "active_dialogue_sequence": _dict(state.get("active_dialogue_sequence")),
             "role": "context_evidence_only",
         },
         "scene": {
