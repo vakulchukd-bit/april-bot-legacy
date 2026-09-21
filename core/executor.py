@@ -246,6 +246,14 @@ class SequentialInterpretation:
             attributes["visual_production_mode"] = "graph"
         elif representation == "table":
             attributes["visual_production_mode"] = "table"
+        elif representation == "code":
+            # Code is a structured presentation too. Keep it explicit so the
+            # provider is instructed to materialize a real CodeBlock instead
+            # of returning only a prose introduction.
+            attributes["visual_production_mode"] = "code"
+        elif representation == "formula":
+            # Formula follows the same explicit structured-output contract.
+            attributes["visual_production_mode"] = "formula"
         elif representation == "link":
             attributes["visual_production_mode"] = "link"
 
@@ -735,6 +743,8 @@ async def _materialize_image_if_requested(response: MachineResponse, request: Ma
         data_uri = artifact_payload.get("image_data_uri") or ""
         if not data_uri and base64_value:
             data_uri = f"data:image/png;base64,{base64_value}"
+        # Machine generation instructions are never part of the canonical
+        # human-visible image payload. Keep prompt/spec server-side only.
         payload = {
             "kind": "generated_image",
             "artifact_type": "image",
@@ -747,10 +757,8 @@ async def _materialize_image_if_requested(response: MachineResponse, request: Ma
             "image_base64": base64_value or None,
             "image_data_uri": data_uri or None,
             "images": [],
-            "prompt": result.get("prompt") or spec.get("prompt") or "",
             "engine": "April Images Generation",
             "backend": result.get("backend"),
-            "render_spec": spec,
         }
         direct = payload.get("src") or payload.get("image_data_uri")
         if direct:
@@ -762,8 +770,7 @@ async def _materialize_image_if_requested(response: MachineResponse, request: Ma
                 "width": result.get("width"),
                 "height": result.get("height"),
                 "title": "Image",
-                "alt": payload["prompt"],
-                "caption": payload["prompt"],
+                "alt": "Сгенерированное изображение",
             }]
 
         response.render_blocks = [
