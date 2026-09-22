@@ -368,9 +368,12 @@ class SequentialInterpretation:
         relation = {
             "CONTINUE_TOPIC": "CONTINUE",
             "CONTINUATION": "CONTINUE",
+            "CONTINUE": "CONTINUE",
             "ARTIFACT_REFERENCE": "CONTINUE",
             "NEW_TOPIC": "NEW",
+            "NEW": "NEW",
             "INDEPENDENT": "NEW",
+            "RECALL": "RECALL",
         }.get(relation, relation)
         if relation not in {"CONTINUE", "RECALL", "NEW"}:
             relation = "NEW"
@@ -503,9 +506,11 @@ class SequentialInterpretation:
         else:
             goal = self._goal(operation, representation)
         semantic_object = _text(semantic_task.get("object"))
+        live_scene = semantic_result.get("live_scene") if isinstance(semantic_result.get("live_scene"), dict) else {}
         semantic_topic = _text(
             semantic_task.get("topic")
             or semantic_result.get("canonical_topic")
+            or live_scene.get("topic")
             or semantic_result.get("active_topic")
         )
         generic_objects = {"", "action", "text", representation}
@@ -791,6 +796,19 @@ class ProcessorScene:
             "semantic_understanding": _compact(semantic_result.get("semantic_understanding") or {}, max_depth=5, max_items=10),
             "continuation_content_analysis": _compact(continuation_analysis, max_depth=4, max_items=8),
             "dialogue_strategy": _compact(dialogue_strategy, max_depth=3, max_items=8),
+            "live_scene": _compact(
+                semantic_result.get("live_scene")
+                or self.state.get("live_dialogue_scene")
+                or self.state.get("scene_state")
+                or {},
+                max_depth=5,
+                max_items=12,
+            ),
+            "dialogue_vector": _compact(
+                semantic_result.get("dialogue_vector") or {},
+                max_depth=5,
+                max_items=12,
+            ),
             "last_user_turn": _compact(self.state.get("last_user_turn", "")),
             "last_april_turn": _compact(self.state.get("last_april_turn", "")),
             "canonical_topic": _compact(dialogue.get("canonical_topic")),
@@ -942,6 +960,21 @@ class ProcessorScene:
                 "turn_meaning": context,
                 "active_task": _compact(turn_active_task),
                 "pending_task": _compact(pending_task),
+                "live_scene": _compact(
+                    semantic_result.get("live_scene")
+                    or context.get("live_scene")
+                    or self.state.get("live_dialogue_scene")
+                    or {},
+                    max_depth=5,
+                    max_items=12,
+                ),
+                "dialogue_vector": _compact(
+                    semantic_result.get("dialogue_vector")
+                    or context.get("dialogue_vector")
+                    or {},
+                    max_depth=5,
+                    max_items=12,
+                ),
             },
             memory=memory_packet,
             visual_context=artifact_visual_context,
