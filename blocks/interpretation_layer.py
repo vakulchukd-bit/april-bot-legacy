@@ -1458,6 +1458,35 @@ def _repair_interpretation_result(
     # Restore the canonical semantic presentation contract.  This is advisory:
     # it feeds Provider/Executor context but never performs renderer dispatch.
     _restore_presentation_contract(result, current, state=state)
+
+    # Build the explicit semantic state only after relation/reference authority
+    # and presentation authority have been synchronized. This guarantees the
+    # object/entity/representation fields cannot race ahead of dialogue selection.
+    semantic_understanding = _build_semantic_understanding(result, current, state=state)
+    result["semantic_understanding"] = semantic_understanding
+
+    # Make the precise semantic object available to downstream consumers while
+    # keeping the original user text as the canonical request operand.
+    semantic_task = result.get("semantic_task")
+    if isinstance(semantic_task, dict):
+        semantic_task = dict(semantic_task)
+        semantic_task["topic"] = semantic_understanding["topic"].get("label") or semantic_task.get("topic", "")
+        semantic_task["entity"] = semantic_understanding["entity"].get("name", "")
+        semantic_task["entity_role"] = semantic_understanding["entity"].get("role", "unknown")
+        semantic_task["object"] = semantic_understanding["object"].get("semantic_object") or semantic_task.get("object", "")
+        semantic_task["operation"] = semantic_understanding["operation"].get("technical") or semantic_task.get("operation", "")
+        semantic_task["semantic_action"] = semantic_understanding["operation"].get("semantic_action", "")
+        semantic_task["representation"] = semantic_understanding["representation"].get("type", semantic_task.get("representation", "text"))
+        semantic_task["goal"] = semantic_understanding.get("goal", semantic_task.get("goal", "answer"))
+        semantic_task["semantic_request"] = semantic_understanding["provider"].get("semantic_request", current)
+        result["semantic_task"] = semantic_task
+
+    result["semantic_request"] = semantic_understanding["provider"].get("semantic_request", current)
+    result["provider_semantic_request"] = result["semantic_request"]
+    result["semantic_object"] = semantic_understanding["object"].get("semantic_object", "")
+    result["semantic_entity"] = semantic_understanding["entity"].get("name", "")
+    result["semantic_topic"] = semantic_understanding["topic"].get("label", "")
+
     result["interpretation_control"] = _build_interpretation_control(result)
 
     result["interpretation_compatibility"] = {
@@ -1719,8 +1748,8 @@ def _is_reference_turn(text: Any) -> bool:
         return True
     tokens = set(re.findall(r"[a-zа-яё]+", low))
     return bool(tokens & {
-        "помнишь", "предыдущ", "прошлый", "прошлая", "прошлое", "раньше",
-        "тогда", "продолжи", "продолжим",
+        "помнишь", "напомни", "напомнить", "предыдущ", "прошлый", "прошлая", "прошлое",
+        "раньше", "тогда", "продолжи", "продолжим",
     })
 
 
@@ -1733,8 +1762,9 @@ def _explicit_memory_recall(text: Any) -> bool:
     low = _clean_text(text).lower()
     markers = (
         "вернемся", "вернёмся", "вернись", "вернись к",
-        "помнишь", "предыдущ", "прошлый", "прошлая", "прошлое",
+        "помнишь", "напомни", "напомнить", "предыдущ", "прошлый", "прошлая", "прошлое",
         "раньше", "как тогда", "как раньше", "возвращаясь к",
+        "о чем говорил", "о чём говорил", "с чем связано", "к чему это было",
     )
     return any(marker in low for marker in markers)
 
@@ -1964,6 +1994,7 @@ def _person_candidates(text: Any, limit: int = 10) -> list[str]:
         "Михаил", "Михаила", "Сергей", "Сергеевич", "Президент", "Генеральный",
         "Советский", "Советская", "Россия", "СССР", "КПСС",
     }
+    ignored_lower = {item.lower() for item in ignored} | _NON_ENTITY_WORDS
     found: list[str] = []
     patterns = (
         r"\b(?:[А-ЯЁ][а-яё-]{2,}\s+){1,3}[А-ЯЁ][а-яё-]{2,}\b",
@@ -1972,7 +2003,7 @@ def _person_candidates(text: Any, limit: int = 10) -> list[str]:
     for pattern in patterns:
         for match in re.finditer(pattern, value):
             candidate = re.sub(r"\s+", " ", match.group(0)).strip(' ,.;:()"')
-            if not candidate or candidate in ignored:
+            if not candidate or candidate in ignored or candidate.lower() in ignored_lower:
                 continue
             words = candidate.split()
             if len(words) >= 2:
@@ -2547,6 +2578,401 @@ def _sequence_has_artifact_context(
     }
 
 
+
+# ---------------------------------------------------------------------------
+# Structured semantic understanding: topic/entity/object/action/presentation
+# ---------------------------------------------------------------------------
+
+_SEMANTIC_ACTION_WORDS = {
+    "расскажи", "рассказать", "скажи", "покажи", "нарисуй", "изобрази",
+    "сгенерируй", "создай", "объясни", "уточни", "добавь", "измени",
+    "исправь", "переделай", "продли", "продолжи", "убери", "построй",
+    "сделай", "дай", "помоги", "помнишь", "напомни", "вернемся", "вернёмся",
+}
+
+# Single capitalized words that are frequently mistaken for person entities
+# because they occur at the start of a sentence.
+_NON_ENTITY_WORDS = _SEMANTIC_ACTION_WORDS | {
+    "если", "вот", "это", "тогда", "теперь", "почему", "зачем", "когда",
+    "можно", "нужно", "будет", "будут", "как", "что", "кто", "какой",
+    "какая", "какие", "изображение", "картинка", "картинке", "рисунок",
+    "болид", "машина", "автомобиль", "график", "таблица", "схема",
+    "формула", "фото", "видео", "ссылка", "файл",
+}
+
+_ENTITY_ROLE_PATTERNS = (
+    ("racer", r"\b(?:автогонщик|гонщик|пилот|спортсмен)\w*\b"),
+    ("politician", r"\b(?:политик|президент|премьер|депутат)\w*\b"),
+    ("scientist", r"\b(?:уч[её]ный|физик|математик|инженер)\w*\b"),
+    ("actor", r"\b(?:акт[её]р|актриса|режисс[её]р)\w*\b"),
+    ("writer", r"\b(?:писатель|поэт|автор)\w*\b"),
+    ("businessperson", r"\b(?:предприниматель|миллиардер|бизнесмен)\w*\b"),
+    ("artist", r"\b(?:художник|музыкант|композитор)\w*\b"),
+)
+
+_SEMANTIC_OBJECT_NOUNS = {
+    "image": (
+        "картинка", "изображение", "фото", "портрет", "рисунок", "болид",
+        "машина", "автомобиль", "авто", "лицо", "предмет",
+    ),
+    "graph": ("график", "диаграмма", "кривая", "зависимость", "ряд"),
+    "table": ("таблица", "табличка", "данные", "список", "сводка"),
+    "diagram": ("схема", "чертеж", "чертёж", "блок-схема", "конструкция"),
+    "formula": ("формула", "уравнение", "выражение"),
+    "code": ("код", "скрипт", "программа", "функция", "класс"),
+    "link": ("ссылка", "url", "ресурс", "страница"),
+    "file": ("файл", "документ", "архив"),
+    "video": ("видео", "ролик"),
+    "audio": ("аудио", "звук", "запись"),
+}
+
+def _infer_entity_role(text: Any, previous_answer: Any = "") -> dict[str, Any]:
+    """
+    Infer a broad semantic role only from discourse evidence already present
+    in the current turn / selected previous answer. No external knowledge.
+    """
+    corpus = f"{_clean_text(text)} {_clean_text(previous_answer)}".lower()
+    for role, pattern in _ENTITY_ROLE_PATTERNS:
+        match = re.search(pattern, corpus, flags=re.I)
+        if match:
+            return {
+                "role": role,
+                "evidence": _clean_text(match.group(0)),
+                "source": "selected_dialogue_evidence",
+            }
+    # A named subject can be a person without a more specific profession claim.
+    if _pronoun_profile(text) in {"masculine", "feminine"}:
+        return {"role": "person", "evidence": "", "source": "discourse_reference"}
+    return {"role": "unknown", "evidence": "", "source": "insufficient_evidence"}
+
+
+def _extract_semantic_object(
+    current_text: Any,
+    representation: str,
+    entity: str = "",
+) -> dict[str, Any]:
+    """
+    Extract the concrete thing the user is asking to operate on, separately
+    from the broader dialogue topic/entity.
+
+    Example:
+        "Изобрази на картинке его болид"
+          topic/entity -> Михаэля Шумахера
+          object       -> болид Михаэля Шумахера
+          representation -> image
+    """
+    text = _clean_text(current_text)
+    low = text.lower()
+    rep = _presentation_representation(representation) or representation
+    nouns = _SEMANTIC_OBJECT_NOUNS.get(rep, ())
+    found = ""
+    found_pos = -1
+
+    # Prefer the first concrete noun associated with the requested representation.
+    for noun in sorted(nouns, key=len, reverse=True):
+        match = re.search(rf"\b{re.escape(noun)}\w*\b", low)
+        if match and (found_pos < 0 or match.start() < found_pos):
+            found_pos = match.start()
+            found = match.group(0)
+
+    if not found:
+        # Generic object phrase from after the action verb.
+        action_match = re.search(
+            r"\b(?:расскажи|скажи|покажи|нарисуй|изобрази|сделай|создай|сгенерируй|построй|объясни)\b\s*(?:[^\w]+)?(.+)$",
+            text,
+            flags=re.I,
+        )
+        if action_match:
+            tail = re.sub(r"\s+", " ", action_match.group(1)).strip(" ,.!?")
+            tail_tokens = [
+                t for t in re.findall(r"[A-Za-zА-Яа-яЁё0-9_-]+", tail)
+                if t.lower() not in _DIALOGUE_STOPWORDS
+                and t.lower() not in _SEMANTIC_ACTION_WORDS
+            ]
+            if tail_tokens:
+                found = " ".join(tail_tokens[:5])
+
+    if not found:
+        found = rep if rep and rep != "text" else _extract_topic(text)
+
+    focus = _clean_text(found)
+    bound = focus
+    if entity:
+        # Keep natural object-before-entity order.
+        if focus and _semantic_similarity(focus, entity) < 0.15 and entity.lower() not in focus.lower():
+            bound = f"{focus} {entity}".strip()
+
+    return {
+        "focus": focus[:180],
+        "bound_to_entity": bool(entity and bound != focus),
+        "semantic_object": bound[:240],
+        "representation": rep or "text",
+        "source": "current_turn_semantic_object",
+    }
+
+
+def _build_semantic_understanding(
+    result: dict[str, Any],
+    current_text: str,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Produce a compact, explicit semantic state used by Provider/Executor.
+
+    This is a deterministic semantic contract, not a hidden chain-of-thought:
+    it records the resolved meaning needed to continue the conversation and
+    materialize the user's requested presentation.
+    """
+    vector = _dialogue_vector(result)
+    relation = _clean_text(
+        result.get("dialogue_relation")
+        or result.get("relation")
+        or vector.get("three_way_relation")
+        or "NEW"
+    ).upper()
+    if relation == "CONTINUE_TOPIC":
+        relation = "CONTINUE"
+
+    semantic_task = result.get("semantic_task")
+    semantic_task = dict(semantic_task) if isinstance(semantic_task, dict) else {}
+
+    representation = _presentation_representation(
+        semantic_task.get("representation")
+        or result.get("production_representation")
+        or result.get("production")
+        or result.get("representation")
+    ) or "text"
+
+    current = _clean_text(current_text)
+    active_topic = _clean_text(
+        result.get("canonical_topic")
+        or result.get("active_topic")
+        or vector.get("canonical_topic")
+    )
+    resolved_entity = _clean_text(
+        result.get("resolved_entity")
+        or result.get("resolved_reference")
+        or ""
+    )
+    explicit_subject = _explicit_subject(current)
+    if relation == "NEW" and explicit_subject:
+        if not resolved_entity:
+            resolved_entity = explicit_subject
+    elif relation == "RECALL":
+        # A recalled thread is authoritative for the recalled subject. Never
+        # borrow the currently active entity from an unrelated live thread.
+        target_sequence = _as_dict(result.get("target_sequence"))
+        target_answer = _clean_text(
+            target_sequence.get("last_april_answer")
+            or ""
+        )
+        target_candidates = _person_candidates(target_answer, limit=8)
+        resolved_entity = target_candidates[-1] if target_candidates else active_topic
+    elif not resolved_entity and relation == "CONTINUE":
+        resolved_entity = _clean_text(
+            result.get("active_entity")
+            or ((state or {}).get("april_active_entity") if isinstance(state, dict) else "")
+            or _as_dict(result.get("active_sequence")).get("active_entity")
+            or active_topic
+        )
+
+    previous_answer = ""
+    if relation in {"CONTINUE", "RECALL"}:
+        previous_answer = _clean_text(
+            result.get("previous_april_turn")
+            or _as_dict(result.get("target_sequence")).get("last_april_answer")
+            or _as_dict(result.get("active_sequence")).get("last_april_answer")
+            or ((state or {}).get("last_april_turn") if isinstance(state, dict) else "")
+        )
+
+    if relation == "RECALL" and not previous_answer and resolved_entity == active_topic:
+        entity_role = {
+            "role": "topic",
+            "evidence": active_topic,
+            "source": "selected_memory_thread",
+        }
+    else:
+        entity_role = _infer_entity_role(current, previous_answer)
+        if resolved_entity and entity_role["role"] == "unknown":
+            entity_role = _infer_entity_role(resolved_entity, previous_answer)
+
+    obj = _extract_semantic_object(current, representation, resolved_entity)
+    if relation == "RECALL" and representation == "text":
+        obj = {
+            "focus": "содержание выбранной темы",
+            "bound_to_entity": False,
+            "semantic_object": active_topic or "выбранная тема",
+            "representation": "text",
+            "source": "selected_memory_thread",
+        }
+
+    # Keep the technical operation values compatible with the existing executor,
+    # while separately describing the user's semantic action.
+    operation = _clean_text(
+        semantic_task.get("operation")
+        or result.get("operation")
+        or result.get("best_operation")
+        or "answer"
+    ).lower()
+    semantic_action = {
+        "build": "create_or_materialize",
+        "modify": "modify_existing_result",
+        "retrieve": "retrieve_resource",
+        "explain": "explain",
+        "calculate": "calculate",
+        "answer": "answer",
+    }.get(operation, operation or "answer")
+
+    if representation in {"image", "diagram", "graph", "table", "formula", "code", "link", "file", "gallery"}:
+        semantic_action = (
+            "visualize" if representation in {"image", "diagram"} and operation in {"build", "answer"}
+            else "present_structured"
+            if representation in {"graph", "table", "formula"}
+            else semantic_action
+        )
+
+    target_phrase = obj.get("semantic_object") or resolved_entity or active_topic or current
+    semantic_request = current
+    if relation == "RECALL":
+        semantic_request = (
+            f"{current} | Восстановить выбранную ветку памяти: тема «{active_topic}». "
+            f"Найти и объяснить только тот фрагмент предыдущего диалога, к которому "
+            f"относится текущий вопрос; не подменять его текущей активной темой."
+        )
+    elif relation == "CONTINUE" and resolved_entity:
+        semantic_request = (
+            f"{current} | Контекст продолжения: тема «{active_topic or resolved_entity}»; "
+            f"сущность «{resolved_entity}»; объект «{target_phrase}»; "
+            f"цель «{operation}»; представление «{representation}»."
+        )
+
+    production_mode = _clean_text(result.get("visual_production_mode")).lower()
+    if representation == "image" and production_mode not in {"image_generation", "image_present"}:
+        production_mode = "image_generation" if operation == "build" else "image_present"
+
+    semantic = {
+        "version": "april_semantic_understanding_v1",
+        "stage_order": [
+            "current_turn",
+            "dialogue_relation",
+            "topic",
+            "entity",
+            "object",
+            "operation",
+            "goal",
+            "representation",
+            "memory_operand",
+            "provider_packet",
+            "scene_contract",
+        ],
+        "current_turn": current,
+        "dialogue": {
+            "relation": relation,
+            "context_dependency": _clean_text(result.get("context_dependency") or ""),
+            "reference_to_previous": bool(result.get("reference_to_previous")),
+            "sequence_continuation_authorized": bool(result.get("sequence_continuation_authorized")),
+        },
+        "topic": {
+            "label": active_topic or explicit_subject or _extract_topic(current),
+            "continuity_owner": (
+                "selected_sequence" if relation in {"CONTINUE", "RECALL"} else "current_turn"
+            ),
+        },
+        "entity": {
+            "name": resolved_entity,
+            "role": entity_role.get("role", "unknown"),
+            "role_evidence": entity_role.get("evidence", ""),
+            "source": _clean_text(result.get("resolved_entity_source")) or entity_role.get("source", ""),
+        },
+        "object": obj,
+        "operation": {
+            "technical": operation,
+            "semantic_action": semantic_action,
+        },
+        "goal": _clean_text(semantic_task.get("goal") or result.get("goal") or "answer").lower(),
+        "representation": {
+            "type": representation,
+            "user_requested": representation != "text",
+            "production_mode": production_mode,
+            "requires_structured_payload": representation != "text",
+        },
+        "discourse_intent": {
+            "mode": _clean_text(
+                _as_dict(result.get("dialogue_strategy")).get("mode")
+                or _as_dict(result.get("continuation_content_analysis")).get("mode")
+                or "NEW"
+            ),
+            "next_direction": _clean_text(
+                _as_dict(result.get("dialogue_strategy")).get("next_direction")
+                or "answer_current_request"
+            ),
+        },
+        "memory": {
+            "sequence_id": (
+                _clean_text(result.get("target_sequence_id") or result.get("sequence_id"))
+                if relation in {"CONTINUE", "RECALL"}
+                else ""
+            ),
+            "selected_memory_index": result.get("selected_memory_index", -1),
+            "evidence_only": True,
+        },
+        "provider": {
+            "semantic_request": semantic_request[:1200],
+            "current_user_request": current,
+            "do_not_replace_current_request": True,
+            "context_source": (
+                "selected_dialogue_sequence" if relation == "CONTINUE"
+                else "selected_7d_thread" if relation == "RECALL"
+                else "current_turn_only"
+            ),
+        },
+        "render": {
+            "authorized": bool(
+                result.get("production_representation_locked")
+                or result.get("presentation_authority", {}).get("authorized")
+            ) if isinstance(result.get("presentation_authority"), dict) else bool(
+                result.get("production_representation_locked")
+            ),
+            "type": representation,
+            "payload_required": representation != "text",
+            "renderer": PRESENTATION_RENDERERS.get(representation, "MessageTextBlock"),
+        },
+    }
+    return semantic
+
+
+
+def _memory_focus_text(text: Any) -> str:
+    """Strip discourse scaffolding and keep the semantic query core."""
+    value = _clean_text(text).lower()
+    if not value:
+        return ""
+    # This is semantic normalization, not a routing trigger.
+    tokens = re.findall(r"[a-zа-яё0-9]{3,}", value)
+    kept = [
+        token for token in tokens
+        if token not in _DIALOGUE_STOPWORDS
+        and token not in _REFERENCE_WORDS
+        and token not in _SEMANTIC_ACTION_WORDS
+    ]
+    return " ".join(kept[:16])
+
+
+def _token_anchor_score(left: Any, right: Any) -> float:
+    a = _dialogue_tokens(left)
+    b = _dialogue_tokens(right)
+    if not a or not b:
+        return 0.0
+    overlap = len(a & b)
+    if not overlap:
+        return 0.0
+    # Stronger when the query's meaningful concepts are covered by the candidate.
+    return max(
+        overlap / max(1, len(a)),
+        0.72 * overlap / max(1, len(b)),
+    )
+
+
 def _choose_dialogue_thread(
     current_text: str,
     memory_field: dict[str, Any],
@@ -2613,11 +3039,14 @@ def _choose_dialogue_thread(
 
         profile_text = _sequence_profile_text(profile)
         profile_topic = _clean_text(profile.get("topic"))
+        focus_text = _memory_focus_text(current_text)
         score = max(
             _semantic_similarity(current_text, profile_topic),
             _semantic_similarity(current_text, profile_text),
-            _semantic_similarity(current_topic, profile_topic)
-            if current_topic and profile_topic else 0.0,
+            _semantic_similarity(focus_text, profile_topic) if focus_text and profile_topic else 0.0,
+            _semantic_similarity(focus_text, profile_text) if focus_text and profile_text else 0.0,
+            _token_anchor_score(focus_text, profile_topic),
+            _token_anchor_score(focus_text, profile_text),
         )
 
         artifact = _sequence_has_artifact_context(profile, state)
@@ -2723,7 +3152,7 @@ def _choose_dialogue_thread(
         relation = "CONTINUE"
         reason = "reactivate_older_user_sequence_for_continuation"
         confidence = max(0.76, min(0.97, best_score))
-    elif explicit_recall and best_sid and best_score >= 0.40:
+    elif explicit_recall and best_sid and best_score >= 0.28:
         relation = "RECALL"
         reason = "explicit_memory_recall"
         confidence = max(0.72, min(0.97, best_score))
