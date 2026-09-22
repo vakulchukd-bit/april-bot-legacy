@@ -361,6 +361,545 @@ def _self_contained_without_reference(result: dict[str, Any]) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# Canonical presentation/synchronization contract
+# ---------------------------------------------------------------------------
+# These structures are semantic/advisory only.  They do not dispatch renderers.
+# The Executor remains the owner of SceneContract construction and RenderMessage
+# remains the owner of actual visualization.
+
+WEB_SUPPORTED_PAYLOADS = (
+    "action", "audio", "code", "diagram", "file", "formula", "gallery",
+    "graph", "image", "link", "markdown", "memory", "scene", "table",
+    "text", "video", "visual_context",
+)
+
+PRESENTATION_RENDERERS = {
+    "text": "MessageTextBlock",
+    "code": "CodeBlock",
+    "graph": "GraphBlock",
+    "diagram": "GalleryBlock",
+    "image": "GalleryBlock",
+    "gallery": "GalleryBlock",
+    "link": "LinkCard",
+    "table": "TableBlock",
+    "formula": "MessageTextBlock",
+    "file": "LinkCard",
+    "audio": "MessageTextBlock",
+    "video": "MessageTextBlock",
+    "action": "MessageTextBlock",
+    "scene": "GalleryBlock",
+    "memory": "MessageTextBlock",
+    "visual_context": "GalleryBlock",
+}
+
+PRESENTATION_LABELS = {
+    "text": "textual answer",
+    "code": "executable code",
+    "graph": "graph/chart",
+    "diagram": "diagram or geometric construction",
+    "image": "image",
+    "gallery": "image gallery",
+    "link": "link cards",
+    "table": "table",
+    "formula": "mathematical notation",
+    "file": "file/resource",
+    "audio": "audio",
+    "video": "video",
+    "action": "interactive action",
+    "scene": "visual scene",
+    "memory": "memory explanation",
+    "visual_context": "visual context",
+}
+
+PRESENTATION_SCENE_PROFILES = {
+    "text": ("explanation", "message", "human-readable answer"),
+    "code": (
+        "code_example", "message_intro -> code -> message_explanation",
+        "source code plus implementation context",
+    ),
+    "graph": (
+        "data_visualization", "message_intro -> graph -> message_explanation",
+        "series, axes, labels, units and requested ranges",
+    ),
+    "diagram": (
+        "diagram_or_construction", "message_intro -> gallery_diagram -> message_explanation",
+        "nodes/shapes/relations/dimensions and construction facts",
+    ),
+    "image": (
+        "image", "message_intro -> gallery_image -> message_explanation",
+        "generated or selected image with visual context",
+    ),
+    "gallery": (
+        "image_collection", "message_intro -> gallery -> message_explanation",
+        "ordered image collection with per-image meaning",
+    ),
+    "link": (
+        "resource_links", "message_intro -> link_cards -> message_explanation",
+        "URL, title and short purpose for each resource",
+    ),
+    "table": (
+        "structured_data", "message_intro -> table -> message_explanation",
+        "rows, columns, headers, units and values",
+    ),
+    "formula": (
+        "mathematical_explanation", "message_intro -> message_formula -> message_explanation",
+        "formula plus variable definitions and interpretation",
+    ),
+    "file": (
+        "resource_file", "message_intro -> link_or_file -> message_explanation",
+        "resource identity and purpose",
+    ),
+    "audio": (
+        "audio", "message_intro -> audio_resource -> message_explanation",
+        "audio resource metadata and purpose",
+    ),
+    "video": (
+        "video", "message_intro -> video_resource -> message_explanation",
+        "video resource metadata and purpose",
+    ),
+    "action": (
+        "interactive_action", "message_intro -> action -> message_explanation",
+        "action target, parameters and expected result",
+    ),
+    "scene": (
+        "composite_visual_scene", "message_intro -> visual_scene -> message_explanation",
+        "scene objects, spatial relations and visual semantics",
+    ),
+    "memory": (
+        "memory_explanation", "message_intro -> message_explanation",
+        "resolved prior context",
+    ),
+    "visual_context": (
+        "visual_analysis", "message_intro -> gallery_context -> message_explanation",
+        "visual evidence and interpretation",
+    ),
+}
+
+_STRUCTURED_PRESENTATIONS = frozenset(
+    x for x in WEB_SUPPORTED_PAYLOADS if x not in {"text", "markdown", "memory", "visual_context"}
+)
+
+_REPRESENTATION_ALIASES = {
+    "chart": "graph", "plot": "graph", "график": "graph", "графики": "graph",
+    "schematic": "diagram", "flowchart": "diagram", "схема": "diagram", "чертеж": "diagram",
+    "чертёж": "diagram", "math": "formula", "equation": "formula",
+    "url": "link", "link_card": "link", "media": "gallery",
+}
+
+
+def _presentation_representation(value: Any) -> str:
+    value = _clean_text(value).lower()
+    value = _REPRESENTATION_ALIASES.get(value, value)
+    return value if value in WEB_SUPPORTED_PAYLOADS else ""
+
+
+def _ordered_unique(values: Any) -> list[str]:
+    out: list[str] = []
+    for value in values if isinstance(values, (list, tuple, set)) else []:
+        rep = _presentation_representation(value)
+        if rep and rep not in out:
+            out.append(rep)
+    return out
+
+
+def _current_turn_representation_mentions(text: Any) -> list[str]:
+    """Extract explicit output-format evidence from the current turn only.
+
+    This is intentionally limited to representation semantics.  It never decides
+    dialogue relation, topic, room, or renderer dispatch.
+    """
+    low = _clean_text(text).lower()
+    if not low:
+        return []
+
+    patterns = (
+        ("code", r"\b(?:код|python|пайтон|скрипт)\b"),
+        ("graph", r"\b(?:график(?:а|и)?|plot|chart)\b|\b(?:крив(?:ую|ая|ой))\b"),
+        ("table", r"\bтаблиц\w*\b|\bтабличк\w*\b"),
+        ("diagram", r"\b(?:схем\w*|чертеж\w*|чертёж\w*|блок[- ]?схем\w*)\b"),
+        ("formula", r"\b(?:формул\w*|уравнени\w*)\b"),
+        ("image", r"\b(?:изображени\w*|картинк\w*|фото|портрет\w*)\b"),
+        ("gallery", r"\bгалере\w*\b"),
+        ("link", r"\b(?:ссылк\w*|url|link)\b|https?://"),
+        ("file", r"\bфайл\w*\b"),
+        ("audio", r"\bауди\w*\b"),
+        ("video", r"\b(?:видео|video)\b"),
+        ("scene", r"\b(?:сцен\w*|визуальн\w* сцен\w*)\b"),
+    )
+    hits = []
+    for rep, pattern in patterns:
+        m = re.search(pattern, low, flags=re.I)
+        if m:
+            hits.append((m.start(), rep))
+    hits.sort(key=lambda item: item[0])
+    return [rep for _, rep in hits]
+
+
+def _explicit_current_representations(text: Any) -> list[str]:
+    mentions = _current_turn_representation_mentions(text)
+    # Imperative drawing language is visual evidence, but its final type depends
+    # on any explicit object noun.  A bare "нарисуй" therefore does not force image.
+    low = _clean_text(text).lower()
+    if not mentions and re.search(r"\b(?:нарисуй|изобрази|draw|show the graph|plot)\b", low):
+        if re.search(r"\b(?:график|plot|chart)\b", low):
+            mentions.append("graph")
+        elif re.search(r"\b(?:схем\w*|чертеж\w*|чертёж\w*)\b", low):
+            mentions.append("diagram")
+        elif re.search(r"\b(?:картинк\w*|изображени\w*|портрет\w*|draw)\b", low):
+            mentions.append("image")
+    return list(dict.fromkeys(mentions))
+
+
+def _presentation_authority(
+    result: dict[str, Any],
+    current_text: str,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve when memory is allowed to participate in output modality.
+
+    Current-turn representation is authoritative.  A prior visual modality can
+    be reused only for an actual artifact/reference continuation in the selected
+    authenticated sequence.  Generic seven-day recall never upgrades a new turn.
+    """
+    explicit = _explicit_current_representations(current_text)
+    requested = _ordered_unique(result.get("requested_outputs"))
+    requested += [x for x in _ordered_unique(result.get("requested_representations")) if x not in requested]
+
+    relation = _clean_text(
+        result.get("dialogue_relation")
+        or result.get("relation")
+        or _as_dict(result.get("dialogue_vector")).get("three_way_relation")
+    ).upper()
+    operation = _clean_text(
+        result.get("operation") or result.get("best_operation") or result.get("active_operation")
+    ).lower()
+    artifact_ref = bool(
+        result.get("artifact_reference")
+        or result.get("artifact_noun_signal")
+        or result.get("reference_to_previous") and result.get("resolved_reference_type") == "artifact"
+    )
+
+    prior_types: list[str] = []
+    scene = result.get("resolved_scene") if isinstance(result.get("resolved_scene"), dict) else {}
+    seq = result.get("active_sequence") if isinstance(result.get("active_sequence"), dict) else {}
+    for source in (scene, seq, state.get("active_visual_scene") if isinstance(state, dict) else None):
+        if not isinstance(source, dict):
+            continue
+        for item in source.get("render_block_types") or source.get("presentation_types") or []:
+            rep = _presentation_representation(item)
+            if rep and rep not in prior_types:
+                prior_types.append(rep)
+
+    explicit_structured = [x for x in explicit if x in _STRUCTURED_PRESENTATIONS]
+    requested_structured = [x for x in requested if x in _STRUCTURED_PRESENTATIONS]
+    if explicit_structured:
+        return {
+            "mode": "CURRENT_TURN",
+            "authorized": True,
+            "representations": explicit_structured,
+            "source": "current_turn_explicit_representation",
+            "relation": relation,
+        }
+
+    # The engine may already have a single current-turn structured request.
+    if requested_structured and bool(result.get("explicit_task")):
+        return {
+            "mode": "CURRENT_TURN",
+            "authorized": True,
+            "representations": requested_structured,
+            "source": "current_turn_explicit_task",
+            "relation": relation,
+        }
+
+    # Only a real artifact continuation can inherit a prior render modality.
+    if relation in {"CONTINUE", "RECALL", "CONTINUE_TOPIC"} and artifact_ref and prior_types:
+        if operation in {"modify", "build", "present", "calculate", "analyze", "retrieve"} or re.search(
+            r"\b(?:добавь|убери|измени|исправь|переделай|продли|продолжи|перерисуй|обнови|покажи)\b",
+            _clean_text(current_text).lower(),
+        ):
+            return {
+                "mode": "ARTIFACT_CONTINUATION",
+                "authorized": True,
+                "representations": [x for x in prior_types if x in _STRUCTURED_PRESENTATIONS],
+                "source": "active_visual_scene_artifact_continuation",
+                "relation": relation,
+            }
+
+    return {
+        "mode": "TEXT_ONLY",
+        "authorized": False,
+        "representations": [],
+        "source": "current_turn_text_no_structured_authority",
+        "relation": relation,
+    }
+
+
+def _presentation_recommendations_from_reps(
+    current_text: str,
+    representations: list[str],
+    *,
+    production: str = "text",
+    continuation: bool = False,
+    previous_scene: dict[str, Any] | None = None,
+    scores: dict[str, Any] | None = None,
+    explicit: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    scores = scores if isinstance(scores, dict) else {}
+    explicit_set = set(explicit or [])
+    reps = [x for x in _ordered_unique(representations) if x in WEB_SUPPORTED_PAYLOADS]
+    if any(x != "text" for x in reps) and "text" not in reps:
+        reps = ["text"] + reps
+    if not reps:
+        reps = ["text"]
+    scene_id = _clean_text((previous_scene or {}).get("scene_id")) if isinstance(previous_scene, dict) else ""
+
+    out: list[dict[str, Any]] = []
+    for idx, label in enumerate(reps):
+        renderer = PRESENTATION_RENDERERS.get(label, "MessageTextBlock")
+        role, composition, payload = PRESENTATION_SCENE_PROFILES.get(
+            label,
+            ("explanation", "message", "human-readable answer"),
+        )
+        continuing_scene = bool(continuation and scene_id and label != "text")
+        signal = {
+            "version": "scene_presentation_signal_v3",
+            "engine": "McDowell",
+            "math_engine": "KaTeX",
+            "kind": label,
+            "renderer": renderer,
+            "renderer_authority": "SCENE_CONTRACT",
+            "owner": "QUANTUM_PROCESSOR",
+            "source": "QUANTUM_INTERPRETATION_ENGINE",
+            "evidence_only": True,
+            "payload_unchanged": True,
+            "layout_mode": "flow",
+            "container": "adaptive_full_width",
+            "scene_id": scene_id,
+            "block_id": "",
+            "render_id": "",
+            "status": "planned",
+        }
+        out.append({
+            "recommendation_id": f"semantic-presentation-{idx + 1}",
+            "representation": label,
+            "representation_label": PRESENTATION_LABELS.get(label, label),
+            "renderer": renderer,
+            "renderer_signal": signal,
+            "semantic_basis": {
+                "representation_score": float(scores.get(label, 0.0) or 0.0),
+                "object_score": 0.0,
+                "operation": "",
+                "goal": "",
+                "is_production_representation": label == production,
+                "production_locked": label == production,
+                "explicit_current_request": label in explicit_set,
+            },
+            "response_role": "supporting_explanation" if label == "text" else "primary_representation",
+            "scene_recommendation": {
+                "role": role,
+                "order_hint": "representation" if label != "text" else "narrative",
+                "composition": composition,
+                "sequence": (
+                    [
+                        {"role": "introduction", "renderer": "MessageTextBlock", "content_role": "request_essence"},
+                        {"role": "representation", "renderer": renderer, "type": label, "content_role": "specialized_result"},
+                        {"role": "explanation", "renderer": "MessageTextBlock", "content_role": "result_explanation"},
+                    ]
+                    if label != "text"
+                    else [{"role": "answer", "renderer": "MessageTextBlock", "content_role": "human_answer"}]
+                ),
+                "intro_via": "MessageTextBlock",
+                "renderer": renderer,
+                "explanation_via": "MessageTextBlock",
+                "payload_expectation": payload,
+                "scene_relation": "continue_existing_scene" if continuing_scene else "new_scene",
+                "reuse_scene_id": scene_id if continuing_scene else "",
+                "avoid_repeat": continuing_scene,
+                "build_scene_after_semantic_understanding": True,
+                "independent_scene_recommendation": True,
+            },
+            "text_guidance": {
+                "introduction": "Briefly state the essence of the current user request and what this representation will show.",
+                "explanation": "Explain the produced result, its main meaning and purpose after the specialized block.",
+            },
+            "advisory_only": True,
+        })
+    return out
+
+
+def _restore_presentation_contract(
+    result: dict[str, Any],
+    current_text: str,
+    state: dict[str, Any] | None = None,
+) -> None:
+    """Restore the semantic presentation contract without becoming a renderer."""
+    if not isinstance(result, dict):
+        return
+
+    authority = _presentation_authority(result, current_text, state)
+    explicit = _explicit_current_representations(current_text)
+
+    current_requested = authority.get("representations") or []
+    if authority.get("mode") == "CURRENT_TURN" and explicit:
+        requested = explicit
+    elif authority.get("mode") == "ARTIFACT_CONTINUATION":
+        requested = list(current_requested)
+    else:
+        requested = []
+
+    # A single production field may be trusted only when its source is current-turn
+    # or an explicitly authorized artifact continuation.
+    production = _presentation_representation(result.get("production") or result.get("representation"))
+    if authority.get("mode") == "CURRENT_TURN" and explicit:
+        # For compound requests the first explicitly named representation is
+        # the primary production signal; the complete list remains requested.
+        production = explicit[0] if explicit else production
+    elif not production or production == "text":
+        production = requested[0] if requested else "text"
+    if production not in requested and production != "text" and authority.get("authorized"):
+        requested.insert(0, production)
+
+    if not requested:
+        requested = ["text"]
+        production = "text"
+
+    result["production"] = production
+    result["representation"] = production
+    result["subtype"] = production
+    result["scene_type"] = production
+    result["requested_outputs"] = list(dict.fromkeys(requested))
+    result["requested_representations"] = list(dict.fromkeys(requested))
+    result["required_representations"] = list(dict.fromkeys(requested))
+    result["candidate_representations"] = list(dict.fromkeys(requested))
+    result["production_representation"] = production
+    result["production_representation_locked"] = bool(authority.get("authorized"))
+    result["production_representation_source"] = authority.get("source")
+    result["supported_payloads"] = list(WEB_SUPPORTED_PAYLOADS)
+
+    prev_scene = {}
+    if authority.get("mode") == "ARTIFACT_CONTINUATION":
+        prev_scene = (
+            result.get("resolved_scene")
+            if isinstance(result.get("resolved_scene"), dict)
+            else {}
+        )
+        if not prev_scene and isinstance(state, dict):
+            prev_scene = (
+                state.get("active_visual_scene")
+                if isinstance(state.get("active_visual_scene"), dict)
+                else state.get("current_visual_scene")
+                if isinstance(state.get("current_visual_scene"), dict)
+                else {}
+            )
+
+    scene_representations = ["text"] + [x for x in requested if x != "text"]
+    recommendations = _presentation_recommendations_from_reps(
+        current_text,
+        scene_representations,
+        production=production,
+        continuation=authority.get("mode") == "ARTIFACT_CONTINUATION",
+        previous_scene=prev_scene,
+        scores=result.get("representation_scores") if isinstance(result.get("representation_scores"), dict) else {},
+        explicit=explicit,
+    )
+    scene_plan = [item["scene_recommendation"] for item in recommendations]
+    signals = [item["renderer_signal"] for item in recommendations]
+
+    old_presentation = result.get("presentation") if isinstance(result.get("presentation"), dict) else {}
+    presentation = dict(old_presentation)
+    presentation.update({
+        "version": "quantum_interpretation_transport_v4",
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "single_route": True,
+        "production_representation": production,
+        "recommendation_policy": {
+            "generated_after_interpretation": True,
+            "current_request_authoritative": True,
+            "multiple_representations_allowed": True,
+            "multiple_renderer_recommendations_allowed": True,
+            "scene_recommendation_per_representation": True,
+            "text_intro_renderer": "MessageTextBlock",
+            "text_explanation_renderer": "MessageTextBlock",
+            "stale_context_cannot_upgrade_current_representation": True,
+        },
+        "signals": signals,
+        "recommendations": recommendations,
+        "scene_plan": scene_plan,
+    })
+
+    result["presentation"] = presentation
+    result["presentation_transport"] = presentation
+    result["presentation_signal"] = presentation
+    result["presentation_recommendations"] = recommendations
+    result["presentation_signals"] = signals
+    result["scene_recommendations"] = scene_plan
+    result["scene_plan"] = scene_plan
+
+    # `scene_composition` is the ordered semantic scene, not renderer output.
+    result["scene_composition"] = [
+        {
+            "representation": item["representation"],
+            "role": item["scene_recommendation"]["role"],
+            "order": index,
+            "renderer": item["renderer"],
+            "scene_relation": item["scene_recommendation"]["scene_relation"],
+        }
+        for index, item in enumerate(recommendations)
+    ]
+    result["scene_graph"] = {
+        "root": "current_request",
+        "parts": result["scene_composition"],
+        "representation_order": [x["representation"] for x in result["scene_composition"]],
+        "semantic_source": "current_turn_presentation_sync",
+    }
+
+    prev_types = []
+    if isinstance(prev_scene, dict):
+        prev_types = _ordered_unique(prev_scene.get("render_block_types") or prev_scene.get("presentation_types"))
+    result["render_continuity"] = {
+        "relation": _clean_text(
+            result.get("dialogue_relation")
+            or result.get("relation")
+            or _as_dict(result.get("dialogue_vector")).get("three_way_relation")
+        ).upper() or "NEW",
+        "reuse_existing_scene": authority.get("mode") == "ARTIFACT_CONTINUATION" and bool(prev_types),
+        "reuse_recalled_memory": False,
+        "selected_memory_index": result.get("selected_memory_index", -1),
+        "previous_scene_id": _clean_text(prev_scene.get("scene_id")) if isinstance(prev_scene, dict) else "",
+        "previous_render_types": prev_types,
+        "avoid_repeat": True,
+        "authority": authority.get("source"),
+    }
+    result["render_signal_inventory"] = [
+        {
+            "block_id": signal.get("block_id", ""),
+            "type": signal.get("kind", "text"),
+            "renderer": _clean_text(signal.get("renderer")).lower(),
+            "fallback_renderer": "MessageTextBlock",
+            "sequence_index": index,
+            "signal_channel": "canonical_web_render_signal_v2",
+            "status": "planned",
+            "evidence_only": True,
+        }
+        for index, signal in enumerate(signals)
+    ]
+    result["presentation_sync"] = {
+        "version": "presentation_sync_v1",
+        "stage": "interpretation_post_semantic_pre_provider",
+        "current_turn_authority": True,
+        "memory_evidence_only": True,
+        "authority_mode": authority.get("mode"),
+        "authority_source": authority.get("source"),
+        "relation": authority.get("relation"),
+        "requested_outputs": list(dict.fromkeys(requested)),
+        "renderer_contract": "advisory",
+        "scene_contract_owner": "EXECUTOR",
+        "web_renderer_owner": "RENDERMESSAGE",
+        "compound_outputs_preserved": len([x for x in requested if x != "text"]) > 1,
+    }
+
+
 def _explicit_structured_request(text: str) -> bool:
     """
     Narrow current-turn check. This is NOT a command router; it only prevents
@@ -498,41 +1037,24 @@ def _force_new_turn_state(result: dict[str, Any], current_text: str) -> None:
 def _remove_stale_structured_representation(
     result: dict[str, Any],
     current_text: str,
+    state: dict[str, Any] | None = None,
 ) -> None:
-    """
-    Do not let an old formula/graph/diagram/image state turn a plain information
-    request into a structured scene.
+    """Remove only genuinely stale visual modality.
 
-    This changes only explicit representation hints at the interpretation
-    boundary; it does not touch canonical historical evidence.
+    Current-turn structured requests and authorized artifact continuations are
+    never downgraded.  Historical memory alone cannot upgrade a plain turn.
     """
-    if _explicit_structured_request(current_text):
+    authority = _presentation_authority(result, current_text, state)
+    if authority.get("authorized"):
         return
 
-    structured = {
-        "formula",
-        "graph",
-        "diagram",
-        "image",
-        "gallery",
-        "table",
-        "code",
-        "link",
-        "audio",
-        "video",
-        "file",
-        "scene",
-        "memory",
-        "visual_context",
-    }
-
+    structured = set(_STRUCTURED_PRESENTATIONS)
     operation = str(
         result.get("operation")
         or result.get("best_operation")
         or result.get("active_operation")
         or ""
     ).lower()
-
     representation = str(
         result.get("production")
         or result.get("representation")
@@ -541,18 +1063,7 @@ def _remove_stale_structured_representation(
         or ""
     ).lower()
 
-    # Only scrub stale structured state for answer/explain/retrieve/list style
-    # operations, or where the engine exposes no operation at all.
-    text_operations = {
-        "",
-        "answer",
-        "explain",
-        "retrieve",
-        "list",
-        "analyze",
-        "present",
-    }
-
+    text_operations = {"", "answer", "explain", "retrieve", "list", "analyze"}
     if representation in structured and operation in text_operations:
         result["production"] = "text"
         result["representation"] = "text"
@@ -561,7 +1072,8 @@ def _remove_stale_structured_representation(
         result["visual_production_mode"] = "text"
         result["requested_representations"] = ["text"]
         result["requested_outputs"] = ["text"]
-
+        result["required_representations"] = ["text"]
+        result["candidate_representations"] = ["text"]
         presentation = result.get("presentation")
         if isinstance(presentation, dict):
             presentation = dict(presentation)
@@ -589,9 +1101,6 @@ def _repair_interpretation_result(
     # Exact Railway regression fence.
     if _self_contained_without_reference(result):
         _force_new_turn_state(result, current)
-
-    # Plain informational turns cannot inherit an unrelated old renderer.
-    _remove_stale_structured_representation(result, current)
 
     # For CONTINUE, the authenticated live sequence is the authority. Generic
     # seven-day recall remains evidence-only and may not replace the current
@@ -733,6 +1242,14 @@ def _repair_interpretation_result(
                 "previous_april_turn": continuation_analysis.get("previous_answer", contract.get("previous_april_turn", "")),
             })
 
+    # Representation safety runs after dialogue authority has been synchronized
+    # so a legitimate artifact continuation cannot be mistaken for stale state.
+    _remove_stale_structured_representation(result, current, state=state)
+
+    # Restore the canonical semantic presentation contract.  This is advisory:
+    # it feeds Provider/Executor context but never performs renderer dispatch.
+    _restore_presentation_contract(result, current, state=state)
+
     result["interpretation_compatibility"] = {
         "version": "2026-09-22-dialogue-content-semantics-v4",
         "canonical_engine_discovery": bool(
@@ -746,6 +1263,12 @@ def _repair_interpretation_result(
         "continuation_content_analysis": True,
         "active_sequence_authority": True,
         "semantic_dialogue_strategy": True,
+        "presentation_contract_restored": True,
+        "render_signal_inventory_restored": True,
+        "compound_outputs_preserved": True,
+        "memory_can_supply_visual_context": True,
+        "artifact_continuation_can_reuse_prior_visual": True,
+        "renderer_authority": "SCENE_CONTRACT",
     }
 
     return result
@@ -1838,9 +2361,32 @@ def _choose_dialogue_thread(
     best_profile = candidates[0][2] if candidates else {}
     best_artifact = candidates[0][3] if candidates else {}
 
+    # A short affirmative clarification can contain a concrete noun phrase
+    # (e.g. "Да, именно про индийца...") while still being a continuation.
+    # Require both an anaphoric/discourse marker and semantic support from the
+    # immediately previous authentic answer, so this does not become a generic
+    # keyword trigger for new topics.
+    contextual_affirmation = bool(re.search(
+        r"^(?:да|точно|верно|именно)\b.*\b(?:про|об|о)\b",
+        _clean_text(current_text).lower(),
+    ))
+    immediate_answer_support = (
+        _semantic_similarity(current_text, active_last_answer) >= 0.06
+        if active_last_answer else False
+    )
+    if (
+        not explicit_new
+        and active_id
+        and contextual_affirmation
+        and reference_signal
+        and immediate_answer_support
+    ):
+        relation = "CONTINUE"
+        reason = "affirmative_contextual_continuation"
+        confidence = max(0.76, min(0.96, 0.76 + active_score * 0.20))
     # Strong concrete subject means "new" unless the same user explicitly
     # points back to an older stored thread.
-    if explicit_new:
+    elif explicit_new:
         relation = "NEW"
         reason = "explicit_new_topic"
         confidence = 0.99
@@ -2818,7 +3364,11 @@ class QuantumInterpretationEngine:
             return "code"
         if re.search(r"\b(ссыл\w*|url|link)\b", low):
             return "link"
-        if re.search(r"\b(нарисуй|изобрази|сгенерируй|создай)\b", low) or "картинк" in low or "изображени" in low or "портрет" in low:
+        if re.search(r"\b(картинк\w*|изображени\w*|портрет\w*|фото)\b", low):
+            return "image"
+        if re.search(r"\b(нарисуй|изобрази|draw)\b", low):
+            if re.search(r"\b(схем\w*|чертеж\w*|чертёж\w*)\b", low):
+                return "diagram"
             return "image"
         if re.search(r"\b(график|графика|кривую|кривая)\b", low):
             return "graph"
@@ -2907,9 +3457,19 @@ class QuantumInterpretationEngine:
             ).lower()
 
         representation = raw_representation
-        if relation_name in {"CONTINUE", "RECALL"} and representation == "text" and active_representation:
-            # Follow-up turns inherit the representation only when the current
-            # user request did not explicitly select another representation.
+        current_explicit_reps = _explicit_current_representations(current)
+        artifact_continuation = bool(
+            relation_name in {"CONTINUE", "RECALL"}
+            and (relation.get("artifact_reference") or relation.get("artifact_noun_signal"))
+            and active_representation
+            and (
+                self._operation(current, active_representation) in {"modify", "build", "present", "calculate"}
+                or bool(re.search(r"\b(?:добавь|убери|измени|исправь|переделай|продли|продолжи|перерисуй|обнови|покажи)\b", current.lower()))
+            )
+        )
+        if representation == "text" and not current_explicit_reps and artifact_continuation:
+            # Artifact continuation is the only case where the previous render
+            # modality can become the current production modality.
             representation = active_representation
 
         operation = self._operation(current, representation)
@@ -3054,10 +3614,13 @@ class QuantumInterpretationEngine:
         else:
             continuation_target = {}
 
-        requested_outputs = [representation if representation != "text" else "text"]
-        scene_composition = list(requested_outputs)
-        if representation != "text" and "text" not in scene_composition:
-            scene_composition.insert(0, "text")
+        compound_representations = list(current_explicit_reps)
+        if representation != "text" and representation not in compound_representations:
+            compound_representations.insert(0, representation)
+        if not compound_representations:
+            compound_representations = [representation if representation != "text" else "text"]
+        requested_outputs = list(dict.fromkeys(compound_representations))
+        scene_composition = ["text"] + [x for x in requested_outputs if x != "text"]
 
         return {
             "type": "text" if representation == "text" else representation,
@@ -3116,7 +3679,7 @@ class QuantumInterpretationEngine:
             "history_available": bool(relation.get("previous_user_turn") or relation.get("previous_april_turn") or relation.get("sequence_pairs")),
             "current_turn_complete": True,
             "current_request_complete": True,
-            "explicit_task": bool(raw_representation != "text"),
+            "explicit_task": bool(current_explicit_reps or raw_representation != "text"),
             "sequence_continuation_authorized": relation_name == "CONTINUE",
             "continuation_target": continuation_target,
             "selected_memory_index": relation.get("selected_memory_index", -1),
@@ -3553,7 +4116,7 @@ def __getattr__(name: str) -> Any:
 
 
 INTERPRETATION_COMPATIBILITY_VERSION = (
-    "2026-09-22-seven-day-dialogue-vector-memory-thread-v2"
+    "2026-09-22-seven-day-dialogue-vector-memory-presentation-sync-v1"
 )
 INTERPRETATION_REQUEST_OPERAND_POLICY = "CURRENT_USER_TURN_ONLY"
 INTERPRETATION_HISTORICAL_MEMORY_POLICY = "SEVEN_DAY_DIALOGUE_MEMORY_EVIDENCE"
