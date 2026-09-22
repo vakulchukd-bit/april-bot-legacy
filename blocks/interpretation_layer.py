@@ -33,6 +33,7 @@ import importlib
 import re
 import hashlib
 import time
+from copy import deepcopy
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -574,11 +575,10 @@ def _presentation_authority(
     operation = _clean_text(
         result.get("operation") or result.get("best_operation") or result.get("active_operation")
     ).lower()
-    artifact_ref = bool(
-        result.get("artifact_reference")
-        or result.get("artifact_noun_signal")
-        or result.get("reference_to_previous") and result.get("resolved_reference_type") == "artifact"
-    )
+    # Current utterance is the authority for artifact continuation. Historical
+    # compatibility flags are diagnostic only and must never turn a new request
+    # that merely mentions "график"/"таблица" into ARTIFACT_CONTINUATION.
+    artifact_ref = bool(_artifact_continuation_signal(current_text))
 
     prior_types: list[str] = []
     scene = result.get("resolved_scene") if isinstance(result.get("resolved_scene"), dict) else {}
@@ -586,13 +586,49 @@ def _presentation_authority(
     for source in (scene, seq, state.get("active_visual_scene") if isinstance(state, dict) else None):
         if not isinstance(source, dict):
             continue
-        for item in source.get("render_block_types") or source.get("presentation_types") or []:
+        source_types = source.get("render_block_types") or source.get("presentation_types") or []
+        if not isinstance(source_types, list):
+            source_types = []
+        if not source_types:
+            source_types = [
+                block.get("type") or block.get("artifact_type") or block.get("kind")
+                for block in (source.get("render_blocks") or source.get("blocks") or [])
+                if isinstance(block, dict)
+            ]
+        for item in source_types:
             rep = _presentation_representation(item)
             if rep and rep not in prior_types:
                 prior_types.append(rep)
 
     explicit_structured = [x for x in explicit if x in _STRUCTURED_PRESENTATIONS]
     requested_structured = [x for x in requested if x in _STRUCTURED_PRESENTATIONS]
+
+    # "Этот график", "продли его", "добавь к таблице" etc. are not ordinary
+    # new structured requests: the current turn explicitly names the operation
+    # while referring to an already-produced artifact. Keep the current-turn
+    # representation authoritative, but unlock only the minimal previous-artifact
+    # context needed to perform the continuation.
+    artifact_operation = operation in {"modify", "build", "present", "calculate", "analyze", "retrieve"} or re.search(
+        r"\b(?:добавь|убери|измени|исправь|переделай|продли|продолжи|перерисуй|обнови|покажи)\b",
+        _clean_text(current_text).lower(),
+    )
+    if (
+        relation in {"CONTINUE", "RECALL", "CONTINUE_TOPIC"}
+        and artifact_ref
+        and prior_types
+        and artifact_operation
+    ):
+        inherited = [x for x in prior_types if x in _STRUCTURED_PRESENTATIONS]
+        representations = list(dict.fromkeys(explicit_structured + inherited))
+        if representations:
+            return {
+                "mode": "ARTIFACT_CONTINUATION",
+                "authorized": True,
+                "representations": representations,
+                "source": "current_turn_with_active_artifact_context",
+                "relation": relation,
+            }
+
     if explicit_structured:
         return {
             "mode": "CURRENT_TURN",
@@ -829,6 +865,7 @@ def _restore_presentation_contract(
     })
 
     result["presentation"] = presentation
+    result["presentation_authority"] = deepcopy(authority)
     result["presentation_transport"] = presentation
     result["presentation_signal"] = presentation
     result["presentation_recommendations"] = recommendations
@@ -989,9 +1026,22 @@ def _force_new_turn_state(result: dict[str, Any], current_text: str) -> None:
     result["request_dependency"] = "independent"
     result["context_dependency"] = "independent"
     result["resolved_reference"] = ""
+    result["resolved_reference_type"] = "none"
+    result["resolved_entity"] = ""
+    result["resolved_entity_source"] = "current_turn_topic"
     result["history_dependent_task"] = False
     result["current_turn_authority"] = True
     result["historical_memory_is_evidence_only"] = True
+    current_topic = _extract_topic(current) or current[:120]
+    if current_topic:
+        result["active_topic"] = current_topic
+        result["canonical_topic"] = current_topic
+        result["current_topic"] = current_topic
+    semantic_task = result.get("semantic_task")
+    if isinstance(semantic_task, dict):
+        semantic_task = dict(semantic_task)
+        semantic_task["topic"] = current_topic or semantic_task.get("topic") or "current_request"
+        result["semantic_task"] = semantic_task
 
     vector = _dialogue_vector(result)
     if vector:
@@ -1008,6 +1058,10 @@ def _force_new_turn_state(result: dict[str, Any], current_text: str) -> None:
                 "resolved_request": current,
                 "request_operand": current,
                 "request_operand_source": "current_user_turn",
+                "active_topic": current_topic,
+                "canonical_topic": current_topic,
+                "resolved_entity": "",
+                "resolved_entity_source": "current_turn_topic",
                 "current_turn_authority": True,
                 "historical_memory_is_evidence_only": True,
                 "forced_new_topic": True,
@@ -1032,6 +1086,27 @@ def _force_new_turn_state(result: dict[str, Any], current_text: str) -> None:
             vector["sequential_dialogue"] = sequential
 
         result["dialogue_vector"] = vector
+
+    contract = result.get("dialogue_contract")
+    if isinstance(contract, dict):
+        contract = dict(contract)
+        contract.update({
+            "relation": "NEW",
+            "three_way_relation": "NEW",
+            "continuation": False,
+            "context_dependency": "independent",
+            "reference_to_previous": False,
+            "active_topic": current_topic,
+            "canonical_topic": current_topic,
+            "resolved_reference": "",
+            "resolved_reference_type": "none",
+            "resolved_entity": "",
+            "resolved_entity_source": "current_turn_topic",
+            "selected_memory_operand": {},
+            "selected_memory_index": -1,
+            "target_sequence_id": "",
+        })
+        result["dialogue_contract"] = contract
 
 
 def _remove_stale_structured_representation(
@@ -1085,6 +1160,107 @@ def _remove_stale_structured_representation(
             result["presentation"] = presentation
 
 
+def _semantic_break_requires_new_vector(
+    result: dict[str, Any],
+    current_text: str,
+    state: dict[str, Any] | None = None,
+) -> bool:
+    """Detect an unrelated, self-contained turn before stale state can leak in."""
+    relation = _clean_text(
+        result.get("dialogue_relation")
+        or result.get("relation")
+        or _as_dict(result.get("dialogue_vector")).get("three_way_relation")
+    ).upper()
+    if relation not in {"CONTINUE", "CONTINUE_TOPIC"}:
+        return False
+
+    # Use the current utterance as the reference authority. Upstream adapters
+    # have historically misclassified ordinary words (for example "они" or
+    # "скажи") as entities; those fields cannot protect a stale continuation.
+    reference = _is_reference_turn(current_text)
+    artifact_reference = _artifact_continuation_signal(current_text)
+    if reference or artifact_reference:
+        return False
+
+    active = _as_dict(result.get("active_sequence"))
+    if not active and isinstance(state, dict):
+        active = _as_dict(state.get("active_dialogue_sequence"))
+    active_topic = _clean_text(
+        result.get("active_topic")
+        or active.get("topic")
+        or (state or {}).get("april_active_topic") if isinstance(state, dict) else ""
+    )
+    last_user = _clean_text(result.get("previous_user_turn") or active.get("last_user_request"))
+    last_answer = _clean_text(result.get("previous_april_turn") or active.get("last_april_answer"))
+    current = _clean_text(current_text)
+    if not current or not active_topic:
+        return False
+
+    active_score = max(
+        _semantic_similarity(current, active_topic),
+        _semantic_similarity(current, last_user) if last_user else 0.0,
+        _semantic_similarity(current, last_answer) if last_answer else 0.0,
+    )
+    explicit_refs = _is_reference_turn(current)
+    artifact_refs = _artifact_continuation_signal(current)
+    explicit_subject = _explicit_subject(current)
+    probe = explicit_subject or _extract_topic(current)
+    topic_fit = _semantic_similarity(probe, active_topic) if probe else 0.0
+    meaningful_tokens = len(_dialogue_tokens(current))
+
+    # Short follow-ups without reference evidence are allowed to stay on topic
+    # when the live answer provides measurable semantic support. Full self-
+    # contained turns require actual semantic affinity.
+    return (
+        meaningful_tokens >= 4
+        and not explicit_refs
+        and not artifact_refs
+        and active_score < 0.34
+        and topic_fit < 0.34
+    )
+
+
+def _build_interpretation_control(result: dict[str, Any]) -> dict[str, Any]:
+    authority = result.get("presentation_authority") if isinstance(result.get("presentation_authority"), dict) else {}
+    relation = _clean_text(result.get("dialogue_relation") or result.get("relation") or "NEW").upper()
+    if relation == "NEW_TOPIC":
+        relation = "NEW"
+    render_authorized = bool(authority.get("authorized"))
+    mode = _clean_text(authority.get("mode") or "TEXT_ONLY").upper()
+    reps = _ordered_unique(authority.get("representations")) if render_authorized else []
+
+    if relation == "NEW":
+        context_policy = "current_turn_only"
+        memory_policy = "no_historical_content"
+    elif mode == "ARTIFACT_CONTINUATION":
+        context_policy = "active_sequence_artifact_only"
+        memory_policy = "selected_live_sequence_only"
+    elif relation == "RECALL":
+        context_policy = "selected_memory_thread_only"
+        memory_policy = "selected_7d_thread_only"
+    else:
+        context_policy = "active_sequence_compact"
+        memory_policy = "selected_live_sequence_only"
+
+    return {
+        "version": "interpretation_control_v2",
+        "relation": relation,
+        "context_policy": context_policy,
+        "memory_policy": memory_policy,
+        "render_authorized": render_authorized,
+        "render_mode": mode,
+        "render_representations": reps,
+        "current_turn_authority": True,
+        "historical_memory_is_evidence_only": True,
+        "stale_visual_scene_can_upgrade_modality": False,
+        "provider_must_follow_plan": True,
+        "provider_input_budget": 900,
+        "one_provider_call": True,
+        "renderer_authority": "SCENE_CONTRACT",
+        "payload_contract": "canonical_non_empty_payload_required_for_structured_blocks",
+    }
+
+
 def _repair_interpretation_result(
     result: Any,
     current_text: str,
@@ -1100,6 +1276,13 @@ def _repair_interpretation_result(
 
     # Exact Railway regression fence.
     if _self_contained_without_reference(result):
+        _force_new_turn_state(result, current)
+
+    # Final semantic-break fence: even if an upstream compatibility adapter
+    # reported CONTINUE, a complete unrelated request without an anaphoric or
+    # artifact reference starts a new dialogue vector. This check runs before
+    # any active-sequence state can be re-applied.
+    if _semantic_break_requires_new_vector(result, current, state):
         _force_new_turn_state(result, current)
 
     # For CONTINUE, the authenticated live sequence is the authority. Generic
@@ -1118,7 +1301,13 @@ def _repair_interpretation_result(
             current,
             {
                 "relation": relation,
-                "reference": bool(result.get("reference_to_previous") or result.get("reference")),
+                "reference": bool(
+                    _is_reference_turn(current)
+                    or (
+                        result.get("reference_to_previous")
+                        and _is_reference_turn(current)
+                    )
+                ),
                 "active_sequence": (
                     result.get("active_sequence")
                     if isinstance(result.get("active_sequence"), dict)
@@ -1131,14 +1320,10 @@ def _repair_interpretation_result(
                 "sequence_pairs": result.get("sequence_pairs") or [],
                 "resolved_entity": result.get("resolved_entity") or "",
                 "resolved_entity_source": result.get("resolved_entity_source") or "",
-                "artifact_reference": bool(
-                    result.get("artifact_reference")
-                    or _as_dict(result.get("thread_choice")).get("artifact_signal")
-                ),
-                "artifact_noun_signal": bool(
-                    result.get("artifact_noun_signal")
-                    or _as_dict(result.get("thread_choice")).get("artifact_noun_signal")
-                ),
+                # A bare artifact noun is a current-turn request, not a
+                # reference to an existing artifact.
+                "artifact_reference": bool(_artifact_continuation_signal(current)),
+                "artifact_noun_signal": bool(_artifact_noun_signal(current)),
                 "target_sequence": (
                     result.get("target_sequence")
                     if isinstance(result.get("target_sequence"), dict)
@@ -1153,15 +1338,12 @@ def _repair_interpretation_result(
             operation=_clean_text(result.get("operation") or result.get("best_operation")),
         )
         result["continuation_content_analysis"] = continuation_analysis
-        result["artifact_reference"] = bool(
-            continuation_analysis.get("artifact_reference")
-            or continuation_analysis.get("artifact_noun_signal")
-            or result.get("artifact_reference")
-        )
-        result["artifact_noun_signal"] = bool(
-            continuation_analysis.get("artifact_noun_signal")
-            or result.get("artifact_noun_signal")
-        )
+        # Only an actual artifact reference/editing continuation may authorize
+        # prior-render context. Bare nouns such as "график" and "таблица" do not.
+        strict_artifact_reference = bool(_artifact_continuation_signal(current))
+        result["artifact_reference"] = strict_artifact_reference
+        result["artifact_continuation_signal"] = strict_artifact_reference
+        result["artifact_noun_signal"] = bool(_artifact_noun_signal(current))
         result["resolved_reference_type"] = (
             "artifact"
             if result.get("artifact_reference")
@@ -1185,9 +1367,9 @@ def _repair_interpretation_result(
         result["resolved_entity_source"] = continuation_analysis.get("active_entity_source", "")
         result["resolved_reference_type"] = (
             "artifact"
-            if continuation_analysis.get("artifact_reference")
+            if strict_artifact_reference
             else "entity"
-            if continuation_analysis.get("active_entity")
+            if continuation_analysis.get("active_entity") and _is_reference_turn(current)
             else "none"
         )
         result["memory_resolution"] = {
@@ -1242,13 +1424,41 @@ def _repair_interpretation_result(
                 "previous_april_turn": continuation_analysis.get("previous_answer", contract.get("previous_april_turn", "")),
             })
 
+    # Final current-turn artifact authority. Compatibility fields from older
+    # adapters are never allowed to survive as artifact references unless the
+    # current utterance itself proves an artifact continuation.
+    strict_artifact_reference = bool(_artifact_continuation_signal(current))
+    result["artifact_reference"] = strict_artifact_reference
+    result["artifact_continuation_signal"] = strict_artifact_reference
+    result["artifact_noun_signal"] = bool(_artifact_noun_signal(current))
+
     # Representation safety runs after dialogue authority has been synchronized
     # so a legitimate artifact continuation cannot be mistaken for stale state.
+    if relation == "NEW":
+        result["resolved_entity"] = ""
+        result["resolved_entity_source"] = "current_turn_topic"
+        result["resolved_reference"] = ""
+        result["resolved_reference_type"] = "none"
+        result["selected_memory_operand"] = {}
+        result["selected_memory_index"] = -1
+        vector = result.get("dialogue_vector")
+        if isinstance(vector, dict):
+            vector.update({
+                "active_topic": result.get("active_topic") or result.get("canonical_topic") or "",
+                "canonical_topic": result.get("canonical_topic") or result.get("active_topic") or "",
+                "resolved_entity": "",
+                "resolved_entity_source": "current_turn_topic",
+                "resolved_reference": "",
+                "resolved_reference_type": "none",
+                "selected_memory_operand": {},
+                "selected_memory_index": -1,
+            })
     _remove_stale_structured_representation(result, current, state=state)
 
     # Restore the canonical semantic presentation contract.  This is advisory:
     # it feeds Provider/Executor context but never performs renderer dispatch.
     _restore_presentation_contract(result, current, state=state)
+    result["interpretation_control"] = _build_interpretation_control(result)
 
     result["interpretation_compatibility"] = {
         "version": "2026-09-22-dialogue-content-semantics-v4",
@@ -1494,12 +1704,16 @@ def _is_reference_turn(text: Any) -> bool:
     low = _clean_text(text).lower()
     if any(phrase in low for phrase in _REFERENCE_PHRASES):
         return True
-    # Possessive/reflexive forms resolve an entity from the active vector even
-    # when the sentence is otherwise self-contained: "его карьера", "её
-    # компания", "о нём", "он родился". This is discourse continuity, not a
-    # request to retrieve an unrelated old topic.
+    # Possessive/oblique forms are strong discourse references. Bare subject
+    # pronouns such as "они" in a self-contained question ("как они выйдут")
+    # are not enough to reactivate the previous dialogue vector.
     if re.search(
-        r"\b(?:его|ее|её|него|нему|ним|ему|ей|ней|неё|он|она|они)\b",
+        r"\b(?:его|ее|её|него|нему|ним|ему|ей|ней|неё)\b",
+        low,
+    ):
+        return True
+    if re.search(r"\b(?:он|она|они)\b", low) and re.search(
+        r"\b(?:про|о|об|насч[её]т|у|для|с|к)\s+(?:него|него|неё|нее|он|она|них|нему|ней)\b",
         low,
     ):
         return True
@@ -1893,8 +2107,24 @@ def _build_user_memory_field(state: dict[str, Any]) -> dict[str, Any]:
         > A-E topic evidence > live summary evidence.
 
     This function only supplies memory evidence. It never decides a route.
+
+    The live visual scene is captured before the memory runtime normalizer runs.
+    Some legacy state migrations may normalize a transient hot pointer away;
+    that must never make an already-live artifact disappear from Interpretation
+    while the current turn is being resolved.
     """
+    original_active_visual_scene = (
+        deepcopy(state.get("active_visual_scene"))
+        if isinstance(state, dict) and isinstance(state.get("active_visual_scene"), dict)
+        else deepcopy(state.get("current_visual_scene"))
+        if isinstance(state, dict) and isinstance(state.get("current_visual_scene"), dict)
+        else {}
+    )
     state = _memory_engine_runtime(state)
+    if isinstance(state, dict) and original_active_visual_scene:
+        current_hot_scene = state.get("active_visual_scene")
+        if not isinstance(current_hot_scene, dict) or not current_hot_scene:
+            state["active_visual_scene"] = deepcopy(original_active_visual_scene)
 
     scope = _as_dict(state.get("memory_scope"))
     user_id = _clean_text(scope.get("user_id") or state.get("user_id"))
@@ -2150,7 +2380,7 @@ def _artifact_reference_signal(text: Any) -> bool:
     low = _clean_text(text).lower()
     has_pronoun = bool(
         re.search(
-            r"\b(?:это|этот|эта|эти|его|ее|её|него|нему|ним|ему|ей|ней|неё|он|она|они)\b",
+            r"\b(?:это|этот|эта|эти|его|ее|её|него|нему|ним|ему|ей|ней|неё)\b",
             low,
         )
     )
@@ -2163,6 +2393,20 @@ def _artifact_reference_signal(text: Any) -> bool:
 def _artifact_noun_signal(text: Any) -> bool:
     low = _clean_text(text).lower()
     return any(noun in low for noun in _ARTIFACT_NOUNS)
+
+
+def _artifact_continuation_signal(text: Any) -> bool:
+    """Return True only when the utterance actually points to an artifact.
+
+    A bare artifact noun ("график", "таблица") is a request description, not
+    a reference. Continuation requires either an anaphoric/demonstrative phrase
+    or an explicit artifact-editing verb paired with an artifact noun.
+    """
+    low = _clean_text(text).lower()
+    if _artifact_reference_signal(low):
+        return True
+    has_edit_verb = any(word in low for word in _REFERENCE_ARTIFACT_VERBS)
+    return bool(has_edit_verb and _artifact_noun_signal(low))
 
 
 def _sequence_has_artifact_context(
@@ -2183,7 +2427,7 @@ def _sequence_has_artifact_context(
     # from their own stored turns, otherwise a poem/image from the current
     # thread can falsely become the artifact of every old thread.
     active_scene = {}
-    if profile_sid and active_sid and profile_sid == active_sid:
+    if (profile_sid and active_sid and profile_sid == active_sid) or (active_sid and not profile_sid):
         active_scene = (
             state.get("active_visual_scene")
             if isinstance(state.get("active_visual_scene"), dict)
@@ -2201,7 +2445,18 @@ def _sequence_has_artifact_context(
         active_scene.get("user_request")
         or active_scene.get("current_request")
     )
-    scene_types = active_scene.get("render_block_types") or []
+    scene_types = active_scene.get("render_block_types") or active_scene.get("presentation_types") or []
+    if not isinstance(scene_types, list):
+        scene_types = []
+    if not scene_types:
+        for block in active_scene.get("render_blocks") or active_scene.get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            block_type = _clean_text(
+                block.get("type") or block.get("artifact_type") or block.get("kind")
+            ).lower()
+            if block_type and block_type not in scene_types:
+                scene_types.append(block_type)
     sequence_text = _sequence_profile_text(profile)
 
     artifact_kind = ""
@@ -2244,9 +2499,43 @@ def _sequence_has_artifact_context(
             artifact_kind = "code"
             artifact_subject = _clean_text(profile.get("topic") or "код")
 
+    # A structured render block is itself sufficient proof that the selected
+    # live scene contains an artifact, even when legacy state omitted the
+    # surrounding answer/request text.
+    if not artifact_kind:
+        for block in active_scene.get("render_blocks") or active_scene.get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            block_kind = _clean_text(
+                block.get("type") or block.get("artifact_type") or block.get("kind")
+            ).lower()
+            if block_kind in _STRUCTURED_PRESENTATIONS or block_kind in {"code", "formula", "link", "file", "audio", "video"}:
+                artifact_kind = block_kind
+                artifact_subject = _clean_text(active_scene.get("topic") or profile.get("topic"))
+                break
+
     # A plain text dialogue scene is not automatically an artifact. Only an
     # explicitly identified artifact kind (poem/code/structured media) should
-    # participate in pronoun→artifact resolution.
+    # participate in pronoun→artifact resolution. Preserve one compact
+    # structured block so a continuation can reuse the actual payload without
+    # importing unrelated historical turns.
+    selected_block = {}
+    for block in active_scene.get("render_blocks") or active_scene.get("blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        block_kind = _clean_text(
+            block.get("type") or block.get("artifact_type") or block.get("kind")
+        ).lower()
+        if block_kind not in _STRUCTURED_PRESENTATIONS and block_kind not in {"code", "formula", "link", "file", "audio", "video"}:
+            continue
+        selected_block = {
+            "type": block_kind,
+            "payload": deepcopy(block.get("payload") or {}),
+            "data": deepcopy(block.get("data")) if block.get("data") is not None else None,
+            "content": _clean_text(block.get("content") or block.get("text")),
+        }
+        break
+
     return {
         "present": bool(artifact_kind),
         "kind": artifact_kind,
@@ -2254,6 +2543,7 @@ def _sequence_has_artifact_context(
         "previous_answer": scene_answer,
         "previous_request": scene_request,
         "render_types": list(scene_types) if isinstance(scene_types, list) else [],
+        "render_block": selected_block,
     }
 
 
@@ -2282,6 +2572,7 @@ def _choose_dialogue_thread(
     reference_signal = _is_reference_turn(current_text)
     artifact_signal = _artifact_reference_signal(current_text)
     artifact_noun_signal = _artifact_noun_signal(current_text)
+    artifact_continuation_signal = _artifact_continuation_signal(current_text)
     explicit_recall = _explicit_memory_recall(current_text)
     explicit_new = _explicit_new_topic(current_text)
 
@@ -2312,7 +2603,7 @@ def _choose_dialogue_thread(
     )
 
     active_artifact = _sequence_has_artifact_context(active_profile, state)
-    if artifact_signal and active_artifact.get("present"):
+    if artifact_continuation_signal and active_artifact.get("present"):
         active_score = max(active_score, 0.62)
 
     candidates = []
@@ -2391,6 +2682,14 @@ def _choose_dialogue_thread(
         reason = "explicit_new_topic"
         confidence = 0.99
     elif (
+        artifact_continuation_signal
+        and active_artifact.get("present")
+        and active_id
+    ):
+        relation = "CONTINUE"
+        reason = "reference_to_active_artifact"
+        confidence = max(0.82, min(0.97, max(active_score, 0.62) + 0.15))
+    elif (
         subject_signal
         and current_topic
         and active_id
@@ -2410,11 +2709,11 @@ def _choose_dialogue_thread(
             relation = "NEW"
             reason = "strong_new_subject_against_active_sequence"
             confidence = min(0.96, 0.70 + (1.0 - active_score) * 0.24)
-    elif artifact_signal and active_artifact.get("present"):
+    elif artifact_continuation_signal and active_artifact.get("present"):
         relation = "CONTINUE"
         reason = "reference_to_active_artifact"
         confidence = max(0.82, min(0.97, active_score + 0.15))
-    elif artifact_signal and best_sid and best_artifact.get("present") and (
+    elif artifact_continuation_signal and best_sid and best_artifact.get("present") and (
         best_score >= 0.70 and best_score > active_score + 0.12
     ):
         # Re-activating an older user-owned thread is still a continuation of
@@ -2434,11 +2733,7 @@ def _choose_dialogue_thread(
         and best_score > active_score + 0.18
         and (
             reference_signal
-            or artifact_signal
-            or (
-                artifact_noun_signal
-                and not subject_signal
-            )
+            or artifact_continuation_signal
         )
     ):
         relation = "CONTINUE"
@@ -2456,12 +2751,28 @@ def _choose_dialogue_thread(
         relation = "CONTINUE"
         reason = "anaphoric_continuation_on_selected_thread"
         confidence = max(0.80, min(0.96, 0.78 + active_score * 0.22))
+    elif active_id and not reference_signal and not artifact_signal:
+        # A complete self-contained request is a new vector unless the current
+        # request itself has measurable semantic support from the live topic.
+        # This is the critical authority boundary: an old visual scene may remain
+        # in memory, but it cannot upgrade an unrelated question into CONTINUE.
+        current_topic_probe = current_topic or _extract_topic(current_text)
+        topic_fit = (
+            _semantic_similarity(current_topic_probe, active_topic)
+            if current_topic_probe and active_topic else 0.0
+        )
+        if active_score < 0.34 and topic_fit < 0.34:
+            relation = "NEW"
+            reason = "self_contained_semantic_break"
+            confidence = min(0.98, 0.76 + (1.0 - max(active_score, topic_fit)) * 0.20)
+        else:
+            relation = "CONTINUE"
+            reason = "active_sequence_semantic_continuation"
+            confidence = max(0.68, min(0.96, 0.68 + active_score * 0.24))
     else:
-        relation = "CONTINUE"
-        reason = "active_sequence_semantic_continuation"
-        confidence = max(0.62, min(0.96, 0.62 + active_score * 0.30))
-        if reference_signal:
-            confidence = max(confidence, 0.78)
+        relation = "NEW"
+        reason = "independent_self_contained_request"
+        confidence = 0.92
 
     target_profile = active_profile
     target_sid = active_id
@@ -2492,6 +2803,7 @@ def _choose_dialogue_thread(
         "reference_signal": reference_signal,
         "artifact_signal": artifact_signal,
         "artifact_noun_signal": artifact_noun_signal,
+        "artifact_continuation_signal": artifact_continuation_signal,
         "explicit_recall": explicit_recall,
         "explicit_new": explicit_new,
         "subject_signal": subject_signal,
@@ -2562,23 +2874,10 @@ def _entity_from_relation_context(
 
     current_candidates = _person_candidates(current_text, limit=12)
 
-    artifact_continuation = bool(
-        (
-            _artifact_reference_signal(current_text)
-            or (
-                bool(artifact.get("present"))
-                and (
-                    any(word in low for word in _REFERENCE_ARTIFACT_VERBS)
-                    or _artifact_noun_signal(current_text)
-                )
-            )
-        )
-        and (
-            artifact.get("present")
-            or artifact_kind
-            or any(noun in low for noun in _ARTIFACT_NOUNS)
-        )
-    )
+    # Delegate artifact-continuation authority to the strict current-turn
+    # signal. This prevents a fresh "покажи таблицу" request from inheriting
+    # an unrelated previous render simply because an artifact noun is present.
+    artifact_continuation = bool(_artifact_continuation_signal(current_text))
 
     # "его продлить" / "это переделать" should resolve to the selected
     # artifact before any stale person candidate is considered.
@@ -2930,10 +3229,7 @@ def _build_continuation_content_analysis(
         current_text,
         relation_name,
         operation=operation,
-        reference=bool(
-            relation.get("reference")
-            or relation.get("artifact_reference")
-        ),
+        reference=bool(_is_reference_turn(current_text)),
         previous_answer=previous_answer,
         topic_similarity=float(relation.get("topic_similarity") or 0.0),
     )
@@ -3241,7 +3537,7 @@ class QuantumInterpretationEngine:
 
         resolved_reference = (
             entity
-            if reference or choice.get("artifact_signal")
+            if reference or choice.get("artifact_continuation_signal")
             else ""
         )
         target_artifact = choice.get("target_artifact") if isinstance(choice.get("target_artifact"), dict) else {}
@@ -3295,8 +3591,10 @@ class QuantumInterpretationEngine:
             "explicit_recall": explicit_recall,
             "explicit_new": explicit_new,
             "artifact_reference": bool(
-                choice.get("artifact_signal")
-                or choice.get("artifact_noun_signal")
+                choice.get("artifact_continuation_signal")
+            ),
+            "artifact_continuation_signal": bool(
+                choice.get("artifact_continuation_signal")
             ),
             "resolved_reference_type": resolved_reference_type,
             "target_artifact": target_artifact,
@@ -3456,16 +3754,44 @@ class QuantumInterpretationEngine:
                 else ""
             ).lower()
 
+        # A live scene can be the only surviving carrier of the previous
+        # structured representation after state rollover. Treat it as artifact
+        # evidence, not as a generic modality trigger. This is what lets a turn
+        # like "Продли его" continue an existing graph/table/image without making
+        # every normal text turn inherit the old renderer.
+        if not active_representation:
+            target_artifact = relation.get("target_artifact") if isinstance(relation.get("target_artifact"), dict) else {}
+            artifact_types = target_artifact.get("render_types") or []
+            if isinstance(artifact_types, list):
+                for item in artifact_types:
+                    candidate = _presentation_representation(item)
+                    if candidate and candidate != "text":
+                        active_representation = candidate
+                        break
+        if not active_representation:
+            live_scene = (
+                state.get("active_visual_scene")
+                if isinstance(state.get("active_visual_scene"), dict)
+                else state.get("current_visual_scene")
+                if isinstance(state.get("current_visual_scene"), dict)
+                else {}
+            )
+            for block in live_scene.get("render_blocks") or live_scene.get("blocks") or []:
+                if not isinstance(block, dict):
+                    continue
+                candidate = _presentation_representation(
+                    block.get("type") or block.get("artifact_type") or block.get("kind")
+                )
+                if candidate and candidate != "text":
+                    active_representation = candidate
+                    break
+
         representation = raw_representation
         current_explicit_reps = _explicit_current_representations(current)
         artifact_continuation = bool(
             relation_name in {"CONTINUE", "RECALL"}
-            and (relation.get("artifact_reference") or relation.get("artifact_noun_signal"))
+            and _artifact_continuation_signal(current)
             and active_representation
-            and (
-                self._operation(current, active_representation) in {"modify", "build", "present", "calculate"}
-                or bool(re.search(r"\b(?:добавь|убери|измени|исправь|переделай|продли|продолжи|перерисуй|обнови|покажи)\b", current.lower()))
-            )
         )
         if representation == "text" and not current_explicit_reps and artifact_continuation:
             # Artifact continuation is the only case where the previous render
@@ -3537,7 +3863,7 @@ class QuantumInterpretationEngine:
             "request_dependency": context_dependency,
             "context_dependency": context_dependency,
             "continuation": relation_name == "CONTINUE",
-            "reference_to_previous": bool(relation_name == "RECALL" or relation.get("reference")),
+            "reference_to_previous": bool(relation_name == "RECALL" or relation.get("reference") or relation.get("artifact_continuation_signal")),
             "three_way_relation": relation_name,
             "three_way_confidence": relation["confidence"],
             "semantic_dialogue_label": (
@@ -3562,7 +3888,7 @@ class QuantumInterpretationEngine:
             "resolved_entity": resolved_entity,
             "resolved_entity_source": entity_source,
             "resolved_reference_type": (
-                "artifact" if relation.get("artifact_reference")
+                "artifact" if relation.get("artifact_continuation_signal")
                 else "entity" if resolved_entity
                 else "none"
             ),
@@ -3574,7 +3900,10 @@ class QuantumInterpretationEngine:
             "selected_memory_operand": selected,
             "topic_similarity": relation.get("topic_similarity", 0.0),
             "topic_novelty": relation.get("topic_novelty", 0.0),
-            "sequence_continuation_authorized": relation_name == "CONTINUE",
+            "sequence_continuation_authorized": bool(
+                relation_name == "CONTINUE"
+                and (relation.get("reference") or relation.get("artifact_signal") or relation.get("active_score", 0.0) >= 0.34)
+            ),
             "current_turn_authority": True,
             "historical_memory_is_evidence_only": True,
             "memory_engine": "QUANTUM-MEMORY-7D-V2",
@@ -3680,7 +4009,10 @@ class QuantumInterpretationEngine:
             "current_turn_complete": True,
             "current_request_complete": True,
             "explicit_task": bool(current_explicit_reps or raw_representation != "text"),
-            "sequence_continuation_authorized": relation_name == "CONTINUE",
+            "sequence_continuation_authorized": bool(
+                relation_name == "CONTINUE"
+                and (relation.get("reference") or relation.get("artifact_signal") or relation.get("active_score", 0.0) >= 0.34)
+            ),
             "continuation_target": continuation_target,
             "selected_memory_index": relation.get("selected_memory_index", -1),
             "selected_memory_operand": selected,
