@@ -159,6 +159,153 @@ def _stable_id(prefix: str, payload: Any) -> str:
     return f"{prefix}_{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:12]}"
 
 
+
+def _provider_artifact_to_block(artifact: Any) -> Dict[str, Any]:
+    """Convert a Provider artifact envelope into one canonical render block."""
+    if not isinstance(artifact, dict):
+        return {}
+
+    kind = _text(
+        artifact.get("type")
+        or artifact.get("artifact_type")
+        or artifact.get("kind")
+        or artifact.get("representation")
+    ).lower()
+    kind = {
+        "chart": "graph",
+        "plot": "graph",
+        "picture": "image",
+        "photo": "image",
+    }.get(kind, kind)
+    if not kind:
+        return {}
+
+    payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+    data = artifact.get("data") if isinstance(artifact.get("data"), dict) else {}
+    if not payload and data:
+        payload = dict(data)
+
+    if kind == "image" and isinstance(payload, dict):
+        direct = (
+            payload.get("src")
+            or payload.get("url")
+            or payload.get("image")
+            or payload.get("image_data_uri")
+        )
+        if direct:
+            payload.setdefault("src", direct)
+            payload.setdefault("url", direct)
+            payload.setdefault("image", direct)
+
+    if not payload and kind in {"text", "markdown"}:
+        content = _text(artifact.get("content") or artifact.get("text"))
+        if content:
+            return {
+                "type": kind,
+                "content": content,
+                "text": content,
+                "renderer": "MessageTextBlock",
+                "viewer": "MessageTextBlock",
+                "scene_contract": True,
+                "human_visible": True,
+            }
+
+    if not payload:
+        return {}
+
+    renderer = _RENDERER_REGISTRY.get(kind, "MessageTextBlock")
+    return {
+        "type": kind,
+        "artifact_type": kind,
+        "payload": payload,
+        "renderer": renderer,
+        "viewer": renderer,
+        "scene_contract": True,
+        "human_visible": True,
+        "block_id": _stable_id(f"provider-{kind}", payload),
+    }
+
+
+def _bridge_provider_artifacts(machine_response: dict) -> dict:
+    """
+    Bridge structured Provider output into render_blocks before SceneContract.
+
+    Provider/Executor owns transport normalization; Web/RenderMessage remains the
+    renderer owner. This path never invents content and only promotes payloads
+    already returned by Provider.
+    """
+    if not isinstance(machine_response, dict):
+        return machine_response
+
+    existing = machine_response.get("render_blocks")
+    existing = list(existing) if isinstance(existing, list) else []
+    candidates: list[dict[str, Any]] = []
+
+    scene = machine_response.get("scene")
+    if isinstance(scene, dict):
+        scene_blocks = scene.get("render_blocks") or scene.get("blocks") or []
+        if isinstance(scene_blocks, list):
+            candidates.extend(x for x in scene_blocks if isinstance(x, dict))
+
+    for key in ("artifacts", "artifacts_payload"):
+        values = machine_response.get(key)
+        if isinstance(values, list):
+            candidates.extend(x for x in values if isinstance(x, dict))
+
+    metadata = dict(machine_response.get("metadata") or {})
+    for artifact in candidates:
+        spec = artifact.get("image_generation_spec") if isinstance(artifact, dict) else None
+        if isinstance(spec, dict) and "image_generation_spec" not in metadata:
+            metadata["image_generation_spec"] = spec
+    if metadata:
+        machine_response["metadata"] = metadata
+
+    seen = {
+        json.dumps(
+            {
+                "type": _text(block.get("type")).lower(),
+                "payload": block.get("payload", {}),
+                "content": block.get("content", ""),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        )
+        for block in existing
+        if isinstance(block, dict)
+    }
+
+    bridged = list(existing)
+    for candidate in candidates:
+        block = (
+            candidate
+            if candidate.get("type") and (
+                candidate.get("payload") or candidate.get("content") or candidate.get("renderer")
+            )
+            else _provider_artifact_to_block(candidate)
+        )
+        if not block:
+            continue
+        sig = json.dumps(
+            {
+                "type": _text(block.get("type")).lower(),
+                "payload": block.get("payload", {}),
+                "content": block.get("content", ""),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        )
+        if sig not in seen:
+            seen.add(sig)
+            bridged.append(block)
+
+    machine_response["render_blocks"] = bridged
+    return machine_response
+
+
 def _state_artifact_type(state: dict) -> str:
     artifact = state.get("last_artifact")
     if isinstance(artifact, dict):
@@ -348,8 +495,23 @@ class SequentialInterpretation:
         topic = semantic_topic or object_name or _text(request)[:120]
         attributes: Dict[str, Any] = {}
 
+        semantic_understanding = semantic_result.get("semantic_understanding") if isinstance(semantic_result.get("semantic_understanding"), dict) else {}
+        semantic_representation_state = semantic_understanding.get("representation") if isinstance(semantic_understanding.get("representation"), dict) else {}
+        semantic_mode = _text(
+            semantic_result.get("visual_production_mode")
+            or semantic_representation_state.get("production_mode")
+        ).lower()
+
         if representation == "image":
-            attributes["visual_production_mode"] = "image_generation" if any(w in text for w in ("нарисуй", "сгенерируй", "создай")) else "image_present"
+            # Interpretation owns the semantic production decision. Executor only
+            # executes it; it does not classify the user's wording again.
+            attributes["visual_production_mode"] = (
+                semantic_mode
+                if semantic_mode in {"image_generation", "image_present"}
+                else "image_generation"
+                if semantic_result.get("operation") in {"build", "visualize"}
+                else "image_present"
+            )
         elif representation == "diagram":
             attributes["visual_production_mode"] = "diagram"
         elif representation == "graph":
@@ -378,6 +540,13 @@ class SequentialInterpretation:
             "render_authorized": bool(interpretation_control.get("render_authorized")),
             "render_mode": authority_mode or "TEXT_ONLY",
             "interpretation_control": _compact(interpretation_control, max_depth=3, max_items=8),
+            "semantic_understanding": _compact(semantic_result.get("semantic_understanding") or {}, max_depth=5, max_items=10),
+            "semantic_request": _text(
+                semantic_result.get("semantic_request")
+                or _as_dict(semantic_result.get("semantic_understanding")).get("provider", {}).get("semantic_request")
+                or dialogue.get("resolved_request")
+                or self.request
+            ),
             "semantic_result": semantic_result,
         })
         return intent
@@ -591,6 +760,12 @@ class ProcessorScene:
             "active_task": _compact(turn_active_task),
             "pending_task": _compact(pending_task),
             "active_entity": resolved_entity,
+            "semantic_request": _text(
+                semantic_result.get("semantic_request")
+                or _as_dict(semantic_result.get("semantic_understanding")).get("provider", {}).get("semantic_request")
+                or resolved_request
+            ),
+            "semantic_understanding": _compact(semantic_result.get("semantic_understanding") or {}, max_depth=5, max_items=10),
             "continuation_content_analysis": _compact(continuation_analysis, max_depth=4, max_items=8),
             "dialogue_strategy": _compact(dialogue_strategy, max_depth=3, max_items=8),
             "last_user_turn": _compact(self.state.get("last_user_turn", "")),
@@ -647,6 +822,12 @@ class ProcessorScene:
             "active_task": _compact(turn_active_task),
             "pending_task": _compact(pending_task),
             "active_entity": resolved_entity,
+            "semantic_request": _text(
+                semantic_result.get("semantic_request")
+                or _as_dict(semantic_result.get("semantic_understanding")).get("provider", {}).get("semantic_request")
+                or resolved_request
+            ),
+            "semantic_understanding": _compact(semantic_result.get("semantic_understanding") or {}, max_depth=5, max_items=10),
             "continuation_content_analysis": _compact(continuation_analysis, max_depth=4, max_items=8),
             "dialogue_strategy": _compact(dialogue_strategy, max_depth=3, max_items=8),
             "resolved_request": resolved_request,
@@ -689,6 +870,12 @@ class ProcessorScene:
             "active_topic": _compact(dialogue.get("canonical_topic")) if relation != "NEW" else "",
             "active_goal": _compact(intent.get("goal")) if relation != "NEW" else "",
             "active_task": _compact(turn_active_task) if relation != "NEW" else {},
+            "semantic_request": _text(
+                semantic_result.get("semantic_request")
+                or _as_dict(semantic_result.get("semantic_understanding")).get("provider", {}).get("semantic_request")
+                or resolved_request
+            ),
+            "semantic_understanding": _compact(semantic_result.get("semantic_understanding") or {}, max_depth=5, max_items=10),
             "pending_task": _compact(pending_task) if pending_task else {},
             "last_artifact_type": _state_artifact_type(self.state) if relation == "CONTINUE" and render_mode == "ARTIFACT_CONTINUATION" else "",
             "selected_artifact": _compact(selected_artifact, max_depth=5, max_items=6) if artifact_context_only else {},
@@ -717,6 +904,12 @@ class ProcessorScene:
                 "goal": intent["goal"],
                 "normalized_text": self.request,
                 "resolved_request": resolved_request,
+                "semantic_request": _text(
+                    semantic_result.get("semantic_request")
+                    or _as_dict(semantic_result.get("semantic_understanding")).get("provider", {}).get("semantic_request")
+                    or resolved_request
+                ),
+                "semantic_understanding": _compact(semantic_result.get("semantic_understanding") or {}, max_depth=5, max_items=10),
                 "attributes": _compact(intent.get("attributes") or {}),
             },
             conversation={
@@ -744,6 +937,12 @@ class ProcessorScene:
                 "metadata": {
                     "identity_scope": {"user_id": self.user_id},
                     "visual_production_mode": visual_mode,
+                    "semantic_request": _text(
+                        semantic_result.get("semantic_request")
+                        or _as_dict(semantic_result.get("semantic_understanding")).get("provider", {}).get("semantic_request")
+                        or resolved_request
+                    ),
+                    "semantic_understanding": _compact(semantic_result.get("semantic_understanding") or {}, max_depth=5, max_items=10),
                     "dialogue_relation": relation,
                     "fast_path": True,
                     "do_not_reinterpret": True,
@@ -1077,6 +1276,20 @@ async def _materialize_image_if_requested(response: MachineResponse, request: Ma
         return
 
     metadata = dict(response.metadata or {})
+
+    # A complete Provider image payload is already renderable; preserve it and
+    # do not force a second local generation step.
+    for block in list(response.render_blocks or []):
+        if not isinstance(block, dict):
+            continue
+        if _text(block.get("type") or block.get("artifact_type")).lower() not in {"image", "gallery"}:
+            continue
+        payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+        if any(payload.get(key) for key in ("src", "url", "image", "image_data_uri", "image_base64")):
+            metadata["image_generation_status"] = "provider_artifact_preserved"
+            response.metadata = metadata
+            return
+
     spec = metadata.get("image_generation_spec")
     if not isinstance(spec, dict):
         # Some provider versions place the spec at top level.
@@ -1199,6 +1412,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
     # before the processor creates the final SceneContract. No second provider.
     machine_preview = provider_contract.get("machine_response") if isinstance(provider_contract, dict) else {}
     if isinstance(machine_preview, dict):
+        machine_preview = _bridge_provider_artifacts(machine_preview)
         preview_response = MachineResponse(
             answer=_text(machine_preview.get("answer")),
             content=_text(machine_preview.get("content")),
@@ -1206,6 +1420,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
             summary=_text(machine_preview.get("summary")),
             confidence=float(machine_preview.get("confidence") or 1.0),
             render_blocks=list(machine_preview.get("render_blocks") or []),
+            artifacts_payload=list(machine_preview.get("artifacts_payload") or machine_preview.get("artifacts") or []),
             scene=dict(machine_preview.get("scene") or {}),
             metadata=dict(machine_preview.get("metadata") or {}),
         )
