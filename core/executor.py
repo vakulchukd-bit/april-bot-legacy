@@ -18,6 +18,7 @@ from blocks.april_personality import APRIL_IDENTITY
 from blocks.interpretation_layer import interpret_request
 from blocks.provider_router import generate_text
 from blocks.state_manager import get_state, update_scene_context, persist_state, build_dialogue_memory_bridge
+from blocks.presentation_formatter import canonical_payload_for_block, validate_render_block_payload
 
 PROCESSOR_VERSION = "april_sequential_processor_v1_fast_memory_scene"
 PROCESSOR_MODE = "SEQUENTIAL_INTERPRETATION_MEMORY_PROVIDER_SCENE"
@@ -300,17 +301,34 @@ class SequentialInterpretation:
             return self._make_intent(operation, pending.get("object") or representation, representation,
                                      pending.get("goal") or "obtain", topic, attrs)
 
-        representation = self._representation(text)
+        lexical_representation = self._representation(text)
         semantic_result = dialogue.get("semantic_result") if isinstance(dialogue.get("semantic_result"), dict) else self.semantic_result
         semantic_task = semantic_result.get("semantic_task") if isinstance(semantic_result.get("semantic_task"), dict) else {}
-        if dialogue["continuation"] and active and representation == "text":
-            representation = _text(active.get("representation") or semantic_task.get("representation") or "text").lower() or "text"
+        semantic_representation = _text(
+            semantic_result.get("production_representation")
+            or semantic_result.get("representation")
+            or semantic_task.get("representation")
+        ).lower()
+        interpretation_control = semantic_result.get("interpretation_control") if isinstance(semantic_result.get("interpretation_control"), dict) else {}
+        authority_mode = _text(interpretation_control.get("render_mode")).upper()
 
-        if dialogue["continuation"] and semantic_task.get("operation"):
+        # Interpretation is the only production-modality authority. The previous
+        # active representation may be inherited only for a proven artifact
+        # continuation; ordinary CONTINUE must not turn text into a stale graph.
+        representation = semantic_representation or lexical_representation or "text"
+        if (
+            representation == "text"
+            and authority_mode == "ARTIFACT_CONTINUATION"
+            and bool(interpretation_control.get("render_authorized"))
+            and isinstance(active, dict)
+        ):
+            representation = _text(active.get("representation") or "text").lower() or "text"
+
+        if semantic_task.get("operation"):
             operation = _text(semantic_task.get("operation")).lower()
         else:
             operation = self._operation(text, representation)
-        if dialogue["continuation"] and semantic_task.get("goal"):
+        if semantic_task.get("goal"):
             goal = _text(semantic_task.get("goal")).lower()
         else:
             goal = self._goal(operation, representation)
@@ -321,7 +339,7 @@ class SequentialInterpretation:
             or semantic_result.get("active_topic")
         )
         generic_objects = {"", "action", "text", representation}
-        if dialogue["continuation"] and active and semantic_object.lower() in generic_objects:
+        if authority_mode == "ARTIFACT_CONTINUATION" and bool(interpretation_control.get("render_authorized")) and active and semantic_object.lower() in generic_objects:
             object_name = _text(active.get("object")) or semantic_topic or self._object(text, representation)
         elif semantic_object and semantic_object.lower() not in generic_objects:
             object_name = semantic_object
@@ -353,7 +371,16 @@ class SequentialInterpretation:
             attributes["telegram_pending"] = True
             attributes["pending_question"] = "Какой Telegram нужен: официальный канал, чат или пользовательский аккаунт?"
 
-        return self._make_intent(operation, object_name, representation, goal, topic, attributes)
+        intent = self._make_intent(operation, object_name, representation, goal, topic, attributes)
+        intent.update({
+            "requested_outputs": list(semantic_result.get("requested_outputs") or (["text"] if representation == "text" else ["text", representation])),
+            "production_representation_locked": bool(semantic_result.get("production_representation_locked", False)),
+            "render_authorized": bool(interpretation_control.get("render_authorized")),
+            "render_mode": authority_mode or "TEXT_ONLY",
+            "interpretation_control": _compact(interpretation_control, max_depth=3, max_items=8),
+            "semantic_result": semantic_result,
+        })
+        return intent
 
     @staticmethod
     def _make_intent(operation: str, object_name: str, representation: str, goal: str, topic: str, attributes: Dict[str, Any]) -> Dict[str, Any]:
@@ -448,6 +475,7 @@ class ProcessorScene:
         self.user_id = _text(user_id)
         self.request = _text(request)
         self.interpreter = SequentialInterpretation()
+        self._render_omissions: list[dict[str, Any]] = []
 
     def prepare(self) -> MachineRequest:
         dialogue = self.interpreter.dialogue(self.request, self.state)
@@ -457,12 +485,23 @@ class ProcessorScene:
         requested_outputs = ["text"]
         required_artifacts: List[str] = []
         representation = intent["representation"]
-        if representation in _STRUCTURED_TYPES and representation != "formula":
-            requested_outputs.append(representation)
+        authorized_outputs = [
+            _text(x).lower() for x in (intent.get("requested_outputs") or [])
+            if _text(x).strip()
+        ]
+        if bool(intent.get("render_authorized")) and authorized_outputs:
+            for item in authorized_outputs:
+                if item != "text" and item in _STRUCTURED_TYPES and item not in requested_outputs:
+                    requested_outputs.append(item)
+        elif representation in _STRUCTURED_TYPES:
+            # Fallback only for an explicitly structured current-turn request.
+            if representation != "formula" and representation not in requested_outputs:
+                requested_outputs.append(representation)
+            if representation == "formula" and representation not in requested_outputs:
+                requested_outputs.append("formula")
+
+        if representation in _STRUCTURED_TYPES and representation in requested_outputs:
             required_artifacts.append(representation)
-        elif representation == "formula":
-            requested_outputs.append("formula")
-            required_artifacts.append("formula")
 
         if intent["attributes"].get("telegram_pending"):
             # The answer is a clarification; the representation remains text
@@ -478,13 +517,15 @@ class ProcessorScene:
             base_topic = _text(pending_task.get("topic") or pending_task.get("representation"))
             resolved_request = f"Продолжение задания: {base_topic}. Ответ пользователя: {self.request}"
 
+        semantic_result = dialogue.get("semantic_result") if isinstance(dialogue.get("semantic_result"), dict) else {}
         dialogue_memory = build_dialogue_memory_bridge(
             self.user_id,
             query=self.request,
-            limit=8,
+            limit=6,
+            relation=relation,
+            target_sequence_id=_text(dialogue.get("target_sequence_id") or dialogue.get("sequence_id")),
         )
 
-        semantic_result = dialogue.get("semantic_result") if isinstance(dialogue.get("semantic_result"), dict) else {}
         continuation_analysis = semantic_result.get("continuation_content_analysis") if isinstance(semantic_result.get("continuation_content_analysis"), dict) else {}
         dialogue_strategy = semantic_result.get("dialogue_strategy") if isinstance(semantic_result.get("dialogue_strategy"), dict) else {}
         resolved_entity = _text(
@@ -503,6 +544,43 @@ class ProcessorScene:
             "goal": intent.get("goal"),
             "topic": dialogue.get("canonical_topic") or intent.get("topic") or intent.get("object"),
         }
+
+        render_mode = _text(intent.get("render_mode") or "TEXT_ONLY").upper()
+        selected_artifact = semantic_result.get("target_artifact") if isinstance(semantic_result.get("target_artifact"), dict) else {}
+        selected_artifact = dict(selected_artifact)
+        selected_artifact_block = selected_artifact.get("render_block") if isinstance(selected_artifact.get("render_block"), dict) else {}
+        live_visual_scene = (
+            self.state.get("active_visual_scene")
+            if isinstance(self.state.get("active_visual_scene"), dict)
+            else self.state.get("current_visual_scene")
+            if isinstance(self.state.get("current_visual_scene"), dict)
+            else {}
+        )
+        artifact_context_only = (
+            render_mode == "ARTIFACT_CONTINUATION"
+            and bool(intent.get("render_authorized"))
+        )
+        artifact_visual_context = {}
+        if artifact_context_only:
+            artifact_visual_context = {
+                "relation": relation,
+                "mode": "ARTIFACT_CONTINUATION",
+                "selected_artifact": _compact(selected_artifact, max_depth=4, max_items=6),
+                "render_block": _compact(selected_artifact_block, max_depth=5, max_items=8),
+            }
+            if live_visual_scene:
+                compact_scene = {
+                    "scene_id": live_visual_scene.get("scene_id"),
+                    "topic": live_visual_scene.get("topic"),
+                    "render_block_types": live_visual_scene.get("render_block_types") or [],
+                    "render_blocks": [
+                        _compact(block, max_depth=5, max_items=8)
+                        for block in (live_visual_scene.get("render_blocks") or live_visual_scene.get("blocks") or [])[:2]
+                        if isinstance(block, dict)
+                        and _text(block.get("type") or block.get("artifact_type") or "").lower() in _STRUCTURED_TYPES
+                    ],
+                }
+                artifact_visual_context["active_visual_scene"] = compact_scene
 
         context = {
             "relation": relation,
@@ -526,21 +604,33 @@ class ProcessorScene:
             "selected_memory_index": dialogue.get("selected_memory_index", -1),
             "selected_memory_operand": _compact(dialogue.get("selected_memory_operand") or {}),
             "dialogue_trajectory": _compact(dialogue.get("trajectory") or {}),
-            "active_dialogue_sequence": _compact(dialogue_memory.get("active_sequence") or {}),
+            "active_dialogue_sequence": _compact(
+                dialogue_memory.get("active_sequence") or {}
+                if relation in {"CONTINUE", "RECALL"} and not artifact_context_only else {},
+                max_depth=3,
+                max_items=6,
+            ),
             "seven_day_dialogue_memory": _compact(
-                dialogue_memory if relation in {"CONTINUE", "RECALL"} else {
-                    "active_sequence": dialogue_memory.get("active_sequence") or {},
+                dialogue_memory if relation in {"CONTINUE", "RECALL"} and not artifact_context_only else {
                     "window_days": 7,
+                    "turn_count_7d": dialogue_memory.get("turn_count_7d", 0),
                     "evidence_only": True,
+                    "retrieval_mode": "artifact" if artifact_context_only else "none",
+                    "selected_artifact": selected_artifact if artifact_context_only else {},
                 },
                 max_depth=5,
-                max_items=8,
+                max_items=6,
             ),
         }
 
         visual_mode = _text(intent["attributes"].get("visual_production_mode"))
         if not visual_mode:
             visual_mode = "text"
+
+
+        # For a proven artifact continuation, the previous artifact is the
+        # operand. A live sequence may contain a newer unrelated turn, so its
+        # full conversational turns are intentionally withheld from Provider.
 
         # One continuous response budget for every representation.
         # The processor must not predict answer length from the renderer.
@@ -567,33 +657,50 @@ class ProcessorScene:
             "selected_memory_index": dialogue.get("selected_memory_index", -1),
             "selected_memory_operand": _compact(dialogue.get("selected_memory_operand") or {}),
             "trajectory": _compact(dialogue.get("trajectory") or {}),
+            "selected_artifact": _compact(selected_artifact, max_depth=5, max_items=6) if artifact_context_only else {},
             "active_dialogue_sequence": _compact(
-                dialogue_memory.get("active_sequence") or {},
-                max_depth=5,
-                max_items=8,
+                dialogue_memory.get("active_sequence") or {}
+                if relation in {"CONTINUE", "RECALL"} and not artifact_context_only else {},
+                max_depth=4,
+                max_items=6,
             ),
             "seven_day_memory_turns": _compact(
-                dialogue_memory.get("active_sequence_turns") or [],
+                dialogue_memory.get("active_sequence_turns") or []
+                if relation == "CONTINUE" and not artifact_context_only else [],
                 max_depth=5,
-                max_items=8,
+                max_items=6,
             ),
             "relevant_7d_turns": _compact(
-                dialogue_memory.get("relevant_7d_turns") or [],
+                dialogue_memory.get("relevant_7d_turns") or []
+                if relation == "RECALL" else [],
                 max_depth=5,
-                max_items=8,
+                max_items=4,
             ),
             "semantic_authority": True,
         }
 
         memory_packet = {
-            "mode": "live_state",
-            "active_topic": self.state.get("april_active_topic", ""),
-            "active_goal": self.state.get("april_active_goal", ""),
-            "active_task": _compact(turn_active_task),
-            "pending_task": _compact(pending_task),
-            "last_artifact_type": _state_artifact_type(self.state),
-            "dialogue_sequence": _compact(dialogue_memory.get("active_sequence") or {}),
-            "dialogue_memory": _compact(dialogue_memory),
+            "mode": (
+                "artifact_context" if artifact_context_only
+                else "active_sequence" if relation == "CONTINUE"
+                else "selected_7d_thread" if relation == "RECALL"
+                else "current_turn_only"
+            ),
+            "active_topic": _compact(dialogue.get("canonical_topic")) if relation != "NEW" else "",
+            "active_goal": _compact(intent.get("goal")) if relation != "NEW" else "",
+            "active_task": _compact(turn_active_task) if relation != "NEW" else {},
+            "pending_task": _compact(pending_task) if pending_task else {},
+            "last_artifact_type": _state_artifact_type(self.state) if relation == "CONTINUE" and render_mode == "ARTIFACT_CONTINUATION" else "",
+            "selected_artifact": _compact(selected_artifact, max_depth=5, max_items=6) if artifact_context_only else {},
+            "dialogue_sequence": _compact(dialogue_memory.get("active_sequence") or {}) if relation in {"CONTINUE", "RECALL"} and not artifact_context_only else {},
+            "dialogue_memory": _compact(dialogue_memory) if relation in {"CONTINUE", "RECALL"} and not artifact_context_only else {
+                "window_days": 7,
+                "turn_count_7d": dialogue_memory.get("turn_count_7d", 0),
+                "evidence_only": True,
+                "retrieval_mode": "artifact" if artifact_context_only else "none",
+                "selected_artifact": _compact(selected_artifact, max_depth=5, max_items=6) if artifact_context_only else {},
+            },
+            "interpretation_control": _compact(semantic_result.get("interpretation_control") or {}, max_depth=3, max_items=8),
             "window_days": 7,
             "authenticated_user_scope": {
                 "user_id": self.user_id,
@@ -621,6 +728,7 @@ class ProcessorScene:
                 "pending_task": _compact(pending_task),
             },
             memory=memory_packet,
+            visual_context=artifact_visual_context,
             requested_outputs=requested_outputs,
             required_artifacts=required_artifacts,
             required_competencies=[intent["operation"], representation],
@@ -639,11 +747,20 @@ class ProcessorScene:
                     "dialogue_relation": relation,
                     "fast_path": True,
                     "do_not_reinterpret": True,
+                    "interpretation_control": _compact(semantic_result.get("interpretation_control") or {}, max_depth=4, max_items=10),
+                    "render_authorized": bool(intent.get("render_authorized")),
+                    "render_mode": _text(intent.get("render_mode") or "TEXT_ONLY"),
+                    "artifact_context_only": artifact_context_only,
+                    "selected_artifact": _compact(selected_artifact, max_depth=5, max_items=6) if artifact_context_only else {},
                 },
                 "representation_plan": {
                     "representation": representation,
                     "visual_production_mode": visual_mode,
                     "renderer": _RENDERER_REGISTRY.get(representation, "MessageTextBlock"),
+                    "requested_outputs": list(requested_outputs),
+                    "authorized": bool(intent.get("render_authorized")),
+                    "render_mode": _text(intent.get("render_mode") or "TEXT_ONLY"),
+                    "artifact_context_only": artifact_context_only,
                 },
                 "scene_composition": requested_outputs,
             },
@@ -668,6 +785,9 @@ class ProcessorScene:
             "continuation_content_analysis": _compact(continuation_analysis, max_depth=4, max_items=8),
             "dialogue_strategy": _compact(dialogue_strategy, max_depth=3, max_items=8),
             "sequence_continuation_authorized": bool(dialogue.get("sequence_continuation_authorized")),
+            "interpretation_control": _compact(semantic_result.get("interpretation_control") or {}, max_depth=4, max_items=10),
+            "render_authorized": bool(intent.get("render_authorized")),
+            "render_mode": _text(intent.get("render_mode") or "TEXT_ONLY"),
             "provider_calls": 1,
             "single_route": True,
             "interpretation_owned_by": "QUANTUM_PROCESSOR",
@@ -682,6 +802,7 @@ class ProcessorScene:
 
         # Keep only actual provider blocks; normalize metadata without changing
         # the representation chosen by the processor.
+        self._render_omissions = []
         blocks = self._canonicalize_blocks(machine_payload.get("render_blocks") or [], request)
         answer = _text(machine_payload.get("answer") or machine_payload.get("content"))
         if not answer:
@@ -788,6 +909,7 @@ class ProcessorScene:
         expected = set(str(x).lower() for x in request.requested_outputs)
         result: List[Dict[str, Any]] = []
         seen = set()
+        structured = set(_STRUCTURED_TYPES) | {"audio", "video", "action", "file", "visual_context", "scene"}
         for raw in raw_blocks:
             if not isinstance(raw, dict):
                 continue
@@ -795,28 +917,43 @@ class ProcessorScene:
             kind = _text(block.get("type") or block.get("artifact_type") or block.get("representation")).lower()
             if not kind:
                 continue
-            # Processor-authorized type only. The provider may not turn image into
-            # diagram, graph into diagram, etc.
             if kind not in expected and kind not in {"text", "markdown"}:
                 continue
-            payload = block.get("payload")
-            if payload is None:
-                payload = {}
-            if not isinstance(payload, dict):
-                payload = {"content": _text(payload)}
+
+            canonical_payload = canonical_payload_for_block(block)
             block["type"] = kind
             block["renderer"] = _RENDERER_REGISTRY.get(kind, block.get("renderer") or "MessageTextBlock")
             block["viewer"] = block.get("viewer") or block["renderer"]
-            block["payload"] = payload
+            if canonical_payload:
+                block["payload"] = canonical_payload
+            elif kind in structured:
+                self._render_omissions.append({
+                    "type": kind,
+                    "reason": "missing_canonical_payload",
+                    "block_id": _text(block.get("block_id") or block.get("id")),
+                })
+                continue
+
+            if kind in structured:
+                valid, reason = validate_render_block_payload(kind, block)
+                if not valid:
+                    self._render_omissions.append({
+                        "type": kind,
+                        "reason": reason,
+                        "block_id": _text(block.get("block_id") or block.get("id")),
+                    })
+                    continue
+
             block["scene_contract"] = True
-            block["block_id"] = block.get("block_id") or _stable_id(f"scene-{kind}", payload)
-            sig = json.dumps({"type": kind, "payload": payload}, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+            block["block_id"] = block.get("block_id") or _stable_id(f"scene-{kind}", block.get("payload") or block.get("content"))
+            sig = json.dumps({"type": kind, "payload": block.get("payload", {}), "content": block.get("content", "")}, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
             if sig in seen:
                 continue
             seen.add(sig)
             block["sequence_index"] = len(result)
             result.append(block)
         return result
+
 
 
 def _set_live_state(state: dict, request: MachineRequest, response: MachineResponse, contract: Any) -> None:
