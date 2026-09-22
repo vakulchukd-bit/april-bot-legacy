@@ -85,6 +85,173 @@ def normalize_type(value: Any) -> str:
     return TYPE_ALIASES.get(key, key or "text")
 
 
+# ---------------------------------------------------------------------------
+# Canonical render-payload transport
+# ---------------------------------------------------------------------------
+# April Web's RenderMessage consumes the structured payload from the canonical
+# block. Provider/room responses may legally place the same data under data,
+# graph, table, images, artifact.payload, or presentation.payload_contract.
+# Normalize those equivalent carriers here so the backend never emits a
+# structured block with payload={} when real data is already present.
+
+STRUCTURED_RENDER_TYPES = {
+    "graph", "table", "diagram", "image", "gallery", "code", "link",
+    "file", "audio", "video", "action", "scene", "visual_context",
+}
+
+
+def _merge_payload_dict(target: dict[str, Any], candidate: Any) -> None:
+    if isinstance(candidate, dict):
+        for key, value in candidate.items():
+            if value in (None, "", [], {}):
+                continue
+            if key not in target or target.get(key) in (None, "", [], {}):
+                target[key] = deepcopy(value)
+            elif isinstance(target.get(key), dict) and isinstance(value, dict):
+                _merge_payload_dict(target[key], value)
+
+
+def canonical_payload_for_block(block: Any) -> dict[str, Any]:
+    """Return one Web-facing payload assembled from known provider carriers."""
+    if not isinstance(block, dict):
+        return {}
+
+    payload: dict[str, Any] = {}
+    candidates = [
+        _d(block.get("artifact_payload")).get("payload"),
+        _d(block.get("artifact")).get("payload"),
+        _d(_d(block.get("presentation")).get("payload_contract")).get("payload"),
+        block.get("payload"),
+        block.get("data"),
+        block.get("graph"),
+        block.get("graph_data"),
+        block.get("table"),
+        block.get("table_data"),
+        block.get("visual_payload"),
+        block.get("images"),
+    ]
+    block_type = normalize_type(block.get("type") or block.get("artifact_type") or block.get("representation"))
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            # Equivalent list carriers depend on the already-decided block type.
+            if block_type in {"image", "gallery"} and not payload.get("images"):
+                payload["images"] = deepcopy(candidate)
+            elif block_type == "table" and not payload.get("data"):
+                payload["data"] = deepcopy(candidate)
+            elif block_type == "diagram" and not payload.get("shapes") and not payload.get("elements"):
+                payload["shapes"] = deepcopy(candidate)
+            elif not payload.get("data"):
+                payload["data"] = deepcopy(candidate)
+            continue
+        _merge_payload_dict(payload, candidate)
+
+    # Direct scalar transport fields are also accepted by Web renderers.
+    direct_keys = (
+        "url", "href", "src", "uri", "path", "title", "labels",
+        "categories", "values", "series", "x", "y", "headers", "rows",
+        "columns", "matrix", "nodes", "edges", "shapes", "elements",
+        "svg", "code", "source", "formula", "latex", "equation",
+        "expression", "language", "action", "action_id", "name",
+    )
+    for key in direct_keys:
+        value = block.get(key)
+        if value not in (None, "", [], {}):
+            payload.setdefault(key, deepcopy(value))
+
+    # If a carrier is nested once more, unwrap only the known structural
+    # wrappers; do not reinterpret arbitrary provider content.
+    for wrapper in ("graph", "chart", "graph_data", "table", "visual_payload", "scene"):
+        nested = payload.get(wrapper)
+        if isinstance(nested, dict):
+            _merge_payload_dict(payload, nested)
+
+    return payload
+
+
+def _non_empty_list(value: Any) -> bool:
+    return isinstance(value, (list, tuple)) and len(value) > 0
+
+
+def _numeric_list(value: Any) -> bool:
+    if not isinstance(value, (list, tuple)) or not value:
+        return False
+    return any(isinstance(item, (int, float)) and not isinstance(item, bool) for item in value)
+
+
+def validate_render_block_payload(block_type: Any, block: Any) -> tuple[bool, str]:
+    """Validate that a structured block contains real data for its Web renderer."""
+    kind = normalize_type(block_type)
+    if kind in {"text", "markdown"}:
+        return bool(_content(_d(block))), "missing_text_content"
+
+    payload = canonical_payload_for_block(block)
+    if kind == "formula":
+        return bool(payload.get("formula") or payload.get("latex") or payload.get("equation") or payload.get("expression") or _content(_d(block))), "missing_formula"
+
+    if kind == "graph":
+        if payload.get("svg") or _non_empty_list(payload.get("nodes")) or _non_empty_list(payload.get("edges")) or _non_empty_list(payload.get("matrix")):
+            return True, "ok"
+        series = payload.get("series")
+        if isinstance(series, list):
+            for item in series:
+                if not isinstance(item, dict):
+                    continue
+                if _non_empty_list(item.get("data")) or _non_empty_list(item.get("values")) or _non_empty_list(item.get("points")) or (_numeric_list(item.get("x")) and _numeric_list(item.get("y"))):
+                    return True, "ok"
+                if _s(item.get("fn") or item.get("equation") or item.get("expression") or item.get("function")):
+                    return True, "ok"
+        if _numeric_list(payload.get("values")):
+            return True, "ok"
+        if _numeric_list(payload.get("x")) and _numeric_list(payload.get("y")):
+            return True, "ok"
+        return False, "missing_graph_data"
+
+    if kind == "table":
+        if _non_empty_list(payload.get("rows")) and (_non_empty_list(payload.get("headers")) or _non_empty_list(payload.get("columns"))):
+            return True, "ok"
+        data = payload.get("data")
+        if _non_empty_list(data):
+            return True, "ok"
+        if _non_empty_list(payload.get("matrix")):
+            return True, "ok"
+        return False, "missing_table_data"
+
+    if kind == "diagram":
+        concrete = (
+            payload.get("svg"), payload.get("drawing"), payload.get("geometry"),
+            payload.get("shapes"), payload.get("elements"), payload.get("nodes"),
+            payload.get("edges"), payload.get("points"),
+        )
+        return any(v not in (None, "", [], {}) for v in concrete), "ok" if any(v not in (None, "", [], {}) for v in concrete) else "missing_diagram_data"
+
+    if kind in {"image", "gallery"}:
+        concrete = (payload.get("images"), payload.get("image"), payload.get("src"), payload.get("url"), payload.get("image_url"), payload.get("items"), payload.get("gallery"))
+        ok = any(v not in (None, "", [], {}) for v in concrete)
+        return ok, "ok" if ok else "missing_image_data"
+
+    if kind == "code":
+        ok = bool(_s(payload.get("code") or payload.get("source") or _content(_d(block))))
+        return ok, "ok" if ok else "missing_code"
+
+    if kind in {"link", "file", "audio", "video"}:
+        ok = bool(_s(payload.get("url") or payload.get("href") or payload.get("src") or payload.get("uri") or payload.get("path")))
+        return ok, "ok" if ok else "missing_resource_url"
+
+    if kind == "action":
+        ok = bool(payload.get("action") or payload.get("action_id") or payload.get("name"))
+        return ok, "ok" if ok else "missing_action"
+
+    if kind == "scene":
+        ok = bool(payload.get("render_blocks") or payload.get("blocks") or payload.get("scene") or payload.get("nodes"))
+        return ok, "ok" if ok else "missing_scene_data"
+
+    if kind == "visual_context":
+        ok = bool(payload)
+        return ok, "ok" if ok else "missing_visual_context"
+
+    return bool(payload), "ok" if payload else "missing_payload"
+
+
 def normalize_renderer(value: Any, block_type: str) -> str:
     requested = _s(value).lower()
     if requested in RENDERER_ALIASES:
@@ -223,6 +390,19 @@ def canonicalize_scene_blocks(
         block_type = normalize_type(block.get("type") or block.get("artifact_type") or block.get("representation"))
         block["type"] = block_type
         block.setdefault("artifact_type", block_type)
+
+        if block_type != "graph_data":
+            canonical_payload = canonical_payload_for_block(block)
+            if block_type in STRUCTURED_RENDER_TYPES or block_type == "formula":
+                valid, reason = validate_render_block_payload(block_type, block)
+                if not valid:
+                    # A structured block without canonical data must never reach
+                    # RenderMessage as payload={}; it becomes an invisible/empty
+                    # renderer card. Preserve the human answer and drop only the
+                    # unusable structured node.
+                    continue
+            if canonical_payload:
+                block["payload"] = canonical_payload
 
         if block_type == "graph_data":
             # Preserve structured graph data inside its owning graph payload,
@@ -402,6 +582,7 @@ def _presentation_for_block(block: dict[str, Any], scene_presentation: dict[str,
         "block_id": _s(block.get("block_id")),
         "render_id": _s(block.get("render_id")),
         "payload_unchanged": True,
+        "payload_source_normalized": True,
         "layout_mode": _d(scene_presentation.get("layout")).get("mode", "flow"),
         "container": "adaptive_full_width",
     }
