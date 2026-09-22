@@ -1018,7 +1018,13 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     # send only compact live state so Luna resolves the task in context without
     # re-running a second semantic classifier.
     dialogue = payload.get("dialogue_contract") if isinstance(payload.get("dialogue_contract"), dict) else {}
-    if dialogue.get("continuation") or dialogue.get("reference_to_previous") or str(dialogue.get("context_dependency") or "").lower() == "pending":
+    if (
+        dialogue.get("continuation")
+        or dialogue.get("reference_to_previous")
+        or str(dialogue.get("context_dependency") or "").lower() in {"pending", "continuation", "recall"}
+        or str(dialogue.get("relation") or "").upper() in {"CONTINUE", "RECALL"}
+    ):
+        live_scene = dialogue.get("live_scene") if isinstance(dialogue.get("live_scene"), dict) else {}
         compact_context = {
             "relation": dialogue.get("relation"),
             "context_dependency": dialogue.get("context_dependency"),
@@ -1026,6 +1032,11 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             "active_entity": dialogue.get("active_entity"),
             "pending_task": dialogue.get("pending_task"),
             "resolved_request": dialogue.get("resolved_request"),
+            "canonical_topic": dialogue.get("canonical_topic") or live_scene.get("topic"),
+            "scene_id": dialogue.get("scene_id") or live_scene.get("scene_id"),
+            "scene_focus": live_scene.get("focus"),
+            "previous_user_turn": dialogue.get("previous_user_turn"),
+            "previous_april_turn": dialogue.get("previous_april_turn"),
         }
         candidates.append(
             "LIVE_DIALOGUE_STATE: " + json.dumps(_compact_value(compact_context), ensure_ascii=False, separators=(',', ':'))
