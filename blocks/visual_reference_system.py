@@ -41,9 +41,23 @@ def _clamp(value: Any) -> float:
 
 
 def build_scene_snapshot(active_visual_scene: Any, active_scene_contract: Any = None) -> Dict[str, Any]:
-    source = active_visual_scene if isinstance(active_visual_scene, dict) and active_visual_scene else (
-        active_scene_contract if isinstance(active_scene_contract, dict) else {}
-    )
+    source = active_visual_scene if isinstance(active_visual_scene, dict) and active_visual_scene else {}
+
+    # Never treat a text-only dialogue SceneContract as visual memory. A visual
+    # reference exists only when the state contains an actual visual scene or a
+    # structured render block with payload.
+    if not source and isinstance(active_scene_contract, dict):
+        blocks = active_scene_contract.get("render_blocks") or active_scene_contract.get("blocks") or []
+        visual_types = {"graph", "plot", "chart", "diagram", "schematic", "gallery", "image", "media", "visual", "scene", "table"}
+        has_visual = any(
+            isinstance(block, dict)
+            and _low(block.get("type") or block.get("artifact_type") or block.get("representation")) in visual_types
+            and not _low(block.get("type") or block.get("artifact_type") or block.get("representation")) in {"text", "markdown"}
+            for block in blocks
+        )
+        if has_visual:
+            source = active_scene_contract
+
     if not source:
         return {"exists": False}
     return {
