@@ -261,18 +261,44 @@ class LiveSceneContinuityEngine:
             values = []
 
         topic_tokens = set(re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", scene_topic.lower()))
+        live_sequence = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+        live_sequence_id = cls._text(live_sequence.get("sequence_id"))
+        user_id = cls._text(state.get("user_id"))
+        conversation_id = cls._text(state.get("conversation_id"))
+
         for item in reversed(values):
             if not isinstance(item, dict):
                 continue
-            if item.get("scene_id") == active_scene_id:
+
+            same_sequence = bool(
+                live_sequence_id
+                and cls._text(item.get("sequence_id")) == live_sequence_id
+                and (not user_id or cls._text(item.get("user_id")) in {"", user_id})
+                and (not conversation_id or cls._text(item.get("conversation_id")) in {"", conversation_id})
+            )
+            same_scene = cls._text(
+                item.get("scene_id")
+                or item.get("visual_scene_id")
+                or item.get("source_scene_id")
+            ) == cls._text(active_scene_id)
+
+            # Hot dialogue memory is keyed by the active sequence first.  This
+            # prevents a semantically valid short follow-up ("Придумай", "Ключ",
+            # "Давай") from losing its preceding turn merely because lexical
+            # overlap with the scene topic is zero.
+            if same_scene or same_sequence:
                 items.append(dict(item))
+                if len(items) >= cls.MAX_MEMORY_ITEMS:
+                    break
                 continue
+
             text = cls._text(
                 item.get("summary") or item.get("content") or item.get("text")
                 or item.get("answer") or item.get("user_request")
             )
             if not text:
                 continue
+
             tokens = set(re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", text.lower()))
             if topic_tokens and len(topic_tokens & tokens) > 0:
                 items.append(dict(item))
@@ -1241,6 +1267,13 @@ class QuantumInterpretationEngine:
         # inside that scene unless semantic evidence establishes a real topic
         # boundary. This is state-based continuity, not a lexical trigger.
         provisional_scene_type = required_representations[0] if required_representations else "text"
+        # Capture whether a scene existed BEFORE this turn. The first turn opens
+        # a scene (NEW); only subsequent turns can CONTINUE it.
+        preexisting_live_scene = LIVE_SCENE_CONTINUITY_ENGINE._scene_from_state(state)
+        had_active_scene = bool(
+            isinstance(preexisting_live_scene, dict)
+            and preexisting_live_scene.get("scene_id")
+        )
         live_scene = LIVE_SCENE_CONTINUITY_ENGINE.resolve(
             text=text,
             state=state,
@@ -1252,15 +1285,34 @@ class QuantumInterpretationEngine:
             scene_type=provisional_scene_type,
         )
 
-        continuation = bool(live_scene.get("continuation"))
-        memory_query = bool(live_scene.get("memory_query"))
-        reference = bool(
-            last_assistant and (
-                dialogue["reference_score"] >= 0.60
-                or dialogue["label"] == "memory_query"
-            )
-        )
+        live_scene_record = live_scene.get("scene", {}) if isinstance(live_scene.get("scene"), dict) else {}
+        live_scene_relation = str(live_scene.get("relation") or "").strip().upper()
+        has_active_scene = bool(live_scene_record.get("scene_id"))
+
+        memory_query = bool(live_scene.get("memory_query")) and not has_active_scene
+
+        # Canonical three-way dialogue relation:
+        #   CONTINUE -> remain in the live scene
+        #   RECALL   -> retrieve an older scene when no live scene owns the turn
+        #   NEW      -> genuine semantic topic boundary
+        #
+        # A live scene is intentionally sticky. Short follow-ups, answers,
+        # confirmations, corrections and representation changes cannot destroy it.
         topic_shift = bool(live_scene.get("topic_boundary"))
+        if topic_shift:
+            three_way_relation = "NEW"
+        elif had_active_scene:
+            three_way_relation = "CONTINUE"
+        elif memory_query:
+            three_way_relation = "RECALL"
+        else:
+            three_way_relation = "NEW"
+
+        continuation = three_way_relation == "CONTINUE"
+        reference = (
+            three_way_relation == "RECALL"
+            or (memory_query and not has_active_scene)
+        )
         resolved_scene = self._resolve_scene_context(
             text, state,
             continuation=continuation,
@@ -1283,12 +1335,31 @@ class QuantumInterpretationEngine:
             )
             if float(v) >= 0.20
         ]
+        live_scene_topic = self.normalize(live_scene_record.get("topic") or "")
+        live_scene_goal = self.normalize(live_scene_record.get("goal") or "")
+        effective_topic = live_scene_topic or active_topic or self.normalize(text)
+        effective_goal = live_scene_goal or active_goal or self.normalize(text)
+
+        if three_way_relation == "CONTINUE":
+            canonical_context_dependency = "continuation"
+        elif three_way_relation == "RECALL":
+            canonical_context_dependency = "recall"
+        elif three_way_relation == "NEW":
+            canonical_context_dependency = "new_topic" if topic_shift else "independent"
+        else:
+            canonical_context_dependency = "independent"
+
         dialogue_contract = {
+            "relation": three_way_relation,
+            "three_way_relation": three_way_relation,
+            "scene_relation": live_scene_relation,
             "dialog_act": dialogue["label"],
             "current_request": text,
             "resolved_request": (
-                f"Continue the previous task naturally.\\n"
-                f"Previous assistant response: {last_assistant}\\n"
+                f"Continue the active conversation naturally.\n"
+                f"Active scene topic: {effective_topic}\n"
+                f"Previous user turn: {last_user}\n"
+                f"Previous April turn: {last_assistant}\n"
                 f"Current user instruction: {text}"
                 if continuation else text
             ),
@@ -1297,25 +1368,22 @@ class QuantumInterpretationEngine:
             "previous_april_turn": last_assistant,
             "previous_user_turn": last_user,
             "reply_to": reply_to,
-            "active_goal": active_goal,
-            "active_topic": active_topic,
+            "active_goal": effective_goal,
+            "active_topic": effective_topic,
+            "current_topic": effective_topic,
+            "canonical_topic": effective_topic,
             "topic_shift": topic_shift,
-            "resolved_scene": resolved_scene,
-            "live_scene": live_scene.get("scene", {}),
-            "scene_relation": live_scene.get("relation"),
+            "live_scene": live_scene_record,
+            "scene_id": self.normalize(live_scene_record.get("scene_id")),
             "scene_continuation": bool(live_scene.get("continuation")),
+            "memory_query": memory_query,
             "memory_projection": live_scene.get("memory_projection", []),
-            "context_dependency": (
-                "memory_query" if memory_query else
-                "continuation" if continuation else
-                "reference" if reference else
-                "new_topic" if topic_shift else
-                "active_scene" if live_scene.get("scene", {}).get("scene_id") else
-                "independent"
-            ),
+            "memory_role": live_scene.get("memory_role", "supporting_evidence"),
+            "resume_after_memory": bool(live_scene.get("resume_after_memory")),
+            "context_dependency": canonical_context_dependency,
             "confidence": dialogue["confidence"],
             "canonical": True,
-            "version": "quantum_matrix_v1",
+            "version": "live_scene_dialogue_v2",
         }
         domain_evidence = [
             {"domain": k, "score": float(v)}
@@ -1340,8 +1408,10 @@ class QuantumInterpretationEngine:
             "candidate_representations": profile["explicit_representations"],
             "required_representations": required_representations,
             "resolved_scene": resolved_scene,
-            "live_scene": live_scene.get("scene", {}),
+            "live_scene": live_scene_record,
             "scene_continuity": live_scene,
+            "scene_relation": live_scene_relation,
+            "three_way_relation": three_way_relation,
             "memory_query": bool(memory_query),
             "representation_evidence": [
                 SemanticEvidence(k, float(v), "quantum_matrix").as_dict()
@@ -1351,8 +1421,8 @@ class QuantumInterpretationEngine:
                 if float(v) >= 0.20
             ],
             "semantic_profile": {
-                "active_topic": active_topic,
-                "active_goal": active_goal,
+                "active_topic": effective_topic,
+                "active_goal": effective_goal,
                 "previous_april_turn": last_assistant,
                 "resolved_scene": resolved_scene,
                 "live_scene": live_scene.get("scene", {}),
@@ -1385,40 +1455,15 @@ class QuantumInterpretationEngine:
                 "semantic_profile_ref": "semantic_profile",
                 "decision_owner": DECISION_OWNER,
             },
-            "dialogue_contract": {
-                "dialog_act": dialogue["label"],
-                "current_request": text,
-                "resolved_request": (
-                    f"Continue the previous task naturally.\n"
-                    f"Previous assistant response: {last_assistant}\n"
-                    f"Current user instruction: {text}"
-                    if continuation else text
-                ),
-                "continuation": continuation,
-                "reference_to_previous": reference,
-                "previous_april_turn": last_assistant,
-                "previous_user_turn": last_user,
-                "reply_to": reply_to,
-                "active_goal": active_goal,
-                "active_topic": active_topic,
-                "topic_shift": topic_shift,
-                "resolved_scene": resolved_scene,
-                "context_dependency": (
-                    "memory_query" if memory_query else
-                    "continuation" if continuation else
-                    "reference" if reference else
-                    "new_topic" if topic_shift else
-                    "independent"
-                ),
-                "confidence": dialogue["confidence"],
-                "canonical": True,
-                "version": "quantum_matrix_v1",
-            },
+            "dialogue_contract": dialogue_contract,
             "dialog_act": dialogue["label"],
             "continuation": float(dialogue["continuation_score"]),
-            "continuation_target": last_assistant or active_topic,
-            "active_goal": active_goal,
-            "active_topic": active_topic,
+            "continuation_target": last_assistant or effective_topic,
+            "active_goal": effective_goal,
+            "active_topic": effective_topic,
+            "current_topic": effective_topic,
+            "canonical_topic": effective_topic,
+            "context_dependency": canonical_context_dependency,
             "resolved_request": text,
             "context_resolution": {
                 "depends_on_previous_dialogue": bool(continuation or reference),
@@ -1428,13 +1473,9 @@ class QuantumInterpretationEngine:
                 "live_scene": live_scene.get("scene", {}),
                 "active_topic": active_topic,
                 "active_goal": active_goal,
-                "relation": (
-                "memory_query" if memory_query else
-                "continuation" if continuation else
-                "reference" if reference else
-                "topic" if active_topic and not topic_shift else
-                "independent"
-            ),
+                "relation": three_way_relation,
+                "scene_relation": live_scene_relation,
+                "memory_query": memory_query,
             },
             "reply_to": reply_to,
             "required_capabilities": [
@@ -1442,13 +1483,67 @@ class QuantumInterpretationEngine:
                 *( ["memory_retrieval"] if memory_query else [] ),
                 *(["representation_evidence"] if required_representations else []),
             ],
-            "context_dependency": (
-                "memory_query" if memory_query else
-                "continuation" if continuation else
-                "reference" if reference else
-                "new_topic" if topic_shift else
-                "independent"
-            ),
+            "context_dependency": canonical_context_dependency,
+            "dialogue_relation": {
+                "relation": three_way_relation,
+                "three_way_relation": three_way_relation,
+                "same_scene": three_way_relation == "CONTINUE",
+                "continuation": continuation,
+                "reference_to_previous": reference,
+                "topic_boundary": topic_shift,
+                "scene_id": live_scene_record.get("scene_id"),
+                "canonical_topic": effective_topic,
+                "confidence": float(dialogue.get("confidence", 0.0) or 0.0),
+                "source": "live_scene_continuity_engine",
+            },
+            "dialogue_vector": {
+                "version": "live_scene_dialogue_vector_v2",
+                "relation": three_way_relation,
+                "three_way_relation": three_way_relation,
+                "scene_relation": live_scene_relation,
+                "continuation": continuation,
+                "reference_to_previous": reference,
+                "memory_query": memory_query,
+                "canonical_topic": effective_topic,
+                "active_topic": effective_topic,
+                "active_goal": effective_goal,
+                "sequence_id": self.normalize(
+                    live_scene_record.get("sequence_id")
+                    or live_scene_record.get("active_sequence_id")
+                    or (
+                        state.get("active_dialogue_sequence", {}).get("sequence_id")
+                        if isinstance(state.get("active_dialogue_sequence"), dict) else ""
+                    )
+                ),
+                "target_sequence_id": self.normalize(
+                    live_scene_record.get("sequence_id")
+                    or (
+                        state.get("active_dialogue_sequence", {}).get("sequence_id")
+                        if isinstance(state.get("active_dialogue_sequence"), dict) else ""
+                    )
+                ),
+                "topic_boundary": topic_shift,
+                "previous_user_turn": last_user,
+                "previous_april_turn": last_assistant,
+                "resolved_request": dialogue_contract.get("resolved_request", text),
+                "resolved_reference": self.normalize(
+                    live_scene_record.get("resolved_reference")
+                    or live_scene.get("resolved_reference")
+                ),
+                "selected_memory_index": -1,
+                "selected_memory_operand": {},
+                "trajectory": {
+                    "scene_id": live_scene_record.get("scene_id"),
+                    "topic": effective_topic,
+                    "goal": effective_goal,
+                    "turn_index": live_scene_record.get("turn_index", 0),
+                    "status": live_scene_record.get("status", "active"),
+                },
+                "sequence_continuation_authorized": continuation,
+                "historical_memory_is_evidence_only": True,
+                "source": "live_scene_continuity_engine",
+            },
+
             "context_policy": {
                 "current_request": True,
                 "dialogue_vector": continuation or reference or memory_query or bool(live_scene.get("scene", {}).get("scene_id")),
@@ -1465,6 +1560,14 @@ class QuantumInterpretationEngine:
             "quantum_interpretation_field": {
                 "linguistic": self._linguistic(text),
                 "dialogue": dialogue_contract,
+                "live_scene": live_scene_record,
+                "dialogue_vector": dialogue_contract.get("three_way_relation") and {
+                    "relation": three_way_relation,
+                    "three_way_relation": three_way_relation,
+                    "scene_id": live_scene_record.get("scene_id"),
+                    "canonical_topic": effective_topic,
+                    "sequence_id": live_scene_record.get("sequence_id"),
+                } or {},
                 "representation": representation_evidence,
                 "domain": [
                     {"domain": k, "score": float(v)}
@@ -1568,6 +1671,79 @@ class QuantumInterpretationEngine:
 # ---------------------------------------------------------------------------
 # Canonical result / transport helpers
 # ---------------------------------------------------------------------------
+
+def build_scene_blueprint(
+    *,
+    text: str,
+    requested_outputs: Sequence[str] = (),
+    scene_composition: Sequence[Any] = (),
+    production_representation: str = "text",
+    active_topic: str = "",
+    active_goal: str = "",
+    subject: str = "",
+    semantic_summary: str = "",
+    dialogue: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a renderer-neutral scene blueprint for Semantic Core.
+
+    This helper contains no routing and no renderer selection. It preserves the
+    Interpretation decision as a compact semantic scene description.
+    """
+    reps: list[str] = []
+    for value in list(requested_outputs or ()) + list(scene_composition or ()) + [production_representation]:
+        if isinstance(value, dict):
+            value = value.get("type") or value.get("representation") or value.get("kind")
+        value = str(value or "").strip().lower()
+        if value and value not in reps:
+            reps.append(value)
+    if not reps:
+        reps = ["text"]
+
+    preferred = str(production_representation or "text").strip().lower() or reps[0]
+    if preferred not in reps:
+        reps.insert(0, preferred)
+
+    dialogue = dialogue if isinstance(dialogue, dict) else {}
+    live_scene = dialogue.get("live_scene") if isinstance(dialogue.get("live_scene"), dict) else {}
+
+    return {
+        "version": "live_scene_blueprint_v1",
+        "scene_kind": "composite" if len(reps) > 1 else reps[0],
+        "representations": reps,
+        "preferred_representation": preferred,
+        "active_topic": str(active_topic or live_scene.get("topic") or "").strip(),
+        "active_goal": str(active_goal or live_scene.get("goal") or "").strip(),
+        "subject": str(subject or "").strip(),
+        "semantic_summary": str(semantic_summary or text or "").strip()[:1800],
+        "dialogue": {
+            "relation": str(
+                dialogue.get("three_way_relation")
+                or dialogue.get("relation")
+                or "NEW"
+            ).strip().upper(),
+            "continuation": bool(dialogue.get("continuation")),
+            "reference_to_previous": bool(dialogue.get("reference_to_previous")),
+            "scene_id": str(
+                dialogue.get("scene_id")
+                or live_scene.get("scene_id")
+                or ""
+            ).strip(),
+            "canonical_topic": str(
+                dialogue.get("canonical_topic")
+                or active_topic
+                or live_scene.get("topic")
+                or ""
+            ).strip(),
+        },
+        "composition": [dict(x) if isinstance(x, dict) else str(x) for x in list(scene_composition or ())[:16]],
+        "ownership": {
+            "interpretation_owner": "INTERPRETATION_LAYER",
+            "semantic_owner": "SEMANTIC_CORE",
+            "renderer_owner": "PROCESSOR_SELECTED",
+        },
+        "renderer_neutral": True,
+    }
+
 
 @dataclass
 class SemanticEvidence:
@@ -2325,6 +2501,37 @@ SEMANTIC_INTERPRETATION_CORE = {
     "confidence_policy": "multi_evidence",
 }
 SEMANTIC_PIPELINE = INTERPRETATION_ROUTE
+
+
+# ---------------------------------------------------------------------------
+# Shared semantic encoder compatibility
+# ---------------------------------------------------------------------------
+
+_SHARED_SEMANTIC_ENCODER = None
+_SHARED_SEMANTIC_ENCODER_LOCK = threading.RLock()
+
+def get_shared_semantic_encoder():
+    """Return the optional shared SentenceTransformer instance.
+
+    Heavy model loading remains opt-in. State Manager can safely link to this
+    function without creating a second semantic runtime.
+    """
+    global _SHARED_SEMANTIC_ENCODER
+    if _SHARED_SEMANTIC_ENCODER is not None:
+        return _SHARED_SEMANTIC_ENCODER
+    if SentenceTransformer is None or not APRIL_ENABLE_HEAVY_HOTPATH:
+        return None
+    with _SHARED_SEMANTIC_ENCODER_LOCK:
+        if _SHARED_SEMANTIC_ENCODER is not None:
+            return _SHARED_SEMANTIC_ENCODER
+        try:
+            _SHARED_SEMANTIC_ENCODER = SentenceTransformer(SEMANTIC_MODEL_NAME)
+        except Exception as exc:
+            _SHARED_SEMANTIC_ENCODER = None
+            safe_semantic_log = globals().get("safe_patch_log")
+            if callable(safe_semantic_log):
+                safe_semantic_log(f"SHARED ENCODER UNAVAILABLE: {exc}")
+    return _SHARED_SEMANTIC_ENCODER
 
 
 # ---------------------------------------------------------------------------
