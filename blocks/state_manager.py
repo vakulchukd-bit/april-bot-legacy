@@ -3254,6 +3254,41 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
     state_obj["current_topic"] = scene_record.get("topic") or active_sequence.get("topic") or state_obj.get("current_topic")
     state_obj["current_visual_scene"] = deepcopy(scene_record)
 
+    # Canonical live dialogue scene. This is the hot conversational context and
+    # exists independently of whether the turn produced a visual artifact.
+    state_obj["scene_state"] = {
+        **(deepcopy(state_obj.get("scene_state")) if isinstance(state_obj.get("scene_state"), dict) else {}),
+        "version": "live_scene_dialogue_v2",
+        "scene_id": scene_id,
+        "status": "active",
+        "continuity": bool(is_continuation),
+        "relation": resolved_relation,
+        "trajectory": scene_record.get("topic"),
+        "active_topic": scene_record.get("topic"),
+        "goal": active_sequence.get("topic") or scene_record.get("topic"),
+        "active_goal": active_sequence.get("topic") or scene_record.get("topic"),
+        "focus": current_request_text,
+        "last_user_turn": current_request_text,
+        "last_april_turn": answer_text,
+        "previous_scene_id": previous_scene_id,
+        "sequence_id": active_sequence.get("sequence_id"),
+        "turn_index": active_sequence.get("turn_count", 0),
+        "updated_at": time.time(),
+        "live_scene": {
+            "scene_id": scene_id,
+            "status": "active",
+            "relation": resolved_relation,
+            "topic": scene_record.get("topic"),
+            "goal": active_sequence.get("topic") or scene_record.get("topic"),
+            "focus": current_request_text,
+            "last_user_turn": current_request_text,
+            "last_april_turn": answer_text,
+            "sequence_id": active_sequence.get("sequence_id"),
+            "turn_index": active_sequence.get("turn_count", 0),
+        },
+    }
+    state_obj["live_dialogue_scene"] = deepcopy(state_obj["scene_state"]["live_scene"])
+
     # Separate the latest dialogue turn from the latest successful visual
     # artifact. A clarification/error turn must never erase the last usable
     # graph/table/formula from the active visual memory.
@@ -3269,18 +3304,24 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         state_obj["active_visual_scene"] = deepcopy(previous_successful_visual)
         active_visual_source = "last_successful_visual_preserved"
     else:
-        state_obj["active_visual_scene"] = deepcopy(scene_record)
-        active_visual_source = "current_dialogue_no_visual"
+        # Plain dialogue is NOT a visual scene. Keep the live dialogue scene in
+        # `scene_state`, and keep the visual pointer empty until a real structured
+        # visual artifact exists.
+        state_obj["active_visual_scene"] = None
+        active_visual_source = "no_visual_scene"
 
-    active_visual = state_obj.get("active_visual_scene") or scene_record
-    state_obj["active_visual_topic"] = {
-        "topic": active_visual.get("topic") or scene_record["topic"],
-        "scene_id": active_visual.get("scene_id") or scene_id,
-        "conversation_id": conversation_id,
-        "turn_id": active_visual.get("turn_id") or scene_record["turn_id"],
-        "user_id": str(user_id),
-        "source": active_visual_source,
-    }
+    active_visual = state_obj.get("active_visual_scene")
+    if isinstance(active_visual, dict) and active_visual:
+        state_obj["active_visual_topic"] = {
+            "topic": active_visual.get("topic") or scene_record["topic"],
+            "scene_id": active_visual.get("scene_id") or scene_id,
+            "conversation_id": conversation_id,
+            "turn_id": active_visual.get("turn_id") or scene_record["turn_id"],
+            "user_id": str(user_id),
+            "source": active_visual_source,
+        }
+    else:
+        state_obj["active_visual_topic"] = None
     state_obj["visual_memory_integrity"] = {
         "active_artifact_source": active_visual_source,
         "last_successful_scene_id": state_obj.get("last_successful_visual_scene_id"),
@@ -3386,27 +3427,37 @@ def update_dialog_context(user_id, semantic_result):
 
     state_obj = get_state(user_id)
     obj = semantic_result.get("current_object")
-    topic = semantic_result.get("current_topic")
     contract = semantic_result.get("dialogue_contract") if isinstance(
         semantic_result.get("dialogue_contract"), dict
     ) else {}
-
-    if obj:
-        state_obj["current_object"] = obj
-        state_obj["active_entity"] = obj
-    if topic:
-        state_obj["current_topic"] = topic
-
     dialogue_vector = (
         semantic_result.get("dialogue_vector")
         if isinstance(semantic_result.get("dialogue_vector"), dict)
         else {}
     )
+    topic = (
+        semantic_result.get("current_topic")
+        or semantic_result.get("active_topic")
+        or semantic_result.get("canonical_topic")
+        or contract.get("canonical_topic")
+        or contract.get("active_topic")
+        or dialogue_vector.get("canonical_topic")
+        or dialogue_vector.get("active_topic")
+    )
+    if obj:
+        state_obj["current_object"] = obj
+        state_obj["active_entity"] = obj
+    if topic:
+        state_obj["current_topic"] = topic
+        state_obj["active_topic"] = topic
+
 
     raw_relation = (
         dialogue_vector.get("three_way_relation")
-        or contract.get("three_way_relation")
+        or dialogue_vector.get("relation")
         or semantic_result.get("three_way_relation")
+        or contract.get("three_way_relation")
+        or contract.get("relation")
         or semantic_result.get("dialogue_relation")
     )
     relation = str(raw_relation or "").strip().upper()
