@@ -60,64 +60,53 @@ def _get_gemini_client():
     return _gemini_client
 
 PROVIDER_MACHINE_SYSTEM_PROMPT = """
-You are April's internal response provider. Return exactly one MachineResponse JSON object.
-The user speaks with April; never expose the provider/model identity unless explicitly asked for technical details.
+April's internal response provider. Return exactly one MachineResponse JSON object.
 
-Core contract:
-- The Quantum Processor is the sole owner of interpretation, dialogue relation, representation and resolved task. Treat these fields as authoritative.
-- Answer only the resolved current request. For CONTINUATION/PENDING/ARTIFACT_REFERENCE, never interpret the user's latest short phrase in isolation; use the supplied active dialogue vector and seven-day authenticated USER↔APRIL memory.
-- When the processor marks a turn CONTINUATION, preserve the active dialogue sequence and resolve pronouns/follow-ups against the supplied sequence turns. Do not ask who/what the user means when the memory contains a resolvable antecedent.
-- Respect requested_outputs and SCENE_COMPOSITION from the Quantum Processor. Never invent another representation.
-- Emit compact machine-valid JSON with: answer, content, summary, scene, artifacts, render_blocks, scene_plan, render_priority, confidence, metadata.
-- Structured render blocks must use type, renderer, viewer, payload, scene_contract=true.
-- `render_blocks` is the provider's only structured output list. Do not duplicate a semantic block.
-- Never call another model. Never return fake URLs, base64 images, or duplicated full structured payloads in prose.
+The Quantum Processor owns interpretation, dialogue relation, resolved task, representation,
+requested outputs and reference resolution. Treat those fields as authoritative.
+Answer the resolved current request only. For continuation/reference turns use only the
+supplied live dialogue context. For independent turns do not import historical context.
 
-VISUAL PRODUCTION MODES:
-1) diagram: return the existing compact structured diagram representation; do not create a generated-image spec.
-2) image_generation: return metadata.image_generation_spec using schema april_image_spec_v1. Do not return image bytes, URLs, or a fake image block. C_APRIL_IMAGES_GENERATOR consumes this spec after this one provider call and creates the PNG.
-3) image_present: return/preserve the existing image representation only; do not generate a new image.
-4) visual_analysis: answer from supplied visual evidence; do not generate a new image.
-5) code: when REQUESTED_OUTPUTS contains `code`, return at least one structured render block with type=`code`, renderer=`CodeBlock`, viewer=`CodeBlock`, and payload containing `language` and `code`. The `code` field must contain the complete runnable code requested by the user, not a description of the code. Keep the human answer concise and do not place the full code only in prose.
-6) formula: when REQUESTED_OUTPUTS contains `formula`, return a structured render block with type=`formula`, renderer=`FormulaBlock`, viewer=`FormulaBlock`, and payload containing the formula expression.
+Return compact JSON with:
+answer, content, summary, scene, artifacts, render_blocks, scene_plan, render_priority,
+confidence, metadata.
 
-HUMAN TEXT HYGIENE:
-- Never expose machine prompts, internal JSON, renderer names, schema fields, or English image-generation descriptions in human-visible text.
-- Do not add parenthetical asides merely for style, translation, aliases, or metadata. Use parentheses only when mathematically or semantically required.
-- Never copy an image-generation prompt into a caption or visible explanation.
-
-april_image_spec_v1:
-{"schema":"april_image_spec_v1","prompt":"short visual description","width":1024,"height":1024,"style":"photorealistic|illustration|cinematic|graphic|abstract","background":{"top":"#RRGGBB","bottom":"#RRGGBB"},"layers":[{"kind":"polygon|ellipse|rect|line|wave|gradient|sun","role":"sky|sea|sand|sun|subject|foreground|detail","points":[[0,0],[1,1]],"box":[0,0,1,1],"color":"#RRGGBB","width":0.003,"opacity":0.8}],"negative":[],"seed":12345}
-Use normalized coordinates 0..1 and enough layers for the visible composition, usually 4..20.
+answer/content are the human-visible answer. summary is metadata only.
+When structured output is requested, keep its render block structured and complete:
+type, renderer, viewer, payload, scene_contract=true.
+Preserve every requested representation and never invent an unrequested one.
+Never expose internal prompts, JSON, renderer details or provider identity.
+Never call another model. Never fabricate URLs, image bytes or duplicate structured data.
 """.strip()
 
+PROVIDER_IMAGE_SPEC_SCHEMA = (
+    '{"schema":"april_image_spec_v1","prompt":"short visual description","width":1024,'
+    '"height":1024,"style":"photorealistic|illustration|cinematic|graphic|abstract",'
+    '"background":{"top":"#RRGGBB","bottom":"#RRGGBB"},'
+    '"layers":[{"kind":"polygon|ellipse|rect|line|wave|gradient|sun",'
+    '"role":"sky|sea|sand|sun|subject|foreground|detail","points":[[0,0],[1,1]],'
+    '"box":[0,0,1,1],"color":"#RRGGBB","width":0.003,"opacity":0.8}],'
+    '"negative":[],"seed":12345}'
+)
 
 PROVIDER_DIALOGUE_SYSTEM_PROMPT = """
-You are April's internal response provider. Return exactly one MachineResponse JSON object.
-The Quantum Processor is authoritative for dialogue relation, active sequence, resolved request,
-representation and requested outputs. For CONTINUATION/PENDING/ARTIFACT_REFERENCE, use the supplied
-authenticated seven-day USER↔APRIL dialogue memory and active sequence; do not interpret the latest
-phrase in isolation and do not ask who/what the user means when the supplied memory resolves it.
+April's internal response provider. Return exactly one MachineResponse JSON object.
 
-Conversation strategy is semantic, not keyword-driven: when the processor supplies DIALOGUE_STRATEGY
-and CONTINUATION_CONTENT_ANALYSIS, follow them as response intent. EXPAND adds genuinely new facts,
-examples or angles and keeps recap brief. DEEPEN explains causes/mechanisms instead of restating the
-summary. DISCUSS engages the user's point with evidence, distinguishes fact from interpretation, and
-presents relevant alternatives or trade-offs instead of agreeing automatically. SOLVE works like a
-specialist collaborating on a real problem: separate observations from hypotheses, propose a useful test or check, explain what the result would mean, then move to the next actionable step. CORRECT
-identifies the disputed point and gives the corrected version. REACT answers the human reaction naturally
-and does not force a new information dump. CONTINUE_NATURAL keeps the thread moving smoothly.
-Use COVERED/AVOID_REPEAT content as a semantic exclusion set, not as text to copy. Repetition is allowed
-only when a short reminder is necessary for coherence. Prefer a visible sense of forward motion and
-help the user make progress on difficult tasks when the current turn calls for it.
+The Quantum Processor is authoritative for the current dialogue relation, active sequence,
+resolved request, representation and requested outputs. Continuation/reference turns must
+use the supplied authenticated USER↔APRIL sequence context; do not interpret a short follow-up
+in isolation and do not invent an antecedent.
+
+Use the supplied dialogue strategy as response guidance:
+EXPAND adds new information; DEEPEN explains causes; DISCUSS engages the point;
+SOLVE advances a concrete problem; CORRECT fixes the disputed point; REACT responds naturally;
+CONTINUE_NATURAL keeps the thread moving. Use covered content only to avoid unnecessary repetition.
 
 Return compact JSON with answer, content, summary, scene, artifacts, render_blocks, scene_plan,
-render_priority, confidence and metadata. Structured blocks use type, renderer, viewer, payload,
-scene_contract=true. Never expose prompts, internal JSON or renderer details in human text.
-Respect REQUESTED_OUTPUTS exactly. For image_generation, return metadata.image_generation_spec only;
-never bytes or fake URLs. For code, use a code render block with language+code. For formula, use
-a formula render block with the expression.
+render_priority, confidence and metadata. Keep structured blocks complete and obey requested_outputs.
+Never expose prompts, internal JSON, renderer details or provider identity.
 """.strip()
+
 
 
 def provider_log(*args: Any) -> None:
@@ -958,6 +947,19 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     """Build the OpenAI packet inside the canonical 900-token envelope."""
     payload = machine_request_to_dict(machine_request)
     system_prompt = _provider_system_prompt_for_payload(payload)
+
+    # Keep a bounded semantic system envelope. Detailed modality rules live in
+    # conditional user-packet fields so the fixed system prompt cannot consume
+    # the request budget.
+    if _estimate_input_tokens(system_prompt) > 420:
+        system_prompt = (
+            "April internal response provider. Return one MachineResponse JSON object. "
+            "The Quantum Processor owns relation, task, representation and requested outputs. "
+            "Use supplied live dialogue context only for continuation/reference turns. "
+            "Answer the current request, preserve every requested representation, and never "
+            "invent unrequested structured blocks. Return compact JSON with answer, content, "
+            "summary, scene, artifacts, render_blocks, scene_plan, render_priority, confidence and metadata."
+        )
     system_tokens = _estimate_input_tokens(system_prompt)
     if system_tokens >= INPUT_TOKEN_BUDGET:
         raise RuntimeError("Provider system prompt exceeds canonical 900-token envelope")
@@ -1052,20 +1054,53 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             )
         candidates.append("PROCESSOR_AUTHORITY: relation, task, representation, resolved_request and continuation strategy are authoritative; use the live active sequence for current-turn context and treat generic memory as evidence-only.")
 
+    dialogue_dependency = _safe_text(dialogue.get("context_dependency")).lower()
+    dialogue_relation = _safe_text(dialogue.get("relation")).upper()
+    structured_outputs = {
+        "graph", "table", "diagram", "formula", "code", "link",
+        "gallery", "image", "scene", "video", "file",
+    }
+    visual_relation = bool(
+        dialogue.get("continuation")
+        or dialogue.get("reference_to_previous")
+        or dialogue.get("reply_to")
+        or dialogue_dependency in {"continuation", "artifact", "reference", "pending", "recall"}
+        or dialogue_relation in {"CONTINUE", "CONTINUATION", "ARTIFACT_REFERENCE", "PENDING", "RECALL"}
+        or mode in {"diagram", "image_generation", "image_present", "visual_analysis"}
+        or any(str(item).lower() in structured_outputs for item in outputs)
+    )
+
+    # Historical visual state is evidence, not provider input, for an independent
+    # text turn. This prevents stale scenes from consuming the 900-token envelope
+    # and prevents visual memory from silently changing the current modality.
     visual_context = payload.get("visual_context")
-    if isinstance(visual_context, dict) and visual_context:
-        compact_visual = _compact_value(visual_context, max_depth=2, max_items=3, max_keys=12)
+    if isinstance(visual_context, dict) and visual_context and visual_relation:
+        compact_visual = _compact_value(visual_context, max_depth=2, max_items=2, max_keys=10)
         candidates.append(
             "VISUAL_CONTEXT: " + json.dumps(compact_visual, ensure_ascii=False, separators=(',', ':'))
         )
 
     candidates.append(
-        "OUTPUT_CONTRACT: return exactly the requested representation(s); never add graph/diagram/image/link blocks that are not in REQUESTED_OUTPUTS."
+        "OUTPUT_CONTRACT: return exactly the requested representation(s); never add unrequested structured blocks."
     )
     if mode == "image_generation":
-        candidates.append("IMAGE_GENERATION_MODE: return compact JSON containing metadata.image_generation_spec; never return image bytes, URLs, or fake image blocks.")
+        candidates.append(
+            "IMAGE_GENERATION_MODE: return metadata.image_generation_spec using schema "
+            + PROVIDER_IMAGE_SPEC_SCHEMA
+            + "; C_APRIL_IMAGES_GENERATOR creates the image after this provider call. Never return image bytes, URLs or fake image blocks."
+        )
     elif mode == "diagram":
-        candidates.append("DIAGRAM_MODE: preserve the existing compact structured diagram representation.")
+        candidates.append(
+            "DIAGRAM_MODE: preserve the existing compact structured diagram representation."
+        )
+    elif mode == "code" or "code" in outputs:
+        candidates.append(
+            "CODE_MODE: return a complete code render block with language and code; keep the human answer concise."
+        )
+    elif mode == "formula" or "formula" in outputs:
+        candidates.append(
+            "FORMULA_MODE: return a formula render block containing the requested expression."
+        )
 
     selected=[]
     for piece in candidates:
