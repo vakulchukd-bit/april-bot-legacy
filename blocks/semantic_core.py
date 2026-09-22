@@ -887,6 +887,7 @@ def _dialogue_context_matrix(text, signals, interpreted):
         canonical_relation in {
             "CONTINUE_TOPIC", "CONTINUATION", "ARTIFACT_REFERENCE",
             "MEMORY_QUERY", "SAME_TOPIC", "INDEPENDENT", "NEW_TOPIC",
+            "CONTINUE", "RECALL", "NEW",
         }
         or canonical_request_relation in {
             "CONTINUE_TOPIC", "ARTIFACT_REFERENCE", "MEMORY_QUERY",
@@ -901,7 +902,7 @@ def _dialogue_context_matrix(text, signals, interpreted):
         )
         continuation = bool(
             canonical.get("continuation")
-            or relation in {"CONTINUE_TOPIC", "CONTINUATION", "ARTIFACT_REFERENCE"}
+            or relation in {"CONTINUE_TOPIC", "CONTINUATION", "ARTIFACT_REFERENCE", "CONTINUE"}
             or canonical_request_relation == "ARTIFACT_REFERENCE"
         )
         reference = bool(
@@ -1271,6 +1272,8 @@ def analyze(text: str, state: dict=None, history: list=None,
         "candidate_representations","scene_type","scene_semantic_state",
         "dialogue_relation","task_phase","operation",
         "production_representation","resolved_representation",
+        "three_way_relation","scene_relation","topic_boundary","live_scene",
+        "dialogue_vector","scene_continuity","current_topic",
         "production_representation_locked","resolved_representation_locked",
         "representation_scores","representation_evidence",
         "presentation_signal_scores"
@@ -1311,6 +1314,42 @@ def analyze(text: str, state: dict=None, history: list=None,
             "continuation_score": max(0.70, float(dc.get("continuation_score", 0.0) or 0.0)),
             "reference_score": max(0.70, float(dc.get("reference_score", 0.0) or 0.0)),
         })
+    # Canonical live-scene relation is authoritative for the whole semantic field.
+    canonical_live_relation = str(
+        interpreted.get("three_way_relation")
+        or interpreted.get("dialogue_vector", {}).get("three_way_relation")
+        or dc.get("three_way_relation")
+        or dc.get("relation")
+        or ""
+    ).strip().upper()
+    if canonical_live_relation in {"CONTINUE", "RECALL", "NEW"}:
+        dc["relation"] = canonical_live_relation
+        dc["three_way_relation"] = canonical_live_relation
+        dc["scene_relation"] = interpreted.get("scene_relation") or dc.get("scene_relation")
+        dc["live_scene"] = interpreted.get("live_scene") or dc.get("live_scene") or {}
+        dc["canonical_topic"] = (
+            interpreted.get("canonical_topic")
+            or interpreted.get("active_topic")
+            or (dc.get("canonical_topic") or dc.get("active_topic") or dc.get("current_topic"))
+        )
+        dc["active_topic"] = dc.get("canonical_topic") or dc.get("active_topic")
+        dc["current_topic"] = dc.get("canonical_topic") or dc.get("current_topic")
+        dialogue_context["continuation"] = canonical_live_relation == "CONTINUE"
+        dialogue_context["reference_to_previous"] = canonical_live_relation == "RECALL"
+        dialogue_context["context_dependency"] = canonical_live_relation != "NEW"
+        dialogue_context["context_dependency_score"] = max(
+            float(dialogue_context.get("context_dependency_score", 0.0) or 0.0),
+            1.0 if canonical_live_relation != "NEW" else 0.0,
+        )
+        if canonical_live_relation == "CONTINUE":
+            dialogue_context["continuation_score"] = max(float(dialogue_context.get("continuation_score", 0.0) or 0.0), 1.0)
+        elif canonical_live_relation == "RECALL":
+            dialogue_context["reference_score"] = max(float(dialogue_context.get("reference_score", 0.0) or 0.0), 1.0)
+        dialogue_context["dialog_act"] = (
+            "continuation" if canonical_live_relation == "CONTINUE"
+            else "memory_query" if canonical_live_relation == "RECALL"
+            else dialogue_context.get("dialog_act", "request")
+        )
     result["dialogue_contract"] = dc
     result["dialogue_context_field"] = dialogue_context
     result["scene_semantic_state"] = (
