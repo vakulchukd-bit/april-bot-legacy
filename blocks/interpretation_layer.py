@@ -1071,10 +1071,20 @@ class QuantumInterpretationEngine:
             dialogue.get("reference", 0.0), 0.86 * assistant_relation,
             0.62 * user_relation, 0.70 * topic_relation,
         )
-        memory_query_score = float(dialogue.get("memory_query", 0.0) or 0.0)
+        # Memory recall is only meaningful when there is an existing dialogue
+        # context to recall from. Without prior user/assistant context a short
+        # phrase such as "Поиграем" must never be promoted to memory_query just
+        # because the prototype matrix gives it a weak semantic score.
+        has_dialogue_context = bool(
+            previous_assistant or previous_user or active_topic or active_goal
+        )
+        memory_query_score = (
+            float(dialogue.get("memory_query", 0.0) or 0.0)
+            if has_dialogue_context else 0.0
+        )
         if memory_query_score >= 0.10:
             # Recall requests are a semantic discourse mode, not an ordinary
-            # continuation of the immediately preceding visual scene.
+            # continuation of the immediately preceding live scene.
             reference_score = max(reference_score, memory_query_score)
 
         # A relational attribute question with an existing dialogue field is
@@ -1192,6 +1202,18 @@ class QuantumInterpretationEngine:
             active_goal=active_goal, active_topic=active_topic,
         )["dialogue"]
 
+        # FIRST TURN GUARD:
+        # No prior dialogue and no active scene means there is nothing historical
+        # to recall. Keep short openers in the normal conversational path.
+        has_live_context = bool(
+            last_assistant or last_user or active_topic or active_goal
+            or LIVE_SCENE_CONTINUITY_ENGINE._scene_from_state(state)
+        )
+        if not has_live_context and dialogue["label"] == "memory_query":
+            dialogue = dict(dialogue)
+            dialogue["label"] = "request"
+            dialogue["reference_score"] = 0.0
+
         explicit_required = [
             str(x).lower()
             for x in (
@@ -1304,7 +1326,10 @@ class QuantumInterpretationEngine:
 
         result = build_result(text)
         result.update({
-            "type": profile["dialogue_best"],
+            # Use the final dialogue decision after the live-scene guards.
+            # The raw matrix winner is evidence only and must not reopen a
+            # memory route after the guard has intentionally normalized it.
+            "type": dialogue["label"],
             "subtype": scene_type,
             "scene_type": scene_type,
             "candidate_domains": candidate_domains,
@@ -1734,8 +1759,12 @@ def resolve_interpretation_payload(result: dict[str, Any]) -> dict[str, Any]:
 def propagate_canonical_response(result: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     transport = state.setdefault("transport", {})
     response = transport.setdefault("response", {})
-    response["content"] = safe_result_get(result, "normalized") or safe_result_get(
-        result, "assistant_response", ""
+    response["content"] = (
+        safe_result_get(result, "assistant_response")
+        or safe_result_get(result, "answer")
+        or safe_result_get(result, "response")
+        or safe_result_get(result, "content")
+        or ""
     )
     return result
 
@@ -1743,8 +1772,13 @@ def propagate_canonical_response(result: dict[str, Any], state: dict[str, Any]) 
 def bridge_machine_response(result: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     machine = state.setdefault("machine_response", {})
     scene = state.setdefault("scene_contract", {})
-    content = machine.get("content") or result.get("normalized") or result.get(
-        "assistant_response", ""
+    content = (
+        machine.get("content")
+        or result.get("assistant_response")
+        or result.get("answer")
+        or result.get("response")
+        or result.get("content")
+        or ""
     )
     machine["content"] = content
     scene.update({"content": content, "answer": content, "summary": content})
