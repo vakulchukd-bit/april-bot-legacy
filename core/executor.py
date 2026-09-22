@@ -104,6 +104,29 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _as_dict(value: Any) -> Dict[str, Any]:
+    """Safely normalize mapping-like semantic payloads to a dict.
+
+    Executor calls this helper in several canonical request builders. The
+    deployed path previously referenced it without defining it, causing every
+    chat request reaching ProcessorScene.prepare() to fail with NameError.
+    """
+    if isinstance(value, dict):
+        return value
+    if is_dataclass(value) and not isinstance(value, type):
+        try:
+            converted = asdict(value)
+            return converted if isinstance(converted, dict) else {}
+        except Exception:
+            return {}
+    if hasattr(value, "items"):
+        try:
+            return dict(value.items())
+        except Exception:
+            return {}
+    return {}
+
+
 def _person_entity_from_answer(text: str) -> str:
     """Keep the latest human entity visible to the authenticated dialogue state."""
     value = _text(text)
