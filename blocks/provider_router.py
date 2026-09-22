@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 from openai import OpenAI
 from blocks.C_ARTIFACT_CONTRACT import BaseArtifact, MachineRequest
 from blocks.april_personality import APRIL_IDENTITY
+from blocks.presentation_formatter import canonical_payload_for_block, validate_render_block_payload
 
 # ============================================================
 # APRIL PROVIDER — CANONICAL LUNA ROUTE
@@ -265,6 +266,12 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
             or {}
         ),
         "constraints": raw.get("constraints") or {},
+        "interpretation_control": (
+            raw.get("interpretation_control")
+            or (raw.get("constraints") or {}).get("interpretation_control")
+            or (raw.get("constraints") or {}).get("metadata", {}).get("interpretation_control")
+            or {}
+        ),
         "response_decision": raw.get("response_decision") or {},
         "semantic": raw.get("semantic") or {},
         "cognition": raw.get("cognition") or {},
@@ -689,14 +696,15 @@ def _clean_render_blocks(blocks: Any) -> list[dict]:
         return []
     result: list[dict] = []
     seen: set[tuple] = set()
+    structured = {
+        "graph", "table", "diagram", "image", "gallery", "code", "link",
+        "file", "audio", "video", "action", "scene", "visual_context",
+    }
 
     for raw in blocks:
         block = dict(raw) if isinstance(raw, dict) else {"type": "text", "content": _safe_text(raw)}
         block_type = _safe_text(block.get("type") or block.get("artifact_type") or "text").lower()
-        if block_type == "markdown":
-            normalized_type = "text"
-        else:
-            normalized_type = block_type
+        normalized_type = "text" if block_type == "markdown" else block_type
 
         content = ""
         for key in ("content", "text", "answer", "message", "value"):
@@ -705,18 +713,20 @@ def _clean_render_blocks(blocks: Any) -> list[dict]:
                 content = value.strip()
                 break
 
+        canonical_payload = canonical_payload_for_block(block)
+        if canonical_payload:
+            block["payload"] = canonical_payload
+
         if normalized_type == "text":
             signature = ("text", re.sub(r"\s+", " ", content).lower())
         else:
-            payload = (
-                block.get("payload")
-                if block.get("payload") is not None
-                else block.get("table")
-                or block.get("graph")
-                or block.get("images")
-                or block.get("url")
-                or content
-            )
+            if normalized_type in structured or normalized_type == "formula":
+                valid, _reason = validate_render_block_payload(normalized_type, block)
+                if not valid:
+                    continue
+            payload = block.get("payload") or canonical_payload
+            if not payload and content:
+                payload = {"content": content}
             signature = (
                 normalized_type,
                 json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)[:4000],
@@ -728,6 +738,8 @@ def _clean_render_blocks(blocks: Any) -> list[dict]:
         block["type"] = normalized_type
         block.setdefault("renderer", _render_block_renderer(normalized_type))
         block.setdefault("viewer", block["renderer"])
+        if normalized_type != "text" and canonical_payload:
+            block["payload"] = canonical_payload
         result.append(block)
 
     return result
@@ -931,6 +943,7 @@ def build_openai_request(machine_request: Any) -> dict:
     }
 
 
+
 def _provider_system_prompt_for_payload(payload: dict[str, Any]) -> str:
     dialogue = _dialogue_contract(payload)
     continuation = bool(dialogue.get("continuation"))
@@ -941,6 +954,7 @@ def _provider_system_prompt_for_payload(payload: dict[str, Any]) -> str:
         if continuation or reference or pending
         else PROVIDER_MACHINE_SYSTEM_PROMPT
     )
+
 
 
 def normalize_provider_input(machine_request: Any) -> list[dict]:
@@ -968,6 +982,15 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     constraints = payload.get("constraints") if isinstance(payload.get("constraints"), dict) else {}
     plan = constraints.get("representation_plan") if isinstance(constraints.get("representation_plan"), dict) else {}
     metadata = constraints.get("metadata") if isinstance(constraints.get("metadata"), dict) else {}
+    interpretation_control = (
+        payload.get("interpretation_control")
+        if isinstance(payload.get("interpretation_control"), dict)
+        else constraints.get("interpretation_control")
+        if isinstance(constraints.get("interpretation_control"), dict)
+        else metadata.get("interpretation_control")
+        if isinstance(metadata.get("interpretation_control"), dict)
+        else {}
+    )
     mode = _safe_text(plan.get("visual_production_mode") or metadata.get("visual_production_mode") or "").strip()
     request_text = _extract_request_text(payload)
     outputs = list(payload.get("requested_outputs") or [])
@@ -977,6 +1000,18 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         f"REQUEST: {request_text}",
         f"VISUAL_PRODUCTION_MODE: {mode}",
         f"REQUESTED_OUTPUTS: {json.dumps(outputs, ensure_ascii=False, separators=(',', ':'))}",
+        "INTERPRETATION_CONTROL: " + json.dumps(
+            _compact_value({
+                "relation": interpretation_control.get("relation") or _dialogue_contract(payload).get("relation"),
+                "context_policy": interpretation_control.get("context_policy"),
+                "memory_policy": interpretation_control.get("memory_policy"),
+                "render_authorized": bool(interpretation_control.get("render_authorized")),
+                "render_mode": interpretation_control.get("render_mode"),
+                "render_representations": interpretation_control.get("render_representations") or [],
+                "payload_contract": interpretation_control.get("payload_contract"),
+            }, max_depth=2, max_items=8, max_keys=8),
+            ensure_ascii=False, separators=(',', ':')
+        ),
     ]
 
     # The Processor owns interpretation. For continuation/pending/reference turns
@@ -1056,18 +1091,12 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
 
     dialogue_dependency = _safe_text(dialogue.get("context_dependency")).lower()
     dialogue_relation = _safe_text(dialogue.get("relation")).upper()
-    structured_outputs = {
-        "graph", "table", "diagram", "formula", "code", "link",
-        "gallery", "image", "scene", "video", "file",
-    }
     visual_relation = bool(
-        dialogue.get("continuation")
+        interpretation_control.get("render_mode") == "ARTIFACT_CONTINUATION"
         or dialogue.get("reference_to_previous")
         or dialogue.get("reply_to")
-        or dialogue_dependency in {"continuation", "artifact", "reference", "pending", "recall"}
-        or dialogue_relation in {"CONTINUE", "CONTINUATION", "ARTIFACT_REFERENCE", "PENDING", "RECALL"}
-        or mode in {"diagram", "image_generation", "image_present", "visual_analysis"}
-        or any(str(item).lower() in structured_outputs for item in outputs)
+        or dialogue_dependency in {"artifact", "reference", "pending", "recall"}
+        or dialogue_relation in {"ARTIFACT_REFERENCE", "PENDING", "RECALL"}
     )
 
     # Historical visual state is evidence, not provider input, for an independent
@@ -1075,13 +1104,18 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     # and prevents visual memory from silently changing the current modality.
     visual_context = payload.get("visual_context")
     if isinstance(visual_context, dict) and visual_context and visual_relation:
-        compact_visual = _compact_value(visual_context, max_depth=2, max_items=2, max_keys=10)
+        # Artifact continuation needs the actual structured operand (for
+        # example graph labels/values), not just the scene id. Keep it compact
+        # but deep enough to preserve one canonical payload.
+        compact_visual = _compact_value(visual_context, max_depth=4, max_items=4, max_keys=12)
         candidates.append(
             "VISUAL_CONTEXT: " + json.dumps(compact_visual, ensure_ascii=False, separators=(',', ':'))
         )
 
     candidates.append(
-        "OUTPUT_CONTRACT: return exactly the requested representation(s); never add unrequested structured blocks."
+        "OUTPUT_CONTRACT: return exactly the requested representation(s); never add unrequested structured blocks. "
+        "A structured block is authorized only when render_authorized=true for the current turn. "
+        "Every structured block must contain canonical non-empty payload data; otherwise omit that block and keep the textual answer."
     )
     if mode == "image_generation":
         candidates.append(
@@ -1426,6 +1460,11 @@ def provider_finalize_for_executor(contract: dict) -> dict:
         answer,
         requested_outputs,
     )
+    # Final canonical transport safety: structured blocks without usable
+    # payload are never exposed to the SceneContract/Web renderer.
+    before_count = len(original_blocks) if isinstance(original_blocks, list) else 0
+    after_count = len(mr.get("render_blocks") or [])
+    mr.setdefault("metadata", {})["invalid_structured_blocks_dropped"] = max(0, before_count - after_count)
     mr.setdefault("scene", {})
     mr.setdefault("scene_plan", list(requested_outputs))
     mr.setdefault("render_priority", list(requested_outputs))
@@ -1442,6 +1481,9 @@ def provider_finalize_for_executor(contract: dict) -> dict:
         "duplicate_guard": True,
         "answer_artifact_separation": True,
         "structured_output_deduplication": True,
+        "render_payload_canonicalization": True,
+        "render_payload_non_empty_guard": True,
+        "interpretation_control_honored": True,
     })
 
     # Never create duplicate text blocks for artifact-only plans.
