@@ -2414,12 +2414,24 @@ def build_executor_memory_bridge(user_id, query=""):
     return QUANTUM_MEMORY_ENGINE.build_executor_bridge(get_state(user_id), query=query)
 
 
-def build_dialogue_memory_bridge(user_id, query="", limit=8):
-    """Build compact authenticated-user dialogue memory for interpretation/provider."""
+def build_dialogue_memory_bridge(user_id, query="", limit=8, *, relation="AUTO", target_sequence_id=""):
+    """Build mode-specific authenticated-user dialogue memory after interpretation.
+
+    NEW -> current-turn metadata only.
+    CONTINUE -> selected live sequence turns only.
+    RECALL -> selected historical 7-day evidence only.
+    """
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
     user_key = str(user_id)
     conversation_id = str(state_obj.get("conversation_id") or "")
     active = deepcopy(state_obj.get("active_dialogue_sequence") or {})
+    mode = str(relation or "AUTO").strip().upper()
+    if mode == "AUTO":
+        resolution = state_obj.get("dialogue_resolution") if isinstance(state_obj.get("dialogue_resolution"), dict) else {}
+        mode = str(resolution.get("relation") or "NEW").strip().upper()
+    if mode not in {"NEW", "CONTINUE", "RECALL"}:
+        mode = "NEW"
+    selected_sequence_id = str(target_sequence_id or (active.get("sequence_id") or ""))
 
     records = []
     now = time.time()
@@ -2457,16 +2469,17 @@ def build_dialogue_memory_bridge(user_id, query="", limit=8):
 
     records.sort(key=lambda item: float(item.get("created_at") or 0.0))
     active_id = str(active.get("sequence_id") or "")
-    active_turns = [item for item in records if str(item.get("sequence_id") or "") == active_id]
+    target_id = selected_sequence_id or active_id
+    active_turns = [item for item in records if str(item.get("sequence_id") or "") == target_id]
     active_turns = active_turns[-max(1, min(int(limit or 8), 8)):]
 
     # Cross-vector recall evidence is intentionally tiny and never becomes
     # routing authority. The processor has already decided CONTINUE/RECALL/NEW.
     relevant = []
-    if str(query or "").strip():
+    if mode == "RECALL" and str(query or "").strip():
         candidates = []
         for item in records:
-            if str(item.get("sequence_id") or "") == active_id:
+            if str(item.get("sequence_id") or "") == target_id:
                 continue
             source = " ".join(
                 str(item.get(key) or "")
@@ -2492,16 +2505,24 @@ def build_dialogue_memory_bridge(user_id, query="", limit=8):
                 if score >= 0.30
             ]
 
+    active_meta = {
+        "sequence_id": active.get("sequence_id"),
+        "topic": active.get("topic"),
+        "turn_count": active.get("turn_count", 0),
+    }
     return {
-        "version": "april_dialogue_memory_bridge_v1",
+        "version": "april_dialogue_memory_bridge_v2",
         "window_days": MEMORY_DAYS,
         "user_id": user_key,
         "conversation_id": conversation_id,
-        "active_sequence": active,
-        "active_sequence_turns": active_turns,
-        "relevant_7d_turns": relevant,
+        "retrieval_mode": mode,
+        "target_sequence_id": target_id,
+        "active_sequence": deepcopy(active) if mode in {"CONTINUE", "RECALL"} else active_meta,
+        "active_sequence_turns": active_turns if mode == "CONTINUE" else [],
+        "relevant_7d_turns": relevant if mode == "RECALL" else [],
         "turn_count_7d": len(records),
         "decision_owner": "QUANTUM_PROCESSOR",
+        "interpretation_first": True,
         "evidence_only": True,
     }
 
@@ -3292,6 +3313,17 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "april_meaning": safe_trim_text(answer_text, 1400),
         "answer_summary": safe_trim_text(contract.get("summary") or answer_text, 1000),
         "semantic_state": deepcopy(semantic_scene_state),
+        "interpretation_summary": {
+            "relation": resolved_relation,
+            "topic": active_sequence.get("topic"),
+            "operation": semantic_scene_state.get("operation") or semantic_scene_state.get("best_operation"),
+            "goal": semantic_scene_state.get("goal") or semantic_scene_state.get("best_goal"),
+            "representation": semantic_scene_state.get("representation") or (block_types[0] if block_types else "text"),
+            "requested_outputs": deepcopy(semantic_scene_state.get("requested_outputs") or block_types),
+            "render_authorized": bool(semantic_scene_state.get("render_authorized")),
+            "render_mode": semantic_scene_state.get("render_mode") or "TEXT_ONLY",
+            "historical_memory_is_evidence_only": True,
+        },
         "dialogue_relation": resolved_relation,
         "sequence_id": active_sequence.get("sequence_id"),
         "sequence_turn_index": active_sequence.get("turn_count", 0),
