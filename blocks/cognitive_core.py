@@ -488,7 +488,13 @@ def analyze_cognition(text: str, state: dict, semantic: dict, reasoning: dict) -
 
     dialog = state.get("dialog", []) or []
     active_flow = state.get("active_flow")
-    active_scene = state.get("active_scene", {}) or {}
+    active_scene = _dict(state.get("active_scene") or state.get("scene_state"))
+    live_scene = _dict(state.get("scene_state"))
+    live_dialogue_scene = _dict(
+        live_scene.get("live_scene")
+        or state.get("live_dialogue_scene")
+    )
+    active_sequence = _dict(state.get("active_dialogue_sequence"))
     visual_continuity = state.get("visual_continuity_summary", {}) or {}
 
     continuity = build_dialog_continuity(dialog)
@@ -571,6 +577,14 @@ def analyze_cognition(text: str, state: dict, semantic: dict, reasoning: dict) -
         "loop_analysis": open_loops,
         "memory_analysis": memory,
         "active_scene": active_scene,
+        "live_dialogue_scene": live_dialogue_scene,
+        "active_dialogue_sequence": active_sequence,
+        "active_scene_topic": _text(
+            live_dialogue_scene.get("topic") or active_scene.get("active_topic") or active_scene.get("trajectory")
+        ),
+        "active_scene_goal": _text(
+            live_dialogue_scene.get("goal") or active_scene.get("active_goal") or active_scene.get("goal")
+        ),
         "visual_continuity": visual_continuity,
         "scene_cognition_active": True,
         "task_understanding": task,
@@ -588,6 +602,25 @@ def analyze_cognition(text: str, state: dict, semantic: dict, reasoning: dict) -
         cognition["internet_context_needed"] = True
 
     cognition = stabilize_trajectory(cognition, active_flow)
+
+    # Live scene continuity is stronger than lexical similarity. When Interpretation
+    # says the current turn remains in the active scene, cognition preserves the
+    # conversational trajectory without turning the signal into a renderer command.
+    live_continuity = _dict(semantic.get("scene_continuity"))
+    if (
+        live_continuity.get("continuation")
+        and not bool(semantic.get("topic_boundary"))
+    ):
+        cognition.update({
+            "needs_continuation": True,
+            "trajectory_locked": True,
+            "protects_user_trajectory": True,
+            "dialogue_still_alive": True,
+            "response_should_continue_naturally": True,
+            "response_should_preserve_context": True,
+            "live_scene_continuity_active": True,
+        })
+        _increase(cognition, "trajectory_confidence", 0.25)
 
     if reasoning.get("continuation"):
         cognition["needs_continuation"] = True
