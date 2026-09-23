@@ -1259,10 +1259,17 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             "VISUAL_CONTEXT: " + json.dumps(compact_visual, ensure_ascii=False, separators=(',', ':'))
         )
 
+    structured_outputs_requested = any(
+        str(x).lower() not in {"text", "markdown"}
+        for x in outputs
+    ) or bool(payload.get("required_artifacts"))
+    render_authorized = bool(interpretation_control.get("render_authorized"))
     candidates.append(
         "OUTPUT_CONTRACT: return exactly the requested representation(s); never add unrequested structured blocks. "
-        "A structured block is authorized only when render_authorized=true for the current turn. "
-        "Every structured block must contain canonical non-empty payload data; otherwise omit that block and keep the textual answer."
+        "A structured block is authorized when the semantic interpretation explicitly authorizes it "
+        "or when the canonical Processor request contains required_artifacts/requested structured outputs. "
+        "Every structured block must contain canonical non-empty payload data; otherwise omit that block and keep the textual answer. "
+        f"STRUCTURED_OUTPUT_AUTHORITY={str(bool(render_authorized or structured_outputs_requested)).lower()}"
     )
     if mode == "image_generation":
         candidates.append(
@@ -1560,7 +1567,11 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
     # model-side table/graph/link is not allowed to manufacture a second
     # presentation. Preserve only text/markdown blocks in that case.
     source_outputs = list(source_payload.get("requested_outputs") or [])
-    if source_outputs and all(str(x).lower() in {"text", "markdown"} for x in source_outputs):
+    source_requires_structured = bool(source_payload.get("required_artifacts")) or any(
+        str(x).lower() not in {"text", "markdown"}
+        for x in source_outputs
+    )
+    if source_outputs and not source_requires_structured and all(str(x).lower() in {"text", "markdown"} for x in source_outputs):
         blocks = [
             block for block in blocks
             if str(block.get("type") or block.get("artifact_type") or "").lower() in {"text", "markdown"}
