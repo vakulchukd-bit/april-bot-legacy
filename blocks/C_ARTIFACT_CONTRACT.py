@@ -1638,6 +1638,13 @@ class SceneContract:
     flow_id: str = ""
     topic_group: str = ""
     continuation: bool = False
+    user_id: str = ""
+    conversation_id: str = ""
+    dialogue_sequence_id: str = ""
+    sequence_turn_index: int = 0
+    active_task: Dict[str, Any] = field(default_factory=dict)
+    dialogue_state: Dict[str, Any] = field(default_factory=dict)
+    authenticated_scope: Dict[str, Any] = field(default_factory=dict)
     blocks: List[Dict[str, Any]] = field(default_factory=list)
     render_blocks: List[Dict[str, Any]] = field(default_factory=list)
     relations: List[Dict[str, Any]] = field(default_factory=list)
@@ -1722,12 +1729,18 @@ def get_web_renderer_registration(payload_type: str) -> Dict[str, Any]:
 class MachineScene:
     fiber: FiberCoreContract = field(default_factory=FiberCoreContract)
     scene_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    scene_version: str = "3.0"
+    scene_version: str = "3.1"
     active_scene: str = ""
     turn_id: str = ""
     flow_id: str = ""
     topic_group: str = ""
     continuation: bool = False
+    user_id: str = ""
+    conversation_id: str = ""
+    dialogue_sequence_id: str = ""
+    sequence_turn_index: int = 0
+    active_task: Dict[str, Any] = field(default_factory=dict)
+    dialogue_state: Dict[str, Any] = field(default_factory=dict)
     blocks: List[Dict[str, Any]] = field(default_factory=list)
     relations: List[Dict[str, Any]] = field(default_factory=list)
     order: List[str] = field(default_factory=list)
@@ -2137,10 +2150,11 @@ def _canonical_scene_relations(scene: MachineScene, blocks: List[Dict[str, Any]]
 
 
 def build_scene_signal(contract: SceneContract) -> Dict[str, Any]:
-    """Create the ONE Web signal for the whole scene."""
+    """Create the single Web signal for the authenticated dialogue scene."""
     return {
         "signal_type": CANONICAL_SCENE_SIGNAL_TYPE,
         "signal_version": UNIFIED_RENDER_SIGNAL_VERSION,
+        "scene_version": contract.scene_version,
         "scene_id": contract.scene_id,
         "turn_id": contract.turn_id,
         "flow_id": contract.flow_id,
@@ -2150,9 +2164,19 @@ def build_scene_signal(contract: SceneContract) -> Dict[str, Any]:
         "single_signal": True,
         "answer_render_policy": ANSWER_RENDER_POLICY,
         "answer": str(contract.metadata.get("answer") or ""),
+        "identity": {
+            "user_id": contract.user_id,
+            "conversation_id": contract.conversation_id,
+            "dialogue_sequence_id": contract.dialogue_sequence_id,
+            "sequence_turn_index": int(contract.sequence_turn_index or 0),
+        },
+        "authenticated_scope": deepcopy(contract.authenticated_scope),
+        "dialogue_state": deepcopy(contract.dialogue_state),
+        "active_task": deepcopy(contract.active_task),
         "order": list(contract.order),
         "relations": deepcopy(contract.relations),
         "blocks": deepcopy(contract.render_blocks),
+        "render_blocks": deepcopy(contract.render_blocks),
         "presentation": deepcopy((contract.metadata.get("presentation") or {})),
     }
 
@@ -2176,6 +2200,17 @@ def build_machine_scene(response: MachineResponse) -> MachineScene:
     scene.topic_group = str(getattr(response, "topic_group", "") or blueprint.get("topic_group") or metadata.get("topic_group") or "")
     scene.continuation = bool(getattr(response, "continuation", False) or blueprint.get("continuation", False) or metadata.get("continuation", False))
     scene.active_scene = str(source_scene.get("active_scene") or metadata.get("active_scene") or "")
+    identity_scope = dict(metadata.get("identity_scope") or metadata.get("authenticated_scope") or {})
+    fiber_identity = getattr(getattr(response, "fiber", None), "identity", None)
+    scene.user_id = str(identity_scope.get("user_id") or getattr(response, "user_id", "") or getattr(fiber_identity, "user_id", "") or "")
+    scene.conversation_id = str(identity_scope.get("conversation_id") or getattr(response, "conversation_id", "") or metadata.get("conversation_id") or "")
+    scene.dialogue_sequence_id = str(metadata.get("dialogue_sequence_id") or "")
+    try:
+        scene.sequence_turn_index = int(metadata.get("sequence_turn_index") or 0)
+    except (TypeError, ValueError):
+        scene.sequence_turn_index = 0
+    scene.active_task = deepcopy(metadata.get("active_task") or metadata.get("interactive_task_state") or source_scene.get("active_task") or {}) if isinstance(metadata.get("active_task") or metadata.get("interactive_task_state") or source_scene.get("active_task") or {}, dict) else {}
+    scene.dialogue_state = deepcopy(metadata.get("dialogue_state") or metadata.get("processor_interpretation") or {})
     scene.scene_blueprint = blueprint
 
     scene.metadata = {
@@ -2196,6 +2231,13 @@ def build_machine_scene(response: MachineResponse) -> MachineScene:
         "topic_group": scene.topic_group,
         "continuation": scene.continuation,
         "scene_blueprint": deepcopy(blueprint),
+        "user_id": scene.user_id,
+        "conversation_id": scene.conversation_id,
+        "dialogue_sequence_id": scene.dialogue_sequence_id,
+        "sequence_turn_index": scene.sequence_turn_index,
+        "active_task": deepcopy(scene.active_task),
+        "dialogue_state": deepcopy(scene.dialogue_state),
+        "identity_scope": {"user_id": scene.user_id, "conversation_id": scene.conversation_id, "dialogue_sequence_id": scene.dialogue_sequence_id},
     }
 
     scene.blocks = list(getattr(response, "render_blocks", []) or [])
@@ -2219,10 +2261,27 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
     contract.flow_id = scene.flow_id
     contract.topic_group = scene.topic_group
     contract.continuation = scene.continuation
+    contract.user_id = str(scene.user_id or scene.metadata.get("user_id") or "")
+    contract.conversation_id = str(scene.conversation_id or scene.metadata.get("conversation_id") or "")
+    contract.dialogue_sequence_id = str(scene.dialogue_sequence_id or scene.metadata.get("dialogue_sequence_id") or "")
+    contract.sequence_turn_index = int(scene.sequence_turn_index or scene.metadata.get("sequence_turn_index") or 0)
+    contract.active_task = deepcopy(scene.active_task or scene.metadata.get("active_task") or {})
+    contract.dialogue_state = deepcopy(scene.dialogue_state or scene.metadata.get("dialogue_state") or {})
+    contract.authenticated_scope = {
+        "user_id": contract.user_id,
+        "conversation_id": contract.conversation_id,
+        "dialogue_sequence_id": contract.dialogue_sequence_id,
+    }
     contract.active_scene = scene.active_scene
     contract.scene_blueprint = deepcopy(scene.scene_blueprint or {})
 
     canonical_blocks = _canonical_scene_blocks(scene)
+    for block in canonical_blocks:
+        if isinstance(block, dict):
+            block["user_id"] = contract.user_id
+            block["conversation_id"] = contract.conversation_id
+            block["dialogue_sequence_id"] = contract.dialogue_sequence_id
+            block["sequence_turn_index"] = contract.sequence_turn_index
     relations = _canonical_scene_relations(scene, canonical_blocks)
     order = [str(block.get("block_id") or "").strip() for block in canonical_blocks if str(block.get("block_id") or "").strip()]
 
@@ -2237,6 +2296,13 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
         "flow_id": scene.flow_id,
         "topic_group": scene.topic_group,
         "continuation": scene.continuation,
+        "user_id": contract.user_id,
+        "conversation_id": contract.conversation_id,
+        "dialogue_sequence_id": contract.dialogue_sequence_id,
+        "sequence_turn_index": contract.sequence_turn_index,
+        "active_task": deepcopy(contract.active_task),
+        "dialogue_state": deepcopy(contract.dialogue_state),
+        "authenticated_scope": deepcopy(contract.authenticated_scope),
         "artifact_count": len(getattr(scene, "artifacts", []) or []),
         "transport_stage": "artifact_contract_scene_v3",
         "canonical_scene_contract": True,
@@ -2268,6 +2334,10 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
             topic_group=scene.topic_group,
             continuation=scene.continuation,
             layout_mode="flow",
+            user_id=contract.user_id,
+            conversation_id=contract.conversation_id,
+            dialogue_sequence_id=contract.dialogue_sequence_id,
+            sequence_turn_index=contract.sequence_turn_index,
         )
         contract.render_blocks = attach_presentation_signals(contract.render_blocks, scene_presentation=presentation)
         contract.blocks = list(contract.render_blocks)
