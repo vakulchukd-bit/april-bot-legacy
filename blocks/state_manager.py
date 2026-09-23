@@ -3122,10 +3122,27 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
     if isinstance(metadata.get("semantic_scene_state"), dict):
         semantic_scene_state = deepcopy(metadata["semantic_scene_state"])
 
+    identity_scope = _dict(contract.get("authenticated_scope") or _dict(contract.get("metadata")).get("identity_scope"))
     state_obj["active_scene_contract"] = {
         "scene_version": str(contract.get("scene_version") or ""),
+        "scene_id": str(contract.get("scene_id") or ""),
+        "turn_id": str(contract.get("turn_id") or ""),
+        "flow_id": str(contract.get("flow_id") or ""),
+        "topic_group": str(contract.get("topic_group") or ""),
+        "continuation": bool(contract.get("continuation")),
+        "user_id": str(contract.get("user_id") or identity_scope.get("user_id") or user_id),
+        "conversation_id": str(contract.get("conversation_id") or identity_scope.get("conversation_id") or conversation_id),
+        "dialogue_sequence_id": str(contract.get("dialogue_sequence_id") or identity_scope.get("dialogue_sequence_id") or ""),
+        "sequence_turn_index": int(contract.get("sequence_turn_index") or 0),
+        "active_task": deepcopy(contract.get("active_task") or {}),
+        "dialogue_state": deepcopy(contract.get("dialogue_state") or {}),
+        "authenticated_scope": deepcopy(identity_scope or {"user_id": str(user_id), "conversation_id": conversation_id}),
         "active_scene": str(contract.get("active_scene") or ""),
         "space_continuity": deepcopy(contract.get("space_continuity") or {}),
+        "scene_blueprint": deepcopy(contract.get("scene_blueprint") or {}),
+        "relations": deepcopy(contract.get("relations") or []),
+        "order": deepcopy(contract.get("order") or []),
+        "signal": deepcopy(contract.get("signal") or {}),
         "metadata": deepcopy(contract.get("metadata") or {}),
         "supported_payloads": deepcopy(contract.get("supported_payloads") or []),
         "render_block_types": block_types,
@@ -3231,6 +3248,15 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
     # whether the visible content is text, formula, table, graph or media.
     scene_record = {
         "scene_id": scene_id,
+        "scene_version": str(contract.get("scene_version") or ""),
+        "turn_id": str(contract.get("turn_id") or state_obj.get("visual_scene_version")),
+        "flow_id": str(contract.get("flow_id") or ""),
+        "user_id": str(contract.get("user_id") or user_id),
+        "conversation_id": str(contract.get("conversation_id") or conversation_id),
+        "dialogue_sequence_id": str(contract.get("dialogue_sequence_id") or active_sequence.get("sequence_id") or ""),
+        "sequence_turn_index": int(contract.get("sequence_turn_index") or active_sequence.get("turn_count") or 0),
+        "authenticated_scope": deepcopy(contract.get("authenticated_scope") or {"user_id": str(user_id), "conversation_id": conversation_id}),
+        "active_task": deepcopy(contract.get("active_task") or state_obj.get("interactive_task_state") or {}),
         "scene_type": str(contract.get("active_scene") or "dialogue"),
         "topic": safe_trim_text(
             (
@@ -3452,6 +3478,8 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
             else {}
         ),
         "visual_scene_id": scene_id,
+        "scene_contract_id": scene_id,
+        "dialogue_sequence_id": str(contract.get("dialogue_sequence_id") or active_sequence.get("sequence_id") or ""),
         "continuation": is_continuation,
         "render_block_types": list(block_types),
         "presentation_types": list(presentation_types),
