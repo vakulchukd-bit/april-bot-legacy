@@ -6,6 +6,7 @@ import json
 import re
 import time
 from dataclasses import asdict, is_dataclass
+from copy import deepcopy
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
 from blocks.C_ARTIFACT_CONTRACT import (
@@ -14,6 +15,10 @@ from blocks.C_ARTIFACT_CONTRACT import (
     build_machine_scene,
     build_scene_contract,
     build_scene_signal,
+    BaseArtifact,
+    create_artifact,
+    create_diagram_artifact,
+    _artifact_canonical_render_blocks,
 )
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.interpretation_layer import interpret_request, QuantumInterpretationEngine
@@ -338,6 +343,161 @@ def _bridge_provider_artifacts(machine_response: dict) -> dict:
 
     machine_response["render_blocks"] = bridged
     return machine_response
+
+
+def _hydrate_scene_artifacts(response: MachineResponse, request: MachineRequest) -> None:
+    """Promote every concrete structured render block into the canonical artifact route.
+
+    Image and diagram used to stop at ``render_blocks`` while graph/table could
+    already participate in the artifact contract.  This bridge makes the
+    artifact lifecycle uniform without changing the representation selected by
+    Interpretation or the concrete Web renderer.
+    """
+    existing: list[BaseArtifact] = [
+        item for item in list(getattr(response, "artifacts", []) or [])
+        if isinstance(item, BaseArtifact)
+    ]
+    known_ids = {
+        str(getattr(getattr(item, "metadata", None), "artifact_id", "") or "")
+        for item in existing
+    }
+
+    room_for_type = {
+        "image": "APRIL_IMAGES_GENERATION",
+        "gallery": "C_GALLERY_ROOM",
+        "diagram": "C_DIAGRAM_ROOM",
+        "graph": "C_GRAPH_ROOM",
+        "table": "C_TABLE_ROOM",
+        "code": "C_FUNCTION_ROOM",
+        "link": "C_LINK_ROOM",
+        "formula": "C_FORMULA_ROOM",
+    }
+
+    hydrated_blocks: list[dict[str, Any]] = []
+    for raw in list(getattr(response, "render_blocks", []) or []):
+        if not isinstance(raw, dict):
+            continue
+        kind = _text(raw.get("type") or raw.get("artifact_type") or raw.get("representation")).lower()
+        if kind not in {"image", "diagram"}:
+            continue
+
+        payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+        if kind == "image":
+            has_source = any(payload.get(k) for k in ("src", "url", "image", "image_data_uri", "image_base64")) or bool(payload.get("images"))
+            if not has_source:
+                continue
+        elif kind == "diagram":
+            has_structure = any(
+                payload.get(k) not in (None, "", [], {})
+                for k in ("nodes", "edges", "geometry", "elements", "points", "segments", "svg", "svg_payload", "shapes")
+            )
+            if not has_structure:
+                continue
+        else:
+            # Existing routes have their own structured validators; here we only
+            # hydrate blocks that already contain meaningful payload data.
+            if not payload and kind not in {"formula", "link"}:
+                continue
+
+        try:
+            if kind == "diagram":
+                identity_payload = dict(payload)
+                if raw.get("renderer") and identity_payload.get("renderer") is None:
+                    identity_payload["renderer"] = raw.get("renderer")
+                if raw.get("viewer") and identity_payload.get("viewer") is None:
+                    identity_payload["viewer"] = raw.get("viewer")
+                response_identity = {
+                    "scene_id": getattr(response, "scene_id", ""),
+                    "turn_id": getattr(response, "turn_id", ""),
+                    "flow_id": getattr(response, "flow_id", ""),
+                    "topic_group": getattr(response, "topic_group", ""),
+                    "continuation": getattr(response, "continuation", False),
+                }
+                for key in ("scene_id", "turn_id", "flow_id", "topic_group", "continuation", "block_id", "render_id"):
+                    candidate = raw.get(key) if raw.get(key) is not None else response_identity.get(key)
+                    if candidate is not None and identity_payload.get(key) is None:
+                        identity_payload[key] = candidate
+                artifact = create_diagram_artifact(
+                    semantic=raw.get("semantic") if isinstance(raw.get("semantic"), dict) else {},
+                    payload=identity_payload,
+                )
+            else:
+                data = {
+                    "payload": payload,
+                    "title": raw.get("title") or payload.get("title") or "",
+                    "description": raw.get("description") or payload.get("description") or "",
+                    "renderer": raw.get("renderer"),
+                    "viewer": raw.get("viewer"),
+                    "presentation": raw.get("presentation") if isinstance(raw.get("presentation"), dict) else {},
+                    "scene_id": raw.get("scene_id") or getattr(response, "scene_id", ""),
+                    "turn_id": raw.get("turn_id") or getattr(response, "turn_id", ""),
+                    "flow_id": raw.get("flow_id") or getattr(response, "flow_id", ""),
+                    "topic_group": raw.get("topic_group") or getattr(response, "topic_group", ""),
+                    "continuation": raw.get("continuation") if raw.get("continuation") is not None else getattr(response, "continuation", False),
+                    "block_id": raw.get("block_id"),
+                    "render_id": raw.get("render_id"),
+                    "human_visible": True,
+                    "machine_only": False,
+                }
+                artifact = create_artifact(
+                    artifact_type=kind,
+                    room_source=room_for_type.get(kind, "C_ARTIFACT_CONTRACT"),
+                    data=data,
+                )
+
+            artifact_id = str(getattr(getattr(artifact, "metadata", None), "artifact_id", "") or "")
+            if artifact_id and artifact_id not in known_ids:
+                existing.append(artifact)
+                known_ids.add(artifact_id)
+            elif not artifact_id:
+                existing.append(artifact)
+
+            # Re-project through the exact same canonical artifact->render-block
+            # formatter used by every other room. This is the unification point.
+            for block in _artifact_canonical_render_blocks(artifact):
+                block = dict(block)
+                if raw.get("scene_id") and not block.get("scene_id"):
+                    block["scene_id"] = raw.get("scene_id")
+                if raw.get("turn_id") and not block.get("turn_id"):
+                    block["turn_id"] = raw.get("turn_id")
+                if raw.get("flow_id") and not block.get("flow_id"):
+                    block["flow_id"] = raw.get("flow_id")
+                hydrated_blocks.append(block)
+        except Exception as exc:
+            print("⚠️ APRIL ARTIFACT HYDRATION:", kind, exc)
+
+    if existing:
+        response.artifacts = existing
+        response.artifacts_payload = [
+            deepcopy(getattr(item, "data", {}) or {}) for item in existing
+        ]
+
+    if hydrated_blocks:
+        existing_signatures = {
+            json.dumps({
+                "type": _text(block.get("type")).lower(),
+                "payload": block.get("payload", {}),
+                "content": block.get("content", ""),
+            }, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+            for block in list(response.render_blocks or []) if isinstance(block, dict)
+        }
+        merged = [
+            block for block in list(response.render_blocks or [])
+            if isinstance(block, dict)
+            and _text(block.get("type") or block.get("artifact_type")).lower() not in {"image", "diagram"}
+        ]
+        for block in hydrated_blocks:
+            sig = json.dumps({
+                "type": _text(block.get("type")).lower(),
+                "payload": block.get("payload", {}),
+                "content": block.get("content", ""),
+            }, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+            if sig not in existing_signatures:
+                existing_signatures.add(sig)
+                merged.append(block)
+        for idx, block in enumerate(merged):
+            block["sequence_index"] = idx
+        response.render_blocks = merged
 
 
 def _state_artifact_type(state: dict) -> str:
@@ -1284,6 +1444,8 @@ class ProcessorScene:
             },
         })
 
+        _hydrate_scene_artifacts(response, request)
+
         scene = build_machine_scene(response)
         scene.contract = build_scene_contract(scene)
         contract = scene.contract
@@ -1713,56 +1875,60 @@ async def _materialize_image_if_requested(response: MachineResponse, request: Ma
             raise RuntimeError("IMAGE_ENGINE_EMPTY_RESULT")
 
         image_bytes = result["image_bytes"]
-        artifact = result.get("artifact") if isinstance(result.get("artifact"), dict) else {}
-        artifact_payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+        artifact_dict = result.get("artifact") if isinstance(result.get("artifact"), dict) else {}
+        artifact_payload = artifact_dict.get("payload") if isinstance(artifact_dict.get("payload"), dict) else {}
         base64_value = artifact_payload.get("image_base64") or ""
         data_uri = artifact_payload.get("image_data_uri") or ""
         if not data_uri and base64_value:
             data_uri = f"data:image/png;base64,{base64_value}"
-        # Machine generation instructions are never part of the canonical
-        # human-visible image payload. Keep prompt/spec server-side only.
-        payload = {
-            "kind": "generated_image",
-            "artifact_type": "image",
-            "mime_type": "image/png",
-            "width": result.get("width"),
-            "height": result.get("height"),
-            "src": data_uri,
-            "url": data_uri,
-            "image": data_uri,
-            "image_base64": base64_value or None,
-            "image_data_uri": data_uri or None,
-            "images": [],
-            "engine": "April Images Generation",
-            "backend": result.get("backend"),
-        }
-        direct = payload.get("src") or payload.get("image_data_uri")
-        if direct:
-            payload["images"] = [{
-                "src": direct,
-                "url": direct,
-                "image": direct,
-                "mime_type": "image/png",
-                "width": result.get("width"),
-                "height": result.get("height"),
-                "title": "Image",
-                "alt": "Сгенерированное изображение",
-            }]
 
+        # Prefer the BaseArtifact already built by C_APRIL_IMAGES_GENERATOR.
+        # Fall back to its serialized payload only when an older generator build
+        # did not expose ``contract.artifact``.
+        contract = result.get("contract")
+        image_artifact = getattr(contract, "artifact", None) if contract is not None else None
         response.render_blocks = [
             block for block in list(response.render_blocks or [])
             if _text(block.get("type") if isinstance(block, dict) else "").lower() not in {"image", "gallery"}
         ]
-        response.render_blocks.append({
-            "type": "image",
-            "artifact_type": "image",
-            "renderer": "GalleryBlock",
-            "viewer": "GalleryBlock",
-            "payload": payload,
-            "scene_contract": True,
-            "human_visible": True,
-            "block_id": _stable_id("scene-image", payload),
-        })
+        if isinstance(image_artifact, BaseArtifact):
+            response.artifacts = list(getattr(response, "artifacts", []) or []) + [image_artifact]
+            response.render_blocks.extend(_artifact_canonical_render_blocks(image_artifact))
+        else:
+            payload = {
+                "kind": "generated_image",
+                "artifact_type": "image",
+                "mime_type": "image/png",
+                "width": result.get("width"),
+                "height": result.get("height"),
+                "src": data_uri,
+                "url": data_uri,
+                "image": data_uri,
+                "image_base64": base64_value or None,
+                "image_data_uri": data_uri or None,
+                "images": [{
+                    "src": data_uri,
+                    "url": data_uri,
+                    "image": data_uri,
+                    "mime_type": "image/png",
+                    "width": result.get("width"),
+                    "height": result.get("height"),
+                    "title": "Image",
+                    "alt": "Сгенерированное изображение",
+                }] if data_uri else [],
+                "engine": "April Images Generation",
+                "backend": result.get("backend"),
+            }
+            response.render_blocks.append({
+                "type": "image",
+                "artifact_type": "image",
+                "renderer": "GalleryBlock",
+                "viewer": "GalleryBlock",
+                "payload": payload,
+                "scene_contract": True,
+                "human_visible": True,
+                "block_id": _stable_id("scene-image", payload),
+            })
         metadata.update({
             "image_generation_status": "success",
             "image_generation_engine": "C_APRIL_IMAGES_GENERATOR",
