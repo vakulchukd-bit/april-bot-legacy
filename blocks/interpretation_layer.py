@@ -493,16 +493,57 @@ class LiveSceneContinuityEngine:
             or "answer"
         )
 
+        def _list(name: str) -> list[Any]:
+            raw = value.get(name)
+            if isinstance(raw, (list, tuple)):
+                return [item for item in raw if item not in (None, "", {}, [])]
+            return []
+
+        qa_history = _list("qa_history")
+        if not qa_history:
+            qa_history = _list("turns")
+        known_clues = _list("known_clues")
         return {
             "active": True,
             "status": status or "open",
             "kind": kind or "task",
+            "role": cls._text(
+                value.get("role")
+                or value.get("game_role")
+                or value.get("task_role")
+                or ""
+            ),
+            "phase": cls._text(value.get("phase") or value.get("task_phase") or ""),
             "prompt": prompt,
+            "last_question": cls._text(
+                value.get("last_question")
+                or value.get("question")
+                or (value.get("prompt") if kind in {"question", "riddle"} else "")
+            ),
             "expected_input_type": expected,
             "target": target,
+            "secret_target": cls._text(
+                value.get("secret_target")
+                or value.get("hidden_target")
+                or value.get("private_target")
+            ),
             "candidate_answer": cls._text(
                 value.get("candidate_answer") or value.get("answer_candidate")
             ),
+            "last_user_answer": cls._text(
+                value.get("last_user_answer")
+                or value.get("user_answer")
+                or value.get("candidate_answer")
+            ),
+            "known_clues": known_clues[-12:],
+            "qa_history": qa_history[-12:],
+            "turns": qa_history[-12:],
+            "awaiting_user": bool(
+                value.get("awaiting_user")
+                or value.get("awaiting_input")
+                or expected in {"answer", "user_answer"}
+            ),
+            "completed": bool(value.get("completed")),
             "topic": cls._text(value.get("topic") or value.get("canonical_topic")),
             "goal": cls._text(value.get("goal") or value.get("task_goal")),
             "sequence_id": cls._text(value.get("sequence_id") or value.get("active_sequence_id")),
@@ -513,32 +554,242 @@ class LiveSceneContinuityEngine:
         }
 
     @classmethod
+    def _interactive_task_state(
+        cls,
+        state: dict[str, Any],
+        scene: dict[str, Any],
+        sequence: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return the newest explicit interactive-task state without guessing ownership."""
+        candidates: list[Any] = [
+            state.get("interactive_task_state"),
+            state.get("task_context_state"),
+            state.get("open_task"),
+            state.get("active_task"),
+            scene.get("interactive_task_state"),
+            scene.get("open_task"),
+            scene.get("task_state"),
+            sequence.get("interactive_task_state"),
+            sequence.get("open_task"),
+            sequence.get("task_state"),
+        ]
+        for value in candidates:
+            mapped = cls._task_mapping(value)
+            if mapped:
+                return mapped
+        return {}
+
+    @classmethod
+    def _is_interactive_start(cls, text: str) -> dict[str, Any]:
+        """Understand conversational task shape (game/riddle), independent of routing."""
+        low = cls._text(text).lower()
+        words = cls._tokens(low)
+        if not low:
+            return {"active": False}
+
+        user_holds_object = (
+            ("я загадал" in low or "я загадала" in low or "моя очередь" in low)
+            and any(x in low for x in ("задавай вопросы", "угадывай", "отгадывай", "вопрос"))
+        )
+        new_game = (
+            "игр" in low
+            and any(x in low for x in ("сыграем", "играем", "давай", "начн"))
+        )
+        riddle_request = (
+            any(x in low for x in ("загадай", "загадку", "придумай загадку"))
+            or ("придумай" in low and any(x in low for x in ("еще", "ещё", "друг", "нов", "слож")))
+        )
+
+        if user_holds_object:
+            return {
+                "active": True,
+                "kind": "game",
+                "role": "april_guesses_user_object",
+                "phase": "asking_questions",
+                "status": "assistant_turn",
+                "expected_input_type": "assistant_question",
+                "goal": "guess_user_object",
+                "topic": "игра",
+                "known_clues": [cls._text(text)],
+                "qa_history": [],
+                "source": "interactive_task_understanding",
+            }
+        if new_game:
+            return {
+                "active": True,
+                "kind": "game",
+                "role": "april_holds_secret",
+                "phase": "generate_secret",
+                "status": "pending_generation",
+                "expected_input_type": "assistant_generation",
+                "goal": "guess_secret",
+                "topic": "игра",
+                "known_clues": [],
+                "qa_history": [],
+                "source": "interactive_task_understanding",
+            }
+        if riddle_request:
+            return {
+                "active": True,
+                "kind": "riddle",
+                "role": "april_asks_riddle",
+                "phase": "generate_riddle",
+                "status": "pending_generation",
+                "expected_input_type": "assistant_generation",
+                "goal": "solve_riddle",
+                "topic": "загадка",
+                "known_clues": [],
+                "qa_history": [],
+                "source": "interactive_task_understanding",
+            }
+        return {"active": False}
+
+    @classmethod
+    def _task_action_of_open_task(
+        cls,
+        text: str,
+        task: dict[str, Any],
+        dialogue: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not task.get("active"):
+            return {"is_task_action": False, "confidence": 0.0, "reason": "no_open_task"}
+
+        normalized = cls._text(text)
+        low = normalized.lower()
+        label = cls._text(dialogue.get("label")).lower()
+        expected_input = cls._text(task.get("expected_input_type")).lower()
+        awaiting_user_answer = bool(
+            task.get("awaiting_user")
+            or expected_input in {"answer", "user_answer"}
+            or task.get("phase") == "awaiting_user_answer"
+        )
+        if not normalized:
+            return {"is_task_action": False, "confidence": 0.0, "reason": "empty"}
+
+        explicit_external = any(
+            marker in low
+            for marker in (
+                "другая тема", "сменим тему", "перейдем к", "перейдём к",
+                "давай про другое", "а теперь про", "отдельно поговорим"
+            )
+        )
+        if explicit_external:
+            return {"is_task_action": False, "confidence": 0.0, "reason": "external_topic"}
+
+        # A task-control turn is a discourse move inside the active task:
+        # continue, solve, guess, or ask for the accumulated result.
+        control_semantics = (
+            "угадывай", "угадай", "отгадывай", "отгадай",
+            "решай", "реши", "продолжай", "дальше",
+            "какой ответ", "правильный ответ", "что это",
+            "мы же играем", "анализируй", "анализируйся",
+        )
+        control_score = sum(1 for cue in control_semantics if cue in low)
+        if control_score > 0:
+            return {
+                "is_task_action": True,
+                "confidence": min(0.99, 0.86 + 0.04 * control_score),
+                "reason": "task_control_discourse",
+            }
+
+        if (
+            not awaiting_user_answer
+            and label in {"continuation", "reference", "affirmation", "rejection", "correction"}
+        ):
+            return {
+                "is_task_action": True,
+                "confidence": 0.88,
+                "reason": "task_discourse_relation",
+            }
+
+        return {"is_task_action": False, "confidence": 0.0, "reason": "ordinary_task_turn"}
+
+    @classmethod
+    def _merge_assistant_task_update(
+        cls,
+        task: dict[str, Any],
+        assistant_text: str,
+    ) -> dict[str, Any]:
+        """Advance the live task to the latest assistant question/interaction."""
+        current = dict(task or {})
+        text = cls._text(assistant_text)
+        if not text:
+            return current
+
+        inferred = cls._infer_task_from_assistant(
+            text,
+            scene_id=cls._text(current.get("scene_id")),
+            sequence_id=cls._text(current.get("sequence_id")),
+        )
+        if not inferred:
+            return current
+
+        merged = dict(current)
+        # A newer assistant question supersedes the old prompt. It is the current
+        # operand for the next user turn, while accumulated task memory survives.
+        if inferred.get("kind") == "question":
+            merged.update({
+                "kind": current.get("kind") or "question",
+                "role": current.get("role") or "april_questions_user",
+                "phase": "awaiting_user_answer",
+                "status": "open",
+                "prompt": inferred.get("prompt") or text,
+                "last_question": text,
+                "expected_input_type": "answer",
+                "awaiting_user": True,
+            })
+        elif inferred.get("kind") == "game":
+            merged.update({
+                "kind": "game",
+                "role": current.get("role") or inferred.get("role") or "april_holds_secret",
+                "phase": current.get("phase") or inferred.get("phase") or "awaiting_user_input",
+                "status": "open",
+                "prompt": text,
+                "expected_input_type": "answer",
+                "awaiting_user": True,
+            })
+
+        # The assistant's latest output is a new task boundary only when its
+        # discourse form actually establishes a new task.
+        merged["task_revision"] = max(
+            int(current.get("task_revision", 0) or 0),
+            int(inferred.get("task_revision", 1) or 1),
+        ) + (1 if merged.get("last_question") and merged.get("last_question") != current.get("last_question") else 0)
+        merged["source"] = "latest_assistant_task_update"
+        return merged
+
+    @classmethod
     def _assistant_question_is_task(cls, assistant_text: str) -> bool:
         text = cls._text(assistant_text)
         if not text:
             return False
 
-        # Structural question detection first.
         question_form = "?" in text or "？" in text
-
         lowered = text.lower()
+        game_structure = any(
+            marker in lowered
+            for marker in (
+                "я уже загадал",
+                "я загадал",
+                "я загадаю",
+                "задавай вопросы",
+                "угадай слово",
+                "угадайте слово",
+                "играем в",
+            )
+        )
         riddle_structure = (
             "что это" in lowered
             or "угадай" in lowered
             or "какое слово" in lowered
-            or "я загадал" in lowered
             or "отгада" in lowered
             or "как определить" in lowered
             or "как отличить" in lowered
             or "что получится" in lowered
         )
-
-        # A sufficiently long question-like assistant reply can itself be
-        # an active task even without a riddle marker.
         words = cls._tokens(text)
         long_question = question_form and len(words) >= 5
-
-        return bool(question_form and (riddle_structure or long_question))
+        return bool(question_form and (riddle_structure or long_question) or game_structure)
 
     @classmethod
     def _infer_task_from_assistant(
@@ -553,28 +804,70 @@ class LiveSceneContinuityEngine:
             return {}
 
         lowered = text.lower()
-        if any(
+        game_structure = any(
             marker in lowered
-            for marker in ("угадай", "я загадал", "что это", "какое слово", "отгада", "как определить", "как отличить")
-        ):
-            kind = "riddle"
-            goal = "solve_riddle"
-        else:
-            kind = "question"
-            goal = "answer_question"
+            for marker in (
+                "я уже загадал",
+                "я загадал",
+                "я загадаю",
+                "задавай вопросы",
+                "угадай слово",
+                "играем в",
+            )
+        )
+        if game_structure:
+            return {
+                "active": True,
+                "status": "open",
+                "kind": "game",
+                "role": "april_holds_secret",
+                "phase": "awaiting_user_input",
+                "prompt": text,
+                "last_question": text if ("?" in text or "？" in text) else "",
+                "expected_input_type": "answer",
+                "target": "",
+                "secret_target": "",
+                "candidate_answer": "",
+                "last_user_answer": "",
+                "known_clues": [],
+                "qa_history": [],
+                "turns": [],
+                "awaiting_user": True,
+                "completed": False,
+                "topic": "игра",
+                "goal": "guess_secret",
+                "sequence_id": sequence_id,
+                "scene_id": scene_id,
+                "task_revision": 1,
+                "source": "assistant_task_inference",
+                "raw": {},
+            }
 
-        # The answer is deliberately unknown.  We do NOT turn nouns mentioned
-        # in the question into the active entity.
         return {
             "active": True,
             "status": "open",
-            "kind": kind,
+            "kind": "riddle" if any(
+                marker in lowered for marker in (
+                    "угадай", "что это", "какое слово", "отгада",
+                    "как определить", "как отличить"
+                )
+            ) else "question",
+            "role": "april_questions_user",
+            "phase": "awaiting_user_answer",
             "prompt": text,
+            "last_question": text,
             "expected_input_type": "answer",
             "target": "",
+            "secret_target": "",
             "candidate_answer": "",
-            "topic": "загадка" if kind == "riddle" else "вопрос",
-            "goal": goal,
+            "last_user_answer": "",
+            "known_clues": [],
+            "qa_history": [],
+            "turns": [],
+            "awaiting_user": True,
+            "completed": False,
+            "topic": "загадка" if "угадай" in lowered or "что это" in lowered else "вопрос",
+            "goal": "solve_riddle" if "угадай" in lowered or "что это" in lowered else "answer_question",
             "sequence_id": sequence_id,
             "scene_id": scene_id,
             "task_revision": 1,
@@ -590,77 +883,44 @@ class LiveSceneContinuityEngine:
         scene: dict[str, Any],
         previous_assistant: str,
     ) -> dict[str, Any]:
-        candidates: list[tuple[str, Any]] = [
-            ("state.open_task", state.get("open_task")),
-            ("state.active_task", state.get("active_task")),
-            ("state.dialogue_task", state.get("dialogue_task")),
-            ("state.pending_task", state.get("pending_task")),
-            ("scene.open_task", scene.get("open_task")),
-            ("scene.task_state", scene.get("task_state")),
-            ("scene.active_task", scene.get("active_task")),
-        ]
-
         sequence = state.get("active_dialogue_sequence")
-        if isinstance(sequence, dict):
-            candidates.extend(
-                [
-                    ("sequence.open_task", sequence.get("open_task")),
-                    ("sequence.task_state", sequence.get("task_state")),
-                    ("sequence.active_task", sequence.get("active_task")),
-                ]
-            )
+        sequence = sequence if isinstance(sequence, dict) else {}
 
-        # A previous dialogue vector may carry the task state.
-        vector = (
-            scene.get("dialogue_vector")
-            if isinstance(scene.get("dialogue_vector"), dict)
-            else {}
-        )
-        candidates.extend(
-            [
-                ("scene.dialogue_vector.open_task", vector.get("open_task")),
-                ("scene.dialogue_vector.task_state", vector.get("task_state")),
-            ]
-        )
-
-        for source, value in candidates:
-            frame = cls._task_mapping(value)
-            if frame:
-                frame["source"] = source
-                return frame
-
+        explicit = cls._interactive_task_state(state, scene, sequence)
         inferred = cls._infer_task_from_assistant(
             previous_assistant,
             scene_id=cls._text(scene.get("scene_id")),
             sequence_id=cls._text(
-                scene.get("sequence_id")
-                or (
-                    sequence.get("sequence_id")
-                    if isinstance(sequence, dict)
-                    else ""
-                )
+                scene.get("sequence_id") or sequence.get("sequence_id")
             ),
         )
+
+        if explicit:
+            # The newest assistant question supersedes a stale persisted question.
+            # Do not throw away private game state while refreshing the prompt.
+            if inferred:
+                explicit = cls._merge_assistant_task_update(explicit, previous_assistant)
+
+            # A current explicit task is always more authoritative than a generic
+            # historical active entity/topic.
+            return explicit
+
         if inferred:
             return inferred
 
-        # Last history assistant may be newer than state.
-        if previous_assistant:
-            for turn in reversed(history):
-                assistant = cls._text(turn.get("assistant"))
-                if assistant != previous_assistant:
-                    continue
-                inferred = cls._infer_task_from_assistant(
-                    assistant,
-                    scene_id=cls._text(turn.get("scene_id")),
-                    sequence_id=cls._text(
-                        sequence.get("sequence_id")
-                        if isinstance(sequence, dict)
-                        else ""
-                    ),
-                )
-                if inferred:
-                    return inferred
+        # Recover an interactive task from recent history when state was partially
+        # persisted by a legacy writer.
+        for turn in reversed(history[-12:]):
+            assistant = cls._text(turn.get("assistant"))
+            if not assistant:
+                continue
+            candidate = cls._infer_task_from_assistant(
+                assistant,
+                scene_id=cls._text(turn.get("scene_id")),
+                sequence_id=cls._text(sequence.get("sequence_id")),
+            )
+            if candidate:
+                return candidate
 
         return {}
 
@@ -738,7 +998,7 @@ class LiveSceneContinuityEngine:
 
         normalized = cls._text(text)
         if not normalized:
-            return {"is_answer": False, "confidence": 0.0, "reason": "empty"}
+            return {"is_answer": False, "is_task_action": False, "confidence": 0.0, "reason": "empty"}
 
         low = normalized.lower()
         words = cls._tokens(normalized)
@@ -759,14 +1019,33 @@ class LiveSceneContinuityEngine:
             for token in words
         )
 
-        # A request to replace the current task is never treated as an answer
-        # to the previous task.
+        # A request to replace the current task is a task-control move, not an
+        # answer.  Keep it separate so the dialogue owner can replace the task
+        # without destroying the surrounding conversation.
         transition = cls._explicit_task_transition(normalized, dialogue)
         if transition.get("requested"):
             return {
                 "is_answer": False,
+                "is_task_action": False,
                 "confidence": 0.0,
                 "reason": "task_transition_requested",
+            }
+
+        # A control/analysis request can be an interaction with the open task
+        # even when it is grammatically imperative.  This is especially important
+        # for turns such as "угадывай", "анализируй" and "мы же играем": they ask
+        # the assistant to operate on the current task, not to start a new topic.
+        task_action = cls._task_action_of_open_task(
+            normalized,
+            task,
+            dialogue,
+        )
+        if task_action.get("is_task_action"):
+            return {
+                "is_answer": False,
+                "is_task_action": True,
+                "confidence": float(task_action.get("confidence", 0.0) or 0.0),
+                "reason": task_action.get("reason") or "task_control_discourse",
             }
 
         # Once an active task exists, user turns are interpreted as task
@@ -823,6 +1102,7 @@ class LiveSceneContinuityEngine:
         if explicit_external:
             return {
                 "is_answer": False,
+                "is_task_action": False,
                 "confidence": 0.0,
                 "reason": "explicit_external_topic",
             }
@@ -833,6 +1113,7 @@ class LiveSceneContinuityEngine:
         if imperative_form and len(words) >= 2:
             return {
                 "is_answer": False,
+                "is_task_action": False,
                 "confidence": 0.0,
                 "reason": "new_directive_shape",
             }
@@ -840,6 +1121,7 @@ class LiveSceneContinuityEngine:
         if task_reference:
             return {
                 "is_answer": True,
+                "is_task_action": False,
                 "confidence": 0.99,
                 "reason": "explicit_task_reference",
             }
@@ -847,6 +1129,7 @@ class LiveSceneContinuityEngine:
         if task.get("kind") in {"riddle", "game", "choice"} and answer_shape:
             return {
                 "is_answer": True,
+                "is_task_action": False,
                 "confidence": 0.94 if not question_form else 0.88,
                 "reason": "open_interactive_task",
             }
@@ -855,6 +1138,7 @@ class LiveSceneContinuityEngine:
             if answer_shape:
                 return {
                     "is_answer": True,
+                    "is_task_action": False,
                     "confidence": 0.86,
                     "reason": "open_question",
                 }
@@ -870,12 +1154,14 @@ class LiveSceneContinuityEngine:
         }:
             return {
                 "is_answer": True,
+                "is_task_action": False,
                 "confidence": 0.82,
                 "reason": "short_discourse_followup",
             }
 
         return {
             "is_answer": False,
+            "is_task_action": False,
             "confidence": 0.0,
             "reason": "not_task_answer",
         }
@@ -1010,12 +1296,16 @@ class LiveSceneContinuityEngine:
 
         task_transition = cls._explicit_task_transition(text, dialogue)
 
-        # Open task ownership wins over weak novelty.  Only an explicit topic
-        # boundary is allowed to break out of an active task.
+        # Open task ownership wins over weak novelty.  Both an actual answer and
+        # a task-control/analysis turn belong to the active task.  They must not
+        # be reclassified as a new topic merely because lexical overlap is low.
         protected_by_task = bool(
             (open_task or {}).get("active")
             and not task_transition.get("requested")
-            and task_answer.get("is_answer")
+            and (
+                task_answer.get("is_answer")
+                or task_answer.get("is_task_action")
+            )
         )
 
         strong_boundary = bool(
@@ -1062,17 +1352,27 @@ class LiveSceneContinuityEngine:
         revision = int(existing.get("task_revision", 0) or 0) + 1
 
         low = cls._text(text).lower()
-        riddle_request = "загад" in low and any(
-            x in low for x in ("загадай", "придумай", "друг", "нов", "ещ", "слож")
+        interactive = cls._is_interactive_start(text)
+        riddle_request = bool(
+            interactive.get("active")
+            and interactive.get("kind") in {"riddle", "game"}
         )
-        if "придумай" in low and not riddle_request:
-            riddle_request = any(x in low for x in ("еще", "ещё", "друг", "нов"))
 
-        kind = "riddle" if riddle_request else cls._text(existing.get("kind")) or "task"
+        kind = (
+            cls._text(interactive.get("kind"))
+            or cls._text(existing.get("kind"))
+            or "task"
+        )
 
         prompt = ""
-        status = "pending_generation" if riddle_request else "open"
-        expected = "assistant_generation" if riddle_request else "answer"
+        status = (
+            cls._text(interactive.get("status"))
+            or ("pending_generation" if riddle_request else "open")
+        )
+        expected = (
+            cls._text(interactive.get("expected_input_type"))
+            or ("assistant_generation" if riddle_request else "answer")
+        )
 
         avoid_entities = []
         if previous_target:
@@ -1101,10 +1401,22 @@ class LiveSceneContinuityEngine:
             "active": True,
             "status": status,
             "kind": kind,
+            "role": cls._text(interactive.get("role"))
+            or ("april_holds_secret" if kind == "game" else "april_asks_riddle" if kind == "riddle" else ""),
+            "phase": cls._text(interactive.get("phase"))
+            or ("generate_secret" if kind == "game" and status == "pending_generation" else "generate_riddle" if kind == "riddle" and status == "pending_generation" else "awaiting_user_answer"),
             "prompt": prompt,
+            "last_question": "",
             "expected_input_type": expected,
             "target": "",
+            "secret_target": "",
             "candidate_answer": "",
+            "last_user_answer": "",
+            "known_clues": list(interactive.get("known_clues") or []),
+            "qa_history": [],
+            "turns": [],
+            "awaiting_user": expected in {"answer", "user_answer"},
+            "completed": False,
             "topic": topic,
             "goal": goal,
             "sequence_id": sequence_id,
@@ -1174,9 +1486,20 @@ class LiveSceneContinuityEngine:
 
         task_transition = evidence.get("task_transition", {})
         task_answer = evidence.get("task_answer", {})
+        interactive_start = cls._is_interactive_start(text)
+        if (
+            interactive_start.get("active")
+            and open_task.get("active")
+            and (task_answer.get("is_answer") or task_answer.get("is_task_action"))
+            and not task_transition.get("replace_task")
+        ):
+            # Phrases such as "я загадал" may appear while the user is talking
+            # about the already-active game.  Current task ownership and the
+            # resolved discourse move outrank surface self-reference.
+            interactive_start = {"active": False, "reason": "existing_task_owns_turn"}
 
-        # Task transition creates a new task frame.  The conversation itself
-        # remains the same scene unless the user explicitly changed topics.
+        # Task transition creates a new task frame.  The conversational scene may
+        # stay continuous, but task ownership is replaced atomically.
         if task_transition.get("replace_task"):
             open_task = cls._new_task_frame(
                 existing=open_task,
@@ -1187,14 +1510,67 @@ class LiveSceneContinuityEngine:
                 sequence_id=sequence_id,
             )
 
+        # A self-contained interactive start is a real new task even when the
+        # semantic topic scorer is weak.  The task frame is attached immediately,
+        # before provider execution, so the provider can see what kind of state it
+        # is operating on.
+        elif interactive_start.get("active"):
+            # An explicit interactive start creates a fresh task frame even when
+            # another task is currently open. The conversation may remain in the
+            # same scene, but task ownership changes atomically.
+            open_task = cls._new_task_frame(
+                existing=open_task,
+                transition={"replace_task": True, "reset_memory": False},
+                state=state,
+                scene=current,
+                text=text,
+                sequence_id=sequence_id,
+            )
+
         elif open_task.get("active") and task_answer.get("is_answer"):
             open_task = dict(open_task)
+            qa_history = list(open_task.get("qa_history") or [])
+            prompt = cls._text(
+                open_task.get("last_question")
+                or open_task.get("prompt")
+            )
+            qa_history.append({
+                "user": cls._text(text),
+                "assistant_prompt": prompt,
+                "kind": "answer",
+            })
+            open_task["qa_history"] = qa_history[-12:]
+            open_task["turns"] = list(open_task["qa_history"])
             open_task["status"] = "answer_received"
+            open_task["phase"] = (
+                "awaiting_assistant_action"
+                if open_task.get("role") == "april_guesses_user_object"
+                else open_task.get("phase") or "answer_received"
+            )
             open_task["candidate_answer"] = cls._text(text)
+            open_task["last_user_answer"] = cls._text(text)
+            open_task["awaiting_user"] = False
             open_task["last_answer_confidence"] = float(
                 task_answer.get("confidence", 0.0) or 0.0
             )
-            open_task["source"] = open_task.get("source") or "task_owner"
+            open_task["source"] = "task_owner_answer"
+            open_task["task_revision"] = int(open_task.get("task_revision", 0) or 0) + 1
+
+        elif open_task.get("active") and task_answer.get("is_task_action"):
+            open_task = dict(open_task)
+            qa_history = list(open_task.get("qa_history") or [])
+            qa_history.append({
+                "user": cls._text(text),
+                "assistant_prompt": cls._text(open_task.get("last_question") or open_task.get("prompt")),
+                "kind": "task_action",
+            })
+            open_task["qa_history"] = qa_history[-12:]
+            open_task["turns"] = list(open_task["qa_history"])
+            open_task["last_user_action"] = cls._text(text)
+            open_task["status"] = "open"
+            open_task["phase"] = "awaiting_assistant_action"
+            open_task["awaiting_user"] = False
+            open_task["source"] = "task_owner_action"
 
         has_live_scene = bool(
             current_scene_id
@@ -1209,10 +1585,9 @@ class LiveSceneContinuityEngine:
         # Explicit external boundary is the only direct escape from an active
         # open task.  Weak semantic novelty cannot steal ownership.
         topic_boundary = bool(evidence.get("new_topic"))
-        if task_transition.get("replace_task"):
-            # Replacing the current task is still continuation of the same
-            # conversational scene; only an explicit external subject change
-            # may create a new scene.
+        if task_transition.get("replace_task") or interactive_start.get("active"):
+            # Replacing/starting an interactive task changes task ownership, not
+            # the user's conversational branch. The scene remains continuous.
             topic_boundary = False
         elif open_task.get("active"):
             topic_boundary = bool(
@@ -1222,6 +1597,7 @@ class LiveSceneContinuityEngine:
                     or evidence.get("semantic")
                 )
                 and not task_answer.get("is_answer")
+                and not task_answer.get("is_task_action")
             )
 
         if topic_boundary:
@@ -1309,6 +1685,16 @@ class LiveSceneContinuityEngine:
             "boundary": evidence,
             "open_task": open_task,
             "task_state": open_task,
+            "interactive_task_state": open_task,
+            "task_memory": {
+                "role": open_task.get("role"),
+                "phase": open_task.get("phase"),
+                "last_question": open_task.get("last_question"),
+                "known_clues": list(open_task.get("known_clues") or [])[-12:],
+                "qa_history": list(open_task.get("qa_history") or [])[-12:],
+                "candidate_answer": cls._text(open_task.get("candidate_answer")),
+                "awaiting_user": bool(open_task.get("awaiting_user")),
+            } if open_task.get("active") else {},
             "active_entity": task_entity,
             "candidate_answer": cls._text(open_task.get("candidate_answer")),
             "forbidden_entities": forbidden_entities,
@@ -1324,8 +1710,9 @@ class LiveSceneContinuityEngine:
         state["active_topic"] = resolved_topic
         state["current_topic"] = resolved_topic
         state["active_goal"] = resolved_goal
-        state["open_task"] = open_task
-        state["active_task"] = open_task
+        state["open_task"] = dict(open_task)
+        state["active_task"] = dict(open_task)
+        state["interactive_task_state"] = dict(open_task)
 
         if open_task.get("active"):
             runtime = (
@@ -1334,6 +1721,7 @@ class LiveSceneContinuityEngine:
                 else {}
             )
             runtime["active_task"] = dict(open_task)
+            runtime["interactive_task_state"] = dict(open_task)
             runtime["forbidden_entities"] = forbidden_entities
             runtime["task_owner"] = "CURRENT_OPEN_TASK"
             runtime["historical_entities_are_evidence_only"] = True
@@ -1387,8 +1775,19 @@ class LiveSceneContinuityEngine:
             "resume_after_memory": bool(memory_query and continuity),
             "open_task": open_task,
             "task_state": open_task,
+            "interactive_task_state": open_task,
+            "task_memory": {
+                "role": open_task.get("role"),
+                "phase": open_task.get("phase"),
+                "last_question": open_task.get("last_question"),
+                "known_clues": list(open_task.get("known_clues") or [])[-12:],
+                "qa_history": list(open_task.get("qa_history") or [])[-12:],
+                "candidate_answer": cls._text(open_task.get("candidate_answer")),
+                "awaiting_user": bool(open_task.get("awaiting_user")),
+            } if open_task.get("active") else {},
             "task_answer": task_answer,
             "task_transition": task_transition,
+            "task_action": bool(task_answer.get("is_task_action")),
             "active_entity": task_entity,
             "candidate_answer": cls._text(open_task.get("candidate_answer")),
             "forbidden_entities": forbidden_entities,
@@ -1788,6 +2187,7 @@ class QuantumInterpretationEngine:
 
     def fast_semantic_profile(
         self, text: str, previous_assistant: str = "",
+        previous_user: str = "",
         active_topic: str = "", active_goal: str = ""
     ) -> dict[str, Any]:
         return self.measure(
@@ -2021,7 +2421,7 @@ class QuantumInterpretationEngine:
 
         # The current open task is stronger evidence than lexical similarity.
         # This is the key semantic rule for interactive dialogue.
-        if task_relation.get("is_answer"):
+        if task_relation.get("is_answer") or task_relation.get("is_task_action"):
             continuation_score = max(
                 continuation_score,
                 float(task_relation.get("confidence", 0.0) or 0.0),
@@ -2036,6 +2436,7 @@ class QuantumInterpretationEngine:
             previous_assistant
             and (
                 task_relation.get("is_answer")
+                or task_relation.get("is_task_action")
                 or task_transition.get("replace_task")
                 or best
                 in {
@@ -2333,8 +2734,13 @@ class QuantumInterpretationEngine:
             open_task.get("target") if task_active else ""
         )
 
-        task_relation = live_scene.get("task_answer", {})
+        task_answer = live_scene.get("task_answer", {})
+        if not isinstance(task_answer, dict):
+            task_answer = {}
+        task_relation = task_answer
         task_transition = live_scene.get("task_transition", {})
+        if not isinstance(task_transition, dict):
+            task_transition = {}
         forbidden_entities = list(
             live_scene.get("forbidden_entities", [])
             if isinstance(live_scene.get("forbidden_entities"), list)
@@ -2386,10 +2792,16 @@ class QuantumInterpretationEngine:
             "goal": effective_goal,
             "topic": effective_topic,
             "kind": open_task.get("kind") if task_active else "",
+            "role": open_task.get("role") if task_active else "",
+            "phase": open_task.get("phase") if task_active else "",
             "status": open_task.get("status") if task_active else "",
             "prompt": open_task.get("prompt") if task_active else "",
+            "last_question": open_task.get("last_question") if task_active else "",
             "candidate_answer": candidate_answer,
+            "last_user_answer": open_task.get("last_user_answer") if task_active else "",
             "expected_input_type": open_task.get("expected_input_type") if task_active else "",
+            "known_clues": list(open_task.get("known_clues") or [])[-12:] if task_active else [],
+            "qa_history": list(open_task.get("qa_history") or [])[-12:] if task_active else [],
             "task_revision": open_task.get("task_revision", 0) if task_active else 0,
             "avoid_entities": forbidden_entities,
         }
@@ -2416,8 +2828,15 @@ class QuantumInterpretationEngine:
             "candidate_answer": candidate_answer,
             "open_task": open_task,
             "active_task": active_task_contract,
+            "interactive_task_state": open_task,
+            "task_memory": {
+                "last_question": open_task.get("last_question"),
+                "known_clues": list(open_task.get("known_clues") or [])[-12:],
+                "qa_history": list(open_task.get("qa_history") or [])[-12:],
+            } if task_active else {},
             "task_relation": task_relation,
             "task_transition": task_transition,
+            "task_action": bool(task_answer.get("is_task_action")),
             "topic_shift": bool(live_scene.get("topic_boundary")),
             "memory_query": bool(live_scene.get("memory_query")),
             "memory_projection": live_scene.get("memory_projection", []),
@@ -2516,6 +2935,7 @@ class QuantumInterpretationEngine:
                 "canonical_topic": effective_topic,
                 "active_entity": active_entity,
                 "candidate_answer": candidate_answer,
+                "semantic_request": resolved_request,
                 "context_dependency": canonical_context_dependency,
                 "context_resolution": {
                     "depends_on_previous_dialogue": bool(continuation or reference),
@@ -2746,9 +3166,23 @@ class QuantumInterpretationEngine:
         # cannot accidentally resurrect a stale entity.
         result["active_task"] = active_task_contract
         result["open_task"] = open_task
+        result["interactive_task_state"] = open_task
+        result["task_memory"] = {
+            "last_question": open_task.get("last_question"),
+            "known_clues": list(open_task.get("known_clues") or [])[-12:],
+            "qa_history": list(open_task.get("qa_history") or [])[-12:],
+            "candidate_answer": candidate_answer,
+            "awaiting_user": bool(open_task.get("awaiting_user")),
+        } if task_active else {}
         result["task_relation"] = task_relation
         result["task_transition"] = task_transition
+        result["task_action"] = bool(task_answer.get("is_task_action"))
         result["active_entity"] = active_entity
+        result["semantic_request"] = (
+            result.get("resolved_request")
+            or dialogue_contract.get("resolved_request")
+            or text
+        )
         result["candidate_answer"] = candidate_answer
         result["forbidden_entities"] = forbidden_entities
 
