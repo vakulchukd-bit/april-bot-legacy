@@ -13,6 +13,7 @@ from blocks.C_ARTIFACT_CONTRACT import (
     MachineResponse,
     build_machine_scene,
     build_scene_contract,
+    build_scene_signal,
 )
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.interpretation_layer import interpret_request
@@ -935,6 +936,7 @@ class ProcessorScene:
             "canonical_topic": _compact(dialogue.get("canonical_topic")),
             "sequence_id": _text(dialogue.get("sequence_id")),
             "target_sequence_id": _text(dialogue.get("sequence_id") or dialogue.get("target_sequence_id")),
+            "sequence_turn_index": int((dialogue_memory.get("active_sequence") or {}).get("turn_count", 0) or 0) + (1 if relation in {"NEW", "CONTINUE"} else 0),
             "resolved_reference": _compact(dialogue.get("resolved_reference")),
             "selected_memory_index": dialogue.get("selected_memory_index", -1),
             "selected_memory_operand": _compact(dialogue.get("selected_memory_operand") or {}),
@@ -1038,6 +1040,9 @@ class ProcessorScene:
                     max_depth=5,
                     max_items=12,
                 ),
+                "scene_blueprint": _compact(semantic_result.get("scene_blueprint") or {}, max_depth=5, max_items=16),
+                "user_id": self.user_id,
+                "conversation_id": dialogue_memory.get("conversation_id"),
             },
             memory=memory_packet,
             visual_context=artifact_visual_context,
@@ -1054,7 +1059,11 @@ class ProcessorScene:
                 "one_provider_call": True,
                 "provider_input_token_budget": 900,
                 "metadata": {
-                    "identity_scope": {"user_id": self.user_id},
+                    "identity_scope": {
+                        "user_id": self.user_id,
+                        "conversation_id": dialogue_memory.get("conversation_id"),
+                        "dialogue_sequence_id": _text(dialogue.get("sequence_id")),
+                    },
                     "visual_production_mode": visual_mode,
                     "semantic_request": _text(
                         semantic_result.get("semantic_request")
@@ -1128,13 +1137,9 @@ class ProcessorScene:
         if not blocks:
             blocks = [self._text_block(answer)]
 
-        # Provider cannot invent another representation that the processor did
-        # not request. For text-only turns, keep text only.
-        requested = {str(x).lower() for x in request.requested_outputs}
-        if requested == {"text"}:
-            blocks = [b for b in blocks if _text(b.get("type") or "").lower() in {"text", "markdown"}]
-            if not blocks:
-                blocks = [self._text_block(answer)]
+        # The scene is composed once below. No renderer-specific side route is
+        # allowed to strip blocks after canonicalization. A truly text-only
+        # request simply arrives with one text block.
 
         response = MachineResponse(
             answer=answer,
@@ -1167,6 +1172,23 @@ class ProcessorScene:
             "provider_calls": 1,
             "fast_path": True,
             "web_signal_source": "SCENE_CONTRACT",
+            "user_id": self.user_id,
+            "conversation_id": _text(request.memory.get("authenticated_user_scope", {}).get("conversation_id")),
+            "dialogue_sequence_id": _text(request.dialogue_contract.get("sequence_id")),
+            "sequence_turn_index": int(request.dialogue_contract.get("sequence_turn_index") or 0),
+            "identity_scope": {
+                "user_id": self.user_id,
+                "conversation_id": _text(request.memory.get("authenticated_user_scope", {}).get("conversation_id")),
+                "dialogue_sequence_id": _text(request.dialogue_contract.get("sequence_id")),
+            },
+            "active_task": _compact_task_state(request.dialogue_contract.get("active_task") or {}),
+            "interactive_task_state": _compact_task_state(request.dialogue_contract.get("interactive_task_state") or {}),
+            "dialogue_state": {
+                "relation": request.dialogue_contract.get("relation"),
+                "continuation": bool(request.dialogue_contract.get("continuation")),
+                "sequence_id": _text(request.dialogue_contract.get("sequence_id")),
+                "resolved_request": request.dialogue_contract.get("resolved_request"),
+            },
             "semantic_scene_state": {
                 "relation": request.dialogue_contract.get("relation"),
                 "continuation": bool(request.quantum_state.get("continuation")),
@@ -1180,8 +1202,8 @@ class ProcessorScene:
         scene.contract = build_scene_contract(scene)
         contract = scene.contract
 
-        # One canonical Web signal: the same list is exported as `blocks` and
-        # `render_blocks` for compatibility, with the same object content.
+        # build_scene_contract already produced the canonical v3.1 signal.
+        # Never downgrade it to an older Web signal or rebuild the scene here.
         contract.metadata = dict(contract.metadata or {})
         contract.metadata["processor_interpretation"] = {
             "relation": request.dialogue_contract.get("relation"),
@@ -1191,24 +1213,16 @@ class ProcessorScene:
             "resolved_request": request.intent.get("resolved_request"),
         }
         contract.metadata["web_delivery"] = {
-            "version": "april_web_scene_signal_v1",
-            "source": "SCENE_CONTRACT",
+            "version": "scene_contract_v3_1",
+            "source": "C_ARTIFACT_CONTRACT.build_scene_contract",
             "render_blocks_canonical": True,
             "renderer_reinterpretation": False,
             "duplicate_rebuild": False,
+            "single_visible_stream": True,
+            "identity_bound": True,
         }
+        contract.signal = build_scene_signal(contract)
         contract.blocks = list(contract.render_blocks)
-        contract.signal = {
-            "signal_type": "scene",
-            "signal_version": "april_web_scene_signal_v1",
-            "scene_id": contract.scene_id,
-            "turn_id": contract.turn_id,
-            "continuation": contract.continuation,
-            "single_response": True,
-            "single_signal": True,
-            "order": list(contract.order),
-            "blocks": list(contract.render_blocks),
-        }
         return response, scene, contract
 
     @staticmethod
@@ -1224,7 +1238,10 @@ class ProcessorScene:
         }
 
     def _canonicalize_blocks(self, raw_blocks: Sequence[Any], request: MachineRequest) -> List[Dict[str, Any]]:
-        expected = set(str(x).lower() for x in request.requested_outputs)
+        expected = {str(x).lower() for x in request.requested_outputs}
+        representation_plan = request.constraints.get("representation_plan", {}) if isinstance(request.constraints, dict) else {}
+        if isinstance(representation_plan, dict):
+            expected.update(str(x).lower() for x in (representation_plan.get("requested_outputs") or []))
         result: List[Dict[str, Any]] = []
         seen = set()
         structured = set(_STRUCTURED_TYPES) | {"audio", "video", "action", "file", "visual_context", "scene"}
@@ -1235,8 +1252,15 @@ class ProcessorScene:
             kind = _text(block.get("type") or block.get("artifact_type") or block.get("representation")).lower()
             if not kind:
                 continue
+            # Do not discard a valid provider artifact merely because a stale
+            # requested_outputs list omitted one member of the already-built
+            # composite scene. Only reject an unplanned structured block.
             if kind not in expected and kind not in {"text", "markdown"}:
-                continue
+                provider_plan = {str(x).lower() for x in (raw.get("scene_plan") or [])} if isinstance(raw.get("scene_plan"), list) else set()
+                scene_plan = request.conversation.get("scene_blueprint") if isinstance(request.conversation.get("scene_blueprint"), dict) else {}
+                blueprint_reps = {str(x).lower() for x in (scene_plan.get("representations") or [])}
+                if kind not in provider_plan and kind not in blueprint_reps:
+                    continue
 
             canonical_payload = canonical_payload_for_block(block)
             block["type"] = kind
