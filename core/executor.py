@@ -153,6 +153,16 @@ def _tokens(value: str) -> List[str]:
     return re.findall(r"[a-zа-яё0-9_]+", value.lower())
 
 
+def _compact_task_state(value: Any) -> Any:
+    """Compact task state without truncating the semantic Q&A trajectory.
+
+    Generic scene compaction is intentionally small, but an interactive task
+    is a state machine: its accumulated questions/answers are the evidence
+    needed for a later solve/guess turn. Keep the bounded task history intact.
+    """
+    return _compact(value, depth=0, max_depth=6, max_items=16)
+
+
 def _compact(value: Any, depth: int = 0, max_depth: int = 3, max_items: int = 6) -> Any:
     if depth > max_depth:
         return None
@@ -398,6 +408,24 @@ class SequentialInterpretation:
             or vector.get("resolved_entity")
             or continuation_analysis.get("active_entity")
         )
+        task_state = (
+            self.semantic_result.get("interactive_task_state")
+            if isinstance(self.semantic_result.get("interactive_task_state"), dict)
+            else self.semantic_result.get("open_task")
+            if isinstance(self.semantic_result.get("open_task"), dict)
+            else contract.get("interactive_task_state")
+            if isinstance(contract.get("interactive_task_state"), dict)
+            else contract.get("open_task")
+            if isinstance(contract.get("open_task"), dict)
+            else {}
+        )
+        task_memory = (
+            self.semantic_result.get("task_memory")
+            if isinstance(self.semantic_result.get("task_memory"), dict)
+            else contract.get("task_memory")
+            if isinstance(contract.get("task_memory"), dict)
+            else {}
+        )
 
         return {
             "relation": relation,
@@ -436,6 +464,13 @@ class SequentialInterpretation:
             "selected_memory_operand": vector.get("selected_memory_operand") or contract.get("selected_memory_operand") or {},
             "trajectory": trajectory,
             "canonical_topic": canonical_topic,
+            "active_task": task_state,
+            "open_task": task_state,
+            "interactive_task_state": task_state,
+            "task_memory": task_memory,
+            "task_relation": contract.get("task_relation") or self.semantic_result.get("task_relation") or {},
+            "task_transition": contract.get("task_transition") or self.semantic_result.get("task_transition") or {},
+            "task_action": bool(contract.get("task_action") or self.semantic_result.get("task_action")),
             "sequence_id": _text(
                 vector.get("sequence_id")
                 or contract.get("sequence_id")
@@ -706,7 +741,13 @@ class ProcessorScene:
             requested_outputs = ["text"]
             required_artifacts = []
 
-        active_task = self.state.get("april_active_task") if isinstance(self.state.get("april_active_task"), dict) else {}
+        semantic_task_state = dialogue.get("interactive_task_state") if isinstance(dialogue.get("interactive_task_state"), dict) else {}
+        persisted_task_state = self.state.get("interactive_task_state") if isinstance(self.state.get("interactive_task_state"), dict) else {}
+        active_task = semantic_task_state or persisted_task_state or (
+            self.state.get("april_active_task")
+            if isinstance(self.state.get("april_active_task"), dict)
+            else {}
+        )
         pending_task = self.state.get("april_pending_task") if isinstance(self.state.get("april_pending_task"), dict) else {}
 
         resolved_request = _text(dialogue.get("resolved_request") or self.request)
@@ -732,9 +773,13 @@ class ProcessorScene:
             or self.state.get("april_active_entity")
         )
 
-        # For NEW turns, the current semantic task is authoritative; do not reuse
-        # the previous topic as the provider-facing active task.
-        turn_active_task = active_task if relation in {"CONTINUE", "RECALL"} else {
+        # The semantic task is authoritative whenever an interactive task exists.
+        # A replacement/new-task request may be NEW at the scene level but still
+        # carries the newly created task frame to the provider.
+        semantic_task_active = bool(
+            isinstance(active_task, dict) and active_task.get("active")
+        )
+        turn_active_task = active_task if semantic_task_active else {
             "operation": intent.get("operation"),
             "object": intent.get("object"),
             "representation": intent.get("representation"),
@@ -785,7 +830,16 @@ class ProcessorScene:
             "reference": bool(dialogue["reference"]),
             "dependency": dialogue["dependency"],
             "anchor": dialogue["anchor"],
-            "active_task": _compact(turn_active_task),
+            "active_task": _compact_task_state(turn_active_task),
+            "interactive_task_state": _compact_task_state(
+                dialogue.get("interactive_task_state") or active_task
+            ),
+            "task_memory": _compact_task_state(
+                dialogue.get("task_memory") or {}
+            ),
+            "task_relation": _compact(dialogue.get("task_relation") or {}),
+            "task_transition": _compact(dialogue.get("task_transition") or {}),
+            "task_action": bool(dialogue.get("task_action")),
             "pending_task": _compact(pending_task),
             "active_entity": resolved_entity,
             "semantic_request": _text(
@@ -860,7 +914,13 @@ class ProcessorScene:
             "continuation": bool(dialogue["continuation"]),
             "reference_to_previous": bool(dialogue["reference"]),
             "context_dependency": dialogue["dependency"],
-            "active_task": _compact(turn_active_task),
+            "active_task": _compact_task_state(turn_active_task),
+            "open_task": _compact_task_state(dialogue.get("open_task") or active_task),
+            "interactive_task_state": _compact_task_state(dialogue.get("interactive_task_state") or active_task),
+            "task_memory": _compact(dialogue.get("task_memory") or {}),
+            "task_relation": _compact(dialogue.get("task_relation") or {}),
+            "task_transition": _compact(dialogue.get("task_transition") or {}),
+            "task_action": bool(dialogue.get("task_action")),
             "pending_task": _compact(pending_task),
             "active_entity": resolved_entity,
             "semantic_request": _text(
@@ -910,7 +970,10 @@ class ProcessorScene:
             ),
             "active_topic": _compact(dialogue.get("canonical_topic")) if relation != "NEW" else "",
             "active_goal": _compact(intent.get("goal")) if relation != "NEW" else "",
-            "active_task": _compact(turn_active_task) if relation != "NEW" else {},
+            "active_task": _compact_task_state(turn_active_task) if semantic_task_active else {},
+            "interactive_task_state": _compact_task_state(dialogue.get("interactive_task_state") or active_task) if semantic_task_active else {},
+            "task_memory": _compact_task_state(dialogue.get("task_memory") or {}) if semantic_task_active else {},
+            "task_relation": _compact(dialogue.get("task_relation") or {}) if semantic_task_active else {},
             "semantic_request": _text(
                 semantic_result.get("semantic_request")
                 or _as_dict(semantic_result.get("semantic_understanding")).get("provider", {}).get("semantic_request")
@@ -958,7 +1021,7 @@ class ProcessorScene:
                 "resolved_request": resolved_request,
                 "dialogue_contract": dialogue_contract,
                 "turn_meaning": context,
-                "active_task": _compact(turn_active_task),
+                "active_task": _compact_task_state(turn_active_task),
                 "pending_task": _compact(pending_task),
                 "live_scene": _compact(
                     semantic_result.get("live_scene")
@@ -1211,6 +1274,140 @@ class ProcessorScene:
 
 
 
+def _normalize_interactive_task(value: Any) -> dict[str, Any]:
+    """Normalize the cross-layer interactive task state without owning routing."""
+    if not isinstance(value, dict):
+        return {}
+
+    nested = value.get("interactive_task_state") or value.get("open_task") or value.get("active_task")
+    merged = dict(value)
+    if isinstance(nested, dict):
+        merged.update(nested)
+
+    active = bool(
+        merged.get("active")
+        or merged.get("open")
+        or merged.get("pending_input")
+        or merged.get("status") in {"open", "active", "answer_received", "assistant_turn"}
+        or merged.get("kind") in {"game", "riddle", "question", "choice"}
+    )
+    if not active:
+        return {}
+
+    task = {
+        "active": True,
+        "status": _text(merged.get("status") or "open").lower(),
+        "kind": _text(merged.get("kind") or merged.get("type") or "task").lower(),
+        "role": _text(merged.get("role") or merged.get("task_role")),
+        "phase": _text(merged.get("phase") or merged.get("task_phase")),
+        "prompt": _text(merged.get("prompt") or merged.get("task_prompt") or merged.get("question")),
+        "last_question": _text(merged.get("last_question") or merged.get("question")),
+        "expected_input_type": _text(merged.get("expected_input_type") or merged.get("input_type") or "answer"),
+        "target": _text(merged.get("target") or merged.get("target_entity")),
+        "secret_target": _text(
+            merged.get("secret_target")
+            or merged.get("hidden_target")
+            or merged.get("private_target")
+        ),
+        "candidate_answer": _text(merged.get("candidate_answer") or merged.get("answer_candidate")),
+        "last_user_answer": _text(merged.get("last_user_answer") or merged.get("user_answer")),
+        "last_user_action": _text(merged.get("last_user_action")),
+        "known_clues": list(merged.get("known_clues") or [])[-12:],
+        "qa_history": list(merged.get("qa_history") or merged.get("turns") or [])[-12:],
+        "turns": list(merged.get("qa_history") or merged.get("turns") or [])[-12:],
+        "awaiting_user": bool(
+            merged.get("awaiting_user")
+            or merged.get("awaiting_input")
+            or merged.get("expected_input_type") in {"answer", "user_answer"}
+        ),
+        "completed": bool(merged.get("completed")),
+        "topic": _text(merged.get("topic") or merged.get("canonical_topic")),
+        "goal": _text(merged.get("goal") or merged.get("task_goal")),
+        "sequence_id": _text(merged.get("sequence_id") or merged.get("active_sequence_id")),
+        "scene_id": _text(merged.get("scene_id") or merged.get("source_scene_id")),
+        "task_revision": int(merged.get("task_revision") or 0),
+        "source": _text(merged.get("source") or "executor_task_bridge"),
+        "replacement_requested": bool(merged.get("replacement_requested")),
+        "reset_memory": bool(merged.get("reset_memory")),
+    }
+    return task
+
+
+def _provider_task_state(response: MachineResponse) -> dict[str, Any]:
+    metadata = response.metadata if isinstance(response.metadata, dict) else {}
+    candidates = [
+        metadata.get("dialogue_task_state"),
+        metadata.get("interactive_task_state"),
+        metadata.get("open_task"),
+        metadata.get("task_state"),
+    ]
+    scene = response.scene if isinstance(response.scene, dict) else {}
+    candidates.extend([
+        scene.get("interactive_task_state"),
+        scene.get("open_task"),
+        scene.get("task_state"),
+    ])
+    for value in candidates:
+        task = _normalize_interactive_task(value)
+        if task:
+            return task
+    return {}
+
+
+def _advance_task_from_answer(task: dict[str, Any], request_text: str, answer: str) -> dict[str, Any]:
+    """Merge the provider turn into the task state while preserving its history."""
+    task = _normalize_interactive_task(task)
+    if not task:
+        return {}
+
+    answer_text = _text(answer)
+    merged = dict(task)
+
+    # Provider metadata is authoritative when present; this fallback only derives
+    # the next waiting phase from the semantic shape of the actual answer.
+    lower_answer = answer_text.lower()
+    qa_history = list(merged.get("qa_history") or [])
+
+    if request_text:
+        last_kind = "task_action" if not merged.get("awaiting_user") and merged.get("last_user_action") else "turn"
+        if merged.get("candidate_answer") == _text(request_text):
+            last_kind = "answer"
+        if not qa_history or qa_history[-1].get("user") != _text(request_text):
+            qa_history.append({
+                "user": _text(request_text),
+                "assistant_prompt": _text(merged.get("last_question") or merged.get("prompt")),
+                "kind": last_kind,
+            })
+
+    merged["qa_history"] = qa_history[-12:]
+    merged["turns"] = list(merged["qa_history"])
+
+    # A provider question means the user now owns the next turn.
+    if "?" in answer_text or "？" in answer_text:
+        merged["last_question"] = answer_text
+        merged["prompt"] = answer_text
+        merged["phase"] = "awaiting_user_answer"
+        merged["status"] = "open"
+        merged["expected_input_type"] = "answer"
+        merged["awaiting_user"] = True
+    elif merged.get("role") == "april_holds_secret":
+        # The setup response establishes the game and asks the user to begin.
+        if any(x in lower_answer for x in ("загадал", "загадала", "уже загад", "задавай вопросы", "угадай слово")):
+            merged["phase"] = "awaiting_user_input"
+            merged["status"] = "open"
+            merged["expected_input_type"] = "answer"
+            merged["awaiting_user"] = True
+    if "угадал" in lower_answer and not ("не угадал" in lower_answer):
+        merged["completed"] = True
+        merged["status"] = "completed"
+        merged["phase"] = "completed"
+        merged["awaiting_user"] = False
+
+    merged["task_revision"] = int(merged.get("task_revision") or 0) + 1
+    merged["source"] = "executor_live_task_state"
+    return merged
+
+
 def _set_live_state(state: dict, request: MachineRequest, response: MachineResponse, contract: Any) -> None:
     dialogue = request.dialogue_contract or {}
     relation = _text(dialogue.get("relation")).upper() or "NEW"
@@ -1224,20 +1421,53 @@ def _set_live_state(state: dict, request: MachineRequest, response: MachineRespo
     state["last_april_turn"] = response.answer
     state["april_active_topic"] = topic
     state["april_active_goal"] = goal
-    # The entity in the completed answer becomes the next-turn discourse anchor.
-    # This is intentionally separate from the broader topic: a conversation can
-    # stay on "Горбачёв" while the active entity becomes "Раиса Горбачёва".
+
+    # Interactive task state has its own ownership. It must survive provider
+    # execution and must never be replaced by the generic topic task.
+    request_task = _normalize_interactive_task(
+        dialogue.get("interactive_task_state")
+        or dialogue.get("open_task")
+        or dialogue.get("active_task")
+    )
+    response_task = _provider_task_state(response)
+    task = dict(request_task)
+    if response_task:
+        task.update(response_task)
+
+    if task:
+        task = _advance_task_from_answer(
+            task,
+            request.conversation.get("current_request", ""),
+            response.answer,
+        )
+        state["interactive_task_state"] = _compact(task, max_depth=5, max_items=16)
+        state["open_task"] = _compact(task, max_depth=5, max_items=16)
+        state["active_task"] = _compact(task, max_depth=5, max_items=16)
+        # `april_active_task` remains the compatibility mirror, but it mirrors
+        # the semantic task rather than rebuilding one from topic/object.
+        state["april_active_task"] = _compact(task, max_depth=5, max_items=16)
+    else:
+        # Only replace the compatibility task when no interactive task exists.
+        state["april_active_task"] = {
+            "operation": operation,
+            "object": topic,
+            "representation": representation,
+            "goal": goal,
+            "topic": topic,
+        }
+        state["interactive_task_state"] = {}
+        state["open_task"] = {}
+        state["active_task"] = {}
+
+    # Generic active entity is a discourse entity, not a hidden secret target.
     entity = _person_entity_from_answer(response.answer)
     if not entity:
-        entity = _text(dialogue.get("resolved_entity") or dialogue.get("resolved_reference") or topic)
+        entity = _text(
+            dialogue.get("active_entity")
+            or dialogue.get("resolved_entity")
+            or dialogue.get("resolved_reference")
+        )
     state["april_active_entity"] = entity
-    state["april_active_task"] = {
-        "operation": operation,
-        "object": topic,
-        "representation": representation,
-        "goal": goal,
-        "topic": topic,
-    }
 
     attrs = dict(request.intent.get("attributes") or {})
     if attrs.get("telegram_pending"):
@@ -1270,10 +1500,19 @@ def _set_live_state(state: dict, request: MachineRequest, response: MachineRespo
         **dict(dialogue),
         "three_way_relation": relation,
         "sequence_id": dialogue.get("sequence_id"),
-        "target_sequence_id": dialogue.get("sequence_id"),
+        "target_sequence_id": dialogue.get("sequence_id") or dialogue.get("target_sequence_id"),
         "sequence_continuation_authorized": bool(dialogue.get("continuation")),
         "current_turn_authority": True,
         "historical_memory_is_evidence_only": True,
+        "interactive_task_state": _compact_task_state(task) if task else {},
+        "task_memory": _compact({
+            "role": task.get("role"),
+            "phase": task.get("phase"),
+            "last_question": task.get("last_question"),
+            "known_clues": task.get("known_clues"),
+            "qa_history": task.get("qa_history"),
+            "candidate_answer": task.get("candidate_answer"),
+        }, max_depth=5, max_items=16) if task else {},
     }
 
     state["dialogue_resolution"] = {
@@ -1287,15 +1526,17 @@ def _set_live_state(state: dict, request: MachineRequest, response: MachineRespo
         "selected_memory_index": dialogue.get("selected_memory_index", -1),
         "selected_memory_operand": dialogue.get("selected_memory_operand") or {},
         "trajectory": dialogue.get("trajectory") or {},
+        "interactive_task_state": _compact_task_state(task) if task else {},
         "source": "semantic_interpretation_layer",
     }
 
     state["april_live_context"] = {
-        "version": "april_live_context_v1",
+        "version": "april_live_context_v2",
         "relation": relation,
         "active_topic": topic,
         "active_goal": goal,
         "active_task": _compact(state.get("april_active_task")),
+        "interactive_task_state": _compact_task_state(task) if task else {},
         "pending_task": _compact(state.get("april_pending_task")),
         "last_user_turn": _text(state.get("last_user_turn")),
         "last_april_turn": _text(state.get("last_april_turn")),
