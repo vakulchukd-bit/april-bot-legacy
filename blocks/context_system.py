@@ -707,15 +707,29 @@ def build_user_space(state: Dict[str, Any]) -> Dict[str, Any]:
         },
     }
 
-def build_scene_contract(state: Dict[str, Any]) -> Dict[str, Any]:
+def build_scene_context_evidence(state: Dict[str, Any]) -> Dict[str, Any]:
+    active_sequence = _dict(state.get("active_dialogue_sequence"))
     return {
-        "version": 2,
+        "version": 3,
         "user_space": build_user_space(state),
         "scene": _dict(state.get("scene_state")),
         "renderer_state": _dict(state.get("renderer_state")),
+        "identity_scope": {
+            "user_id": normalize_text(state.get("user_id")),
+            "conversation_id": normalize_text(state.get("conversation_id")),
+            "dialogue_sequence_id": normalize_text(active_sequence.get("sequence_id")),
+        },
+        "active_dialogue_sequence": active_sequence,
+        "active_task": _dict(state.get("interactive_task_state") or state.get("open_task") or state.get("active_task")),
         "context_role": "EVIDENCE_ONLY",
         "decision_owner": "QUANTUM_PROCESSOR",
+        "web_scene_contract": "C_ARTIFACT_CONTRACT_ONLY",
     }
+
+
+def build_scene_contract(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Compatibility alias; returns evidence only, never the Web SceneContract."""
+    return build_scene_context_evidence(state)
 
 def build_workspace_summary(state: Dict[str, Any]) -> Dict[str, Any]:
     return {
@@ -733,7 +747,7 @@ def build_executor_context_packet(state: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "user_space": build_user_space(state),
         "workspace_summary": build_workspace_summary(state),
-        "scene_contract": build_scene_contract(state),
+        "scene_evidence": build_scene_context_evidence(state),
         "scene_evidence": scene_evidence,
         "context_role": "EVIDENCE_ONLY",
         "decision_owner": "QUANTUM_PROCESSOR",
