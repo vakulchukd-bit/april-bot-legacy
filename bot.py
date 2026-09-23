@@ -528,17 +528,32 @@ if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)), debug=False, use_reloader=False)
 
 def preserve_executor_scene_contract(payload: dict) -> dict:
+    """Expose only the canonical SceneContract as Web's scene authority."""
     if not isinstance(payload, dict):
         return payload
     scene = payload.get('scene_contract')
     if isinstance(scene, str):
         scene = scene_contract_to_dict(scene)
     if not isinstance(scene, dict):
-        return payload
+        raise RuntimeError('Canonical SceneContract missing from executor result.')
+    signal = scene.get('signal') if isinstance(scene.get('signal'), dict) else {}
+    blocks = scene.get('render_blocks') or scene.get('blocks') or signal.get('render_blocks') or signal.get('blocks') or []
     payload['answer'] = scene.get('answer') or payload.get('answer')
     payload['summary'] = scene.get('summary') or payload.get('summary')
     payload['content'] = scene.get('content') or payload.get('content')
-    if scene.get('render_blocks'):
-        payload['render_blocks'] = scene['render_blocks']
-    payload['gateway_transport'] = payload.get('gateway_transport') or scene
+    payload['render_blocks'] = blocks
+    payload['blocks'] = blocks
+    payload['gateway_transport'] = scene
+    payload['web_delivery'] = {
+        'version': 'scene_contract_v3_1',
+        'transport': 'SceneContract',
+        'single_visible_stream': True,
+        'scene_id': scene.get('scene_id'),
+        'turn_id': scene.get('turn_id'),
+        'user_id': scene.get('user_id'),
+        'conversation_id': scene.get('conversation_id'),
+        'dialogue_sequence_id': scene.get('dialogue_sequence_id'),
+        'signal': signal,
+        'scene_contract': scene,
+    }
     return payload
