@@ -16,7 +16,7 @@ from blocks.C_ARTIFACT_CONTRACT import (
     build_scene_signal,
 )
 from blocks.april_personality import APRIL_IDENTITY
-from blocks.interpretation_layer import interpret_request
+from blocks.interpretation_layer import interpret_request, QuantumInterpretationEngine
 from blocks.provider_router import generate_text
 from blocks.state_manager import get_state, update_scene_context, persist_state, build_dialogue_memory_bridge
 from blocks.presentation_formatter import canonical_payload_for_block, validate_render_block_payload
@@ -567,15 +567,23 @@ class SequentialInterpretation:
         ).lower()
 
         if representation == "image":
-            # Interpretation owns the semantic production decision. Executor only
-            # executes it; it does not classify the user's wording again.
-            attributes["visual_production_mode"] = (
-                semantic_mode
-                if semantic_mode in {"image_generation", "image_present"}
-                else "image_generation"
-                if semantic_result.get("operation") in {"build", "visualize"}
-                else "image_present"
+            # A current-turn image build is a production request.  The previous
+            # code trusted a stale `image_present` semantic field even when the
+            # current operation was `build`, which made Provider return only text
+            # and prevented C_APRIL_IMAGES_GENERATOR from ever materializing the
+            # image.  Artifact continuation is still one semantic image route; it
+            # simply uses the previous scene as the operand.
+            artifact_reference = bool(
+                interpretation_control.get("artifact_reference")
+                or interpretation_control.get("render_mode") == "ARTIFACT_CONTINUATION"
             )
+            if operation in {"build", "visualize", "modify", "transform", "redraw"}:
+                attributes["visual_production_mode"] = "image_generation"
+            elif semantic_mode in {"image_generation", "image_present"}:
+                attributes["visual_production_mode"] = semantic_mode
+            else:
+                attributes["visual_production_mode"] = "image_present"
+            attributes["artifact_reference"] = artifact_reference
         elif representation == "diagram":
             attributes["visual_production_mode"] = "diagram"
         elif representation == "graph":
@@ -628,20 +636,24 @@ class SequentialInterpretation:
 
     @staticmethod
     def _representation(text: str) -> str:
+        # This is only the Executor's compatibility view after semantic
+        # interpretation.  Specific structured forms outrank the generic
+        # "draw/create" modality, so "нарисуй это в схеме" remains a diagram
+        # rather than collapsing to image.
         if re.search(r"\b(код|python|пайтон|скрипт)\b", text):
             return "code"
         if re.search(r"\b(ссыл\w*|url|link)\b", text):
             return "link"
-        if re.search(r"\b(нарисуй|изобрази|сгенерируй|создай)\b", text) or "картинк" in text or "изображени" in text or "портрет" in text:
-            return "image"
+        if re.search(r"\b(формул\w*|уравнени\w*)\b", text):
+            return "formula"
         if re.search(r"\b(график|графика|кривую|кривая)\b", text):
             return "graph"
         if re.search(r"\b(таблиц\w*|табличк\w*)\b", text):
             return "table"
         if re.search(r"\b(схем\w*|блок-схем\w*)\b", text):
             return "diagram"
-        if re.search(r"\b(формул\w*|уравнени\w*)\b", text):
-            return "formula"
+        if re.search(r"\b(нарисуй|изобрази|сгенерируй|создай)\b", text) or "картинк" in text or "изображени" in text or "портрет" in text:
+            return "image"
         return "text"
 
     @staticmethod
@@ -711,8 +723,63 @@ class ProcessorScene:
         self._render_omissions: list[dict[str, Any]] = []
 
     def prepare(self) -> MachineRequest:
+        # Snapshot the operand before interpretation can update the live scene.
+        # Artifact-continuation requests must resolve against the previous
+        # successful visual result, never against the scene being constructed for
+        # the current turn.
+        prior_visual_scene = (
+            dict(self.state.get("active_visual_scene"))
+            if isinstance(self.state.get("active_visual_scene"), dict)
+            else dict(self.state.get("current_visual_scene"))
+            if isinstance(self.state.get("current_visual_scene"), dict)
+            else {}
+        )
         dialogue = self.interpreter.dialogue(self.request, self.state)
         intent = self.interpreter.intent(self.request, self.state, dialogue)
+
+        # A modality change is a topic-vector change, not a new conversation.
+        # If an authenticated active dialogue sequence exists, a resolved
+        # structured request continues that same sequence unless the semantic
+        # task owner explicitly replaced/closed the conversation.
+        if (
+            dialogue.get("relation") == "NEW"
+            and isinstance(self.state.get("active_dialogue_sequence"), dict)
+            and self.state.get("active_dialogue_sequence", {}).get("sequence_id")
+            and intent.get("representation") in _STRUCTURED_TYPES
+            and not bool((dialogue.get("task_transition") or {}).get("replace_task"))
+        ):
+            dialogue["relation"] = "CONTINUE"
+            dialogue["continuation"] = True
+            dialogue["dependency"] = "continuation"
+            dialogue["anchor"] = "last_turn"
+
+        # Final semantic handoff: once the Processor has a resolved representation,
+        # Interpretation remains the authority for render authorization.  This
+        # closes the old gap where the representation was correctly resolved to
+        # image/diagram/table but interpretation_control was empty, so Provider
+        # was instructed to return text only.
+        resolved_control = intent.get("interpretation_control") if isinstance(intent.get("interpretation_control"), dict) else {}
+        if intent.get("representation") in _STRUCTURED_TYPES and not resolved_control.get("render_authorized"):
+            live_visual = (
+                self.state.get("active_visual_scene")
+                if isinstance(self.state.get("active_visual_scene"), dict)
+                else self.state.get("current_visual_scene")
+                if isinstance(self.state.get("current_visual_scene"), dict)
+                else {}
+            )
+            resolved_control = QuantumInterpretationEngine._build_interpretation_control(
+                text=self.request,
+                representation=_text(intent.get("representation")),
+                operation=_text(intent.get("operation")),
+                relation=_text(dialogue.get("relation")),
+                previous_user=_text(self.state.get("last_user_turn")),
+                previous_assistant=_text(self.state.get("last_april_turn")),
+                live_scene=live_visual,
+                explicit_boundary=False,
+            )
+            intent["interpretation_control"] = resolved_control
+            intent["render_authorized"] = bool(resolved_control.get("render_authorized"))
+            intent["render_mode"] = _text(resolved_control.get("render_mode") or "STRUCTURED_OUTPUT")
         relation = dialogue["relation"]
 
         requested_outputs = ["text"]
@@ -791,8 +858,7 @@ class ProcessorScene:
         render_mode = _text(intent.get("render_mode") or "TEXT_ONLY").upper()
         selected_artifact = semantic_result.get("target_artifact") if isinstance(semantic_result.get("target_artifact"), dict) else {}
         selected_artifact = dict(selected_artifact)
-        selected_artifact_block = selected_artifact.get("render_block") if isinstance(selected_artifact.get("render_block"), dict) else {}
-        live_visual_scene = (
+        live_visual_scene = prior_visual_scene or (
             self.state.get("active_visual_scene")
             if isinstance(self.state.get("active_visual_scene"), dict)
             else self.state.get("current_visual_scene")
@@ -803,6 +869,26 @@ class ProcessorScene:
             render_mode == "ARTIFACT_CONTINUATION"
             and bool(intent.get("render_authorized"))
         )
+
+        # The active visual scene is the canonical fallback operand when
+        # Interpretation identified an artifact continuation but did not attach
+        # a separate target_artifact object.  This keeps the operand inside the
+        # same dialogue/SceneContract instead of inventing a second visual route.
+        if artifact_context_only and not selected_artifact and live_visual_scene:
+            visual_blocks = [
+                block for block in (live_visual_scene.get("render_blocks") or live_visual_scene.get("blocks") or [])
+                if isinstance(block, dict)
+                and _text(block.get("type") or block.get("artifact_type") or "").lower() in _STRUCTURED_TYPES
+            ]
+            if visual_blocks:
+                selected_artifact = {
+                    "scene_id": live_visual_scene.get("scene_id"),
+                    "type": _text(visual_blocks[-1].get("type") or visual_blocks[-1].get("artifact_type")),
+                    "render_block": _compact(visual_blocks[-1], max_depth=6, max_items=10),
+                    "source": "active_visual_scene",
+                }
+
+        selected_artifact_block = selected_artifact.get("render_block") if isinstance(selected_artifact.get("render_block"), dict) else {}
         artifact_visual_context = {}
         if artifact_context_only:
             artifact_visual_context = {
@@ -1074,7 +1160,7 @@ class ProcessorScene:
                     "dialogue_relation": relation,
                     "fast_path": True,
                     "do_not_reinterpret": True,
-                    "interpretation_control": _compact(semantic_result.get("interpretation_control") or {}, max_depth=4, max_items=10),
+                    "interpretation_control": _compact(intent.get("interpretation_control") or semantic_result.get("interpretation_control") or {}, max_depth=4, max_items=10),
                     "render_authorized": bool(intent.get("render_authorized")),
                     "render_mode": _text(intent.get("render_mode") or "TEXT_ONLY"),
                     "artifact_context_only": artifact_context_only,
@@ -1112,7 +1198,7 @@ class ProcessorScene:
             "continuation_content_analysis": _compact(continuation_analysis, max_depth=4, max_items=8),
             "dialogue_strategy": _compact(dialogue_strategy, max_depth=3, max_items=8),
             "sequence_continuation_authorized": bool(dialogue.get("sequence_continuation_authorized")),
-            "interpretation_control": _compact(semantic_result.get("interpretation_control") or {}, max_depth=4, max_items=10),
+            "interpretation_control": _compact(intent.get("interpretation_control") or semantic_result.get("interpretation_control") or {}, max_depth=4, max_items=10),
             "render_authorized": bool(intent.get("render_authorized")),
             "render_mode": _text(intent.get("render_mode") or "TEXT_ONLY"),
             "provider_calls": 1,
