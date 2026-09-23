@@ -219,6 +219,10 @@ def build_default_state():
         "current_object": None,
         "current_topic": None,
         "active_entity": None,
+        # Canonical interactive task owner, separate from generic topic/entity state.
+        "interactive_task_state": {},
+        "open_task": {},
+        "active_task": {},
         "machine_runtime": True,
         "renderer_safe": True,
         "continuity_alive": True,
@@ -859,6 +863,15 @@ class QuantumMemoryEngine:
             or ""
         ).strip()
 
+        interactive_task_state = deepcopy(
+            dialogue_vector.get("interactive_task_state")
+            or dialogue_vector.get("open_task")
+            or dialogue_vector.get("task_state")
+            or {}
+        )
+        if not isinstance(interactive_task_state, dict):
+            interactive_task_state = {}
+
         if relation == "NEW" or not current_id or (target_id and target_id != current_id and relation == "RECALL"):
             if not target_id or (relation == "NEW" and target_id == current_id):
                 raw = f"{user_id}|{conversation_id}|{time.time_ns()}|{current_request}|{topic}"
@@ -876,6 +889,10 @@ class QuantumMemoryEngine:
                 "last_user_request": "",
                 "last_april_answer": "",
                 "relation": "NEW",
+                "interactive_task_state": deepcopy(interactive_task_state),
+                "open_task": deepcopy(interactive_task_state),
+                "task_state": deepcopy(interactive_task_state),
+                "active_task": deepcopy(interactive_task_state),
             }
         else:
             sequence = deepcopy(current)
@@ -886,6 +903,16 @@ class QuantumMemoryEngine:
             sequence["status"] = "active"
             if topic:
                 sequence["topic"] = topic
+            if interactive_task_state:
+                sequence["interactive_task_state"] = deepcopy(interactive_task_state)
+                sequence["open_task"] = deepcopy(interactive_task_state)
+                sequence["task_state"] = deepcopy(interactive_task_state)
+                sequence["active_task"] = deepcopy(interactive_task_state)
+            elif relation == "NEW":
+                sequence["interactive_task_state"] = {}
+                sequence["open_task"] = {}
+                sequence["task_state"] = {}
+                sequence["active_task"] = {}
 
         sequence["turn_count"] = int(sequence.get("turn_count") or 0) + 1
         sequence["last_turn_at"] = time.time()
@@ -894,6 +921,9 @@ class QuantumMemoryEngine:
         sequence["relation"] = relation
         sequence["restored"] = False
         state_obj["active_dialogue_sequence"] = sequence
+        state_obj["interactive_task_state"] = deepcopy(interactive_task_state)
+        state_obj["open_task"] = deepcopy(interactive_task_state)
+        state_obj["active_task"] = deepcopy(interactive_task_state)
         return sequence
 
     def ensure_runtime(self, state_obj):
@@ -2505,6 +2535,16 @@ def build_dialogue_memory_bridge(user_id, query="", limit=8, *, relation="AUTO",
                 if score >= 0.30
             ]
 
+    interactive_task_state = deepcopy(
+        state_obj.get("interactive_task_state")
+        or active.get("interactive_task_state")
+        or active.get("open_task")
+        or active.get("task_state")
+        or {}
+    )
+    if not isinstance(interactive_task_state, dict):
+        interactive_task_state = {}
+
     active_meta = {
         "sequence_id": active.get("sequence_id"),
         "topic": active.get("topic"),
@@ -2518,6 +2558,20 @@ def build_dialogue_memory_bridge(user_id, query="", limit=8, *, relation="AUTO",
         "retrieval_mode": mode,
         "target_sequence_id": target_id,
         "active_sequence": deepcopy(active) if mode in {"CONTINUE", "RECALL"} else active_meta,
+        "interactive_task_state": interactive_task_state,
+        "task_memory": {
+            "role": interactive_task_state.get("role"),
+            "phase": interactive_task_state.get("phase"),
+            "last_question": interactive_task_state.get("last_question"),
+            "known_clues": list(interactive_task_state.get("known_clues") or [])[-12:],
+            "qa_history": list(
+                interactive_task_state.get("qa_history")
+                or interactive_task_state.get("turns")
+                or []
+            )[-12:],
+            "candidate_answer": interactive_task_state.get("candidate_answer"),
+            "awaiting_user": bool(interactive_task_state.get("awaiting_user")),
+        } if interactive_task_state else {},
         "active_sequence_turns": active_turns if mode == "CONTINUE" else [],
         "relevant_7d_turns": relevant if mode == "RECALL" else [],
         "turn_count_7d": len(records),
@@ -3209,6 +3263,11 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "dialogue_relation": resolved_relation,
         "selected_memory_index": selected_index,
         "selected_memory_operand": deepcopy(selected_operand),
+        "interactive_task_state": deepcopy(
+            state_obj.get("interactive_task_state")
+            or active_sequence.get("interactive_task_state")
+            or {}
+        ),
         "development_state": deepcopy(
             dialogue_resolution.get("development_state")
             if isinstance(dialogue_resolution, dict)
@@ -3229,6 +3288,12 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "semantic_state": deepcopy(semantic_scene_state),
         "dialogue_vector": deepcopy(state_obj.get("dialogue_vector", {})),
         "turn_progression": deepcopy(state_obj.get("turn_progression", {})),
+        "interactive_task_state": deepcopy(
+            state_obj.get("interactive_task_state")
+            or active_sequence.get("interactive_task_state")
+            or active_sequence.get("open_task")
+            or {}
+        ),
         "sequence_id": active_sequence.get("sequence_id"),
         "sequence_turn_index": active_sequence.get("turn_count", 0),
         "sequence_topic": active_sequence.get("topic"),
@@ -3273,6 +3338,11 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "previous_scene_id": previous_scene_id,
         "sequence_id": active_sequence.get("sequence_id"),
         "turn_index": active_sequence.get("turn_count", 0),
+        "interactive_task_state": deepcopy(
+            state_obj.get("interactive_task_state")
+            or active_sequence.get("interactive_task_state")
+            or {}
+        ),
         "updated_at": time.time(),
         "live_scene": {
             "scene_id": scene_id,
@@ -3285,6 +3355,11 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
             "last_april_turn": answer_text,
             "sequence_id": active_sequence.get("sequence_id"),
             "turn_index": active_sequence.get("turn_count", 0),
+            "interactive_task_state": deepcopy(
+                state_obj.get("interactive_task_state")
+                or active_sequence.get("interactive_task_state")
+                or {}
+            ),
         },
     }
     state_obj["live_dialogue_scene"] = deepcopy(state_obj["scene_state"]["live_scene"])
@@ -3435,6 +3510,16 @@ def update_dialog_context(user_id, semantic_result):
         if isinstance(semantic_result.get("dialogue_vector"), dict)
         else {}
     )
+    interactive_task_state = deepcopy(
+        semantic_result.get("interactive_task_state")
+        or semantic_result.get("open_task")
+        or dialogue_vector.get("interactive_task_state")
+        or contract.get("interactive_task_state")
+        or contract.get("open_task")
+        or {}
+    )
+    if not isinstance(interactive_task_state, dict):
+        interactive_task_state = {}
     topic = (
         semantic_result.get("current_topic")
         or semantic_result.get("active_topic")
@@ -3450,6 +3535,21 @@ def update_dialog_context(user_id, semantic_result):
     if topic:
         state_obj["current_topic"] = topic
         state_obj["active_topic"] = topic
+
+    if interactive_task_state:
+        state_obj["interactive_task_state"] = deepcopy(interactive_task_state)
+        state_obj["open_task"] = deepcopy(interactive_task_state)
+        state_obj["active_task"] = deepcopy(interactive_task_state)
+        active_sequence = state_obj.get("active_dialogue_sequence")
+        if isinstance(active_sequence, dict):
+            active_sequence["interactive_task_state"] = deepcopy(interactive_task_state)
+            active_sequence["open_task"] = deepcopy(interactive_task_state)
+            active_sequence["task_state"] = deepcopy(interactive_task_state)
+            active_sequence["active_task"] = deepcopy(interactive_task_state)
+    elif semantic_result.get("three_way_relation") == "NEW":
+        state_obj["interactive_task_state"] = {}
+        state_obj["open_task"] = {}
+        state_obj["active_task"] = {}
 
 
     raw_relation = (
@@ -3606,9 +3706,12 @@ def update_dialog_context(user_id, semantic_result):
         "selected_memory_operand": deepcopy(selected_operand),
         "development_state": deepcopy(development_state),
         "resolved_request": resolved_request,
+        "interactive_task_state": deepcopy(interactive_task_state),
     })
 
     state_obj["dialogue_vector"] = deepcopy(dialogue_vector)
+    state_obj["dialogue_vector"]["interactive_task_state"] = deepcopy(interactive_task_state)
+    state_obj["dialogue_vector"]["open_task"] = deepcopy(interactive_task_state)
     state_obj["turn_progression"] = {
         "relation": relation,
         "subtype": dialogue_state.get("subtype"),
@@ -3618,6 +3721,19 @@ def update_dialog_context(user_id, semantic_result):
         "selected_memory_index": selected_index,
         "selected_memory_operand": deepcopy(selected_operand),
         "development_state": deepcopy(development_state),
+        "interactive_task_state": deepcopy(interactive_task_state),
+        "task_memory": {
+            "role": interactive_task_state.get("role"),
+            "phase": interactive_task_state.get("phase"),
+            "last_question": interactive_task_state.get("last_question"),
+            "known_clues": list(interactive_task_state.get("known_clues") or [])[-12:],
+            "qa_history": list(
+                interactive_task_state.get("qa_history")
+                or interactive_task_state.get("turns")
+                or []
+            )[-12:],
+            "candidate_answer": interactive_task_state.get("candidate_answer"),
+        } if interactive_task_state else {},
         "avoid_repeat": True,
         "updated_at": now,
     }
