@@ -475,13 +475,21 @@ class LiveSceneContinuityEngine:
             or value.get("entity")
         )
 
+        # Terminal interactive tasks remain useful as historical evidence, but
+        # they are no longer an open semantic owner of the next user turn.
+        # Previously `kind == riddle/game/...` kept solved tasks active forever,
+        # which let an old riddle leak into later image/table/diagram requests.
+        terminal = status in {"solved", "completed", "closed", "cancelled", "canceled"}
         active = bool(
-            value.get("pending_input")
-            or value.get("open")
-            or value.get("active")
-            or status in cls.ACTIVE_STATUSES
-            or kind in {"riddle", "question", "game", "choice"}
-            or prompt
+            not terminal
+            and (
+                value.get("pending_input")
+                or value.get("open")
+                or value.get("active")
+                or status in cls.ACTIVE_STATUSES
+                or kind in {"riddle", "question", "game", "choice"}
+                or prompt
+            )
         )
 
         if not active:
@@ -2515,6 +2523,106 @@ class QuantumInterpretationEngine:
             "engine": "quantum_domain_matrix_view",
         }
 
+    @classmethod
+    def _artifact_reference_evidence(
+        cls,
+        text: str,
+        previous_user: str,
+        previous_assistant: str,
+        active_scene: dict[str, Any],
+        representation: str,
+    ) -> dict[str, Any]:
+        """Resolve whether a structured request operates on the current dialogue artifact.
+
+        This is semantic relation evidence, not a renderer trigger.  It combines
+        grammatical deixis, a structured representation request, and the existence
+        of a live conversational operand.  The result only authorizes context; the
+        provider and Web still receive the canonical SceneContract.
+        """
+        rep = cls.normalize(representation).lower()
+        if rep not in {"image", "gallery", "diagram", "graph", "table", "formula", "code", "link"}:
+            return {"score": 0.0, "artifact_reference": False, "reason": "non_structured"}
+
+        low = cls.normalize(text).lower()
+        if not low:
+            return {"score": 0.0, "artifact_reference": False, "reason": "empty"}
+
+        live = isinstance(active_scene, dict) and bool(
+            active_scene.get("scene_id") or active_scene.get("topic") or
+            active_scene.get("render_blocks") or active_scene.get("blocks")
+        )
+        if not live and not previous_user and not previous_assistant:
+            return {"score": 0.0, "artifact_reference": False, "reason": "no_operand"}
+
+        deictic = (
+            "это", "этот", "эта", "эту", "этой", "этом", "этим",
+            "здесь", "выше", "ниже", "получивш", "предыдущ",
+        )
+        transformation = (
+            "покажи", "представь", "сделай", "нарисуй", "изобрази",
+            "добавь", "измени", "переделай", "в таблице", "в виде",
+            "в схеме", "на графике", "формул",
+        )
+        deictic_score = 0.72 if any(x in low for x in deictic) else 0.0
+        transform_score = 0.20 if any(x in low for x in transformation) else 0.0
+        scene_score = 0.08 if live else 0.0
+        previous_score = 0.08 if (previous_user or previous_assistant) else 0.0
+        score = min(1.0, deictic_score + transform_score + scene_score + previous_score)
+
+        return {
+            "score": round(score, 6),
+            "artifact_reference": bool(score >= 0.70),
+            "reason": "dialogue_artifact_dependency" if score >= 0.70 else "structured_new_operand",
+            "deictic": bool(deictic_score),
+            "transformation": bool(transform_score),
+            "live_scene": live,
+        }
+
+    @classmethod
+    def _build_interpretation_control(
+        cls,
+        *,
+        text: str,
+        representation: str,
+        operation: str,
+        relation: str,
+        previous_user: str,
+        previous_assistant: str,
+        live_scene: dict[str, Any],
+        explicit_boundary: bool,
+    ) -> dict[str, Any]:
+        """Produce the one semantic control packet consumed downstream.
+
+        Renderer selection is not decided here.  This packet only states whether
+        the current semantic result is authorized to produce a structured artifact
+        and whether that artifact depends on the previous dialogue operand.
+        """
+        rep = cls.normalize(representation).lower()
+        structured = rep in {"image", "gallery", "diagram", "graph", "table", "formula", "code", "link"}
+        artifact = cls._artifact_reference_evidence(
+            text, previous_user, previous_assistant, live_scene, rep
+        )
+        authorized = bool(structured and not explicit_boundary)
+        mode = "TEXT_ONLY"
+        if authorized:
+            mode = "ARTIFACT_CONTINUATION" if artifact.get("artifact_reference") else "STRUCTURED_OUTPUT"
+
+        return {
+            "version": "interpretation_control_v1",
+            "relation": relation,
+            "render_authorized": authorized,
+            "render_mode": mode,
+            "render_representations": [rep] if authorized else [],
+            "artifact_reference": bool(artifact.get("artifact_reference")),
+            "artifact_reference_score": float(artifact.get("score", 0.0) or 0.0),
+            "artifact_reference_reason": artifact.get("reason", ""),
+            "context_policy": "active_dialogue_operand" if artifact.get("artifact_reference") else "current_semantic_request",
+            "memory_policy": "same_dialogue_sequence",
+            "payload_contract": "scene_contract",
+            "operation": cls.normalize(operation),
+            "representation": rep,
+        }
+
     def interpret(
         self,
         text: str,
@@ -2664,6 +2772,46 @@ class QuantumInterpretationEngine:
             else {}
         )
 
+        # A structured representation request is still a turn in the same
+        # conversation even when its topic vector changes.  The old resolver
+        # treated a modality change (e.g. text -> table) as NEW and therefore
+        # withheld the active sequence from Provider.  Keep topic-boundary evidence
+        # separate from conversation continuity.
+        requested_representation = (
+            required_representations[0]
+            if required_representations
+            else (profile["explicit_representations"][0] if profile.get("explicit_representations") else "")
+        )
+        if not requested_representation:
+            best_rep = str(profile.get("best_representation") or "").lower()
+            best_score = float(profile.get("best_representation_score", 0.0) or 0.0)
+            rep_margin = float(profile.get("representation_margin", 0.0) or 0.0)
+            if best_rep and best_rep != "text" and best_score >= 0.20 and rep_margin >= 0.04:
+                requested_representation = best_rep
+
+        explicit_boundary = bool(live_scene.get("topic_boundary"))
+        structured_request = requested_representation in {
+            "image", "gallery", "diagram", "graph", "table", "formula", "code", "link"
+        }
+        artifact_evidence = self._artifact_reference_evidence(
+            text, last_user, last_assistant, live_scene_record or raw_scene, requested_representation
+        )
+        if artifact_evidence.get("artifact_reference") and raw_scene.get("scene_id"):
+            # A representation transform of the current operand is a continuation
+            # even when the generic topic scorer calls it a new scene. Topic-vector
+            # change remains available separately as evidence.
+            explicit_boundary = False
+        if (
+            structured_request
+            and raw_scene.get("scene_id")
+            and not explicit_boundary
+            and not transition_preview.get("replace_task")
+        ):
+            live_scene["continuation"] = True
+            live_scene["new_scene"] = False
+            live_scene["topic_boundary"] = False
+            live_scene["relation"] = "CONTINUE_SCENE"
+
         three_way_relation = "CONTINUE" if live_scene.get("continuation") else (
             "NEW" if live_scene.get("new_scene") else "RECALL"
             if live_scene.get("memory_query")
@@ -2715,6 +2863,23 @@ class QuantumInterpretationEngine:
                 else active_goal
             )
             or (active_goal if continuation else text)
+        )
+
+        interpretation_control = self._build_interpretation_control(
+            text=text,
+            representation=requested_representation or "text",
+            operation=(
+                semantic.get("operation")
+                or semantic.get("semantic_task", {}).get("operation")
+                if isinstance(semantic.get("semantic_task"), dict)
+                else semantic.get("operation")
+                or ""
+            ),
+            relation=three_way_relation,
+            previous_user=last_user,
+            previous_assistant=last_assistant,
+            live_scene=live_scene_record or raw_scene,
+            explicit_boundary=bool(live_scene.get("topic_boundary")) and not bool(artifact_evidence.get("artifact_reference")),
         )
 
         canonical_context_dependency = (
@@ -3183,6 +3348,9 @@ class QuantumInterpretationEngine:
             or dialogue_contract.get("resolved_request")
             or text
         )
+        result["interpretation_control"] = interpretation_control
+        result["artifact_reference"] = bool(interpretation_control.get("artifact_reference"))
+        result["artifact_reference_score"] = float(interpretation_control.get("artifact_reference_score", 0.0) or 0.0)
         result["candidate_answer"] = candidate_answer
         result["forbidden_entities"] = forbidden_entities
 
