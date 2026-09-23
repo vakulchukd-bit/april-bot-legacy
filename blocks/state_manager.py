@@ -98,6 +98,11 @@ safe_state_log("QUANTUM MEMORY ENGINE INITIALIZED")
 # CORE DATA BUILDERS
 # =====================================================
 
+def _dict(value: Any):
+    """Return a mapping safely; used by canonical scene-memory builders."""
+    return value if isinstance(value, dict) else {}
+
+
 def safe_trim_text(text, limit=120):
     value = str(text or "").strip()
     if len(value) <= limit:
