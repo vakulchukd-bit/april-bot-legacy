@@ -1242,6 +1242,25 @@ def analyze(text: str, state: dict=None, history: list=None,
         text, signals, interpreted
     )
 
+    # Task state is resolved once here so every later semantic contract layer
+    # sees the same object. It is carried as semantic state, never as a routing
+    # trigger, and therefore cannot disappear merely because the raw relation
+    # scorer selected NEW for a short or elliptical turn.
+    task_state = (
+        interpreted.get("interactive_task_state")
+        if isinstance(interpreted.get("interactive_task_state"), dict)
+        else interpreted.get("open_task")
+        if isinstance(interpreted.get("open_task"), dict)
+        else interpreted.get("active_task")
+        if isinstance(interpreted.get("active_task"), dict)
+        else {}
+    )
+    task_memory = (
+        interpreted.get("task_memory")
+        if isinstance(interpreted.get("task_memory"), dict)
+        else {}
+    )
+
     # Continuity is dialogue evidence only. Representation remains owned by
     # Interpretation; Semantic Core never restores a previous renderer.
     continuity_rep, continuity_source = "", "semantic_core_no_representation_inference"
@@ -1264,6 +1283,9 @@ def analyze(text: str, state: dict=None, history: list=None,
     for key in (
         "dialogue_contract","dialog_act","active_goal","active_topic",
         "resolved_request","reply_to","required_capabilities",
+        "semantic_request","active_entity","candidate_answer",
+        "open_task","active_task","interactive_task_state","task_memory",
+        "task_relation","task_transition","task_action",
         "history_available","continuation","continuation_target",
         "content_role","contains_object","contains_explanation",
         "contains_analysis","contains_legend","scene_composition_ready",
@@ -1334,6 +1356,18 @@ def analyze(text: str, state: dict=None, history: list=None,
         )
         dc["active_topic"] = dc.get("canonical_topic") or dc.get("active_topic")
         dc["current_topic"] = dc.get("canonical_topic") or dc.get("current_topic")
+        if task_state:
+            dc.update({
+                "active_task": task_state,
+                "open_task": task_state,
+                "interactive_task_state": task_state,
+                "task_memory": task_memory,
+                "task_relation": interpreted.get("task_relation") if isinstance(interpreted.get("task_relation"), dict) else {},
+                "task_transition": interpreted.get("task_transition") if isinstance(interpreted.get("task_transition"), dict) else {},
+                "task_action": bool(interpreted.get("task_action")),
+                "active_entity": interpreted.get("active_entity") or dc.get("active_entity"),
+                "candidate_answer": interpreted.get("candidate_answer") or "",
+            })
         dialogue_context["continuation"] = canonical_live_relation == "CONTINUE"
         dialogue_context["reference_to_previous"] = canonical_live_relation == "RECALL"
         dialogue_context["context_dependency"] = canonical_live_relation != "NEW"
@@ -1363,6 +1397,41 @@ def analyze(text: str, state: dict=None, history: list=None,
         else result.get("dialogue_relation", {})
     )
     result["dialogue_vector"] = interpreted.get("dialogue_vector", {})
+    if not isinstance(result["dialogue_vector"], dict):
+        result["dialogue_vector"] = {}
+
+    # Interactive task state is semantic state, not a side-channel. Keep the
+    # same task object present in the Core result and inside the dialogue vector
+    # so Executor -> Provider -> StateManager cannot silently downgrade a live
+    # task into a generic topic between turns.
+    task_state = (
+        interpreted.get("interactive_task_state")
+        if isinstance(interpreted.get("interactive_task_state"), dict)
+        else interpreted.get("open_task")
+        if isinstance(interpreted.get("open_task"), dict)
+        else interpreted.get("active_task")
+        if isinstance(interpreted.get("active_task"), dict)
+        else {}
+    )
+    task_memory = interpreted.get("task_memory") if isinstance(interpreted.get("task_memory"), dict) else {}
+    result["interactive_task_state"] = task_state
+    result["open_task"] = task_state
+    result["active_task"] = task_state
+    result["task_memory"] = task_memory
+    result["task_relation"] = interpreted.get("task_relation") if isinstance(interpreted.get("task_relation"), dict) else {}
+    result["task_transition"] = interpreted.get("task_transition") if isinstance(interpreted.get("task_transition"), dict) else {}
+    result["task_action"] = bool(interpreted.get("task_action"))
+    result["active_entity"] = interpreted.get("active_entity") or ""
+    result["candidate_answer"] = interpreted.get("candidate_answer") or ""
+    result["semantic_request"] = interpreted.get("semantic_request") or result.get("resolved_request") or text
+
+    result["dialogue_vector"]["interactive_task_state"] = task_state
+    result["dialogue_vector"]["open_task"] = task_state
+    result["dialogue_vector"]["active_task"] = task_state
+    result["dialogue_vector"]["task_memory"] = task_memory
+    result["dialogue_vector"]["task_relation"] = result["task_relation"]
+    result["dialogue_vector"]["task_transition"] = result["task_transition"]
+    result["dialogue_vector"]["task_action"] = result["task_action"]
     result["dialogue_reference"] = interpreted.get("dialogue_reference", {})
     result["resolved_request"] = interpreted.get("resolved_request") or result.get("resolved_request") or text
     result["dialogue_delta"] = interpreted.get("dialogue_delta", {})
