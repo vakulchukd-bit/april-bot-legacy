@@ -527,6 +527,10 @@ def build_presentation_contract(
     topic_group: str = "",
     continuation: bool = False,
     layout_mode: str = "flow",
+    user_id: str = "",
+    conversation_id: str = "",
+    dialogue_sequence_id: str = "",
+    sequence_turn_index: int = 0,
 ) -> dict[str, Any]:
     """Describe how Web should lay out the already-decided scene.
 
@@ -544,6 +548,12 @@ def build_presentation_contract(
         "flow_id": flow_id,
         "topic_group": topic_group,
         "continuation": bool(continuation),
+        "identity": {
+            "user_id": _s(user_id),
+            "conversation_id": _s(conversation_id),
+            "dialogue_sequence_id": _s(dialogue_sequence_id),
+            "sequence_turn_index": int(sequence_turn_index or 0),
+        },
         "single_response": True,
         "single_signal": True,
         "layout": {
@@ -585,6 +595,7 @@ def _presentation_for_block(block: dict[str, Any], scene_presentation: dict[str,
         "payload_source_normalized": True,
         "layout_mode": _d(scene_presentation.get("layout")).get("mode", "flow"),
         "container": "adaptive_full_width",
+        "scene_identity": deepcopy(scene_presentation.get("identity") or {}),
     }
 
 
@@ -621,6 +632,7 @@ def build_scene_presentation(
     topic_group = _s(scene_map.get("topic_group") or blueprint.get("topic_group") or metadata.get("topic_group"))
     continuation = bool(scene_map.get("continuation", blueprint.get("continuation", metadata.get("continuation", False))))
     answer = _s(scene_map.get("answer") or metadata.get("answer"))
+    identity = _d(scene_map.get("identity") or metadata.get("identity_scope") or {})
 
     source_blocks = blocks if blocks is not None else scene_map.get("render_blocks") or scene_map.get("blocks") or []
     canonical_blocks = ensure_scene_text_block(
@@ -638,6 +650,10 @@ def build_scene_presentation(
         topic_group=topic_group,
         continuation=continuation,
         layout_mode=_s(_d(metadata.get("presentation")).get("layout_mode")) or "flow",
+        user_id=_s(identity.get("user_id") or scene_map.get("user_id")),
+        conversation_id=_s(identity.get("conversation_id") or scene_map.get("conversation_id")),
+        dialogue_sequence_id=_s(identity.get("dialogue_sequence_id") or scene_map.get("dialogue_sequence_id")),
+        sequence_turn_index=int(scene_map.get("sequence_turn_index") or identity.get("sequence_turn_index") or 0),
     )
     presented_blocks = attach_presentation_signals(canonical_blocks, scene_presentation=presentation)
 
@@ -675,12 +691,23 @@ def build_scene_presentation(
         "relations": relations,
         "order": order,
         "presentation": presentation,
+        "identity": deepcopy(identity),
+        "dialogue_sequence_id": _s(identity.get("dialogue_sequence_id") or scene_map.get("dialogue_sequence_id")),
+        "sequence_turn_index": int(scene_map.get("sequence_turn_index") or identity.get("sequence_turn_index") or 0),
     }
 
 
 def build_scene_signal(scene: dict[str, Any] | Any, *, blocks: Iterable[Any] | None = None) -> dict[str, Any]:
-    """Compatibility alias used by the canonical artifact boundary."""
-    return build_scene_presentation(scene, blocks=blocks)
+    """Compatibility accessor for the canonical SceneContract signal.
+
+    Presentation formatting never becomes a second scene-signal authority. Once
+    C_ARTIFACT_CONTRACT has produced the SceneContract, this function returns its
+    existing signal unchanged.
+    """
+    existing = scene.get("signal") if isinstance(scene, dict) else getattr(scene, "signal", None)
+    if isinstance(existing, dict) and existing.get("signal_type") == "scene":
+        return deepcopy(existing)
+    raise RuntimeError("Canonical SceneContract signal is required.")
 
 
 # ---------------------------------------------------------------------------
