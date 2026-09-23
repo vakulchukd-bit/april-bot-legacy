@@ -204,16 +204,32 @@ SCENE_MATRIX_DOMAIN_BIAS = {
 
 
 class LiveSceneContinuityEngine:
-    """Stateful semantic scene continuity without keyword routing.
+    """
+    Stateful semantic dialogue owner.
 
-    The engine keeps one active conversational scene alive across turns.
-    A scene ends only when semantic evidence establishes a genuine topic shift.
-    Seven-day memory is evidence/retrieval support; it never silently replaces
-    the live scene.
+    The engine separates four concepts that were previously collapsed into one
+    field:
+
+        scene            = the conversational container
+        task             = the currently open thing the user is acting on
+        entity           = an object inside that task
+        history          = evidence only
+
+    The crucial invariant is:
+
+        CURRENT OPEN TASK > STALE SEQUENCE ENTITY > HISTORICAL MEMORY
+
+    A short answer to an open question/riddle is therefore resolved against
+    the open task before topic-boundary logic is evaluated.  A request to
+    change the task creates a new task revision inside the same conversation
+    instead of inheriting the old entity.
+
+    The engine does not execute providers or renderers.  It only produces and
+    bridges semantic evidence/state for the existing pipeline.
     """
 
-    VERSION = "live_scene_continuity_v1"
-    ACTIVE_STATUSES = {"active", "open", "continuing", "resumable"}
+    VERSION = "live_scene_continuity_v2_task_ownership"
+    ACTIVE_STATUSES = {"active", "open", "continuing", "resumable", "answer_received"}
     MAX_MEMORY_ITEMS = 8
 
     @staticmethod
@@ -221,25 +237,43 @@ class LiveSceneContinuityEngine:
         return re.sub(r"\s+", " ", str(value or "").strip())
 
     @classmethod
+    def _tokens(cls, value: Any) -> list[str]:
+        return re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", cls._text(value).lower())
+
+    @classmethod
     def _scene_from_state(cls, state: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(state, dict):
             return {}
+
         candidates = [
             state.get("scene_state"),
             state.get("active_scene"),
             state.get("active_visual_scene"),
+            state.get("current_visual_scene"),
             state.get("active_flow"),
         ]
+
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 continue
+
             nested = candidate.get("live_scene")
             if isinstance(nested, dict) and (
-                nested.get("scene_id") or nested.get("status") in cls.ACTIVE_STATUSES
+                nested.get("scene_id")
+                or nested.get("status") in cls.ACTIVE_STATUSES
+                or nested.get("open_task")
+                or nested.get("task_state")
             ):
                 return dict(nested)
-            if candidate.get("scene_id") or candidate.get("status") in cls.ACTIVE_STATUSES:
+
+            if (
+                candidate.get("scene_id")
+                or candidate.get("status") in cls.ACTIVE_STATUSES
+                or candidate.get("open_task")
+                or candidate.get("task_state")
+            ):
                 return dict(candidate)
+
         return {}
 
     @classmethod
@@ -251,8 +285,9 @@ class LiveSceneContinuityEngine:
     ) -> list[dict[str, Any]]:
         raw = state.get("memory_timeline", {}) if isinstance(state, dict) else {}
         items: list[dict[str, Any]] = []
+
         if isinstance(raw, dict):
-            values = []
+            values: list[Any] = []
             for value in raw.values():
                 values.extend(value if isinstance(value, list) else [value])
         elif isinstance(raw, list):
@@ -260,8 +295,12 @@ class LiveSceneContinuityEngine:
         else:
             values = []
 
-        topic_tokens = set(re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", scene_topic.lower()))
-        live_sequence = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+        topic_tokens = set(cls._tokens(scene_topic))
+        live_sequence = (
+            state.get("active_dialogue_sequence")
+            if isinstance(state.get("active_dialogue_sequence"), dict)
+            else {}
+        )
         live_sequence_id = cls._text(live_sequence.get("sequence_id"))
         user_id = cls._text(state.get("user_id"))
         conversation_id = cls._text(state.get("conversation_id"))
@@ -282,10 +321,8 @@ class LiveSceneContinuityEngine:
                 or item.get("source_scene_id")
             ) == cls._text(active_scene_id)
 
-            # Hot dialogue memory is keyed by the active sequence first.  This
-            # prevents a semantically valid short follow-up ("Придумай", "Ключ",
-            # "Давай") from losing its preceding turn merely because lexical
-            # overlap with the scene topic is zero.
+            # Live sequence/scene memory is useful only as evidence.  It does
+            # not decide who owns the current task.
             if same_scene or same_sequence:
                 items.append(dict(item))
                 if len(items) >= cls.MAX_MEMORY_ITEMS:
@@ -293,18 +330,663 @@ class LiveSceneContinuityEngine:
                 continue
 
             text = cls._text(
-                item.get("summary") or item.get("content") or item.get("text")
-                or item.get("answer") or item.get("user_request")
+                item.get("summary")
+                or item.get("content")
+                or item.get("text")
+                or item.get("answer")
+                or item.get("user_request")
             )
             if not text:
                 continue
 
-            tokens = set(re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", text.lower()))
+            tokens = set(cls._tokens(text))
             if topic_tokens and len(topic_tokens & tokens) > 0:
                 items.append(dict(item))
             if len(items) >= cls.MAX_MEMORY_ITEMS:
                 break
+
         return items[-cls.MAX_MEMORY_ITEMS:]
+
+    # ------------------------------ task model ------------------------------
+
+    @classmethod
+    def _history_turns(cls, history: Any) -> list[dict[str, Any]]:
+        turns = history if isinstance(history, list) else []
+        out: list[dict[str, Any]] = []
+
+        for item in turns:
+            if not isinstance(item, dict):
+                continue
+
+            user = ""
+            assistant = ""
+
+            if isinstance(item.get("user"), dict):
+                user = cls._text(
+                    item["user"].get("text")
+                    or item["user"].get("content")
+                    or item["user"].get("answer")
+                )
+            elif str(item.get("role") or "").lower() in {"user", "human"}:
+                user = cls._text(item.get("content") or item.get("text"))
+
+            if isinstance(item.get("april"), dict):
+                assistant = cls._text(
+                    item["april"].get("answer")
+                    or item["april"].get("content")
+                    or item["april"].get("summary")
+                )
+            elif str(item.get("role") or "").lower() in {"assistant", "april", "bot"}:
+                assistant = cls._text(
+                    item.get("answer") or item.get("content") or item.get("summary")
+                )
+
+            if user or assistant:
+                out.append(
+                    {
+                        "user": user,
+                        "assistant": assistant,
+                        "turn_id": item.get("turn_id"),
+                        "scene_id": cls._text(
+                            item.get("scene_id") or item.get("visual_scene_id")
+                        ),
+                        "raw": item,
+                    }
+                )
+        return out
+
+    @classmethod
+    def _latest_assistant(
+        cls,
+        history: list[dict[str, Any]],
+        scene: dict[str, Any],
+    ) -> str:
+        direct = cls._text(
+            scene.get("last_april_turn")
+            or scene.get("april_answer")
+            or scene.get("answer")
+        )
+        if direct:
+            return direct
+
+        for turn in reversed(history):
+            value = cls._text(turn.get("assistant"))
+            if value:
+                return value
+        return ""
+
+    @classmethod
+    def _latest_user(
+        cls,
+        history: list[dict[str, Any]],
+        scene: dict[str, Any],
+    ) -> str:
+        direct = cls._text(
+            scene.get("last_user_turn")
+            or scene.get("user_request")
+            or scene.get("current_request")
+        )
+        if direct:
+            return direct
+
+        for turn in reversed(history):
+            value = cls._text(turn.get("user"))
+            if value:
+                return value
+        return ""
+
+    @classmethod
+    def _task_mapping(cls, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+
+        # Normalize all known spellings into one stable shape.
+        nested_candidates = [
+            value.get("open_task"),
+            value.get("task_state"),
+            value.get("active_task"),
+            value.get("dialogue_task"),
+            value.get("pending_task"),
+        ]
+        for nested in nested_candidates:
+            if isinstance(nested, dict) and nested:
+                merged = dict(value)
+                merged.update(nested)
+                value = merged
+                break
+
+        status = cls._text(value.get("status")).lower()
+        kind = cls._text(
+            value.get("kind")
+            or value.get("type")
+            or value.get("task_type")
+            or value.get("dialogue_type")
+        ).lower()
+        prompt = cls._text(
+            value.get("prompt")
+            or value.get("question")
+            or value.get("task_prompt")
+            or value.get("text")
+        )
+        target = cls._text(
+            value.get("target")
+            or value.get("target_entity")
+            or value.get("active_entity")
+            or value.get("entity")
+        )
+
+        active = bool(
+            value.get("pending_input")
+            or value.get("open")
+            or value.get("active")
+            or status in cls.ACTIVE_STATUSES
+            or kind in {"riddle", "question", "game", "choice"}
+            or prompt
+        )
+
+        if not active:
+            return {}
+
+        expected = cls._text(
+            value.get("expected_input_type")
+            or value.get("input_type")
+            or "answer"
+        )
+
+        return {
+            "active": True,
+            "status": status or "open",
+            "kind": kind or "task",
+            "prompt": prompt,
+            "expected_input_type": expected,
+            "target": target,
+            "candidate_answer": cls._text(
+                value.get("candidate_answer") or value.get("answer_candidate")
+            ),
+            "topic": cls._text(value.get("topic") or value.get("canonical_topic")),
+            "goal": cls._text(value.get("goal") or value.get("task_goal")),
+            "sequence_id": cls._text(value.get("sequence_id") or value.get("active_sequence_id")),
+            "scene_id": cls._text(value.get("scene_id") or value.get("source_scene_id")),
+            "task_revision": int(value.get("task_revision", 0) or 0),
+            "source": cls._text(value.get("source") or "state"),
+            "raw": dict(value),
+        }
+
+    @classmethod
+    def _assistant_question_is_task(cls, assistant_text: str) -> bool:
+        text = cls._text(assistant_text)
+        if not text:
+            return False
+
+        # Structural question detection first.
+        question_form = "?" in text or "？" in text
+
+        lowered = text.lower()
+        riddle_structure = (
+            "что это" in lowered
+            or "угадай" in lowered
+            or "какое слово" in lowered
+            or "я загадал" in lowered
+            or "отгада" in lowered
+            or "как определить" in lowered
+            or "как отличить" in lowered
+            or "что получится" in lowered
+        )
+
+        # A sufficiently long question-like assistant reply can itself be
+        # an active task even without a riddle marker.
+        words = cls._tokens(text)
+        long_question = question_form and len(words) >= 5
+
+        return bool(question_form and (riddle_structure or long_question))
+
+    @classmethod
+    def _infer_task_from_assistant(
+        cls,
+        assistant_text: str,
+        *,
+        scene_id: str = "",
+        sequence_id: str = "",
+    ) -> dict[str, Any]:
+        text = cls._text(assistant_text)
+        if not cls._assistant_question_is_task(text):
+            return {}
+
+        lowered = text.lower()
+        if any(
+            marker in lowered
+            for marker in ("угадай", "я загадал", "что это", "какое слово", "отгада", "как определить", "как отличить")
+        ):
+            kind = "riddle"
+            goal = "solve_riddle"
+        else:
+            kind = "question"
+            goal = "answer_question"
+
+        # The answer is deliberately unknown.  We do NOT turn nouns mentioned
+        # in the question into the active entity.
+        return {
+            "active": True,
+            "status": "open",
+            "kind": kind,
+            "prompt": text,
+            "expected_input_type": "answer",
+            "target": "",
+            "candidate_answer": "",
+            "topic": "загадка" if kind == "riddle" else "вопрос",
+            "goal": goal,
+            "sequence_id": sequence_id,
+            "scene_id": scene_id,
+            "task_revision": 1,
+            "source": "assistant_task_inference",
+            "raw": {},
+        }
+
+    @classmethod
+    def _find_open_task(
+        cls,
+        state: dict[str, Any],
+        history: list[dict[str, Any]],
+        scene: dict[str, Any],
+        previous_assistant: str,
+    ) -> dict[str, Any]:
+        candidates: list[tuple[str, Any]] = [
+            ("state.open_task", state.get("open_task")),
+            ("state.active_task", state.get("active_task")),
+            ("state.dialogue_task", state.get("dialogue_task")),
+            ("state.pending_task", state.get("pending_task")),
+            ("scene.open_task", scene.get("open_task")),
+            ("scene.task_state", scene.get("task_state")),
+            ("scene.active_task", scene.get("active_task")),
+        ]
+
+        sequence = state.get("active_dialogue_sequence")
+        if isinstance(sequence, dict):
+            candidates.extend(
+                [
+                    ("sequence.open_task", sequence.get("open_task")),
+                    ("sequence.task_state", sequence.get("task_state")),
+                    ("sequence.active_task", sequence.get("active_task")),
+                ]
+            )
+
+        # A previous dialogue vector may carry the task state.
+        vector = (
+            scene.get("dialogue_vector")
+            if isinstance(scene.get("dialogue_vector"), dict)
+            else {}
+        )
+        candidates.extend(
+            [
+                ("scene.dialogue_vector.open_task", vector.get("open_task")),
+                ("scene.dialogue_vector.task_state", vector.get("task_state")),
+            ]
+        )
+
+        for source, value in candidates:
+            frame = cls._task_mapping(value)
+            if frame:
+                frame["source"] = source
+                return frame
+
+        inferred = cls._infer_task_from_assistant(
+            previous_assistant,
+            scene_id=cls._text(scene.get("scene_id")),
+            sequence_id=cls._text(
+                scene.get("sequence_id")
+                or (
+                    sequence.get("sequence_id")
+                    if isinstance(sequence, dict)
+                    else ""
+                )
+            ),
+        )
+        if inferred:
+            return inferred
+
+        # Last history assistant may be newer than state.
+        if previous_assistant:
+            for turn in reversed(history):
+                assistant = cls._text(turn.get("assistant"))
+                if assistant != previous_assistant:
+                    continue
+                inferred = cls._infer_task_from_assistant(
+                    assistant,
+                    scene_id=cls._text(turn.get("scene_id")),
+                    sequence_id=cls._text(
+                        sequence.get("sequence_id")
+                        if isinstance(sequence, dict)
+                        else ""
+                    ),
+                )
+                if inferred:
+                    return inferred
+
+        return {}
+
+    @classmethod
+    def _explicit_task_transition(
+        cls,
+        text: str,
+        dialogue: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Detect a discourse-level request to replace the current task.
+
+        This is not topic routing by keyword.  It is a control relation:
+        the user explicitly asks the assistant to produce/continue a different
+        task, reset the current task, or discard its current target.
+        """
+        normalized = cls._text(text)
+        low = normalized.lower()
+        label = cls._text(dialogue.get("label")).lower()
+
+        reset_markers = (
+            "заново",
+            "другое",
+            "другую",
+            "другое слово",
+            "новую",
+            "новое",
+            "еще придумай",
+            "ещё придумай",
+            "загадай другое",
+            "загадай ещё",
+            "загадай еще",
+            "посложней",
+            "посложнее",
+            "удали его из памяти",
+            "забудь его",
+            "не это",
+        )
+
+        riddle_creation_semantics = (
+            ("загад" in low and any(x in low for x in ("друг", "нов", "ещ", "занов")))
+            or ("придумай" in low and any(x in low for x in ("еще", "ещё", "друг", "нов")))
+            or ("загадай" in low and any(x in low for x in ("друг", "нов", "ещ", "занов", "слож")))
+        )
+
+        explicit_control = any(marker in low for marker in reset_markers)
+        correction_control = label in {"correction", "rejection"} and riddle_creation_semantics
+
+        reset_memory = "памят" in low and any(
+            x in low for x in ("удали", "забудь", "убери", "очист")
+        )
+
+        requested_new_task = bool(explicit_control or correction_control or riddle_creation_semantics)
+
+        return {
+            "requested": requested_new_task,
+            "reset_memory": reset_memory,
+            "replace_task": requested_new_task,
+            "source": "discourse_task_transition",
+        }
+
+    @classmethod
+    def _answer_of_open_task(
+        cls,
+        text: str,
+        task: dict[str, Any],
+        dialogue: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not task.get("active"):
+            return {
+                "is_answer": False,
+                "confidence": 0.0,
+                "reason": "no_open_task",
+            }
+
+        normalized = cls._text(text)
+        if not normalized:
+            return {"is_answer": False, "confidence": 0.0, "reason": "empty"}
+
+        low = normalized.lower()
+        words = cls._tokens(normalized)
+        label = cls._text(dialogue.get("label")).lower()
+        imperative_lexemes = {
+            "включи", "выключи", "скажи", "расскажи", "покажи", "придумай",
+            "загадай", "нарисуй", "напиши", "объясни", "сформулируй", "удали",
+            "забудь", "убери", "сделай", "проверь", "посмотри", "построй",
+            "создай", "выбери", "перейди", "добавь", "замени", "оставь",
+        }
+        imperative_form = any(
+            token in imperative_lexemes
+            or (
+                len(token) >= 5
+                and re.search(r"(?:ай|ей|уй|жи|ши|чи)$", token)
+                and token not in {"первый", "второй", "третий", "правильный", "который"}
+            )
+            for token in words
+        )
+
+        # A request to replace the current task is never treated as an answer
+        # to the previous task.
+        transition = cls._explicit_task_transition(normalized, dialogue)
+        if transition.get("requested"):
+            return {
+                "is_answer": False,
+                "confidence": 0.0,
+                "reason": "task_transition_requested",
+            }
+
+        # Once an active task exists, user turns are interpreted as task
+        # interaction unless there is strong evidence of an external topic
+        # boundary.  Riddle/game turns intentionally allow low lexical overlap.
+        question_form = "?" in normalized or "？" in normalized
+        explicit_external = any(
+            marker in low
+            for marker in (
+                "другая тема",
+                "отдельно",
+                "поговорим о другом",
+                "давай про другое",
+                "сменим тему",
+                "перейдем к",
+                "перейдём к",
+                "а теперь про",
+            )
+        )
+
+        answer_shape = (
+            len(words) <= 18
+            and not explicit_external
+            and (
+                not question_form
+                or label
+                in {
+                    "question",
+                    "continuation",
+                    "reference",
+                    "affirmation",
+                    "rejection",
+                    "correction",
+                }
+            )
+        )
+
+        # Explicit references to the active task have very high authority.
+        task_reference = any(
+            marker in low
+            for marker in (
+                "твой ответ",
+                "твоя загадка",
+                "на твою загадку",
+                "на вопрос",
+                "правильный ответ",
+                "мой ответ",
+                "это оно",
+                "это он",
+                "это она",
+            )
+        )
+
+        if explicit_external:
+            return {
+                "is_answer": False,
+                "confidence": 0.0,
+                "reason": "explicit_external_topic",
+            }
+
+        # Imperative morphology usually addresses the assistant with a new
+        # instruction ("Расскажи про Tesla", "Покажи ..."), not an answer to
+        # the active riddle.  This is discourse-shape evidence, not routing.
+        if imperative_form and len(words) >= 2:
+            return {
+                "is_answer": False,
+                "confidence": 0.0,
+                "reason": "new_directive_shape",
+            }
+
+        if task_reference:
+            return {
+                "is_answer": True,
+                "confidence": 0.99,
+                "reason": "explicit_task_reference",
+            }
+
+        if task.get("kind") in {"riddle", "game", "choice"} and answer_shape:
+            return {
+                "is_answer": True,
+                "confidence": 0.94 if not question_form else 0.88,
+                "reason": "open_interactive_task",
+            }
+
+        if task.get("kind") == "question":
+            if answer_shape:
+                return {
+                    "is_answer": True,
+                    "confidence": 0.86,
+                    "reason": "open_question",
+                }
+
+        # Generic open tasks still receive protection when the user asks a
+        # short follow-up rather than introducing a distinct request.
+        if len(words) <= 7 and label in {
+            "continuation",
+            "reference",
+            "affirmation",
+            "rejection",
+            "correction",
+        }:
+            return {
+                "is_answer": True,
+                "confidence": 0.82,
+                "reason": "short_discourse_followup",
+            }
+
+        return {
+            "is_answer": False,
+            "confidence": 0.0,
+            "reason": "not_task_answer",
+        }
+
+    @classmethod
+    def _explicit_topic_break(
+        cls,
+        text: str,
+        profile: dict[str, Any],
+        dialogue: dict[str, Any],
+        active_topic: str,
+    ) -> dict[str, Any]:
+        normalized = cls._text(text)
+        low = normalized.lower()
+        words = cls._tokens(normalized)
+
+        context = profile.get("context_scores", {}) or {}
+        dialogue_scores = profile.get("dialogue_scores", {}) or {}
+
+        topic_relation = float(context.get("active_topic", 0.0) or 0.0)
+        goal_relation = float(context.get("active_goal", 0.0) or 0.0)
+        explicit_new = float(dialogue_scores.get("new_topic", 0.0) or 0.0)
+        independent = float(dialogue_scores.get("independent", 0.0) or 0.0)
+
+        explicit_markers = (
+            "другая тема",
+            "сменим тему",
+            "перейдем к",
+            "перейдём к",
+            "давай теперь про",
+            "а теперь поговорим",
+            "отдельно хочу",
+            "новая тема",
+        )
+        explicit_boundary = any(marker in low for marker in explicit_markers)
+
+        question_like = "?" in normalized or "？" in normalized
+        short_turn = len(words) <= 7
+        dialogue_label = cls._text(dialogue.get("label")).lower()
+        discourse_continuation = dialogue_label in {
+            "continuation",
+            "reference",
+            "affirmation",
+            "rejection",
+            "correction",
+            "reformulation",
+        }
+
+        # Lightweight linguistic structure: imperative morphology is evidence
+        # of a self-contained request even when the matrix prototype score is
+        # weak for a single word such as "Придумай".  This is linguistic
+        # understanding, not command routing.
+        imperative_lexemes = {
+            "включи", "выключи", "скажи", "расскажи", "покажи", "придумай",
+            "загадай", "нарисуй", "напиши", "объясни", "сформулируй", "удали",
+            "забудь", "убери", "сделай", "проверь", "посмотри", "построй",
+            "создай", "выбери", "перейди", "добавь", "замени", "оставь",
+        }
+        imperative_form = any(
+            token in imperative_lexemes
+            or (
+                len(token) >= 5
+                and re.search(r"(?:ай|ей|уй|жи|ши|чи)$", token)
+                and token not in {"первый", "второй", "третий", "правильный", "который"}
+            )
+            for token in words
+        )
+        collaborative_request = any(
+            phrase in low
+            for phrase in (
+                "давай",
+                "поиграем",
+                "сыграем",
+                "начнем",
+                "начнём",
+                "продолжим",
+            )
+        )
+
+        # A self-contained request can legitimately open a new topic even while
+        # another interactive task is open.  Task-transition requests are
+        # handled separately and remain inside the same conversational scene.
+        request_boundary = (
+            (dialogue_label == "request" or imperative_form or collaborative_request)
+            and topic_relation < 0.25
+            and goal_relation < 0.25
+            and not question_like
+        )
+
+        # Semantic novelty is considered only for a self-contained request.
+        semantic_novelty = (
+            explicit_new >= 0.58
+            and independent >= 0.12
+            and topic_relation < 0.14
+            and goal_relation < 0.14
+            and not discourse_continuation
+            and not question_like
+            and (not short_turn or dialogue_label == "request")
+        )
+
+        return {
+            "explicit": explicit_boundary,
+            "request_boundary": bool(request_boundary),
+            "semantic": bool(semantic_novelty),
+            "topic_relation": round(topic_relation, 6),
+            "goal_relation": round(goal_relation, 6),
+            "explicit_new_topic": round(explicit_new, 6),
+            "independent": round(independent, 6),
+            "active_topic": active_topic,
+            "source": "semantic_topic_boundary",
+        }
 
     @classmethod
     def _topic_change_evidence(
@@ -314,94 +996,124 @@ class LiveSceneContinuityEngine:
         profile: dict[str, Any],
         dialogue: dict[str, Any],
         active_topic: str,
+        *,
+        open_task: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        context = profile.get("context_scores", {}) or {}
-        dialogue_scores = profile.get("dialogue_scores", {}) or {}
-        topic_relation = float(context.get("active_topic", 0.0) or 0.0)
-        goal_relation = float(context.get("active_goal", 0.0) or 0.0)
-        explicit_new = float(dialogue_scores.get("new_topic", 0.0) or 0.0)
-        independent = float(dialogue_scores.get("independent", 0.0) or 0.0)
-        lexical_topic = set(re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", active_topic.lower()))
-        current_tokens = set(re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", text.lower()))
-        overlap = len(lexical_topic & current_tokens) / max(1, min(len(lexical_topic), len(current_tokens))) if lexical_topic and current_tokens else 0.0
+        boundary = cls._explicit_topic_break(
+            text, profile, dialogue, active_topic
+        )
+        task_answer = cls._answer_of_open_task(
+            text,
+            open_task or {},
+            dialogue,
+        )
 
-        # Structural novelty: internal capitalized tokens are useful evidence
-        # of a newly introduced named entity, but are never a routing trigger by
-        # themselves. Short answers remain protected by the live-scene rule.
-        words = re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", text)
-        internal_capitals = sum(
-            1 for word in words[1:]
-            if len(word) > 1 and word[0].isupper()
-        )
-        proper_name_signal = min(1.0, internal_capitals / 2.0)
-        short_turn = len(words) <= 7
-        discourse_continuation = dialogue.get("label") in {
-            "continuation", "reference", "affirmation", "rejection",
-            "correction", "reformulation"
-        }
-        current_request_signal = max(
-            float(dialogue_scores.get("request", 0.0) or 0.0),
-            float(dialogue_scores.get("question", 0.0) or 0.0),
-        )
-        deictic_signal = 1.0 if any(
-            token in {"теперь", "дальше", "продолжим", "это", "этот", "эта", "эти", "его", "ее", "её"}
-            for token in current_tokens
-        ) else 0.0
-        math_signal = 1.0 if re.search(r"\d\s*[+\-*/=]\s*\d", text) else 0.0
+        task_transition = cls._explicit_task_transition(text, dialogue)
 
-        # A live scene is deliberately sticky. A weakly related short turn, an
-        # answer, confirmation, correction, or reference does NOT close it.
-        hard_new = (
-            explicit_new >= 0.62
-            and independent >= 0.12
-            and topic_relation < 0.18
-            and goal_relation < 0.18
+        # Open task ownership wins over weak novelty.  Only an explicit topic
+        # boundary is allowed to break out of an active task.
+        protected_by_task = bool(
+            (open_task or {}).get("active")
+            and not task_transition.get("requested")
+            and task_answer.get("is_answer")
         )
-        semantic_new = (
-            explicit_new >= 0.48
-            and topic_relation < 0.12
-            and goal_relation < 0.12
-            and overlap < 0.08
-            and not short_turn
-            and not discourse_continuation
+
+        strong_boundary = bool(
+            boundary.get("explicit")
+            or (
+                (
+                    boundary.get("semantic")
+                    or boundary.get("request_boundary")
+                )
+                and not protected_by_task
+            )
         )
-        entity_shift = (
-            proper_name_signal >= 0.50
-            and overlap < 0.08
-            and topic_relation < 0.18
-            and goal_relation < 0.18
-        )
-        scene_is_fresh = int(active_scene.get("turn_index", 0) or 0) <= 1
-        self_contained_novel_request = (
-            current_request_signal >= 0.018
-            and overlap < 0.08
-            and topic_relation < 0.18
-            and goal_relation < 0.18
-            and deictic_signal == 0.0
-            and not short_turn
-            and not discourse_continuation
-            and not scene_is_fresh
-        )
-        math_shift = (
-            math_signal > 0.0
-            and overlap < 0.08
-            and topic_relation < 0.18
-            and goal_relation < 0.18
-        )
+
         return {
-            "explicit_new_topic": round(explicit_new, 6),
-            "independent": round(independent, 6),
-            "topic_relation": round(topic_relation, 6),
-            "goal_relation": round(goal_relation, 6),
-            "topic_overlap": round(overlap, 6),
-            "proper_name_signal": round(proper_name_signal, 6),
-            "current_request_signal": round(current_request_signal, 6),
-            "deictic_signal": deictic_signal,
-            "math_signal": math_signal,
-            "short_turn": short_turn,
-            "new_topic": bool(hard_new or semantic_new or entity_shift or self_contained_novel_request or math_shift),
-            "source": "semantic_scene_boundary",
+            **boundary,
+            "task_answer": task_answer,
+            "task_transition": task_transition,
+            "protected_by_open_task": protected_by_task,
+            "new_topic": strong_boundary,
+            "source": "semantic_scene_boundary_v2",
             "evidence_only": True,
+        }
+
+    @classmethod
+    def _new_task_frame(
+        cls,
+        *,
+        existing: dict[str, Any],
+        transition: dict[str, Any],
+        state: dict[str, Any],
+        scene: dict[str, Any],
+        text: str,
+        sequence_id: str,
+    ) -> dict[str, Any]:
+        previous_target = cls._text(
+            existing.get("target")
+            or (
+                state.get("active_dialogue_sequence", {}).get("active_entity")
+                if isinstance(state.get("active_dialogue_sequence"), dict)
+                else ""
+            )
+            or existing.get("candidate_answer")
+        )
+        revision = int(existing.get("task_revision", 0) or 0) + 1
+
+        low = cls._text(text).lower()
+        riddle_request = "загад" in low and any(
+            x in low for x in ("загадай", "придумай", "друг", "нов", "ещ", "слож")
+        )
+        if "придумай" in low and not riddle_request:
+            riddle_request = any(x in low for x in ("еще", "ещё", "друг", "нов"))
+
+        kind = "riddle" if riddle_request else cls._text(existing.get("kind")) or "task"
+
+        prompt = ""
+        status = "pending_generation" if riddle_request else "open"
+        expected = "assistant_generation" if riddle_request else "answer"
+
+        avoid_entities = []
+        if previous_target:
+            avoid_entities.append(previous_target)
+
+        # A reset request may explicitly demand memory removal.  The semantic
+        # bridge records the old target as forbidden evidence for the next task.
+        forbidden = list(
+            dict.fromkeys(
+                [
+                    *(
+                        state.get("interpretation_runtime", {})
+                        .get("forbidden_entities", [])
+                        if isinstance(state.get("interpretation_runtime"), dict)
+                        else []
+                    ),
+                    *avoid_entities,
+                ]
+            )
+        )
+
+        topic = "загадка" if kind == "riddle" else "задача"
+        goal = "generate_riddle" if status == "pending_generation" else "continue_task"
+
+        return {
+            "active": True,
+            "status": status,
+            "kind": kind,
+            "prompt": prompt,
+            "expected_input_type": expected,
+            "target": "",
+            "candidate_answer": "",
+            "topic": topic,
+            "goal": goal,
+            "sequence_id": sequence_id,
+            "scene_id": cls._text(scene.get("scene_id")),
+            "task_revision": revision,
+            "source": "task_transition_engine",
+            "replacement_requested": True,
+            "avoid_entities": forbidden,
+            "reset_memory": bool(transition.get("reset_memory")),
         }
 
     @classmethod
@@ -417,67 +1129,168 @@ class LiveSceneContinuityEngine:
         active_goal: str = "",
         scene_type: str = "text",
     ) -> dict[str, Any]:
+        state = state if isinstance(state, dict) else {}
+        history = history if isinstance(history, list) else []
+
         current = cls._scene_from_state(state)
         current_scene_id = cls._text(current.get("scene_id"))
+        sequence = (
+            state.get("active_dialogue_sequence")
+            if isinstance(state.get("active_dialogue_sequence"), dict)
+            else {}
+        )
+        sequence_id = cls._text(sequence.get("sequence_id"))
+
         current_topic = cls._text(
-            current.get("topic") or current.get("active_topic") or active_topic
+            current.get("topic")
+            or current.get("active_topic")
+            or active_topic
         )
         current_goal = cls._text(
-            current.get("goal") or current.get("active_goal") or active_goal
+            current.get("goal")
+            or current.get("active_goal")
+            or active_goal
         )
-        last_user = cls._text(current.get("last_user_turn") or current.get("user_request"))
-        last_april = cls._text(
-            current.get("last_april_turn") or current.get("april_answer") or current.get("answer")
+
+        normalized_history = cls._history_turns(history)
+        last_user = cls._latest_user(normalized_history, current)
+        last_april = cls._latest_assistant(normalized_history, current)
+
+        open_task = cls._find_open_task(
+            state,
+            normalized_history,
+            current,
+            last_april,
         )
-        if not last_april:
-            for item in reversed(history or []):
-                if not isinstance(item, dict):
-                    continue
-                if isinstance(item.get("april"), dict):
-                    last_april = cls._text(
-                        item["april"].get("answer")
-                        or item["april"].get("content")
-                        or item["april"].get("summary")
-                    )
-                elif str(item.get("role") or "").lower() in {"assistant", "april", "bot"}:
-                    last_april = cls._text(
-                        item.get("answer") or item.get("content") or item.get("summary")
-                    )
-                if last_april:
-                    break
+
         evidence = cls._topic_change_evidence(
-            text, current, profile, dialogue, current_topic
+            text,
+            current,
+            profile,
+            dialogue,
+            current_topic,
+            open_task=open_task,
         )
 
-        memory_query = dialogue.get("label") == "memory_query"
-        has_live_scene = bool(current_scene_id) or bool(current_topic or last_april)
+        task_transition = evidence.get("task_transition", {})
+        task_answer = evidence.get("task_answer", {})
 
-        # Memory recall temporarily changes the information source, not the
-        # active scene. The scene remains resumable underneath the recall.
-        if has_live_scene and not evidence["new_topic"]:
-            relation = "MEMORY_RECALL" if memory_query else "CONTINUE_SCENE"
-            next_scene_id = current_scene_id or f"scene-{int(time.time() * 1000)}"
-            status = "active"
-            continuity = True
-        elif evidence["new_topic"]:
+        # Task transition creates a new task frame.  The conversation itself
+        # remains the same scene unless the user explicitly changed topics.
+        if task_transition.get("replace_task"):
+            open_task = cls._new_task_frame(
+                existing=open_task,
+                transition=task_transition,
+                state=state,
+                scene=current,
+                text=text,
+                sequence_id=sequence_id,
+            )
+
+        elif open_task.get("active") and task_answer.get("is_answer"):
+            open_task = dict(open_task)
+            open_task["status"] = "answer_received"
+            open_task["candidate_answer"] = cls._text(text)
+            open_task["last_answer_confidence"] = float(
+                task_answer.get("confidence", 0.0) or 0.0
+            )
+            open_task["source"] = open_task.get("source") or "task_owner"
+
+        has_live_scene = bool(
+            current_scene_id
+            or current_topic
+            or last_april
+            or open_task.get("active")
+        )
+
+        # Memory recall is a retrieval mode, not a scene owner.
+        memory_query = cls._text(dialogue.get("label")).lower() == "memory_query"
+
+        # Explicit external boundary is the only direct escape from an active
+        # open task.  Weak semantic novelty cannot steal ownership.
+        topic_boundary = bool(evidence.get("new_topic"))
+        if task_transition.get("replace_task"):
+            # Replacing the current task is still continuation of the same
+            # conversational scene; only an explicit external subject change
+            # may create a new scene.
+            topic_boundary = False
+        elif open_task.get("active"):
+            topic_boundary = bool(
+                (
+                    evidence.get("explicit")
+                    or evidence.get("request_boundary")
+                    or evidence.get("semantic")
+                )
+                and not task_answer.get("is_answer")
+            )
+
+        if topic_boundary:
             relation = "NEW_SCENE"
             next_scene_id = f"scene-{int(time.time() * 1000)}"
-            status = "active"
             continuity = False
+        elif has_live_scene:
+            relation = "MEMORY_RECALL" if memory_query and not open_task.get("active") else "CONTINUE_SCENE"
+            next_scene_id = current_scene_id or f"scene-{int(time.time() * 1000)}"
+            continuity = True
         else:
             relation = "OPEN_SCENE"
             next_scene_id = current_scene_id or f"scene-{int(time.time() * 1000)}"
-            status = "active"
             continuity = bool(current_scene_id)
 
-        resolved_topic = current_topic if continuity else cls._text(text)
-        resolved_goal = current_goal if continuity else cls._text(text)
-        memory = cls._memory_projection(state, resolved_topic, next_scene_id)
+        # The scene topic is task-owned, not entity-owned.  This prevents
+        # "Ключ" from becoming the permanent canonical scene merely because it
+        # was an old answer.
+        if topic_boundary and not task_transition.get("replace_task"):
+            # A genuine external subject change closes the old open task.
+            open_task = {}
+            resolved_topic = cls._text(text)
+            resolved_goal = cls._text(text)
+        elif open_task.get("active"):
+            resolved_topic = cls._text(
+                open_task.get("topic")
+                or ("загадка" if open_task.get("kind") == "riddle" else "")
+            )
+            resolved_goal = cls._text(
+                open_task.get("goal")
+                or ("solve_riddle" if open_task.get("kind") == "riddle" else current_goal)
+            )
+        elif continuity:
+            resolved_topic = current_topic
+            resolved_goal = current_goal
+        else:
+            resolved_topic = cls._text(text)
+            resolved_goal = cls._text(text)
+
+        memory = cls._memory_projection(
+            state,
+            resolved_topic,
+            next_scene_id,
+        )
+
+        task_entity = ""
+        if open_task.get("active"):
+            # The target is deliberately empty until it is established by the
+            # active task itself.  Candidate user answers live separately.
+            task_entity = cls._text(open_task.get("target"))
+
+        forbidden_entities = list(
+            dict.fromkeys(
+                cls._text(x)
+                for x in (
+                    open_task.get("avoid_entities", [])
+                    if isinstance(open_task.get("avoid_entities"), list)
+                    else []
+                )
+                if cls._text(x)
+            )
+        )
+
+        scene_turn_index = int(current.get("turn_index", 0) or 0) + 1
 
         scene = {
             "version": cls.VERSION,
             "scene_id": next_scene_id,
-            "status": status,
+            "status": "active",
             "relation": relation,
             "continuity": continuity,
             "topic": resolved_topic,
@@ -488,33 +1301,98 @@ class LiveSceneContinuityEngine:
             "last_april_turn": last_april,
             "previous_user_turn": last_user,
             "focus_history": list(current.get("focus_history") or [])[-7:] + [cls._text(text)],
-            "turn_index": int(current.get("turn_index", 0) or 0) + 1,
+            "turn_index": scene_turn_index,
+            "sequence_id": sequence_id,
             "memory_projection": memory,
             "memory_role": "supporting_evidence",
-            "resume_after_memory": memory_query and continuity,
+            "resume_after_memory": bool(memory_query and continuity),
             "boundary": evidence,
+            "open_task": open_task,
+            "task_state": open_task,
+            "active_entity": task_entity,
+            "candidate_answer": cls._text(open_task.get("candidate_answer")),
+            "forbidden_entities": forbidden_entities,
             "single_active_scene": True,
             "trigger_free": True,
             "decision_owner": DECISION_OWNER,
         }
 
-        # Mutate the runtime state object as a best-effort same-turn bridge.
-        # Persistence remains the responsibility of the existing state manager.
-        if isinstance(state, dict):
-            state["scene_state"] = scene
-            state["active_topic"] = resolved_topic
-            state["active_goal"] = resolved_goal
+        # Same-turn bridge.  Persistence remains state-manager-owned.
+        state["scene_state"] = scene
+        state["active_scene"] = scene
+        state["current_visual_scene"] = scene
+        state["active_topic"] = resolved_topic
+        state["current_topic"] = resolved_topic
+        state["active_goal"] = resolved_goal
+        state["open_task"] = open_task
+        state["active_task"] = open_task
+
+        if open_task.get("active"):
+            runtime = (
+                state.get("interpretation_runtime")
+                if isinstance(state.get("interpretation_runtime"), dict)
+                else {}
+            )
+            runtime["active_task"] = dict(open_task)
+            runtime["forbidden_entities"] = forbidden_entities
+            runtime["task_owner"] = "CURRENT_OPEN_TASK"
+            runtime["historical_entities_are_evidence_only"] = True
+            state["interpretation_runtime"] = runtime
+
+            # Do not let the stale sequence topic keep owning the dialogue.
+            if isinstance(sequence, dict):
+                sequence["topic"] = resolved_topic
+                sequence["active_topic"] = resolved_topic
+                sequence["active_goal"] = resolved_goal
+                sequence["open_task"] = dict(open_task)
+                sequence["task_state"] = dict(open_task)
+                sequence["active_entity"] = task_entity
+                sequence["candidate_answer"] = cls._text(open_task.get("candidate_answer"))
+                sequence["forbidden_entities"] = forbidden_entities
+                if open_task.get("status") == "pending_generation":
+                    sequence["task_revision"] = open_task.get("task_revision", 0)
+        elif topic_boundary:
+            # Close the old task/anchor when the user explicitly moves to a new
+            # subject.  Leaving the old sequence entity here would allow the
+            # next turn to resurrect the previous topic.
+            if isinstance(sequence, dict):
+                sequence["topic"] = resolved_topic
+                sequence["active_topic"] = resolved_topic
+                sequence["active_goal"] = resolved_goal
+                sequence["open_task"] = {}
+                sequence["task_state"] = {}
+                sequence["active_entity"] = ""
+                sequence["candidate_answer"] = ""
+                sequence["forbidden_entities"] = []
+            runtime = (
+                state.get("interpretation_runtime")
+                if isinstance(state.get("interpretation_runtime"), dict)
+                else {}
+            )
+            runtime["active_task"] = {}
+            runtime["forbidden_entities"] = []
+            runtime["task_owner"] = "CURRENT_SCENE"
+            runtime["historical_entities_are_evidence_only"] = True
+            state["interpretation_runtime"] = runtime
 
         return {
             "scene": scene,
             "relation": relation,
             "continuation": bool(continuity),
             "new_scene": relation in {"OPEN_SCENE", "NEW_SCENE"},
-            "topic_boundary": bool(evidence["new_topic"]),
-            "memory_query": memory_query,
+            "topic_boundary": bool(topic_boundary),
+            "memory_query": bool(memory_query),
             "memory_projection": memory,
             "memory_role": "supporting_evidence",
             "resume_after_memory": bool(memory_query and continuity),
+            "open_task": open_task,
+            "task_state": open_task,
+            "task_answer": task_answer,
+            "task_transition": task_transition,
+            "active_entity": task_entity,
+            "candidate_answer": cls._text(open_task.get("candidate_answer")),
+            "forbidden_entities": forbidden_entities,
+            "scene_type": scene_type,
             "evidence": evidence,
             "decision_owner": DECISION_OWNER,
             "engine": cls.VERSION,
@@ -1076,70 +1954,122 @@ class QuantumInterpretationEngine:
         }
 
     def dialogue(
-        self, text: str, previous_assistant: str = "", previous_user: str = "",
-        active_goal: str = "", active_topic: str = "",
+        self,
+        text: str,
+        previous_assistant: str = "",
+        previous_user: str = "",
+        active_goal: str = "",
+        active_topic: str = "",
+        open_task: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         profile = self.measure(
-            text, previous_assistant=previous_assistant,
+            text,
+            previous_assistant=previous_assistant,
             previous_user=previous_user,
-            active_topic=active_topic, active_goal=active_goal,
+            active_topic=active_topic,
+            active_goal=active_goal,
         )
         dialogue = profile["dialogue_scores"]
         best = profile["dialogue_best"]
+
         assistant_relation = profile["context_scores"].get("previous_assistant", 0.0)
         user_relation = profile["context_scores"].get("previous_user", 0.0)
         topic_relation = profile["context_scores"].get("active_topic", 0.0)
+
         continuation_score = max(
-            dialogue.get("continuation", 0.0), 0.72 * assistant_relation,
-            0.58 * user_relation, 0.64 * topic_relation,
+            dialogue.get("continuation", 0.0),
+            0.72 * assistant_relation,
+            0.58 * user_relation,
+            0.64 * topic_relation,
         )
+
         reference_score = max(
-            dialogue.get("reference", 0.0), 0.86 * assistant_relation,
-            0.62 * user_relation, 0.70 * topic_relation,
+            dialogue.get("reference", 0.0),
+            0.86 * assistant_relation,
+            0.62 * user_relation,
+            0.70 * topic_relation,
         )
-        # Memory recall is only meaningful when there is an existing dialogue
-        # context to recall from. Without prior user/assistant context a short
-        # phrase such as "Поиграем" must never be promoted to memory_query just
-        # because the prototype matrix gives it a weak semantic score.
+
         has_dialogue_context = bool(
             previous_assistant or previous_user or active_topic or active_goal
         )
+
         memory_query_score = (
             float(dialogue.get("memory_query", 0.0) or 0.0)
-            if has_dialogue_context else 0.0
+            if has_dialogue_context
+            else 0.0
         )
+
         if memory_query_score >= 0.10:
-            # Recall requests are a semantic discourse mode, not an ordinary
-            # continuation of the immediately preceding live scene.
             reference_score = max(reference_score, memory_query_score)
 
-        # A relational attribute question with an existing dialogue field is
-        # context-dependent even when lexical overlap is zero. This is a
-        # structural discourse relation, not a word/name trigger.
         if previous_assistant or previous_user:
             if profile.get("dialogue_best") == "identity" or dialogue.get("identity", 0.0) >= 0.12:
                 reference_score = max(reference_score, 0.72)
                 continuation_score = max(continuation_score, 0.62)
+
+        task_frame = open_task if isinstance(open_task, dict) else {}
+        task_relation = LIVE_SCENE_CONTINUITY_ENGINE._answer_of_open_task(
+            text,
+            task_frame,
+            {"label": best},
+        )
+        task_transition = LIVE_SCENE_CONTINUITY_ENGINE._explicit_task_transition(
+            text,
+            {"label": best},
+        )
+
+        # The current open task is stronger evidence than lexical similarity.
+        # This is the key semantic rule for interactive dialogue.
+        if task_relation.get("is_answer"):
+            continuation_score = max(
+                continuation_score,
+                float(task_relation.get("confidence", 0.0) or 0.0),
+            )
+            reference_score = max(reference_score, 0.90)
+
+        if task_transition.get("replace_task"):
+            continuation_score = max(continuation_score, 0.93)
+            reference_score = max(reference_score, 0.90)
+
         continuation = bool(
             previous_assistant
-            and best != "memory_query"
-            and (best in {
-                "continuation", "reformulation", "correction",
-                "reference", "affirmation", "rejection",
-            } or continuation_score >= 0.72)
+            and (
+                task_relation.get("is_answer")
+                or task_transition.get("replace_task")
+                or best
+                in {
+                    "continuation",
+                    "reformulation",
+                    "correction",
+                    "reference",
+                    "affirmation",
+                    "rejection",
+                }
+                or continuation_score >= 0.72
+            )
         )
+
         return {
             "dialogue": {
                 "label": best,
                 "confidence": float(profile["dialogue_confidence"]),
                 "continuation_score": float(continuation_score),
                 "reference_score": float(reference_score),
-                "topic_score": float(profile["context_scores"].get("active_topic", 0.0)),
-                "goal_score": float(profile["context_scores"].get("active_goal", 0.0)),
+                "topic_score": float(
+                    profile["context_scores"].get("active_topic", 0.0)
+                ),
+                "goal_score": float(
+                    profile["context_scores"].get("active_goal", 0.0)
+                ),
+                "task_relation": task_relation,
+                "task_transition": task_transition,
             },
             "linguistic": self._linguistic(self.normalize(text)),
             "continuation": continuation,
-            "reference_to_previous": bool(previous_assistant and reference_score >= 0.60),
+            "reference_to_previous": bool(
+                previous_assistant and reference_score >= 0.60
+            ),
             "identity_request": bool(profile["identity_request"]),
             "nli": {
                 "labels": list(profile["dialogue_scores"]),
@@ -1148,7 +2078,7 @@ class QuantumInterpretationEngine:
             },
             "decision_owner": DECISION_OWNER,
             "evidence_only": True,
-            "engine": "quantum_dialogue_matrix_view",
+            "engine": "quantum_dialogue_matrix_view_v2_task_aware",
         }
 
     def representations(self, text: str, context: str = "") -> dict[str, Any]:
@@ -1185,30 +2115,69 @@ class QuantumInterpretationEngine:
         }
 
     def interpret(
-        self, text: str, cognition: dict | None = None, semantic: dict | None = None,
-        history: list | None = None, state: dict | None = None,
+        self,
+        text: str,
+        cognition: dict | None = None,
+        semantic: dict | None = None,
+        history: list | None = None,
+        state: dict | None = None,
     ) -> dict[str, Any] | None:
         text = self.normalize(text)
         if not text:
             return None
+
         cognition = cognition if isinstance(cognition, dict) else {}
         semantic = semantic if isinstance(semantic, dict) else {}
         state = state if isinstance(state, dict) else {}
         history = history if isinstance(history, list) else []
 
+        started = time.perf_counter()
+
         last_assistant, last_user, reply_to = self._history(history)
-        active_topic = self.normalize(
-            state.get("active_topic") or state.get("current_topic")
-            or semantic.get("active_topic") or semantic.get("current_topic")
-            or cognition.get("active_topic") or cognition.get("current_topic")
+
+        # The old sequence topic is evidence only.  Current task ownership is
+        # resolved from the live state/scene/history before we choose the
+        # canonical topic.
+        raw_scene = LIVE_SCENE_CONTINUITY_ENGINE._scene_from_state(state)
+        inferred_open_task = LIVE_SCENE_CONTINUITY_ENGINE._find_open_task(
+            state,
+            LIVE_SCENE_CONTINUITY_ENGINE._history_turns(history),
+            raw_scene,
+            last_assistant,
         )
+
+        transition_preview = LIVE_SCENE_CONTINUITY_ENGINE._explicit_task_transition(
+            text,
+            {"label": ""},
+        )
+
+        if inferred_open_task.get("active") and not transition_preview.get("replace_task"):
+            owner_topic = self.normalize(
+                inferred_open_task.get("topic")
+                or ("загадка" if inferred_open_task.get("kind") == "riddle" else "вопрос")
+            )
+        else:
+            owner_topic = ""
+
+        active_topic = self.normalize(
+            owner_topic
+            or state.get("active_topic")
+            or state.get("current_topic")
+            or semantic.get("active_topic")
+            or semantic.get("current_topic")
+            or cognition.get("active_topic")
+            or cognition.get("current_topic")
+        )
+
         active_goal = self.normalize(
-            state.get("active_goal") or state.get("current_goal")
-            or semantic.get("active_goal") or cognition.get("active_goal")
+            inferred_open_task.get("goal")
+            or state.get("active_goal")
+            or state.get("current_goal")
+            or semantic.get("active_goal")
+            or cognition.get("active_goal")
             or cognition.get("current_goal")
         )
 
-        started = time.perf_counter()
         profile = self.measure(
             text,
             previous_assistant=last_assistant,
@@ -1223,146 +2192,217 @@ class QuantumInterpretationEngine:
             },
         )
         matrix = profile["scene_matrix"]
-        dialogue = self.dialogue(
-            text, previous_assistant=last_assistant, previous_user=last_user,
-            active_goal=active_goal, active_topic=active_topic,
+
+        measured_dialogue = self.dialogue(
+            text,
+            previous_assistant=last_assistant,
+            previous_user=last_user,
+            active_goal=active_goal,
+            active_topic=active_topic,
+            open_task=inferred_open_task,
         )["dialogue"]
 
-        # FIRST TURN GUARD:
-        # No prior dialogue and no active scene means there is nothing historical
-        # to recall. Keep short openers in the normal conversational path.
+        # First-turn guard remains, but it does not override a real live task.
         has_live_context = bool(
-            last_assistant or last_user or active_topic or active_goal
-            or LIVE_SCENE_CONTINUITY_ENGINE._scene_from_state(state)
+            last_assistant
+            or last_user
+            or active_topic
+            or active_goal
+            or raw_scene.get("scene_id")
+            or inferred_open_task.get("active")
         )
-        if not has_live_context and dialogue["label"] == "memory_query":
-            dialogue = dict(dialogue)
-            dialogue["label"] = "request"
-            dialogue["reference_score"] = 0.0
+        if not has_live_context and measured_dialogue["label"] == "memory_query":
+            measured_dialogue = dict(measured_dialogue)
+            measured_dialogue["label"] = "request"
+            measured_dialogue["reference_score"] = 0.0
 
-        explicit_required = [
-            str(x).lower()
-            for x in (
-                semantic.get("required_representations", []) or []
-            ) + (
-                cognition.get("required_representations", []) or []
+        required_representations = list(
+            dict.fromkeys(
+                [
+                    *[
+                        str(x).lower()
+                        for x in (semantic.get("required_representations", []) or [])
+                        + (cognition.get("required_representations", []) or [])
+                        if str(x).strip()
+                    ],
+                    *profile["explicit_representations"],
+                ]
             )
-            if str(x).strip()
-        ]
-        required_representations = list(dict.fromkeys(
-            explicit_required or profile["explicit_representations"]
-        ))
+        )
 
         candidate_domains = [
-            k for k, v in profile["domain_scores"].items() if float(v) >= 0.45
+            k
+            for k, v in profile["domain_scores"].items()
+            if float(v) >= 0.45
         ]
         required_domains = list(
             semantic.get("required_domains", []) or candidate_domains
         )
 
-        # -------------------------------------------------------------------
-        # LIVE SCENE CONTINUITY
-        # -------------------------------------------------------------------
-        # The active scene is now the primary discourse context. A turn remains
-        # inside that scene unless semantic evidence establishes a real topic
-        # boundary. This is state-based continuity, not a lexical trigger.
-        provisional_scene_type = required_representations[0] if required_representations else "text"
-        # Capture whether a scene existed BEFORE this turn. The first turn opens
-        # a scene (NEW); only subsequent turns can CONTINUE it.
-        preexisting_live_scene = LIVE_SCENE_CONTINUITY_ENGINE._scene_from_state(state)
-        had_active_scene = bool(
-            isinstance(preexisting_live_scene, dict)
-            and preexisting_live_scene.get("scene_id")
+        provisional_scene_type = (
+            required_representations[0]
+            if required_representations
+            else "text"
         )
+
+        # One canonical owner decides scene/task continuity.
         live_scene = LIVE_SCENE_CONTINUITY_ENGINE.resolve(
             text=text,
             state=state,
             history=history,
             profile=profile,
-            dialogue=dialogue,
+            dialogue=measured_dialogue,
             active_topic=active_topic,
             active_goal=active_goal,
             scene_type=provisional_scene_type,
         )
 
-        live_scene_record = live_scene.get("scene", {}) if isinstance(live_scene.get("scene"), dict) else {}
-        live_scene_relation = str(live_scene.get("relation") or "").strip().upper()
-        has_active_scene = bool(live_scene_record.get("scene_id"))
+        live_scene_record = (
+            live_scene.get("scene", {})
+            if isinstance(live_scene.get("scene"), dict)
+            else {}
+        )
 
-        memory_query = bool(live_scene.get("memory_query")) and not has_active_scene
-
-        # Canonical three-way dialogue relation:
-        #   CONTINUE -> remain in the live scene
-        #   RECALL   -> retrieve an older scene when no live scene owns the turn
-        #   NEW      -> genuine semantic topic boundary
-        #
-        # A live scene is intentionally sticky. Short follow-ups, answers,
-        # confirmations, corrections and representation changes cannot destroy it.
-        topic_shift = bool(live_scene.get("topic_boundary"))
-        if topic_shift:
-            three_way_relation = "NEW"
-        elif had_active_scene:
-            three_way_relation = "CONTINUE"
-        elif memory_query:
-            three_way_relation = "RECALL"
-        else:
-            three_way_relation = "NEW"
+        three_way_relation = "CONTINUE" if live_scene.get("continuation") else (
+            "NEW" if live_scene.get("new_scene") else "RECALL"
+            if live_scene.get("memory_query")
+            else "NEW"
+        )
 
         continuation = three_way_relation == "CONTINUE"
-        reference = (
-            three_way_relation == "RECALL"
-            or (memory_query and not has_active_scene)
-        )
+        reference = three_way_relation == "RECALL"
+
         resolved_scene = self._resolve_scene_context(
-            text, state,
+            text,
+            state,
             continuation=continuation,
             reference=reference,
-            active_topic=live_scene.get("scene", {}).get("topic") or active_topic,
+            active_topic=live_scene_record.get("topic") or active_topic,
         )
 
-        # Scene type is an execution decision only when the representation
-        # matrix has produced an explicit current-turn representation.
-        # The live scene itself survives a representation change: text ->
-        # diagram/image/table is a presentation change, not a new dialogue.
-        scene_type = provisional_scene_type
         representation_scores = profile["representation_scores"]
         capability = profile["capability_scores"]
 
         representation_evidence = [
             SemanticEvidence(k, float(v), "quantum_matrix").as_dict()
             for k, v in sorted(
-                representation_scores.items(), key=lambda x: x[1], reverse=True
+                representation_scores.items(),
+                key=lambda x: x[1],
+                reverse=True,
             )
             if float(v) >= 0.20
         ]
-        live_scene_topic = self.normalize(live_scene_record.get("topic") or "")
-        live_scene_goal = self.normalize(live_scene_record.get("goal") or "")
-        effective_topic = live_scene_topic or active_topic or self.normalize(text)
-        effective_goal = live_scene_goal or active_goal or self.normalize(text)
 
-        if three_way_relation == "CONTINUE":
-            canonical_context_dependency = "continuation"
-        elif three_way_relation == "RECALL":
-            canonical_context_dependency = "recall"
-        elif three_way_relation == "NEW":
-            canonical_context_dependency = "new_topic" if topic_shift else "independent"
-        else:
-            canonical_context_dependency = "independent"
+        open_task = live_scene.get("open_task", {})
+        task_active = bool(isinstance(open_task, dict) and open_task.get("active"))
 
-        dialogue_contract = {
-            "relation": three_way_relation,
-            "three_way_relation": three_way_relation,
-            "scene_relation": live_scene_relation,
-            "dialog_act": dialogue["label"],
-            "current_request": text,
-            "resolved_request": (
-                f"Continue the active conversation naturally.\n"
+        effective_topic = self.normalize(
+            live_scene_record.get("topic")
+            or (
+                open_task.get("topic")
+                if task_active
+                else active_topic
+            )
+            or (active_topic if continuation else text)
+        )
+
+        effective_goal = self.normalize(
+            live_scene_record.get("goal")
+            or (
+                open_task.get("goal")
+                if task_active
+                else active_goal
+            )
+            or (active_goal if continuation else text)
+        )
+
+        canonical_context_dependency = (
+            "continuation"
+            if continuation
+            else "recall"
+            if reference
+            else "new_topic"
+            if live_scene.get("topic_boundary")
+            else "independent"
+        )
+
+        candidate_answer = self.normalize(
+            open_task.get("candidate_answer") if task_active else ""
+        )
+        active_entity = self.normalize(
+            open_task.get("target") if task_active else ""
+        )
+
+        task_relation = live_scene.get("task_answer", {})
+        task_transition = live_scene.get("task_transition", {})
+        forbidden_entities = list(
+            live_scene.get("forbidden_entities", [])
+            if isinstance(live_scene.get("forbidden_entities"), list)
+            else []
+        )
+
+        # Do not expose an inherited sequence entity as the active entity.
+        # Candidates belong to the task and are not facts until confirmed.
+        if task_active and candidate_answer and not active_entity:
+            active_entity = ""
+
+        if task_active:
+            resolved_request = (
+                "Continue the current active task.\n"
+                f"Task type: {open_task.get('kind')}\n"
+                f"Task goal: {effective_goal}\n"
+                f"Open task prompt: {open_task.get('prompt')}\n"
+                f"Current user turn: {text}\n"
+                f"Candidate answer: {candidate_answer}\n"
+                "Treat the current user turn as an interaction with this task "
+                "unless the user explicitly changes the subject."
+            )
+            if task_transition.get("replace_task"):
+                resolved_request = (
+                    "Replace the previous task with a new task requested by the user.\n"
+                    f"Current user instruction: {text}\n"
+                    f"Previous task target is forbidden from reuse: {forbidden_entities}\n"
+                    "Do not continue the previous target. Create the requested new task."
+                )
+        elif continuation:
+            resolved_request = (
+                "Continue the active conversation naturally.\n"
                 f"Active scene topic: {effective_topic}\n"
                 f"Previous user turn: {last_user}\n"
                 f"Previous April turn: {last_assistant}\n"
                 f"Current user instruction: {text}"
-                if continuation else text
-            ),
+            )
+        else:
+            resolved_request = text
+
+        active_task_contract = {
+            "operation": "answer"
+            if open_task.get("status") in {"open", "answer_received"}
+            else "generate"
+            if open_task.get("status") == "pending_generation"
+            else "answer",
+            "object": active_entity or open_task.get("kind") or "conversation",
+            "representation": "text",
+            "goal": effective_goal,
+            "topic": effective_topic,
+            "kind": open_task.get("kind") if task_active else "",
+            "status": open_task.get("status") if task_active else "",
+            "prompt": open_task.get("prompt") if task_active else "",
+            "candidate_answer": candidate_answer,
+            "expected_input_type": open_task.get("expected_input_type") if task_active else "",
+            "task_revision": open_task.get("task_revision", 0) if task_active else 0,
+            "avoid_entities": forbidden_entities,
+        }
+
+        dialogue_contract = {
+            "relation": three_way_relation,
+            "three_way_relation": three_way_relation,
+            "scene_relation": str(
+                live_scene.get("relation") or ""
+            ).upper(),
+            "dialog_act": measured_dialogue["label"],
+            "current_request": text,
+            "resolved_request": resolved_request,
             "continuation": continuation,
             "reference_to_previous": reference,
             "previous_april_turn": last_assistant,
@@ -1372,287 +2412,364 @@ class QuantumInterpretationEngine:
             "active_topic": effective_topic,
             "current_topic": effective_topic,
             "canonical_topic": effective_topic,
-            "topic_shift": topic_shift,
-            "live_scene": live_scene_record,
-            "scene_id": self.normalize(live_scene_record.get("scene_id")),
-            "scene_continuation": bool(live_scene.get("continuation")),
-            "memory_query": memory_query,
+            "active_entity": active_entity,
+            "candidate_answer": candidate_answer,
+            "open_task": open_task,
+            "active_task": active_task_contract,
+            "task_relation": task_relation,
+            "task_transition": task_transition,
+            "topic_shift": bool(live_scene.get("topic_boundary")),
+            "memory_query": bool(live_scene.get("memory_query")),
             "memory_projection": live_scene.get("memory_projection", []),
             "memory_role": live_scene.get("memory_role", "supporting_evidence"),
             "resume_after_memory": bool(live_scene.get("resume_after_memory")),
             "context_dependency": canonical_context_dependency,
-            "confidence": dialogue["confidence"],
+            "confidence": measured_dialogue["confidence"],
             "canonical": True,
-            "version": "live_scene_dialogue_v2",
+            "version": "live_scene_dialogue_v3_task_ownership",
         }
+
         domain_evidence = [
             {"domain": k, "score": float(v)}
             for k, v in sorted(
-                profile["domain_scores"].items(), key=lambda x: x[1], reverse=True
-            ) if float(v) >= 0.20
+                profile["domain_scores"].items(),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+            if float(v) >= 0.20
         ]
 
         result = build_result(text)
-        result.update({
-            # Use the final dialogue decision after the live-scene guards.
-            # The raw matrix winner is evidence only and must not reopen a
-            # memory route after the guard has intentionally normalized it.
-            "type": dialogue["label"],
-            "subtype": scene_type,
-            "scene_type": scene_type,
-            "candidate_domains": candidate_domains,
-            "required_domains": required_domains,
-            "domain_confidence": {
-                k: round(float(v), 4) for k, v in profile["domain_scores"].items()
-            },
-            "candidate_representations": profile["explicit_representations"],
-            "required_representations": required_representations,
-            "resolved_scene": resolved_scene,
-            "live_scene": live_scene_record,
-            "scene_continuity": live_scene,
-            "scene_relation": live_scene_relation,
-            "three_way_relation": three_way_relation,
-            "memory_query": bool(memory_query),
-            "representation_evidence": [
-                SemanticEvidence(k, float(v), "quantum_matrix").as_dict()
-                for k, v in sorted(
-                    representation_scores.items(), key=lambda x: x[1], reverse=True
-                )
-                if float(v) >= 0.20
-            ],
-            "semantic_profile": {
-                "active_topic": effective_topic,
-                "active_goal": effective_goal,
-                "previous_april_turn": last_assistant,
-                "resolved_scene": resolved_scene,
-                "live_scene": live_scene.get("scene", {}),
-                "scene_relation": live_scene.get("relation"),
-                "dialogue_history": history[-8:],
-                "representation_scores": dict(representation_scores),
-                "domain_scores": dict(profile["domain_scores"]),
-                "capability_scores": dict(capability),
-                "context_scores": dict(profile["context_scores"]),
-                "scene_matrix": matrix,
-                "engine": "quantum_interpretation_engine",
-            },
-            "scene_profile": {
-                "scene_type": scene_type,
-                "dialogue_mode": "semantic_unified",
-                "matrix_confidence": matrix["best_score"],
-                "matrix_margin": matrix["margin"],
-                "live_scene": live_scene.get("scene", {}),
-                "scene_relation": live_scene.get("relation"),
-                "scene_continuation": bool(live_scene.get("continuation")),
-                "topic_boundary": bool(live_scene.get("topic_boundary")),
-                "memory_role": live_scene.get("memory_role"),
-                "decision_owner": DECISION_OWNER,
-            },
-            "artifact_contract": {
-                "contract": "scene_artifact",
-                "transport": TRANSPORT_NAME,
-                "scene_type": scene_type,
-                "representation": required_representations or [scene_type],
-                "semantic_profile_ref": "semantic_profile",
-                "decision_owner": DECISION_OWNER,
-            },
-            "dialogue_contract": dialogue_contract,
-            "dialog_act": dialogue["label"],
-            "continuation": float(dialogue["continuation_score"]),
-            "continuation_target": last_assistant or effective_topic,
-            "active_goal": effective_goal,
-            "active_topic": effective_topic,
-            "current_topic": effective_topic,
-            "canonical_topic": effective_topic,
-            "context_dependency": canonical_context_dependency,
-            "resolved_request": text,
-            "context_resolution": {
-                "depends_on_previous_dialogue": bool(continuation or reference),
-                "previous_user_turn": last_user,
-                "previous_assistant_turn": last_assistant,
-                "resolved_scene": resolved_scene,
-                "live_scene": live_scene.get("scene", {}),
-                "active_topic": active_topic,
-                "active_goal": active_goal,
-                "relation": three_way_relation,
-                "scene_relation": live_scene_relation,
-                "memory_query": memory_query,
-            },
-            "reply_to": reply_to,
-            "required_capabilities": [
-                "semantic_interpretation", "dialogue_context",
-                *( ["memory_retrieval"] if memory_query else [] ),
-                *(["representation_evidence"] if required_representations else []),
-            ],
-            "context_dependency": canonical_context_dependency,
-            "dialogue_relation": {
-                "relation": three_way_relation,
-                "three_way_relation": three_way_relation,
-                "same_scene": three_way_relation == "CONTINUE",
-                "continuation": continuation,
-                "reference_to_previous": reference,
-                "topic_boundary": topic_shift,
-                "scene_id": live_scene_record.get("scene_id"),
-                "canonical_topic": effective_topic,
-                "confidence": float(dialogue.get("confidence", 0.0) or 0.0),
-                "source": "live_scene_continuity_engine",
-            },
-            "dialogue_vector": {
-                "version": "live_scene_dialogue_vector_v2",
-                "relation": three_way_relation,
-                "three_way_relation": three_way_relation,
-                "scene_relation": live_scene_relation,
-                "continuation": continuation,
-                "reference_to_previous": reference,
-                "memory_query": memory_query,
-                "canonical_topic": effective_topic,
-                "active_topic": effective_topic,
-                "active_goal": effective_goal,
-                "sequence_id": self.normalize(
-                    live_scene_record.get("sequence_id")
-                    or live_scene_record.get("active_sequence_id")
-                    or (
-                        state.get("active_dialogue_sequence", {}).get("sequence_id")
-                        if isinstance(state.get("active_dialogue_sequence"), dict) else ""
-                    )
-                ),
-                "target_sequence_id": self.normalize(
-                    live_scene_record.get("sequence_id")
-                    or (
-                        state.get("active_dialogue_sequence", {}).get("sequence_id")
-                        if isinstance(state.get("active_dialogue_sequence"), dict) else ""
-                    )
-                ),
-                "topic_boundary": topic_shift,
-                "previous_user_turn": last_user,
-                "previous_april_turn": last_assistant,
-                "resolved_request": dialogue_contract.get("resolved_request", text),
-                "resolved_reference": self.normalize(
-                    live_scene_record.get("resolved_reference")
-                    or live_scene.get("resolved_reference")
-                ),
-                "selected_memory_index": -1,
-                "selected_memory_operand": {},
-                "trajectory": {
-                    "scene_id": live_scene_record.get("scene_id"),
-                    "topic": effective_topic,
-                    "goal": effective_goal,
-                    "turn_index": live_scene_record.get("turn_index", 0),
-                    "status": live_scene_record.get("status", "active"),
+        result.update(
+            {
+                "type": measured_dialogue["label"],
+                "subtype": provisional_scene_type,
+                "scene_type": provisional_scene_type,
+                "candidate_domains": candidate_domains,
+                "required_domains": required_domains,
+                "domain_confidence": {
+                    k: round(float(v), 4)
+                    for k, v in profile["domain_scores"].items()
                 },
-                "sequence_continuation_authorized": continuation,
-                "historical_memory_is_evidence_only": True,
-                "source": "live_scene_continuity_engine",
-            },
-
-            "context_policy": {
-                "current_request": True,
-                "dialogue_vector": continuation or reference or memory_query or bool(live_scene.get("scene", {}).get("scene_id")),
-                "active_scene": bool(live_scene.get("scene", {}).get("scene_id")),
-                "previous_turn": bool(reply_to),
-                "memory_retrieval": bool(memory_query),
-                "active_goal": bool(active_goal),
-                "full_history": True,
-                "semantic_similarity": True,
-                "nli_intent": "refinement_only",
-                "linguistic_structure": True,
-                "scene_resolution": bool(resolved_scene),
-            },
-            "quantum_interpretation_field": {
-                "linguistic": self._linguistic(text),
-                "dialogue": dialogue_contract,
+                "candidate_representations": profile["explicit_representations"],
+                "required_representations": required_representations,
+                "resolved_scene": resolved_scene,
                 "live_scene": live_scene_record,
-                "dialogue_vector": dialogue_contract.get("three_way_relation") and {
+                "scene_continuity": live_scene,
+                "scene_relation": live_scene.get("relation"),
+                "three_way_relation": three_way_relation,
+                "memory_query": bool(live_scene.get("memory_query")),
+                "representation_evidence": representation_evidence,
+                "semantic_profile": {
+                    "active_topic": effective_topic,
+                    "active_goal": effective_goal,
+                    "active_entity": active_entity,
+                    "candidate_answer": candidate_answer,
+                    "previous_april_turn": last_assistant,
+                    "resolved_scene": resolved_scene,
+                    "live_scene": live_scene_record,
+                    "open_task": open_task,
+                    "task_relation": task_relation,
+                    "task_transition": task_transition,
+                    "forbidden_entities": forbidden_entities,
+                    "scene_relation": live_scene.get("relation"),
+                    "dialogue_history": history[-8:],
+                    "representation_scores": dict(representation_scores),
+                    "domain_scores": dict(profile["domain_scores"]),
+                    "capability_scores": dict(capability),
+                    "context_scores": dict(profile["context_scores"]),
+                    "scene_matrix": matrix,
+                    "engine": "quantum_interpretation_engine",
+                },
+                "scene_profile": {
+                    "scene_type": provisional_scene_type,
+                    "dialogue_mode": "semantic_unified",
+                    "matrix_confidence": matrix["best_score"],
+                    "matrix_margin": matrix["margin"],
+                    "live_scene": live_scene_record,
+                    "scene_relation": live_scene.get("relation"),
+                    "scene_continuation": bool(live_scene.get("continuation")),
+                    "topic_boundary": bool(live_scene.get("topic_boundary")),
+                    "memory_role": live_scene.get("memory_role"),
+                    "open_task": open_task,
+                    "decision_owner": DECISION_OWNER,
+                },
+                "artifact_contract": {
+                    "contract": "scene_artifact",
+                    "transport": TRANSPORT_NAME,
+                    "scene_type": provisional_scene_type,
+                    "representation": required_representations or [provisional_scene_type],
+                    "semantic_profile_ref": "semantic_profile",
+                    "decision_owner": DECISION_OWNER,
+                },
+                "dialogue_contract": dialogue_contract,
+                "dialog_act": measured_dialogue["label"],
+                "continuation": float(measured_dialogue["continuation_score"]),
+                "continuation_target": (
+                    f"task:{open_task.get('kind')}"
+                    if task_active
+                    else last_assistant or effective_topic
+                ),
+                "active_goal": effective_goal,
+                "active_topic": effective_topic,
+                "current_topic": effective_topic,
+                "canonical_topic": effective_topic,
+                "active_entity": active_entity,
+                "candidate_answer": candidate_answer,
+                "context_dependency": canonical_context_dependency,
+                "context_resolution": {
+                    "depends_on_previous_dialogue": bool(continuation or reference),
+                    "previous_user_turn": last_user,
+                    "previous_assistant_turn": last_assistant,
+                    "resolved_scene": resolved_scene,
+                    "live_scene": live_scene_record,
+                    "active_topic": active_topic,
+                    "active_goal": active_goal,
+                    "active_entity": active_entity,
+                    "candidate_answer": candidate_answer,
+                    "open_task": open_task,
+                    "task_relation": task_relation,
+                    "task_transition": task_transition,
+                    "forbidden_entities": forbidden_entities,
+                    "relation": three_way_relation,
+                    "scene_relation": live_scene.get("relation"),
+                    "memory_query": bool(live_scene.get("memory_query")),
+                },
+                "reply_to": reply_to,
+                "required_capabilities": [
+                    "semantic_interpretation",
+                    "dialogue_context",
+                    *(
+                        ["memory_retrieval"]
+                        if live_scene.get("memory_query")
+                        else []
+                    ),
+                    *(
+                        ["open_task_reasoning"]
+                        if task_active
+                        else []
+                    ),
+                    *(
+                        ["representation_evidence"]
+                        if required_representations
+                        else []
+                    ),
+                ],
+                "dialogue_relation": {
                     "relation": three_way_relation,
                     "three_way_relation": three_way_relation,
+                    "same_scene": three_way_relation == "CONTINUE",
+                    "continuation": continuation,
+                    "reference_to_previous": reference,
+                    "topic_boundary": bool(live_scene.get("topic_boundary")),
                     "scene_id": live_scene_record.get("scene_id"),
                     "canonical_topic": effective_topic,
-                    "sequence_id": live_scene_record.get("sequence_id"),
-                } or {},
-                "representation": representation_evidence,
-                "domain": [
-                    {"domain": k, "score": float(v)}
-                    for k, v in sorted(
-                        profile["domain_scores"].items(), key=lambda x: x[1], reverse=True
-                    ) if float(v) >= 0.20
-                ],
-                "context_vectors": profile["context_scores"],
-                "profile": profile,
-                "scene_matrix": matrix,
+                    "active_entity": active_entity,
+                    "candidate_answer": candidate_answer,
+                    "open_task": open_task,
+                    "task_relation": task_relation,
+                    "task_transition": task_transition,
+                    "confidence": float(measured_dialogue.get("confidence", 0.0) or 0.0),
+                    "source": "live_scene_continuity_engine_v2",
+                },
+                "dialogue_vector": {
+                    "version": "live_scene_dialogue_vector_v3_task_ownership",
+                    "relation": three_way_relation,
+                    "three_way_relation": three_way_relation,
+                    "scene_relation": live_scene.get("relation"),
+                    "continuation": continuation,
+                    "reference_to_previous": reference,
+                    "memory_query": bool(live_scene.get("memory_query")),
+                    "canonical_topic": effective_topic,
+                    "active_topic": effective_topic,
+                    "active_goal": effective_goal,
+                    "active_entity": active_entity,
+                    "candidate_answer": candidate_answer,
+                    "open_task": open_task,
+                    "task_relation": task_relation,
+                    "task_transition": task_transition,
+                    "forbidden_entities": forbidden_entities,
+                    "sequence_id": self.normalize(
+                        live_scene_record.get("sequence_id")
+                        or (
+                            state.get("active_dialogue_sequence", {}).get("sequence_id")
+                            if isinstance(state.get("active_dialogue_sequence"), dict)
+                            else ""
+                        )
+                    ),
+                    "target_sequence_id": self.normalize(
+                        live_scene_record.get("sequence_id")
+                        or (
+                            state.get("active_dialogue_sequence", {}).get("sequence_id")
+                            if isinstance(state.get("active_dialogue_sequence"), dict)
+                            else ""
+                        )
+                    ),
+                    "topic_boundary": bool(live_scene.get("topic_boundary")),
+                    "previous_user_turn": last_user,
+                    "previous_april_turn": last_assistant,
+                    "resolved_request": resolved_request,
+                    "selected_memory_index": -1,
+                    "selected_memory_operand": {},
+                    "trajectory": {
+                        "scene_id": live_scene_record.get("scene_id"),
+                        "topic": effective_topic,
+                        "goal": effective_goal,
+                        "turn_index": live_scene_record.get("turn_index", 0),
+                        "status": live_scene_record.get("status", "active"),
+                    },
+                    "sequence_continuation_authorized": continuation,
+                    "historical_memory_is_evidence_only": True,
+                    "current_task_is_authoritative": task_active,
+                    "source": "live_scene_continuity_engine_v2",
+                },
+                "context_policy": {
+                    "current_request": True,
+                    "dialogue_vector": True,
+                    "active_scene": bool(
+                        live_scene_record.get("scene_id")
+                    ),
+                    "previous_turn": bool(reply_to),
+                    "memory_retrieval": bool(live_scene.get("memory_query")),
+                    "active_goal": bool(effective_goal),
+                    "full_history": True,
+                    "semantic_similarity": True,
+                    "nli_intent": "refinement_only",
+                    "linguistic_structure": True,
+                    "scene_resolution": bool(resolved_scene),
+                    "open_task_priority": task_active,
+                },
+                "quantum_interpretation_field": {
+                    "linguistic": self._linguistic(text),
+                    "dialogue": dialogue_contract,
+                    "live_scene": live_scene_record,
+                    "dialogue_vector": {
+                        "relation": three_way_relation,
+                        "scene_id": live_scene_record.get("scene_id"),
+                        "canonical_topic": effective_topic,
+                        "sequence_id": live_scene_record.get("sequence_id"),
+                        "active_entity": active_entity,
+                        "candidate_answer": candidate_answer,
+                        "open_task": open_task,
+                        "task_relation": task_relation,
+                    },
+                    "representation": representation_evidence,
+                    "domain": domain_evidence,
+                    "context_vectors": profile["context_scores"],
+                    "profile": profile,
+                    "scene_matrix": matrix,
+                    "decision_owner": DECISION_OWNER,
+                    "evidence_only": True,
+                    "engine": "quantum_interpretation_engine",
+                },
+                "quantum_representation_measurement": {
+                    "measurements": representation_evidence,
+                    "scene_matrix": matrix,
+                },
+                "evidence": {
+                    "domain": domain_evidence,
+                    "representation": representation_evidence,
+                    "math": float(
+                        representation_scores.get("formula", 0.0)
+                    ),
+                    "code": float(
+                        representation_scores.get("code", 0.0)
+                    ),
+                    "web": float(capability.get("web", 0.0)),
+                    "image": float(representation_scores.get("image", 0.0)),
+                    "continuation": float(
+                        measured_dialogue["continuation_score"]
+                    ),
+                    "exploration": float(
+                        capability.get("exploration", 0.0)
+                    ),
+                    "information": float(
+                        capability.get("information", 0.0)
+                    ),
+                    "linguistic": self._linguistic(text),
+                    "dialogue": dialogue_contract,
+                    "context_vectors": profile["context_scores"],
+                    "cognition": dict(cognition),
+                    "semantic": dict(semantic),
+                },
+                "quantum_matrix": matrix,
+                "matrix_scene": matrix["best_scene"],
+                "matrix_confidence": matrix["best_score"],
                 "decision_owner": DECISION_OWNER,
-                "evidence_only": True,
-                "engine": "quantum_interpretation_engine",
-            },
-            "quantum_representation_measurement": {
-                "measurements": representation_evidence,
-                "scene_matrix": matrix,
-            },
-            "evidence": {
-                "domain": domain_evidence,
-                "representation": representation_evidence,
-                "math": float(representation_scores.get("formula", 0.0)),
-                "code": float(representation_scores.get("code", 0.0)),
-                "web": float(capability.get("web", 0.0)),
-                "image": float(representation_scores.get("image", 0.0)),
-                "continuation": float(dialogue["continuation_score"]),
-                "exploration": float(capability.get("exploration", 0.0)),
-                "information": float(capability.get("information", 0.0)),
-                "linguistic": self._linguistic(text),
-                "dialogue": dialogue_contract,
-                "context_vectors": profile["context_scores"],
-                "cognition": dict(cognition),
-                "semantic": dict(semantic),
-            },
-            "quantum_matrix": matrix,
-            "matrix_scene": matrix["best_scene"],
-            "matrix_confidence": matrix["best_score"],
-            "decision_owner": DECISION_OWNER,
-            "routing_owner": DECISION_OWNER,
-            "renderer_owner": DECISION_OWNER,
-            "provider_calls": 0,
-            "canonical_transport": TRANSPORT_NAME,
-            "semantic_authority": True,
-            "semantic_decision_source": "quantum_matrix",
-            "representation_resolution": "processor_selection",
-            "legacy_keyword_matching": False,
-            "avoid_trigger_execution": True,
-            "machine_only": True,
-            "single_route": True,
-            "measurement_ms": round((time.perf_counter() - started) * 1000.0, 3),
-        })
+                "routing_owner": DECISION_OWNER,
+                "renderer_owner": DECISION_OWNER,
+                "provider_calls": 0,
+                "canonical_transport": TRANSPORT_NAME,
+                "semantic_authority": True,
+                "semantic_decision_source": "task_aware_quantum_matrix",
+                "representation_resolution": "processor_selection",
+                "legacy_keyword_matching": False,
+                "avoid_trigger_execution": True,
+                "machine_only": True,
+                "single_route": True,
+                "measurement_ms": round(
+                    (time.perf_counter() - started) * 1000.0,
+                    3,
+                ),
+            }
+        )
 
-        result["memory_query"] = bool(memory_query)
+        result["memory_query"] = bool(live_scene.get("memory_query"))
         result["discussion_mode"] = float(capability.get("discussion", 0.0)) >= 0.60
         result["space_discussion"] = float(capability.get("space", 0.0)) >= 0.60
         result["exploration"] = float(capability.get("exploration", 0.0))
         result["web_context"] = float(capability.get("web", 0.0))
-        result["explicit_image_generation"] = float(representation_scores.get("image", 0.0))
+        result["explicit_image_generation"] = float(
+            representation_scores.get("image", 0.0)
+        )
         result["lightweight_visual"] = max(
             float(representation_scores.get("graph", 0.0)),
             float(representation_scores.get("diagram", 0.0)),
             float(representation_scores.get("image", 0.0)),
         ) >= 0.72
         result["contains_object"] = bool(text)
-        result["contains_explanation"] = float(capability.get("information", 0.0)) >= 0.60
-        result["contains_analysis"] = float(capability.get("exploration", 0.0)) >= 0.60
-        result["content_role"] = (
-            "explanation" if result["contains_explanation"]
-            else "analysis" if result["contains_analysis"] else None
+        result["contains_explanation"] = (
+            float(capability.get("information", 0.0)) >= 0.60
         )
+        result["contains_analysis"] = (
+            float(capability.get("exploration", 0.0)) >= 0.60
+        )
+        result["content_role"] = (
+            "explanation"
+            if result["contains_explanation"]
+            else "analysis"
+            if result["contains_analysis"]
+            else None
+        )
+
+        # Machine-facing state is explicitly task-aware so that the next layer
+        # cannot accidentally resurrect a stale entity.
+        result["active_task"] = active_task_contract
+        result["open_task"] = open_task
+        result["task_relation"] = task_relation
+        result["task_transition"] = task_transition
+        result["active_entity"] = active_entity
+        result["candidate_answer"] = candidate_answer
+        result["forbidden_entities"] = forbidden_entities
 
         result["estimated_action_count"] = estimate_action_count(result)
         result["response_complexity"] = determine_response_complexity(result)
         result["factory_order"] = build_factory_order(result)
         result["scene_strategy"] = build_scene_strategy(result)
         result["interpretation_state"] = synchronize_interpretation_context(
-            build_interpretation_state(), result
+            build_interpretation_state(),
+            result,
         )
         result["transport_state"] = export_transport_state(
-            result["interpretation_state"], result
+            result["interpretation_state"],
+            result,
         )
         result["interpretation_state"]["diagnostics"]["matrix"] = matrix
         result["transport_diagnostics"] = build_transport_diagnostics(result)
+
         result["semantic_engine_diagnostics"] = {
             "engine": "quantum_interpretation_engine",
+            "version": "task_ownership_v2",
             "matrix_shape": matrix["matrix_shape"],
             "matrix_features": matrix["feature_order"],
             "single_measurement": True,
@@ -1661,14 +2778,20 @@ class QuantumInterpretationEngine:
             "substring_routing": False,
             "renderer_selection_owner": DECISION_OWNER,
             "provider_calls": 0,
+            "open_task_priority": task_active,
+            "task_transition": task_transition,
+            "task_relation": task_relation,
+            "active_entity": active_entity,
+            "candidate_answer": candidate_answer,
+            "forbidden_entities": forbidden_entities,
+            "historical_memory_is_evidence_only": True,
         }
+
         propagate_canonical_response(result, result["transport_state"])
         bridge_machine_response(result, result["transport_state"])
         validate_response_complexity(result)
         return result
 
-
-# ---------------------------------------------------------------------------
 # Canonical result / transport helpers
 # ---------------------------------------------------------------------------
 
