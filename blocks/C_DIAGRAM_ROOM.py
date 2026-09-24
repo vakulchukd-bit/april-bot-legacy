@@ -13,6 +13,7 @@ Processor supplies nodes, edges, geometry, SVG, states, and semantics.
 from __future__ import annotations
 
 from copy import deepcopy
+import html
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -185,14 +186,177 @@ def _select_renderer(payload: Dict[str, Any]) -> str:
     explicit = _text(
         payload.get("renderer")
         or _obj(payload.get("presentation")).get("renderer")
-    )
-    if explicit:
-        return explicit
+    ).strip()
 
+    # Structured schematics (nodes/edges) need a renderer that can actually
+    # display vector geometry. GalleryBlock is an image/gallery viewer and was
+    # producing an empty white card for these payloads.
     if _text(payload.get("svg") or payload.get("svg_payload")):
         return "SvgBlock"
 
+    nodes = _list(payload.get("nodes") or payload.get("components") or payload.get("vertices"))
+    edges = _list(
+        payload.get("edges")
+        or payload.get("connections")
+        or payload.get("relations")
+        or payload.get("segments")
+    )
+    if nodes or edges:
+        if explicit in {"ArithmeticDiagram", "arithmeticdiagram", "SvgBlock", "svgblock"}:
+            return "SvgBlock" if explicit.lower() == "svgblock" else "ArithmeticDiagram"
+        return "SvgBlock"
+
+    if explicit:
+        return explicit
+
     return "GalleryBlock"
+
+
+def _build_schematic_svg(
+    nodes: List[Dict[str, Any]],
+    edges: List[Dict[str, Any]],
+    *,
+    width: int = 1400,
+    height: int = 520,
+) -> str:
+    """Build a crisp deterministic schematic from already-supplied structure.
+
+    This does not infer components from natural language. It only lays out the
+    normalized nodes/edges already supplied by the Processor so the Web
+    renderer receives an actual SVG instead of a GalleryBlock with structural
+    JSON that it cannot draw.
+    """
+    if not nodes:
+        return ""
+
+    width = max(720, int(width))
+    height = max(360, int(height))
+    margin_x = 70
+    center_y = height // 2
+    node_w = 210
+    node_h = 92
+    usable = max(200, width - 2 * margin_x)
+    gap = max(48, int((usable - node_w * len(nodes)) / max(1, len(nodes) - 1)))
+
+    positions: Dict[str, tuple[int, int]] = {}
+    for index, node in enumerate(nodes):
+        node_id = _text(node.get("id")) or f"node_{index + 1}"
+        x = margin_x + index * (node_w + gap)
+        y = center_y - node_h // 2
+        positions[node_id] = (x, y)
+
+    # Prefer any explicit normalized positions when supplied.
+    for node in nodes:
+        node_id = _text(node.get("id"))
+        pos = node.get("position")
+        if isinstance(pos, dict):
+            try:
+                x = int(float(pos.get("x")))
+                y = int(float(pos.get("y")))
+                positions[node_id] = (
+                    max(20, min(width - node_w - 20, x)),
+                    max(20, min(height - node_h - 20, y)),
+                )
+            except (TypeError, ValueError):
+                pass
+
+    esc = html.escape
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" role="img" aria-label="April schematic">',
+        "<defs>",
+        '<marker id="april-arrow" viewBox="0 0 10 10" refX="9" refY="5" '
+        'markerWidth="8" markerHeight="8" orient="auto-start-reverse">',
+        '<path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>',
+        "</marker>",
+        "</defs>",
+        '<rect x="0" y="0" width="100%" height="100%" fill="#ffffff" rx="18"/>',
+    ]
+
+    # Edges first so node cards remain visually dominant.
+    for edge in edges:
+        source = _text(edge.get("from") or edge.get("source") or edge.get("start"))
+        target = _text(edge.get("to") or edge.get("target") or edge.get("end"))
+        if source not in positions or target not in positions:
+            continue
+        x1, y1 = positions[source]
+        x2, y2 = positions[target]
+        sx = x1 + node_w
+        sy = y1 + node_h // 2
+        tx = x2
+        ty = y2 + node_h // 2
+        mid_x = (sx + tx) // 2
+        path = f"M {sx} {sy} C {mid_x} {sy}, {mid_x} {ty}, {tx} {ty}"
+        parts.append(
+            f'<path d="{path}" fill="none" stroke="#334155" stroke-width="5" '
+            f'stroke-linecap="round" marker-end="url(#april-arrow)"/>'
+        )
+        label = _text(edge.get("label"))
+        if label:
+            parts.append(
+                f'<text x="{mid_x}" y="{min(sy, ty) - 14}" text-anchor="middle" '
+                f'font-family="Inter,Arial,sans-serif" font-size="20" fill="#334155">'
+                f'{esc(label)}</text>'
+            )
+
+    for index, node in enumerate(nodes):
+        node_id = _text(node.get("id")) or f"node_{index + 1}"
+        label = _text(node.get("label") or node.get("name") or node_id)
+        kind = _text(node.get("kind") or node.get("type") or "node").lower()
+        x, y = positions[node_id]
+
+        if "positive" in kind or label.startswith("+"):
+            fill = "#ECFDF5"
+            stroke = "#047857"
+        elif "negative" in kind or "−" in label or "-" == label.strip():
+            fill = "#FEF2F2"
+            stroke = "#B91C1C"
+        elif "fuse" in kind or "предохран" in label.lower():
+            fill = "#FFF7ED"
+            stroke = "#C2410C"
+        elif "switch" in kind or "выключ" in label.lower():
+            fill = "#EFF6FF"
+            stroke = "#1D4ED8"
+        elif "lamp" in kind or "лампоч" in label.lower():
+            fill = "#FFFBEB"
+            stroke = "#A16207"
+        else:
+            fill = "#F8FAFC"
+            stroke = "#475569"
+
+        parts.append(
+            f'<rect x="{x}" y="{y}" width="{node_w}" height="{node_h}" rx="18" '
+            f'fill="{fill}" stroke="{stroke}" stroke-width="4"/>'
+        )
+        parts.append(
+            f'<circle cx="{x + 26}" cy="{y + 30}" r="9" fill="{stroke}"/>'
+        )
+        # Compactly wrap labels at a conservative character width.
+        words = label.split()
+        lines = []
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if len(candidate) > 22 and current:
+                lines.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        lines = lines[:3] or [node_id]
+
+        base_y = y + 42 - max(0, len(lines) - 1) * 10
+        for line_index, line in enumerate(lines):
+            parts.append(
+                f'<text x="{x + node_w / 2 + 10}" y="{base_y + line_index * 28}" '
+                f'text-anchor="middle" font-family="Inter,Arial,sans-serif" '
+                f'font-size="24" font-weight="600" fill="#0f172a">{esc(line)}</text>'
+            )
+
+    parts.append("</svg>")
+    return "".join(parts)
 
 
 def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
@@ -204,6 +368,17 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
 
     svg = source.get("svg")
     svg_payload = source.get("svg_payload")
+
+    # Turn the already-supplied graph structure into a real SVG transport
+    # artifact. This is a presentation normalization step, not semantic routing.
+    generated_svg = ""
+    if not svg and not svg_payload and (nodes or edges):
+        generated_svg = _build_schematic_svg(nodes, edges)
+
+    if generated_svg:
+        source["svg"] = generated_svg
+        svg = generated_svg
+
     renderer = _select_renderer(source)
 
     diagram_type = _text(
@@ -271,6 +446,7 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
             "preserve_edges": True,
             "preserve_geometry": True,
             "preserve_svg": bool(svg or svg_payload),
+            "generated_svg_from_supplied_structure": bool(generated_svg),
             "no_generated_missing_components": True,
             "no_parallel_route": True,
         },
