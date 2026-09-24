@@ -1025,6 +1025,20 @@ class ProcessorScene:
         dialogue = self.interpreter.dialogue(self.request, self.state)
         intent = self.interpreter.intent(self.request, self.state, dialogue)
 
+        # The semantic result/workspace is produced by Interpretation and must be
+        # available before task ownership is resolved below.  Keep this binding
+        # local to prepare() so the fast path never references it before assignment.
+        semantic_result = (
+            dialogue.get("semantic_result")
+            if isinstance(dialogue.get("semantic_result"), dict)
+            else {}
+        )
+        cognitive_workspace = (
+            semantic_result.get("cognitive_workspace")
+            if isinstance(semantic_result.get("cognitive_workspace"), dict)
+            else {}
+        )
+
         # A modality change is a topic-vector change, not a new conversation.
         # If an authenticated active dialogue sequence exists, a resolved
         # structured request continues that same sequence unless the semantic
@@ -1119,12 +1133,6 @@ class ProcessorScene:
             base_topic = _text(pending_task.get("topic") or pending_task.get("representation"))
             resolved_request = f"Продолжение задания: {base_topic}. Ответ пользователя: {self.request}"
 
-        semantic_result = dialogue.get("semantic_result") if isinstance(dialogue.get("semantic_result"), dict) else {}
-        cognitive_workspace = (
-            semantic_result.get("cognitive_workspace")
-            if isinstance(semantic_result.get("cognitive_workspace"), dict)
-            else {}
-        )
         dialogue_memory = build_dialogue_memory_bridge(
             self.user_id,
             query=self.request,
