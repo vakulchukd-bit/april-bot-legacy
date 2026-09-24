@@ -126,3 +126,96 @@ def build_goal_snapshot(
         "machine_only": True,
         "decision_owner": DECISION_OWNER,
     }
+
+
+
+def evaluate_goal_progress(
+    text: str,
+    state: Dict[str, Any] | None = None,
+    semantic: Dict[str, Any] | None = None,
+    *,
+    response: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Read-only evaluation of goal completion and whether a difficult completed turn
+    merits a natural synthesis. Full memory remains owned by the existing state system.
+    """
+    state = state if isinstance(state, dict) else {}
+    semantic = semantic if isinstance(semantic, dict) else {}
+    response = response if isinstance(response, dict) else {}
+
+    contract = semantic.get("dialogue_contract") if isinstance(semantic.get("dialogue_contract"), dict) else {}
+    task = semantic.get("interactive_task_state") if isinstance(semantic.get("interactive_task_state"), dict) else {}
+    if not task:
+        task = state.get("interactive_task_state") if isinstance(state.get("interactive_task_state"), dict) else {}
+
+    answer = _text(response.get("answer") or response.get("content") or state.get("last_april_turn"))
+    blocks = response.get("render_blocks") if isinstance(response.get("render_blocks"), list) else []
+    reps = {
+        _low(item.get("type") or item.get("artifact_type"))
+        for item in blocks if isinstance(item, dict)
+    }
+
+    status = _low(task.get("status"))
+    phase = _low(task.get("phase") or task.get("task_phase"))
+    task_completed = bool(task.get("completed")) or status == "completed" or phase == "completed"
+    has_result = bool(answer)
+    structured_result = bool(reps & {"image", "diagram", "graph", "table", "formula", "code", "link", "file"})
+
+    history = task.get("qa_history") if isinstance(task.get("qa_history"), list) else []
+    turn_count = max(len(history), int(task.get("task_revision") or 0))
+    revision_count = int(task.get("task_revision") or 0)
+    kind = _low(task.get("kind"))
+
+    complexity = 0.0
+    complexity += min(0.30, turn_count * 0.06)
+    complexity += min(0.25, revision_count * 0.08)
+    if structured_result or _low(semantic.get("visual_production_mode")) in {"image_generation", "diagram", "graph", "table"}:
+        complexity += 0.18
+    if kind in {"logic_riddle", "riddle", "game", "problem", "research", "complex_task"}:
+        complexity += 0.18
+    if contract.get("continuation"):
+        complexity += 0.08
+    complexity = _clamp(complexity)
+
+    completed = bool(task_completed and has_result)
+    eligible_if_completed = bool(
+        complexity >= 0.55
+        and (turn_count >= 3 or revision_count >= 2 or structured_result or kind in {"logic_riddle", "complex_task", "research"})
+    )
+    closure_allowed = bool(completed and eligible_if_completed)
+
+    frame = semantic.get("semantic_frame") if isinstance(semantic.get("semantic_frame"), dict) else {}
+    topic = _text(
+        frame.get("topic")
+        or contract.get("canonical_topic")
+        or semantic.get("active_topic")
+        or state.get("april_active_topic")
+        or task.get("topic")
+        or semantic.get("normalized_text")
+    )[:220]
+    representation = _low(frame.get("representation") or semantic.get("visual_production_mode") or "text")
+    achievement = "получен готовый результат"
+    if representation in {"diagram", "graph", "table", "formula", "code", "image"}:
+        achievement = f"получен готовый результат в формате {representation}"
+
+    return {
+        "version": "april_goal_progress_v2",
+        "goal": _text(frame.get("goal") or contract.get("active_goal") or semantic.get("active_goal") or text)[:320],
+        "topic": topic,
+        "status": "achieved" if completed else "in_progress",
+        "goal_completed": completed,
+        "difficulty_score": complexity,
+        "turn_count": turn_count,
+        "revision_count": revision_count,
+        "structured_result": structured_result,
+        "closure": {
+            "eligible_if_completed": eligible_if_completed,
+            "allowed_now": closure_allowed,
+            "topic": topic,
+            "achievement": achievement,
+            "instruction": (
+                "Только при действительно трудном завершённом результате естественно назвать тему и сказать, чего удалось добиться вместе; не употреблять обезличенное 'задача решена' и не делать такой итог после обычных простых ответов."
+            ),
+        },
+        "evidence_only": True,
+    }
