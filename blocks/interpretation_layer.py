@@ -5986,6 +5986,16 @@ class QuantumInterpretationEngine:
         )
         cognitive_environment = interpretation_council.get("workspace", {})
         canonical_cognitive = interpretation_council.get("canonical", {})
+
+        # The cognitive orchestrator already performed the fast authenticated
+        # dialogue-history search. Recover that result here before the legacy
+        # compatibility bridge consumes it. Without this handoff the bridge
+        # raises NameError and silently falls back to the legacy/weak route.
+        history_search = cognitive_environment.get("dialogue_history_search")
+        if not isinstance(history_search, dict):
+            history_search = interpretation_council.get("dialogue_history_search")
+        if not isinstance(history_search, dict):
+            history_search = {}
         state["interpretation_workspace"] = cognitive_environment
         state["interpretation_canonical"] = canonical_cognitive
 
@@ -6911,6 +6921,7 @@ class QuantumInterpretationEngine:
         result["cognitive_workspace"]["interpretation_council"] = interpretation_council
         result["cognitive_workspace"]["provider_context_plan"] = interpretation_council.get("provider_context_plan", {})
         result["cognitive_workspace"]["dialogue_history_search"] = history_search
+        result["cognitive_workspace"]["history_search_ready"] = bool(history_search)
         result["cognitive_workspace"]["current_user_request"] = text
         result["cognitive_workspace"]["current_request_raw"] = text
         result["cognitive_workspace"]["canonical_user_request"] = text
