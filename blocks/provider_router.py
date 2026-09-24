@@ -2150,18 +2150,117 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     ]
 
 
+def _object_to_plain(value: Any, *, max_depth: int = 5, _depth: int = 0) -> Any:
+    """Convert OpenAI SDK response objects into plain Python data safely.
+
+    Recent Responses API object shapes can expose the same payload through
+    ``output_text``, ``output`` objects, or SDK model instances. The provider
+    must treat all of those as one transport representation.
+    """
+    if value is None or _depth > max_depth:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {
+            str(k): _object_to_plain(v, max_depth=max_depth, _depth=_depth + 1)
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [
+            _object_to_plain(v, max_depth=max_depth, _depth=_depth + 1)
+            for v in value
+        ]
+
+    # Pydantic/OpenAI SDK model instances.
+    for method_name in ("model_dump", "to_dict", "dict"):
+        method = getattr(value, method_name, None)
+        if callable(method):
+            try:
+                dumped = method()
+                return _object_to_plain(
+                    dumped, max_depth=max_depth, _depth=_depth + 1
+                )
+            except Exception:
+                pass
+
+    # Last-resort iterable support for SDK collection wrappers.
+    try:
+        if not isinstance(value, (bytes, bytearray)):
+            return [
+                _object_to_plain(v, max_depth=max_depth, _depth=_depth + 1)
+                for v in value
+            ]
+    except Exception:
+        pass
+
+    return None
+
+
+def _collect_text_candidates(value: Any, *, max_depth: int = 7, _depth: int = 0) -> list[str]:
+    """Collect actual output text while ignoring IDs/diagnostic metadata."""
+    if value is None or _depth > max_depth:
+        return []
+    if isinstance(value, str):
+        clean = normalize_response_text(value)
+        return [clean] if clean else []
+    if isinstance(value, dict):
+        results: list[str] = []
+        # Prefer semantic text-bearing fields and preserve their order.
+        for key in ("output_text", "text", "value", "answer", "content", "response", "final_text", "message"):
+            if key in value:
+                results.extend(
+                    _collect_text_candidates(
+                        value.get(key), max_depth=max_depth, _depth=_depth + 1
+                    )
+                )
+        # Then recurse into the remaining structure (bounded) to handle SDK
+        # wrappers such as response.output[*].content[*].
+        for key, child in value.items():
+            if key in {"output_text", "text", "value", "answer", "content", "response", "final_text", "message"}:
+                continue
+            results.extend(
+                _collect_text_candidates(
+                    child, max_depth=max_depth, _depth=_depth + 1
+                )
+            )
+        return results
+    if isinstance(value, (list, tuple, set)):
+        results: list[str] = []
+        for child in value:
+            results.extend(
+                _collect_text_candidates(
+                    child, max_depth=max_depth, _depth=_depth + 1
+                )
+            )
+        return results
+    return []
+
+
 def _extract_openai_text(response: Any) -> str:
+    """Extract the model's actual textual payload across Responses API shapes."""
     direct = getattr(response, "output_text", None)
     if isinstance(direct, str) and direct.strip():
-        return direct.strip()
+        return normalize_response_text(direct)
 
-    pieces = []
+    plain = _object_to_plain(response)
+    candidates = _collect_text_candidates(plain)
+    if candidates:
+        # The first candidate may be a duplicated wrapper field. Prefer the
+        # longest meaningful candidate when multiple SDK paths expose it.
+        candidates = [x for x in candidates if normalize_response_text(x)]
+        if candidates:
+            return max(candidates, key=len).strip()
+
+    # Some SDK versions expose ``output`` as a custom iterable without a useful
+    # model_dump implementation. Keep the direct walk as a compatibility path.
+    pieces: list[str] = []
     output = getattr(response, "output", None)
-    if isinstance(output, (list, tuple)):
-        for item in output:
+    try:
+        for item in output or []:
             content = getattr(item, "content", None)
-            if isinstance(content, (list, tuple)):
-                for part in content:
+            try:
+                for part in content or []:
                     value = getattr(part, "text", None)
                     if isinstance(value, str) and value.strip():
                         pieces.append(value.strip())
@@ -2169,6 +2268,10 @@ def _extract_openai_text(response: Any) -> str:
                         value = part.get("text") or part.get("value")
                         if isinstance(value, str) and value.strip():
                             pieces.append(value.strip())
+            except Exception:
+                pass
+    except Exception:
+        pass
     return "\n".join(pieces).strip()
 
 
@@ -2211,24 +2314,50 @@ def _parse_provider_json(raw_text: str) -> dict[str, Any]:
 
 
 def _unwrap_model_answer(value: Any) -> str:
-    """Extract the human answer when the model accidentally returns its own JSON envelope."""
+    """Extract a human answer from both flat and nested model envelopes."""
+    if isinstance(value, dict):
+        # Canonical provider payloads can occasionally arrive wrapped as
+        # {"machine_response": {...}}, {"result": {...}} or similar.
+        for key in (
+            "answer", "content", "response", "summary", "final_text", "text",
+            "machine_response", "result", "data", "output",
+        ):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return _unwrap_model_answer(candidate)
+            if isinstance(candidate, dict):
+                nested = _unwrap_model_answer(candidate)
+                if nested:
+                    return nested
+        return ""
+
     if not isinstance(value, str):
+        plain = _object_to_plain(value)
+        if isinstance(plain, dict):
+            return _unwrap_model_answer(plain)
         return normalize_response_text(value)
+
     text = normalize_response_text(value)
-    if not text or not text.lstrip().startswith("{"):
+    if not text or not text.lstrip().startswith(("{", "[")):
         return text
     try:
         obj = json.loads(text)
     except Exception:
         return text
-    if not isinstance(obj, dict):
-        return text
-    for key in ("answer", "content", "response", "summary", "final_text", "text"):
-        candidate = obj.get(key)
-        if isinstance(candidate, str) and candidate.strip():
-            nested = normalize_response_text(candidate)
-            if nested and nested != text:
-                return _unwrap_model_answer(nested)
+    if isinstance(obj, dict):
+        for key in (
+            "answer", "content", "response", "summary", "final_text", "text",
+            "machine_response", "result", "data", "output",
+        ):
+            candidate = obj.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                nested = _unwrap_model_answer(candidate)
+                if nested and nested != text:
+                    return nested
+            elif isinstance(candidate, dict):
+                nested = _unwrap_model_answer(candidate)
+                if nested:
+                    return nested
     return text
 
 
@@ -2255,8 +2384,28 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         return raw_text
 
     parsed = raw_text if isinstance(raw_text, dict) else _parse_provider_json(raw_text)
+
+    # Accept one level of provider-envelope wrapping without changing the
+    # canonical contract. This is a transport repair, not a semantic rewrite.
+    canonical_payload = parsed
+    if isinstance(parsed, dict):
+        for wrapper_key in ("machine_response", "result", "data", "output"):
+            wrapped = parsed.get(wrapper_key)
+            if isinstance(wrapped, dict) and any(
+                key in wrapped
+                for key in ("answer", "content", "response", "render_blocks", "artifacts")
+            ):
+                canonical_payload = wrapped
+                break
+
     answer = _unwrap_model_answer(
-        parsed.get("answer") or parsed.get("content") or parsed.get("response") or ""
+        canonical_payload.get("answer")
+        or canonical_payload.get("content")
+        or canonical_payload.get("response")
+        or parsed.get("answer")
+        or parsed.get("content")
+        or parsed.get("response")
+        or ""
     )
     source_payload = machine_request_to_dict(source_request) if source_request is not None else {}
     source_constraints = source_payload.get("constraints") if isinstance(source_payload.get("constraints"), dict) else {}
@@ -2265,7 +2414,7 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
     visual_mode = _safe_text(source_plan.get("visual_production_mode") or source_metadata.get("visual_production_mode") or "").lower()
 
     if not answer:
-        for block in parsed.get("render_blocks", []) or []:
+        for block in canonical_payload.get("render_blocks", []) or []:
             if isinstance(block, dict):
                 candidate = normalize_response_text(
                     block.get("content") or block.get("text") or block.get("answer") or ""
@@ -2275,10 +2424,10 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
                     break
 
     if not answer and visual_mode == "image_generation":
-        candidate_metadata = parsed.get("metadata") if isinstance(parsed.get("metadata"), dict) else {}
+        candidate_metadata = canonical_payload.get("metadata") if isinstance(canonical_payload.get("metadata"), dict) else {}
         candidate_spec = candidate_metadata.get("image_generation_spec")
         if not isinstance(candidate_spec, dict):
-            candidate_spec = parsed.get("image_generation_spec") if isinstance(parsed.get("image_generation_spec"), dict) else None
+            candidate_spec = canonical_payload.get("image_generation_spec") if isinstance(canonical_payload.get("image_generation_spec"), dict) else None
         if isinstance(candidate_spec, dict):
             answer = "Готово — изображение подготовлено."
     if not answer:
@@ -2286,11 +2435,11 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
 
     # Never preserve a machine JSON envelope as visible content. The canonical
     # human content follows the already-unwrapped answer.
-    content = _unwrap_model_answer(parsed.get("content") or answer)
+    content = _unwrap_model_answer(canonical_payload.get("content") or answer)
     if not content:
         content = answer
     blocks = _sanitize_render_block_texts(
-        _clean_render_blocks(parsed.get("render_blocks", []) or []),
+        _clean_render_blocks(canonical_payload.get("render_blocks", []) or []),
         answer,
     )
 
@@ -2304,7 +2453,7 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             "scene_contract": True,
         }]
 
-    raw_metadata = parsed.get("metadata")
+    raw_metadata = canonical_payload.get("metadata")
     metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
     # Transport diagnostics: keep separate measurements for the model output and
     # the canonical fields so a later stage cannot be mistaken for an OpenAI
@@ -2313,28 +2462,28 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         "raw_text_chars": len(_safe_text(raw_text)),
         "parsed_answer_chars": len(answer),
         "parsed_content_chars": len(content),
-        "parsed_render_blocks": len(parsed.get("render_blocks") or []) if isinstance(parsed.get("render_blocks"), list) else 0,
-        "parsed_artifacts": len(parsed.get("artifacts") or []) if isinstance(parsed.get("artifacts"), list) else 0,
+        "parsed_render_blocks": len(canonical_payload.get("render_blocks") or []) if isinstance(canonical_payload.get("render_blocks"), list) else 0,
+        "parsed_artifacts": len(canonical_payload.get("artifacts") or []) if isinstance(canonical_payload.get("artifacts"), list) else 0,
     }
     # Keep the provider's semantic task update in the canonical metadata channel.
     # This makes task state round-trip through Provider -> Executor -> StateManager.
     for key in ("dialogue_task_state", "interactive_task_state", "open_task", "task_state"):
-        if key in parsed and isinstance(parsed.get(key), dict):
-            metadata["dialogue_task_state"] = parsed[key]
+        if key in canonical_payload and isinstance(canonical_payload.get(key), dict):
+            metadata["dialogue_task_state"] = canonical_payload[key]
             break
     if "dialogue_task_state" not in metadata and isinstance(metadata.get("interactive_task_state"), dict):
         metadata["dialogue_task_state"] = metadata["interactive_task_state"]
     if "image_generation_spec" not in metadata and isinstance(
-        parsed.get("image_generation_spec"), dict
+        canonical_payload.get("image_generation_spec"), dict
     ):
-        metadata["image_generation_spec"] = parsed.get("image_generation_spec")
-    raw_scene = parsed.get("scene")
+        metadata["image_generation_spec"] = canonical_payload.get("image_generation_spec")
+    raw_scene = canonical_payload.get("scene")
     scene = dict(raw_scene) if isinstance(raw_scene, dict) else {}
-    raw_artifacts = parsed.get("artifacts")
+    raw_artifacts = canonical_payload.get("artifacts")
     artifacts = list(raw_artifacts) if isinstance(raw_artifacts, list) else []
-    raw_scene_plan = parsed.get("scene_plan")
+    raw_scene_plan = canonical_payload.get("scene_plan")
     scene_plan = list(raw_scene_plan) if isinstance(raw_scene_plan, list) else ([str(raw_scene_plan)] if raw_scene_plan else ["text"])
-    raw_render_priority = parsed.get("render_priority")
+    raw_render_priority = canonical_payload.get("render_priority")
     render_priority = list(raw_render_priority) if isinstance(raw_render_priority, list) else []
 
     source_payload = machine_request_to_dict(source_request) if source_request is not None else {}
@@ -2368,15 +2517,15 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         "machine_response": {
             "answer": answer,
             "content": content,
-            "response": _unwrap_model_answer(parsed.get("response") or answer),
-            "summary": _unwrap_model_answer(parsed.get("summary") or _compact_summary(answer, blocks)),
-            "explanation": normalize_response_text(parsed.get("explanation") or ""),
+            "response": _unwrap_model_answer(canonical_payload.get("response") or answer),
+            "summary": _unwrap_model_answer(canonical_payload.get("summary") or _compact_summary(answer, blocks)),
+            "explanation": normalize_response_text(canonical_payload.get("explanation") or ""),
             "scene": scene,
             "artifacts": artifacts,
             "render_blocks": blocks,
             "scene_plan": scene_plan,
             "render_priority": render_priority,
-            "confidence": parsed.get("confidence", 1.0),
+            "confidence": canonical_payload.get("confidence", 1.0),
             "provider": "openai",
             "provider_contract": "fiber_v6_quantum",
             "transport_contract": "scene_first",
@@ -2615,6 +2764,15 @@ async def generate_text(messages: Any, temperature: Any = None,
         response = await asyncio.to_thread(_get_openai_client().responses.create, **request)
         usage = _extract_usage(response)
         raw_text = _extract_openai_text(response)
+        provider_log({
+            "provider_output_transport": {
+                "response_type": type(response).__name__,
+                "direct_output_text_chars": len(_safe_text(getattr(response, "output_text", None))),
+                "raw_text_chars": len(_safe_text(raw_text)),
+                "output_items": len(getattr(response, "output", None) or [])
+                if hasattr(getattr(response, "output", None), "__len__") else None,
+            }
+        })
         if not raw_text:
             raise RuntimeError("GPT-5.6 Luna returned no textual output.")
 
