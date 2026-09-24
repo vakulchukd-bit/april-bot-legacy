@@ -1,8 +1,8 @@
 """
 APRIL INTERPRETATION LAYER — QUANTUM MATRIX ENGINE
 
-Single semantic engine for:
-input -> matrix interpretation -> evidence packet -> QUANTUM_PROCESSOR
+Coordinated semantic environment for:
+input -> interpretation council -> cognitive workspace -> evidence packet -> QUANTUM_PROCESSOR
       -> existing provider/rooms -> C_ARTIFACT_CONTRACT -> April Web
 
 The interpretation layer never owns routing, providers, renderers, room execution,
@@ -2558,6 +2558,1507 @@ class DialogueEnvironmentEngine:
 
 
 DIALOGUE_ENVIRONMENT_ENGINE = DialogueEnvironmentEngine()
+# ---------------------------------------------------------------------------
+# Cognitive interpretation council
+# ---------------------------------------------------------------------------
+# These engines are deterministic semantic specialists. They do not call
+# providers, select renderers, or execute tools. They enrich one shared
+# workspace in a strict order. Each engine owns its own fields and returns
+# evidence; arbitration and canonicalization decide the final handoff.
+# ---------------------------------------------------------------------------
+
+import hashlib
+
+
+class InterpretationEngineBase:
+    NAME = "interpretation_engine"
+    VERSION = "1"
+
+    @staticmethod
+    def _text(value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip())
+
+    @classmethod
+    def _low(cls, value: Any) -> str:
+        return cls._text(value).lower()
+
+    @classmethod
+    def _tokens(cls, value: Any) -> list[str]:
+        return re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", cls._low(value))
+
+    @classmethod
+    def _sim(cls, a: Any, b: Any) -> float:
+        left, right = set(cls._tokens(a)), set(cls._tokens(b))
+        if not left or not right:
+            return 0.0
+        return float(len(left & right) / max(1, min(len(left), len(right))))
+
+    @classmethod
+    def _fingerprint(cls, value: Any) -> str:
+        return hashlib.sha1(cls._low(value).encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _scope(state: dict[str, Any]) -> dict[str, str]:
+        seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+        return {
+            "user_id": str(state.get("user_id") or seq.get("user_id") or "").strip(),
+            "conversation_id": str(state.get("conversation_id") or seq.get("conversation_id") or "").strip(),
+            "dialogue_sequence_id": str(
+                seq.get("sequence_id") or state.get("dialogue_sequence_id") or ""
+            ).strip(),
+        }
+
+    @staticmethod
+    def _modality_payloads(
+        semantic: dict[str, Any],
+        cognition: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        inputs = state.get("input_sources") if isinstance(state.get("input_sources"), dict) else {}
+        return {
+            "voice": semantic.get("voice_context") or cognition.get("voice_context") or inputs.get("voice"),
+            "vision": semantic.get("vision_context") or cognition.get("vision_context") or inputs.get("images"),
+            "gallery": semantic.get("gallery_context") or cognition.get("gallery_context") or inputs.get("gallery"),
+            "files": semantic.get("file_context") or cognition.get("file_context") or inputs.get("files"),
+            "links": semantic.get("link_context") or cognition.get("link_context") or inputs.get("links"),
+        }
+
+
+class IdentityScopeEngine(InterpretationEngineBase):
+    NAME = "IdentityScopeEngine"
+    VERSION = "identity_scope_v1"
+
+    def analyze(self, state: dict[str, Any]) -> dict[str, Any]:
+        scope = self._scope(state)
+        complete = bool(scope["user_id"] and scope["conversation_id"])
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "scope": scope,
+            "authenticated": bool(scope["user_id"]),
+            "conversation_bound": bool(scope["conversation_id"]),
+            "sequence_bound": bool(scope["dialogue_sequence_id"]),
+            "scope_complete": complete,
+            "authority": "CURRENT_AUTHENTICATED_SCOPE",
+            "historical_cross_user_allowed": False,
+            "confidence": 1.0 if complete else 0.60 if scope["user_id"] else 0.20,
+        }
+
+
+class CurrentTurnEngine(InterpretationEngineBase):
+    NAME = "CurrentTurnEngine"
+    VERSION = "current_turn_v1"
+
+    def analyze(
+        self,
+        text: str,
+        *,
+        semantic: dict[str, Any],
+        cognition: dict[str, Any],
+        state: dict[str, Any],
+        identity: dict[str, Any],
+    ) -> dict[str, Any]:
+        modalities = self._modality_payloads(semantic, cognition, state)
+        available = [name for name, payload in modalities.items() if payload not in (None, "", {}, [])]
+        raw = str(text or "")
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "raw_text": raw,
+            "normalized_text": self._text(raw),
+            "authoritative": True,
+            "user_id": identity.get("scope", {}).get("user_id", ""),
+            "conversation_id": identity.get("scope", {}).get("conversation_id", ""),
+            "dialogue_sequence_id": identity.get("scope", {}).get("dialogue_sequence_id", ""),
+            "modalities": modalities,
+            "available_modalities": available,
+            "text_present": bool(self._text(raw)),
+            "current_request_fingerprint": self._fingerprint(raw),
+            "must_preserve_exact_user_request": True,
+        }
+
+
+class DialogueRelationEngine(InterpretationEngineBase):
+    NAME = "DialogueRelationEngine"
+    VERSION = "dialogue_relation_v3"
+
+    def analyze(
+        self,
+        text: str,
+        *,
+        state: dict[str, Any],
+        history: list[Any],
+        semantic: dict[str, Any],
+        identity: dict[str, Any],
+    ) -> dict[str, Any]:
+        env = DIALOGUE_ENVIRONMENT_ENGINE.build(text, state, history)
+        relation = str(env.get("relation") or "NEW").upper()
+        turn_relation = str(env.get("turn_relation") or "").upper()
+        previous_user = self._text(env.get("previous_user_turn"))
+        previous_april = self._text(env.get("previous_april_turn"))
+        task = env.get("active_task") if isinstance(env.get("active_task"), dict) else {}
+        current = self._text(text)
+        task_active = bool(task.get("active"))
+
+        # A compact second pass catches discourse relations that are easier to
+        # express directly than through prototype similarity.
+        low = current.lower().strip(" .,!?:;-")
+        confirmation = low in DialogueEnvironmentEngine._CONFIRMATION
+        rejection = low in DialogueEnvironmentEngine._REJECTION
+        explicit_recall = (
+            DIALOGUE_ENVIRONMENT_ENGINE._memory_query(current)
+            or (
+                any(marker in low for marker in ("вчера", "позавчера", "раньше", "на прошлой неделе"))
+                and any(marker in low for marker in ("обсуждали", "говорили", "спрашивал", "спрашивала", "обсудили"))
+            )
+            or "помнишь" in low
+        )
+        explicit_new = DIALOGUE_ENVIRONMENT_ENGINE._explicit_new_topic(current)
+
+        if explicit_recall:
+            relation = "RECALL"
+            turn_relation = "REFERENCE_OLD_TOPIC"
+        elif confirmation and previous_april:
+            relation = "CONTINUE"
+            turn_relation = "TASK_CONFIRMATION" if task_active else "CONFIRMATION"
+        elif rejection and previous_april:
+            relation = "CONTINUE"
+            turn_relation = "TASK_CORRECTION" if task_active else "CORRECTION"
+        elif task_active and env.get("context_dependency") == "active_dialogue_sequence":
+            relation = "CONTINUE"
+        elif explicit_new and not task_active:
+            relation = "NEW"
+            turn_relation = "NEW_TOPIC"
+
+        continuation_score = 0.0
+        if relation == "CONTINUE":
+            continuation_score = 0.94 if task_active else 0.82
+        elif relation == "RECALL":
+            continuation_score = 0.0
+        else:
+            continuation_score = 0.0
+
+        confidence = 0.98 if turn_relation in {
+            "TASK_ANSWER", "TASK_CONFIRMATION", "TASK_CORRECTION",
+            "REFERENCE_OLD_TOPIC", "NEW_TOPIC"
+        } else float(env.get("diagnostics", {}).get("current_turn_authority", False))
+
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "relation": relation,
+            "turn_relation": turn_relation,
+            "continuation": relation == "CONTINUE",
+            "reference": relation == "RECALL",
+            "previous_user_turn": previous_user,
+            "previous_april_turn": previous_april,
+            "active_task": task,
+            "task_active": task_active,
+            "context_dependency": env.get("context_dependency") or ("continuation" if relation == "CONTINUE" else "new_topic"),
+            "environment": env,
+            "signals": {
+                "confirmation": confirmation,
+                "rejection": rejection,
+                "explicit_recall": explicit_recall,
+                "explicit_new_topic": explicit_new,
+            },
+            "confidence": max(0.20, confidence),
+            "evidence": [
+                "authenticated_scope",
+                "immediate_user_april_pair",
+                "active_task_state",
+                "explicit_discourse_controls",
+            ],
+        }
+
+
+class TopicDynamicsEngine(InterpretationEngineBase):
+    NAME = "TopicDynamicsEngine"
+    VERSION = "topic_dynamics_v2"
+
+    def analyze(
+        self,
+        text: str,
+        *,
+        relation: dict[str, Any],
+        semantic: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        env = relation.get("environment") if isinstance(relation.get("environment"), dict) else {}
+        task = relation.get("active_task") if isinstance(relation.get("active_task"), dict) else {}
+        previous_topic = self._text(
+            env.get("current_topic")
+            or state.get("active_topic")
+            or state.get("current_topic")
+        )
+        task_topic = self._text(task.get("topic"))
+        current = self._text(text)
+
+        if relation.get("relation") == "RECALL":
+            branch_action = "recall_branch"
+            topic = task_topic or self._text(env.get("current_topic")) or current
+        elif relation.get("relation") == "CONTINUE":
+            branch_action = "continue_branch"
+            topic = task_topic or previous_topic or current
+        else:
+            branch_action = "open_branch"
+            # A current-turn task such as "загадай мне загадку" opens a new
+            # branch, but its semantic topic is the task topic, not the raw
+            # command sentence.
+            topic = task_topic or self._text(env.get("current_topic")) or current
+
+        branch_key = self._fingerprint(topic)
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "topic": topic[:180],
+            "previous_topic": previous_topic[:180],
+            "topic_branch": branch_action,
+            "topic_branch_key": f"topic:{branch_key}",
+            "topic_changed": bool(previous_topic and topic and self._sim(previous_topic, topic) < 0.20),
+            "old_topic_fenced": relation.get("relation") == "NEW",
+            "topic_owner": "CURRENT_TURN" if relation.get("relation") == "NEW" else "ACTIVE_BRANCH",
+            "confidence": 0.92 if topic else 0.40,
+        }
+
+
+class ActiveTaskEngine(InterpretationEngineBase):
+    NAME = "ActiveTaskEngine"
+    VERSION = "active_task_v3"
+
+    def analyze(
+        self,
+        text: str,
+        *,
+        relation: dict[str, Any],
+        state: dict[str, Any],
+        history: list[Any],
+    ) -> dict[str, Any]:
+        env_task = relation.get("active_task") if isinstance(relation.get("active_task"), dict) else {}
+        task = dict(env_task)
+        turn_relation = str(relation.get("turn_relation") or "").upper()
+
+        if relation.get("relation") == "NEW" and not task.get("active"):
+            current = DIALOGUE_ENVIRONMENT_ENGINE._current_task_start(text, self._scope(state))
+            if current:
+                task = dict(current)
+
+        task_active = bool(task.get("active"))
+        if task_active:
+            phase = self._text(task.get("phase"))
+            expected = self._text(task.get("expected_input_type"))
+            ownership = "CURRENT_ACTIVE_TASK"
+        else:
+            phase = ""
+            expected = ""
+            ownership = "NONE"
+
+        task_action = turn_relation in {
+            "TASK_ANSWER", "TASK_CONFIRMATION", "TASK_CORRECTION",
+            "TASK_CONTINUE", "TASK_RESPONSE",
+        }
+
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "active": task_active,
+            "task": task,
+            "kind": self._text(task.get("kind")),
+            "role": self._text(task.get("role")),
+            "phase": phase,
+            "expected_input_type": expected,
+            "task_action": task_action,
+            "ownership": ownership,
+            "goal": self._text(task.get("goal")),
+            "topic": self._text(task.get("topic")),
+            "candidate_answer": self._text(task.get("candidate_answer")),
+            "known_clues": list(task.get("known_clues") or [])[-12:],
+            "qa_history": list(task.get("qa_history") or [])[-12:],
+            "confidence": 0.96 if task_active else 0.50,
+        }
+
+
+class SemanticIntentEngine(InterpretationEngineBase):
+    NAME = "SemanticIntentEngine"
+    VERSION = "semantic_intent_v2"
+
+    _OPERATIONS = (
+        ("calculate", ("посчитай", "вычисли", "рассчитай", "сколько будет", "реши")),
+        ("explain", ("объясни", "расскажи", "почему", "что означает", "разъясни")),
+        ("compare", ("сравни", "сравнение", "чем отличается", "разница")),
+        ("search", ("найди", "поищи", "где найти", "официальный сайт", "сайт")),
+        ("create", ("создай", "сделай", "напиши", "придумай", "загадай", "загадай мне", "задай мне")),
+        ("build", ("построй", "составь", "сформируй")),
+        ("analyze", ("проанализируй", "разбери", "проверь", "диагностируй")),
+        ("retrieve", ("вспомни", "напомни", "вернись", "достань из памяти")),
+        ("show", ("покажи", "представь", "изобрази", "нарисуй")),
+    )
+
+    def analyze(
+        self,
+        text: str,
+        *,
+        semantic_measurement: dict[str, Any],
+        relation: dict[str, Any],
+        task: dict[str, Any],
+    ) -> dict[str, Any]:
+        low = self._low(text)
+        operation = ""
+        for candidate, cues in self._OPERATIONS:
+            if any(cue in low for cue in cues):
+                operation = candidate
+                break
+
+        if relation.get("turn_relation") in {"TASK_CONFIRMATION", "CONFIRMATION"}:
+            intent = "confirmation"
+        elif relation.get("turn_relation") in {"TASK_CORRECTION", "CORRECTION"}:
+            intent = "correction"
+        elif relation.get("turn_relation") in {"TASK_ANSWER", "TASK_CONTINUE", "TASK_RESPONSE"}:
+            intent = "task_response"
+        elif relation.get("relation") == "RECALL":
+            intent = "memory_recall"
+        elif relation.get("relation") == "CONTINUE":
+            intent = "follow_up"
+        elif "?" in low or "？" in low:
+            intent = "question"
+        elif operation:
+            intent = "request"
+        else:
+            intent = "statement"
+
+        if not operation:
+            operation = {
+                "confirmation": "acknowledge",
+                "correction": "correct",
+                "task_response": "answer",
+                "memory_recall": "retrieve",
+                "follow_up": "answer",
+                "question": "answer",
+            }.get(intent, "answer")
+
+        task_goal = self._text(task.get("goal"))
+        goal = task_goal or {
+            "calculate": "calculate",
+            "explain": "understand",
+            "compare": "compare",
+            "search": "obtain_information",
+            "create": "create_result",
+            "build": "build_result",
+            "analyze": "diagnose_or_analyze",
+            "retrieve": "obtain_memory",
+            "show": "present",
+        }.get(operation, "answer")
+
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "intent": intent,
+            "operation": operation,
+            "goal": goal,
+            "current_request": self._text(text),
+            "task_owned": bool(task.get("active")),
+            "measurement": semantic_measurement,
+            "confidence": 0.94 if operation or relation.get("relation") != "NEW" else 0.72,
+        }
+
+
+class DomainReasoningEngine(InterpretationEngineBase):
+    NAME = "DomainReasoningEngine"
+    VERSION = "domain_reasoning_v2"
+
+    DOMAIN_CUES = {
+        "mathematics": ("математ", "числ", "уравнен", "интеграл", "производн", "процент", "арифмет"),
+        "geometry": ("геометр", "угол", "площад", "периметр", "треугольник", "круг", "радиус", "диаметр"),
+        "physics": ("физик", "сила", "скорост", "масса", "энерг", "давлен", "ускорен", "ньютон"),
+        "chemistry": ("хими", "реакци", "молекул", "атом", "элемент", "раствор"),
+        "biology": ("биолог", "клетк", "ген", "организм", "растен", "животн"),
+        "geography": ("географ", "страна", "город", "река", "горы", "континент", "карта"),
+        "it": ("код", "python", "программ", "сервер", "api", "бот", "приложен", "алгоритм"),
+        "web": ("сайт", "веб", "интернет", "страниц", "ссылка", "онлайн", "найди", "официальный сайт"),
+        "automotive": ("автомоб", "машин", "двигател", "масл", "тормоз", "шина", "расход топлива", "tesla", "bmw", "geely", "toyota", "volkswagen"),
+        "finance": ("банк", "деньги", "цена", "стоимость", "платеж", "paypal", "финанс", "крипт"),
+        "literature": ("роман", "стих", "поэз", "писател", "литератур"),
+        "politics": ("полит", "выбор", "правитель", "закон", "президент"),
+        "news": ("новост", "сегодня", "последн", "событи"),
+        "social": ("отношен", "общество", "человек", "семь"),
+        "medicine": ("симптом", "лекар", "болит", "здоров", "медицин"),
+        "travel": ("поездк", "отел", "билет", "турист", "маршрут"),
+    }
+
+    def analyze(
+        self,
+        text: str,
+        *,
+        semantic_measurement: dict[str, Any],
+        relation: dict[str, Any] | None = None,
+        intent: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        low = self._low(text)
+        relation = relation if isinstance(relation, dict) else {}
+        intent = intent if isinstance(intent, dict) else {}
+
+        if str(relation.get("turn_relation") or "").upper() in {
+            "TASK_CONFIRMATION", "TASK_CORRECTION", "CONFIRMATION", "CORRECTION"
+        }:
+            return {
+                "engine": self.NAME,
+                "version": self.VERSION,
+                "domain": "conversation",
+                "domain_scores": {"conversation": 1.0},
+                "candidate_domains": ["conversation"],
+                "subdomain": "dialogue",
+                "requires_domain_knowledge": False,
+                "confidence": 0.98,
+            }
+        score_map: dict[str, float] = {}
+        for domain, cues in self.DOMAIN_CUES.items():
+            hits = sum(1 for cue in cues if cue in low)
+            score_map[domain] = min(1.0, hits / max(1.0, min(4.0, len(cues) * 0.25)))
+
+        # Existing matrix domain scores are supporting evidence only. Very small
+        # prototype similarities must not turn an unrelated utterance into a
+        # concrete domain (for example, a riddle becoming "biology").
+        base = semantic_measurement.get("domain_scores") if isinstance(semantic_measurement, dict) else {}
+        if isinstance(base, dict):
+            for domain, value in base.items():
+                value = float(value or 0.0)
+                if value >= 0.20:
+                    score_map[domain] = max(float(score_map.get(domain, 0.0)), value)
+
+        ranked = sorted(score_map.items(), key=lambda item: item[1], reverse=True)
+        best = ranked[0][0] if ranked and ranked[0][1] > 0 else "general"
+        best_score = ranked[0][1] if ranked else 0.0
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "domain": best,
+            "domain_scores": {k: round(float(v), 4) for k, v in ranked[:12]},
+            "candidate_domains": [k for k, v in ranked[:6] if v > 0.0],
+            "subdomain": "",
+            "requires_domain_knowledge": best not in {"general", "social"},
+            "confidence": round(min(1.0, max(best_score, 0.35 if best != "general" else 0.20)), 4),
+        }
+
+
+class EntityResolutionEngine(InterpretationEngineBase):
+    NAME = "EntityResolutionEngine"
+    VERSION = "entity_resolution_v2"
+
+    def analyze(
+        self,
+        text: str,
+        *,
+        relation: dict[str, Any],
+        topic: dict[str, Any],
+        task: dict[str, Any],
+        semantic: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        current = self._text(text)
+        candidates: list[str] = []
+
+        explicit_values = [
+            semantic.get("active_entity"),
+            semantic.get("entity"),
+            state.get("current_entity"),
+        ]
+        for value in explicit_values:
+            if self._text(value):
+                candidates.append(self._text(value))
+
+        task_entity = self._text(task.get("task", {}).get("target") if isinstance(task.get("task"), dict) else "")
+        if task_entity:
+            candidates.append(task_entity)
+
+        quoted = re.findall(r"[«\"]([^»\"]{2,120})[»\"]", current)
+        candidates.extend(self._text(x) for x in quoted if self._text(x))
+
+        # URLs/domains are first-class entities for web/site problems.
+        candidates.extend(re.findall(r"(?:https?://)?(?:www\.)?[A-Za-z0-9.-]+\.[A-Za-z]{2,}", current))
+
+        # Capitalized phrases are useful entity evidence in mixed Russian/English input.
+        proper = re.findall(
+            r"\b(?:[А-ЯЁA-Z][\wЁёЇїІіЄєҐґ-]+(?:\s+[А-ЯЁA-Z][\wЁёЇїІіЄєҐґ-]+){0,3})\b",
+            current,
+        )
+        candidates.extend(proper)
+
+        # Do not mistake an imperative verb ("Отгадай", "Расскажи", "Покажи")
+        # for an entity. Entity ownership comes from explicit entity evidence,
+        # task state, or a real named object in the current turn.
+        command_heads = {
+            "расскажи", "объясни", "покажи", "нарисуй", "создай", "сделай",
+            "напиши", "построй", "проверь", "опиши", "сравни", "найди",
+            "выведи", "подскажи", "скажи", "дай", "загадай", "отгадай",
+            "разгадай", "реши", "придумай",
+        }
+        non_entity_heads = command_heads | {
+            "теперь", "сейчас", "потом", "далее", "а", "и", "но", "давай",
+            "пусть", "можешь", "можно", "скажи", "что", "как", "почему",
+        }
+        filtered = []
+        for candidate in candidates:
+            first = self._tokens(candidate)[:1]
+            if first and first[0] in non_entity_heads and len(self._tokens(candidate)) <= 2:
+                continue
+            filtered.append(candidate)
+        candidates = list(dict.fromkeys(x.strip() for x in filtered if self._text(x)))
+
+        inherited = ""
+        if relation.get("relation") == "CONTINUE":
+            inherited = self._text(
+                task.get("candidate_answer")
+                or task.get("target")
+                or state.get("april_active_entity")
+            )
+            if inherited:
+                candidates.insert(0, inherited)
+
+        if task.get("active"):
+            task_obj = task.get("task", {})
+            task_kind = self._text(task_obj.get("kind")).lower()
+            task_topic = self._text(task_obj.get("topic"))
+            if task_kind == "riddle":
+                candidates.insert(0, task_topic or "загадка")
+            elif task_kind == "game":
+                candidates.insert(0, task_topic or "игра")
+
+        candidates = list(dict.fromkeys(x.strip() for x in candidates if self._text(x)))
+        active_entity = self._text(candidates[0] if candidates else "")
+        if relation.get("relation") == "NEW" and task.get("active"):
+            task_obj = task.get("task", {})
+            task_kind = self._text(task_obj.get("kind")).lower()
+            if task_kind in {"riddle", "game"}:
+                active_entity = self._text(task_obj.get("topic") or ("загадка" if task_kind == "riddle" else "игра"))
+
+        if relation.get("relation") == "NEW":
+            # A fresh topic cannot inherit an old entity. Prefer a current-turn
+            # entity candidate; otherwise keep a task label (e.g. "загадка").
+            current_tokens = set(self._tokens(current))
+            current_candidates = [
+                c for c in candidates
+                if set(self._tokens(c)) & current_tokens
+            ]
+            if current_candidates:
+                active_entity = self._text(current_candidates[0])
+            elif task.get("active") and self._text(task.get("topic")):
+                active_entity = self._text(task.get("topic"))
+            else:
+                active_entity = ""
+
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "active_entity": active_entity[:180],
+            "candidate_entities": candidates[:16],
+            "entity_source": "current_turn" if active_entity and self._sim(active_entity, current) > 0 else "contextual",
+            "inherited_entity": inherited,
+            "historical_entity_inheritance_blocked": relation.get("relation") == "NEW",
+            "confidence": 0.90 if active_entity else 0.45,
+        }
+
+
+class ReferenceResolutionEngine(InterpretationEngineBase):
+    NAME = "ReferenceResolutionEngine"
+    VERSION = "reference_resolution_v2"
+
+    DEICTIC = (
+        "это", "этот", "эта", "эту", "этой", "этом", "этим",
+        "он", "она", "оно", "они", "его", "ее", "её", "тот", "та", "там",
+        "здесь", "выше", "ниже", "предыдущ", "дальше", "теперь",
+    )
+
+    def analyze(
+        self,
+        text: str,
+        *,
+        relation: dict[str, Any],
+        entity: dict[str, Any],
+        topic: dict[str, Any],
+        task: dict[str, Any],
+    ) -> dict[str, Any]:
+        low = self._low(text)
+        signals = [cue for cue in self.DEICTIC if cue in low]
+        eligible = (
+            relation.get("relation") != "NEW"
+            and (
+                bool(signals)
+                or relation.get("turn_relation") in {
+                    "TASK_ANSWER", "TASK_CONFIRMATION", "TASK_CORRECTION",
+                    "CONFIRMATION", "CORRECTION",
+                }
+            )
+        )
+
+        candidates = [
+            self._text(entity.get("active_entity")),
+            self._text(task.get("candidate_answer")),
+            self._text(task.get("topic")),
+            self._text(topic.get("topic")),
+            self._text(relation.get("previous_april_turn")),
+            self._text(relation.get("previous_user_turn")),
+        ]
+        candidates = [x for x in dict.fromkeys(candidates) if x]
+
+        resolved = candidates[0] if eligible and candidates else ""
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "reference_present": bool(signals),
+            "reference_signals": signals,
+            "eligible_for_resolution": eligible,
+            "resolved_reference": resolved[:180],
+            "candidate_antecedents": candidates[:10],
+            "resolution_policy": (
+                "active_task_then_current_topic_then_immediate_pair"
+                if eligible else "no_reference_resolution"
+            ),
+            "confidence": 0.88 if resolved and signals else 0.72 if eligible and resolved else 0.35,
+        }
+
+
+class MemoryRelevanceEngine(InterpretationEngineBase):
+    NAME = "MemoryRelevanceEngine"
+    VERSION = "memory_relevance_v3"
+    SEVEN_DAYS_SECONDS = 7 * 24 * 60 * 60
+    MAX_ITEMS = 6
+
+    def _timestamp(self, value: Any) -> float | None:
+        if value in (None, "", 0, 0.0):
+            return None
+        try:
+            if isinstance(value, (int, float)):
+                return float(value)
+            text = str(value).replace("Z", "+00:00")
+            from datetime import datetime
+            return datetime.fromisoformat(text).timestamp()
+        except Exception:
+            return None
+
+    def analyze(
+        self,
+        text: str,
+        *,
+        relation: dict[str, Any],
+        topic: dict[str, Any],
+        identity: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = time.time()
+        scope = identity.get("scope", {})
+        memory_raw = state.get("memory_timeline", {})
+        values: list[Any] = []
+        if isinstance(memory_raw, dict):
+            for value in memory_raw.values():
+                values.extend(value if isinstance(value, list) else [value])
+        elif isinstance(memory_raw, list):
+            values = list(memory_raw)
+
+        allowed = relation.get("relation") == "RECALL"
+        if relation.get("relation") == "CONTINUE":
+            allowed = True
+
+        selected: list[dict[str, Any]] = []
+        candidates: list[dict[str, Any]] = []
+        query = self._text(text)
+        query_topic = self._text(topic.get("topic"))
+        for item in reversed(values):
+            if not isinstance(item, dict):
+                continue
+            item_user = self._text(item.get("user_id"))
+            item_conv = self._text(item.get("conversation_id"))
+            if scope.get("user_id") and item_user and item_user != scope["user_id"]:
+                continue
+            if scope.get("conversation_id") and item_conv and item_conv != scope["conversation_id"]:
+                continue
+
+            stamp = self._timestamp(item.get("created_at") or item.get("timestamp") or item.get("updated_at"))
+            if stamp is not None and now - stamp > self.SEVEN_DAYS_SECONDS:
+                continue
+
+            content = self._text(
+                item.get("summary")
+                or item.get("content")
+                or item.get("text")
+                or item.get("answer")
+                or item.get("user_request")
+            )
+            if not content:
+                continue
+
+            score = max(self._sim(query, content), self._sim(query_topic, content))
+            candidates.append({
+                "item": dict(item),
+                "score": round(float(score), 4),
+                "age_seconds": round(max(0.0, now - stamp), 2) if stamp is not None else None,
+            })
+
+        if relation.get("relation") == "NEW":
+            selected = []
+            allowed = False
+        elif relation.get("relation") == "RECALL":
+            ranked = sorted(candidates, key=lambda x: x["score"], reverse=True)
+            selected = [x["item"] for x in ranked if x["score"] >= 0.15][: self.MAX_ITEMS]
+        else:
+            # Continuation may use same-conversation evidence, but unrelated
+            # historical topics are not allowed to become the owner.
+            ranked = sorted(candidates, key=lambda x: x["score"], reverse=True)
+            selected = [x["item"] for x in ranked if x["score"] >= 0.25][: self.MAX_ITEMS]
+
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "seven_day_window_seconds": self.SEVEN_DAYS_SECONDS,
+            "allowed": bool(allowed),
+            "selection_mode": "explicit_recall" if relation.get("relation") == "RECALL" else "same_branch_support" if allowed else "excluded",
+            "selected": selected,
+            "candidate_count": len(candidates),
+            "selected_count": len(selected),
+            "historical_memory_is_evidence_only": True,
+            "cross_user_blocked": True,
+            "confidence": 0.96 if relation.get("relation") == "RECALL" else 0.90 if selected else 0.78 if not allowed else 0.62,
+        }
+
+
+class ConversationContinuityEngine(InterpretationEngineBase):
+    NAME = "ConversationContinuityEngine"
+    VERSION = "conversation_continuity_v3"
+
+    def analyze(
+        self,
+        text: str,
+        *,
+        relation: dict[str, Any],
+        topic: dict[str, Any],
+        task: dict[str, Any],
+        entity: dict[str, Any],
+        reference: dict[str, Any],
+    ) -> dict[str, Any]:
+        previous_user = self._text(relation.get("previous_user_turn"))
+        previous_april = self._text(relation.get("previous_april_turn"))
+        current = self._text(text)
+        rel = relation.get("relation")
+        covered = [previous_april] if previous_april and rel == "CONTINUE" else []
+
+        if rel == "CONTINUE":
+            if task.get("active"):
+                next_step = {
+                    "TASK_ANSWER": "evaluate_current_user_answer",
+                    "TASK_CONFIRMATION": "acknowledge_and_advance",
+                    "TASK_CORRECTION": "correct_and_advance",
+                }.get(str(relation.get("turn_relation")), "advance_active_task")
+            else:
+                next_step = "answer_current_turn_and_advance"
+            avoid_repeat = covered
+        elif rel == "RECALL":
+            next_step = "retrieve_requested_historical_topic_and_connect"
+            avoid_repeat = []
+        else:
+            next_step = "develop_current_topic_from_scratch"
+            avoid_repeat = []
+
+        novelty = self._sim(current, previous_april)
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "relation": rel,
+            "same_conversational_branch": rel == "CONTINUE",
+            "previous_pair": {
+                "user": previous_user,
+                "april": previous_april,
+            },
+            "covered_content": covered,
+            "avoid_repeat_content": avoid_repeat,
+            "novelty_score": round(float(1.0 - novelty), 4),
+            "next_logical_step": next_step,
+            "acknowledge_memory_when_recalled": rel == "RECALL",
+            "do_not_reintroduce_old_topics_on_new": rel == "NEW",
+            "confidence": 0.94 if previous_april or task.get("active") else 0.70,
+        }
+
+
+class KnowledgeSourceEngine(InterpretationEngineBase):
+    NAME = "KnowledgeSourceEngine"
+    VERSION = "knowledge_source_v2"
+
+    def analyze(
+        self,
+        text: str,
+        *,
+        intent: dict[str, Any],
+        domain: dict[str, Any],
+        current_turn: dict[str, Any],
+        memory: dict[str, Any],
+        relation: dict[str, Any],
+    ) -> dict[str, Any]:
+        low = self._low(text)
+        modalities = current_turn.get("modalities", {})
+        sources: list[str] = []
+
+        if memory.get("allowed") and relation.get("relation") == "RECALL":
+            sources.append("memory")
+        if any(modalities.get(k) not in (None, "", {}, []) for k in ("vision", "gallery")):
+            sources.append("vision")
+        if modalities.get("files") not in (None, "", {}, []):
+            sources.append("file")
+        if intent.get("operation") == "calculate" or any(
+            cue in low for cue in ("посчитай", "вычисли", "сколько будет", "формула")
+        ):
+            sources.append("calculation")
+        if domain.get("domain") == "web" or intent.get("operation") == "search" or any(
+            cue in low for cue in ("сайт", "найди", "поищи", "ссылка", "сегодня", "сейчас", "последн")
+        ):
+            sources.append("web")
+        if intent.get("operation") == "code" or domain.get("domain") == "it" and "код" in low:
+            sources.append("code")
+        if not sources:
+            sources.append("internal_knowledge")
+
+        sources = list(dict.fromkeys(sources))
+        primary = sources[0]
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "candidate_sources": sources,
+            "primary_source": primary,
+            "freshness_required": "web" in sources and any(
+                cue in low for cue in ("сейчас", "сегодня", "последн", "актуаль", "цена")
+            ),
+            "evidence_required": primary in {"web", "memory", "vision", "file"},
+            "routing_owner": DECISION_OWNER,
+            "confidence": 0.92,
+        }
+
+
+class RepresentationDecisionEngine(InterpretationEngineBase):
+    NAME = "RepresentationDecisionEngine"
+    VERSION = "representation_decision_v2"
+
+    def analyze(
+        self,
+        text: str,
+        *,
+        semantic_measurement: dict[str, Any],
+        intent: dict[str, Any],
+        current_turn: dict[str, Any],
+    ) -> dict[str, Any]:
+        low = self._low(text)
+        explicit = ""
+        cue_map = (
+            ("graph", ("график", "графика", "plot", "chart")),
+            ("table", ("таблиц", "таблица", "сводка в таблице")),
+            ("diagram", ("схем", "диаграм", "блок-схем")),
+            ("formula", ("формул", "уравнен", "математическ")),
+            ("image", ("картин", "изображ", "рисунок", "нарисуй", "изобрази", "фото")),
+            ("gallery", ("галере", "несколько изображен", "подборк")),
+            ("code", ("код", "python", "функци", "программа")),
+            ("link", ("ссылк", "официальный сайт", "адрес сайта")),
+        )
+        for representation, cues in cue_map:
+            if any(cue in low for cue in cues):
+                explicit = representation
+                break
+
+        profile = semantic_measurement.get("representation_scores", {}) if isinstance(semantic_measurement, dict) else {}
+        best = explicit
+        if not best and isinstance(profile, dict) and profile:
+            ranked = sorted(profile.items(), key=lambda x: x[1], reverse=True)
+            if ranked and float(ranked[0][1]) >= 0.20 and ranked[0][0] != "text":
+                best = ranked[0][0]
+        representation = best or "text"
+
+        # Presentation is a semantic contract, not a renderer call.
+        modalities = current_turn.get("available_modalities", [])
+        if "vision" in modalities and representation == "text" and intent.get("operation") in {"analyze", "explain"}:
+            representation = "text"
+
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "representation": representation,
+            "explicit": bool(explicit),
+            "candidate_representations": [explicit] if explicit else [],
+            "scene_transform": representation != "text",
+            "renderer_neutral": True,
+            "confidence": 0.94 if explicit else 0.72,
+        }
+
+
+class ResponseStrategyEngine(InterpretationEngineBase):
+    NAME = "ResponseStrategyEngine"
+    VERSION = "response_strategy_v2"
+
+    def analyze(
+        self,
+        text: str,
+        *,
+        relation: dict[str, Any],
+        intent: dict[str, Any],
+        task: dict[str, Any],
+        continuity: dict[str, Any],
+        representation: dict[str, Any],
+        knowledge: dict[str, Any],
+    ) -> dict[str, Any]:
+        rel = relation.get("relation")
+        turn = str(relation.get("turn_relation") or "").upper()
+
+        if turn == "TASK_CONFIRMATION":
+            mode = "acknowledge_and_advance"
+        elif turn == "TASK_CORRECTION":
+            mode = "correct_and_advance"
+        elif turn in {"TASK_ANSWER", "TASK_RESPONSE"}:
+            mode = "evaluate_and_advance_task"
+        elif rel == "RECALL":
+            mode = "recall_and_connect"
+        elif rel == "CONTINUE":
+            mode = "continue_dialogue"
+        else:
+            mode = "develop_new_topic"
+
+        answer_shape = {
+            "text": "textual",
+            "table": "structured_table",
+            "graph": "data_visualization",
+            "diagram": "schematic",
+            "formula": "mathematical",
+            "image": "visual",
+            "gallery": "multi_visual",
+            "code": "executable_code",
+            "link": "web_resource",
+        }.get(representation.get("representation"), "textual")
+
+        avoid_repeat = bool(continuity.get("avoid_repeat_content"))
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "mode": mode,
+            "answer_shape": answer_shape,
+            "natural_dialogue": True,
+            "acknowledge_previous_turn": rel in {"CONTINUE", "RECALL"},
+            "avoid_repetition": avoid_repeat,
+            "recap_ratio_max": 0.20 if rel == "CONTINUE" else 0.0,
+            "provider_should_follow_current_user_request": True,
+            "provider_must_not_invent_missing_context": True,
+            "knowledge_source": knowledge.get("primary_source"),
+            "confidence": 0.92,
+        }
+
+
+class DecisionArbitrationEngine(InterpretationEngineBase):
+    NAME = "DecisionArbitrationEngine"
+    VERSION = "decision_arbitration_v2"
+
+    def decide(
+        self,
+        *,
+        current_turn: dict[str, Any],
+        relation: dict[str, Any],
+        topic: dict[str, Any],
+        task: dict[str, Any],
+        intent: dict[str, Any],
+        entity: dict[str, Any],
+        reference: dict[str, Any],
+        memory: dict[str, Any],
+        continuity: dict[str, Any],
+        knowledge: dict[str, Any],
+        representation: dict[str, Any],
+    ) -> dict[str, Any]:
+        # Deterministic priority:
+        # current user turn > explicit discourse relation > active task > explicit recall
+        # > current branch > semantic similarity > historical memory.
+        rel = str(relation.get("relation") or "NEW").upper()
+        turn = str(relation.get("turn_relation") or "").upper()
+        signals = relation.get("signals") if isinstance(relation.get("signals"), dict) else {}
+
+        if signals.get("explicit_recall"):
+            canonical = "RECALL"
+            reason = "explicit_memory_request"
+        elif signals.get("explicit_new_topic") and turn not in {"TASK_ANSWER", "TASK_CONTINUE", "TASK_CONFIRMATION", "TASK_CORRECTION"}:
+            canonical = "NEW"
+            reason = "explicit_topic_boundary"
+        elif task.get("active") and (
+            turn in {"TASK_ANSWER", "TASK_RESPONSE", "TASK_CONFIRMATION", "TASK_CORRECTION", "TASK_CONTINUE"}
+            or task.get("task_action")
+        ):
+            canonical = "CONTINUE"
+            reason = "active_task_owns_turn"
+        elif rel == "CONTINUE":
+            canonical = "CONTINUE"
+            reason = "active_dialogue_relation"
+        elif rel == "RECALL":
+            canonical = "RECALL"
+            reason = "memory_relation"
+        else:
+            canonical = "NEW"
+            reason = "self_contained_current_turn"
+
+        # Active task answers always get task-level semantic ownership.
+        if canonical == "CONTINUE" and task.get("active"):
+            if turn == "TASK_ANSWER":
+                semantic_relation = "TASK_RESPONSE"
+            elif turn == "TASK_CONFIRMATION":
+                semantic_relation = "TASK_CONFIRMATION"
+            elif turn == "TASK_CORRECTION":
+                semantic_relation = "TASK_CORRECTION"
+            else:
+                semantic_relation = "TASK_CONTINUE"
+        elif canonical == "RECALL":
+            semantic_relation = "REFERENCE_OLD_TOPIC"
+        else:
+            semantic_relation = "NEW_TOPIC"
+
+        # Historical entities never become active solely because memory exists.
+        active_entity = entity.get("active_entity", "") if canonical != "NEW" else entity.get("active_entity", "")
+        use_memory = bool(canonical == "RECALL" or (canonical == "CONTINUE" and memory.get("selected")))
+
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "relation": canonical,
+            "turn_relation": semantic_relation,
+            "reason": reason,
+            "active_topic": self._text(topic.get("topic")),
+            "active_entity": self._text(active_entity),
+            "active_task": task.get("task") if task.get("active") else {},
+            "use_memory": use_memory,
+            "memory_items": list(memory.get("selected") or []) if use_memory else [],
+            "semantic_intent": intent.get("intent"),
+            "operation": intent.get("operation"),
+            "goal": intent.get("goal"),
+            "representation": representation.get("representation") or "text",
+            "current_request": current_turn.get("raw_text", ""),
+            "provider_request_authority": "CURRENT_USER_TURN",
+            "historical_memory_role": "evidence_only",
+            "confidence": 0.97,
+        }
+
+
+class ConsistencyEngine(InterpretationEngineBase):
+    NAME = "ConsistencyEngine"
+    VERSION = "consistency_v2"
+
+    def validate(
+        self,
+        *,
+        current_turn: dict[str, Any],
+        identity: dict[str, Any],
+        relation: dict[str, Any],
+        arbitration: dict[str, Any],
+        memory: dict[str, Any],
+        entity: dict[str, Any],
+        task: dict[str, Any],
+        representation: dict[str, Any],
+    ) -> dict[str, Any]:
+        checks: list[dict[str, Any]] = []
+
+        raw = current_turn.get("raw_text", "")
+        checks.append({"name": "current_request_preserved", "ok": raw == current_turn.get("raw_text")})
+
+        same_user = (
+            not identity.get("scope", {}).get("user_id")
+            or str(current_turn.get("user_id") or "") == str(identity.get("scope", {}).get("user_id") or "")
+        )
+        checks.append({"name": "authenticated_user_scope", "ok": same_user})
+
+        mem_allowed = relation.get("relation") == "RECALL" or (
+            relation.get("relation") == "CONTINUE" and bool(memory.get("selected"))
+        )
+        checks.append({
+            "name": "memory_fenced_for_new_topic",
+            "ok": relation.get("relation") != "NEW" or not mem_allowed,
+        })
+
+        stale_block = relation.get("relation") == "NEW" and bool(entity.get("inherited_entity"))
+        checks.append({"name": "stale_entity_not_inherited", "ok": not stale_block})
+
+        task_match = True
+        if relation.get("relation") == "CONTINUE" and task.get("active"):
+            task_match = True
+        checks.append({"name": "task_relation_consistent", "ok": task_match})
+
+        rep = representation.get("representation") or "text"
+        supported = rep in {"text", "table", "graph", "diagram", "formula", "image", "gallery", "code", "link"}
+        checks.append({"name": "representation_supported", "ok": supported})
+
+        errors = [x["name"] for x in checks if not x["ok"]]
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "valid": not errors,
+            "checks": checks,
+            "errors": errors,
+            "repair_actions": (
+                ["clear_historical_memory", "clear_inherited_entity"] if errors else []
+            ),
+            "confidence": 0.98 if not errors else 0.55,
+        }
+
+
+class CanonicalizationEngine(InterpretationEngineBase):
+    NAME = "CanonicalizationEngine"
+    VERSION = "canonical_packet_v3"
+
+    def build(
+        self,
+        *,
+        current_turn: dict[str, Any],
+        identity: dict[str, Any],
+        relation: dict[str, Any],
+        topic: dict[str, Any],
+        task: dict[str, Any],
+        intent: dict[str, Any],
+        domain: dict[str, Any],
+        entity: dict[str, Any],
+        reference: dict[str, Any],
+        memory: dict[str, Any],
+        continuity: dict[str, Any],
+        knowledge: dict[str, Any],
+        representation: dict[str, Any],
+        strategy: dict[str, Any],
+        arbitration: dict[str, Any],
+        consistency: dict[str, Any],
+    ) -> dict[str, Any]:
+        user_request = str(current_turn.get("raw_text") or "")
+        normalized = self._text(user_request)
+        relation_value = arbitration.get("relation") or relation.get("relation") or "NEW"
+
+        active_task = task.get("task") if task.get("active") else {}
+        active_topic = self._text(arbitration.get("active_topic") or topic.get("topic") or normalized)
+        active_entity = self._text(arbitration.get("active_entity") or entity.get("active_entity"))
+
+        provider_instruction_parts = [
+            f"Current user request: {normalized}",
+            f"Dialogue relation: {relation_value}",
+            f"Topic: {active_topic}",
+            f"Intent: {intent.get('intent')}",
+            f"Operation: {intent.get('operation')}",
+            f"Goal: {intent.get('goal')}",
+            f"Domain: {domain.get('domain')}",
+            f"Representation: {representation.get('representation') or 'text'}",
+        ]
+        if relation_value == "CONTINUE":
+            provider_instruction_parts.append("Continue the current dialogue naturally; do not repeat content already covered.")
+        elif relation_value == "RECALL":
+            provider_instruction_parts.append("Use only the selected historical memory as evidence for the requested recall.")
+        else:
+            provider_instruction_parts.append("Treat the current user request as a fresh topic unless it explicitly depends on supplied current context.")
+
+        if active_task:
+            provider_instruction_parts.append(
+                f"Active task state: {active_task.get('kind') or 'task'} / {active_task.get('phase') or 'active'}."
+            )
+        if continuity.get("avoid_repeat_content"):
+            provider_instruction_parts.append(
+                "Avoid repeating: " + " | ".join(
+                    self._text(x) for x in continuity.get("avoid_repeat_content", []) if self._text(x)
+                )
+            )
+
+        execution_instruction = "\n".join(provider_instruction_parts)
+
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            # The raw user request is immutable and independently addressable.
+            "current_user_request": user_request,
+            "canonical_user_request": user_request,
+            "normalized_user_request": normalized,
+            "authenticated_scope": identity.get("scope", {}),
+            "dialogue": {
+                "relation": relation_value,
+                "turn_relation": arbitration.get("turn_relation") or relation.get("turn_relation"),
+                "continuation": relation_value == "CONTINUE",
+                "reference": relation_value == "RECALL",
+                "sequence_id": identity.get("scope", {}).get("dialogue_sequence_id", ""),
+                "previous_user_turn": relation.get("previous_user_turn"),
+                "previous_april_turn": relation.get("previous_april_turn"),
+            },
+            "topic": {
+                "active": active_topic,
+                "branch": topic.get("topic_branch"),
+                "branch_key": topic.get("topic_branch_key"),
+                "old_topic_fenced": relation_value == "NEW",
+            },
+            "task": active_task,
+            "semantic": {
+                "intent": intent.get("intent"),
+                "operation": intent.get("operation"),
+                "goal": intent.get("goal"),
+                "domain": domain.get("domain"),
+                "subdomain": domain.get("subdomain"),
+                "active_entity": active_entity,
+            },
+            "reference": reference,
+            "memory": {
+                "allowed": bool(arbitration.get("use_memory")),
+                "selected": list(arbitration.get("memory_items") or []),
+                "historical_memory_is_evidence_only": True,
+                "seven_day_window_seconds": memory.get("seven_day_window_seconds"),
+            },
+            "knowledge_source": knowledge,
+            "representation": representation,
+            "response_strategy": strategy,
+            "continuation_analysis": continuity,
+            "consistency": consistency,
+            "execution_instruction": execution_instruction,
+            "provider_input_policy": {
+                "current_user_request_authoritative": True,
+                "current_user_request_must_not_be_replaced_by_history": True,
+                "historical_memory_is_evidence_only": True,
+                "old_topics_are_excluded_on_new_topic": True,
+                "derived_instruction_is_separate_from_user_text": True,
+            },
+            "decision_owner": DECISION_OWNER,
+            "evidence_only_until_executor": True,
+            "confidence": min(
+                float(arbitration.get("confidence", 0.0) or 0.0),
+                float(consistency.get("confidence", 0.0) or 0.0),
+            ),
+        }
+
+
+class InterpretationOrchestrator(InterpretationEngineBase):
+    NAME = "InterpretationOrchestrator"
+    VERSION = "cognitive_interpretation_environment_v1"
+
+    def __init__(self):
+        self.identity = IdentityScopeEngine()
+        self.current_turn = CurrentTurnEngine()
+        self.dialogue = DialogueRelationEngine()
+        self.topic = TopicDynamicsEngine()
+        self.task = ActiveTaskEngine()
+        self.intent = SemanticIntentEngine()
+        self.domain = DomainReasoningEngine()
+        self.entity = EntityResolutionEngine()
+        self.reference = ReferenceResolutionEngine()
+        self.memory = MemoryRelevanceEngine()
+        self.continuity = ConversationContinuityEngine()
+        self.knowledge = KnowledgeSourceEngine()
+        self.representation = RepresentationDecisionEngine()
+        self.strategy = ResponseStrategyEngine()
+        self.arbitration = DecisionArbitrationEngine()
+        self.consistency = ConsistencyEngine()
+        self.canonical = CanonicalizationEngine()
+
+    def run(
+        self,
+        text: str,
+        *,
+        state: dict[str, Any],
+        history: list[Any],
+        semantic: dict[str, Any],
+        cognition: dict[str, Any],
+    ) -> dict[str, Any]:
+        state = state if isinstance(state, dict) else {}
+        history = history if isinstance(history, list) else []
+        semantic = semantic if isinstance(semantic, dict) else {}
+        cognition = cognition if isinstance(cognition, dict) else {}
+
+        identity = self.identity.analyze(state)
+        current_turn = self.current_turn.analyze(
+            text, semantic=semantic, cognition=cognition, state=state, identity=identity
+        )
+
+        # The existing environment is a specialized dialogue/task engine. It is
+        # consulted here as evidence, then its result is reconciled by arbitration.
+        relation = self.dialogue.analyze(
+            text, state=state, history=history, semantic=semantic, identity=identity
+        )
+        task = self.task.analyze(text, relation=relation, state=state, history=history)
+        # Topic dynamics consumes the task decision rather than re-deriving task
+        # ownership from raw text. This keeps the council synchronized.
+        relation_with_task = dict(relation)
+        relation_with_task["active_task_engine"] = task
+        if task.get("active") and isinstance(task.get("task"), dict):
+            relation_with_task["active_task"] = task.get("task")
+        topic = self.topic.analyze(text, relation=relation_with_task, semantic=semantic, state=state)
+
+        # Quantum matrix measurement is an evidence engine. This call is safe:
+        # during normal execution QUANTUM_INTERPRETATION_ENGINE already exists.
+        try:
+            measurement = QUANTUM_INTERPRETATION_ENGINE.measure(
+                self._text(text),
+                previous_assistant=self._text(relation.get("previous_april_turn")),
+                previous_user=self._text(relation.get("previous_user_turn")),
+                active_topic=self._text(topic.get("topic")),
+                active_goal=self._text(task.get("goal")),
+                modalities=current_turn.get("modalities", {}),
+            )
+        except Exception as exc:
+            measurement = {
+                "dialogue_scores": {},
+                "representation_scores": {"text": 1.0},
+                "domain_scores": {},
+                "capability_scores": {},
+                "context_scores": {},
+                "scene_matrix": {},
+                "engine_error": str(exc),
+            }
+
+        intent = self.intent.analyze(
+            text, semantic_measurement=measurement, relation=relation, task=task
+        )
+        domain = self.domain.analyze(
+            text, semantic_measurement=measurement, relation=relation, intent=intent
+        )
+        entity = self.entity.analyze(
+            text, relation=relation, topic=topic, task=task, semantic=semantic, state=state
+        )
+        reference = self.reference.analyze(
+            text, relation=relation, entity=entity, topic=topic, task=task
+        )
+        memory = self.memory.analyze(
+            text, relation=relation, topic=topic, identity=identity, state=state
+        )
+        continuity = self.continuity.analyze(
+            text, relation=relation, topic=topic, task=task, entity=entity, reference=reference
+        )
+        knowledge = self.knowledge.analyze(
+            text, intent=intent, domain=domain, current_turn=current_turn,
+            memory=memory, relation=relation
+        )
+        representation = self.representation.analyze(
+            text, semantic_measurement=measurement, intent=intent,
+            current_turn=current_turn
+        )
+        strategy = self.strategy.analyze(
+            text, relation=relation, intent=intent, task=task,
+            continuity=continuity, representation=representation, knowledge=knowledge
+        )
+
+        arbitration = self.arbitration.decide(
+            current_turn=current_turn,
+            relation=relation,
+            topic=topic,
+            task=task,
+            intent=intent,
+            entity=entity,
+            reference=reference,
+            memory=memory,
+            continuity=continuity,
+            knowledge=knowledge,
+            representation=representation,
+        )
+        consistency = self.consistency.validate(
+            current_turn=current_turn,
+            identity=identity,
+            relation=arbitration,
+            arbitration=arbitration,
+            memory=memory,
+            entity=entity,
+            task=task,
+            representation=representation,
+        )
+        canonical = self.canonical.build(
+            current_turn=current_turn,
+            identity=identity,
+            relation=relation,
+            topic=topic,
+            task=task,
+            intent=intent,
+            domain=domain,
+            entity=entity,
+            reference=reference,
+            memory=memory,
+            continuity=continuity,
+            knowledge=knowledge,
+            representation=representation,
+            strategy=strategy,
+            arbitration=arbitration,
+            consistency=consistency,
+        )
+
+        workspace = {
+            "version": self.VERSION,
+            "current_request": current_turn["raw_text"],
+            "current_turn": current_turn,
+            "authenticated_scope": identity["scope"],
+            "identity_scope": identity,
+            "dialogue_relation": relation,
+            "topic_dynamics": topic,
+            "active_task": task,
+            "semantic_intent": intent,
+            "domain_reasoning": domain,
+            "entity_resolution": entity,
+            "reference_resolution": reference,
+            "memory_relevance": memory,
+            "conversation_continuity": continuity,
+            "knowledge_source": knowledge,
+            "representation_decision": representation,
+            "response_strategy": strategy,
+            "arbitration": arbitration,
+            "consistency": consistency,
+            "canonical": canonical,
+            # Flat authoritative fields for downstream adapters.
+            "relation": arbitration["relation"],
+            "turn_relation": arbitration["turn_relation"],
+            "continuation": arbitration["relation"] == "CONTINUE",
+            "reference": arbitration["relation"] == "RECALL",
+            "conversation_continuation": bool(identity["scope"].get("conversation_id")),
+            "sequence_id": identity["scope"].get("dialogue_sequence_id", ""),
+            "active_topic": canonical["topic"]["active"],
+            "active_entity": canonical["semantic"]["active_entity"],
+            "operation": canonical["semantic"]["operation"],
+            "goal": canonical["semantic"]["goal"],
+            "representation": canonical["representation"]["representation"],
+            "current_user_request": canonical["current_user_request"],
+            "canonical_user_request": canonical["canonical_user_request"],
+            "provider_instruction": canonical["execution_instruction"],
+            "selected_memory": canonical["memory"]["selected"],
+            "historical_memory_allowed": canonical["memory"]["allowed"],
+            "active_task_context": canonical["task"],
+            "continuation_content_analysis": continuity,
+            "avoid_repeat_content": continuity.get("avoid_repeat_content", []),
+            "provider_request_authority": "CURRENT_USER_TURN",
+            "historical_topics_are_evidence_only": True,
+            "engine_order": [
+                self.identity.NAME,
+                self.current_turn.NAME,
+                self.dialogue.NAME,
+                self.topic.NAME,
+                self.task.NAME,
+                self.intent.NAME,
+                self.domain.NAME,
+                self.entity.NAME,
+                self.reference.NAME,
+                self.memory.NAME,
+                self.continuity.NAME,
+                self.knowledge.NAME,
+                self.representation.NAME,
+                self.strategy.NAME,
+                self.arbitration.NAME,
+                self.consistency.NAME,
+                self.canonical.NAME,
+            ],
+        }
+
+        return {
+            "workspace": workspace,
+            "canonical": canonical,
+            "engines": {
+                "identity": identity,
+                "current_turn": current_turn,
+                "dialogue": relation,
+                "topic": topic,
+                "task": task,
+                "intent": intent,
+                "domain": domain,
+                "entity": entity,
+                "reference": reference,
+                "memory": memory,
+                "continuity": continuity,
+                "knowledge": knowledge,
+                "representation": representation,
+                "strategy": strategy,
+                "arbitration": arbitration,
+                "consistency": consistency,
+                "canonicalization": canonical,
+            },
+        }
+
+
+INTERPRETATION_ORCHESTRATOR = InterpretationOrchestrator()
+
 
 class QuantumInterpretationEngine:
     """One engine: linguistic evidence + semantic matrix + context fusion."""
@@ -3392,10 +4893,91 @@ class QuantumInterpretationEngine:
 
         started = time.perf_counter()
 
+        # ------------------------------------------------------------------
+        # Cognitive Interpretation Environment: all specialist engines work
+        # in one authenticated workspace before the legacy scene bridge runs.
+        # The raw current user request remains immutable and separate from the
+        # derived provider instruction.
+        # ------------------------------------------------------------------
+        interpretation_council = INTERPRETATION_ORCHESTRATOR.run(
+            text,
+            state=state,
+            history=history,
+            semantic=semantic,
+            cognition=cognition,
+        )
+        cognitive_environment = interpretation_council.get("workspace", {})
+        canonical_cognitive = interpretation_council.get("canonical", {})
+        state["interpretation_workspace"] = cognitive_environment
+        state["interpretation_canonical"] = canonical_cognitive
+
+        # Seed only ownership facts into the existing scene bridge. The bridge
+        # still owns scene state; the council owns semantic interpretation.
+        council_relation = str(cognitive_environment.get("relation") or "NEW").upper()
+        council_task = cognitive_environment.get("active_task_context")
+        if council_relation == "NEW" and not council_task:
+            state["open_task"] = {}
+            state["active_task"] = {}
+            state["interactive_task_state"] = {}
+            state["active_topic"] = self.normalize(cognitive_environment.get("active_topic"))
+            state["current_topic"] = self.normalize(cognitive_environment.get("active_topic"))
+            state["active_goal"] = self.normalize(cognitive_environment.get("goal"))
+            state["current_goal"] = self.normalize(cognitive_environment.get("goal"))
+            state["april_active_entity"] = ""
+        elif council_task:
+            state["open_task"] = dict(council_task)
+            state["active_task"] = dict(council_task)
+            state["interactive_task_state"] = dict(council_task)
+            state["active_topic"] = self.normalize(cognitive_environment.get("active_topic"))
+            state["current_topic"] = self.normalize(cognitive_environment.get("active_topic"))
+            state["active_goal"] = self.normalize(cognitive_environment.get("goal"))
+            state["current_goal"] = self.normalize(cognitive_environment.get("goal"))
+
         # Build the dialogue environment BEFORE any task/scene resolution.  The
         # environment is scoped to the authenticated USER↔conversation and picks
         # the freshest real antecedent instead of trusting a stale sequence topic.
         dialogue_environment = DIALOGUE_ENVIRONMENT_ENGINE.build(text, state, history)
+
+        # Reconcile the compatibility environment with the specialist council.
+        # The council owns semantic relation; the legacy environment stays available
+        # for scene/state compatibility.
+        council_env = cognitive_environment if isinstance(cognitive_environment, dict) else {}
+        council_rel = str(council_env.get("relation") or "").upper()
+        if council_rel in {"NEW", "CONTINUE", "RECALL"}:
+            dialogue_environment = dict(dialogue_environment)
+            dialogue_environment["relation"] = council_rel
+            dialogue_environment["turn_relation"] = council_env.get("turn_relation") or dialogue_environment.get("turn_relation")
+            dialogue_environment["conversation_continuation"] = bool(council_env.get("conversation_continuation"))
+            dialogue_environment["context_dependency"] = (
+                "memory_reference" if council_rel == "RECALL"
+                else "active_dialogue_sequence" if council_rel == "CONTINUE"
+                else "current_turn_only"
+            )
+            dialogue_environment["current_topic"] = self.normalize(
+                council_env.get("active_topic") or dialogue_environment.get("current_topic") or text
+            )
+            dialogue_environment["active_entity"] = self.normalize(
+                council_env.get("active_entity") or dialogue_environment.get("active_entity") or ""
+            )
+            dialogue_environment["operation"] = self.normalize(
+                council_env.get("operation") or dialogue_environment.get("operation") or "answer"
+            )
+            dialogue_environment["goal"] = self.normalize(
+                council_env.get("goal") or dialogue_environment.get("goal") or "answer"
+            )
+            dialogue_environment["representation"] = self.normalize(
+                council_env.get("representation") or dialogue_environment.get("representation") or "text"
+            )
+            dialogue_environment["historical_memory_allowed"] = council_rel == "RECALL"
+            dialogue_environment["selected_memory"] = list(council_env.get("selected_memory") or [])
+            if isinstance(council_env.get("active_task_context"), dict) and council_env.get("active_task_context"):
+                dialogue_environment["active_task"] = dict(council_env["active_task_context"])
+            dialogue_environment["continuation_content_analysis"] = (
+                council_env.get("continuation_content_analysis")
+                or dialogue_environment.get("continuation_content_analysis")
+                or {}
+            )
+
         environment_previous = dialogue_environment.get("previous_pair") if isinstance(dialogue_environment.get("previous_pair"), dict) else {}
         last_assistant = self.normalize(
             dialogue_environment.get("previous_april_turn") or environment_previous.get("april")
@@ -4244,6 +5826,26 @@ class QuantumInterpretationEngine:
             state=state,
             history=history,
         )
+
+        # Attach the real interpretation council to the existing workspace.
+        # This is additive: legacy workspace fields remain available, while the
+        # council becomes the explicit source of semantic provenance.
+        result["cognitive_workspace"]["interpretation_council"] = interpretation_council
+        result["cognitive_workspace"]["current_user_request"] = text
+        result["cognitive_workspace"]["canonical_user_request"] = text
+        result["cognitive_workspace"]["provider_instruction"] = canonical_cognitive.get("execution_instruction", "")
+        result["cognitive_workspace"]["engine_order"] = cognitive_environment.get("engine_order", [])
+        result["cognitive_workspace"]["provider_request_authority"] = "CURRENT_USER_TURN"
+        result["cognitive_workspace"]["historical_topics_are_evidence_only"] = True
+        result["interpretation_council"] = interpretation_council
+        result["canonical_interpretation"] = canonical_cognitive
+        result["current_user_request"] = text
+        result["canonical_user_request"] = text
+        result["provider_instruction"] = canonical_cognitive.get("execution_instruction", "")
+        result["interpretation_engine_order"] = cognitive_environment.get("engine_order", [])
+        result["interpretation_authority"] = "COGNITIVE_INTERPRETATION_COUNCIL"
+        result["current_request_authority"] = "CURRENT_USER_TURN"
+        result["historical_memory_is_evidence_only"] = True
         result["context_plan"] = result["cognitive_workspace"]
 
         # Promote the workspace decision into the canonical semantic surface used
@@ -4329,7 +5931,7 @@ class QuantumInterpretationEngine:
             result["representation"] = workspace.get("representation") or result.get("representation")
             result["canonical_topic"] = workspace.get("active_topic") if "active_topic" in workspace else result.get("canonical_topic")
             result["active_topic"] = workspace.get("active_topic") if "active_topic" in workspace else result.get("active_topic")
-            result["active_entity"] = workspace.get("active_entity") if "active_entity" in workspace else result.get("active_entity")
+            result["active_entity"] = (cognitive_environment.get("active_entity") or (workspace.get("active_entity") if "active_entity" in workspace else result.get("active_entity")))
             result["continuation"] = bool(workspace.get("continuation"))
             result["reference_to_previous"] = bool(workspace.get("reference"))
             result["resolved_request"] = workspace.get("resolved_request") or result.get("resolved_request")
@@ -4455,6 +6057,19 @@ class QuantumInterpretationEngine:
                 evidence["dialogue"] = contract
                 result["evidence"] = evidence
 
+        # Final council authority surface.
+        result["current_user_request"] = text
+        result["canonical_user_request"] = text
+        result["interpretation_council"] = interpretation_council
+        result["canonical_interpretation"] = canonical_cognitive
+        result["provider_instruction"] = canonical_cognitive.get("execution_instruction", "")
+        result["interpretation_engine_order"] = cognitive_environment.get("engine_order", [])
+        result["current_request_authority"] = "CURRENT_USER_TURN"
+        result["interpretation_authority"] = "COGNITIVE_INTERPRETATION_COUNCIL"
+        result["interpretation_consistency_valid"] = bool(
+            (cognitive_environment.get("consistency") or {}).get("valid")
+        )
+
         result["estimated_action_count"] = estimate_action_count(result)
         result["response_complexity"] = determine_response_complexity(result)
         result["factory_order"] = build_factory_order(result)
@@ -4469,6 +6084,21 @@ class QuantumInterpretationEngine:
         )
         result["interpretation_state"]["diagnostics"]["matrix"] = matrix
         result["transport_diagnostics"] = build_transport_diagnostics(result)
+
+        result["interpretation_council_diagnostics"] = {
+            "engine": INTERPRETATION_ORCHESTRATOR.NAME,
+            "version": INTERPRETATION_ORCHESTRATOR.VERSION,
+            "engine_count": len(cognitive_environment.get("engine_order", [])),
+            "engine_order": cognitive_environment.get("engine_order", []),
+            "canonical_relation": cognitive_environment.get("relation"),
+            "canonical_turn_relation": cognitive_environment.get("turn_relation"),
+            "current_user_request_preserved": cognitive_environment.get("current_user_request") == text,
+            "provider_instruction_separate": bool(cognitive_environment.get("provider_instruction")) and cognitive_environment.get("provider_instruction") != text,
+            "memory_selected": len(cognitive_environment.get("selected_memory") or []),
+            "historical_topics_fenced": bool(cognitive_environment.get("historical_topics_are_evidence_only")),
+            "consistency_valid": bool((cognitive_environment.get("consistency") or {}).get("valid")),
+            "decision_owner": DECISION_OWNER,
+        }
 
         result["semantic_engine_diagnostics"] = {
             "engine": "quantum_interpretation_engine",
