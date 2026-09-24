@@ -3356,6 +3356,559 @@ class MemoryRelevanceEngine(InterpretationEngineBase):
         }
 
 
+class DialogueHistorySearchEngine(InterpretationEngineBase):
+    """Fast semantic retrieval over the authenticated dialogue branch.
+
+    This is deliberately not another language model.  It builds a lightweight
+    in-memory index from recent dialogue + same-sequence memory, then resolves
+    multi-turn dependencies (especially "answer/result" references) before the
+    provider receives its compact context plan.
+
+    The important distinction is between the *latest assistant message* and the
+    *latest result of the active task*.  A follow-up such as "Так сколько?"
+    must retrieve the result of the preceding operation instead of treating the
+    preceding scalar as a new operand.
+    """
+
+    NAME = "DialogueHistorySearchEngine"
+    VERSION = "dialogue_history_search_v1_fast_branch"
+    MAX_INDEX_TURNS = 48
+    MAX_SELECTED = 5
+    MAX_MEMORY_SELECTED = 8
+
+    _REFERENCE_MARKERS = (
+        "ответ", "ответа", "ответу", "ответом", "результат", "результата",
+        "получен", "полученного", "получилось", "получится", "полученого",
+        "сумм", "от него", "от этого", "из этого", "это число", "тот ответ",
+        "этот ответ", "как я просил", "я задавал", "спрашивал", "просил",
+        "посмотри", "просмотри", "в истории", "раньше", "до этого",
+    )
+    _FOLLOWUP_MARKERS = (
+        "так сколько", "ну сколько", "и сколько", "сколько получилось",
+        "сколько получится", "что получилось", "что получилось?", "какой ответ",
+        "какой результат", "ну и сколько", "и что получилось", "сколько?",
+    )
+    _HISTORY_LOOKUP_MARKERS = (
+        "я задавал", "я спрашивал", "какой вопрос", "какой был вопрос",
+        "какой был ответ", "что я спрашивал", "что мы обсуждали", "что обсуждали",
+        "просмотри", "посмотри историю", "в истории", "раньше спрашивал",
+    )
+    _OPERATION_PATTERNS = (
+        ("subtract", ("вычти", "вычесть", "отними", "отнять", "минус")),
+        ("add", ("прибавь", "прибавить", "добавь", "сложи", "плюс")),
+        ("multiply", ("умножь", "умножить", "умножение", "на сколько")),
+        ("divide", ("раздели", "разделить", "делением", "подели")),
+    )
+
+    @classmethod
+    def _numbers(cls, value: Any) -> list[str]:
+        text = cls._text(value).replace("−", "-").replace("–", "-")
+        return re.findall(r"-?\d+(?:[.,]\d+)?", text)
+
+    @classmethod
+    def _arithmetic_expression(cls, value: Any) -> bool:
+        text = cls._text(value).replace("−", "-")
+        return bool(re.search(r"\d+\s*[+\-*/×x]\s*\d+", text))
+
+    @classmethod
+    def _result_value(cls, answer: Any, *, user_request: Any = "") -> str:
+        text = cls._text(answer).replace("−", "-").replace("–", "-")
+        if not text:
+            return ""
+
+        patterns = (
+            r"(?:=|равн(?:о|яется)|получ(?:ается|ится)|итого|ответ(?:\s+равен)?)\s*([-+]?\d+(?:[.,]\d+)?)\s*\.?$",
+            r"(?:=|равн(?:о|яется)|получ(?:ается|ится)|итого|ответ(?:\s+равен)?)\s*([-+]?\d+(?:[.,]\d+)?)\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                return match.group(1)
+
+        # A scalar-only answer is safe to treat as the result when the user turn
+        # itself is a calculation/operation request.
+        if cls._arithmetic_expression(user_request) or any(
+            needle in cls._low(user_request) for _, needles in cls._OPERATION_PATTERNS for needle in needles
+        ):
+            scalar = re.fullmatch(r"[-+]?\d+(?:[.,]\d+)?\.?", text)
+            if scalar:
+                return scalar.group(0).rstrip(".")
+            numbers = cls._numbers(text)
+            if numbers:
+                return numbers[-1]
+        return ""
+
+    @classmethod
+    def _operation(cls, value: Any) -> dict[str, Any]:
+        low = cls._low(value)
+        for name, needles in cls._OPERATION_PATTERNS:
+            matched = [x for x in needles if x in low]
+            if matched:
+                amount = ""
+                nums = cls._numbers(value)
+                if nums:
+                    amount = nums[-1]
+                return {"kind": name, "matched": matched[:3], "amount": amount}
+        if cls._arithmetic_expression(value):
+            return {"kind": "calculate", "matched": ["arithmetic_expression"], "amount": ""}
+        return {"kind": "", "matched": [], "amount": ""}
+
+    @classmethod
+    def _reference_kind(cls, value: Any) -> str:
+        low = cls._low(value)
+        if any(marker in low for marker in cls._HISTORY_LOOKUP_MARKERS):
+            return "history_lookup"
+
+        # A concrete operation such as "вычти ... от ответа" is a new
+        # dependent operation, not a pure request to repeat the last result.
+        # Check the operation before generic "получилось/сколько" follow-up
+        # markers so the searcher cannot accidentally re-apply or carry a
+        # result while the user is explicitly asking for a new calculation.
+        operation = cls._operation(low)
+        if operation.get("kind"):
+            if any(marker in low for marker in cls._REFERENCE_MARKERS):
+                return "answer_reference"
+            return "none"
+
+        if any(marker in low for marker in cls._FOLLOWUP_MARKERS):
+            return "result_followup"
+        if any(marker in low for marker in cls._REFERENCE_MARKERS):
+            return "answer_reference"
+        return "none"
+
+    @classmethod
+    def _sequence_id(cls, item: dict[str, Any]) -> str:
+        return cls._text(item.get("sequence_id") or item.get("dialogue_sequence_id"))
+
+    @classmethod
+    def _scene_id(cls, item: dict[str, Any]) -> str:
+        return cls._text(item.get("scene_id") or item.get("visual_scene_id"))
+
+    @classmethod
+    def _normalize_history(cls, history: Any) -> list[dict[str, Any]]:
+        """Normalize the small transport history without invoking another engine."""
+        turns = history if isinstance(history, list) else []
+        out: list[dict[str, Any]] = []
+        for item in turns:
+            if not isinstance(item, dict):
+                continue
+            user = ""
+            assistant = ""
+            if isinstance(item.get("user"), dict):
+                user = cls._text(item["user"].get("text") or item["user"].get("content") or item["user"].get("answer"))
+            elif str(item.get("role") or "").lower() in {"user", "human"}:
+                user = cls._text(item.get("content") or item.get("text"))
+            elif item.get("user") not in (None, ""):
+                user = cls._text(item.get("user"))
+
+            if isinstance(item.get("april"), dict):
+                assistant = cls._text(item["april"].get("answer") or item["april"].get("content") or item["april"].get("summary"))
+            elif str(item.get("role") or "").lower() in {"assistant", "april", "bot"}:
+                assistant = cls._text(item.get("answer") or item.get("content") or item.get("summary"))
+            elif item.get("assistant") not in (None, ""):
+                assistant = cls._text(item.get("assistant"))
+
+            if user or assistant:
+                out.append({
+                    "user": user,
+                    "assistant": assistant,
+                    "turn_id": item.get("turn_id"),
+                    "raw": item,
+                })
+        return out
+
+    @classmethod
+    def _record_from_pair(
+        cls,
+        pair: dict[str, Any],
+        *,
+        index: int,
+        source: str,
+        sequence_id: str = "",
+        scene_id: str = "",
+    ) -> dict[str, Any]:
+        user = cls._text(pair.get("user"))
+        assistant = cls._text(pair.get("assistant"))
+        raw = pair.get("raw") if isinstance(pair.get("raw"), dict) else {}
+        seq = cls._sequence_id(raw) or sequence_id
+        scene = cls._scene_id(raw) or scene_id
+        result = cls._result_value(assistant, user_request=user)
+        return {
+            "index": index,
+            "source": source,
+            "user": user,
+            "assistant": assistant,
+            "result": result,
+            "operation": cls._operation(user),
+            "sequence_id": seq,
+            "scene_id": scene,
+            "turn_id": raw.get("turn_id") or pair.get("turn_id"),
+        }
+
+    @classmethod
+    def _timeline_records(
+        cls,
+        state: dict[str, Any],
+        identity: dict[str, Any],
+        history: list[Any],
+    ) -> list[dict[str, Any]]:
+        scope = identity.get("scope", {}) if isinstance(identity, dict) else {}
+        sequence = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+        sequence_id = cls._text(sequence.get("sequence_id") or scope.get("dialogue_sequence_id"))
+        scene = state.get("active_visual_scene") if isinstance(state.get("active_visual_scene"), dict) else (
+            state.get("current_visual_scene") if isinstance(state.get("current_visual_scene"), dict) else {}
+        )
+        scene_id = cls._scene_id(scene)
+
+        records: list[dict[str, Any]] = []
+        normalized = cls._normalize_history(history)
+        for idx, pair in enumerate(normalized[-cls.MAX_INDEX_TURNS:]):
+            records.append(
+                cls._record_from_pair(
+                    pair, index=idx, source="dialogue_history", sequence_id=sequence_id, scene_id=scene_id
+                )
+            )
+
+        # Same authenticated sequence records can exist in seven-day memory even
+        # when the transport history only contains a short recent window.
+        memory_raw = state.get("memory_timeline", {})
+        values: list[Any] = []
+        if isinstance(memory_raw, dict):
+            for value in memory_raw.values():
+                values.extend(value if isinstance(value, list) else [value])
+        elif isinstance(memory_raw, list):
+            values = list(memory_raw)
+        base = len(records)
+        for offset, item in enumerate(reversed(values[-cls.MAX_INDEX_TURNS:])):
+            if not isinstance(item, dict):
+                continue
+            if scope.get("user_id") and item.get("user_id") and str(item.get("user_id")) != str(scope.get("user_id")):
+                continue
+            if scope.get("conversation_id") and item.get("conversation_id") and str(item.get("conversation_id")) != str(scope.get("conversation_id")):
+                continue
+            item_seq = cls._sequence_id(item)
+            if sequence_id and item_seq and item_seq != sequence_id:
+                continue
+            user = cls._text(item.get("user_request") or item.get("user") or item.get("text"))
+            assistant = cls._text(item.get("april_answer") or item.get("answer") or item.get("assistant") or item.get("summary"))
+            if not user and not assistant:
+                continue
+            pair = {"user": user, "assistant": assistant, "raw": item}
+            records.append(
+                cls._record_from_pair(
+                    pair,
+                    index=base + offset,
+                    source="same_sequence_memory",
+                    sequence_id=item_seq or sequence_id,
+                    scene_id=cls._scene_id(item) or scene_id,
+                )
+            )
+
+        # A compact active-sequence snapshot can contain the prior pair even if
+        # neither history nor memory_timeline carries it verbatim.
+        if sequence:
+            user = cls._text(sequence.get("last_user_request"))
+            assistant = cls._text(sequence.get("last_april_answer"))
+            if user or assistant:
+                records.append(
+                    cls._record_from_pair(
+                        {"user": user, "assistant": assistant, "raw": sequence},
+                        index=len(records), source="active_sequence", sequence_id=sequence_id, scene_id=scene_id,
+                    )
+                )
+
+        if scene:
+            user = cls._text(scene.get("last_user_turn") or scene.get("user_request"))
+            assistant = cls._text(scene.get("last_april_turn") or scene.get("april_answer") or scene.get("answer"))
+            if user or assistant:
+                records.append(
+                    cls._record_from_pair(
+                        {"user": user, "assistant": assistant, "raw": scene},
+                        index=len(records), source="active_scene", sequence_id=sequence_id, scene_id=scene_id,
+                    )
+                )
+
+        # De-duplicate repeated snapshots while retaining the newest source.
+        # Some state snapshots do not carry turn_id, so content is part of the
+        # identity. This prevents active_sequence/scene snapshots from creating
+        # phantom duplicate operations in the result ledger.
+        dedup: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for record in records:
+            user_key = cls._low(record.get("user"))
+            assistant_key = cls._low(record.get("assistant"))
+            turn_key = cls._text(record.get("turn_id"))
+            if not user_key and not assistant_key:
+                continue
+            key = (user_key, assistant_key, turn_key)
+            if turn_key:
+                dedup[key] = record
+                continue
+
+            # Without a turn id, collapse identical user↔assistant pairs across
+            # history/memory/active-scene snapshots. Prefer the newest appended
+            # source, which is the most complete snapshot.
+            fallback_key = (user_key, assistant_key, "")
+            dedup[fallback_key] = record
+        return list(dedup.values())[-cls.MAX_INDEX_TURNS:]
+
+    @classmethod
+    def _score_record(
+        cls,
+        query: str,
+        record: dict[str, Any],
+        *,
+        scope: dict[str, Any],
+        relation: str,
+        query_reference: str,
+        query_numbers: set[str],
+        recency_rank: int,
+    ) -> float:
+        user = cls._text(record.get("user"))
+        assistant = cls._text(record.get("assistant"))
+        combined = f"{user} {assistant}"
+        score = 0.0
+        score += min(0.45, 0.45 * cls._sim(query, combined))
+        score += min(0.25, 0.25 * cls._sim(query, user))
+
+        current_seq = cls._text(scope.get("dialogue_sequence_id"))
+        record_seq = cls._text(record.get("sequence_id"))
+        if relation == "CONTINUE" and current_seq and record_seq == current_seq:
+            score += 0.24
+
+        if query_reference in {"answer_reference", "result_followup"} and assistant:
+            score += 0.12
+        if query_reference == "history_lookup" and user:
+            score += 0.14
+
+        record_numbers = set(cls._numbers(combined))
+        if query_numbers and record_numbers & query_numbers:
+            score += 0.08
+        if record.get("result") and query_reference in {"answer_reference", "result_followup"}:
+            score += 0.12
+        operation = record.get("operation") if isinstance(record.get("operation"), dict) else {}
+        if operation.get("kind") and query_reference in {"answer_reference", "result_followup"}:
+            score += 0.10
+
+        score += max(0.0, 0.08 - recency_rank * 0.006)
+        return float(min(1.0, score))
+
+    @classmethod
+    def _branch_records(
+        cls,
+        records: list[dict[str, Any]],
+        *,
+        scope: dict[str, Any],
+        relation: str,
+    ) -> list[dict[str, Any]]:
+        current_seq = cls._text(scope.get("dialogue_sequence_id"))
+        if relation == "CONTINUE" and current_seq:
+            same = [r for r in records if cls._text(r.get("sequence_id")) == current_seq]
+            if same:
+                return same
+        return records
+
+    @classmethod
+    def _result_chain(cls, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        chain: list[dict[str, Any]] = []
+        previous_result = ""
+        previous_record: dict[str, Any] | None = None
+        for record in records:
+            user = cls._text(record.get("user"))
+            assistant = cls._text(record.get("assistant"))
+            operation = record.get("operation") if isinstance(record.get("operation"), dict) else {}
+            result = cls._text(record.get("result"))
+            if operation.get("kind") or result or cls._arithmetic_expression(user):
+                target = ""
+                if operation.get("kind") and any(marker in cls._low(user) for marker in cls._REFERENCE_MARKERS):
+                    target = previous_result
+                chain.append({
+                    "user_request": user,
+                    "assistant_answer": assistant,
+                    "operation": operation.get("kind") or "",
+                    "operation_amount": operation.get("amount") or "",
+                    "target_result": target,
+                    "result": result,
+                    "turn_id": record.get("turn_id"),
+                })
+            if result:
+                previous_result = result
+            if user or assistant:
+                previous_record = record
+        return chain[-10:]
+
+    @classmethod
+    def _latest_operation_result(cls, branch: list[dict[str, Any]]) -> dict[str, Any]:
+        for record in reversed(branch):
+            operation = record.get("operation") if isinstance(record.get("operation"), dict) else {}
+            result = cls._text(record.get("result"))
+            if (operation.get("kind") or cls._arithmetic_expression(record.get("user"))) and result:
+                return {
+                    "value": result,
+                    "user_request": cls._text(record.get("user")),
+                    "assistant_answer": cls._text(record.get("assistant")),
+                    "operation": operation.get("kind") or "calculate",
+                    "operation_amount": operation.get("amount") or "",
+                    "turn_id": record.get("turn_id"),
+                }
+        return {}
+
+    def analyze(
+        self,
+        text: str,
+        *,
+        relation: dict[str, Any],
+        topic: dict[str, Any],
+        identity: dict[str, Any],
+        state: dict[str, Any],
+        history: list[Any],
+        task: dict[str, Any] | None = None,
+        reference: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        relation_value = self._text(relation.get("relation") or "NEW").upper()
+        scope = identity.get("scope", {}) if isinstance(identity, dict) else {}
+        query = self._text(text)
+        query_reference = self._reference_kind(query)
+        query_numbers = set(self._numbers(query))
+
+        records = self._timeline_records(state, identity, history)
+        branch = self._branch_records(records, scope=scope, relation=relation_value)
+
+        ranked = []
+        total = len(branch)
+        for recency_rank, record in enumerate(reversed(branch)):
+            ranked.append({
+                "record": record,
+                "score": round(self._score_record(
+                    query,
+                    record,
+                    scope=scope,
+                    relation=relation_value,
+                    query_reference=query_reference,
+                    query_numbers=query_numbers,
+                    recency_rank=recency_rank,
+                ), 4),
+            })
+        ranked.sort(key=lambda x: x["score"], reverse=True)
+
+        if relation_value == "NEW" and query_reference != "history_lookup":
+            selected = []
+        elif query_reference == "history_lookup":
+            selected = [x for x in ranked if x["score"] >= 0.18][: self.MAX_SELECTED]
+        elif query_reference in {"answer_reference", "result_followup"}:
+            selected = [x for x in ranked if x["score"] >= 0.14][: self.MAX_SELECTED]
+        else:
+            selected = [x for x in ranked if x["score"] >= 0.28][:3]
+
+        latest_operation_result = self._latest_operation_result(branch)
+        carry_forward: dict[str, Any] = {}
+        if relation_value == "CONTINUE" and query_reference == "result_followup" and latest_operation_result:
+            carry_forward = {
+                **latest_operation_result,
+                "do_not_reapply_previous_operation": True,
+                "reason": "pure_followup_requests_last_derived_result",
+            }
+
+        # For a new dependent operation, bind the referenced operand to the
+        # previously obtained result, not blindly to the immediately prior scalar.
+        operand_anchor: dict[str, Any] = {}
+        operation = self._operation(query)
+        if relation_value == "CONTINUE" and operation.get("kind") and any(
+            marker in self._low(query) for marker in self._REFERENCE_MARKERS
+        ):
+            previous_result = ""
+            previous_record = None
+            for record in reversed(branch):
+                result = self._text(record.get("result"))
+                if result:
+                    previous_result = result
+                    previous_record = record
+                    break
+            if previous_result:
+                operand_anchor = {
+                    "value": previous_result,
+                    "source_user_request": self._text((previous_record or {}).get("user")),
+                    "source_assistant_answer": self._text((previous_record or {}).get("assistant")),
+                    "operation": operation.get("kind"),
+                    "operation_amount": operation.get("amount"),
+                    "reference": "previous_result",
+                    "reason": "current_operation_explicitly_references_prior_answer",
+                }
+
+        result_chain = self._result_chain(branch)
+        selected_evidence = []
+        for item in selected:
+            record = item["record"]
+            selected_evidence.append({
+                "score": item["score"],
+                "source": record.get("source"),
+                "turn_id": record.get("turn_id"),
+                "sequence_id": record.get("sequence_id"),
+                "user": self._text(record.get("user")),
+                "assistant": self._text(record.get("assistant")),
+                "result": self._text(record.get("result")),
+                "operation": record.get("operation") or {},
+            })
+
+        needs_history = (
+            query_reference == "history_lookup"
+            or relation_value in {"CONTINUE", "RECALL"} and bool(
+                query_reference != "none" or carry_forward or operand_anchor or selected_evidence
+            )
+        )
+        if relation_value == "CONTINUE" and latest_operation_result and query_reference == "result_followup":
+            needs_history = True
+
+        recommended = ""
+        if carry_forward:
+            recommended = "RESULT_FOLLOWUP"
+        elif operand_anchor:
+            recommended = "DEPENDENT_OPERATION"
+        elif query_reference == "history_lookup":
+            recommended = "HISTORY_LOOKUP"
+        elif selected_evidence:
+            recommended = "HISTORY_SUPPORTED_CONTINUATION"
+
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "relation": relation_value,
+            "query": query,
+            "query_kind": query_reference,
+            "authenticated_scope": {
+                "user_id": self._text(scope.get("user_id")),
+                "conversation_id": self._text(scope.get("conversation_id")),
+                "dialogue_sequence_id": self._text(scope.get("dialogue_sequence_id")),
+            },
+            "index_size": total,
+            "selected_count": len(selected_evidence),
+            "selected_evidence": selected_evidence,
+            "result_chain": result_chain,
+            "latest_operation_result": latest_operation_result,
+            "operand_anchor": operand_anchor,
+            "carry_forward_result": carry_forward,
+            "history_context_required": needs_history,
+            "same_authenticated_branch_first": relation_value == "CONTINUE",
+            "seven_day_cross_branch_allowed": relation_value == "RECALL",
+            "historical_memory_is_evidence_only": True,
+            "recommended_turn_relation": recommended,
+            "provider_instruction": (
+                "Use the carried result as the answer; do not reapply the preceding operation."
+                if carry_forward else
+                "Use the anchored prior result as the operand for the current operation."
+                if operand_anchor else
+                "Use only the selected dialogue-history evidence to resolve the current request."
+                if needs_history else
+                "No historical evidence is required for this turn."
+            ),
+            "confidence": round(
+                0.97 if carry_forward or operand_anchor else
+                0.92 if selected_evidence else
+                0.80 if relation_value in {"CONTINUE", "RECALL"} else 0.98,
+                4,
+            ),
+        }
+
+
 class ConversationContinuityEngine(InterpretationEngineBase):
     NAME = "ConversationContinuityEngine"
     VERSION = "conversation_continuity_v3"
@@ -3369,15 +3922,24 @@ class ConversationContinuityEngine(InterpretationEngineBase):
         task: dict[str, Any],
         entity: dict[str, Any],
         reference: dict[str, Any],
+        history_search: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         previous_user = self._text(relation.get("previous_user_turn"))
         previous_april = self._text(relation.get("previous_april_turn"))
         current = self._text(text)
         rel = relation.get("relation")
+        history_search = history_search if isinstance(history_search, dict) else {}
+        carry_forward = history_search.get("carry_forward_result") if isinstance(history_search.get("carry_forward_result"), dict) else {}
+        operand_anchor = history_search.get("operand_anchor") if isinstance(history_search.get("operand_anchor"), dict) else {}
+        result_chain = list(history_search.get("result_chain") or [])[-6:]
         covered = [previous_april] if previous_april and rel == "CONTINUE" else []
 
         if rel == "CONTINUE":
-            if task.get("active"):
+            if carry_forward:
+                next_step = "return_last_derived_result_without_reapplying_previous_operation"
+            elif operand_anchor:
+                next_step = "apply_current_operation_to_anchored_prior_result"
+            elif task.get("active"):
                 next_step = {
                     "TASK_ANSWER": "evaluate_current_user_answer",
                     "TASK_CONFIRMATION": "acknowledge_and_advance",
@@ -3405,6 +3967,14 @@ class ConversationContinuityEngine(InterpretationEngineBase):
             },
             "covered_content": covered,
             "avoid_repeat_content": avoid_repeat,
+            "history_search": {
+                "query_kind": history_search.get("query_kind"),
+                "selected_evidence": list(history_search.get("selected_evidence") or [])[:4],
+                "carry_forward_result": carry_forward,
+                "operand_anchor": operand_anchor,
+                "result_chain": result_chain,
+                "history_context_required": bool(history_search.get("history_context_required")),
+            },
             "novelty_score": round(float(1.0 - novelty), 4),
             "next_logical_step": next_step,
             "acknowledge_memory_when_recalled": rel == "RECALL",
@@ -3598,6 +4168,7 @@ class DecisionArbitrationEngine(InterpretationEngineBase):
         continuity: dict[str, Any],
         knowledge: dict[str, Any],
         representation: dict[str, Any],
+        history_search: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         # Deterministic priority:
         # current user turn > explicit discourse relation > active task > explicit recall
@@ -3605,10 +4176,12 @@ class DecisionArbitrationEngine(InterpretationEngineBase):
         rel = str(relation.get("relation") or "NEW").upper()
         turn = str(relation.get("turn_relation") or "").upper()
         signals = relation.get("signals") if isinstance(relation.get("signals"), dict) else {}
+        hs = history_search if isinstance(history_search, dict) else {}
+        hs_kind = self._text(hs.get("query_kind")).lower()
 
-        if signals.get("explicit_recall"):
+        if signals.get("explicit_recall") or hs_kind == "history_lookup":
             canonical = "RECALL"
-            reason = "explicit_memory_request"
+            reason = "explicit_history_lookup" if hs_kind == "history_lookup" else "explicit_memory_request"
         elif signals.get("explicit_new_topic") and turn not in {"TASK_ANSWER", "TASK_CONTINUE", "TASK_CONFIRMATION", "TASK_CORRECTION"}:
             canonical = "NEW"
             reason = "explicit_topic_boundary"
@@ -3640,6 +4213,20 @@ class DecisionArbitrationEngine(InterpretationEngineBase):
                 semantic_relation = "TASK_CONTINUE"
         elif canonical == "RECALL":
             semantic_relation = "REFERENCE_OLD_TOPIC"
+        elif canonical == "CONTINUE":
+            # Let the fast history index refine the *kind* of continuation
+            # without changing the canonical three-way relation. This keeps
+            # dialogue semantics explicit: a result follow-up, a dependent
+            # operation, a history lookup, and a generic branch continuation
+            # are different discourse acts even though all remain CONTINUE.
+            hs = history_search if isinstance(history_search, dict) else {}
+            hs_relation = self._text(hs.get("recommended_turn_relation")).upper()
+            semantic_relation = {
+                "RESULT_FOLLOWUP": "RESULT_FOLLOWUP",
+                "DEPENDENT_OPERATION": "DEPENDENT_OPERATION",
+                "HISTORY_LOOKUP": "HISTORY_LOOKUP",
+                "HISTORY_SUPPORTED_CONTINUATION": "HISTORY_SUPPORTED_CONTINUATION",
+            }.get(hs_relation, "TASK_CONTINUE")
         else:
             semantic_relation = "NEW_TOPIC"
 
@@ -3665,6 +4252,17 @@ class DecisionArbitrationEngine(InterpretationEngineBase):
             "current_request": current_turn.get("raw_text", ""),
             "provider_request_authority": "CURRENT_USER_TURN",
             "historical_memory_role": "evidence_only",
+            "history_search_relation": self._text(
+                (history_search or {}).get("recommended_turn_relation")
+            ) if isinstance(history_search, dict) else "",
+            "result_dependency": {
+                "latest_operation_result": (history_search or {}).get("latest_operation_result", {})
+                if isinstance(history_search, dict) else {},
+                "carry_forward_result": (history_search or {}).get("carry_forward_result", {})
+                if isinstance(history_search, dict) else {},
+                "operand_anchor": (history_search or {}).get("operand_anchor", {})
+                if isinstance(history_search, dict) else {},
+            },
             "confidence": 0.97,
         }
 
@@ -3970,7 +4568,9 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
         strategy: dict[str, Any],
         arbitration: dict[str, Any],
         consistency: dict[str, Any],
+        history_search: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        history_search = history_search if isinstance(history_search, dict) else {}
         rel = self._text(arbitration.get("relation") or relation.get("relation") or "NEW").upper()
         turn_rel = self._text(arbitration.get("turn_relation") or relation.get("turn_relation")).upper()
         raw_request = self._text(current_turn.get("raw_text"))
@@ -4042,9 +4642,34 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
                 "previous_april_turn": relation.get("previous_april_turn"),
                 "topic": active_topic,
                 "entity": active_entity,
-                "turn_relation": turn_rel,
+                "turn_relation": history_search.get("recommended_turn_relation") or turn_rel,
                 "sequence_id": relation.get("environment", {}).get("sequence_id") if isinstance(relation.get("environment"), dict) else "",
             }, 0.99, "immediate_authenticated_dialogue_pair", True, max_depth=3, max_items=5, max_keys=8)
+
+            if history_search.get("history_context_required"):
+                compact_history_evidence = {
+                    "query_kind": history_search.get("query_kind"),
+                    "selected_evidence": list(history_search.get("selected_evidence") or [])[:4],
+                    "result_chain": list(history_search.get("result_chain") or [])[-6:],
+                    "latest_operation_result": history_search.get("latest_operation_result") or {},
+                    "recommended_turn_relation": history_search.get("recommended_turn_relation"),
+                }
+                add(required, "DIALOGUE_HISTORY_EVIDENCE", compact_history_evidence, 0.985, "fast_authenticated_history_search", True, max_depth=4, max_items=6, max_keys=10)
+
+            carry_forward = history_search.get("carry_forward_result")
+            if isinstance(carry_forward, dict) and carry_forward.get("value"):
+                add(required, "RESULT_CARRY_FORWARD", {
+                    "value": carry_forward.get("value"),
+                    "source_user_request": carry_forward.get("user_request"),
+                    "source_assistant_answer": carry_forward.get("assistant_answer"),
+                    "operation": carry_forward.get("operation"),
+                    "operation_amount": carry_forward.get("operation_amount"),
+                    "do_not_reapply_previous_operation": True,
+                }, 0.997, "latest_derived_result_is_current_answer", True, max_depth=3, max_items=5, max_keys=8)
+
+            operand_anchor = history_search.get("operand_anchor")
+            if isinstance(operand_anchor, dict) and operand_anchor.get("value"):
+                add(required, "OPERAND_ANCHOR", operand_anchor, 0.996, "current_operation_references_prior_result", True, max_depth=3, max_items=6, max_keys=9)
 
             add(optional, "CONTINUATION_ANALYSIS", {
                 "next_logical_step": continuity.get("next_logical_step"),
@@ -4071,12 +4696,20 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
                 {"key": "UNRELATED_7D_MEMORY", "reason": "continuation_uses_live_branch_first"},
                 {"key": "OTHER_TOPIC_BRANCHES", "reason": "current_branch_is_authoritative"},
                 {"key": "STALE_GLOBAL_ENTITY", "reason": "entity must resolve from current branch"},
-                {"key": "FULL_HISTORY", "reason": "immediate pair and task state are sufficient"},
+                {"key": "FULL_HISTORY", "reason": "history_search_selects_relevant_evidence_only"},
             ])
 
         elif rel == "RECALL":
             memory_items = self._memory_projection(memory, recall=True, continuation=False)
-            add(required, "MEMORY_RECALL", memory_items, 0.98, "explicit_7d_memory_request", True, max_depth=4, max_items=4, max_keys=8)
+            history_items = list(history_search.get("selected_evidence") or [])[:5]
+            recall_packet = {
+                "memory_items": memory_items,
+                "dialogue_history_items": history_items,
+                "result_chain": list(history_search.get("result_chain") or [])[-6:],
+                "query_kind": history_search.get("query_kind"),
+                "authenticated_scope": history_search.get("authenticated_scope") or {},
+            }
+            add(required, "MEMORY_RECALL", recall_packet, 0.99, "explicit_history_or_7d_recall", True, max_depth=4, max_items=6, max_keys=10)
             add(optional, "RECALL_RESPONSE_GUIDANCE", {
                 "use_memory_as_evidence": True,
                 "state_only_what_is_recalled": True,
@@ -4186,6 +4819,11 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
             "active_task": bool(active_task),
             "knowledge_source": source,
             "continuation_analysis": continuity if rel == "CONTINUE" else {},
+            "history_search": history_search if rel in {"CONTINUE", "RECALL"} else {},
+            "result_dependency": {
+                "carry_forward": history_search.get("carry_forward_result") or {},
+                "operand_anchor": history_search.get("operand_anchor") or {},
+            },
             "selection_basis": [
                 "current_user_request",
                 "authenticated_scope",
@@ -4195,6 +4833,7 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
                 "domain",
                 "entity/reference",
                 "memory_relevance",
+                "dialogue_history_search",
                 "knowledge_source",
                 "representation",
                 "response_strategy",
@@ -4221,6 +4860,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
         self.entity = EntityResolutionEngine()
         self.reference = ReferenceResolutionEngine()
         self.memory = MemoryRelevanceEngine()
+        self.history_search = DialogueHistorySearchEngine()
         self.continuity = ConversationContinuityEngine()
         self.knowledge = KnowledgeSourceEngine()
         self.representation = RepresentationDecisionEngine()
@@ -4300,8 +4940,13 @@ class InterpretationOrchestrator(InterpretationEngineBase):
         memory = self.memory.analyze(
             text, relation=relation, topic=topic, identity=identity, state=state
         )
+        history_search = self.history_search.analyze(
+            text, relation=relation, topic=topic, identity=identity, state=state,
+            history=history, task=task, reference=reference,
+        )
         continuity = self.continuity.analyze(
-            text, relation=relation, topic=topic, task=task, entity=entity, reference=reference
+            text, relation=relation, topic=topic, task=task, entity=entity, reference=reference,
+            history_search=history_search,
         )
         knowledge = self.knowledge.analyze(
             text, intent=intent, domain=domain, current_turn=current_turn,
@@ -4328,6 +4973,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             continuity=continuity,
             knowledge=knowledge,
             representation=representation,
+            history_search=history_search,
         )
         consistency = self.consistency.validate(
             current_turn=current_turn,
@@ -4374,6 +5020,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             strategy=strategy,
             arbitration=arbitration,
             consistency=consistency,
+            history_search=history_search,
         )
         canonical["provider_context_plan"] = provider_context_plan
 
@@ -4393,6 +5040,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             "entity_resolution": entity,
             "reference_resolution": reference,
             "memory_relevance": memory,
+            "dialogue_history_search": history_search,
             "conversation_continuity": continuity,
             "knowledge_source": knowledge,
             "representation_decision": representation,
@@ -4427,6 +5075,12 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             "historical_memory_allowed": canonical["memory"]["allowed"],
             "active_task_context": canonical["task"],
             "continuation_content_analysis": continuity,
+            "dialogue_history_search": history_search,
+            "result_dependency": {
+                "latest_operation_result": history_search.get("latest_operation_result", {}),
+                "carry_forward_result": history_search.get("carry_forward_result", {}),
+                "operand_anchor": history_search.get("operand_anchor", {}),
+            },
             "avoid_repeat_content": continuity.get("avoid_repeat_content", []),
             "provider_request_authority": "CURRENT_USER_TURN",
             "historical_topics_are_evidence_only": True,
@@ -4441,6 +5095,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
                 self.entity.NAME,
                 self.reference.NAME,
                 self.memory.NAME,
+                self.history_search.NAME,
                 self.continuity.NAME,
                 self.knowledge.NAME,
                 self.representation.NAME,
@@ -6255,6 +6910,7 @@ class QuantumInterpretationEngine:
         # council becomes the explicit source of semantic provenance.
         result["cognitive_workspace"]["interpretation_council"] = interpretation_council
         result["cognitive_workspace"]["provider_context_plan"] = interpretation_council.get("provider_context_plan", {})
+        result["cognitive_workspace"]["dialogue_history_search"] = history_search
         result["cognitive_workspace"]["current_user_request"] = text
         result["cognitive_workspace"]["current_request_raw"] = text
         result["cognitive_workspace"]["canonical_user_request"] = text
@@ -6268,6 +6924,13 @@ class QuantumInterpretationEngine:
         result["canonical_user_request"] = text
         result["provider_instruction"] = canonical_cognitive.get("execution_instruction", "")
         result["provider_context_plan"] = cognitive_environment.get("provider_context_plan", {})
+        result["dialogue_history_search"] = history_search
+        result["result_dependency"] = {
+            "carry_forward": history_search.get("carry_forward_result") or {},
+            "operand_anchor": history_search.get("operand_anchor") or {},
+            "latest_operation_result": history_search.get("latest_operation_result") or {},
+            "result_chain": list(history_search.get("result_chain") or [])[-8:],
+        }
         result["interpretation_engine_order"] = cognitive_environment.get("engine_order", [])
         result["interpretation_authority"] = "COGNITIVE_INTERPRETATION_COUNCIL"
         result["current_request_authority"] = "CURRENT_USER_TURN"
