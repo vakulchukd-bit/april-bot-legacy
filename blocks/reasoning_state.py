@@ -216,6 +216,109 @@ def _scene_evidence(state, semantic):
     }
 
 
+def build_turn_synchronization_snapshot(
+    text: str,
+    state: dict | None = None,
+    semantic: dict | None = None,
+) -> dict:
+    """Read-only canonical snapshot shared by interpretation/provider/result stages."""
+    state = state if isinstance(state, dict) else {}
+    semantic = semantic if isinstance(semantic, dict) else {}
+    contract = _as_dict(semantic.get("dialogue_contract"))
+    task = _as_dict(
+        semantic.get("interactive_task_state")
+        or contract.get("interactive_task_state")
+        or state.get("interactive_task_state")
+    )
+    nested = _as_dict(task.get("interactive_task_state") or task.get("open_task"))
+    if nested:
+        merged = dict(task)
+        merged.update(nested)
+        task = merged
+
+    relation = _text(
+        semantic.get("three_way_relation")
+        or semantic.get("relation")
+        or contract.get("relation")
+        or "NEW",
+        32,
+    ).upper()
+    if relation == "CONTINUATION":
+        relation = "CONTINUE"
+
+    topic = _text(
+        semantic.get("active_topic")
+        or semantic.get("current_topic")
+        or contract.get("canonical_topic")
+        or task.get("topic")
+        or state.get("april_active_topic"),
+        240,
+    )
+    goal = _text(
+        semantic.get("active_goal")
+        or contract.get("active_goal")
+        or task.get("goal")
+        or state.get("april_active_goal"),
+        320,
+    )
+    semantic_frame = _as_dict(semantic.get("semantic_frame"))
+    representation = _text(
+        semantic_frame.get("representation")
+        or semantic.get("requested_representation")
+        or semantic.get("production_representation")
+        or semantic.get("representation")
+        or "text",
+        80,
+    ).lower()
+    if not topic:
+        topic = _text(semantic_frame.get("topic"), 240)
+    if not goal:
+        goal = _text(semantic_frame.get("goal"), 320)
+
+    artifact = _as_dict(state.get("last_artifact"))
+    selected = _as_dict(contract.get("selected_artifact"))
+    if selected:
+        artifact = selected
+    scene_id = _text(
+        semantic.get("scene_id")
+        or contract.get("scene_id")
+        or artifact.get("scene_id")
+        or state.get("visual_scene_turn_id"),
+        200,
+    )
+
+    return {
+        "version": "april_turn_sync_v1",
+        "authority": "quantum_processor",
+        "current_request": _text(text, 500),
+        "relation": relation,
+        "topic": topic,
+        "goal": goal,
+        "representation": representation,
+        "sequence_id": _text(
+            contract.get("sequence_id")
+            or _as_dict(state.get("active_dialogue_sequence")).get("sequence_id"),
+            120,
+        ),
+        "scene_id": scene_id,
+        "active_task": {
+            "active": bool(task),
+            "kind": _text(task.get("kind"), 80),
+            "phase": _text(task.get("phase") or task.get("task_phase"), 80),
+            "question": _text(task.get("last_question") or task.get("prompt"), 260),
+            "expected": _text(task.get("expected_input_type"), 60),
+        },
+        "active_artifact": {
+            "type": _text(artifact.get("type") or artifact.get("artifact_type"), 60),
+            "id": _text(artifact.get("block_id") or artifact.get("render_id") or artifact.get("id"), 160),
+        },
+        "previous_user": _text(semantic.get("previous_user_turn") or state.get("last_user_turn"), 220),
+        "previous_april": _text(semantic.get("previous_april_turn") or state.get("last_april_turn"), 260),
+        "memory_role": "evidence_only",
+        "full_history_provider": False,
+        "synchronization": "single_authoritative_turn_state",
+    }
+
 # =====================================================
 # 🔥 MAIN REASONING STATE
 # =====================================================
@@ -670,7 +773,11 @@ def build_reasoning_state(
 
         "provider_safe": True,
 
-        "continuity_safe": True
+        "continuity_safe": True,
+
+        "turn_sync": build_turn_synchronization_snapshot(text, state, semantic),
+        "synchronization_authority": "quantum_processor",
+        "single_authoritative_turn_state": True,
     }
 
     reasoning_exit(
