@@ -811,3 +811,30 @@ def build_response_decision(
 
 # Compatibility alias for integrations that used the internal name.
 _base_build_response_decision = build_response_decision
+
+
+
+def build_completion_decision(
+    goal_progress: Dict[str, Any] | None,
+    semantic: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Convert goal evidence into a compact post-result closure policy."""
+    progress = goal_progress if isinstance(goal_progress, dict) else {}
+    closure = progress.get("closure") if isinstance(progress.get("closure"), dict) else {}
+    topic = _s(
+        closure.get("topic")
+        or progress.get("topic")
+        or _d(semantic).get("active_topic")
+        or ""
+    )
+    return {
+        "version": "april_completion_decision_v1",
+        "goal_completed": bool(progress.get("goal_completed")),
+        "closure_allowed": bool(closure.get("allowed_now")),
+        "eligible_if_completed": bool(closure.get("eligible_if_completed")),
+        "topic": topic,
+        "instruction": _s(closure.get("instruction")) or "Только при трудном завершённом результате естественно назвать тему и сформулировать достигнутое вместе.",
+        "avoid_generic_task_phrase": True,
+        "avoid_repeated_closure": True,
+        "machine_only": True,
+    }
