@@ -2892,12 +2892,12 @@ class QuantumInterpretationEngine:
             else "independent"
         )
 
+        active_entity = ""
         candidate_answer = self.normalize(
-            open_task.get("candidate_answer") if task_active else ""
+            open_task.get("candidate_answer") if task_active and isinstance(open_task, dict) else ""
         )
-        active_entity = self.normalize(
-            open_task.get("target") if task_active else ""
-        )
+        if task_active and not active_entity:
+            active_entity = self.normalize(open_task.get("target") if isinstance(open_task, dict) else "")
 
         task_answer = live_scene.get("task_answer", {})
         if not isinstance(task_answer, dict):
@@ -2917,34 +2917,10 @@ class QuantumInterpretationEngine:
         if task_active and candidate_answer and not active_entity:
             active_entity = ""
 
-        if task_active:
-            resolved_request = (
-                "Continue the current active task.\n"
-                f"Task type: {open_task.get('kind')}\n"
-                f"Task goal: {effective_goal}\n"
-                f"Open task prompt: {open_task.get('prompt')}\n"
-                f"Current user turn: {text}\n"
-                f"Candidate answer: {candidate_answer}\n"
-                "Treat the current user turn as an interaction with this task "
-                "unless the user explicitly changes the subject."
-            )
-            if task_transition.get("replace_task"):
-                resolved_request = (
-                    "Replace the previous task with a new task requested by the user.\n"
-                    f"Current user instruction: {text}\n"
-                    f"Previous task target is forbidden from reuse: {forbidden_entities}\n"
-                    "Do not continue the previous target. Create the requested new task."
-                )
-        elif continuation:
-            resolved_request = (
-                "Continue the active conversation naturally.\n"
-                f"Active scene topic: {effective_topic}\n"
-                f"Previous user turn: {last_user}\n"
-                f"Previous April turn: {last_assistant}\n"
-                f"Current user instruction: {text}"
-            )
-        else:
-            resolved_request = text
+        resolved_request = text
+        # The cognitive workspace is the current-turn authority and will replace
+        # this provisional request below. The legacy task frame is deliberately
+        # not allowed to rewrite the request before that decision is made.
 
         active_task_contract = {
             "operation": "answer"
@@ -2968,7 +2944,7 @@ class QuantumInterpretationEngine:
             "known_clues": list(open_task.get("known_clues") or [])[-12:] if task_active else [],
             "qa_history": list(open_task.get("qa_history") or [])[-12:] if task_active else [],
             "task_revision": open_task.get("task_revision", 0) if task_active else 0,
-            "avoid_entities": forbidden_entities,
+            "avoid_entities": forbidden_entities if task_active else [],
         }
 
         dialogue_contract = {
@@ -3390,14 +3366,141 @@ class QuantumInterpretationEngine:
         workspace_frame = workspace.get("semantic_frame") if isinstance(workspace.get("semantic_frame"), dict) else {}
         if workspace_frame:
             result["semantic_frame"] = dict(workspace_frame)
-            result["type"] = workspace_frame.get("intent") or result.get("type")
+            workspace_relation = str(workspace.get("relation") or "").upper()
+            promoted_intent = workspace_frame.get("intent") or result.get("type")
+            if workspace_relation == "NEW_TOPIC" and promoted_intent in {"identity", "statement"}:
+                promoted_intent = "request"
+            result["type"] = promoted_intent
             result["operation"] = workspace.get("operation") or result.get("operation")
             result["goal"] = workspace.get("goal") or result.get("goal")
             result["representation"] = workspace.get("representation") or result.get("representation")
-            result["canonical_topic"] = workspace.get("active_topic") or result.get("canonical_topic")
-            result["active_entity"] = workspace.get("active_entity") or result.get("active_entity")
+            result["canonical_topic"] = workspace.get("active_topic") if "active_topic" in workspace else result.get("canonical_topic")
+            result["active_topic"] = workspace.get("active_topic") if "active_topic" in workspace else result.get("active_topic")
+            result["active_entity"] = workspace.get("active_entity") if "active_entity" in workspace else result.get("active_entity")
             result["continuation"] = bool(workspace.get("continuation"))
             result["reference_to_previous"] = bool(workspace.get("reference"))
+            result["resolved_request"] = workspace.get("resolved_request") or result.get("resolved_request")
+            result["semantic_request"] = workspace.get("resolved_request") or result.get("semantic_request")
+            result["history_dependent_task"] = bool(workspace.get("task_continuation"))
+            result["current_turn_authority"] = True
+            result["historical_memory_is_evidence_only"] = True
+            if workspace.get("conversation_continuation") and (workspace.get("continuation") or workspace.get("reference")):
+                result["continuation_authority"] = "active_dialogue_sequence"
+                result["selected_memory_index"] = -1
+                result["selected_memory_operand"] = {
+                    "source": "active_dialogue_sequence",
+                    "sequence_id": workspace.get("sequence_id"),
+                    "user_request": workspace.get("previous_user_turn"),
+                    "april_answer": workspace.get("previous_april_turn"),
+                    "user_id": (workspace.get("authenticated_scope") or {}).get("user_id", ""),
+                    "conversation_id": (workspace.get("authenticated_scope") or {}).get("conversation_id", ""),
+                }
+            else:
+                result["continuation_authority"] = "current_turn"
+                result["selected_memory_index"] = -1
+                result["selected_memory_operand"] = {}
+
+            # Keep the immediately preceding authenticated USER↔APRIL pair on the
+            # top-level result too. Older consumers may still read these fields
+            # directly instead of entering dialogue_contract/dialogue_vector.
+            result["previous_user_turn"] = (
+                workspace.get("previous_user_turn") or result.get("previous_user_turn")
+            )
+            result["previous_april_turn"] = (
+                workspace.get("previous_april_turn") or result.get("previous_april_turn")
+            )
+
+            control = result.get("interpretation_control") if isinstance(result.get("interpretation_control"), dict) else {}
+            control = dict(control)
+            control.update({
+                "relation": workspace.get("relation") or control.get("relation"),
+                "context_policy": (
+                    "active_sequence_compact" if workspace.get("continuation") or workspace.get("reference")
+                    else "current_turn_only"
+                ),
+                "memory_policy": (
+                    "selected_live_sequence_only" if workspace.get("continuation") or workspace.get("reference")
+                    else "no_historical_content"
+                ),
+                "current_turn_authority": True,
+                "historical_memory_is_evidence_only": True,
+                "provider_must_follow_plan": True,
+            })
+            result["interpretation_control"] = control
+
+            # Make the new semantic bridge visible through the existing canonical
+            # dialogue contract so older adapters cannot resurrect the stale task.
+            contract = result.get("dialogue_contract") if isinstance(result.get("dialogue_contract"), dict) else {}
+            contract = dict(contract)
+            contract.update({
+                "relation": workspace.get("relation") or contract.get("relation"),
+                "three_way_relation": workspace.get("relation") or contract.get("three_way_relation"),
+                "continuation": bool(workspace.get("continuation")),
+                "reference_to_previous": bool(workspace.get("reference")),
+                "context_dependency": workspace.get("context_dependency") or contract.get("context_dependency"),
+                "resolved_request": workspace.get("resolved_request") or contract.get("resolved_request"),
+                "previous_user_turn": workspace.get("previous_user_turn") or contract.get("previous_user_turn"),
+                "previous_april_turn": workspace.get("previous_april_turn") or contract.get("previous_april_turn"),
+                "canonical_topic": workspace.get("active_topic") or contract.get("canonical_topic"),
+                "active_topic": workspace.get("active_topic") or contract.get("active_topic"),
+                "current_topic": workspace.get("active_topic") or contract.get("current_topic"),
+                "active_entity": workspace.get("active_entity") or "",
+                "active_task": workspace.get("active_task_context") or {},
+                "open_task": workspace.get("active_task_context") or {},
+                "interactive_task_state": workspace.get("active_task_context") or {},
+                "task_relation": workspace.get("task_relation") or {
+                    "owned": bool(workspace.get("task_continuation")),
+                    "reason": "cognitive_workspace",
+                },
+                "sequence_id": workspace.get("sequence_id") or contract.get("sequence_id"),
+                "target_sequence_id": workspace.get("sequence_id") or contract.get("target_sequence_id"),
+                "conversation_continuation": bool(workspace.get("conversation_continuation")),
+                "semantic_continuation": bool(workspace.get("semantic_continuation")),
+                "task_continuation": bool(workspace.get("task_continuation")),
+                "continuation_content_analysis": workspace.get("continuation_content_analysis") or {},
+                "continuation_authority": result.get("continuation_authority"),
+                "selected_memory_operand": result.get("selected_memory_operand") or {},
+                "selected_memory_index": result.get("selected_memory_index", -1),
+            })
+            result["dialogue_contract"] = contract
+            result["interactive_task_state"] = workspace.get("active_task_context") or {}
+            result["open_task"] = workspace.get("active_task_context") or {}
+            result["task_active"] = bool(workspace.get("task_continuation"))
+
+            vector = result.get("dialogue_vector") if isinstance(result.get("dialogue_vector"), dict) else {}
+            vector = dict(vector)
+            vector.update({
+                "relation": workspace.get("relation") or vector.get("relation"),
+                "three_way_relation": workspace.get("relation") or vector.get("three_way_relation"),
+                "continuation": bool(workspace.get("continuation")),
+                "reference_to_previous": bool(workspace.get("reference")),
+                "conversation_continuation": bool(workspace.get("conversation_continuation")),
+                "semantic_continuation": bool(workspace.get("semantic_continuation")),
+                "task_continuation": bool(workspace.get("task_continuation")),
+                "canonical_topic": workspace.get("active_topic"),
+                "active_topic": workspace.get("active_topic"),
+                "active_entity": workspace.get("active_entity"),
+                "previous_user_turn": workspace.get("previous_user_turn"),
+                "previous_april_turn": workspace.get("previous_april_turn"),
+                "resolved_request": workspace.get("resolved_request"),
+                "sequence_id": workspace.get("sequence_id"),
+                "target_sequence_id": workspace.get("sequence_id"),
+                "continuation_authority": result.get("continuation_authority"),
+                "continuation_content_analysis": workspace.get("continuation_content_analysis") or {},
+            })
+            result["dialogue_vector"] = vector
+
+            qif = result.get("quantum_interpretation_field") if isinstance(result.get("quantum_interpretation_field"), dict) else {}
+            if qif:
+                qif = dict(qif)
+                qif["dialogue"] = contract
+                qif["dialogue_vector"] = vector
+                result["quantum_interpretation_field"] = qif
+            evidence = result.get("evidence") if isinstance(result.get("evidence"), dict) else {}
+            if evidence:
+                evidence = dict(evidence)
+                evidence["dialogue"] = contract
+                result["evidence"] = evidence
 
         result["estimated_action_count"] = estimate_action_count(result)
         result["response_complexity"] = determine_response_complexity(result)
@@ -3804,6 +3907,261 @@ class DialogCognitiveWorkspace:
             })
         return candidates[:self.MAX_MEMORY_CANDIDATES]
 
+    @classmethod
+    def _reference_signals(cls, text: str) -> dict[str, Any]:
+        low = cls._text(text).lower()
+        words = cls._tokens(text)
+        markers = (
+            "её", "ее", "этот", "эта", "это", "эту", "эти", "его", "ему", "ей",
+            "она", "он", "оно", "они", "там", "туда", "сюда", "отсюда",
+            "теперь", "дальше", "слева", "справа", "снова", "ещё", "еще",
+            "а теперь", "а слева", "а справа", "кто её", "кто ее", "про неё", "про нее",
+            "what is it", "who sings it", "this", "that", "it", "then", "next", "left", "right",
+        )
+        def present(marker: str) -> bool:
+            marker_low = marker.lower()
+            if " " in marker_low:
+                return marker_low in low
+            return marker_low in words
+
+        matched = [x for x in markers if present(x)]
+        return {
+            "markers": matched[:10],
+            "deictic": bool(matched),
+            "short_followup": len(words) <= 8,
+            "explicit_reference": any(x in low for x in ("эту", "этот", "эта", "эти", "её", "ее", "кто её", "кто ее", "this ", "it ")),
+        }
+
+    @classmethod
+    def _extract_quoted_reference(cls, text: str) -> str:
+        value = str(text or "")
+        patterns = (
+            r"«([^»]{3,140})»",
+            r"“([^”]{3,140})”",
+            r'"([^\"]{3,140})"',
+            r"'([^']{3,140})'",
+        )
+        for pattern in patterns:
+            for match in re.findall(pattern, value):
+                candidate = cls._text(match)
+                if candidate and len(candidate.split()) <= 18:
+                    return candidate
+        return ""
+
+    @classmethod
+    def _build_continuation_bridge(
+        cls,
+        *,
+        text: str,
+        dialogue: dict[str, Any],
+        frame: dict[str, Any],
+        task: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        dialogue = dialogue if isinstance(dialogue, dict) else {}
+        frame = frame if isinstance(frame, dict) else {}
+        task = task if isinstance(task, dict) else {}
+        state = state if isinstance(state, dict) else {}
+
+        previous_user = cls._text(
+            dialogue.get("previous_user_turn")
+            or state.get("last_user_turn")
+        )
+        previous_april = cls._text(
+            dialogue.get("previous_april_turn")
+            or state.get("last_april_turn")
+        )
+        previous_pair_present = bool(previous_user or previous_april)
+
+        sequence = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+        sequence_id = cls._text(
+            dialogue.get("sequence_id")
+            or sequence.get("sequence_id")
+            or state.get("dialogue_sequence_id")
+        )
+        authenticated_scope = {
+            "user_id": cls._text(state.get("user_id")),
+            "conversation_id": cls._text(state.get("conversation_id")),
+            "dialogue_sequence_id": sequence_id,
+        }
+        same_authenticated_dialogue = bool(
+            authenticated_scope["user_id"]
+            and authenticated_scope["conversation_id"]
+            and sequence_id
+            and previous_pair_present
+        )
+
+        refs = cls._reference_signals(text)
+        words = cls._tokens(text)
+        previous_user_similarity = cls._similarity(text, previous_user)
+        previous_april_similarity = cls._similarity(text, previous_april)
+        recent_similarity = max(previous_user_similarity, previous_april_similarity)
+
+        task_text = " ".join(
+            cls._text(x) for x in (
+                task.get("kind"), task.get("topic"), task.get("target"), task.get("prompt"),
+                task.get("last_question"), task.get("goal"),
+                frame.get("entity"), dialogue.get("active_entity"),
+            ) if cls._text(x)
+        )
+        task_similarity = cls._similarity(text, task_text)
+        recent_task_similarity = max(
+            cls._similarity(previous_user, task_text),
+            cls._similarity(previous_april, task_text),
+        )
+
+        raw_task_active = bool(
+            task.get("active")
+            or task.get("status") in {"open", "active", "continuing", "resumable", "answer_received"}
+        )
+        task_relation = dialogue.get("task_relation")
+        if not isinstance(task_relation, dict):
+            task_relation = {}
+        task_answer = bool(task_relation.get("is_answer") or task_relation.get("is_task_action"))
+
+        # A task owns the current turn only when the current turn actually fits
+        # the task or is a discourse follow-up to a recent turn that belongs to it.
+        # Merely having a persisted open task is never enough.
+        task_answer_signal = bool(
+            task_answer
+            and (
+                task_similarity >= 0.08
+                or (
+                    refs["short_followup"]
+                    and len(words) <= 2
+                    and recent_task_similarity >= 0.08
+                )
+            )
+        )
+        task_continuation = bool(
+            raw_task_active
+            and (
+                task_similarity >= 0.18
+                or (refs["deictic"] and recent_task_similarity >= 0.10)
+                or task_answer_signal
+            )
+        )
+
+        quoted_entity = cls._extract_quoted_reference(previous_april)
+        reference = bool(
+            previous_pair_present
+            and (
+                refs["explicit_reference"]
+                or (refs["deictic"] and recent_similarity >= 0.03)
+                or bool(quoted_entity and recent_similarity >= 0.02)
+            )
+        )
+
+        semantic_continuation = bool(
+            previous_pair_present
+            and (
+                task_continuation
+                or reference
+                or (refs["deictic"] and recent_similarity >= 0.02)
+                or recent_similarity >= 0.22
+            )
+        )
+
+        # A self-contained request can start a new topic while remaining inside
+        # the same authenticated dialogue sequence. This is the distinction the
+        # old task owner collapsed into one CONTINUE flag.
+        topic_relation = "CONTINUE" if semantic_continuation else "NEW_TOPIC" if previous_pair_present else "NEW"
+        conversation_continuation = same_authenticated_dialogue
+
+        resolved_entity = ""
+        if reference and quoted_entity:
+            resolved_entity = quoted_entity
+        elif task_continuation:
+            resolved_entity = cls._text(
+                task.get("target")
+                or dialogue.get("active_entity")
+                or frame.get("entity")
+            )
+        elif semantic_continuation and recent_similarity >= 0.10:
+            candidate = cls._text(frame.get("entity") or dialogue.get("active_entity"))
+            if candidate and cls._similarity(candidate, text) >= 0.05:
+                resolved_entity = candidate
+
+        current_identifiers = cls._request_identifiers(text)
+        resolved_topic = ""
+        if task_continuation:
+            resolved_topic = cls._text(task.get("topic") or frame.get("topic") or dialogue.get("canonical_topic"))
+        elif reference and quoted_entity:
+            resolved_topic = quoted_entity
+        elif current_identifiers:
+            resolved_topic = current_identifiers[0]
+        elif semantic_continuation and previous_user:
+            # Keep a real semantic subject from the latest conversational pair;
+            # never inherit a generic task label such as "вопрос".
+            candidates = [
+                frame.get("topic"),
+                dialogue.get("canonical_topic"),
+                dialogue.get("active_topic"),
+            ]
+            resolved_topic = cls._safe_topic(candidates, previous_user)
+        else:
+            resolved_topic = cls._excerpt(re.split(r"(?<=[.!?。！？])\s+", cls._text(text))[0] if cls._text(text) else "", 140)
+
+        if resolved_entity and not resolved_topic:
+            resolved_topic = resolved_entity
+
+        context_dependency = (
+            "task_continuation" if task_continuation
+            else "dialogue_reference" if reference
+            else "dialogue_continuation" if semantic_continuation
+            else "new_topic"
+            if previous_pair_present else "independent"
+        )
+
+        if task_continuation:
+            resolved_request = (
+                "Continue the active task using the current user turn.\n"
+                f"Task topic: {resolved_topic}\n"
+                f"Current user turn: {cls._text(text)}\n"
+                f"Previous user turn: {previous_user}\n"
+                f"Previous April turn: {previous_april}"
+            )
+        elif semantic_continuation or reference:
+            resolved_request = (
+                "Continue the current conversational thread using only the supplied recent context.\n"
+                f"Previous user turn: {previous_user}\n"
+                f"Previous April turn: {previous_april}\n"
+                f"Resolved reference: {resolved_entity or resolved_topic}\n"
+                f"Current user instruction: {cls._text(text)}"
+            )
+        else:
+            resolved_request = cls._text(text)
+
+        return {
+            "authenticated_scope": authenticated_scope,
+            "conversation_continuation": conversation_continuation,
+            "topic_relation": topic_relation,
+            "semantic_continuation": semantic_continuation,
+            "task_continuation": task_continuation,
+            "reference": reference,
+            "reference_signals": refs,
+            "sequence_id": sequence_id,
+            "previous_user_turn": previous_user,
+            "previous_april_turn": previous_april,
+            "previous_user_similarity": round(previous_user_similarity, 4),
+            "previous_april_similarity": round(previous_april_similarity, 4),
+            "task_similarity": round(task_similarity, 4),
+            "recent_task_similarity": round(recent_task_similarity, 4),
+            "active_entity": resolved_entity,
+            "topic": resolved_topic,
+            "context_dependency": context_dependency,
+            "resolved_request": resolved_request,
+            "active_task_context": cls._task_digest(task) if task_continuation else {},
+            "parked_task_context": cls._task_digest(task) if raw_task_active and not task_continuation else {},
+            "reasoning": {
+                "identity_continuity": "authenticated_sequence + previous_turn",
+                "task_ownership": "current_turn_fit_required",
+                "topic_change": "allowed_inside_same_authenticated_sequence",
+                "reference_resolution": "recent_user_assistant_pair",
+                "history_role": "semantic_evidence",
+            },
+        }
+
     def build(
         self,
         *,
@@ -3819,22 +4177,34 @@ class DialogCognitiveWorkspace:
         frame = semantic_result.get("semantic_frame") if isinstance(semantic_result.get("semantic_frame"), dict) else {}
         control = semantic_result.get("interpretation_control") if isinstance(semantic_result.get("interpretation_control"), dict) else {}
         relation = self._text(dialogue.get("relation") or semantic_result.get("three_way_relation") or "NEW").upper()
-        continuation = bool(dialogue.get("continuation") or semantic_result.get("continuation"))
-        reference = bool(dialogue.get("reference_to_previous") or semantic_result.get("reference_to_previous"))
         representation = self._text(frame.get("representation") or control.get("representation") or semantic_result.get("subtype") or "text").lower()
         directives = self._request_directives(text)
         operation = self._safe_operation(frame.get("operation") or control.get("operation"), representation, directives)
         goal = self._safe_goal(frame.get("goal") or dialogue.get("active_goal"), operation, representation, text)
-        active_entity = self._text(frame.get("entity") or dialogue.get("active_entity") or semantic_result.get("active_entity"))
+        raw_task = semantic_result.get("interactive_task_state") if isinstance(semantic_result.get("interactive_task_state"), dict) else dialogue.get("active_task") if isinstance(dialogue.get("active_task"), dict) else {}
+        continuation_bridge = self._build_continuation_bridge(
+            text=text, dialogue=dialogue, frame=frame, task=raw_task, state=state,
+        )
+        continuation = bool(continuation_bridge.get("semantic_continuation"))
+        reference = bool(continuation_bridge.get("reference"))
+        task_active = bool(continuation_bridge.get("task_continuation"))
+        active_entity = self._text(continuation_bridge.get("active_entity"))
         artifact_reference = self._explicit_artifact_dependency(text, control, semantic_result)
         topic = self._safe_topic(
-            [dialogue.get("canonical_topic"), frame.get("topic"), active_entity,
+            [continuation_bridge.get("topic"),
+             active_entity,
+             dialogue.get("canonical_topic") if task_active else "",
+             frame.get("topic") if task_active else "",
              "Algorithm Engine" if "algorithm engine" in self._text(text).lower() else "",
              "Interpretation Layer" if "interpretation layer" in self._text(text).lower() else ""],
             text,
         )
-        task = semantic_result.get("interactive_task_state") if isinstance(semantic_result.get("interactive_task_state"), dict) else dialogue.get("active_task") if isinstance(dialogue.get("active_task"), dict) else {}
-        task_active = bool(task and (task.get("active") or task.get("status") in {"open", "active", "continuing"}))
+        bridge_topic = self._text(continuation_bridge.get("topic"))
+        if bridge_topic and bridge_topic.lower() not in {
+            "вопрос", "ответ", "запрос", "тема", "опрос", "question", "request", "answer"
+        }:
+            topic = bridge_topic
+        relation = self._text(continuation_bridge.get("topic_relation") or relation).upper()
 
         signals = self._instruction_signals(text)
         output_modes = list(semantic_result.get("requested_outputs") or semantic_result.get("candidate_representations") or [])
@@ -3906,18 +4276,20 @@ class DialogCognitiveWorkspace:
         if identifiers and (representation == "code" or signals.get("architecture") or signals.get("code")):
             add(required, "REQUEST_IDENTIFIERS", identifiers[:12], 0.96, "named_contract_entities", True)
         if task_active:
-            add(required, "ACTIVE_TASK", self._task_digest(task), 0.97, "active_task_owner", True)
+            add(required, "ACTIVE_TASK", self._task_digest(raw_task), 0.97, "active_task_owner", True)
 
         if continuation or reference or task_active:
-            add(optional, "DIALOGUE_ANCHOR", {
-                "relation": relation,
-                "canonical_topic": dialogue.get("canonical_topic"),
-                "active_goal": dialogue.get("active_goal") or goal,
+            add(required if (continuation or reference) else optional, "DIALOGUE_ANCHOR", {
+                # Keep the actual USER↔APRIL antecedent first so even a hard
+                # protected compaction preserves the pair that resolves pronouns.
+                "previous_user_turn": continuation_bridge.get("previous_user_turn"),
+                "previous_april_turn": continuation_bridge.get("previous_april_turn"),
+                "resolved_reference": active_entity or topic,
                 "active_entity": active_entity,
-                "previous_user_turn": dialogue.get("previous_user_turn"),
-                "previous_april_turn": dialogue.get("previous_april_turn"),
-                "sequence_id": dialogue.get("sequence_id"),
-            }, 0.92, "continuation_anchor")
+                "canonical_topic": topic,
+                "relation": relation,
+                "sequence_id": continuation_bridge.get("sequence_id"),
+            }, 0.99 if (continuation or reference) else 0.92, "continuation_anchor", bool(continuation or reference))
 
         if continuation or reference:
             seq = dialogue.get("active_dialogue_sequence") or state.get("active_dialogue_sequence")
@@ -3989,6 +4361,13 @@ class DialogCognitiveWorkspace:
                     "scene_id": live_visual.get("scene_id"),
                 })
 
+        if continuation_bridge.get("parked_task_context"):
+            excluded.append({
+                "key": "STALE_ACTIVE_TASK",
+                "reason": "current_turn_not_owned_by_persisted_task",
+                "task": continuation_bridge.get("parked_task_context"),
+            })
+
         # A replaced task explicitly forbids the previous entity/task from becoming
         # an implicit provider dependency.
         transition = semantic_result.get("task_transition") if isinstance(semantic_result.get("task_transition"), dict) else dialogue.get("task_transition") if isinstance(dialogue.get("task_transition"), dict) else {}
@@ -4027,10 +4406,19 @@ class DialogCognitiveWorkspace:
             "current_request": self._excerpt(text, 1200),
             "current_request_raw_preserved": True,
             "active_task": bool(task_active),
+            "task_continuation": bool(continuation_bridge.get("task_continuation")),
+            "conversation_continuation": bool(continuation_bridge.get("conversation_continuation")),
+            "semantic_continuation": bool(continuation_bridge.get("semantic_continuation")),
             "relation": relation,
             "continuation": continuation,
             "reference": reference,
             "artifact_reference": artifact_reference,
+            "sequence_id": continuation_bridge.get("sequence_id"),
+            "authenticated_scope": continuation_bridge.get("authenticated_scope") or {},
+            "previous_user_turn": continuation_bridge.get("previous_user_turn"),
+            "previous_april_turn": continuation_bridge.get("previous_april_turn"),
+            "continuation_bridge": continuation_bridge,
+            "resolved_request": continuation_bridge.get("resolved_request") or self._text(text),
             "active_topic": topic,
             "active_entity": active_entity,
             "operation": operation,
@@ -4045,6 +4433,25 @@ class DialogCognitiveWorkspace:
             "protected_context": protected,
             "excluded_context": excluded,
             "selected_memory": selected_memory,
+            "context_dependency": continuation_bridge.get("context_dependency") or "independent",
+            "task_relation": {
+                "owned": bool(continuation_bridge.get("task_continuation")),
+                "current_turn_fit": bool(continuation_bridge.get("task_continuation")),
+                "task_similarity": continuation_bridge.get("task_similarity", 0.0),
+                "recent_task_similarity": continuation_bridge.get("recent_task_similarity", 0.0),
+            },
+            "continuation_content_analysis": {
+                "version": "dialog_cognitive_continuation_v1",
+                "active": bool(continuation or reference),
+                "mode": "REFERENCE" if reference else "CONTINUE" if continuation else "NONE",
+                "conversation_continuation": bool(continuation_bridge.get("conversation_continuation")),
+                "semantic_continuation": bool(continuation_bridge.get("semantic_continuation")),
+                "task_continuation": bool(continuation_bridge.get("task_continuation")),
+                "previous_user_turn": continuation_bridge.get("previous_user_turn"),
+                "previous_answer": continuation_bridge.get("previous_april_turn"),
+                "active_entity": active_entity,
+                "next_direction": "answer_current_request_using_resolved_context" if (continuation or reference) else "start_current_turn",
+            },
             "context_dependencies": [
                 x for x in (
                     "current_request",
@@ -4059,8 +4466,8 @@ class DialogCognitiveWorkspace:
             "output_contract": output_contract,
             "provider_sections": provider_sections,
             "reasoning_basis": {
-                "selection": "dependency + semantic similarity + task ownership + recency + entity continuity",
-                "decision_order": "understand -> classify dependencies -> rank context -> rank relevance -> protect mandatory -> budget pack",
+                "selection": "dependency + semantic similarity + authenticated sequence continuity + task ownership + recency + entity continuity",
+                "decision_order": "authenticate -> detect conversation continuity -> separate topic/task ownership -> resolve references -> rank context -> protect mandatory -> budget pack",
                 "budget_policy": "relevance_before_budget",
                 "provider_role": "consume_selected_context; do_not_reinterpret_or_reselect",
                 "stale_visual_state": "excluded_without_artifact_dependency",
