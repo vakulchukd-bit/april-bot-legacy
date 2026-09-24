@@ -23,6 +23,9 @@ from blocks.C_ARTIFACT_CONTRACT import (
 from blocks.april_personality import APRIL_IDENTITY
 from blocks.interpretation_layer import interpret_request, QuantumInterpretationEngine
 from blocks.provider_router import generate_text
+from blocks.reasoning_state import build_turn_synchronization_snapshot
+from blocks.goal_engine import build_goal_evidence, evaluate_goal_progress
+from blocks.response_decision import build_completion_decision
 from blocks.state_manager import get_state, update_scene_context, persist_state, build_dialogue_memory_bridge
 from blocks.presentation_formatter import canonical_payload_for_block, validate_render_block_payload
 
@@ -1173,6 +1176,31 @@ class ProcessorScene:
                 }
                 artifact_visual_context["active_visual_scene"] = compact_scene
 
+        semantic_frame = dict(semantic_result.get("semantic_frame") or {})
+        semantic_frame.update({
+            "topic": _text(dialogue.get("canonical_topic") or intent.get("topic") or semantic_frame.get("topic") or representation),
+            "operation": _text(intent.get("operation") or semantic_frame.get("operation") or "answer"),
+            "goal": _text(intent.get("goal") or semantic_frame.get("goal") or "answer"),
+            "representation": _text(representation or semantic_frame.get("representation") or "text").lower(),
+            "entity": _text(intent.get("object") or semantic_frame.get("entity")),
+            "relation": _text(dialogue.get("relation") or semantic_frame.get("relation") or "NEW").upper(),
+        })
+        semantic_result["semantic_frame"] = semantic_frame
+
+        turn_sync = build_turn_synchronization_snapshot(self.request, self.state, semantic_result)
+        goal_evidence = build_goal_evidence(self.request, self.state, semantic_result)
+        closure_readiness = build_completion_decision(
+            {
+                **goal_evidence,
+                "goal_completed": False,
+                "closure": {
+                    **(goal_evidence.get("closure") if isinstance(goal_evidence.get("closure"), dict) else {}),
+                    "allowed_now": False,
+                },
+            },
+            semantic_result,
+        )
+
         context = {
             "relation": relation,
             "continuation": bool(dialogue["continuation"]),
@@ -1272,6 +1300,9 @@ class ProcessorScene:
             "task_action": bool(dialogue.get("task_action")),
             "pending_task": _compact(pending_task),
             "active_entity": resolved_entity,
+            "semantic_frame": _compact(semantic_result.get("semantic_frame") or {}, max_depth=3, max_items=8),
+            "turn_sync": _compact(turn_sync, max_depth=4, max_items=10),
+            "closure_policy": closure_readiness,
             "semantic_request": _text(
                 semantic_result.get("semantic_request")
                 or _as_dict(semantic_result.get("semantic_understanding")).get("provider", {}).get("semantic_request")
@@ -1363,6 +1394,7 @@ class ProcessorScene:
                     or _as_dict(semantic_result.get("semantic_understanding")).get("provider", {}).get("semantic_request")
                     or resolved_request
                 ),
+                "semantic_frame": _compact(semantic_result.get("semantic_frame") or {}, max_depth=3, max_items=8),
                 "semantic_understanding": _compact(semantic_result.get("semantic_understanding") or {}, max_depth=5, max_items=10),
                 "attributes": _compact(intent.get("attributes") or {}),
             },
@@ -1388,6 +1420,8 @@ class ProcessorScene:
                     max_depth=5,
                     max_items=12,
                 ),
+                "semantic_frame": _compact(semantic_result.get("semantic_frame") or {}, max_depth=3, max_items=8),
+                "turn_sync": _compact(turn_sync, max_depth=4, max_items=10),
                 "scene_blueprint": _compact(semantic_result.get("scene_blueprint") or {}, max_depth=5, max_items=16),
                 "user_id": self.user_id,
                 "conversation_id": dialogue_memory.get("conversation_id"),
@@ -1420,6 +1454,9 @@ class ProcessorScene:
                     ),
                     "semantic_understanding": _compact(semantic_result.get("semantic_understanding") or {}, max_depth=5, max_items=10),
                     "dialogue_relation": relation,
+                    "semantic_frame": _compact(semantic_result.get("semantic_frame") or {}, max_depth=3, max_items=8),
+                    "turn_sync": _compact(turn_sync, max_depth=4, max_items=10),
+                    "closure_policy": closure_readiness,
                     "fast_path": True,
                     "do_not_reinterpret": True,
                     "interpretation_control": _compact(intent.get("interpretation_control") or semantic_result.get("interpretation_control") or {}, max_depth=4, max_items=10),
@@ -2106,6 +2143,30 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
 
     response, scene, contract = processor.build_scene(request, provider_contract)
     response.metadata["timing"] = {"provider_ms": provider_ms}
+
+    # Post-result goal analysis is read-only. It decides only whether a difficult
+    # completed turn deserves a natural synthesis; ordinary turns remain plain.
+    semantic_for_goal = {
+        "semantic_frame": request.intent.get("semantic_frame") if isinstance(request.intent, dict) else {},
+        "dialogue_contract": request.dialogue_contract or {},
+        "active_goal": request.intent.get("goal") if isinstance(request.intent, dict) else "",
+        "active_topic": (request.dialogue_contract or {}).get("canonical_topic"),
+        "visual_production_mode": ((request.constraints or {}).get("representation_plan") or {}).get("visual_production_mode"),
+        "interactive_task_state": (request.dialogue_contract or {}).get("interactive_task_state") or {},
+    }
+    goal_progress = evaluate_goal_progress(
+        request_text,
+        state,
+        semantic_for_goal,
+        response={
+            "answer": response.answer,
+            "content": response.content,
+            "render_blocks": list(getattr(response, "render_blocks", []) or []),
+        },
+    )
+    completion_decision = build_completion_decision(goal_progress, semantic_for_goal)
+    response.metadata["goal_progress"] = goal_progress
+    response.metadata["completion_decision"] = completion_decision
 
     _set_live_state(state, request, response, contract)
 
