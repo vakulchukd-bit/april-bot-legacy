@@ -637,9 +637,17 @@ class SequentialInterpretation:
             semantic_result = {}
         self.semantic_result = semantic_result if isinstance(semantic_result, dict) else {}
 
+        cognitive_workspace = self.semantic_result.get("cognitive_workspace") if isinstance(self.semantic_result.get("cognitive_workspace"), dict) else {}
         vector = self.semantic_result.get("dialogue_vector") if isinstance(self.semantic_result.get("dialogue_vector"), dict) else {}
         contract = self.semantic_result.get("dialogue_contract") if isinstance(self.semantic_result.get("dialogue_contract"), dict) else {}
-        relation = _text(vector.get("three_way_relation") or contract.get("three_way_relation") or contract.get("relation") or "NEW").upper()
+        relation = _text(
+            cognitive_workspace.get("relation")
+            or cognitive_workspace.get("topic_relation")
+            or vector.get("three_way_relation")
+            or contract.get("three_way_relation")
+            or contract.get("relation")
+            or "NEW"
+        ).upper()
         relation = {
             "CONTINUE_TOPIC": "CONTINUE",
             "CONTINUATION": "CONTINUE",
@@ -658,7 +666,11 @@ class SequentialInterpretation:
         canonical_topic = _text(vector.get("canonical_topic") or contract.get("canonical_topic") or self.semantic_result.get("canonical_topic"))
         pending = state.get("april_pending_task") if isinstance(state.get("april_pending_task"), dict) else {}
         pending_resolved = bool(pending.get("active") and relation == "CONTINUE")
-        reference = bool(relation == "RECALL" or contract.get("reference_to_previous"))
+        reference = bool(
+            cognitive_workspace.get("reference")
+            if cognitive_workspace
+            else (relation == "RECALL" or contract.get("reference_to_previous"))
+        )
         dependency = _text(contract.get("context_dependency"))
         if not dependency:
             dependency = "pending" if pending_resolved else "recall" if reference else "continuation" if relation == "CONTINUE" else "independent"
@@ -668,22 +680,30 @@ class SequentialInterpretation:
         dialogue_strategy = self.semantic_result.get("dialogue_strategy")
         dialogue_strategy = dialogue_strategy if isinstance(dialogue_strategy, dict) else {}
         resolved_entity = _text(
-            self.semantic_result.get("resolved_entity")
+            cognitive_workspace.get("active_entity")
+            or self.semantic_result.get("resolved_entity")
             or contract.get("resolved_entity")
             or vector.get("resolved_entity")
             or continuation_analysis.get("active_entity")
         )
-        task_state = (
-            self.semantic_result.get("interactive_task_state")
-            if isinstance(self.semantic_result.get("interactive_task_state"), dict)
-            else self.semantic_result.get("open_task")
-            if isinstance(self.semantic_result.get("open_task"), dict)
-            else contract.get("interactive_task_state")
-            if isinstance(contract.get("interactive_task_state"), dict)
-            else contract.get("open_task")
-            if isinstance(contract.get("open_task"), dict)
-            else {}
-        )
+        if cognitive_workspace:
+            task_state = (
+                cognitive_workspace.get("active_task_context")
+                if bool(cognitive_workspace.get("task_continuation")) and isinstance(cognitive_workspace.get("active_task_context"), dict)
+                else {}
+            )
+        else:
+            task_state = (
+                self.semantic_result.get("interactive_task_state")
+                if isinstance(self.semantic_result.get("interactive_task_state"), dict)
+                else self.semantic_result.get("open_task")
+                if isinstance(self.semantic_result.get("open_task"), dict)
+                else contract.get("interactive_task_state")
+                if isinstance(contract.get("interactive_task_state"), dict)
+                else contract.get("open_task")
+                if isinstance(contract.get("open_task"), dict)
+                else {}
+            )
         task_memory = (
             self.semantic_result.get("task_memory")
             if isinstance(self.semantic_result.get("task_memory"), dict)
@@ -737,7 +757,8 @@ class SequentialInterpretation:
             "task_transition": contract.get("task_transition") or self.semantic_result.get("task_transition") or {},
             "task_action": bool(contract.get("task_action") or self.semantic_result.get("task_action")),
             "sequence_id": _text(
-                vector.get("sequence_id")
+                cognitive_workspace.get("sequence_id")
+                or vector.get("sequence_id")
                 or contract.get("sequence_id")
                 or (
                     (vector.get("trajectory") or {}).get("sequence_id")
@@ -745,6 +766,9 @@ class SequentialInterpretation:
                     else ""
                 )
             ),
+            "conversation_continuation": bool(cognitive_workspace.get("conversation_continuation")) if cognitive_workspace else bool(relation == "CONTINUE"),
+            "semantic_continuation": bool(cognitive_workspace.get("semantic_continuation")) if cognitive_workspace else bool(relation == "CONTINUE"),
+            "task_continuation": bool(cognitive_workspace.get("task_continuation")) if cognitive_workspace else bool(task_state),
             "target_sequence_id": _text(
                 vector.get("target_sequence_id")
                 or contract.get("target_sequence_id")
@@ -1076,11 +1100,18 @@ class ProcessorScene:
 
         semantic_task_state = dialogue.get("interactive_task_state") if isinstance(dialogue.get("interactive_task_state"), dict) else {}
         persisted_task_state = self.state.get("interactive_task_state") if isinstance(self.state.get("interactive_task_state"), dict) else {}
-        active_task = semantic_task_state or persisted_task_state or (
-            self.state.get("april_active_task")
-            if isinstance(self.state.get("april_active_task"), dict)
-            else {}
-        )
+        if cognitive_workspace:
+            active_task = (
+                semantic_task_state
+                if bool(cognitive_workspace.get("task_continuation")) and isinstance(semantic_task_state, dict)
+                else {}
+            )
+        else:
+            active_task = semantic_task_state or persisted_task_state or (
+                self.state.get("april_active_task")
+                if isinstance(self.state.get("april_active_task"), dict)
+                else {}
+            )
         pending_task = self.state.get("april_pending_task") if isinstance(self.state.get("april_pending_task"), dict) else {}
 
         resolved_request = _text(dialogue.get("resolved_request") or self.request)
@@ -1105,7 +1136,8 @@ class ProcessorScene:
         continuation_analysis = semantic_result.get("continuation_content_analysis") if isinstance(semantic_result.get("continuation_content_analysis"), dict) else {}
         dialogue_strategy = semantic_result.get("dialogue_strategy") if isinstance(semantic_result.get("dialogue_strategy"), dict) else {}
         resolved_entity = _text(
-            semantic_result.get("resolved_entity")
+            cognitive_workspace.get("active_entity")
+            or semantic_result.get("resolved_entity")
             or continuation_analysis.get("active_entity")
             or dialogue.get("resolved_reference")
             or self.state.get("april_active_entity")
