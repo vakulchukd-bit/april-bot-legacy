@@ -1809,6 +1809,756 @@ class LiveSceneContinuityEngine:
 
 LIVE_SCENE_CONTINUITY_ENGINE = LiveSceneContinuityEngine()
 
+
+
+class DialogueEnvironmentEngine:
+    """Canonical preflight environment for one authenticated USER->APRIL turn.
+
+    This engine does not route providers or renderers.  It resolves the semantic
+    working environment *before* LiveSceneContinuityEngine/Processor decisions:
+
+      1. authenticate the current conversation scope;
+      2. recover the latest real USER<->APRIL antecedent in that same scope;
+      3. classify the discourse move (new topic / continuation / recall / task);
+      4. recover or create the live task frame when the turn is an interactive task;
+      5. explicitly fence historical topics/entities from the current turn;
+      6. build a compact continuation-content plan for Provider.
+
+    The authenticated conversation is the long-lived container.  Topic branches
+    inside it are independent semantic work items.  Historical 7-day memory is
+    retrieval evidence only and never becomes the active owner by itself.
+    """
+
+    VERSION = "dialogue_environment_v2_sequential_authority"
+    SEVEN_DAYS_SECONDS = 7 * 24 * 60 * 60
+
+    _CONFIRMATION = (
+        "правильно", "верно", "точно", "ага", "именно", "да", "да,", "всё верно", "все верно",
+        "совершенно верно", "угадал", "угадала", "угадано",
+    )
+    _REJECTION = (
+        "неправильно", "не верно", "неверно", "нет", "не то", "неправильный ответ", "не угадал", "не угадала",
+    )
+    _MEMORY_RECALL = (
+        "вспомни", "напомни", "что мы обсуждали", "о чем мы говорили", "о чём мы говорили",
+        "что я спрашивал", "что я спрашивала", "мой прошлый вопрос", "помнишь", "из памяти",
+        "вернись к теме", "вернемся к теме", "вернёмся к теме", "к той теме", "к прошлой теме",
+    )
+    _NEW_TOPIC = (
+        "новая тема", "другая тема", "сменим тему", "перейдем к", "перейдём к",
+        "давай про другое", "давай теперь про", "а теперь про", "отдельно поговорим",
+    )
+    _RIDDLE_SOLVE = (
+        "отгадай загадку", "отгадай", "разгадай загадку", "разгадай", "реши загадку", "решить загадку",
+    )
+    _RIDDLE_CREATE = (
+        "загадай мне", "загадай загадку", "придумай мне загадку", "придумай загадку",
+        "задай мне загадку", "загадку мне",
+    )
+    _COMMAND_HEADS = (
+        "расскажи", "объясни", "покажи", "нарисуй", "создай", "сделай", "напиши", "построй",
+        "проверь", "опиши", "сравни", "найди", "выведи", "подскажи", "скажи", "дай",
+    )
+
+    @staticmethod
+    def _text(value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip())
+
+    @classmethod
+    def _low(cls, value: Any) -> str:
+        return cls._text(value).lower()
+
+    @classmethod
+    def _tokens(cls, value: Any) -> list[str]:
+        return re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", cls._low(value))
+
+    @classmethod
+    def _similarity(cls, a: Any, b: Any) -> float:
+        left, right = set(cls._tokens(a)), set(cls._tokens(b))
+        if not left or not right:
+            return 0.0
+        return len(left & right) / max(1.0, min(len(left), len(right)))
+
+    @classmethod
+    def _timestamp(cls, value: Any) -> float | None:
+        if value in (None, "", 0, 0.0):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value) if float(value) > 0 else None
+        text = cls._text(value)
+        if not text:
+            return None
+        try:
+            numeric = float(text)
+            if numeric > 0:
+                return numeric
+        except Exception:
+            pass
+        try:
+            raw = text.replace("Z", "+00:00")
+            from datetime import datetime
+            dt = datetime.fromisoformat(raw)
+            return dt.timestamp()
+        except Exception:
+            return None
+
+    @classmethod
+    def _scope(cls, state: dict[str, Any]) -> dict[str, str]:
+        sequence = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+        return {
+            "user_id": cls._text(state.get("user_id") or sequence.get("user_id")),
+            "conversation_id": cls._text(state.get("conversation_id") or sequence.get("conversation_id")),
+            "dialogue_sequence_id": cls._text(sequence.get("sequence_id") or state.get("dialogue_sequence_id")),
+        }
+
+    @classmethod
+    def _scope_match(cls, item: Any, scope: dict[str, str], *, require_sequence: bool = False) -> bool:
+        if not isinstance(item, dict):
+            return False
+        user_id = cls._text(item.get("user_id"))
+        conversation_id = cls._text(item.get("conversation_id"))
+        sequence_id = cls._text(item.get("sequence_id") or item.get("dialogue_sequence_id"))
+        if scope.get("user_id") and user_id and user_id != scope["user_id"]:
+            return False
+        if scope.get("conversation_id") and conversation_id and conversation_id != scope["conversation_id"]:
+            return False
+        if require_sequence and scope.get("dialogue_sequence_id") and sequence_id and sequence_id != scope["dialogue_sequence_id"]:
+            return False
+        return True
+
+    @classmethod
+    def _pair_from_item(cls, item: Any, scope: dict[str, str]) -> dict[str, Any]:
+        if not isinstance(item, dict) or not cls._scope_match(item, scope):
+            return {}
+        user = item.get("user")
+        april = item.get("april") or item.get("assistant")
+        if isinstance(user, dict):
+            user = user.get("text") or user.get("content") or user.get("answer") or user.get("user_request")
+        if isinstance(april, dict):
+            april = april.get("answer") or april.get("content") or april.get("summary") or april.get("april_answer")
+        user = cls._text(user or item.get("user_request"))
+        april = cls._text(april or item.get("april_answer"))
+        if not user and not april:
+            return {}
+        return {
+            "user": user,
+            "april": april,
+            "sequence_id": cls._text(item.get("sequence_id") or item.get("dialogue_sequence_id") or scope.get("dialogue_sequence_id")),
+            "scene_id": cls._text(item.get("scene_id") or item.get("visual_scene_id")),
+            "conversation_id": cls._text(item.get("conversation_id") or scope.get("conversation_id")),
+            "user_id": cls._text(item.get("user_id") or scope.get("user_id")),
+            "timestamp": cls._timestamp(item.get("created_at") or item.get("timestamp") or item.get("updated_at")),
+            "raw": item,
+        }
+
+    @classmethod
+    def _candidate_pairs(cls, state: dict[str, Any], history: list[Any], scope: dict[str, str]) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def push(pair: dict[str, Any]) -> None:
+            if not pair:
+                return
+            sig = (pair.get("user") or "") + "\n" + (pair.get("april") or "")
+            sig = sig.strip().lower()
+            if not sig or sig in seen:
+                return
+            seen.add(sig)
+            candidates.append(pair)
+
+        # Current scene is the freshest semantic carrier when it belongs to the
+        # same authenticated conversation. It is preferred to stale sequence text.
+        for key in ("active_visual_scene", "current_visual_scene", "scene_state", "active_scene"):
+            scene = state.get(key)
+            if isinstance(scene, dict):
+                pair = cls._pair_from_item(scene, scope)
+                if pair:
+                    push(pair)
+                    if len(candidates) >= 2:
+                        break
+
+        # Prefer actual chronological history over potentially stale convenience
+        # fields such as state.last_user_turn/last_april_turn. Those fields can lag
+        # behind after a scene/sequence transition; history is the source of the
+        # real USER↔APRIL pair for the authenticated conversation.
+        if isinstance(history, list):
+            for item in reversed(history):
+                pair = cls._pair_from_item(item, scope)
+                if pair:
+                    push(pair)
+                if len(candidates) >= 12:
+                    break
+
+        direct = cls._pair_from_item({
+            "user": state.get("last_user_turn"),
+            "april": state.get("last_april_turn"),
+            "user_id": scope.get("user_id"),
+            "conversation_id": scope.get("conversation_id"),
+            "sequence_id": scope.get("dialogue_sequence_id"),
+        }, scope)
+        push(direct)
+        return candidates
+
+    @classmethod
+    def _latest_pair(cls, state: dict[str, Any], history: list[Any], scope: dict[str, str]) -> dict[str, Any]:
+        candidates = cls._candidate_pairs(state, history, scope)
+        if not candidates:
+            return {}
+        # Prefer explicit timestamps when available, otherwise preserve source order.
+        dated = [x for x in candidates if x.get("timestamp") is not None]
+        if dated:
+            return max(dated, key=lambda x: float(x.get("timestamp") or 0.0))
+        return candidates[0]
+
+    @classmethod
+    def _explicit_new_topic(cls, text: str) -> bool:
+        low = cls._low(text)
+        return any(x in low for x in cls._NEW_TOPIC)
+
+    @classmethod
+    def _memory_query(cls, text: str) -> bool:
+        low = cls._low(text)
+        return any(x in low for x in cls._MEMORY_RECALL)
+
+    @classmethod
+    def _riddle_solve_request(cls, text: str) -> bool:
+        low = cls._low(text)
+        return any(x in low for x in cls._RIDDLE_SOLVE) and "загад" in low
+
+    @classmethod
+    def _riddle_create_request(cls, text: str) -> bool:
+        low = cls._low(text)
+        return any(x in low for x in cls._RIDDLE_CREATE) or (
+            "загад" in low and any(x in low for x in ("загадай", "придумай", "задай"))
+        )
+
+    @classmethod
+    def _confirmation(cls, text: str) -> bool:
+        low = cls._low(text).strip(" .,!?:;-")
+        if not low:
+            return False
+        return low in cls._CONFIRMATION or any(low.startswith(x + " ") for x in cls._CONFIRMATION if x.strip())
+
+    @classmethod
+    def _rejection(cls, text: str) -> bool:
+        low = cls._low(text).strip(" .,!?:;-")
+        return low in cls._REJECTION or any(low.startswith(x + " ") for x in cls._REJECTION if x.strip())
+
+    @classmethod
+    def _riddle_answer_relation(cls, previous_user: str, previous_april: str) -> bool:
+        pu = cls._low(previous_user)
+        pa = cls._low(previous_april)
+        return bool(
+            cls._riddle_solve_request(previous_user)
+            or ("загадк" in pu and "?" in pu)
+            or ("что это" in pa or "что это" in pu)
+        )
+
+    @classmethod
+    def _riddle_generation_relation(cls, previous_user: str, previous_april: str) -> bool:
+        pu = cls._low(previous_user)
+        pa = cls._low(previous_april)
+        return bool(
+            cls._riddle_create_request(previous_user)
+            or ("загад" in pa and ("?" in pa or "что это" in pa))
+        )
+
+    @classmethod
+    def _generic_task_from_pair(cls, previous_user: str, previous_april: str, scope: dict[str, str]) -> dict[str, Any]:
+        if not previous_user and not previous_april:
+            return {}
+
+        # A generated riddle belongs to April's riddle task.  Check this branch
+        # first because the generated question itself can contain "что это?",
+        # which must not be mistaken for a user-owned riddle.
+        if cls._riddle_generation_relation(previous_user, previous_april):
+            return {
+                "active": True,
+                "status": "open",
+                "kind": "riddle",
+                "role": "april_asks_riddle",
+                "phase": "awaiting_user_answer",
+                "expected_input_type": "answer",
+                "prompt": previous_april,
+                "last_question": previous_april,
+                "target": "",
+                "candidate_answer": "",
+                "last_user_answer": "",
+                "known_clues": [],
+                "qa_history": [{"user": previous_user, "assistant_prompt": previous_april, "kind": "riddle_prompt"}],
+                "turns": [{"user": previous_user, "assistant_prompt": previous_april, "kind": "riddle_prompt"}],
+                "awaiting_user": True,
+                "completed": False,
+                "topic": "загадка",
+                "goal": "solve_riddle",
+                "sequence_id": scope.get("dialogue_sequence_id", ""),
+                "scene_id": "",
+                "task_revision": 1,
+                "source": "dialogue_environment_riddle_recovery",
+            }
+
+        if cls._riddle_answer_relation(previous_user, previous_april):
+            return {
+                "active": True,
+                "status": "answer_received",
+                "kind": "riddle",
+                "role": "april_solves_user_riddle",
+                "phase": "awaiting_user_followup",
+                "expected_input_type": "followup",
+                "prompt": previous_user,
+                "last_question": previous_user,
+                "target": "загадка",
+                "candidate_answer": previous_april,
+                "last_user_answer": "",
+                "known_clues": [previous_user],
+                "qa_history": [{"user": previous_user, "assistant_prompt": previous_user, "kind": "riddle_prompt", "assistant_answer": previous_april}],
+                "turns": [{"user": previous_user, "assistant_prompt": previous_user, "kind": "riddle_prompt", "assistant_answer": previous_april}],
+                "awaiting_user": True,
+                "completed": False,
+                "topic": "загадка",
+                "goal": "solve_riddle",
+                "sequence_id": scope.get("dialogue_sequence_id", ""),
+                "scene_id": "",
+                "task_revision": 1,
+                "source": "dialogue_environment_riddle_recovery",
+            }
+
+        # A preceding assistant question opens a generic answer slot.
+        if previous_april and ("?" in previous_april or "？" in previous_april):
+            return {
+                "active": True,
+                "status": "open",
+                "kind": "question",
+                "role": "april_questions_user",
+                "phase": "awaiting_user_answer",
+                "expected_input_type": "answer",
+                "prompt": previous_april,
+                "last_question": previous_april,
+                "target": "",
+                "candidate_answer": "",
+                "last_user_answer": "",
+                "known_clues": [],
+                "qa_history": [{"user": previous_user, "assistant_prompt": previous_april, "kind": "question"}],
+                "turns": [{"user": previous_user, "assistant_prompt": previous_april, "kind": "question"}],
+                "awaiting_user": True,
+                "completed": False,
+                "topic": "вопрос",
+                "goal": "answer_question",
+                "sequence_id": scope.get("dialogue_sequence_id", ""),
+                "scene_id": "",
+                "task_revision": 1,
+                "source": "dialogue_environment_question_recovery",
+            }
+        return {}
+
+    @classmethod
+    def _current_task_start(cls, text: str, scope: dict[str, str]) -> dict[str, Any]:
+        if cls._riddle_solve_request(text):
+            return {
+                "active": True,
+                "status": "answer_received",
+                "kind": "riddle",
+                "role": "april_solves_user_riddle",
+                "phase": "solve_user_riddle",
+                "expected_input_type": "assistant_answer",
+                "prompt": cls._text(text),
+                "last_question": cls._text(text),
+                "target": "загадка",
+                "secret_target": "",
+                "candidate_answer": "",
+                "last_user_answer": cls._text(text),
+                "known_clues": [cls._text(text)],
+                "qa_history": [{"user": cls._text(text), "kind": "riddle_prompt"}],
+                "turns": [{"user": cls._text(text), "kind": "riddle_prompt"}],
+                "awaiting_user": False,
+                "completed": False,
+                "topic": "загадка",
+                "goal": "solve_riddle",
+                "sequence_id": scope.get("dialogue_sequence_id", ""),
+                "scene_id": "",
+                "task_revision": 1,
+                "source": "dialogue_environment_current_task",
+            }
+        if cls._riddle_create_request(text):
+            return {
+                "active": True,
+                "status": "pending_generation",
+                "kind": "riddle",
+                "role": "april_asks_riddle",
+                "phase": "generate_riddle",
+                "expected_input_type": "assistant_generation",
+                "prompt": cls._text(text),
+                "last_question": "",
+                "target": "",
+                "secret_target": "",
+                "candidate_answer": "",
+                "last_user_answer": "",
+                "known_clues": [],
+                "qa_history": [{"user": cls._text(text), "kind": "riddle_request"}],
+                "turns": [{"user": cls._text(text), "kind": "riddle_request"}],
+                "awaiting_user": False,
+                "completed": False,
+                "topic": "загадка",
+                "goal": "generate_riddle",
+                "sequence_id": scope.get("dialogue_sequence_id", ""),
+                "scene_id": "",
+                "task_revision": 1,
+                "source": "dialogue_environment_current_task",
+            }
+        return {}
+
+    @classmethod
+    def _looks_like_command(cls, text: str) -> bool:
+        words = cls._tokens(text)
+        if not words:
+            return False
+        return words[0] in cls._COMMAND_HEADS
+
+    @classmethod
+    def _topic_from_current(cls, text: str, task: dict[str, Any] | None = None) -> str:
+        task = task if isinstance(task, dict) else {}
+        if task.get("topic"):
+            return cls._text(task.get("topic"))
+        low = cls._low(text)
+        if cls._riddle_solve_request(text) or cls._riddle_create_request(text):
+            return "загадка"
+        quoted = re.findall(r"[«\"]([^»\"]{2,100})[»\"]", cls._text(text))
+        if quoted:
+            return cls._text(quoted[0])[:140]
+        words = cls._tokens(text)
+        if len(words) <= 2:
+            return cls._text(text)[:140]
+        # Do not promote an entire instruction to an entity; the request itself
+        # remains the provider's source of truth.
+        return cls._text(re.split(r"(?<=[.!?。！？])\s+", cls._text(text))[0])[:140]
+
+    @classmethod
+    def _new_topic_context(cls, text: str, scope: dict[str, str]) -> dict[str, Any]:
+        task = cls._current_task_start(text, scope)
+        topic = cls._topic_from_current(text, task)
+        representation = "text"
+        low = cls._low(text)
+        if any(x in low for x in ("картин", "изображ", "портрет", "нарисуй", "изобрази")):
+            representation = "image"
+        elif "схем" in low:
+            representation = "diagram"
+        elif "график" in low:
+            representation = "graph"
+        elif "таблиц" in low:
+            representation = "table"
+        elif "код" in low or "python" in low:
+            representation = "code"
+        if task.get("active"):
+            goal = task.get("goal") or "answer"
+            operation = "generate" if task.get("status") == "pending_generation" else "answer"
+            relation = "NEW_TOPIC"
+            return {
+                "turn_relation": relation,
+                "relation": "NEW",
+                "conversation_continuation": bool(scope.get("conversation_id")),
+                "topic_branch": "new",
+                "context_dependency": "current_turn_only",
+                "current_topic": topic,
+                "active_entity": "загадка" if task.get("kind") == "riddle" else "",
+                "operation": operation,
+                "goal": goal,
+                "representation": representation,
+                "active_task": task,
+                "previous_user_turn": "",
+                "previous_april_turn": "",
+                "selected_memory": [],
+                "historical_memory_allowed": False,
+                "resolved_request": cls._text(text),
+            }
+        return {
+            "turn_relation": relation if (relation := "NEW_TOPIC") else "NEW_TOPIC",
+            "relation": "NEW",
+            "conversation_continuation": bool(scope.get("conversation_id")),
+            "topic_branch": "new",
+            "context_dependency": "current_turn_only",
+            "current_topic": topic,
+            "active_entity": "",
+            "operation": "answer" if "?" in text or "？" in text else "build" if cls._looks_like_command(text) else "answer",
+            "goal": "answer",
+            "representation": representation,
+            "active_task": {},
+            "previous_user_turn": "",
+            "previous_april_turn": "",
+            "selected_memory": [],
+            "historical_memory_allowed": False,
+            "resolved_request": cls._text(text),
+        }
+
+    @classmethod
+    def _recall_context(cls, text: str, state: dict[str, Any], history: list[Any], scope: dict[str, str]) -> dict[str, Any]:
+        # Recall is deliberately isolated from active task ownership.  The actual
+        # ranking is left to the existing semantic memory surface later in the route.
+        return {
+            "turn_relation": "REFERENCE_OLD_TOPIC",
+            "relation": "RECALL",
+            "conversation_continuation": bool(scope.get("conversation_id")),
+            "topic_branch": "recalled",
+            "context_dependency": "memory_reference",
+            "current_topic": cls._topic_from_current(text),
+            "active_entity": "",
+            "operation": "retrieve" if any(x in cls._low(text) for x in ("вспомни", "напомни", "что мы обсуждали")) else "answer",
+            "goal": "obtain",
+            "representation": "text",
+            "active_task": {},
+            "previous_user_turn": "",
+            "previous_april_turn": "",
+            "selected_memory": [],
+            "historical_memory_allowed": True,
+            "resolved_request": cls._text(text),
+        }
+
+    @classmethod
+    def _continuation_context(cls, text: str, previous: dict[str, Any], scope: dict[str, str]) -> dict[str, Any]:
+        previous_user = cls._text(previous.get("user"))
+        previous_april = cls._text(previous.get("april"))
+        confirmation = cls._confirmation(text)
+        rejection = cls._rejection(text)
+        recovered = cls._generic_task_from_pair(previous_user, previous_april, scope)
+        task = dict(recovered)
+
+        # Confirmation/rejection are discourse moves, never new topics.
+        if confirmation or rejection:
+            if task:
+                task["status"] = "answer_received"
+                task["phase"] = "confirmed" if confirmation else "corrected"
+                task["candidate_answer"] = previous_april
+                task["last_user_answer"] = cls._text(text)
+                task["awaiting_user"] = False
+            return {
+                "turn_relation": "TASK_CONFIRMATION" if confirmation else "TASK_CORRECTION",
+                "relation": "CONTINUE",
+                "conversation_continuation": bool(scope.get("conversation_id")),
+                "topic_branch": "continue",
+                "context_dependency": "active_dialogue_sequence" if task else "immediate_pair",
+                "current_topic": cls._text(task.get("topic") or "вопрос"),
+                "active_entity": cls._text(task.get("candidate_answer") or ""),
+                "operation": "answer",
+                "goal": cls._text(task.get("goal") or "continue"),
+                "representation": "text",
+                "active_task": task,
+                "previous_user_turn": previous_user,
+                "previous_april_turn": previous_april,
+                "selected_memory": [],
+                "historical_memory_allowed": False,
+                "resolved_request": (
+                    "Acknowledge the user's confirmation of the immediately preceding answer and advance the conversation naturally. "
+                    if confirmation else
+                    "Handle the user's correction/rejection against the immediately preceding answer and continue the active task. "
+                ) + f"Previous user: {previous_user}. Previous April: {previous_april}. Current user: {cls._text(text)}",
+            }
+
+        # Short/elliptical replies are attached to a real antecedent rather than
+        # promoted to standalone topics.  Pronouns and follow-up words get a wide
+        # semantic window; ordinary self-contained commands stay new.
+        low = cls._low(text)
+        tokens = cls._tokens(text)
+        deictic = any(x in low for x in ("это", "этот", "эта", "эту", "её", "ее", "его", "он", "она", "оно", "они", "теперь", "дальше"))
+        short = len(tokens) <= 8
+        question_followup = ("?" in text or "？" in text) and ("кто" in low or "где" in low or "какой" in low or "какая" in low or "почему" in low or "как" in low or "когда" in low)
+        prior_question = "?" in previous_april or "？" in previous_april
+        semantic_overlap = max(cls._similarity(text, previous_user), cls._similarity(text, previous_april))
+
+        # A self-contained request/question is a new topic even when an older
+        # interactive task is still present. Short replies and deictic references
+        # remain eligible for continuation, but a concrete new command such as
+        # "Расскажи про Tesla" must never be swallowed by the old task.
+        self_contained_new = bool(
+            len(tokens) >= 3
+            and not deictic
+            and not confirmation
+            and not rejection
+            and semantic_overlap < 0.30
+            and (cls._looks_like_command(text) or "?" in text or "？" in text)
+        )
+        if self_contained_new:
+            return cls._new_topic_context(text, scope)
+
+        # When April has just asked the user a riddle/question, a short standalone
+        # answer belongs to that task even with zero lexical overlap. Record the
+        # answer in the task frame immediately so Provider receives the new fact.
+        if task and short and not question_followup and not confirmation and not rejection:
+            expected = cls._low(task.get("expected_input_type"))
+            if expected in {"answer", "user_answer", "followup", ""} or task.get("phase") == "awaiting_user_answer":
+                task["candidate_answer"] = cls._text(text)
+                task["last_user_answer"] = cls._text(text)
+                task["status"] = "answer_received"
+                task["phase"] = "awaiting_assistant_action"
+                task["awaiting_user"] = False
+                task["task_revision"] = int(task.get("task_revision", 0) or 0) + 1
+                return {
+                    "turn_relation": "TASK_ANSWER",
+                    "relation": "CONTINUE",
+                    "conversation_continuation": bool(scope.get("conversation_id")),
+                    "topic_branch": "continue",
+                    "context_dependency": "active_dialogue_sequence",
+                    "current_topic": cls._text(task.get("topic") or "вопрос"),
+                    "active_entity": cls._text(text),
+                    "operation": "answer",
+                    "goal": cls._text(task.get("goal") or "answer"),
+                    "representation": "text",
+                    "active_task": task,
+                    "previous_user_turn": previous_user,
+                    "previous_april_turn": previous_april,
+                    "selected_memory": [],
+                    "historical_memory_allowed": False,
+                    "resolved_request": (
+                        "Evaluate the user's current answer against the immediately preceding active question/riddle. "
+                        "Use the task state and respond naturally without repeating the prompt. "
+                        f"Question/riddle: {previous_april}. Current user answer: {cls._text(text)}"
+                    ),
+                }
+
+        continuation = bool(
+            task
+            or question_followup
+            or prior_question and short
+            or deictic and previous_april
+            or semantic_overlap >= 0.22
+            or low.startswith(("теперь ", "дальше ", "ещё ", "еще ", "а теперь ", "продолж"))
+        )
+        if continuation:
+            topic = cls._text(task.get("topic") or previous.get("topic") or "")
+            if not topic or topic in {"вопрос", "ответ", "тема"}:
+                topic = cls._topic_from_current(previous_user or previous_april, task)
+            active_entity = cls._text(task.get("candidate_answer") or "")
+            return {
+                "turn_relation": "CONTINUE_TOPIC" if not task else "TASK_CONTINUE",
+                "relation": "CONTINUE",
+                "conversation_continuation": bool(scope.get("conversation_id")),
+                "topic_branch": "continue",
+                "context_dependency": "active_dialogue_sequence",
+                "current_topic": topic or "",
+                "active_entity": active_entity,
+                "operation": "answer",
+                "goal": cls._text(task.get("goal") or "continue"),
+                "representation": "text",
+                "active_task": task,
+                "previous_user_turn": previous_user,
+                "previous_april_turn": previous_april,
+                "selected_memory": [],
+                "historical_memory_allowed": False,
+                "resolved_request": (
+                    "Continue the current dialogue using the immediately preceding USER↔APRIL pair. "
+                    "Do not repeat covered content; answer the current turn and advance naturally. "
+                    f"Previous user: {previous_user}. Previous April: {previous_april}. Current user: {cls._text(text)}"
+                ),
+            }
+
+        return cls._new_topic_context(text, scope)
+
+    @classmethod
+    def _stale_entity_candidates(cls, state: dict[str, Any], previous: dict[str, Any], current_text: str, active_entity: str) -> list[str]:
+        stale: list[str] = []
+        seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+        for value in (
+            seq.get("active_entity"),
+            state.get("april_active_entity"),
+            (state.get("scene_state") or {}).get("active_entity") if isinstance(state.get("scene_state"), dict) else "",
+        ):
+            value = cls._text(value)
+            if value and value != active_entity and cls._similarity(value, current_text) < 0.05 and cls._similarity(value, previous.get("user"),) < 0.05:
+                stale.append(value)
+        return list(dict.fromkeys(stale))
+
+    @classmethod
+    def build(cls, text: str, state: dict[str, Any], history: list[Any]) -> dict[str, Any]:
+        state = state if isinstance(state, dict) else {}
+        history = history if isinstance(history, list) else []
+        scope = cls._scope(state)
+        previous = cls._latest_pair(state, history, scope)
+
+        # Current-turn task starts have priority over the old open task.  Otherwise
+        # an old riddle/question can steal a completely new request.
+        current_task = cls._current_task_start(text, scope)
+        if current_task:
+            env = cls._new_topic_context(text, scope)
+        elif cls._memory_query(text):
+            env = cls._recall_context(text, state, history, scope)
+        elif cls._explicit_new_topic(text):
+            env = cls._new_topic_context(text, scope)
+        elif previous:
+            env = cls._continuation_context(text, previous, scope)
+        else:
+            env = cls._new_topic_context(text, scope)
+
+        active_task = env.get("active_task") if isinstance(env.get("active_task"), dict) else {}
+        active_entity = cls._text(env.get("active_entity"))
+        stale_entities = cls._stale_entity_candidates(state, previous, text, active_entity)
+        continuation_analysis = {
+            "version": "dialogue_continuation_planner_v2",
+            "mode": env.get("turn_relation"),
+            "active": env.get("relation") in {"CONTINUE", "RECALL"},
+            "new_information_required": env.get("relation") == "CONTINUE",
+            "covered_content": [cls._text(previous.get("april"))] if previous.get("april") and env.get("relation") == "CONTINUE" else [],
+            "avoid_repeat_content": [cls._text(previous.get("april"))] if previous.get("april") and env.get("relation") == "CONTINUE" else [],
+            "novelty_target": "current_turn_answer" if env.get("relation") == "CONTINUE" else "current_topic",
+            "next_direction": "answer_current_turn_and_advance" if env.get("relation") == "CONTINUE" else "recall_and_connect" if env.get("relation") == "RECALL" else "develop_new_topic",
+            "answer_strategy": (
+                "ACKNOWLEDGE_AND_ADVANCE" if env.get("turn_relation") == "TASK_CONFIRMATION"
+                else "CORRECT_AND_ADVANCE" if env.get("turn_relation") == "TASK_CORRECTION"
+                else "SOLVE_ACTIVE_TASK" if env.get("turn_relation") == "TASK_CONTINUE" and active_task.get("kind") in {"riddle", "game"}
+                else "ANSWER_WITHOUT_REPEAT" if env.get("relation") == "CONTINUE"
+                else "RECALL_AND_CONNECT" if env.get("relation") == "RECALL"
+                else "START_FRESH"
+            ),
+            "recap_ratio_max": 0.20 if env.get("relation") == "CONTINUE" else 0.0,
+        }
+
+        diagnostics = {
+            "source": cls.VERSION,
+            "scope": scope,
+            "previous_pair_found": bool(previous),
+            "previous_pair_sequence_id": cls._text(previous.get("sequence_id")),
+            "stale_entities_fenced": stale_entities,
+            "historical_memory_policy": "recall_only" if env.get("historical_memory_allowed") else "excluded",
+            "current_turn_authority": True,
+            "active_branch_authority": env.get("relation") == "CONTINUE",
+            "contradiction_count": len(stale_entities),
+        }
+
+        return {
+            "version": cls.VERSION,
+            "scope": scope,
+            "current_turn": {"text": cls._text(text), "authoritative": True},
+            "previous_pair": previous,
+            "turn_relation": env.get("turn_relation"),
+            "relation": env.get("relation"),
+            "conversation_continuation": bool(env.get("conversation_continuation")),
+            "topic_branch": env.get("topic_branch"),
+            "context_dependency": env.get("context_dependency"),
+            "current_topic": cls._text(env.get("current_topic")),
+            "active_entity": active_entity,
+            "operation": cls._text(env.get("operation") or "answer"),
+            "goal": cls._text(env.get("goal") or "answer"),
+            "representation": cls._text(env.get("representation") or "text"),
+            "active_task": active_task,
+            "previous_user_turn": cls._text(previous.get("user")),
+            "previous_april_turn": cls._text(previous.get("april")),
+            "selected_memory": list(env.get("selected_memory") or []),
+            "historical_memory_allowed": bool(env.get("historical_memory_allowed")),
+            "resolved_request": cls._text(env.get("resolved_request") or text),
+            "continuation_content_analysis": continuation_analysis,
+            "fenced_historical_entities": stale_entities,
+            "diagnostics": diagnostics,
+            "authority_chain": [
+                "CURRENT_TURN",
+                "AUTHENTICATED_USER_SCOPE",
+                "IMMEDIATE_USER_APRIL_PAIR",
+                "ACTIVE_TOPIC_BRANCH",
+                "ACTIVE_TASK",
+                "EXPLICIT_7D_MEMORY_RECALL",
+                "HISTORICAL_MEMORY_EVIDENCE",
+            ],
+        }
+
+
+DIALOGUE_ENVIRONMENT_ENGINE = DialogueEnvironmentEngine()
+
 class QuantumInterpretationEngine:
     """One engine: linguistic evidence + semantic matrix + context fusion."""
 
@@ -2642,13 +3392,50 @@ class QuantumInterpretationEngine:
 
         started = time.perf_counter()
 
-        last_assistant, last_user, reply_to = self._history(history)
+        # Build the dialogue environment BEFORE any task/scene resolution.  The
+        # environment is scoped to the authenticated USER↔conversation and picks
+        # the freshest real antecedent instead of trusting a stale sequence topic.
+        dialogue_environment = DIALOGUE_ENVIRONMENT_ENGINE.build(text, state, history)
+        environment_previous = dialogue_environment.get("previous_pair") if isinstance(dialogue_environment.get("previous_pair"), dict) else {}
+        last_assistant = self.normalize(
+            dialogue_environment.get("previous_april_turn") or environment_previous.get("april")
+        )
+        last_user = self.normalize(
+            dialogue_environment.get("previous_user_turn") or environment_previous.get("user")
+        )
+        reply_to = ""
 
-        # The old sequence topic is evidence only.  Current task ownership is
-        # resolved from the live state/scene/history before we choose the
-        # canonical topic.
+        # The environment, not stale sequence/entity fields, is the first semantic
+        # authority for the current turn.  Older state remains available as evidence
+        # but cannot silently become the active owner.
         raw_scene = LIVE_SCENE_CONTINUITY_ENGINE._scene_from_state(state)
-        inferred_open_task = LIVE_SCENE_CONTINUITY_ENGINE._find_open_task(
+        preflight_relation = self.normalize(dialogue_environment.get("relation")).upper()
+        preflight_task = dialogue_environment.get("active_task") if isinstance(dialogue_environment.get("active_task"), dict) else {}
+
+        if preflight_relation == "NEW" and not preflight_task:
+            # Fence the previous task/topic before the live-scene resolver runs.
+            state["open_task"] = {}
+            state["active_task"] = {}
+            state["interactive_task_state"] = {}
+            state["april_active_task"] = {}
+            state["april_pending_task"] = {} if isinstance(state.get("april_pending_task"), dict) else state.get("april_pending_task")
+            state["active_topic"] = self.normalize(dialogue_environment.get("current_topic"))
+            state["current_topic"] = self.normalize(dialogue_environment.get("current_topic"))
+            state["active_goal"] = self.normalize(dialogue_environment.get("goal"))
+            state["current_goal"] = self.normalize(dialogue_environment.get("goal"))
+        elif preflight_task:
+            # Recover/create only the task that belongs to this current authenticated
+            # branch.  This is especially important for riddle confirmation turns.
+            state["open_task"] = dict(preflight_task)
+            state["active_task"] = dict(preflight_task)
+            state["interactive_task_state"] = dict(preflight_task)
+            state["april_active_task"] = dict(preflight_task)
+            state["active_topic"] = self.normalize(dialogue_environment.get("current_topic"))
+            state["current_topic"] = self.normalize(dialogue_environment.get("current_topic"))
+            state["active_goal"] = self.normalize(dialogue_environment.get("goal"))
+            state["current_goal"] = self.normalize(dialogue_environment.get("goal"))
+
+        inferred_open_task = dict(preflight_task) if preflight_task else LIVE_SCENE_CONTINUITY_ENGINE._find_open_task(
             state,
             LIVE_SCENE_CONTINUITY_ENGINE._history_turns(history),
             raw_scene,
@@ -2660,13 +3447,12 @@ class QuantumInterpretationEngine:
             {"label": ""},
         )
 
-        if inferred_open_task.get("active") and not transition_preview.get("replace_task"):
+        owner_topic = self.normalize(dialogue_environment.get("current_topic"))
+        if not owner_topic and inferred_open_task.get("active"):
             owner_topic = self.normalize(
                 inferred_open_task.get("topic")
                 or ("загадка" if inferred_open_task.get("kind") == "riddle" else "вопрос")
             )
-        else:
-            owner_topic = ""
 
         active_topic = self.normalize(
             owner_topic
@@ -2679,7 +3465,8 @@ class QuantumInterpretationEngine:
         )
 
         active_goal = self.normalize(
-            inferred_open_task.get("goal")
+            dialogue_environment.get("goal")
+            or inferred_open_task.get("goal")
             or state.get("active_goal")
             or state.get("current_goal")
             or semantic.get("active_goal")
@@ -2710,6 +3497,69 @@ class QuantumInterpretationEngine:
             active_topic=active_topic,
             open_task=inferred_open_task,
         )["dialogue"]
+
+        # The preflight environment is the discourse authority. Matrix scores remain
+        # evidence, but they may not relabel a known interaction such as
+        # `Правильно`, `Ключ`, or `Отгадай загадку ...`.
+        measured_dialogue = dict(measured_dialogue)
+        preflight_turn_relation = self.normalize(dialogue_environment.get("turn_relation")).upper()
+        if preflight_relation == "NEW":
+            measured_dialogue.update({
+                "label": "request",
+                "continuation_score": 0.0,
+                "reference_score": 0.0,
+                "topic_score": 0.0,
+                "goal_score": 0.0,
+                "task_relation": {
+                    "is_answer": False,
+                    "is_task_action": False,
+                    "confidence": 0.0,
+                    "reason": "current_topic_authority",
+                },
+                "task_transition": {"requested": False, "replace_task": False, "reset_memory": False, "source": "dialogue_environment"},
+                "confidence": max(float(measured_dialogue.get("confidence", 0.0) or 0.0), 0.90),
+            })
+        elif preflight_relation == "RECALL":
+            measured_dialogue.update({
+                "label": "memory_query",
+                "continuation_score": 0.0,
+                "reference_score": 0.95,
+                "reference_to_previous": True,
+                "topic_score": 0.0,
+                "goal_score": 0.0,
+            })
+        elif preflight_relation == "CONTINUE":
+            measured_dialogue.update({
+                "label": (
+                    "affirmation" if preflight_turn_relation == "TASK_CONFIRMATION"
+                    else "correction" if preflight_turn_relation == "TASK_CORRECTION"
+                    else "continuation"
+                ),
+                "continuation_score": max(float(measured_dialogue.get("continuation_score", 0.0) or 0.0), 0.94),
+                "reference_score": max(float(measured_dialogue.get("reference_score", 0.0) or 0.0), 0.90),
+                "topic_score": max(float(measured_dialogue.get("topic_score", 0.0) or 0.0), 0.50),
+                "goal_score": max(float(measured_dialogue.get("goal_score", 0.0) or 0.0), 0.50),
+                "task_relation": (
+                    {
+                        "is_answer": False,
+                        "is_task_action": True,
+                        "confidence": 0.99,
+                        "reason": "confirmed_active_task",
+                    } if preflight_turn_relation in {"TASK_CONFIRMATION", "TASK_CORRECTION"} and preflight_task else measured_dialogue.get("task_relation", {})
+                ),
+                "confidence": max(float(measured_dialogue.get("confidence", 0.0) or 0.0), 0.92),
+            })
+
+        # For an explicitly new topic, erase stale semantic context from the matrix
+        # profile before LiveSceneContinuityEngine sees it.
+        if preflight_relation == "NEW":
+            profile = dict(profile)
+            profile["context_scores"] = dict(profile.get("context_scores") or {})
+            for key in ("previous_assistant", "previous_user", "active_topic", "active_goal"):
+                profile["context_scores"][key] = 0.0
+            profile["dialogue_scores"] = dict(profile.get("dialogue_scores") or {})
+            profile["dialogue_scores"]["new_topic"] = max(float(profile["dialogue_scores"].get("new_topic", 0.0) or 0.0), 0.95)
+            profile["dialogue_scores"]["independent"] = max(float(profile["dialogue_scores"].get("independent", 0.0) or 0.0), 0.90)
 
         # First-turn guard remains, but it does not override a real live task.
         has_live_context = bool(
@@ -2765,6 +3615,44 @@ class QuantumInterpretationEngine:
             active_goal=active_goal,
             scene_type=provisional_scene_type,
         )
+
+        # Reconcile the low-level scene resolver with the preflight environment.
+        # This is intentionally a narrow semantic fence: it does not touch routing
+        # or rendering, only the ownership/continuity facts used by those layers.
+        if preflight_relation == "NEW":
+            live_scene["topic_boundary"] = True
+            live_scene["new_scene"] = True
+            live_scene["continuation"] = False
+            live_scene["relation"] = "NEW_SCENE"
+            if preflight_task:
+                live_scene["open_task"] = dict(preflight_task)
+                live_scene["task_state"] = dict(preflight_task)
+                live_scene["interactive_task_state"] = dict(preflight_task)
+                live_scene["active_entity"] = self.normalize(dialogue_environment.get("active_entity"))
+                state["open_task"] = dict(preflight_task)
+                state["active_task"] = dict(preflight_task)
+                state["interactive_task_state"] = dict(preflight_task)
+        elif preflight_relation == "CONTINUE":
+            live_scene["topic_boundary"] = False
+            live_scene["new_scene"] = False
+            live_scene["continuation"] = True
+            live_scene["relation"] = "CONTINUE_SCENE"
+            if preflight_task:
+                live_scene["open_task"] = dict(preflight_task)
+                live_scene["task_state"] = dict(preflight_task)
+                live_scene["interactive_task_state"] = dict(preflight_task)
+        elif preflight_relation == "RECALL":
+            live_scene["memory_query"] = True
+            live_scene["relation"] = "MEMORY_RECALL"
+            live_scene["continuation"] = False
+
+        # Historical entity values from an older branch are evidence only.  Never
+        # let them survive as the active entity when the preflight environment has
+        # established a fresh topic.
+        if preflight_relation == "NEW":
+            state["april_active_entity"] = self.normalize(dialogue_environment.get("active_entity"))
+        elif preflight_relation == "CONTINUE" and dialogue_environment.get("active_entity"):
+            state["april_active_entity"] = self.normalize(dialogue_environment.get("active_entity"))
 
         live_scene_record = (
             live_scene.get("scene", {})
@@ -3363,6 +4251,71 @@ class QuantumInterpretationEngine:
         # back to weaker legacy fields after the workspace has already resolved
         # the current turn.
         workspace = result["cognitive_workspace"]
+
+        # Final canonicalization: the workspace is now the single semantic handoff
+        # object.  It must reflect the preflight environment exactly, otherwise a
+        # late legacy field can silently resurrect an older topic/task.
+        env_task = dialogue_environment.get("active_task") if isinstance(dialogue_environment.get("active_task"), dict) else {}
+        resolved_live_task = live_scene.get("open_task") if isinstance(live_scene.get("open_task"), dict) else {}
+        effective_env_task = (
+            resolved_live_task if resolved_live_task.get("active")
+            else env_task
+        )
+        if dialogue_environment.get("relation") in {"NEW", "CONTINUE", "RECALL"}:
+            workspace["turn_relation"] = dialogue_environment.get("turn_relation")
+            workspace["relation"] = dialogue_environment.get("relation")
+            workspace["conversation_continuation"] = bool(dialogue_environment.get("conversation_continuation"))
+            workspace["semantic_continuation"] = dialogue_environment.get("relation") == "CONTINUE"
+            workspace["task_continuation"] = bool(effective_env_task and dialogue_environment.get("relation") == "CONTINUE")
+            workspace["reference"] = dialogue_environment.get("relation") == "RECALL"
+            workspace["context_dependency"] = dialogue_environment.get("context_dependency")
+            workspace["active_topic"] = self.normalize(dialogue_environment.get("current_topic"))
+            workspace["active_entity"] = self.normalize(
+                dialogue_environment.get("active_entity")
+                or effective_env_task.get("candidate_answer")
+                or effective_env_task.get("target")
+            )
+            workspace["operation"] = self.normalize(dialogue_environment.get("operation") or workspace.get("operation") or "answer")
+            workspace["goal"] = self.normalize(dialogue_environment.get("goal") or workspace.get("goal") or "answer")
+            workspace["representation"] = self.normalize(dialogue_environment.get("representation") or workspace.get("representation") or "text")
+            workspace["active_task_context"] = effective_env_task
+            workspace["previous_user_turn"] = self.normalize(dialogue_environment.get("previous_user_turn"))
+            workspace["previous_april_turn"] = self.normalize(dialogue_environment.get("previous_april_turn"))
+            workspace["resolved_request"] = self.normalize(dialogue_environment.get("resolved_request") or text)
+            workspace["historical_memory_allowed"] = bool(dialogue_environment.get("historical_memory_allowed"))
+            workspace["selected_memory"] = list(dialogue_environment.get("selected_memory") or [])
+            workspace["continuation_content_analysis"] = dialogue_environment.get("continuation_content_analysis") or {}
+            workspace["fenced_historical_entities"] = list(dialogue_environment.get("fenced_historical_entities") or [])
+            workspace["authority_chain"] = list(dialogue_environment.get("authority_chain") or workspace.get("authority_chain") or [])
+
+            # New/continuing turns must not inherit semantically unrelated 7-day
+            # memory. Recall is the only mode that is allowed to rank historical
+            # topics into provider context.
+            optional_context = list(workspace.get("optional_context") or [])
+            if not workspace["historical_memory_allowed"]:
+                optional_context = [
+                    entry for entry in optional_context
+                    if not isinstance(entry, dict) or entry.get("key") not in {"RELEVANT_MEMORY", "SEVEN_DAY_DIALOGUE_MEMORY", "HISTORICAL_MEMORY"}
+                ]
+                excluded_context = list(workspace.get("excluded_context") or [])
+                excluded_context.append({
+                    "key": "HISTORICAL_MEMORY",
+                    "reason": "current_turn_or_active_sequence_has_priority",
+                })
+                workspace["excluded_context"] = excluded_context
+            workspace["optional_context"] = optional_context
+            workspace["selected_memory"] = list(workspace.get("selected_memory") or []) if workspace["historical_memory_allowed"] else []
+
+            # Rebuild the provider section index after the memory fence without
+            # changing the provider or renderer route.
+            provider_sections = list(workspace.get("provider_sections") or [])
+            if not workspace["historical_memory_allowed"]:
+                provider_sections = [
+                    entry for entry in provider_sections
+                    if not isinstance(entry, dict) or entry.get("name") not in {"RELEVANT_MEMORY", "SEVEN_DAY_DIALOGUE_MEMORY", "HISTORICAL_MEMORY"}
+                ]
+            workspace["provider_sections"] = provider_sections
+
         workspace_frame = workspace.get("semantic_frame") if isinstance(workspace.get("semantic_frame"), dict) else {}
         if workspace_frame:
             result["semantic_frame"] = dict(workspace_frame)
@@ -3890,8 +4843,22 @@ class DialogCognitiveWorkspace:
                 values.extend(value)
         values.extend(history[-8:])
 
+        now = time.time()
+        cutoff = now - DialogueEnvironmentEngine.SEVEN_DAYS_SECONDS
         seen: set[str] = set()
-        for item in reversed(values[-self.MAX_MEMORY_CANDIDATES:]):
+        for item in reversed(values[-self.MAX_MEMORY_CANDIDATES * 2:]):
+            if isinstance(item, dict):
+                stamp = DialogueEnvironmentEngine._timestamp(
+                    item.get("created_at") or item.get("timestamp") or item.get("updated_at")
+                )
+                # The 7-day memory contract is enforced when a source exposes a
+                # timestamp. Entries without a timestamp are treated as transient
+                # active-history evidence, not as historical memory.
+                is_historical_store = bool(item.get("sequence_id") or item.get("memory_kind") or item.get("created_at"))
+                if stamp is not None and stamp < cutoff:
+                    continue
+                if stamp is None and is_historical_store:
+                    continue
             text = self._turn_text(item)
             if not text:
                 continue
