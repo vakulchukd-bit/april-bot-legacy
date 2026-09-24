@@ -640,6 +640,20 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
         "response_decision": raw.get("response_decision") or {},
         "semantic": raw.get("semantic") or {},
         "cognition": raw.get("cognition") or {},
+        "cognitive_workspace": (
+            raw.get("cognitive_workspace")
+            or (raw.get("conversation") or {}).get("cognitive_workspace")
+            or raw.get("cognitive_context_plan")
+            or (raw.get("constraints") or {}).get("cognitive_context_plan")
+            or {}
+        ),
+        "cognitive_context_plan": (
+            raw.get("cognitive_context_plan")
+            or (raw.get("constraints") or {}).get("cognitive_context_plan")
+            or (raw.get("conversation") or {}).get("cognitive_workspace")
+            or raw.get("cognitive_workspace")
+            or {}
+        ),
         "response_complexity": raw.get("response_complexity"),
         "response_output_tokens": raw.get("response_output_tokens"),
         "quantum_state": raw.get("quantum_state") or {},
@@ -651,6 +665,22 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
         max_items=8,
         max_keys=16,
     ) or {}
+
+    # The cognitive workspace is a canonical handoff, not an optional metadata
+    # field. Re-attach it after generic key compaction so the provider packer
+    # cannot erase the semantic continuation decision.
+    workspace_raw = (
+        raw.get("cognitive_workspace")
+        or (raw.get("conversation") or {}).get("cognitive_workspace")
+        or raw.get("cognitive_context_plan")
+        or (raw.get("constraints") or {}).get("cognitive_context_plan")
+        or {}
+    )
+    if isinstance(workspace_raw, dict) and workspace_raw:
+        compact["cognitive_workspace"] = _compact_value(
+            workspace_raw, max_depth=7, max_items=12, max_keys=28
+        ) or {}
+        compact["cognitive_context_plan"] = compact["cognitive_workspace"]
 
     # Generic request compaction intentionally stays small, but interactive
     # dialogue is stateful evidence. Restore the bounded task trajectory after
@@ -1352,24 +1382,37 @@ def build_openai_request(machine_request: Any) -> dict:
 
 def _provider_system_prompt_for_payload(payload: dict[str, Any]) -> str:
     dialogue = _dialogue_contract(payload)
-    continuation = bool(dialogue.get("continuation"))
-    reference = bool(dialogue.get("reference_to_previous"))
-    pending = str(dialogue.get("context_dependency") or "").lower() == "pending"
-    task_state = (
-        dialogue.get("interactive_task_state")
-        if isinstance(dialogue.get("interactive_task_state"), dict)
-        else dialogue.get("open_task")
-        if isinstance(dialogue.get("open_task"), dict)
+    workspace = (
+        payload.get("cognitive_workspace")
+        if isinstance(payload.get("cognitive_workspace"), dict)
+        else (payload.get("conversation") or {}).get("cognitive_workspace")
+        if isinstance(payload.get("conversation"), dict) and isinstance((payload.get("conversation") or {}).get("cognitive_workspace"), dict)
+        else payload.get("cognitive_context_plan")
+        if isinstance(payload.get("cognitive_context_plan"), dict)
         else {}
     )
-    task_active = bool(
-        isinstance(task_state, dict)
-        and (
-            task_state.get("active")
-            or task_state.get("open")
-            or task_state.get("kind") in {"game", "riddle", "question", "choice"}
+    continuation = bool(workspace.get("continuation") or workspace.get("semantic_continuation")) if workspace else bool(dialogue.get("continuation"))
+    reference = bool(workspace.get("reference")) if workspace else bool(dialogue.get("reference_to_previous"))
+    pending = str(dialogue.get("context_dependency") or "").lower() == "pending"
+    if workspace:
+        task_state = workspace.get("active_task_context") if isinstance(workspace.get("active_task_context"), dict) else {}
+        task_active = bool(workspace.get("task_continuation"))
+    else:
+        task_state = (
+            dialogue.get("interactive_task_state")
+            if isinstance(dialogue.get("interactive_task_state"), dict)
+            else dialogue.get("open_task")
+            if isinstance(dialogue.get("open_task"), dict)
+            else {}
         )
-    )
+        task_active = bool(
+            isinstance(task_state, dict)
+            and (
+                task_state.get("active")
+                or task_state.get("open")
+                or task_state.get("kind") in {"game", "riddle", "question", "choice"}
+            )
+        )
     return (
         PROVIDER_DIALOGUE_SYSTEM_PROMPT
         if continuation or reference or pending or task_active
@@ -1416,7 +1459,9 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     outputs = list(payload.get("requested_outputs") or [])
     conversation_payload = payload.get("conversation") if isinstance(payload.get("conversation"), dict) else {}
     workspace = (
-        conversation_payload.get("cognitive_workspace")
+        payload.get("cognitive_workspace")
+        if isinstance(payload.get("cognitive_workspace"), dict)
+        else conversation_payload.get("cognitive_workspace")
         if isinstance(conversation_payload.get("cognitive_workspace"), dict)
         else payload.get("cognitive_context_plan")
         if isinstance(payload.get("cognitive_context_plan"), dict)
@@ -1470,11 +1515,15 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         workspace_core = {
             "version": workspace.get("version"),
             "relation": workspace.get("relation"),
-            "continuation": bool(workspace.get("continuation")),
-            "reference": bool(workspace.get("reference")),
-            "active_task": bool(workspace.get("active_task")),
+            "resolved_request": _semantic_excerpt(workspace.get("resolved_request") or "", 360),
             "active_topic": workspace.get("active_topic"),
             "active_entity": workspace.get("active_entity"),
+            "conversation_continuation": bool(workspace.get("conversation_continuation")),
+            "semantic_continuation": bool(workspace.get("continuation") or workspace.get("semantic_continuation")),
+            "task_continuation": bool(workspace.get("task_continuation")),
+            "continuation": bool(workspace.get("continuation")),
+            "reference": bool(workspace.get("reference")),
+            "active_task": bool(workspace.get("task_continuation")),
             "operation": workspace.get("operation"),
             "goal": workspace.get("goal"),
             "representation": workspace.get("representation"),
@@ -1574,7 +1623,10 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             value = section.get("value")
             if not name or value in (None, "", [], {}):
                 continue
-            if name.upper() in {"CURRENT_REQUEST", "SEMANTIC_FRAME", "OUTPUT_CONTRACT"}:
+            if name.upper() in {
+                "CURRENT_REQUEST", "SEMANTIC_FRAME", "OUTPUT_CONTRACT",
+                "REQUEST_DIRECTIVES", "REQUEST_IDENTIFIERS", "COGNITIVE_CORE",
+            }:
                 continue
             mandatory.append(
                 _json_piece(name.upper(), value, depth=3, items=5, keys=10)
