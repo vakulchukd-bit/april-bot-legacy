@@ -345,6 +345,100 @@ def _bridge_provider_artifacts(machine_response: dict) -> dict:
     return machine_response
 
 
+def _visual_hydration_key(block: Any) -> str:
+    """Return a semantic key for image/diagram carriers of the same artifact.
+
+    Provider responses can legally expose one visual artifact both in
+    ``scene.render_blocks`` and in ``artifacts``.  Those are transport carriers,
+    not two visible scene nodes.  The key intentionally ignores renderer/UI
+    metadata and keeps only the visual payload identity.
+    """
+    if not isinstance(block, dict):
+        return ""
+    kind = _text(
+        block.get("type") or block.get("artifact_type") or block.get("representation")
+    ).lower()
+    if kind not in {"image", "diagram"}:
+        return ""
+
+    payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+    if kind == "image":
+        images = payload.get("images")
+        if isinstance(images, list) and images:
+            sources = []
+            for item in images:
+                if isinstance(item, dict):
+                    source = (
+                        item.get("src")
+                        or item.get("url")
+                        or item.get("image")
+                        or item.get("image_data_uri")
+                        or item.get("image_base64")
+                    )
+                    if source:
+                        sources.append(str(source))
+            if sources:
+                return "image:" + hashlib.sha1(
+                    json.dumps(sources, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                ).hexdigest()[:20]
+        direct = (
+            payload.get("src")
+            or payload.get("url")
+            or payload.get("image")
+            or payload.get("image_data_uri")
+            or payload.get("image_base64")
+        )
+        if direct:
+            return "image:" + hashlib.sha1(str(direct).encode("utf-8")).hexdigest()[:20]
+        return ""
+
+    raw_nodes = payload.get("nodes") or payload.get("components") or payload.get("vertices") or []
+    raw_edges = payload.get("edges") or payload.get("connections") or payload.get("relations") or payload.get("segments") or []
+
+    nodes = []
+    for node in raw_nodes if isinstance(raw_nodes, list) else []:
+        if isinstance(node, dict):
+            nodes.append({
+                "id": str(node.get("id") or node.get("node_id") or node.get("name") or node.get("label") or ""),
+                "label": str(node.get("label") or node.get("name") or node.get("title") or ""),
+            })
+        else:
+            nodes.append({"id": str(node), "label": str(node)})
+
+    edges = []
+    for edge in raw_edges if isinstance(raw_edges, list) else []:
+        if isinstance(edge, (list, tuple)) and len(edge) >= 2:
+            source, target = edge[0], edge[1]
+            label = ""
+        elif isinstance(edge, dict):
+            source = edge.get("from") or edge.get("source") or edge.get("start")
+            target = edge.get("to") or edge.get("target") or edge.get("end")
+            label = edge.get("label") or ""
+        else:
+            continue
+        if source and target:
+            edges.append({
+                "from": str(source),
+                "to": str(target),
+                "label": str(label),
+            })
+
+    semantic = {
+        "svg": payload.get("svg") or payload.get("svg_payload"),
+        "nodes": nodes,
+        "edges": edges,
+        "geometry": payload.get("geometry"),
+        "elements": payload.get("elements"),
+        "points": payload.get("points"),
+        "shapes": payload.get("shapes"),
+    }
+    if not any(value not in (None, "", [], {}) for value in semantic.values()):
+        return ""
+    return "diagram:" + hashlib.sha1(
+        json.dumps(semantic, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:20]
+
+
 def _hydrate_scene_artifacts(response: MachineResponse, request: MachineRequest) -> None:
     """Promote every concrete structured render block into the canonical artifact route.
 
@@ -374,6 +468,7 @@ def _hydrate_scene_artifacts(response: MachineResponse, request: MachineRequest)
     }
 
     hydrated_blocks: list[dict[str, Any]] = []
+    seen_hydration_keys: set[str] = set()
     for raw in list(getattr(response, "render_blocks", []) or []):
         if not isinstance(raw, dict):
             continue
@@ -398,6 +493,12 @@ def _hydrate_scene_artifacts(response: MachineResponse, request: MachineRequest)
             # hydrate blocks that already contain meaningful payload data.
             if not payload and kind not in {"formula", "link"}:
                 continue
+
+        hydration_key = _visual_hydration_key(raw)
+        if hydration_key and hydration_key in seen_hydration_keys:
+            continue
+        if hydration_key:
+            seen_hydration_keys.add(hydration_key)
 
         try:
             if kind == "diagram":
@@ -953,12 +1054,13 @@ class ProcessorScene:
             for item in authorized_outputs:
                 if item != "text" and item in _STRUCTURED_TYPES and item not in requested_outputs:
                     requested_outputs.append(item)
-        elif representation in _STRUCTURED_TYPES:
-            # Fallback only for an explicitly structured current-turn request.
-            if representation != "formula" and representation not in requested_outputs:
-                requested_outputs.append(representation)
-            if representation == "formula" and representation not in requested_outputs:
-                requested_outputs.append("formula")
+
+        # The current Interpretation representation is authoritative for the
+        # current turn.  A stale requested_outputs list may come from an older
+        # scene (for example graph/diagram left in dialogue memory) and must not
+        # be allowed to suppress the current image/diagram artifact.
+        if representation in _STRUCTURED_TYPES and representation not in requested_outputs:
+            requested_outputs.append(representation)
 
         if representation in _STRUCTURED_TYPES and representation in requested_outputs:
             required_artifacts.append(representation)
