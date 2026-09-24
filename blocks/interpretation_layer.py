@@ -199,6 +199,17 @@ SCENE_MATRIX_DOMAIN_BIAS = {
 
 
 # ---------------------------------------------------------------------------
+# Provider-context planning constants
+# ---------------------------------------------------------------------------
+
+PROVIDER_INPUT_HARD_BUDGET = 900
+PROVIDER_INPUT_SOFT_TARGET_NEW = 850
+PROVIDER_INPUT_SOFT_TARGET_CONTINUE = 820
+PROVIDER_INPUT_SOFT_TARGET_RECALL = 800
+PROVIDER_CONTEXT_PLAN_VERSION = "provider_context_plan_v2_dependency_first"
+
+
+# ---------------------------------------------------------------------------
 # Core engine
 # ---------------------------------------------------------------------------
 
@@ -3254,14 +3265,18 @@ class MemoryRelevanceEngine(InterpretationEngineBase):
         elif isinstance(memory_raw, list):
             values = list(memory_raw)
 
-        allowed = relation.get("relation") == "RECALL"
-        if relation.get("relation") == "CONTINUE":
-            allowed = True
+        relation_value = self._text(relation.get("relation")).upper()
+        allowed = relation_value == "RECALL" or relation_value == "CONTINUE"
 
         selected: list[dict[str, Any]] = []
         candidates: list[dict[str, Any]] = []
         query = self._text(text)
         query_topic = self._text(topic.get("topic"))
+        current_sequence_id = self._text(scope.get("dialogue_sequence_id"))
+        current_scene = state.get("active_visual_scene") if isinstance(state.get("active_visual_scene"), dict) else (
+            state.get("current_visual_scene") if isinstance(state.get("current_visual_scene"), dict) else {}
+        )
+        current_scene_id = self._text(current_scene.get("scene_id")) if isinstance(current_scene, dict) else ""
         for item in reversed(values):
             if not isinstance(item, dict):
                 continue
@@ -3276,6 +3291,17 @@ class MemoryRelevanceEngine(InterpretationEngineBase):
             if stamp is not None and now - stamp > self.SEVEN_DAYS_SECONDS:
                 continue
 
+            item_sequence_id = self._text(item.get("sequence_id") or item.get("dialogue_sequence_id"))
+            item_scene_id = self._text(item.get("scene_id") or item.get("visual_scene_id"))
+            same_sequence = bool(current_sequence_id and item_sequence_id and item_sequence_id == current_sequence_id)
+            same_scene = bool(current_scene_id and item_scene_id and item_scene_id == current_scene_id)
+
+            # Continuation must stay inside the authenticated active branch. A 7-day
+            # record from the same user/conversation but another sequence is historical
+            # evidence, not continuation context. Explicit RECALL may cross branches.
+            if relation_value == "CONTINUE" and current_sequence_id and not (same_sequence or same_scene):
+                continue
+
             content = self._text(
                 item.get("summary")
                 or item.get("content")
@@ -3287,31 +3313,41 @@ class MemoryRelevanceEngine(InterpretationEngineBase):
                 continue
 
             score = max(self._sim(query, content), self._sim(query_topic, content))
+            if same_sequence:
+                score += 0.18
+            if same_scene:
+                score += 0.10
             candidates.append({
                 "item": dict(item),
-                "score": round(float(score), 4),
+                "score": round(float(min(1.0, score)), 4),
                 "age_seconds": round(max(0.0, now - stamp), 2) if stamp is not None else None,
+                "same_sequence": same_sequence,
+                "same_scene": same_scene,
             })
 
-        if relation.get("relation") == "NEW":
+        if relation_value == "NEW":
             selected = []
             allowed = False
-        elif relation.get("relation") == "RECALL":
+        elif relation_value == "RECALL":
             ranked = sorted(candidates, key=lambda x: x["score"], reverse=True)
             selected = [x["item"] for x in ranked if x["score"] >= 0.15][: self.MAX_ITEMS]
         else:
-            # Continuation may use same-conversation evidence, but unrelated
-            # historical topics are not allowed to become the owner.
-            ranked = sorted(candidates, key=lambda x: x["score"], reverse=True)
-            selected = [x["item"] for x in ranked if x["score"] >= 0.25][: self.MAX_ITEMS]
+            # Continuation can use same-branch support only. Prefer active sequence
+            # evidence and never promote another topic branch into the active owner.
+            ranked = sorted(candidates, key=lambda x: (x["same_sequence"], x["same_scene"], x["score"]), reverse=True)
+            selected = [
+                x["item"] for x in ranked
+                if (x["same_sequence"] or x["same_scene"]) and x["score"] >= 0.25
+            ][: self.MAX_ITEMS]
 
         return {
             "engine": self.NAME,
             "version": self.VERSION,
             "seven_day_window_seconds": self.SEVEN_DAYS_SECONDS,
             "allowed": bool(allowed),
-            "selection_mode": "explicit_recall" if relation.get("relation") == "RECALL" else "same_branch_support" if allowed else "excluded",
+            "selection_mode": "explicit_recall" if relation_value == "RECALL" else "same_authenticated_branch" if allowed else "excluded",
             "selected": selected,
+            "same_sequence_required_for_continuation": bool(relation_value == "CONTINUE" and current_sequence_id),
             "candidate_count": len(candidates),
             "selected_count": len(selected),
             "historical_memory_is_evidence_only": True,
@@ -3817,6 +3853,359 @@ class CanonicalizationEngine(InterpretationEngineBase):
         }
 
 
+class ProviderContextPlanEngine(InterpretationEngineBase):
+    """Build the provider-facing context contract before the 900-token packer.
+
+    This engine decides *which* semantic facts are relevant. Provider is only
+    responsible for fitting those selected facts into the hard input envelope.
+    The raw current user request is always retained separately.
+    """
+
+    NAME = "ProviderContextPlanEngine"
+    VERSION = PROVIDER_CONTEXT_PLAN_VERSION
+
+    @classmethod
+    def _section(
+        cls,
+        key: str,
+        value: Any,
+        priority: float,
+        reason: str,
+        *,
+        protected: bool = False,
+        max_depth: int = 4,
+        max_items: int = 8,
+        max_keys: int = 12,
+    ) -> dict[str, Any] | None:
+        if value in (None, "", [], {}):
+            return None
+        if key == "CURRENT_REQUEST":
+            compact = cls._text(value)
+        else:
+            # Keep this plan provider-friendly without copying arbitrary state.
+            # Strings are bounded by _text; structured payloads are compacted.
+            compact = value
+            if isinstance(value, (dict, list, tuple, set)):
+                compact = cls._compact(value, max_depth=max_depth, max_items=max_items, max_keys=max_keys)
+        if compact in (None, "", [], {}):
+            return None
+        return {
+            "key": key,
+            "value": compact,
+            "priority": round(max(0.0, min(1.0, float(priority))), 4),
+            "reason": reason,
+            "protected": bool(protected),
+        }
+
+    @classmethod
+    def _compact(
+        cls,
+        value: Any,
+        *,
+        depth: int = 0,
+        max_depth: int = 4,
+        max_items: int = 8,
+        max_keys: int = 12,
+    ) -> Any:
+        if depth > max_depth or value in (None, "", [], {}):
+            return None
+        if isinstance(value, (str, int, float, bool)):
+            return value if not isinstance(value, str) else cls._text(value)
+        if isinstance(value, dict):
+            out: dict[str, Any] = {}
+            for key, item in list(value.items())[:max_keys]:
+                cleaned = cls._compact(
+                    item,
+                    depth=depth + 1,
+                    max_depth=max_depth,
+                    max_items=max_items,
+                    max_keys=max_keys,
+                )
+                if cleaned not in (None, "", [], {}):
+                    out[str(key)] = cleaned
+            return out
+        if isinstance(value, (list, tuple, set)):
+            out = []
+            for item in list(value)[:max_items]:
+                cleaned = cls._compact(
+                    item,
+                    depth=depth + 1,
+                    max_depth=max_depth,
+                    max_items=max_items,
+                    max_keys=max_keys,
+                )
+                if cleaned not in (None, "", [], {}):
+                    out.append(cleaned)
+            return out
+        return cls._text(value)
+
+    @classmethod
+    def _memory_projection(cls, memory: dict[str, Any], *, recall: bool, continuation: bool) -> list[dict[str, Any]]:
+        selected = list(memory.get("selected") or []) if isinstance(memory, dict) else []
+        if not (recall or continuation):
+            return []
+        limit = 4 if recall else 2
+        result = []
+        for item in selected[:limit]:
+            if not isinstance(item, dict):
+                continue
+            result.append(cls._compact(item, max_depth=3, max_items=4, max_keys=8))
+        return [x for x in result if x not in (None, "", [], {})]
+
+    def build(
+        self,
+        *,
+        current_turn: dict[str, Any],
+        relation: dict[str, Any],
+        topic: dict[str, Any],
+        task: dict[str, Any],
+        intent: dict[str, Any],
+        domain: dict[str, Any],
+        entity: dict[str, Any],
+        reference: dict[str, Any],
+        memory: dict[str, Any],
+        continuity: dict[str, Any],
+        knowledge: dict[str, Any],
+        representation: dict[str, Any],
+        strategy: dict[str, Any],
+        arbitration: dict[str, Any],
+        consistency: dict[str, Any],
+    ) -> dict[str, Any]:
+        rel = self._text(arbitration.get("relation") or relation.get("relation") or "NEW").upper()
+        turn_rel = self._text(arbitration.get("turn_relation") or relation.get("turn_relation")).upper()
+        raw_request = self._text(current_turn.get("raw_text"))
+        active_task = task.get("task") if isinstance(task.get("task"), dict) and task.get("active") else {}
+        active_topic = self._text(arbitration.get("active_topic") or topic.get("topic"))
+        active_entity = self._text(arbitration.get("active_entity") or entity.get("active_entity"))
+        rep = self._text(arbitration.get("representation") or representation.get("representation") or "text").lower()
+        source = self._text(knowledge.get("primary_source") or "internal_knowledge").lower()
+
+        required: list[dict[str, Any]] = []
+        optional: list[dict[str, Any]] = []
+        excluded: list[dict[str, Any]] = []
+
+        def add(bucket, key, value, priority, reason, protected=False, **kwargs):
+            item = self._section(key, value, priority, reason, protected=protected, **kwargs)
+            if item:
+                bucket.append(item)
+
+        semantic_core = {
+            "intent": intent.get("intent"),
+            "operation": intent.get("operation"),
+            "goal": intent.get("goal"),
+            "domain": domain.get("domain"),
+            "subdomain": domain.get("subdomain"),
+            "topic": active_topic,
+            "entity": active_entity,
+            "representation": rep,
+        }
+        output_contract = {
+            "representation": rep,
+            "requested_outputs": (
+                [rep] if rep != "text" else ["text"]
+            ),
+            "operation": intent.get("operation"),
+            "render_authorized": bool(
+                (reference.get("artifact_reference") if isinstance(reference, dict) else False)
+            ) if rep in {"image", "gallery", "diagram", "graph", "table", "formula", "code", "link"} else False,
+        }
+
+        # The current request is immutable. Provider may compact it only when the
+        # hard envelope requires it; it can never replace it with historical text.
+        add(required, "CURRENT_REQUEST", raw_request, 1.0, "current_user_turn", True)
+
+        # Compact semantic core is always required; it is the smallest representation
+        # of what Interpretation already understood.
+        add(required, "SEMANTIC_CORE", semantic_core, 0.98, "interpretation_semantic_decision", True, max_depth=3, max_items=8, max_keys=10)
+        add(required, "OUTPUT_CONTRACT", output_contract, 0.96, "response_shape_contract", True, max_depth=3, max_items=5, max_keys=8)
+
+        directives = current_turn.get("request_directives") or []
+        if directives:
+            add(required, "REQUEST_DIRECTIVES", list(directives)[:5], 0.95, "explicit_current_turn_constraints", True, max_depth=2, max_items=5, max_keys=6)
+
+        # Tool/source decisions are useful only when the answer cannot be purely
+        # generated from the semantic turn.
+        if source not in {"internal_knowledge", "", "general"}:
+            add(required, "KNOWLEDGE_SOURCE", {
+                "primary": source,
+                "freshness_required": bool(knowledge.get("freshness_required")),
+                "evidence_required": bool(knowledge.get("evidence_required")),
+            }, 0.90, "knowledge_source_requirement", True, max_depth=2, max_items=4, max_keys=6)
+
+        # Interactive task ownership is stronger than generic topic continuity.
+        if active_task:
+            add(required, "ACTIVE_TASK", active_task, 0.97, "active_task_owner", True, max_depth=4, max_items=8, max_keys=12)
+
+        if rel == "CONTINUE":
+            add(required, "DIALOGUE_ANCHOR", {
+                "previous_user_turn": relation.get("previous_user_turn"),
+                "previous_april_turn": relation.get("previous_april_turn"),
+                "topic": active_topic,
+                "entity": active_entity,
+                "turn_relation": turn_rel,
+                "sequence_id": relation.get("environment", {}).get("sequence_id") if isinstance(relation.get("environment"), dict) else "",
+            }, 0.99, "immediate_authenticated_dialogue_pair", True, max_depth=3, max_items=5, max_keys=8)
+
+            add(optional, "CONTINUATION_ANALYSIS", {
+                "next_logical_step": continuity.get("next_logical_step"),
+                "covered_content": continuity.get("covered_content") or [],
+                "avoid_repeat_content": continuity.get("avoid_repeat_content") or [],
+                "novelty_score": continuity.get("novelty_score"),
+                "same_conversational_branch": True,
+            }, 0.93, "advance_without_repetition", False, max_depth=3, max_items=6, max_keys=8)
+
+            seq = (relation.get("environment") or {}).get("active_sequence") if isinstance(relation.get("environment"), dict) else None
+            if isinstance(seq, dict) and seq:
+                add(optional, "ACTIVE_SEQUENCE_DIGEST", {
+                    "sequence_id": seq.get("sequence_id"),
+                    "turn_count": seq.get("turn_count") or seq.get("turns_count"),
+                    "last_user_request": seq.get("last_user_request"),
+                    "last_april_answer": seq.get("last_april_answer"),
+                }, 0.78, "same_authenticated_sequence", False, max_depth=2, max_items=5, max_keys=8)
+
+            branch_memory = self._memory_projection(memory, recall=False, continuation=True)
+            if branch_memory:
+                add(optional, "BRANCH_MEMORY_EVIDENCE", branch_memory, 0.62, "same_sequence_support_only", False, max_depth=4, max_items=2, max_keys=7)
+
+            excluded.extend([
+                {"key": "UNRELATED_7D_MEMORY", "reason": "continuation_uses_live_branch_first"},
+                {"key": "OTHER_TOPIC_BRANCHES", "reason": "current_branch_is_authoritative"},
+                {"key": "STALE_GLOBAL_ENTITY", "reason": "entity must resolve from current branch"},
+                {"key": "FULL_HISTORY", "reason": "immediate pair and task state are sufficient"},
+            ])
+
+        elif rel == "RECALL":
+            memory_items = self._memory_projection(memory, recall=True, continuation=False)
+            add(required, "MEMORY_RECALL", memory_items, 0.98, "explicit_7d_memory_request", True, max_depth=4, max_items=4, max_keys=8)
+            add(optional, "RECALL_RESPONSE_GUIDANCE", {
+                "use_memory_as_evidence": True,
+                "state_only_what_is_recalled": True,
+                "do_not_invent_missing_details": True,
+                "invite_user_to_restate_missing_context": True,
+            }, 0.90, "safe_memory_recall_behavior", False, max_depth=2, max_items=4, max_keys=6)
+
+            # Old branch context can be useful only insofar as the memory engine
+            # selected it for this explicit recall.
+            excluded.extend([
+                {"key": "UNSELECTED_7D_MEMORY", "reason": "not_relevant_to_explicit_recall"},
+                {"key": "FULL_HISTORY", "reason": "memory_engine_selected_evidence_only"},
+                {"key": "CURRENT_UNRELATED_TASK", "reason": "recall_requested"},
+            ])
+        else:
+            # NEW/INDEPENDENT: no old conversational content crosses the boundary.
+            excluded.extend([
+                {"key": "PREVIOUS_USER_TURN", "reason": "new_topic"},
+                {"key": "PREVIOUS_APRIL_TURN", "reason": "new_topic"},
+                {"key": "ACTIVE_SEQUENCE_DIGEST", "reason": "new_topic"},
+                {"key": "RELEVANT_MEMORY", "reason": "new_topic_memory_fence"},
+                {"key": "SEVEN_DAY_MEMORY", "reason": "new_topic_memory_fence"},
+                {"key": "HISTORICAL_MEMORY", "reason": "new_topic_memory_fence"},
+                {"key": "STALE_VISUAL_STATE", "reason": "no_artifact_dependency"},
+                {"key": "STALE_ENTITY", "reason": "current_turn_entity_only"},
+            ])
+
+        # Current-turn multimodal presence is relevant when it can materially change
+        # the answer. Actual payload bytes remain outside the semantic plan.
+        modalities = current_turn.get("available_modalities") or []
+        if modalities:
+            add(optional, "CURRENT_MODALITIES", list(modalities)[:5], 0.86, "current_turn_multimodal_evidence", False, max_depth=2, max_items=5, max_keys=5)
+
+        # Keep only the selected representation; Provider must not manufacture another.
+        if rep != "text":
+            add(optional, "REPRESENTATION_DECISION", {
+                "representation": rep,
+                "renderer_neutral": True,
+                "structured_output_required": True,
+            }, 0.88, "representation_decision", False, max_depth=2, max_items=4, max_keys=6)
+
+        # A tool/search/calculation source is not the answer itself; it is the source
+        # requirement that Executor/Provider must honor.
+        if source == "web":
+            add(required, "WEB_REQUIREMENT", {
+                "search_required": True,
+                "freshness_required": bool(knowledge.get("freshness_required")),
+                "evidence_required": True,
+            }, 0.91, "current_turn_requires_web_evidence", True, max_depth=2, max_items=4, max_keys=6)
+        elif source == "calculation":
+            add(optional, "CALCULATION_REQUIREMENT", {
+                "calculation_required": True,
+                "use_current_request_operands_only": True,
+            }, 0.86, "current_turn_computation", False, max_depth=2, max_items=4, max_keys=5)
+
+        if source in {"vision", "file"}:
+            add(required, "MODALITY_REQUIREMENT", {
+                "source": source,
+                "current_turn_only": True,
+            }, 0.90, "current_turn_external_input", True, max_depth=2, max_items=3, max_keys=5)
+
+        # Stable semantic order: high priority first, current turn protected first.
+        required.sort(key=lambda x: (-float(x.get("priority", 0.0)), x.get("key", "")))
+        optional.sort(key=lambda x: (-float(x.get("priority", 0.0)), x.get("key", "")))
+
+        if rel == "NEW":
+            soft_target = PROVIDER_INPUT_SOFT_TARGET_NEW
+        elif rel == "RECALL":
+            soft_target = PROVIDER_INPUT_SOFT_TARGET_RECALL
+        else:
+            soft_target = PROVIDER_INPUT_SOFT_TARGET_CONTINUE
+
+        provider_sections = [
+            {
+                "name": item["key"],
+                "value": item["value"],
+                "priority": item["priority"],
+                "protected": item["protected"],
+                "reason": item["reason"],
+            }
+            for item in required + optional
+        ]
+
+        return {
+            "version": self.VERSION,
+            "mode": "dependency_first",
+            "relation": rel,
+            "turn_relation": turn_rel,
+            "hard_budget_tokens": PROVIDER_INPUT_HARD_BUDGET,
+            "soft_target_tokens": soft_target,
+            "current_user_request": raw_request,
+            "current_request_authoritative": True,
+            "current_request_may_be_compacted_only_for_budget": True,
+            "context_selection_done_before_provider": True,
+            "provider_must_not_reselect_context": True,
+            "memory_policy": (
+                "explicit_recall_only" if rel == "RECALL"
+                else "same_authenticated_branch_only" if rel == "CONTINUE"
+                else "disabled"
+            ),
+            "required_context": required,
+            "optional_context": optional,
+            "excluded_context": excluded,
+            "provider_sections": provider_sections,
+            "active_topic": active_topic,
+            "active_entity": active_entity,
+            "active_task": bool(active_task),
+            "knowledge_source": source,
+            "continuation_analysis": continuity if rel == "CONTINUE" else {},
+            "selection_basis": [
+                "current_user_request",
+                "authenticated_scope",
+                "dialogue_relation",
+                "active_task",
+                "semantic_intent",
+                "domain",
+                "entity/reference",
+                "memory_relevance",
+                "knowledge_source",
+                "representation",
+                "response_strategy",
+            ],
+            "budget_policy": "relevance_first_then_progressive_compression",
+            "provider_role": "consume_plan_and_answer_current_request",
+            "exclusions_are_authoritative": True,
+            "confidence": 0.97 if consistency.get("valid") else 0.72,
+        }
+
+
 class InterpretationOrchestrator(InterpretationEngineBase):
     NAME = "InterpretationOrchestrator"
     VERSION = "cognitive_interpretation_environment_v1"
@@ -3839,6 +4228,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
         self.arbitration = DecisionArbitrationEngine()
         self.consistency = ConsistencyEngine()
         self.canonical = CanonicalizationEngine()
+        self.provider_context = ProviderContextPlanEngine()
 
     def run(
         self,
@@ -3968,9 +4358,30 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             consistency=consistency,
         )
 
+        provider_context_plan = self.provider_context.build(
+            current_turn=current_turn,
+            relation=relation,
+            topic=topic,
+            task=task,
+            intent=intent,
+            domain=domain,
+            entity=entity,
+            reference=reference,
+            memory=memory,
+            continuity=continuity,
+            knowledge=knowledge,
+            representation=representation,
+            strategy=strategy,
+            arbitration=arbitration,
+            consistency=consistency,
+        )
+        canonical["provider_context_plan"] = provider_context_plan
+
         workspace = {
             "version": self.VERSION,
             "current_request": current_turn["raw_text"],
+            "current_request_raw": current_turn["raw_text"],
+            "current_user_request": current_turn["raw_text"],
             "current_turn": current_turn,
             "authenticated_scope": identity["scope"],
             "identity_scope": identity,
@@ -3989,6 +4400,14 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             "arbitration": arbitration,
             "consistency": consistency,
             "canonical": canonical,
+            "provider_context_plan": provider_context_plan,
+            "provider_context_authority": "INTERPRETATION",
+            "provider_context_plan_version": provider_context_plan.get("version"),
+            "provider_hard_input_budget": provider_context_plan.get("hard_budget_tokens", PROVIDER_INPUT_HARD_BUDGET),
+            "provider_soft_input_target": provider_context_plan.get("soft_target_tokens"),
+            "provider_context_required": provider_context_plan.get("required_context", []),
+            "provider_context_optional": provider_context_plan.get("optional_context", []),
+            "provider_context_excluded": provider_context_plan.get("excluded_context", []),
             # Flat authoritative fields for downstream adapters.
             "relation": arbitration["relation"],
             "turn_relation": arbitration["turn_relation"],
@@ -4029,7 +4448,10 @@ class InterpretationOrchestrator(InterpretationEngineBase):
                 self.arbitration.NAME,
                 self.consistency.NAME,
                 self.canonical.NAME,
+                self.provider_context.NAME,
             ],
+            "provider_context_authority": "INTERPRETATION",
+            "provider_must_not_reselect_context": True,
         }
 
         return {
@@ -4053,6 +4475,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
                 "arbitration": arbitration,
                 "consistency": consistency,
                 "canonicalization": canonical,
+                "provider_context": provider_context_plan,
             },
         }
 
@@ -5831,7 +6254,9 @@ class QuantumInterpretationEngine:
         # This is additive: legacy workspace fields remain available, while the
         # council becomes the explicit source of semantic provenance.
         result["cognitive_workspace"]["interpretation_council"] = interpretation_council
+        result["cognitive_workspace"]["provider_context_plan"] = interpretation_council.get("provider_context_plan", {})
         result["cognitive_workspace"]["current_user_request"] = text
+        result["cognitive_workspace"]["current_request_raw"] = text
         result["cognitive_workspace"]["canonical_user_request"] = text
         result["cognitive_workspace"]["provider_instruction"] = canonical_cognitive.get("execution_instruction", "")
         result["cognitive_workspace"]["engine_order"] = cognitive_environment.get("engine_order", [])
@@ -5842,6 +6267,7 @@ class QuantumInterpretationEngine:
         result["current_user_request"] = text
         result["canonical_user_request"] = text
         result["provider_instruction"] = canonical_cognitive.get("execution_instruction", "")
+        result["provider_context_plan"] = cognitive_environment.get("provider_context_plan", {})
         result["interpretation_engine_order"] = cognitive_environment.get("engine_order", [])
         result["interpretation_authority"] = "COGNITIVE_INTERPRETATION_COUNCIL"
         result["current_request_authority"] = "CURRENT_USER_TURN"
@@ -5917,6 +6343,20 @@ class QuantumInterpretationEngine:
                     if not isinstance(entry, dict) or entry.get("name") not in {"RELEVANT_MEMORY", "SEVEN_DAY_DIALOGUE_MEMORY", "HISTORICAL_MEMORY"}
                 ]
             workspace["provider_sections"] = provider_sections
+
+        # Dedicated provider-context planner is the final relevance authority.
+        provider_plan = interpretation_council.get("provider_context_plan")
+        if isinstance(provider_plan, dict) and provider_plan:
+            workspace["provider_context_plan"] = provider_plan
+            workspace["required_context"] = list(provider_plan.get("required_context") or [])
+            workspace["optional_context"] = list(provider_plan.get("optional_context") or [])
+            workspace["excluded_context"] = list(provider_plan.get("excluded_context") or [])
+            workspace["provider_sections"] = list(provider_plan.get("provider_sections") or [])
+            workspace["context_selection_done_before_provider"] = True
+            workspace["provider_must_not_reselect_context"] = True
+            workspace["provider_hard_budget_tokens"] = int(provider_plan.get("hard_budget_tokens") or PROVIDER_INPUT_HARD_BUDGET)
+            workspace["provider_soft_target_tokens"] = int(provider_plan.get("soft_target_tokens") or PROVIDER_INPUT_SOFT_TARGET_NEW)
+            workspace["current_request_raw"] = text
 
         workspace_frame = workspace.get("semantic_frame") if isinstance(workspace.get("semantic_frame"), dict) else {}
         if workspace_frame:
@@ -6097,6 +6537,26 @@ class QuantumInterpretationEngine:
             "memory_selected": len(cognitive_environment.get("selected_memory") or []),
             "historical_topics_fenced": bool(cognitive_environment.get("historical_topics_are_evidence_only")),
             "consistency_valid": bool((cognitive_environment.get("consistency") or {}).get("valid")),
+            "provider_context_plan": {
+                "version": (cognitive_environment.get("provider_context_plan") or {}).get("version"),
+                "hard_budget_tokens": (cognitive_environment.get("provider_context_plan") or {}).get("hard_budget_tokens"),
+                "soft_target_tokens": (cognitive_environment.get("provider_context_plan") or {}).get("soft_target_tokens"),
+                "required_context": [
+                    x.get("key") for x in (cognitive_environment.get("provider_context_plan") or {}).get("required_context", [])
+                    if isinstance(x, dict)
+                ],
+                "optional_context": [
+                    x.get("key") for x in (cognitive_environment.get("provider_context_plan") or {}).get("optional_context", [])
+                    if isinstance(x, dict)
+                ],
+                "excluded_context": [
+                    x.get("key") for x in (cognitive_environment.get("provider_context_plan") or {}).get("excluded_context", [])
+                    if isinstance(x, dict)
+                ],
+                "provider_must_not_reselect_context": bool(
+                    (cognitive_environment.get("provider_context_plan") or {}).get("provider_must_not_reselect_context")
+                ),
+            },
             "decision_owner": DECISION_OWNER,
         }
 
@@ -7000,7 +7460,9 @@ class DialogCognitiveWorkspace:
         return {
             "version": self.VERSION,
             "mode": "semantic_pre_provider_workspace",
-            "current_request": self._excerpt(text, 1200),
+            "current_request": self._text(text),
+            "current_request_raw": self._text(text),
+            "current_request_excerpt": self._excerpt(text, 1200),
             "current_request_raw_preserved": True,
             "active_task": bool(task_active),
             "task_continuation": bool(continuation_bridge.get("task_continuation")),
