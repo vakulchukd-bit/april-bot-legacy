@@ -1039,21 +1039,32 @@ class ProcessorScene:
             else {}
         )
 
-        # A modality change is a topic-vector change, not a new conversation.
-        # If an authenticated active dialogue sequence exists, a resolved
-        # structured request continues that same sequence unless the semantic
-        # task owner explicitly replaced/closed the conversation.
-        if (
-            dialogue.get("relation") == "NEW"
-            and isinstance(self.state.get("active_dialogue_sequence"), dict)
-            and self.state.get("active_dialogue_sequence", {}).get("sequence_id")
-            and intent.get("representation") in _STRUCTURED_TYPES
-            and not bool((dialogue.get("task_transition") or {}).get("replace_task"))
-        ):
-            dialogue["relation"] = "CONTINUE"
-            dialogue["continuation"] = True
-            dialogue["dependency"] = "continuation"
-            dialogue["anchor"] = "last_turn"
+        provider_context_plan = (
+            semantic_result.get("provider_context_plan")
+            if isinstance(semantic_result.get("provider_context_plan"), dict)
+            else (
+                cognitive_workspace.get("provider_context_plan")
+                if isinstance(cognitive_workspace.get("provider_context_plan"), dict)
+                else {}
+            )
+        )
+        # Current request is immutable across the handoff. Derived semantic/request text
+        # is a separate field and can never replace the raw authenticated user turn.
+        if cognitive_workspace:
+            cognitive_workspace["current_user_request"] = self.request
+            cognitive_workspace["current_request_raw"] = self.request
+
+        # Interpretation owns the dialogue relation. Executor records the decision
+        # but never upgrades NEW -> CONTINUE merely because the representation is structured.
+        # A new graph/table/image request is allowed to start a new semantic branch.
+        interpretation_relation_audit = {
+            "interpretation_relation": _text(dialogue.get("relation") or "NEW"),
+            "interpretation_turn_relation": _text(
+                dialogue.get("semantic_result", {}).get("turn_relation")
+            ) if isinstance(dialogue.get("semantic_result"), dict) else "",
+            "relation_overridden": False,
+            "authority": "INTERPRETATION",
+        }
 
         # Final semantic handoff: once the Processor has a resolved representation,
         # Interpretation remains the authority for render authorization.  This
@@ -1302,6 +1313,10 @@ class ProcessorScene:
             "task_action": bool(dialogue.get("task_action")),
             "pending_task": _compact(pending_task),
             "active_entity": resolved_entity,
+            "provider_context_plan": _compact(provider_context_plan, max_depth=7, max_items=14),
+            "provider_context_authority": "INTERPRETATION",
+            "interpretation_relation_audit": interpretation_relation_audit,
+            "current_user_request": self.request,
             "semantic_request": _text(
                 semantic_result.get("semantic_request")
                 or _as_dict(semantic_result.get("semantic_understanding")).get("provider", {}).get("semantic_request")
@@ -1423,6 +1438,10 @@ class ProcessorScene:
                 max_items=4,
             ),
             "semantic_authority": True,
+            "current_user_request": self.request,
+            "provider_context_plan": _compact(provider_context_plan, max_depth=7, max_items=14),
+            "provider_context_authority": "INTERPRETATION",
+            "provider_must_not_reselect_context": True,
         }
 
         memory_packet = {
@@ -1461,6 +1480,9 @@ class ProcessorScene:
                 "user_id": self.user_id,
                 "conversation_id": dialogue_memory.get("conversation_id"),
             },
+            "provider_context_plan": _compact(provider_context_plan, max_depth=7, max_items=14),
+            "provider_context_authority": "INTERPRETATION",
+            "current_user_request": self.request,
         }
 
         request = MachineRequest(
@@ -1507,6 +1529,9 @@ class ProcessorScene:
                 "turn_sync": _compact(turn_sync, max_depth=4, max_items=10),
                 "scene_blueprint": _compact(semantic_result.get("scene_blueprint") or {}, max_depth=5, max_items=16),
                 "cognitive_workspace": _compact(cognitive_workspace, max_depth=5, max_items=14),
+                "provider_context_plan": _compact(provider_context_plan, max_depth=7, max_items=14),
+                "provider_context_authority": "INTERPRETATION",
+                "current_user_request": self.request,
                 "user_id": self.user_id,
                 "conversation_id": dialogue_memory.get("conversation_id"),
             },
@@ -1524,6 +1549,11 @@ class ProcessorScene:
             constraints={
                 "one_provider_call": True,
                 "provider_input_token_budget": 900,
+                "provider_hard_input_budget": provider_context_plan.get("hard_budget_tokens", 900),
+                "provider_soft_input_target": provider_context_plan.get("soft_target_tokens"),
+                "provider_context_plan": _compact(provider_context_plan, max_depth=7, max_items=14),
+                "provider_context_authority": "INTERPRETATION",
+                "provider_must_not_reselect_context": True,
                 "cognitive_context_plan": _compact(cognitive_workspace, max_depth=5, max_items=14),
                 "metadata": {
                     "identity_scope": {
@@ -1586,6 +1616,25 @@ class ProcessorScene:
             "cognitive_workspace_version": _text(cognitive_workspace.get("version")),
             "cognitive_workspace_protected": list(cognitive_workspace.get("protected_context") or [])[:12],
             "cognitive_workspace_excluded": list(cognitive_workspace.get("excluded_context") or [])[:8],
+            "provider_context_plan_version": _text(provider_context_plan.get("version")),
+            "provider_context_required": [
+                _text(x.get("key") or x.get("name"))
+                for x in list(provider_context_plan.get("required_context") or [])[:16]
+                if isinstance(x, dict)
+            ],
+            "provider_context_optional": [
+                _text(x.get("key") or x.get("name"))
+                for x in list(provider_context_plan.get("optional_context") or [])[:16]
+                if isinstance(x, dict)
+            ],
+            "provider_context_excluded": [
+                _text(x.get("key") or x.get("name"))
+                for x in list(provider_context_plan.get("excluded_context") or [])[:16]
+                if isinstance(x, dict)
+            ],
+            "provider_context_authority": "INTERPRETATION",
+            "provider_must_not_reselect_context": True,
+            "current_user_request": self.request,
             "render_authorized": bool(intent.get("render_authorized")),
             "render_mode": _text(intent.get("render_mode") or "TEXT_ONLY"),
             "provider_calls": 1,
@@ -2037,8 +2086,17 @@ def _set_live_state(state: dict, request: MachineRequest, response: MachineRespo
         "source": "semantic_interpretation_layer",
     }
 
+    provider_plan = (
+        request.conversation.get("provider_context_plan")
+        if isinstance(request.conversation, dict)
+        and isinstance(request.conversation.get("provider_context_plan"), dict)
+        else {}
+    )
+    state["interpretation_provider_context_plan"] = _compact(provider_plan, max_depth=7, max_items=14)
+    state["provider_context_authority"] = "INTERPRETATION"
+
     state["april_live_context"] = {
-        "version": "april_live_context_v2",
+        "version": "april_live_context_v3_provider_context",
         "relation": relation,
         "active_topic": topic,
         "active_goal": goal,
@@ -2052,6 +2110,9 @@ def _set_live_state(state: dict, request: MachineRequest, response: MachineRespo
         "continuation_content_analysis": _compact(dialogue.get("continuation_content_analysis") if isinstance(dialogue, dict) else {}),
         "scene_id": _text(getattr(contract, "scene_id", "")),
         "render_types": [_text(b.get("type")).lower() for b in blocks if isinstance(b, dict)],
+        "current_user_request": _text(request.conversation.get("current_request")),
+        "provider_context_plan": _compact(provider_plan, max_depth=7, max_items=14),
+        "provider_context_authority": "INTERPRETATION",
     }
 
 
@@ -2311,6 +2372,8 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
         "single_route": True,
         "provider_calls_per_request": 1,
         "quantum_state": getattr(request, "quantum_state", {}),
+        "provider_context_plan": (request.conversation or {}).get("provider_context_plan", {}),
+        "provider_context_authority": "INTERPRETATION",
         "visible_answer_guaranteed": True,
         "artifact_preservation": True,
         "web_delivery": {
