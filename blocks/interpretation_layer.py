@@ -3374,6 +3374,31 @@ class QuantumInterpretationEngine:
             "scene_id": self.normalize(live_scene_record.get("scene_id")),
         }
 
+        result["cognitive_workspace"] = DIALOG_COGNITIVE_WORKSPACE.build(
+            text=text,
+            semantic_result=result,
+            state=state,
+            history=history,
+        )
+        result["context_plan"] = result["cognitive_workspace"]
+
+        # Promote the workspace decision into the canonical semantic surface used
+        # by Processor/Executor. This prevents downstream adapters from falling
+        # back to weaker legacy fields after the workspace has already resolved
+        # the current turn.
+        workspace = result["cognitive_workspace"]
+        workspace_frame = workspace.get("semantic_frame") if isinstance(workspace.get("semantic_frame"), dict) else {}
+        if workspace_frame:
+            result["semantic_frame"] = dict(workspace_frame)
+            result["type"] = workspace_frame.get("intent") or result.get("type")
+            result["operation"] = workspace.get("operation") or result.get("operation")
+            result["goal"] = workspace.get("goal") or result.get("goal")
+            result["representation"] = workspace.get("representation") or result.get("representation")
+            result["canonical_topic"] = workspace.get("active_topic") or result.get("canonical_topic")
+            result["active_entity"] = workspace.get("active_entity") or result.get("active_entity")
+            result["continuation"] = bool(workspace.get("continuation"))
+            result["reference_to_previous"] = bool(workspace.get("reference"))
+
         result["estimated_action_count"] = estimate_action_count(result)
         result["response_complexity"] = determine_response_complexity(result)
         result["factory_order"] = build_factory_order(result)
@@ -3507,6 +3532,547 @@ class SemanticEvidence:
             "details": self.details or {},
         }
 
+
+
+class DialogCognitiveWorkspace:
+    """Pre-provider semantic workspace for context selection.
+
+    This is a deterministic working memory layer, not a second language model.
+    It combines the existing Interpretation/continuity evidence into a ranked
+    context plan before the 900-token provider packer runs.
+    """
+
+    VERSION = "dialog_cognitive_workspace_v1"
+    MAX_MEMORY_CANDIDATES = 24
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _text(value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip())
+
+    @classmethod
+    def _tokens(cls, value: Any) -> set[str]:
+        return set(re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", cls._text(value).lower()))
+
+    @classmethod
+    def _similarity(cls, a: Any, b: Any) -> float:
+        left, right = cls._tokens(a), cls._tokens(b)
+        if not left or not right:
+            return 0.0
+        return len(left & right) / max(1.0, min(len(left), len(right)))
+
+    @classmethod
+    def _excerpt(cls, value: Any, limit: int = 360) -> str:
+        text = cls._text(value)
+        if len(text) <= limit:
+            return text
+        parts = [x.strip() for x in re.split(r"(?<=[.!?。！？])\s+", text) if x.strip()]
+        key_lines = [
+            x.strip(" -\t") for x in text.splitlines()
+            if x.strip().startswith(("-", "•", "1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9."))
+        ]
+        selected: list[str] = []
+        selected.extend(parts[:1])
+        selected.extend(key_lines[:4])
+        if parts:
+            selected.append(parts[-1])
+        compact = " | ".join(dict.fromkeys(x for x in selected if x))
+        if compact and len(compact) <= limit:
+            return compact
+        head = max(180, int(limit * 0.60))
+        tail = max(80, limit - head - 5)
+        return text[:head].rstrip() + " … " + text[-tail:].lstrip()
+
+    @classmethod
+    def _instruction_signals(cls, text: str) -> dict[str, Any]:
+        low = cls._text(text).lower()
+        terms = {
+            "must": ("нужно", "должен", "должна", "обязательно", "важно", "must", "required"),
+            "forbidden": ("не пиши", "не создавай", "не меняй", "не трогай", "не выдумывай", "не используй", "do not", "don't"),
+            "continuation": ("продолж", "теперь", "дальше", "ещё", "еще", "а теперь", "continue", "next"),
+            "architecture": ("архитект", "контракт", "слой", "движок", "engine", "pipeline", "маршрут", "processor", "provider"),
+            "code": ("python", "код", "класс", "функц", "module", "class", "function"),
+            "visual": ("картин", "изображ", "схем", "график", "диаграм", "render", "artifact"),
+        }
+        return {
+            key: [needle for needle in needles if needle in low][:6]
+            for key, needles in terms.items()
+        }
+
+    @classmethod
+    def _request_directives(cls, text: str) -> list[str]:
+        """Extract short, high-signal instruction clauses from the current turn."""
+        directives: list[str] = []
+        for raw in str(text or "").splitlines():
+            line = cls._text(raw).strip(" -•\t")
+            low = line.lower()
+            if not line:
+                continue
+            if any(marker in low for marker in (
+                "не ", "нельзя", "обязательно", "важно", "нужно", "должен", "должна",
+                "только", "without", "must ", "required", "do not", "don't", "only ",
+            )):
+                directives.append(cls._excerpt(line, 220))
+            elif re.match(r"^(?:\d+\.|[a-z]\))\s+", low):
+                directives.append(cls._excerpt(line, 180))
+            if len(directives) >= 8:
+                break
+        return list(dict.fromkeys(directives))
+
+    @classmethod
+    def _request_identifiers(cls, text: str) -> list[str]:
+        values = re.findall(r"`([^`]{2,80})`", str(text or ""))
+        if not values:
+            values = re.findall(r"\b[A-Z][A-Za-z0-9_]{2,}(?:\s+[A-Z][A-Za-z0-9_]{2,})*\b", str(text or ""))
+        return list(dict.fromkeys(cls._text(v) for v in values if cls._text(v)))[:12]
+
+    @classmethod
+    def _safe_topic(cls, candidates: list[Any], text: str) -> str:
+        current = cls._text(text)
+        current_low = current.lower()
+        generic = {"вопрос", "ответ", "запрос", "тема", "опрос", "question", "request", "answer"}
+        scored: list[tuple[float, str]] = []
+        for candidate in candidates:
+            value = cls._text(candidate)
+            if not value or len(value) > 140 or value.lower() in generic:
+                continue
+            low = value.lower()
+            overlap = cls._similarity(value, current)
+            explicit = 1.0 if low in current_low else 0.0
+            scored.append((explicit + overlap, value))
+        if scored:
+            scored.sort(key=lambda x: x[0], reverse=True)
+            return cls._excerpt(scored[0][1], 140)
+        identifiers = cls._request_identifiers(text)
+        if identifiers:
+            return identifiers[0]
+        first = cls._text(re.split(r"(?<=[.!?。！？])\s+", current)[0] if current else "")
+        return cls._excerpt(first, 140)
+
+    @classmethod
+    def _safe_operation(cls, value: Any, representation: str, directives: list[str]) -> str:
+        known = {"answer", "build", "modify", "retrieve", "calculate", "analyze", "explain", "summarize", "list", "present"}
+        op = cls._text(value).lower()
+        joined = (cls._text(" ".join(directives)) + " " + cls._text(representation)).lower()
+        # A generic legacy `answer` operation is too weak for explicit
+        # construction/specification requests. Prefer the current-turn action
+        # semantics when the request clearly asks to define/create/design/build.
+        explicit_build = any(x in joined for x in (
+            "создай", "создать", "определи", "определить", "спроектируй",
+            "спроектировать", "зафиксируй", "структур", "контракт",
+            "реализуй", "реализац", "покажи", "выведи", "опиши в коде",
+            "build", "design", "specify", "implement",
+        ))
+        if op == "answer" and explicit_build and representation in {
+            "code", "diagram", "image", "graph", "table", "formula", "gallery", "text"
+        }:
+            return "build"
+        if op in known and len(op) < 32:
+            return op
+        if any(x in joined for x in ("исправ", "измени", "передел", "добавь", "убери", "modify", "change")):
+            return "modify"
+        if representation in {"code", "image", "diagram", "graph", "table", "formula", "gallery", "link"}:
+            return "build"
+        if any(x in joined for x in ("объясни", "почему", "что такое", "explain")):
+            return "explain"
+        return "answer"
+
+    @classmethod
+    def _safe_goal(cls, value: Any, operation: str, representation: str, text: str) -> str:
+        goal = cls._text(value)
+        if operation == "build" and goal.lower() in {"answer", "reply", "question"}:
+            return "present" if representation in {"image", "diagram", "graph", "table", "formula", "code", "gallery"} else "obtain"
+        if goal and len(goal) <= 80 and goal.lower() not in cls._text(text).lower():
+            return goal
+        return {
+            "retrieve": "obtain",
+            "explain": "understand",
+            "analyze": "understand",
+            "build": "present" if representation in {"image", "diagram", "graph", "table", "formula", "code", "gallery"} else "answer",
+            "modify": "transform",
+            "summarize": "understand",
+            "list": "answer",
+        }.get(operation, "answer")
+
+    @classmethod
+    def _explicit_artifact_dependency(cls, text: str, control: dict[str, Any], semantic_result: dict[str, Any]) -> bool:
+        low = cls._text(text).lower()
+        explicit_ref = any(x in low for x in (
+            "этот график", "этот рисунок", "эту картинку", "на картинке", "этот файл",
+            "на схеме", "эту схему", "предыдущий рисунок", "предыдущую картинку",
+            "этот артефакт", "this image", "this diagram", "this file",
+        ))
+        explicit_transform = any(x in low for x in (
+            "измени эту", "переделай эту", "добавь на", "убери с", "нарисуй на",
+            "вставь в эту", "modify this", "edit this",
+        ))
+        return bool(
+            explicit_ref
+            or explicit_transform
+            or (bool(control.get("artifact_reference")) and explicit_ref)
+            or (bool(semantic_result.get("target_artifact")) and explicit_ref)
+        )
+
+    @classmethod
+    def _compact_value(cls, value: Any, depth: int = 0, max_depth: int = 4, max_items: int = 8, max_keys: int = 12) -> Any:
+        if depth > max_depth or value in (None, "", [], {}):
+            return None
+        if isinstance(value, (str, int, float, bool)):
+            return cls._excerpt(value, 360) if isinstance(value, str) else value
+        if isinstance(value, dict):
+            out = {}
+            for key, item in list(value.items())[:max_keys]:
+                compact = cls._compact_value(item, depth + 1, max_depth, max_items, max_keys)
+                if compact not in (None, "", [], {}):
+                    out[str(key)] = compact
+            return out
+        if isinstance(value, (list, tuple, set)):
+            out = []
+            for item in list(value)[:max_items]:
+                compact = cls._compact_value(item, depth + 1, max_depth, max_items, max_keys)
+                if compact not in (None, "", [], {}):
+                    out.append(compact)
+            return out
+        return cls._text(value)
+
+    @classmethod
+    def _turn_text(cls, item: Any) -> str:
+        if not isinstance(item, dict):
+            return cls._text(item)
+        user = item.get("user")
+        april = item.get("april") or item.get("assistant")
+        if isinstance(user, dict):
+            user = user.get("text") or user.get("content") or user.get("answer")
+        if isinstance(april, dict):
+            april = april.get("answer") or april.get("content") or april.get("summary")
+        direct = cls._text(item.get("text") or item.get("content") or item.get("summary"))
+        return cls._excerpt(" ".join(x for x in (user, april, direct) if x), 420)
+
+    @classmethod
+    def _task_digest(cls, task: dict[str, Any]) -> dict[str, Any]:
+        task = task if isinstance(task, dict) else {}
+        return {
+            "active": bool(task.get("active") or task.get("status") in {"open", "active", "continuing"}),
+            "kind": cls._text(task.get("kind") or task.get("type")),
+            "phase": cls._text(task.get("phase") or task.get("task_phase")),
+            "goal": cls._excerpt(task.get("goal") or task.get("task_goal"), 160),
+            "target": cls._excerpt(task.get("target") or task.get("target_entity") or task.get("entity"), 160),
+            "prompt": cls._excerpt(task.get("prompt") or task.get("question") or task.get("last_question"), 260),
+            "expected_input_type": cls._text(task.get("expected_input_type") or task.get("input_type")),
+            "candidate_answer": cls._excerpt(task.get("candidate_answer") or task.get("answer_candidate"), 120),
+            "known_clues": [cls._excerpt(x, 120) for x in list(task.get("known_clues") or [])[-4:] if cls._text(x)],
+            "qa_history": [
+                cls._compact_value(x, depth=0, max_depth=2, max_items=4, max_keys=5)
+                for x in list(task.get("qa_history") or task.get("turns") or [])[-2:]
+            ],
+        }
+
+    def _memory_candidates(self, state: dict[str, Any], history: list[Any]) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        raw = state.get("memory_timeline") if isinstance(state, dict) else None
+        if isinstance(raw, dict):
+            values: list[Any] = []
+            for value in raw.values():
+                values.extend(value if isinstance(value, list) else [value])
+        elif isinstance(raw, list):
+            values = list(raw)
+        else:
+            values = []
+
+        for key in ("active_sequence_turns", "relevant_7d_turns", "seven_day_memory_turns"):
+            value = state.get(key) if isinstance(state, dict) else None
+            if isinstance(value, list):
+                values.extend(value)
+        values.extend(history[-8:])
+
+        seen: set[str] = set()
+        for item in reversed(values[-self.MAX_MEMORY_CANDIDATES:]):
+            text = self._turn_text(item)
+            if not text:
+                continue
+            sig = text.lower()
+            if sig in seen:
+                continue
+            seen.add(sig)
+            candidates.append({
+                "text": text,
+                "sequence_id": self._text(item.get("sequence_id")) if isinstance(item, dict) else "",
+                "scene_id": self._text(item.get("scene_id") or item.get("visual_scene_id")) if isinstance(item, dict) else "",
+                "raw": item if isinstance(item, dict) else {},
+            })
+        return candidates[:self.MAX_MEMORY_CANDIDATES]
+
+    def build(
+        self,
+        *,
+        text: str,
+        semantic_result: dict[str, Any],
+        state: dict[str, Any],
+        history: list[Any],
+    ) -> dict[str, Any]:
+        semantic_result = semantic_result if isinstance(semantic_result, dict) else {}
+        state = state if isinstance(state, dict) else {}
+        history = history if isinstance(history, list) else []
+        dialogue = semantic_result.get("dialogue_contract") if isinstance(semantic_result.get("dialogue_contract"), dict) else {}
+        frame = semantic_result.get("semantic_frame") if isinstance(semantic_result.get("semantic_frame"), dict) else {}
+        control = semantic_result.get("interpretation_control") if isinstance(semantic_result.get("interpretation_control"), dict) else {}
+        relation = self._text(dialogue.get("relation") or semantic_result.get("three_way_relation") or "NEW").upper()
+        continuation = bool(dialogue.get("continuation") or semantic_result.get("continuation"))
+        reference = bool(dialogue.get("reference_to_previous") or semantic_result.get("reference_to_previous"))
+        representation = self._text(frame.get("representation") or control.get("representation") or semantic_result.get("subtype") or "text").lower()
+        directives = self._request_directives(text)
+        operation = self._safe_operation(frame.get("operation") or control.get("operation"), representation, directives)
+        goal = self._safe_goal(frame.get("goal") or dialogue.get("active_goal"), operation, representation, text)
+        active_entity = self._text(frame.get("entity") or dialogue.get("active_entity") or semantic_result.get("active_entity"))
+        artifact_reference = self._explicit_artifact_dependency(text, control, semantic_result)
+        topic = self._safe_topic(
+            [dialogue.get("canonical_topic"), frame.get("topic"), active_entity,
+             "Algorithm Engine" if "algorithm engine" in self._text(text).lower() else "",
+             "Interpretation Layer" if "interpretation layer" in self._text(text).lower() else ""],
+            text,
+        )
+        task = semantic_result.get("interactive_task_state") if isinstance(semantic_result.get("interactive_task_state"), dict) else dialogue.get("active_task") if isinstance(dialogue.get("active_task"), dict) else {}
+        task_active = bool(task and (task.get("active") or task.get("status") in {"open", "active", "continuing"}))
+
+        signals = self._instruction_signals(text)
+        output_modes = list(semantic_result.get("requested_outputs") or semantic_result.get("candidate_representations") or [])
+        if representation and representation != "text" and representation not in output_modes:
+            output_modes.append(representation)
+
+        base_intent = self._text(frame.get("intent") or "")
+        if base_intent not in DIALOGUE_LABELS:
+            base_intent = "request" if directives or representation != "text" else (relation.lower() or "request")
+        if base_intent in {"independent", "statement"} and (directives or representation != "text"):
+            base_intent = "request"
+
+        canonical_frame = {
+            "intent": base_intent,
+            "relation": relation,
+            "topic": topic,
+            "entity": active_entity,
+            "operation": operation,
+            "goal": goal,
+            "representation": representation,
+            "reference": bool(reference or artifact_reference),
+            "task_active": bool(task_active),
+            "sequence_id": self._text(
+                dialogue.get("sequence_id")
+                or (state.get("active_dialogue_sequence", {}) or {}).get("sequence_id")
+                if isinstance(state.get("active_dialogue_sequence"), dict) else ""
+            ),
+        }
+
+        output_contract = {
+            "representation": representation,
+            "operation": operation,
+            "goal": goal,
+            "requested_outputs": output_modes[:6],
+            "render_authorized": bool(control.get("render_authorized")),
+            "render_mode": self._text(control.get("render_mode") or "TEXT_ONLY"),
+            "artifact_reference": artifact_reference,
+        }
+
+        required: list[dict[str, Any]] = []
+        optional: list[dict[str, Any]] = []
+        excluded: list[dict[str, Any]] = []
+        protected: list[str] = []
+
+        def add(bucket: list[dict[str, Any]], key: str, value: Any, score: float, reason: str, protected_flag: bool = False) -> None:
+            compact = self._compact_value(value, depth=0, max_depth=4, max_items=8, max_keys=12)
+            if compact in (None, "", [], {}):
+                return
+            entry = {
+                "key": key,
+                "value": compact,
+                "priority": round(max(0.0, min(1.0, float(score))), 4),
+                "reason": reason,
+                "protected": bool(protected_flag),
+            }
+            bucket.append(entry)
+            if protected_flag and key not in protected:
+                protected.append(key)
+
+        # These four elements define the current computational task and survive
+        # all budget optimization unless the request itself is pathologically larger
+        # than the hard provider envelope.
+        add(required, "CURRENT_REQUEST", self._excerpt(text, 1600), 1.0, "current_user_turn", True)
+        add(required, "SEMANTIC_FRAME", canonical_frame, 0.99, "workspace_normalized_semantics", True)
+        add(required, "OUTPUT_CONTRACT", output_contract, 1.0, "render_and_response_shape", True)
+        if directives:
+            add(required, "REQUEST_DIRECTIVES", directives[:8], 0.98, "explicit_user_constraints", True)
+        identifiers = self._request_identifiers(text)
+        if identifiers and (representation == "code" or signals.get("architecture") or signals.get("code")):
+            add(required, "REQUEST_IDENTIFIERS", identifiers[:12], 0.96, "named_contract_entities", True)
+        if task_active:
+            add(required, "ACTIVE_TASK", self._task_digest(task), 0.97, "active_task_owner", True)
+
+        if continuation or reference or task_active:
+            add(optional, "DIALOGUE_ANCHOR", {
+                "relation": relation,
+                "canonical_topic": dialogue.get("canonical_topic"),
+                "active_goal": dialogue.get("active_goal") or goal,
+                "active_entity": active_entity,
+                "previous_user_turn": dialogue.get("previous_user_turn"),
+                "previous_april_turn": dialogue.get("previous_april_turn"),
+                "sequence_id": dialogue.get("sequence_id"),
+            }, 0.92, "continuation_anchor")
+
+        if continuation or reference:
+            seq = dialogue.get("active_dialogue_sequence") or state.get("active_dialogue_sequence")
+            if isinstance(seq, dict) and seq:
+                add(optional, "ACTIVE_SEQUENCE", {
+                    "sequence_id": seq.get("sequence_id"),
+                    "turn_count": seq.get("turn_count") or seq.get("turns_count"),
+                    "last_user_request": seq.get("last_user_request"),
+                    "last_april_answer": seq.get("last_april_answer"),
+                }, 0.9, "same_authenticated_sequence")
+
+        if task_active:
+            task_memory = semantic_result.get("task_memory") if isinstance(semantic_result.get("task_memory"), dict) else dialogue.get("task_memory")
+            if isinstance(task_memory, dict):
+                add(optional, "TASK_MEMORY", self._task_digest(task_memory), 0.88, "active_task_evidence")
+
+        if artifact_reference:
+            visual = semantic_result.get("target_artifact") if isinstance(semantic_result.get("target_artifact"), dict) else {}
+            if not visual:
+                visual = state.get("selected_artifact") if isinstance(state.get("selected_artifact"), dict) else {}
+            if visual:
+                add(optional, "ACTIVE_ARTIFACT", {
+                    "type": visual.get("type") or visual.get("artifact_type"),
+                    "id": visual.get("block_id") or visual.get("render_id") or visual.get("id"),
+                    "title": visual.get("title"),
+                }, 0.96, "explicit_artifact_dependency")
+
+        # Rank memory semantically instead of blindly taking the newest records.
+        memory_items = self._memory_candidates(state, history)
+        memory_ranked: list[dict[str, Any]] = []
+        for item in memory_items:
+            text_value = item["text"]
+            lexical = self._similarity(text, text_value)
+            topic_match = self._similarity(dialogue.get("canonical_topic") or frame.get("topic"), text_value)
+            entity_match = self._similarity(active_entity, text_value) if active_entity else 0.0
+            sequence_match = 1.0 if dialogue.get("sequence_id") and item.get("sequence_id") == dialogue.get("sequence_id") else 0.0
+            score = (0.46 * lexical) + (0.24 * topic_match) + (0.16 * entity_match) + (0.14 * sequence_match)
+            if continuation and sequence_match:
+                score += 0.18
+            if reference and (topic_match > 0 or entity_match > 0):
+                score += 0.12
+            if artifact_reference and item.get("scene_id") and dialogue.get("scene_id") == item.get("scene_id"):
+                score += 0.15
+            memory_ranked.append((min(1.0, score), text_value, item))
+        memory_ranked.sort(key=lambda x: x[0], reverse=True)
+
+        selected_memory = []
+        for score, text_value, item in memory_ranked[:4]:
+            if score < 0.16:
+                continue
+            selected_memory.append({
+                "text": self._excerpt(text_value, 320),
+                "sequence_id": item.get("sequence_id"),
+                "scene_id": item.get("scene_id"),
+                "score": round(score, 4),
+            })
+        if selected_memory:
+            add(optional, "RELEVANT_MEMORY", selected_memory, 0.76 if continuation or reference else 0.48, "semantic_memory_selection")
+
+        # Visual state is explicitly excluded unless the current task depends on
+        # a prior artifact. This prevents old graph/image state from contaminating
+        # unrelated text/code/architecture requests.
+        if not artifact_reference:
+            live_visual = state.get("active_visual_scene") or state.get("current_visual_scene")
+            if isinstance(live_visual, dict) and live_visual.get("scene_id"):
+                excluded.append({
+                    "key": "STALE_VISUAL_STATE",
+                    "reason": "no_current_artifact_dependency",
+                    "scene_id": live_visual.get("scene_id"),
+                })
+
+        # A replaced task explicitly forbids the previous entity/task from becoming
+        # an implicit provider dependency.
+        transition = semantic_result.get("task_transition") if isinstance(semantic_result.get("task_transition"), dict) else dialogue.get("task_transition") if isinstance(dialogue.get("task_transition"), dict) else {}
+        if transition.get("replace_task"):
+            excluded.append({
+                "key": "PREVIOUS_TASK",
+                "reason": "task_replaced",
+                "forbidden_entities": list(semantic_result.get("forbidden_entities") or []),
+            })
+
+        # Current request instruction signals are part of the reasoning basis,
+        # never a routing trigger.
+        confidence_components = [
+            1.0,
+            float(bool(frame)),
+            float(bool(output_contract["requested_outputs"] or representation == "text")),
+            float(1.0 if task_active else 0.75 if continuation or reference else 0.60),
+        ]
+        confidence = sum(confidence_components) / len(confidence_components)
+
+        # Provider sections are already ordered by semantic priority. The provider
+        # packer only performs size fitting; it does not decide relevance.
+        provider_sections: list[dict[str, Any]] = []
+        for entry in required + sorted(optional, key=lambda x: x.get("priority", 0.0), reverse=True):
+            provider_sections.append({
+                "name": entry["key"],
+                "value": entry["value"],
+                "priority": entry["priority"],
+                "protected": entry["protected"],
+                "reason": entry["reason"],
+            })
+
+        return {
+            "version": self.VERSION,
+            "mode": "semantic_pre_provider_workspace",
+            "current_request": self._excerpt(text, 1200),
+            "current_request_raw_preserved": True,
+            "active_task": bool(task_active),
+            "relation": relation,
+            "continuation": continuation,
+            "reference": reference,
+            "artifact_reference": artifact_reference,
+            "active_topic": topic,
+            "active_entity": active_entity,
+            "operation": operation,
+            "goal": goal,
+            "representation": representation,
+            "semantic_frame": canonical_frame,
+            "instruction_signals": signals,
+            "request_directives": directives,
+            "request_identifiers": self._request_identifiers(text),
+            "required_context": required,
+            "optional_context": sorted(optional, key=lambda x: x.get("priority", 0.0), reverse=True),
+            "protected_context": protected,
+            "excluded_context": excluded,
+            "selected_memory": selected_memory,
+            "context_dependencies": [
+                x for x in (
+                    "current_request",
+                    "output_contract",
+                    "semantic_frame",
+                    "active_task" if task_active else "",
+                    "dialogue_anchor" if continuation or reference or task_active else "",
+                    "active_artifact" if artifact_reference else "",
+                ) if x
+            ],
+            "requested_outputs": output_modes[:6],
+            "output_contract": output_contract,
+            "provider_sections": provider_sections,
+            "reasoning_basis": {
+                "selection": "dependency + semantic similarity + task ownership + recency + entity continuity",
+                "decision_order": "understand -> classify dependencies -> rank context -> rank relevance -> protect mandatory -> budget pack",
+                "budget_policy": "relevance_before_budget",
+                "provider_role": "consume_selected_context; do_not_reinterpret_or_reselect",
+                "stale_visual_state": "excluded_without_artifact_dependency",
+                "historical_memory": "evidence_only",
+                "current_request_policy": "preserve_semantically; compact only when provider envelope requires it",
+                "output_contract_policy": "protected",
+            },
+            "confidence": round(min(1.0, confidence), 4),
+        }
+
+
+DIALOG_COGNITIVE_WORKSPACE = DialogCognitiveWorkspace()
 
 def build_result(text: str) -> dict[str, Any]:
     return {
