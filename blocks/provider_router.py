@@ -647,6 +647,12 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
             or (raw.get("constraints") or {}).get("cognitive_context_plan")
             or {}
         ),
+        "provider_context_plan": (
+            raw.get("provider_context_plan")
+            or (raw.get("conversation") or {}).get("provider_context_plan")
+            or (raw.get("constraints") or {}).get("provider_context_plan")
+            or {}
+        ),
         "cognitive_context_plan": (
             raw.get("cognitive_context_plan")
             or (raw.get("constraints") or {}).get("cognitive_context_plan")
@@ -681,6 +687,17 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
             workspace_raw, max_depth=7, max_items=12, max_keys=28
         ) or {}
         compact["cognitive_context_plan"] = compact["cognitive_workspace"]
+
+    provider_plan_raw = (
+        raw.get("provider_context_plan")
+        or (raw.get("conversation") or {}).get("provider_context_plan")
+        or (raw.get("constraints") or {}).get("provider_context_plan")
+        or {}
+    )
+    if isinstance(provider_plan_raw, dict) and provider_plan_raw:
+        compact["provider_context_plan"] = _compact_value(
+            provider_plan_raw, max_depth=7, max_items=16, max_keys=28
+        ) or {}
 
     # Generic request compaction intentionally stays small, but interactive
     # dialogue is stateful evidence. Restore the bounded task trajectory after
@@ -1335,6 +1352,215 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     return fields
 
 
+
+def _provider_context_plan(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the Interpretation-authored provider context plan, if present.
+
+    Provider never creates or revises this plan. It only serializes it into the
+    OpenAI input envelope and applies the hard token budget.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    candidates = (
+        payload.get("provider_context_plan"),
+        (payload.get("conversation") or {}).get("provider_context_plan")
+        if isinstance(payload.get("conversation"), dict) else None,
+        (payload.get("constraints") or {}).get("provider_context_plan")
+        if isinstance(payload.get("constraints"), dict) else None,
+    )
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate:
+            return candidate
+    return {}
+
+
+def _plan_section_text(section: dict[str, Any]) -> str:
+    if not isinstance(section, dict):
+        return ""
+    key = _safe_text(section.get("key") or section.get("name")).upper()
+    if not key:
+        return ""
+    value = section.get("value")
+    if isinstance(value, (dict, list, tuple)):
+        value = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    return f"{key}: {value}"
+
+
+
+def _minimal_plan_context(plan: dict[str, Any]) -> dict[str, Any]:
+    """Reduce protected Interpretation decisions to a semantic core for emergency packing.
+
+    This is only used when the full selected plan itself is too large. It preserves
+    the current turn, relation, core task semantics and output contract rather than
+    falling back to a bare request.
+    """
+    relation = _safe_text(plan.get("relation") or "NEW").upper()
+    out: dict[str, Any] = {
+        "relation": relation,
+        "current_request": _semantic_excerpt(plan.get("current_user_request") or "", 360),
+    }
+
+    by_key: dict[str, Any] = {}
+    for bucket in ("required_context", "optional_context"):
+        for section in list(plan.get(bucket) or []):
+            if not isinstance(section, dict):
+                continue
+            key = _safe_text(section.get("key") or section.get("name")).upper()
+            if key and key not in by_key:
+                by_key[key] = section.get("value")
+
+    semantic = by_key.get("SEMANTIC_CORE")
+    if isinstance(semantic, dict):
+        keep = ("intent", "operation", "goal", "domain", "subdomain", "topic", "entity", "representation")
+        out["semantic_core"] = {
+            key: _semantic_excerpt(semantic.get(key), 100)
+            for key in keep
+            if semantic.get(key) not in (None, "", [], {})
+        }
+    elif semantic not in (None, "", [], {}):
+        out["semantic_core"] = _semantic_excerpt(semantic, 220)
+
+    contract = by_key.get("OUTPUT_CONTRACT")
+    if isinstance(contract, dict):
+        keep = ("representation", "requested_outputs", "operation", "render_authorized")
+        out["output_contract"] = {
+            key: contract.get(key)
+            for key in keep
+            if contract.get(key) not in (None, "", [], {})
+        }
+    elif contract not in (None, "", [], {}):
+        out["output_contract"] = _semantic_excerpt(contract, 180)
+
+    task = by_key.get("ACTIVE_TASK")
+    if isinstance(task, dict):
+        keep = (
+            "kind", "role", "phase", "expected_input_type", "topic", "goal",
+            "last_question", "candidate_answer", "last_user_answer",
+        )
+        out["active_task"] = {
+            key: _semantic_excerpt(task.get(key), 160)
+            for key in keep
+            if task.get(key) not in (None, "", [], {})
+        }
+
+    anchor = by_key.get("DIALOGUE_ANCHOR")
+    if isinstance(anchor, dict):
+        keep = ("previous_user_turn", "previous_april_turn", "topic", "entity", "turn_relation")
+        out["dialogue_anchor"] = {
+            key: _semantic_excerpt(anchor.get(key), 180)
+            for key in keep
+            if anchor.get(key) not in (None, "", [], {})
+        }
+
+    memory = by_key.get("MEMORY_RECALL")
+    if relation == "RECALL" and memory not in (None, "", [], {}):
+        if isinstance(memory, list):
+            out["memory_recall"] = [
+                _compact_value(item, max_depth=2, max_items=4, max_keys=8)
+                for item in memory[:2]
+                if isinstance(item, dict)
+            ]
+        else:
+            out["memory_recall"] = _semantic_excerpt(memory, 260)
+
+    return {
+        key: value for key, value in out.items()
+        if value not in (None, "", [], {})
+    }
+
+
+def _build_provider_user_text_from_plan(
+    payload: dict[str, Any],
+    plan: dict[str, Any],
+    *,
+    system_prompt: str,
+) -> tuple[str, dict[str, Any]]:
+    """Serialize the Interpretation plan without reselecting context.
+
+    Required/optional/excluded context has already been decided upstream.
+    The provider packer only performs progressive compression to fit the 900-token
+    envelope. The current user request remains the first semantic operand.
+    """
+    current_request = _safe_text(
+        plan.get("current_user_request")
+        or (payload.get("intent") or {}).get("normalized_text")
+        or _extract_request_text(payload)
+    )
+    relation = _safe_text(plan.get("relation") or "NEW").upper()
+    requested = payload.get("requested_outputs") or []
+    if isinstance(requested, str):
+        requested = [requested]
+    requested = [x for x in requested if _safe_text(x).strip()]
+
+    mandatory: list[str] = [
+        "APRIL CANONICAL REQUEST",
+        "REQUEST: " + current_request,
+        "RELATION: " + relation,
+        "REQUESTED: " + json.dumps(requested[:6], ensure_ascii=False, separators=(",", ":")),
+        "RESPONSE_FORMAT: Return exactly one complete logical answer as MachineResponse JSON. Use only the supplied context plan.",
+    ]
+
+    required = [
+        x for x in (plan.get("required_context") or [])
+        if isinstance(x, dict) and _safe_text(x.get("key") or x.get("name")).upper() != "CURRENT_REQUEST"
+    ]
+    optional = [
+        x for x in (plan.get("optional_context") or [])
+        if isinstance(x, dict)
+    ]
+    required.sort(key=lambda x: (-float(x.get("priority", 0.0) or 0.0), _safe_text(x.get("key") or x.get("name"))))
+    optional.sort(key=lambda x: (-float(x.get("priority", 0.0) or 0.0), _safe_text(x.get("key") or x.get("name"))))
+
+    for section in required:
+        piece = _plan_section_text(section)
+        if piece:
+            mandatory.append(piece)
+
+    optional_tiers: list[tuple[str, str]] = []
+    for section in optional:
+        piece = _plan_section_text(section)
+        if piece:
+            optional_tiers.append((
+                _safe_text(section.get("key") or section.get("name")).lower(),
+                piece,
+            ))
+
+    hard = int(plan.get("hard_budget_tokens") or INPUT_TOKEN_BUDGET)
+    soft = int(plan.get("soft_target_tokens") or min(850, hard - 50))
+    system_tokens = _estimate_input_tokens(system_prompt)
+    user_hard = max(1, hard - system_tokens)
+    user_target = max(1, min(soft - system_tokens, user_hard))
+
+    user_text, meta = _adaptive_pack(
+        "",
+        mandatory,
+        optional_tiers,
+        hard_budget=user_hard,
+        target_budget=user_target,
+    )
+
+    return user_text, {
+        **meta,
+        "provider_context_plan_version": _safe_text(plan.get("version")),
+        "provider_context_authority": "INTERPRETATION",
+        "provider_must_not_reselect_context": True,
+        "plan_required_selected": [
+            _safe_text(x.get("key") or x.get("name"))
+            for x in required[:16]
+        ],
+        "plan_optional_candidates": [
+            _safe_text(x.get("key") or x.get("name"))
+            for x in optional[:16]
+        ],
+        "plan_excluded": [
+            _safe_text(x.get("key") or x.get("name"))
+            for x in list(plan.get("excluded_context") or [])[:16]
+            if isinstance(x, dict)
+        ],
+        "current_request_length_chars": len(current_request),
+    }
+
+
 def _build_provider_user_text(payload: dict[str, Any], budget_tokens: int) -> str:
     fields = _select_context_fields(payload)
     complexity = _derive_complexity(payload)
@@ -1381,6 +1607,14 @@ def build_openai_request(machine_request: Any) -> dict:
 
 
 def _provider_system_prompt_for_payload(payload: dict[str, Any]) -> str:
+    provider_plan = _provider_context_plan(payload)
+    if provider_plan:
+        relation = _safe_text(provider_plan.get("relation") or "NEW").upper()
+        task_active = bool(provider_plan.get("active_task"))
+        recall = relation == "RECALL"
+        continuation = relation == "CONTINUE"
+        return PROVIDER_DIALOGUE_SYSTEM_PROMPT if continuation or recall or task_active else PROVIDER_MACHINE_SYSTEM_PROMPT
+
     dialogue = _dialogue_contract(payload)
     workspace = (
         payload.get("cognitive_workspace")
@@ -1431,11 +1665,114 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     if _estimate_input_tokens(system_prompt) > 420:
         system_prompt = (
             "April internal response provider. Return exactly one MachineResponse JSON object. "
-            "Quantum Processor owns relation, task, representation, resolved request and requested outputs. "
-            "For continuation/reference turns use only supplied authenticated live context. "
-            "When an active task exists, resolve the current turn against its phase/question/history. "
-            "Preserve requested structured representations, never invent unrequested blocks, and never expose internal state."
+            "Quantum Processor owns current request, dialogue relation, task, representation and context plan. "
+            "Use only the supplied context plan. Do not add, search, reinterpret or substitute context. "
+            "Preserve requested structured representations and never expose internal state."
         )
+
+    # New canonical path: Interpretation has already selected context semantically.
+    # Provider only serializes and compresses the plan to <= 900 total input tokens.
+    provider_plan = _provider_context_plan(payload)
+    if provider_plan:
+        user_text, plan_meta = _build_provider_user_text_from_plan(
+            payload,
+            provider_plan,
+            system_prompt=system_prompt,
+        )
+        estimated_total = _estimate_input_tokens(system_prompt) + _estimate_input_tokens(user_text)
+
+        # Absolute last-resort guard: progressively compact the current request while
+        # retaining relation/output contract. This branch should rarely execute because
+        # _adaptive_pack already enforces the hard envelope.
+        if estimated_total > INPUT_TOKEN_BUDGET:
+            request_text = _safe_text(
+                provider_plan.get("current_user_request")
+                or _extract_request_text(payload)
+            )
+            relation = _safe_text(provider_plan.get("relation") or "NEW").upper()
+            outputs = payload.get("requested_outputs") or []
+            minimal_context = _minimal_plan_context(provider_plan)
+            compact_system = (
+                "April provider. Return one MachineResponse JSON object. "
+                "Quantum Processor is authoritative. Use only supplied plan context. "
+                "Answer the current request and preserve requested output."
+            )
+
+            for request_limit in (420, 320, 260, 220, 180, 150, 120, 90, 70, 50):
+                candidate_request = _semantic_excerpt(request_text, request_limit)
+                for context_limit in (260, 220, 180, 150, 120):
+                    context_for_try = dict(minimal_context)
+                    context_for_try["current_request"] = candidate_request
+
+                    # Keep the semantic core, output contract and active dialogue/task
+                    # in the protected emergency packet. Larger historical payloads
+                    # are intentionally omitted rather than allowed to displace meaning.
+                    for key, value in list(context_for_try.items()):
+                        if key == "current_request":
+                            continue
+                        if isinstance(value, dict):
+                            for inner_key, inner_value in list(value.items()):
+                                if isinstance(inner_value, str):
+                                    value[inner_key] = _semantic_excerpt(inner_value, context_limit)
+                        elif isinstance(value, list):
+                            context_for_try[key] = value[:2]
+
+                    candidate_user = (
+                        "REQUEST: " + candidate_request + "\n"
+                        "RELATION: " + relation + "\n"
+                        "CONTEXT_CORE: " + json.dumps(
+                            context_for_try,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            default=str,
+                        ) + "\n"
+                        "REQUESTED: " + json.dumps(outputs[:4], ensure_ascii=False, separators=(",", ":")) + "\n"
+                        "RESPONSE_FORMAT: Return one complete logical MachineResponse JSON answer."
+                    )
+                    trial_total = _estimate_input_tokens(compact_system) + _estimate_input_tokens(candidate_user)
+                    if trial_total <= INPUT_TOKEN_BUDGET:
+                        system_prompt = compact_system
+                        user_text = candidate_user
+                        estimated_total = trial_total
+                        plan_meta["compression_level"] = "minimal_protected_context"
+                        plan_meta["compressed_context"] = list(plan_meta.get("compressed_context") or []) + [
+                            "PROTECTED_CONTEXT_EMERGENCY_COMPACTION"
+                        ]
+                        plan_meta["current_request_semantic_compression"] = request_limit < len(request_text)
+                        break
+                else:
+                    continue
+                break
+            else:
+                raise RuntimeError("PROVIDER_INPUT_BUDGET_PACK_FAILURE")
+
+        # Emit exactly one compact telemetry record for the plan-driven route.
+        provider_log({
+            "input_token_budget": INPUT_TOKEN_BUDGET,
+            "input_budget_target": provider_plan.get("soft_target_tokens"),
+            "estimated_input_tokens": estimated_total,
+            "input_budget_enforced": True,
+            "context_strategy": "interpretation_provider_context_plan_v2",
+            "compression_level": plan_meta.get("compression_level"),
+            "compressed_context": plan_meta.get("compressed_context") or [],
+            "dropped_context": plan_meta.get("dropped") or [],
+            "provider_context_plan_version": provider_plan.get("version"),
+            "provider_context_authority": "INTERPRETATION",
+            "provider_must_not_reselect_context": True,
+            "provider_context_required": plan_meta.get("plan_required_selected") or [],
+            "provider_context_optional": plan_meta.get("plan_optional_candidates") or [],
+            "provider_context_excluded": plan_meta.get("plan_excluded") or [],
+            "current_request_semantic_compression": bool(plan_meta.get("current_request_semantic_compression")),
+            "current_request_semantics_preserved": True,
+            "dialogue_system_prompt": bool(system_prompt == PROVIDER_DIALOGUE_SYSTEM_PROMPT),
+            "current_request_length_chars": plan_meta.get("current_request_length_chars", 0),
+            "canonical_packet_fingerprint": _provider_packet_fingerprint(user_text),
+        })
+
+        return [
+            {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
+            {"role": "user", "content": [{"type": "input_text", "text": user_text}]},
+        ]
 
     constraints = payload.get("constraints") if isinstance(payload.get("constraints"), dict) else {}
     plan = constraints.get("representation_plan") if isinstance(constraints.get("representation_plan"), dict) else {}
@@ -2259,6 +2596,7 @@ async def generate_text(messages: Any, temperature: Any = None,
             "max_output_tokens": output_tokens,
         }
 
+        provider_plan = _provider_context_plan(source_request)
         provider_log({
             "provider_version": APRIL_QUANTUM_PROVIDER_VERSION,
             "model": APRIL_QUANTUM_PROVIDER_MODEL,
@@ -2267,6 +2605,9 @@ async def generate_text(messages: Any, temperature: Any = None,
             "input_token_budget": INPUT_TOKEN_BUDGET,
             "single_call": True,
             "no_model_escalation": True,
+            "provider_context_plan_version": _safe_text(provider_plan.get("version")),
+            "provider_context_authority": "INTERPRETATION" if provider_plan else "LEGACY",
+            "provider_must_not_reselect_context": bool(provider_plan),
         })
 
         # OpenAI's synchronous SDK would block the async Web/Telegram event loop.
@@ -2290,6 +2631,8 @@ async def generate_text(messages: Any, temperature: Any = None,
             "response_complexity": complexity,
             "response_output_tokens": output_tokens,
             "input_token_budget": INPUT_TOKEN_BUDGET,
+            "provider_context_plan_version": _safe_text(provider_plan.get("version")),
+            "provider_context_authority": "INTERPRETATION" if provider_plan else "LEGACY",
         })
 
         provider_log({
