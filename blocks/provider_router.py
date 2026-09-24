@@ -2517,7 +2517,7 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             wrapped = parsed.get(wrapper_key)
             if isinstance(wrapped, dict) and any(
                 key in wrapped
-                for key in ("answer", "content", "response", "render_blocks", "artifacts")
+                for key in ("answer", "content", "response", "text", "render_blocks", "artifacts")
             ):
                 canonical_payload = wrapped
                 break
@@ -2527,12 +2527,16 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         answer = _coerce_human_answer(canonical_payload.get("content"))
     if not answer:
         answer = _coerce_human_answer(canonical_payload.get("response"))
+    if not answer:
+        answer = _coerce_human_answer(canonical_payload.get("text"))
     if not answer and canonical_payload is not parsed:
         answer = _coerce_human_answer(parsed.get("answer"))
     if not answer:
         answer = _coerce_human_answer(parsed.get("content"))
     if not answer:
         answer = _coerce_human_answer(parsed.get("response"))
+    if not answer:
+        answer = _coerce_human_answer(parsed.get("text"))
     source_payload = machine_request_to_dict(source_request) if source_request is not None else {}
     source_constraints = source_payload.get("constraints") if isinstance(source_payload.get("constraints"), dict) else {}
     source_plan = source_constraints.get("representation_plan") if isinstance(source_constraints.get("representation_plan"), dict) else {}
