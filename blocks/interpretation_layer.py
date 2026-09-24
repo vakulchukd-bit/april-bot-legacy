@@ -1840,7 +1840,7 @@ class DialogueEnvironmentEngine:
     retrieval evidence only and never becomes the active owner by itself.
     """
 
-    VERSION = "dialogue_environment_v2_sequential_authority"
+    VERSION = "dialogue_environment_v3_semantic_sync"
     SEVEN_DAYS_SECONDS = 7 * 24 * 60 * 60
 
     _CONFIRMATION = (
@@ -2015,6 +2015,24 @@ class DialogueEnvironmentEngine:
         candidates = cls._candidate_pairs(state, history, scope)
         if not candidates:
             return {}
+
+        # A transport/parser failure is not a semantic turn. Never let such a
+        # placeholder become the active dialogue anchor when a real USER↔APRIL
+        # pair is available behind it. This prevents a failed response from
+        # poisoning short follow-ups such as "Почему?" or "А дальше?".
+        def is_transport_failure(pair: dict[str, Any]) -> bool:
+            answer = cls._low(pair.get("april"))
+            return answer.startswith((
+                "не удалось сформировать ответ на запрос",
+                "не удалось сформировать ответ.",
+                "не удалось сформировать ответ",
+                "произошла ошибка при формировании ответа",
+            ))
+
+        semantic_candidates = [x for x in candidates if not is_transport_failure(x)]
+        if semantic_candidates:
+            candidates = semantic_candidates
+
         # Prefer explicit timestamps when available, otherwise preserve source order.
         dated = [x for x in candidates if x.get("timestamp") is not None]
         if dated:
@@ -2024,7 +2042,88 @@ class DialogueEnvironmentEngine:
     @classmethod
     def _explicit_new_topic(cls, text: str) -> bool:
         low = cls._low(text)
-        return any(x in low for x in cls._NEW_TOPIC)
+        if any(x in low for x in cls._NEW_TOPIC):
+            return True
+        # Natural switch form: "а теперь расскажи про Гоголя".
+        return bool(re.search(
+            r"^(?:а\s+)?теперь\s+(?:давай\s+)?"
+            r"(?:расскажи|объясни|обьясни|опиши|покажи|сделай|создай|нарисуй|"
+            r"напиши|проверь|сравни|найди|скажи|дай|построй)\b"
+            r"(?:\s+про\s+|\s+об\s+|\s+о\s+|\s+насч(?:ё|ё)т\s+)[^?!。！？]{2,}$",
+            low,
+            re.IGNORECASE,
+        ))
+
+    @classmethod
+    def _subject_from_current(cls, text: str) -> str:
+        """Extract the semantic object/subject, never the imperative command."""
+        current = cls._text(text)
+        if not current:
+            return ""
+        tokens = cls._tokens(current)
+        if not tokens:
+            return ""
+
+        # Explicit object introduction: "про Пушкина", "о Tesla", etc.
+        match = re.search(
+            r"\b(?:про|обо?|насч(?:ё|ё)т)\s+(.+?)(?:[?!.。！？]|$)",
+            current,
+            re.IGNORECASE,
+        )
+        if match:
+            value = cls._text(match.group(1)).strip(" ,:;—-\t")
+            if value and not cls._reference_led_subject(value):
+                return value[:180]
+
+        # Direct-object command: "нарисуй свинку", "покажи Tesla".
+        if tokens[0] in cls._COMMAND_HEADS and len(tokens) >= 2:
+            second = tokens[1]
+            interrogative = {
+                "как", "что", "почему", "зачем", "когда", "где", "кто",
+                "какой", "какая", "какое", "какие", "сколько", "чем",
+            }
+            filler = {
+                "подробнее", "подробно", "историю", "всё", "все", "мне",
+                "пожалуйста", "еще", "ещё", "далее", "сейчас", "теперь",
+            }
+            if second not in interrogative and second not in filler:
+                raw_head = re.split(r"\s+", current, maxsplit=1)[0]
+                rest = cls._text(re.sub(
+                    r"^\s*" + re.escape(raw_head) + r"\s+", "", current, count=1, flags=re.IGNORECASE
+                ))
+                if rest:
+                    return rest[:180]
+        return ""
+
+    @classmethod
+    def _reference_led_subject(cls, value: Any) -> bool:
+        tokens = cls._tokens(value)
+        return bool(tokens and tokens[0] in {
+            "он", "она", "оно", "они", "его", "ее", "её", "ему", "ей",
+            "этот", "эта", "это", "эту", "этой", "этим", "тот", "та", "те",
+        })
+
+    @classmethod
+    def _stable_subject_from_pair(cls, previous_user: str, previous_april: str) -> str:
+        subject = cls._subject_from_current(previous_user)
+        if subject and not cls._reference_led_subject(subject):
+            return subject
+        answer = cls._text(previous_april)
+        if answer:
+            matches = re.findall(
+                r"\b[А-ЯЁA-Z][\wЁёЇїІіЄєҐґ-]+(?:\s+[А-ЯЁA-Z][\wЁёЇїІіЄєҐґ-]+){0,3}\b",
+                answer,
+            )
+            stop = {
+                "Среди", "Он", "Она", "Оно", "Они", "Это", "Также", "Но", "В",
+                "На", "По", "Из", "После", "Причиной", "Причина", "Русский",
+                "Русская", "Русское", "Русские", "Этот", "Эта", "Эти",
+            }
+            for candidate in matches:
+                if candidate.split()[0] in stop:
+                    continue
+                return cls._text(candidate)[:180]
+        return ""
 
     @classmethod
     def _memory_query(cls, text: str) -> bool:
@@ -2230,17 +2329,17 @@ class DialogueEnvironmentEngine:
         task = task if isinstance(task, dict) else {}
         if task.get("topic"):
             return cls._text(task.get("topic"))
-        low = cls._low(text)
         if cls._riddle_solve_request(text) or cls._riddle_create_request(text):
             return "загадка"
         quoted = re.findall(r"[«\"]([^»\"]{2,100})[»\"]", cls._text(text))
         if quoted:
             return cls._text(quoted[0])[:140]
+        subject = cls._subject_from_current(text)
+        if subject and not cls._reference_led_subject(subject):
+            return subject[:140]
         words = cls._tokens(text)
         if len(words) <= 2:
             return cls._text(text)[:140]
-        # Do not promote an entire instruction to an entity; the request itself
-        # remains the provider's source of truth.
         return cls._text(re.split(r"(?<=[.!?。！？])\s+", cls._text(text))[0])[:140]
 
     @classmethod
@@ -2270,7 +2369,7 @@ class DialogueEnvironmentEngine:
                 "topic_branch": "new",
                 "context_dependency": "current_turn_only",
                 "current_topic": topic,
-                "active_entity": "загадка" if task.get("kind") == "riddle" else "",
+                "active_entity": "загадка" if task.get("kind") == "riddle" else (cls._subject_from_current(text) if not cls._reference_led_subject(cls._subject_from_current(text)) else ""),
                 "operation": operation,
                 "goal": goal,
                 "representation": representation,
@@ -2288,7 +2387,7 @@ class DialogueEnvironmentEngine:
             "topic_branch": "new",
             "context_dependency": "current_turn_only",
             "current_topic": topic,
-            "active_entity": "",
+            "active_entity": (cls._subject_from_current(text) if not cls._reference_led_subject(cls._subject_from_current(text)) else ""),
             "operation": "answer" if "?" in text or "？" in text else "build" if cls._looks_like_command(text) else "answer",
             "goal": "answer",
             "representation": representation,
@@ -2356,7 +2455,8 @@ class DialogueEnvironmentEngine:
                 "previous_april_turn": previous_april,
                 "selected_memory": [],
                 "historical_memory_allowed": False,
-                "resolved_request": (
+                "resolved_request": cls._text(text),
+                "provider_instruction": (
                     "Acknowledge the user's confirmation of the immediately preceding answer and advance the conversation naturally. "
                     if confirmation else
                     "Handle the user's correction/rejection against the immediately preceding answer and continue the active task. "
@@ -2368,9 +2468,16 @@ class DialogueEnvironmentEngine:
         # semantic window; ordinary self-contained commands stay new.
         low = cls._low(text)
         tokens = cls._tokens(text)
+        current_subject = cls._subject_from_current(text)
         deictic = any(x in low for x in ("это", "этот", "эта", "эту", "её", "ее", "его", "он", "она", "оно", "они", "теперь", "дальше"))
         short = len(tokens) <= 8
-        question_followup = ("?" in text or "？" in text) and ("кто" in low or "где" in low or "какой" in low or "какая" in low or "почему" in low or "как" in low or "когда" in low)
+        followup_heads = {"кто", "где", "какой", "какая", "какое", "какие", "почему", "как", "когда", "зачем", "сколько", "чем"}
+        question_followup = bool(tokens and tokens[0] in followup_heads) or (("?" in text or "？" in text) and any(x in tokens for x in followup_heads))
+
+        # Explicit topic switch with an explicit object is NEW, even though it
+        # contains the continuation word "теперь".
+        if cls._explicit_new_topic(text) and current_subject and previous_user:
+            return cls._new_topic_context(text, scope)
         prior_question = "?" in previous_april or "？" in previous_april
         semantic_overlap = max(cls._similarity(text, previous_user), cls._similarity(text, previous_april))
 
@@ -2384,7 +2491,7 @@ class DialogueEnvironmentEngine:
             and not confirmation
             and not rejection
             and semantic_overlap < 0.30
-            and (cls._looks_like_command(text) or "?" in text or "？" in text)
+            and (current_subject or cls._looks_like_command(text) or "?" in text or "？" in text)
         )
         if self_contained_new:
             return cls._new_topic_context(text, scope)
@@ -2417,7 +2524,8 @@ class DialogueEnvironmentEngine:
                     "previous_april_turn": previous_april,
                     "selected_memory": [],
                     "historical_memory_allowed": False,
-                    "resolved_request": (
+                    "resolved_request": cls._text(text),
+                    "provider_instruction": (
                         "Evaluate the user's current answer against the immediately preceding active question/riddle. "
                         "Use the task state and respond naturally without repeating the prompt. "
                         f"Question/riddle: {previous_april}. Current user answer: {cls._text(text)}"
@@ -2433,10 +2541,16 @@ class DialogueEnvironmentEngine:
             or low.startswith(("теперь ", "дальше ", "ещё ", "еще ", "а теперь ", "продолж"))
         )
         if continuation:
-            topic = cls._text(task.get("topic") or previous.get("topic") or "")
+            stable_subject = cls._stable_subject_from_pair(previous_user, previous_april)
+            topic = cls._text(task.get("topic") or stable_subject or previous.get("topic") or "")
             if not topic or topic in {"вопрос", "ответ", "тема"}:
-                topic = cls._topic_from_current(previous_user or previous_april, task)
-            active_entity = cls._text(task.get("candidate_answer") or "")
+                topic = stable_subject or cls._topic_from_current(previous_user or previous_april, task)
+            active_entity = cls._text(task.get("candidate_answer") or "") or stable_subject
+            provider_instruction = (
+                "Continue the current dialogue using the immediately preceding USER↔APRIL pair. "
+                "Do not repeat covered content; answer the current user turn and advance naturally. "
+                f"Previous user: {previous_user}. Previous April: {previous_april}. Current user: {cls._text(text)}"
+            )
             return {
                 "turn_relation": "CONTINUE_TOPIC" if not task else "TASK_CONTINUE",
                 "relation": "CONTINUE",
@@ -2453,11 +2567,8 @@ class DialogueEnvironmentEngine:
                 "previous_april_turn": previous_april,
                 "selected_memory": [],
                 "historical_memory_allowed": False,
-                "resolved_request": (
-                    "Continue the current dialogue using the immediately preceding USER↔APRIL pair. "
-                    "Do not repeat covered content; answer the current turn and advance naturally. "
-                    f"Previous user: {previous_user}. Previous April: {previous_april}. Current user: {cls._text(text)}"
-                ),
+                "resolved_request": cls._text(text),
+                "provider_instruction": provider_instruction,
             }
 
         return cls._new_topic_context(text, scope)
@@ -2505,8 +2616,8 @@ class DialogueEnvironmentEngine:
             "mode": env.get("turn_relation"),
             "active": env.get("relation") in {"CONTINUE", "RECALL"},
             "new_information_required": env.get("relation") == "CONTINUE",
-            "covered_content": [cls._text(previous.get("april"))] if previous.get("april") and env.get("relation") == "CONTINUE" else [],
-            "avoid_repeat_content": [cls._text(previous.get("april"))] if previous.get("april") and env.get("relation") == "CONTINUE" else [],
+            "covered_content": [cls._text(previous.get("april"))[:360]] if previous.get("april") and env.get("relation") == "CONTINUE" else [],
+            "avoid_repeat_content": [cls._text(previous.get("april"))[:360]] if previous.get("april") and env.get("relation") == "CONTINUE" else [],
             "novelty_target": "current_turn_answer" if env.get("relation") == "CONTINUE" else "current_topic",
             "next_direction": "answer_current_turn_and_advance" if env.get("relation") == "CONTINUE" else "recall_and_connect" if env.get("relation") == "RECALL" else "develop_new_topic",
             "answer_strategy": (
@@ -2552,7 +2663,8 @@ class DialogueEnvironmentEngine:
             "previous_april_turn": cls._text(previous.get("april")),
             "selected_memory": list(env.get("selected_memory") or []),
             "historical_memory_allowed": bool(env.get("historical_memory_allowed")),
-            "resolved_request": cls._text(env.get("resolved_request") or text),
+            "resolved_request": cls._text(text),
+            "provider_instruction": cls._text(env.get("provider_instruction") or ""),
             "continuation_content_analysis": continuation_analysis,
             "fenced_historical_entities": stale_entities,
             "diagnostics": diagnostics,
@@ -2691,7 +2803,7 @@ class CurrentTurnEngine(InterpretationEngineBase):
 
 class DialogueRelationEngine(InterpretationEngineBase):
     NAME = "DialogueRelationEngine"
-    VERSION = "dialogue_relation_v3"
+    VERSION = "dialogue_relation_v4_synced"
 
     def analyze(
         self,
@@ -2785,7 +2897,7 @@ class DialogueRelationEngine(InterpretationEngineBase):
 
 class TopicDynamicsEngine(InterpretationEngineBase):
     NAME = "TopicDynamicsEngine"
-    VERSION = "topic_dynamics_v2"
+    VERSION = "topic_dynamics_v3_subject_first"
 
     def analyze(
         self,
@@ -3053,7 +3165,7 @@ class DomainReasoningEngine(InterpretationEngineBase):
 
 class EntityResolutionEngine(InterpretationEngineBase):
     NAME = "EntityResolutionEngine"
-    VERSION = "entity_resolution_v2"
+    VERSION = "entity_resolution_v3_semantic_subject"
 
     def analyze(
         self,
@@ -3067,6 +3179,38 @@ class EntityResolutionEngine(InterpretationEngineBase):
     ) -> dict[str, Any]:
         current = self._text(text)
         candidates: list[str] = []
+        relation_value = self._text(relation.get("relation")).upper()
+        env = relation.get("environment") if isinstance(relation.get("environment"), dict) else {}
+        current_subject = DIALOGUE_ENVIRONMENT_ENGINE._subject_from_current(current)
+        current_subject_is_reference = DIALOGUE_ENVIRONMENT_ENGINE._reference_led_subject(current_subject)
+        command_heads = {
+            "расскажи", "объясни", "покажи", "нарисуй", "создай", "сделай",
+            "напиши", "построй", "проверь", "опиши", "сравни", "найди",
+            "выведи", "подскажи", "скажи", "дай", "загадай", "отгадай",
+            "разгадай", "реши", "придумай",
+        }
+
+        def usable(value: Any) -> str:
+            item = self._text(value)
+            if not item:
+                return ""
+            first = self._tokens(item)[:1]
+            non_entities = command_heads | {
+                "почему", "как", "что", "кто", "где", "когда", "зачем",
+                "сколько", "какой", "какая", "какое", "какие", "чем",
+                "это", "теперь", "дальше",
+            }
+            if first and first[0] in non_entities and len(self._tokens(item)) <= 3:
+                return ""
+            return item
+
+        # Environment owns the stable subject; legacy semantic fields are only evidence.
+        if relation_value == "CONTINUE":
+            env_entity = usable(env.get("active_entity"))
+            if env_entity and not DIALOGUE_ENVIRONMENT_ENGINE._reference_led_subject(env_entity):
+                candidates.append(env_entity)
+        if current_subject and not current_subject_is_reference:
+            candidates.insert(0, current_subject)
 
         explicit_values = [
             semantic.get("active_entity"),
@@ -3074,8 +3218,9 @@ class EntityResolutionEngine(InterpretationEngineBase):
             state.get("current_entity"),
         ]
         for value in explicit_values:
-            if self._text(value):
-                candidates.append(self._text(value))
+            value = usable(value)
+            if value:
+                candidates.append(value)
 
         task_entity = self._text(task.get("task", {}).get("target") if isinstance(task.get("task"), dict) else "")
         if task_entity:
@@ -3113,15 +3258,24 @@ class EntityResolutionEngine(InterpretationEngineBase):
             if first and first[0] in non_entity_heads and len(self._tokens(candidate)) <= 2:
                 continue
             filtered.append(candidate)
-        candidates = list(dict.fromkeys(x.strip() for x in filtered if self._text(x)))
+        # Re-run the same semantic guard after all sources (quoted/proper/task)
+        # have contributed candidates. This prevents question words such as
+        # "Сколько" from returning through a later fallback path.
+        candidates = list(dict.fromkeys(usable(x).strip() for x in filtered if usable(x)))
 
         inherited = ""
         if relation.get("relation") == "CONTINUE":
-            inherited = self._text(
-                task.get("candidate_answer")
-                or task.get("target")
-                or state.get("april_active_entity")
-            )
+            if current_subject and not current_subject_is_reference:
+                inherited = current_subject
+            if not inherited:
+                inherited = usable(env.get("active_entity"))
+            if not inherited:
+                inherited = DIALOGUE_ENVIRONMENT_ENGINE._stable_subject_from_pair(
+                    self._text(relation.get("previous_user_turn")),
+                    self._text(relation.get("previous_april_turn")),
+                )
+            if not inherited:
+                inherited = usable(task.get("target") or state.get("april_active_entity"))
             if inherited:
                 candidates.insert(0, inherited)
 
@@ -3143,19 +3297,22 @@ class EntityResolutionEngine(InterpretationEngineBase):
                 active_entity = self._text(task_obj.get("topic") or ("загадка" if task_kind == "riddle" else "игра"))
 
         if relation.get("relation") == "NEW":
-            # A fresh topic cannot inherit an old entity. Prefer a current-turn
-            # entity candidate; otherwise keep a task label (e.g. "загадка").
-            current_tokens = set(self._tokens(current))
-            current_candidates = [
-                c for c in candidates
-                if set(self._tokens(c)) & current_tokens
-            ]
-            if current_candidates:
-                active_entity = self._text(current_candidates[0])
-            elif task.get("active") and self._text(task.get("topic")):
-                active_entity = self._text(task.get("topic"))
+            # A fresh topic cannot inherit an old entity. Prefer the explicit
+            # semantic object extracted from this turn.
+            if current_subject and not current_subject_is_reference:
+                active_entity = self._text(current_subject)
             else:
-                active_entity = ""
+                current_tokens = set(self._tokens(current))
+                current_candidates = [
+                    c for c in candidates
+                    if set(self._tokens(c)) & current_tokens
+                ]
+                if current_candidates:
+                    active_entity = self._text(current_candidates[0])
+                elif task.get("active") and self._text(task.get("topic")):
+                    active_entity = self._text(task.get("topic"))
+                else:
+                    active_entity = ""
 
         return {
             "engine": self.NAME,
@@ -3266,7 +3423,9 @@ class MemoryRelevanceEngine(InterpretationEngineBase):
             values = list(memory_raw)
 
         relation_value = self._text(relation.get("relation")).upper()
-        allowed = relation_value == "RECALL" or relation_value == "CONTINUE"
+        # Generic continuation is served by the immediate authenticated dialogue
+        # pair; only explicit RECALL may pull 7-day historical memory.
+        allowed = relation_value == "RECALL"
 
         selected: list[dict[str, Any]] = []
         candidates: list[dict[str, Any]] = []
@@ -3371,7 +3530,7 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
     """
 
     NAME = "DialogueHistorySearchEngine"
-    VERSION = "dialogue_history_search_v1_fast_branch"
+    VERSION = "dialogue_history_search_v2_branch_fenced"
     MAX_INDEX_TURNS = 48
     MAX_SELECTED = 5
     MAX_MEMORY_SELECTED = 8
@@ -3849,6 +4008,14 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
                 "operation": record.get("operation") or {},
             })
 
+        # A normal conversational continuation needs no result/history ledger.
+        # Keeping it out prevents old arithmetic/result chains from contaminating
+        # an unrelated semantic thread.
+        if relation_value == "CONTINUE" and query_reference == "none" and not carry_forward and not operand_anchor:
+            selected_evidence = []
+            result_chain = []
+            latest_operation_result = {}
+
         needs_history = (
             query_reference == "history_lookup"
             or relation_value in {"CONTINUE", "RECALL"} and bool(
@@ -4038,7 +4205,7 @@ class KnowledgeSourceEngine(InterpretationEngineBase):
 
 class RepresentationDecisionEngine(InterpretationEngineBase):
     NAME = "RepresentationDecisionEngine"
-    VERSION = "representation_decision_v2"
+    VERSION = "representation_decision_v3_signal_gated"
 
     def analyze(
         self,
@@ -4069,8 +4236,19 @@ class RepresentationDecisionEngine(InterpretationEngineBase):
         best = explicit
         if not best and isinstance(profile, dict) and profile:
             ranked = sorted(profile.items(), key=lambda x: x[1], reverse=True)
-            if ranked and float(ranked[0][1]) >= 0.20 and ranked[0][0] != "text":
-                best = ranked[0][0]
+            if ranked:
+                top_rep, top_score = ranked[0]
+                second_score = float(ranked[1][1]) if len(ranked) > 1 else 0.0
+                # Prototype similarity is supporting evidence only. A weak
+                # semantic resemblance must not silently request a gallery/image
+                # for a plain text question. Explicit user modality cues above
+                # remain authoritative.
+                if (
+                    top_rep != "text"
+                    and float(top_score) >= 0.72
+                    and float(top_score) - second_score >= 0.08
+                ):
+                    best = top_rep
         representation = best or "text"
 
         # Presentation is a semantic contract, not a renderer call.
@@ -4226,7 +4404,7 @@ class DecisionArbitrationEngine(InterpretationEngineBase):
                 "DEPENDENT_OPERATION": "DEPENDENT_OPERATION",
                 "HISTORY_LOOKUP": "HISTORY_LOOKUP",
                 "HISTORY_SUPPORTED_CONTINUATION": "HISTORY_SUPPORTED_CONTINUATION",
-            }.get(hs_relation, "TASK_CONTINUE")
+            }.get(hs_relation, "CONTINUE_TOPIC")
         else:
             semantic_relation = "NEW_TOPIC"
 
@@ -4269,7 +4447,7 @@ class DecisionArbitrationEngine(InterpretationEngineBase):
 
 class ConsistencyEngine(InterpretationEngineBase):
     NAME = "ConsistencyEngine"
-    VERSION = "consistency_v2"
+    VERSION = "consistency_v3_semantic_sync"
 
     def validate(
         self,
@@ -4313,6 +4491,14 @@ class ConsistencyEngine(InterpretationEngineBase):
         rep = representation.get("representation") or "text"
         supported = rep in {"text", "table", "graph", "diagram", "formula", "image", "gallery", "code", "link"}
         checks.append({"name": "representation_supported", "ok": supported})
+
+        active_entity = self._text(arbitration.get("active_entity"))
+        command_entity_leak = self._low(active_entity) in {
+            "расскажи", "объясни", "покажи", "нарисуй", "создай", "сделай",
+            "напиши", "построй", "проверь", "опиши", "сравни", "найди",
+            "скажи", "дай", "почему", "как", "что",
+        }
+        checks.append({"name": "semantic_entity_not_command", "ok": not command_entity_leak})
 
         errors = [x["name"] for x in checks if not x["ok"]]
         return {
