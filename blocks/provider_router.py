@@ -199,6 +199,281 @@ def _compact_value(value: Any, *, depth: int = 0, max_depth: int = 3,
     return _safe_text(value).strip()
 
 
+# ============================================================
+# ADAPTIVE PROVIDER CONTEXT PACKER
+# ============================================================
+
+ADAPTIVE_PROVIDER_PACKER_VERSION = "adaptive_semantic_provider_packer_v1"
+ADAPTIVE_PROVIDER_TARGET_TOKENS = 840
+ADAPTIVE_PROVIDER_SAFETY_MARGIN_TOKENS = 60
+
+
+def _semantic_excerpt(value: Any, limit: int = 320) -> str:
+    """Keep semantic head + tail without blindly cutting the user's meaning."""
+    text = re.sub(r"\s+", " ", _safe_text(value)).strip()
+    if len(text) <= limit:
+        return text
+    # Prefer sentence boundaries because they preserve intent better than a
+    # character cut. Fall back to head+tail when a sentence is too large.
+    parts = [p.strip() for p in re.split(r"(?<=[.!?。！？])\s+", text) if p.strip()]
+    if len(parts) >= 2:
+        first = parts[0]
+        last = parts[-1]
+        if len(first) + len(last) + 1 <= limit:
+            return f"{first} {last}"
+    head = max(120, int(limit * 0.68))
+    tail = max(40, limit - head - 5)
+    return text[:head].rstrip() + " … " + text[-tail:].lstrip()
+
+
+def _compact_qa_item(item: Any) -> dict[str, str]:
+    if not isinstance(item, dict):
+        return {}
+    user = _semantic_excerpt(
+        item.get("user")
+        or item.get("user_request")
+        or item.get("user_meaning")
+        or item.get("question"),
+        150,
+    )
+    answer = _semantic_excerpt(
+        item.get("assistant_prompt")
+        or item.get("april_answer")
+        or item.get("april_meaning")
+        or item.get("answer"),
+        190,
+    )
+    result: dict[str, str] = {}
+    if user:
+        result["u"] = user
+    if answer:
+        result["a"] = answer
+    return result
+
+
+def _build_adaptive_task_digest(
+    task_state: dict[str, Any],
+    task_memory: dict[str, Any],
+    *,
+    history_limit: int = 2,
+    clue_limit: int = 3,
+) -> dict[str, Any]:
+    """Create one canonical, non-duplicated representation of an active task."""
+    state = task_state if isinstance(task_state, dict) else {}
+    memory = task_memory if isinstance(task_memory, dict) else {}
+
+    question = _semantic_excerpt(
+        state.get("last_question")
+        or state.get("prompt")
+        or memory.get("last_question"),
+        280,
+    )
+
+    raw_history = (
+        state.get("qa_history")
+        or state.get("turns")
+        or memory.get("qa_history")
+        or memory.get("turns")
+        or []
+    )
+    history = []
+    for item in list(raw_history)[-history_limit:]:
+        compact = _compact_qa_item(item)
+        if compact:
+            history.append(compact)
+
+    clues = []
+    raw_clues = state.get("known_clues") or memory.get("known_clues") or []
+    for clue in list(raw_clues)[-clue_limit:]:
+        text = _semantic_excerpt(clue, 110)
+        if text:
+            clues.append(text)
+
+    digest: dict[str, Any] = {
+        "active": True,
+        "kind": _safe_text(state.get("kind") or memory.get("kind")),
+        "phase": _safe_text(state.get("phase") or memory.get("phase")),
+        "expected": _safe_text(state.get("expected_input_type") or memory.get("expected_input_type") or "answer"),
+        "question": question,
+    }
+
+    # Candidate/last answer are important for games and concrete turn-by-turn
+    # tasks. The secret target is deliberately never copied into the provider packet.
+    candidate = _semantic_excerpt(
+        state.get("candidate_answer")
+        or state.get("last_user_answer")
+        or memory.get("candidate_answer"),
+        120,
+    )
+    if candidate:
+        digest["candidate"] = candidate
+
+    if clues:
+        digest["clues"] = clues
+    if history:
+        digest["qa"] = history
+
+    return {k: v for k, v in digest.items() if v not in (None, "", [], {})}
+
+
+def _build_live_dialogue_digest(dialogue: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the live conversational facts required for a continuation."""
+    contract = dialogue if isinstance(dialogue, dict) else {}
+    digest: dict[str, Any] = {
+        "relation": _safe_text(contract.get("relation")),
+        "dependency": _safe_text(contract.get("context_dependency")),
+        "topic": _semantic_excerpt(contract.get("canonical_topic"), 120),
+        "prev_user": _semantic_excerpt(contract.get("previous_user_turn"), 170),
+        "prev_april": _semantic_excerpt(contract.get("previous_april_turn"), 220),
+    }
+    # Only carry the scene identity when it can matter for reference continuity.
+    if contract.get("reference_to_previous") or str(contract.get("context_dependency") or "").lower() in {
+        "artifact", "reference", "pending", "recall"
+    }:
+        scene_id = _safe_text(contract.get("scene_id"))
+        if scene_id:
+            digest["scene_id"] = scene_id
+    return {k: v for k, v in digest.items() if v not in (None, "", [], {})}
+
+
+def _build_visual_reference_digest(payload: dict[str, Any], dialogue: dict[str, Any]) -> dict[str, Any]:
+    """Reference the active visual object without copying large render payloads."""
+    digest: dict[str, Any] = {}
+    scene_id = _safe_text(
+        dialogue.get("scene_id")
+        or (dialogue.get("live_scene") or {}).get("scene_id")
+        or (payload.get("visual_context") or {}).get("scene_id")
+    )
+    if scene_id:
+        digest["scene_id"] = scene_id
+
+    vc = payload.get("visual_context") if isinstance(payload.get("visual_context"), dict) else {}
+    block_types = vc.get("render_block_types") or vc.get("presentation_types") or []
+    if block_types:
+        digest["types"] = list(dict.fromkeys([_safe_text(x) for x in block_types if _safe_text(x)]))[:4]
+
+    # Keep a selected artifact descriptor, but never copy image bytes / SVG / full
+    # shape arrays into the 900-token provider envelope.
+    selected = dialogue.get("selected_artifact") if isinstance(dialogue.get("selected_artifact"), dict) else {}
+    if not selected and isinstance(payload.get("selected_artifact"), dict):
+        selected = payload.get("selected_artifact")
+    if selected:
+        digest["artifact"] = {
+            "type": _safe_text(selected.get("type") or selected.get("artifact_type")),
+            "id": _safe_text(selected.get("block_id") or selected.get("render_id") or selected.get("id")),
+            "title": _semantic_excerpt(selected.get("title"), 100),
+        }
+        digest["artifact"] = {
+            k: v for k, v in digest["artifact"].items() if v not in (None, "", [], {})
+        }
+
+    return {k: v for k, v in digest.items() if v not in (None, "", [], {})}
+
+
+def _json_piece(label: str, value: Any, *, depth: int = 3, items: int = 6, keys: int = 10) -> str:
+    compact = _compact_value(value, max_depth=depth, max_items=items, max_keys=keys)
+    return label + ": " + json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+
+
+def _adaptive_pack(
+    system_prompt: str,
+    mandatory: list[str],
+    optional_tiers: list[tuple[str, str]],
+    *,
+    hard_budget: int = INPUT_TOKEN_BUDGET,
+    target_budget: int = ADAPTIVE_PROVIDER_TARGET_TOKENS,
+) -> tuple[str, dict[str, Any]]:
+    """
+    Pack a semantic provider packet with a soft target and hard 900-token invariant.
+
+    Tier order is explicit: current request/output semantics first, then active task,
+    live dialogue, artifact reference, recent memory and strategy. The algorithm can
+    progressively reduce text payloads without ever discarding the current request.
+    """
+    prompt = _safe_text(system_prompt).strip()
+
+    if _estimate_input_tokens(prompt) + _estimate_input_tokens("\n".join(mandatory)) > target_budget:
+        compact_system = (
+            "April internal provider. Return one MachineResponse JSON object. "
+            "Quantum Processor is authoritative for relation, task, representation and requested outputs. "
+            "Use supplied current context to answer the current request; preserve requested structured outputs; "
+            "do not invent unrequested blocks or expose internal state."
+        )
+        if _estimate_input_tokens(compact_system) + _estimate_input_tokens("\n".join(mandatory)) <= target_budget:
+            prompt = compact_system
+
+    # If even the soft target is tight, progressively shrink only non-request
+    # mandatory labels and never remove the current request itself.
+    selected = list(mandatory)
+    used = _estimate_input_tokens(prompt) + _estimate_input_tokens("\n".join(selected))
+
+    # First pass: target budget.
+    dropped: list[str] = []
+    for name, piece in optional_tiers:
+        if not piece:
+            continue
+        candidate_text = "\n".join(selected + [piece])
+        candidate_total = _estimate_input_tokens(prompt) + _estimate_input_tokens(candidate_text)
+        if candidate_total <= target_budget:
+            selected.append(piece)
+            used = candidate_total
+        else:
+            dropped.append(name)
+
+    # Safety pass: never exceed the hard 900-token invariant. Because the target
+    # is intentionally below 900, this is normally a no-op.
+    if used > hard_budget:
+        # Remove lowest-priority optional pieces first.
+        for idx in range(len(selected) - 1, len(mandatory) - 1, -1):
+            removed = selected.pop(idx)
+            dropped.append("hard_trim:" + removed.split(":", 1)[0])
+            used = _estimate_input_tokens(prompt) + _estimate_input_tokens("\n".join(selected))
+            if used <= hard_budget:
+                break
+
+    # Final emergency packet: current request + representation only. This makes
+    # the provider path fail-soft instead of raising an exception.
+    if used > hard_budget:
+        selected = list(mandatory[:2])  # canonical marker + current request
+        emergency = "OUTPUT_MODE: " + _safe_text(
+            next((x.split(":", 1)[1].strip() for x in mandatory if x.startswith("OUTPUT_MODE:")), "text")
+        )
+        selected.append(emergency)
+        used = _estimate_input_tokens(prompt) + _estimate_input_tokens("\n".join(selected))
+
+        if used > hard_budget:
+            prompt = (
+                "April provider. Return one compact MachineResponse JSON object. "
+                "Answer the current request directly and obey the requested representation."
+            )
+            used = _estimate_input_tokens(prompt) + _estimate_input_tokens("\n".join(selected))
+
+    # We should now be inside the invariant. As a final deterministic fallback,
+    # keep compressing the current request until the local guard fits. This does
+    # not change memory; it only creates the provider-facing excerpt.
+    if used > hard_budget:
+        request_piece = next(
+            (x for x in selected if x.startswith("REQUEST:")),
+            "REQUEST: " + _safe_text(selected[-1]),
+        )
+        selected = [x for x in selected if not x.startswith("REQUEST:")]
+        selected.insert(1, "REQUEST: " + _semantic_excerpt(request_piece.split(":", 1)[1], 180))
+        used = _estimate_input_tokens(prompt) + _estimate_input_tokens("\n".join(selected))
+
+    return "\n".join(selected), {
+        "estimated_input_tokens": used,
+        "compression_level": (
+            "full" if not dropped else
+            "compact" if len(dropped) <= 2 else
+            "compressed" if len(dropped) <= 5 else
+            "minimal"
+        ),
+        "dropped": dropped[:20],
+        "target_budget": target_budget,
+        "hard_budget": hard_budget,
+    }
+
+
 def _dialogue_contract(payload: dict[str, Any]) -> dict[str, Any]:
     contract = payload.get("dialogue_contract")
     if isinstance(contract, dict):
@@ -1023,26 +1298,20 @@ def _provider_system_prompt_for_payload(payload: dict[str, Any]) -> str:
 
 
 def normalize_provider_input(machine_request: Any) -> list[dict]:
-    """Build the OpenAI packet inside the canonical 900-token envelope."""
+    """Build the OpenAI packet with adaptive semantic compression inside 900 tokens."""
     payload = machine_request_to_dict(machine_request)
     system_prompt = _provider_system_prompt_for_payload(payload)
 
-    # Keep a bounded semantic system envelope. Detailed modality rules live in
-    # conditional user-packet fields so the fixed system prompt cannot consume
-    # the request budget.
+    # Keep a bounded system envelope. The longer dialogue prompt is retained when
+    # it fits; otherwise use the compact equivalent rather than failing the turn.
     if _estimate_input_tokens(system_prompt) > 420:
         system_prompt = (
-            "April internal response provider. Return one MachineResponse JSON object. "
-            "The Quantum Processor owns relation, task, representation and requested outputs. "
-            "Use supplied live dialogue context only for continuation/reference turns. "
-            "Answer the current request, preserve every requested representation, and never "
-            "invent unrequested structured blocks. Return compact JSON with answer, content, "
-            "summary, scene, artifacts, render_blocks, scene_plan, render_priority, confidence and metadata."
+            "April internal response provider. Return exactly one MachineResponse JSON object. "
+            "Quantum Processor owns relation, task, representation, resolved request and requested outputs. "
+            "For continuation/reference turns use only supplied authenticated live context. "
+            "When an active task exists, resolve the current turn against its phase/question/history. "
+            "Preserve requested structured representations, never invent unrequested blocks, and never expose internal state."
         )
-    system_tokens = _estimate_input_tokens(system_prompt)
-    if system_tokens >= INPUT_TOKEN_BUDGET:
-        raise RuntimeError("Provider system prompt exceeds canonical 900-token envelope")
-    remaining = INPUT_TOKEN_BUDGET - system_tokens
 
     constraints = payload.get("constraints") if isinstance(payload.get("constraints"), dict) else {}
     plan = constraints.get("representation_plan") if isinstance(constraints.get("representation_plan"), dict) else {}
@@ -1056,37 +1325,51 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         if isinstance(metadata.get("interpretation_control"), dict)
         else {}
     )
-    mode = _safe_text(plan.get("visual_production_mode") or metadata.get("visual_production_mode") or "").strip()
+
+    mode = _safe_text(
+        plan.get("visual_production_mode")
+        or metadata.get("visual_production_mode")
+        or ""
+    ).strip()
     request_text = _extract_request_text(payload)
     outputs = list(payload.get("requested_outputs") or [])
-
-    candidates = [
-        "APRIL CANONICAL REQUEST",
-        f"REQUEST: {request_text}",
-        f"VISUAL_PRODUCTION_MODE: {mode}",
-        f"REQUESTED_OUTPUTS: {json.dumps(outputs, ensure_ascii=False, separators=(',', ':'))}",
-        "INTERPRETATION_CONTROL: " + json.dumps(
-            _compact_value({
-                "relation": interpretation_control.get("relation") or _dialogue_contract(payload).get("relation"),
-                "context_policy": interpretation_control.get("context_policy"),
-                "memory_policy": interpretation_control.get("memory_policy"),
-                "render_authorized": bool(interpretation_control.get("render_authorized")),
-                "render_mode": interpretation_control.get("render_mode"),
-                "render_representations": interpretation_control.get("render_representations") or [],
-                "payload_contract": interpretation_control.get("payload_contract"),
-            }, max_depth=2, max_items=8, max_keys=8),
-            ensure_ascii=False, separators=(',', ':')
-        ),
-    ]
-
-    # The Processor owns interpretation. For continuation/pending/reference turns
-    # send only compact live state so Luna resolves the task in context without
-    # re-running a second semantic classifier.
     dialogue = payload.get("dialogue_contract") if isinstance(payload.get("dialogue_contract"), dict) else {}
 
-    # Interactive task state is a separate semantic channel from generic topic
-    # continuity. It must reach the provider even when the relation scorer has
-    # classified the current wording as novel.
+    # Canonical mandatory core. Current request is never removed; it is only
+    # semantically excerpted if pathological input is too large.
+    request_excerpt = _semantic_excerpt(request_text, 360)
+    output_modes = [str(x) for x in outputs if _safe_text(x).strip()]
+    effective_mode = _safe_text(mode or (output_modes[0] if output_modes else "text"))
+    mandatory = [
+        "APRIL REQUEST CORE",
+        "REQUEST: " + request_excerpt,
+        "OUTPUT_MODE: " + effective_mode,
+        "REQUESTED: " + json.dumps(output_modes[:4], ensure_ascii=False, separators=(",", ":")),
+    ]
+
+    # Modality rules are mandatory because they define the shape that downstream
+    # rooms/executors must receive. They are intentionally tiny so they cannot
+    # crowd out the active task or current request.
+    if effective_mode == "image_generation":
+        mandatory.append(
+            "MODE_RULE: metadata.image_generation_spec must use schema=april_image_spec_v1 and include prompt,width,height,style,background,layers,negative,seed."
+        )
+    elif effective_mode == "diagram":
+        mandatory.append(
+            "MODE_RULE: return one complete diagram payload/block with explicit nodes/edges or vector shapes; do not emit duplicate diagrams."
+        )
+    elif effective_mode == "graph":
+        mandatory.append(
+            "MODE_RULE: return one complete graph payload with labels, values and axes when applicable."
+        )
+    elif effective_mode == "table":
+        mandatory.append(
+            "MODE_RULE: return one complete table payload with columns and rows when applicable."
+        )
+
+    relation = _safe_text(dialogue.get("relation") or "")
+    dependency = _safe_text(dialogue.get("context_dependency") or "")
+    reference = bool(dialogue.get("reference_to_previous"))
     task_state = (
         dialogue.get("interactive_task_state")
         if isinstance(dialogue.get("interactive_task_state"), dict)
@@ -1108,272 +1391,131 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         and (
             task_state.get("active")
             or task_state.get("open")
-            or task_state.get("kind") in {"game", "riddle", "question", "choice"}
+            or task_state.get("kind") in {"game", "riddle", "question", "choice", "logic_riddle"}
         )
     )
-    if task_is_active:
-        interactive_packet = {
-            "active": True,
-            "kind": task_state.get("kind"),
-            "role": task_state.get("role"),
-            "phase": task_state.get("phase"),
-            "status": task_state.get("status"),
-            "prompt": task_state.get("prompt"),
-            "last_question": task_state.get("last_question"),
-            "expected_input_type": task_state.get("expected_input_type"),
-            "candidate_answer": task_state.get("candidate_answer"),
-            "last_user_answer": task_state.get("last_user_answer"),
-            "known_clues": list(task_state.get("known_clues") or [])[-12:],
-            "qa_history": list(
-                task_state.get("qa_history")
-                or task_state.get("turns")
-                or task_memory.get("qa_history")
-                or []
-            )[-12:],
-            "awaiting_user": bool(task_state.get("awaiting_user")),
-            "completed": bool(task_state.get("completed")),
-        }
-        # The secret target is included only in the machine task state; it is
-        # intentionally excluded from the visible/provider instruction packet.
-        if _safe_text(task_state.get("secret_target") or task_state.get("private_target")):
-            interactive_packet["secret_target"] = _safe_text(
-                task_state.get("secret_target") or task_state.get("private_target")
-            )
-        candidates.append(
-            "INTERACTIVE_TASK_STATE: "
-            + json.dumps(
-                _compact_value(interactive_packet, max_depth=5, max_items=18, max_keys=18),
-                ensure_ascii=False,
-                separators=(',', ':'),
-            )
-        )
-        candidates.append(
-            "INTERACTIVE_TASK_AUTHORITY: resolve the current user turn against the "
-            "latest task phase/question and accumulated Q&A before considering a new topic; "
-            "the task state is semantic context, not a trigger."
-        )
 
-    if (
-        task_is_active
-        or dialogue.get("continuation")
-        or dialogue.get("reference_to_previous")
-        or str(dialogue.get("context_dependency") or "").lower() in {"pending", "continuation", "recall"}
-        or str(dialogue.get("relation") or "").upper() in {"CONTINUE", "RECALL"}
-    ):
-        live_scene = dialogue.get("live_scene") if isinstance(dialogue.get("live_scene"), dict) else {}
-        compact_context = {
-            "relation": dialogue.get("relation"),
-            "context_dependency": dialogue.get("context_dependency"),
-            "active_task": dialogue.get("active_task"),
-            "active_entity": dialogue.get("active_entity"),
-            "pending_task": dialogue.get("pending_task"),
-            "resolved_request": dialogue.get("resolved_request"),
-            "canonical_topic": dialogue.get("canonical_topic") or live_scene.get("topic"),
-            "scene_id": dialogue.get("scene_id") or live_scene.get("scene_id"),
-            "scene_focus": live_scene.get("focus"),
-            "previous_user_turn": dialogue.get("previous_user_turn"),
-            "previous_april_turn": dialogue.get("previous_april_turn"),
-        }
-        candidates.append(
-            "LIVE_DIALOGUE_STATE: " + json.dumps(_compact_value(compact_context), ensure_ascii=False, separators=(',', ':'))
-        )
+    structured_outputs_requested = any(
+        _safe_text(x).lower() not in {"text", "markdown"} for x in outputs
+    ) or bool(payload.get("required_artifacts"))
+    render_authorized = bool(interpretation_control.get("render_authorized"))
+    visual_relation = bool(
+        interpretation_control.get("render_mode") == "ARTIFACT_CONTINUATION"
+        or reference
+        or str(dependency).lower() in {"artifact", "reference", "pending", "recall"}
+        or str(relation).upper() in {"ARTIFACT_REFERENCE", "PENDING", "RECALL"}
+    )
+
+    optional: list[tuple[str, str]] = []
+
+    # Tier 1: active task semantics, deduplicated into one compact object.
+    if task_is_active:
+        task_digest = _build_adaptive_task_digest(task_state, task_memory, history_limit=2, clue_limit=3)
+        optional.append(("active_task", _json_piece("ACTIVE_TASK", task_digest, depth=3, items=5, keys=10)))
+        optional.append((
+            "task_rule",
+            "TASK_RULE: resolve current turn against ACTIVE_TASK before treating it as a new topic."
+        ))
+
+    # Tier 2: current live dialogue continuity.
+    if task_is_active or dialogue.get("continuation") or reference or str(dependency).lower() in {
+        "continuation", "pending", "recall"
+    }:
+        live_digest = _build_live_dialogue_digest(dialogue)
+        if live_digest:
+            optional.append(("live_dialogue", _json_piece("LIVE_DIALOGUE", live_digest, depth=2, items=5, keys=8)))
 
         strategy = dialogue.get("dialogue_strategy") if isinstance(dialogue.get("dialogue_strategy"), dict) else {}
         analysis = dialogue.get("continuation_content_analysis") if isinstance(dialogue.get("continuation_content_analysis"), dict) else {}
-        if strategy or analysis.get("active"):
-            strategy_packet = {
-                "mode": strategy.get("mode") or analysis.get("mode"),
-                "intent": strategy.get("intent") or analysis.get("intent"),
-                "posture": strategy.get("conversational_posture"),
-                "new_information_required": strategy.get("new_information_required", analysis.get("new_information_required")),
-                "novelty_target": strategy.get("novelty_target", analysis.get("novelty_target")),
-                "recap_ratio_max": strategy.get("recap_ratio_max", analysis.get("recap_ratio_max")),
-                "active_entity": dialogue.get("active_entity") or analysis.get("active_entity"),
-                "expertise_behavior": strategy.get("expertise_behavior") or analysis.get("expertise_behavior"),
-                "covered_content": (analysis.get("avoid_repeat_content") or analysis.get("covered_content") or [])[:4],
-                "next_direction": strategy.get("next_direction") or analysis.get("next_direction"),
-            }
-            candidates.append(
-                "CONTINUATION_PLAN: " + json.dumps(
-                    _compact_value(strategy_packet, max_depth=3, max_items=6, max_keys=9),
-                    ensure_ascii=False, separators=(',', ':')
-                )
-            )
+        strategy_digest = {
+            "mode": strategy.get("mode") or analysis.get("mode"),
+            "intent": strategy.get("intent") or analysis.get("intent"),
+            "next": strategy.get("next_direction") or analysis.get("next_direction"),
+            "avoid": (analysis.get("avoid_repeat_content") or analysis.get("covered_content") or [])[:2],
+        }
+        strategy_digest = {k: v for k, v in strategy_digest.items() if v not in (None, "", [], {})}
+        if strategy_digest:
+            optional.append(("continuation_plan", _json_piece("CONTINUATION_PLAN", strategy_digest, depth=2, items=4, keys=6)))
 
-        memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
-        dialogue_memory = memory.get("dialogue_memory")
-        if isinstance(dialogue_memory, dict):
-            active_turns = dialogue_memory.get("active_sequence_turns") or []
-            # The continuation plan already carries the previous-answer delta and
-            # covered content. Keep only the last two user/assistant turns here so
-            # the 900-token envelope retains headroom for the actual request.
-            recent_turns: list[dict[str, str]] = []
-            for turn in (active_turns[-2:] if isinstance(active_turns, list) else []):
-                if not isinstance(turn, dict):
-                    continue
-                user_turn = _safe_text(turn.get("user_request") or turn.get("user_meaning"))[:180]
-                answer_turn = _safe_text(turn.get("april_answer") or turn.get("april_meaning"))[:320]
-                if user_turn or answer_turn:
-                    recent_turns.append({"user": user_turn, "answer": answer_turn})
-            compact_dialogue_memory = {
-                "window_days": dialogue_memory.get("window_days", 7),
-                "active_sequence_turns": recent_turns,
-            }
-            if str(dialogue.get("context_dependency") or "").lower() == "recall":
-                compact_dialogue_memory["relevant_7d_turns"] = (dialogue_memory.get("relevant_7d_turns") or [])[:2]
-            candidates.append(
-                "SEVEN_DAY_DIALOGUE_MEMORY: "
-                + json.dumps(
-                    _compact_value(
-                        compact_dialogue_memory,
-                        max_depth=5,
-                        max_items=4,
-                        max_keys=9,
-                    ),
-                    ensure_ascii=False,
-                    separators=(',', ':'),
-                )
-            )
-        candidates.append("PROCESSOR_AUTHORITY: relation, task, representation, resolved_request and continuation strategy are authoritative; use the live active sequence for current-turn context and treat generic memory as evidence-only.")
+    # Tier 3: visual reference identity only. Full SVG/images/render payloads stay
+    # outside the provider packet and remain in Scene Memory.
+    if visual_relation or structured_outputs_requested:
+        visual_ref = _build_visual_reference_digest(payload, dialogue)
+        if visual_ref:
+            optional.append(("visual_reference", _json_piece("VISUAL_REFERENCE", visual_ref, depth=2, items=4, keys=8)))
 
-    dialogue_dependency = _safe_text(dialogue.get("context_dependency")).lower()
-    dialogue_relation = _safe_text(dialogue.get("relation")).upper()
-    visual_relation = bool(
-        interpretation_control.get("render_mode") == "ARTIFACT_CONTINUATION"
-        or dialogue.get("reference_to_previous")
-        or dialogue.get("reply_to")
-        or dialogue_dependency in {"artifact", "reference", "pending", "recall"}
-        or dialogue_relation in {"ARTIFACT_REFERENCE", "PENDING", "RECALL"}
+    # Tier 4: the minimal output/render contract. Keep it small so it doesn't
+    # compete with task/dialogue semantics.
+    output_contract = {
+        "mode": mode or "text",
+        "requested": output_modes[:4],
+        "authorized": render_authorized,
+        "structured_required": structured_outputs_requested,
+    }
+    optional.append(("output_contract", _json_piece(
+        "RENDER_CONTRACT", output_contract, depth=2, items=4, keys=6
+    )))
+
+    # Tier 5: only a tiny slice of seven-day dialogue memory. This is evidence;
+    # active task/live dialogue take precedence. Never copy large visual payloads.
+    memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
+    dialogue_memory = memory.get("dialogue_memory") if isinstance(memory.get("dialogue_memory"), dict) else {}
+    if dialogue_memory and not task_is_active:
+        active_turns = dialogue_memory.get("active_sequence_turns") or []
+        recent = []
+        for turn in list(active_turns)[-2:]:
+            compact = _compact_qa_item(turn)
+            if compact:
+                recent.append(compact)
+        if recent:
+            optional.append(("seven_day_memory", _json_piece(
+                "MEMORY_EVIDENCE", {"window_days": dialogue_memory.get("window_days", 7), "recent": recent},
+                depth=3, items=3, keys=4
+            )))
+
+    # Adaptive semantic packer: target <=840, hard invariant <=900.
+    user_text, pack_meta = _adaptive_pack(
+        system_prompt,
+        mandatory,
+        optional,
+        hard_budget=INPUT_TOKEN_BUDGET,
+        target_budget=ADAPTIVE_PROVIDER_TARGET_TOKENS,
     )
 
-    # Historical visual state is evidence, not provider input, for an independent
-    # text turn. This prevents stale scenes from consuming the 900-token envelope
-    # and prevents visual memory from silently changing the current modality.
-    visual_context = payload.get("visual_context")
-    if isinstance(visual_context, dict) and visual_context and visual_relation:
-        # Artifact continuation needs the actual structured operand (for
-        # example graph labels/values), not just the scene id. Keep it compact
-        # but deep enough to preserve one canonical payload.
-        compact_visual = _compact_value(visual_context, max_depth=4, max_items=4, max_keys=12)
-        candidates.append(
-            "VISUAL_CONTEXT: " + json.dumps(compact_visual, ensure_ascii=False, separators=(',', ':'))
-        )
-
-    structured_outputs_requested = any(
-        str(x).lower() not in {"text", "markdown"}
-        for x in outputs
-    ) or bool(payload.get("required_artifacts"))
-    render_authorized = bool(interpretation_control.get("render_authorized"))
-    candidates.append(
-        "OUTPUT_CONTRACT: return exactly the requested representation(s); never add unrequested structured blocks. "
-        "A structured block is authorized when the semantic interpretation explicitly authorizes it "
-        "or when the canonical Processor request contains required_artifacts/requested structured outputs. "
-        "Every structured block must contain canonical non-empty payload data; otherwise omit that block and keep the textual answer. "
-        f"STRUCTURED_OUTPUT_AUTHORITY={str(bool(render_authorized or structured_outputs_requested)).lower()}"
-    )
-    if mode == "image_generation":
-        candidates.append(
-            "IMAGE_GENERATION_MODE: return metadata.image_generation_spec using schema "
-            + PROVIDER_IMAGE_SPEC_SCHEMA
-            + "; C_APRIL_IMAGES_GENERATOR creates the image after this provider call. Never return image bytes, URLs or fake image blocks."
-        )
-    elif mode == "diagram":
-        candidates.append(
-            "DIAGRAM_MODE: preserve the existing compact structured diagram representation."
-        )
-    elif mode == "code" or "code" in outputs:
-        candidates.append(
-            "CODE_MODE: return a complete code render block with language and code; keep the human answer concise."
-        )
-    elif mode == "formula" or "formula" in outputs:
-        candidates.append(
-            "FORMULA_MODE: return a formula render block containing the requested expression."
-        )
-
-    # Context selection is priority-aware. A live interactive task is not an
-    # optional memory candidate: it is the semantic work item for this turn.
-    # Reserve budget for the current request, output contract and task state
-    # first; only then add secondary evidence. This prevents the exact failure
-    # seen in production where the task existed upstream but was silently
-    # dropped while packing the 900-token envelope.
-    selected = ["APRIL CANONICAL REQUEST", f"REQUEST: {request_text}"]
-
-    output_piece = next((x for x in candidates if x.startswith("OUTPUT_CONTRACT:")), None)
-    if output_piece:
-        if _estimate_input_tokens("\n".join(selected + [output_piece])) <= remaining:
-            selected.append(output_piece)
-        else:
-            raise RuntimeError("Provider input budget exceeded: request/output contract cannot fit inside 900 tokens")
-
-    task_authority_piece = next((x for x in candidates if x.startswith("INTERACTIVE_TASK_AUTHORITY:")), None)
-    if task_is_active:
-        # Rebuild the task packet at progressively smaller bounded Q&A windows
-        # until the complete current task still fits beside the request/contract.
-        qa_all = list(
-            task_state.get("qa_history")
-            or task_state.get("turns")
-            or task_memory.get("qa_history")
-            or []
-        )
-        core_task = dict(interactive_packet)
-        chosen_task_piece = None
-        for qa_limit in (12, 10, 8, 6, 4, 3, 2, 1, 0):
-            trial = dict(core_task)
-            trial["qa_history"] = qa_all[-qa_limit:] if qa_limit else []
-            piece = "INTERACTIVE_TASK_STATE: " + json.dumps(
-                _compact_value(trial, max_depth=5, max_items=18, max_keys=18),
-                ensure_ascii=False,
-                separators=(',', ':'),
-            )
-            extra = [piece]
-            if task_authority_piece:
-                extra.append(task_authority_piece)
-            if _estimate_input_tokens("\n".join(selected + extra)) <= remaining:
-                chosen_task_piece = piece
-                break
-        if chosen_task_piece is None:
-            raise RuntimeError("Provider input budget exceeded: active interactive task cannot fit")
-        selected.append(chosen_task_piece)
-        if task_authority_piece and _estimate_input_tokens("\n".join(selected + [task_authority_piece])) <= remaining:
-            selected.append(task_authority_piece)
-
-    # Secondary evidence is best-effort. When a task is active, its Q&A state is
-    # already the primary history, so generic seven-day turn payloads are
-    # deliberately deprioritized rather than competing for the same budget.
-    seen = set(selected)
-    for piece in candidates:
-        if piece in seen or piece == output_piece or piece == task_authority_piece:
-            continue
-        if task_is_active and piece.startswith("SEVEN_DAY_DIALOGUE_MEMORY:"):
-            continue
-        if task_is_active and piece.startswith("LIVE_DIALOGUE_STATE:"):
-            # Task state already contains the live work item; keep only one
-            # canonical source of active-task truth.
-            continue
-        if _estimate_input_tokens("\n".join(selected + [piece])) <= remaining:
-            selected.append(piece)
-            seen.add(piece)
-
-    user_text = "\n".join(selected)
-    estimated_total=system_tokens+_estimate_input_tokens(user_text)
+    system_tokens = _estimate_input_tokens(system_prompt)
+    estimated_total = system_tokens + _estimate_input_tokens(user_text)
     if estimated_total > INPUT_TOKEN_BUDGET:
-        raise RuntimeError(f"Provider input budget invariant failed: {estimated_total} > {INPUT_TOKEN_BUDGET}")
+        # Defensive invariant. This branch should be unreachable after the
+        # packer's emergency compaction; never let it become a production 500.
+        compact_request = _semantic_excerpt(request_text, 160)
+        system_prompt = (
+            "April provider. Return one compact MachineResponse JSON object. "
+            "Answer the current request and obey requested outputs."
+        )
+        user_text = (
+            "REQUEST: " + compact_request + "\n"
+            "OUTPUT_MODE: " + _safe_text(mode or "text")
+        )
+        estimated_total = _estimate_input_tokens(system_prompt) + _estimate_input_tokens(user_text)
 
     provider_log({
         "input_token_budget": INPUT_TOKEN_BUDGET,
+        "input_budget_target": ADAPTIVE_PROVIDER_TARGET_TOKENS,
         "estimated_input_tokens": estimated_total,
         "input_budget_enforced": True,
-        "context_strategy": "semantic_visual_route_compact",
-        "current_request_truncation": False,
+        "context_strategy": ADAPTIVE_PROVIDER_PACKER_VERSION,
+        "compression_level": pack_meta.get("compression_level"),
+        "dropped_context": pack_meta.get("dropped") or [],
         "history_sent_to_provider": False,
         "dialogue_memory_sent_to_provider": bool(
             dialogue.get("continuation")
             or dialogue.get("reference_to_previous")
-            or str(dialogue.get("context_dependency") or "").lower() == "pending"
+            or str(dependency).lower() in {"pending", "continuation", "recall"}
             or task_is_active
         ),
         "interactive_task_state_sent_to_provider": bool(task_is_active),
-        "dialogue_system_prompt": system_prompt is PROVIDER_DIALOGUE_SYSTEM_PROMPT,
+        "current_request_truncation": len(request_text) > len(request_excerpt),
+        "dialogue_system_prompt": bool(system_prompt == PROVIDER_DIALOGUE_SYSTEM_PROMPT),
         "visual_production_mode": mode,
         "canonical_packet_fingerprint": _provider_packet_fingerprint(user_text),
     })
