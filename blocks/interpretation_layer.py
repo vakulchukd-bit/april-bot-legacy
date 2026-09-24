@@ -3354,6 +3354,26 @@ class QuantumInterpretationEngine:
         result["candidate_answer"] = candidate_answer
         result["forbidden_entities"] = forbidden_entities
 
+        # Canonical semantic frame: one compact identity shared by downstream engines.
+        result["semantic_frame"] = {
+            "intent": measured_dialogue.get("label") or "request",
+            "relation": three_way_relation,
+            "topic": effective_topic,
+            "entity": active_entity,
+            "operation": self.normalize(
+                semantic.get("operation")
+                or (semantic.get("semantic_task") or {}).get("operation")
+                or active_task_contract.get("operation")
+                or "answer"
+            ),
+            "goal": effective_goal,
+            "representation": requested_representation or "text",
+            "reference": bool(artifact_evidence.get("artifact_reference") or reference),
+            "task_phase": active_task_contract.get("phase") if task_active else "",
+            "sequence_id": self.normalize(dialogue_contract.get("sequence_id")),
+            "scene_id": self.normalize(live_scene_record.get("scene_id")),
+        }
+
         result["estimated_action_count"] = estimate_action_count(result)
         result["response_complexity"] = determine_response_complexity(result)
         result["factory_order"] = build_factory_order(result)
