@@ -1089,6 +1089,11 @@ class ProcessorScene:
             resolved_request = f"Продолжение задания: {base_topic}. Ответ пользователя: {self.request}"
 
         semantic_result = dialogue.get("semantic_result") if isinstance(dialogue.get("semantic_result"), dict) else {}
+        cognitive_workspace = (
+            semantic_result.get("cognitive_workspace")
+            if isinstance(semantic_result.get("cognitive_workspace"), dict)
+            else {}
+        )
         dialogue_memory = build_dialogue_memory_bridge(
             self.user_id,
             query=self.request,
@@ -1177,13 +1182,51 @@ class ProcessorScene:
                 artifact_visual_context["active_visual_scene"] = compact_scene
 
         semantic_frame = dict(semantic_result.get("semantic_frame") or {})
+        workspace_frame = (cognitive_workspace.get("semantic_frame")
+                           if isinstance(cognitive_workspace.get("semantic_frame"), dict)
+                           else {})
         semantic_frame.update({
-            "topic": _text(dialogue.get("canonical_topic") or intent.get("topic") or semantic_frame.get("topic") or representation),
-            "operation": _text(intent.get("operation") or semantic_frame.get("operation") or "answer"),
-            "goal": _text(intent.get("goal") or semantic_frame.get("goal") or "answer"),
-            "representation": _text(representation or semantic_frame.get("representation") or "text").lower(),
-            "entity": _text(intent.get("object") or semantic_frame.get("entity")),
-            "relation": _text(dialogue.get("relation") or semantic_frame.get("relation") or "NEW").upper(),
+            "topic": _text(
+                workspace_frame.get("topic")
+                or cognitive_workspace.get("active_topic")
+                or intent.get("topic")
+                or semantic_frame.get("topic")
+                or representation
+            ),
+            "operation": _text(
+                cognitive_workspace.get("operation")
+                or workspace_frame.get("operation")
+                or intent.get("operation")
+                or semantic_frame.get("operation")
+                or "answer"
+            ),
+            "goal": _text(
+                cognitive_workspace.get("goal")
+                or workspace_frame.get("goal")
+                or intent.get("goal")
+                or semantic_frame.get("goal")
+                or "answer"
+            ),
+            "representation": _text(
+                cognitive_workspace.get("representation")
+                or workspace_frame.get("representation")
+                or representation
+                or semantic_frame.get("representation")
+                or "text"
+            ).lower(),
+            "entity": _text(
+                cognitive_workspace.get("active_entity")
+                or workspace_frame.get("entity")
+                or intent.get("object")
+                or semantic_frame.get("entity")
+            ),
+            "relation": _text(
+                cognitive_workspace.get("relation")
+                or workspace_frame.get("relation")
+                or dialogue.get("relation")
+                or semantic_frame.get("relation")
+                or "NEW"
+            ).upper(),
         })
         semantic_result["semantic_frame"] = semantic_frame
 
@@ -1423,6 +1466,7 @@ class ProcessorScene:
                 "semantic_frame": _compact(semantic_result.get("semantic_frame") or {}, max_depth=3, max_items=8),
                 "turn_sync": _compact(turn_sync, max_depth=4, max_items=10),
                 "scene_blueprint": _compact(semantic_result.get("scene_blueprint") or {}, max_depth=5, max_items=16),
+                "cognitive_workspace": _compact(cognitive_workspace, max_depth=5, max_items=14),
                 "user_id": self.user_id,
                 "conversation_id": dialogue_memory.get("conversation_id"),
             },
@@ -1440,6 +1484,7 @@ class ProcessorScene:
             constraints={
                 "one_provider_call": True,
                 "provider_input_token_budget": 900,
+                "cognitive_context_plan": _compact(cognitive_workspace, max_depth=5, max_items=14),
                 "metadata": {
                     "identity_scope": {
                         "user_id": self.user_id,
@@ -1498,6 +1543,9 @@ class ProcessorScene:
             "dialogue_strategy": _compact(dialogue_strategy, max_depth=3, max_items=8),
             "sequence_continuation_authorized": bool(dialogue.get("sequence_continuation_authorized")),
             "interpretation_control": _compact(intent.get("interpretation_control") or semantic_result.get("interpretation_control") or {}, max_depth=4, max_items=10),
+            "cognitive_workspace_version": _text(cognitive_workspace.get("version")),
+            "cognitive_workspace_protected": list(cognitive_workspace.get("protected_context") or [])[:12],
+            "cognitive_workspace_excluded": list(cognitive_workspace.get("excluded_context") or [])[:8],
             "render_authorized": bool(intent.get("render_authorized")),
             "render_mode": _text(intent.get("render_mode") or "TEXT_ONLY"),
             "provider_calls": 1,
@@ -1515,7 +1563,9 @@ class ProcessorScene:
         # Keep only actual provider blocks; normalize metadata without changing
         # the representation chosen by the processor.
         self._render_omissions = []
-        blocks = self._canonicalize_blocks(machine_payload.get("render_blocks") or [], request)
+        provider_blocks = machine_payload.get("render_blocks") or []
+        provider_artifacts = machine_payload.get("artifacts") or []
+        blocks = self._canonicalize_blocks(provider_blocks, request)
         answer = _text(machine_payload.get("answer") or machine_payload.get("content"))
         if not answer:
             raise RuntimeError("EMPTY_PROVIDER_ANSWER")
@@ -1548,6 +1598,12 @@ class ProcessorScene:
         response.flow_id = str(request.request_id)
         response.topic_group = _text(request.intent.get("object") or request.intent.get("type"))
         response.metadata.update({
+            "provider_transport_counts": {
+                "provider_render_blocks_received": len(provider_blocks) if isinstance(provider_blocks, list) else 0,
+                "provider_artifacts_received": len(provider_artifacts) if isinstance(provider_artifacts, list) else 0,
+                "scene_render_blocks_after_canonicalization": len(blocks),
+            },
+            "render_omissions": list(self._render_omissions)[:24],
             "processor_version": PROCESSOR_VERSION,
             "decision_owner": "QUANTUM_PROCESSOR",
             "canonical_representation": request.intent.get("type"),
