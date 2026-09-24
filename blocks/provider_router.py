@@ -499,17 +499,23 @@ def _adaptive_pack(
             if used <= hard_budget:
                 break
 
-    # Emergency degradation keeps request + output mode. It never raises.
+    # Emergency degradation preserves the protected semantic contract. Never
+    # replace it with a bare request/mode pair: output contract, requested outputs,
+    # cognitive core and active task must remain represented. Only the textual
+    # payloads of protected sections may be compacted further.
     if used > hard_budget:
-        request_piece = next((x for x in mandatory if x.startswith("REQUEST:")), "REQUEST: ")
-        mode_piece = next((x for x in mandatory if x.startswith("OUTPUT_MODE:")), "OUTPUT_MODE: text")
-        compact_request = _semantic_excerpt(request_piece.split(":", 1)[1], 150)
-        selected = [
-            "APRIL REQUEST CORE",
-            "REQUEST: " + compact_request,
-            mode_piece,
-        ]
-        dropped.append("emergency_context_trim")
+        compacted = []
+        for piece in mandatory:
+            label = piece.split(":", 1)[0].strip().upper()
+            if label == "REQUEST":
+                value = _semantic_excerpt(piece.split(":", 1)[1], 360)
+                compacted.append("REQUEST: " + value)
+            elif label in {"COGNITIVE_CORE", "RENDER_CONTRACT", "ACTIVE_TASK", "DIALOGUE_ANCHOR"}:
+                compacted.append(_shrink_packet_piece(piece, 260))
+            else:
+                compacted.append(piece)
+        selected = compacted
+        dropped.append("emergency_protected_compaction")
         used = total(selected)
 
     # Deterministic final guarantee. The current request is reduced semantically,
@@ -1408,13 +1414,28 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     ).strip()
     request_text = _extract_request_text(payload)
     outputs = list(payload.get("requested_outputs") or [])
+    conversation_payload = payload.get("conversation") if isinstance(payload.get("conversation"), dict) else {}
+    workspace = (
+        conversation_payload.get("cognitive_workspace")
+        if isinstance(conversation_payload.get("cognitive_workspace"), dict)
+        else payload.get("cognitive_context_plan")
+        if isinstance(payload.get("cognitive_context_plan"), dict)
+        else {}
+    )
     dialogue = payload.get("dialogue_contract") if isinstance(payload.get("dialogue_contract"), dict) else {}
     semantic_frame = payload.get("semantic_frame") if isinstance(payload.get("semantic_frame"), dict) else {}
+    if workspace and isinstance(workspace.get("semantic_frame"), dict):
+        # The pre-provider workspace is the canonical semantic handoff. Do not
+        # reintroduce the older raw frame after semantic selection has already
+        # normalized it.
+        semantic_frame = dict(workspace.get("semantic_frame") or {})
     turn_sync = payload.get("turn_sync") if isinstance(payload.get("turn_sync"), dict) else {}
 
-    # Canonical mandatory core. Current request is never removed; it is only
-    # semantically excerpted if pathological input is too large.
-    request_excerpt = _semantic_excerpt(request_text, 300)
+    # Canonical mandatory core. The cognitive workspace owns semantic selection.
+    # Provider packing may compact the representation, but it must not make a
+    # relevance decision or silently discard the output contract.
+    workspace_request = _safe_text(workspace.get("current_request") or "")
+    request_excerpt = _semantic_excerpt(workspace_request or request_text, 520)
     output_modes = [str(x) for x in outputs if _safe_text(x).strip()]
     effective_mode = _safe_text(mode or (output_modes[0] if output_modes else "text"))
     mandatory = [
@@ -1444,6 +1465,40 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             "MODE_RULE: return one complete table payload with columns and rows."
         )
 
+    if workspace:
+        workspace_contract = workspace.get("output_contract") if isinstance(workspace.get("output_contract"), dict) else {}
+        workspace_core = {
+            "version": workspace.get("version"),
+            "relation": workspace.get("relation"),
+            "continuation": bool(workspace.get("continuation")),
+            "reference": bool(workspace.get("reference")),
+            "active_task": bool(workspace.get("active_task")),
+            "active_topic": workspace.get("active_topic"),
+            "active_entity": workspace.get("active_entity"),
+            "operation": workspace.get("operation"),
+            "goal": workspace.get("goal"),
+            "representation": workspace.get("representation"),
+            "dependencies": list(workspace.get("context_dependencies") or [])[:8],
+            "protected": list(workspace.get("protected_context") or [])[:10],
+            "excluded": [
+                x.get("key") if isinstance(x, dict) else str(x)
+                for x in list(workspace.get("excluded_context") or [])[:8]
+            ],
+        }
+        mandatory.append("COGNITIVE_CORE: " + json.dumps(workspace_core, ensure_ascii=False, separators=(",", ":"), default=str))
+        if workspace.get("request_directives"):
+            mandatory.append("REQUEST_DIRECTIVES: " + json.dumps(list(workspace.get("request_directives") or [])[:6], ensure_ascii=False, separators=(",", ":"), default=str))
+        if workspace.get("request_identifiers") and (effective_mode == "code" or workspace.get("operation") == "build"):
+            mandatory.append("REQUEST_IDENTIFIERS: " + json.dumps(list(workspace.get("request_identifiers") or [])[:10], ensure_ascii=False, separators=(",", ":"), default=str))
+        mandatory.append("SEMANTIC_FRAME: " + json.dumps(semantic_frame, ensure_ascii=False, separators=(",", ":"), default=str))
+        mandatory.append("RENDER_CONTRACT: " + json.dumps({
+            "mode": workspace_contract.get("representation") or effective_mode,
+            "requested": list(workspace_contract.get("requested_outputs") or output_modes[:4])[:4],
+            "authorized": bool(workspace_contract.get("render_authorized")),
+            "render_mode": workspace_contract.get("render_mode") or "TEXT_ONLY",
+            "structured_required": bool(workspace_contract.get("requested_outputs") and any(x != "text" for x in workspace_contract.get("requested_outputs") or [])),
+        }, ensure_ascii=False, separators=(",", ":"), default=str))
+
     closure_policy = dialogue.get("closure_policy") if isinstance(dialogue.get("closure_policy"), dict) else {}
 
     relation = _safe_text(dialogue.get("relation") or "")
@@ -1466,18 +1521,34 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         else {}
     )
     task_is_active = bool(
-        isinstance(task_state, dict)
-        and (
-            task_state.get("active")
-            or task_state.get("open")
-            or task_state.get("kind") in {"game", "riddle", "question", "choice", "logic_riddle"}
+        workspace.get("active_task")
+        if workspace
+        else (
+            isinstance(task_state, dict)
+            and (
+                task_state.get("active")
+                or task_state.get("open")
+                or task_state.get("kind") in {"game", "riddle", "question", "choice", "logic_riddle"}
+            )
         )
     )
+
+    if workspace:
+        relation = _safe_text(workspace.get("relation") or relation)
+        dependency = "continuation" if workspace.get("continuation") else dependency
+        reference = bool(workspace.get("reference"))
 
     structured_outputs_requested = any(
         _safe_text(x).lower() not in {"text", "markdown"} for x in outputs
     ) or bool(payload.get("required_artifacts"))
-    render_authorized = bool(interpretation_control.get("render_authorized"))
+    if workspace and isinstance(workspace_contract, dict):
+        structured_outputs_requested = structured_outputs_requested or bool(
+            workspace_contract.get("requested_outputs")
+            and any(_safe_text(x).lower() != "text" for x in workspace_contract.get("requested_outputs") or [])
+        )
+    render_authorized = bool(
+        workspace_contract.get("render_authorized") if workspace else interpretation_control.get("render_authorized")
+    )
     visual_relation = bool(
         interpretation_control.get("render_mode") == "ARTIFACT_CONTINUATION"
         or reference
@@ -1487,28 +1558,60 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
 
     optional: list[tuple[str, str]] = []
 
-    # Tier 0: active task is the strongest continuity owner. Do not send all of
-    # open_task/task_memory/interactive_task_state again; use one digest only.
-    if task_is_active:
-        task_digest = _build_adaptive_task_digest(
-            task_state,
-            task_memory,
-            history_limit=2,
-            clue_limit=3,
-        )
-        optional.append(("active_task", _json_piece(
-            "ACTIVE_TASK", task_digest, depth=3, items=5, keys=10
-        )))
+    if workspace:
+        # The cognitive workspace has already decided relevance. Protected semantic
+        # sections are promoted to the provider core; ranked optional sections are
+        # passed to the budget packer as candidates.
+        required_keys = {
+            _safe_text(x.get("key")).upper()
+            for x in list(workspace.get("required_context") or [])
+            if isinstance(x, dict)
+        }
+        for section in list(workspace.get("required_context") or []):
+            if not isinstance(section, dict):
+                continue
+            name = _safe_text(section.get("key") or section.get("name"))
+            value = section.get("value")
+            if not name or value in (None, "", [], {}):
+                continue
+            if name.upper() in {"CURRENT_REQUEST", "SEMANTIC_FRAME", "OUTPUT_CONTRACT"}:
+                continue
+            mandatory.append(
+                _json_piece(name.upper(), value, depth=3, items=5, keys=10)
+            )
 
-        sync_digest = turn_sync or _build_live_dialogue_digest(dialogue)
-        if sync_digest:
-            optional.append(("turn_sync", _json_piece(
-                "TURN_SYNC", sync_digest, depth=2, items=5, keys=8
-            )))
+        for section in list(workspace.get("optional_context") or []):
+            if not isinstance(section, dict):
+                continue
+            name = _safe_text(section.get("key") or section.get("name"))
+            value = section.get("value")
+            if not name or value in (None, "", [], {}):
+                continue
+            # Do not re-add a field already promoted to the protected core.
+            if name.upper() in required_keys:
+                continue
+            optional.append(
+                (name.lower(), _json_piece(name.upper(), value, depth=3, items=5, keys=10))
+            )
     else:
-        # For ordinary continuation, live dialogue carries the current relation;
-        # the semantic frame is a compact secondary anchor.
-        if dialogue.get("continuation") or reference or str(dependency).lower() in {
+        # Legacy compatibility path for callers that do not yet provide the
+        # cognitive workspace. It remains secondary to the new semantic workspace.
+        if task_is_active:
+            task_digest = _build_adaptive_task_digest(
+                task_state,
+                task_memory,
+                history_limit=2,
+                clue_limit=3,
+            )
+            optional.append(("active_task", _json_piece(
+                "ACTIVE_TASK", task_digest, depth=3, items=5, keys=10
+            )))
+            sync_digest = turn_sync or _build_live_dialogue_digest(dialogue)
+            if sync_digest:
+                optional.append(("turn_sync", _json_piece(
+                    "TURN_SYNC", sync_digest, depth=2, items=5, keys=8
+                )))
+        elif dialogue.get("continuation") or reference or str(dependency).lower() in {
             "continuation", "pending", "recall"
         }:
             live_digest = _build_live_dialogue_digest(dialogue)
@@ -1517,69 +1620,63 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
                     "LIVE_DIALOGUE", live_digest, depth=2, items=5, keys=8
                 )))
 
-    if semantic_frame:
-        optional.append(("semantic_frame", _json_piece(
-            "SEMANTIC_FRAME", semantic_frame, depth=2, items=6, keys=10
+        if semantic_frame:
+            optional.append(("semantic_frame", _json_piece(
+                "SEMANTIC_FRAME", semantic_frame, depth=2, items=6, keys=10
+            )))
+
+        if task_is_active or dialogue.get("continuation") or reference:
+            strategy = dialogue.get("dialogue_strategy") if isinstance(dialogue.get("dialogue_strategy"), dict) else {}
+            analysis = dialogue.get("continuation_content_analysis") if isinstance(dialogue.get("continuation_content_analysis"), dict) else {}
+            strategy_digest = {
+                "mode": strategy.get("mode") or analysis.get("mode"),
+                "intent": strategy.get("intent") or analysis.get("intent"),
+                "next": strategy.get("next_direction") or analysis.get("next_direction"),
+                "avoid": (analysis.get("avoid_repeat_content") or analysis.get("covered_content") or [])[:2],
+            }
+            strategy_digest = {k: v for k, v in strategy_digest.items() if v not in (None, "", [], {})}
+            if strategy_digest:
+                optional.append(("continuation_plan", _json_piece(
+                    "CONTINUATION_PLAN", strategy_digest, depth=2, items=4, keys=6
+                )))
+
+        if closure_policy.get("eligible_if_completed"):
+            optional.append((
+                "closure_policy",
+                "CLOSURE: when this difficult work is genuinely achieved, naturally name the resolved topic and what was achieved together; do not use a generic task-solved phrase and do not force a closing on simple turns.",
+            ))
+
+        if visual_relation or structured_outputs_requested:
+            visual_ref = _build_visual_reference_digest(payload, dialogue)
+            if visual_ref:
+                optional.append(("visual_reference", _json_piece(
+                    "VISUAL_REFERENCE", visual_ref, depth=2, items=4, keys=8
+                )))
+
+        output_contract = {
+            "mode": mode or "text",
+            "requested": output_modes[:4],
+            "authorized": render_authorized,
+            "structured_required": structured_outputs_requested,
+        }
+        optional.append(("output_contract", _json_piece(
+            "RENDER_CONTRACT", output_contract, depth=2, items=4, keys=6
         )))
 
-    # Only include continuation strategy after the authoritative task/frame.
-    if task_is_active or dialogue.get("continuation") or reference:
-        strategy = dialogue.get("dialogue_strategy") if isinstance(dialogue.get("dialogue_strategy"), dict) else {}
-        analysis = dialogue.get("continuation_content_analysis") if isinstance(dialogue.get("continuation_content_analysis"), dict) else {}
-        strategy_digest = {
-            "mode": strategy.get("mode") or analysis.get("mode"),
-            "intent": strategy.get("intent") or analysis.get("intent"),
-            "next": strategy.get("next_direction") or analysis.get("next_direction"),
-            "avoid": (analysis.get("avoid_repeat_content") or analysis.get("covered_content") or [])[:2],
-        }
-        strategy_digest = {k: v for k, v in strategy_digest.items() if v not in (None, "", [], {})}
-        if strategy_digest:
-            optional.append(("continuation_plan", _json_piece(
-                "CONTINUATION_PLAN", strategy_digest, depth=2, items=4, keys=6
-            )))
-
-    if closure_policy.get("eligible_if_completed"):
-        optional.append((
-            "closure_policy",
-            "CLOSURE: when this difficult work is genuinely achieved, naturally name the resolved topic and what was achieved together; do not use a generic task-solved phrase and do not force a closing on simple turns.",
-        ))
-
-    # Visual identity is a reference, never a large payload. Keep it after task/dialogue
-    # semantics so visual data cannot starve conversation meaning.
-    if visual_relation or structured_outputs_requested:
-        visual_ref = _build_visual_reference_digest(payload, dialogue)
-        if visual_ref:
-            optional.append(("visual_reference", _json_piece(
-                "VISUAL_REFERENCE", visual_ref, depth=2, items=4, keys=8
-            )))
-
-    # Minimal render contract. Renderer details never outrank the current meaning.
-    output_contract = {
-        "mode": mode or "text",
-        "requested": output_modes[:4],
-        "authorized": render_authorized,
-        "structured_required": structured_outputs_requested,
-    }
-    optional.append(("output_contract", _json_piece(
-        "RENDER_CONTRACT", output_contract, depth=2, items=4, keys=6
-    )))
-
-    # Seven-day memory is evidence only. It is deliberately the lowest-priority tier
-    # and is skipped while an active task already explains the current context.
-    memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
-    dialogue_memory = memory.get("dialogue_memory") if isinstance(memory.get("dialogue_memory"), dict) else {}
-    if dialogue_memory and not task_is_active:
-        active_turns = dialogue_memory.get("active_sequence_turns") or []
-        recent = []
-        for turn in list(active_turns)[-2:]:
-            compact = _compact_qa_item(turn)
-            if compact:
-                recent.append(compact)
-        if recent:
-            optional.append(("seven_day_memory", _json_piece(
-                "MEMORY_EVIDENCE", {"window_days": dialogue_memory.get("window_days", 7), "recent": recent},
-                depth=3, items=3, keys=4
-            )))
+        memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
+        dialogue_memory = memory.get("dialogue_memory") if isinstance(memory.get("dialogue_memory"), dict) else {}
+        if dialogue_memory and not task_is_active:
+            active_turns = dialogue_memory.get("active_sequence_turns") or []
+            recent = []
+            for turn in list(active_turns)[-2:]:
+                compact = _compact_qa_item(turn)
+                if compact:
+                    recent.append(compact)
+            if recent:
+                optional.append(("seven_day_memory", _json_piece(
+                    "MEMORY_EVIDENCE", {"window_days": dialogue_memory.get("window_days", 7), "recent": recent},
+                    depth=3, items=3, keys=4
+                )))
 
     # Floating semantic target: leave more room for task/visual continuation while
     # preserving the hard 900-token ceiling.
@@ -1599,16 +1696,26 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     system_tokens = _estimate_input_tokens(system_prompt)
     estimated_total = system_tokens + _estimate_input_tokens(user_text)
     if estimated_total > INPUT_TOKEN_BUDGET:
-        # Defensive invariant. This branch should be unreachable after the
-        # packer's emergency compaction; never let it become a production 500.
-        compact_request = _semantic_excerpt(request_text, 160)
+        # Defensive invariant. Preserve the current semantic core and render
+        # contract rather than falling back to a bare request/mode pair.
+        compact_request = _semantic_excerpt(
+            workspace_request or request_text,
+            300,
+        )
         system_prompt = (
             "April provider. Return one compact MachineResponse JSON object. "
-            "Answer the current request and obey requested outputs."
+            "Quantum Processor owns the current semantic task and output contract. "
+            "Answer the current request directly and preserve requested structured output."
         )
         user_text = (
             "REQUEST: " + compact_request + "\n"
-            "OUTPUT_MODE: " + _safe_text(mode or "text")
+            "OUTPUT_MODE: " + _safe_text(mode or "text") + "\n"
+            "REQUESTED: " + json.dumps(output_modes[:4], ensure_ascii=False, separators=(",", ":")) + "\n"
+            "RENDER_CONTRACT: " + json.dumps({
+                "authorized": render_authorized,
+                "render_mode": workspace_contract.get("render_mode") if isinstance(workspace, dict) and isinstance(workspace.get("output_contract"), dict) else _safe_text(interpretation_control.get("render_mode") or "TEXT_ONLY"),
+                "structured_required": structured_outputs_requested,
+            }, ensure_ascii=False, separators=(",", ":"))
         )
         estimated_total = _estimate_input_tokens(system_prompt) + _estimate_input_tokens(user_text)
 
@@ -1629,7 +1736,20 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             or task_is_active
         ),
         "interactive_task_state_sent_to_provider": bool(task_is_active),
-        "current_request_truncation": len(request_text) > len(request_excerpt),
+        "current_request_truncation": False if workspace else len(request_text) > len(request_excerpt),
+        "current_request_semantic_compression": bool(workspace and len(request_text) > len(request_excerpt)),
+        "current_request_semantics_preserved": bool(workspace),
+        "cognitive_workspace_version": _safe_text(workspace.get("version")),
+        "cognitive_workspace_protected": list(workspace.get("protected_context") or [])[:12],
+        "cognitive_workspace_excluded": [
+            x.get("key") if isinstance(x, dict) else str(x)
+            for x in list(workspace.get("excluded_context") or [])[:8]
+        ],
+        "cognitive_workspace_selected": [
+            x.get("key") if isinstance(x, dict) else str(x)
+            for x in list(workspace.get("required_context") or [])[:12]
+            + list(workspace.get("optional_context") or [])[:12]
+        ],
         "dialogue_system_prompt": bool(system_prompt == PROVIDER_DIALOGUE_SYSTEM_PROMPT),
         "visual_production_mode": mode,
         "canonical_packet_fingerprint": _provider_packet_fingerprint(user_text),
@@ -1797,6 +1917,16 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
 
     raw_metadata = parsed.get("metadata")
     metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+    # Transport diagnostics: keep separate measurements for the model output and
+    # the canonical fields so a later stage cannot be mistaken for an OpenAI
+    # generation truncation. These are machine-only diagnostics.
+    metadata["provider_transport_input"] = {
+        "raw_text_chars": len(_safe_text(raw_text)),
+        "parsed_answer_chars": len(answer),
+        "parsed_content_chars": len(content),
+        "parsed_render_blocks": len(parsed.get("render_blocks") or []) if isinstance(parsed.get("render_blocks"), list) else 0,
+        "parsed_artifacts": len(parsed.get("artifacts") or []) if isinstance(parsed.get("artifacts"), list) else 0,
+    }
     # Keep the provider's semantic task update in the canonical metadata channel.
     # This makes task state round-trip through Provider -> Executor -> StateManager.
     for key in ("dialogue_task_state", "interactive_task_state", "open_task", "task_state"):
@@ -1924,6 +2054,12 @@ def provider_finalize_for_executor(contract: dict) -> dict:
 
     original_blocks = mr.get("render_blocks") or []
     mr["artifacts"] = list(mr.get("artifacts") or [])
+    mr.setdefault("metadata", {})["provider_pre_finalize_counts"] = {
+        "answer_length": len(mr.get("answer") or ""),
+        "content_length": len(mr.get("content") or ""),
+        "render_blocks": len(original_blocks) if isinstance(original_blocks, list) else 0,
+        "artifacts": len(mr.get("artifacts") or []),
+    }
 
     # Structured artifacts are first-class output. If the model returned them
     # without render_blocks, project them into the canonical scene stream once.
@@ -2178,3 +2314,4 @@ async def analyze_image(path: str, prompt: str):
 # Image generation has no Provider implementation.
 # Image creation belongs exclusively to C_APRIL_IMAGES_GENERATOR.
 # Text generation, voice transcription, and visual analysis remain unchanged.
+
