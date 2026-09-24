@@ -865,22 +865,28 @@ def _derive_output_tokens(payload: dict[str, Any], requested: Any = None) -> int
 
 
 def _render_block_renderer(block_type: str) -> str:
+    """Return the canonical Web renderer for a semantic artifact type.
+
+    Provider never selects an implementation-specific renderer.  It emits the
+    semantic block type and this function only mirrors the canonical
+    C_ARTIFACT_CONTRACT → April Web registry.
+    """
     return {
-        "text": "TextBlock",
-        "markdown": "MarkdownBlock",
+        "text": "MessageTextBlock",
+        "markdown": "MessageTextBlock",
+        "formula": "MessageTextBlock",
         "table": "TableBlock",
         "graph": "GraphBlock",
-        "diagram": "DiagramBlock",
-        "formula": "FormulaBlock",
-        "code": "CodeBlock",
+        "diagram": "GalleryBlock",
         "gallery": "GalleryBlock",
-        "image": "ImageBlock",
+        "image": "GalleryBlock",
+        "code": "CodeBlock",
         "link": "LinkCard",
-        "file": "FileBlock",
+        "file": "LinkCard",
         "audio": "AudioBlock",
         "video": "VideoBlock",
         "action": "ActionBlock",
-    }.get(block_type, "TextBlock")
+    }.get(block_type, "MessageTextBlock")
 
 
 def _canonical_requested_outputs(payload: dict[str, Any]) -> list[str]:
@@ -1195,8 +1201,8 @@ def _clean_render_blocks(blocks: Any) -> list[dict]:
             continue
         seen.add(signature)
         block["type"] = normalized_type
-        block.setdefault("renderer", _render_block_renderer(normalized_type))
-        block.setdefault("viewer", block["renderer"])
+        block["renderer"] = _render_block_renderer(normalized_type)
+        block["viewer"] = block["renderer"]
         if normalized_type != "text" and canonical_payload:
             block["payload"] = canonical_payload
         result.append(block)
@@ -2503,6 +2509,223 @@ def _recover_answer_from_source_request(source_request: Any) -> str:
     # A completely empty provider object must never produce an empty UI bubble.
     return f"Не удалось сформировать ответ на запрос: {request}"
 
+
+# ---------------------------------------------------------------------------
+# Canonical visual-output promotion
+# ---------------------------------------------------------------------------
+
+_TOP_LEVEL_VISUAL_TYPES = ("image", "gallery", "diagram", "graph", "table", "formula", "code", "link")
+
+
+def _image_source_value(value: Any) -> str:
+    """Return a concrete image source, never a natural-language description."""
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return ""
+        if value.startswith(("data:image/", "http://", "https://", "blob:", "/")):
+            return value
+        return ""
+    if not isinstance(value, dict):
+        return ""
+    for key in (
+        "src",
+        "url",
+        "image_url",
+        "image_data_uri",
+        "data_uri",
+        "image_base64",
+        "base64",
+        "image",
+    ):
+        candidate = value.get(key)
+        if isinstance(candidate, str):
+            candidate = candidate.strip()
+            if candidate.startswith(("data:image/", "http://", "https://", "blob:", "/")):
+                if key in {"image_base64", "base64"}:
+                    mime = _safe_text(value.get("mime_type") or "image/png") or "image/png"
+                    return f"data:{mime};base64,{candidate}"
+                return candidate
+    return ""
+
+
+def _image_prompt_from_provider_payload(value: Any) -> str:
+    """Extract a descriptive image prompt from provider output."""
+    if isinstance(value, str):
+        source = _image_source_value(value)
+        return "" if source else value.strip()
+    if not isinstance(value, dict):
+        return ""
+    for key in ("description", "prompt", "caption", "alt", "title", "content", "text"):
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    nested = value.get("image")
+    if nested is not value:
+        return _image_prompt_from_provider_payload(nested)
+    return ""
+
+
+def _build_image_generation_spec_from_provider(value: Any) -> dict[str, Any] | None:
+    """Normalize a Provider image description into the local image-spec contract."""
+    if isinstance(value, dict):
+        schema = _safe_text(value.get("schema"))
+        if schema == "april_image_spec_v1":
+            return dict(value)
+    prompt = _image_prompt_from_provider_payload(value)
+    if not prompt:
+        return None
+    width = 1024
+    height = 1024
+    if isinstance(value, dict):
+        try:
+            width = int(value.get("width") or width)
+            height = int(value.get("height") or height)
+        except (TypeError, ValueError, OverflowError):
+            width, height = 1024, 1024
+    return {
+        "schema": "april_image_spec_v1",
+        "prompt": prompt[:1600],
+        "width": max(256, min(width, 1536)),
+        "height": max(256, min(height, 1536)),
+        "style": _safe_text(value.get("style") if isinstance(value, dict) else "") or "illustration",
+        "background": dict(value.get("background") or {}) if isinstance(value, dict) and isinstance(value.get("background"), dict) else {},
+        "layers": list(value.get("layers") or [])[:96] if isinstance(value, dict) and isinstance(value.get("layers"), list) else [],
+        "negative": list(value.get("negative") or [])[:24] if isinstance(value, dict) and isinstance(value.get("negative"), list) else [],
+    }
+
+
+def _top_level_visual_block(kind: str, value: Any) -> dict[str, Any] | None:
+    """Promote one concrete provider visual into a canonical semantic block."""
+    kind = _safe_text(kind).lower()
+    if kind not in _TOP_LEVEL_VISUAL_TYPES:
+        return None
+
+    if kind in {"image", "gallery"}:
+        # A description/prompt is an instruction for Executor materialization,
+        # not a renderable block.  Only a concrete source enters SceneContract.
+        items = value if kind == "gallery" and isinstance(value, list) else (
+            value.get("images") if isinstance(value, dict) and isinstance(value.get("images"), list) else None
+        )
+        if isinstance(items, list):
+            concrete = []
+            for item in items[:8]:
+                src = _image_source_value(item)
+                if not src:
+                    continue
+                if isinstance(item, dict):
+                    normalized = dict(item)
+                else:
+                    normalized = {"src": src}
+                normalized.setdefault("src", src)
+                normalized.setdefault("url", src)
+                normalized.setdefault("image", src)
+                concrete.append(normalized)
+            if concrete:
+                payload = {"images": concrete}
+                if isinstance(value, dict):
+                    for key in ("title", "caption", "prompt", "description", "mime_type", "width", "height"):
+                        if key in value and key not in payload:
+                            payload[key] = value[key]
+                return {
+                    "type": "gallery" if kind == "gallery" or len(concrete) > 1 else "image",
+                    "artifact_type": "gallery" if kind == "gallery" or len(concrete) > 1 else "image",
+                    "renderer": "GalleryBlock",
+                    "viewer": "GalleryBlock",
+                    "payload": payload,
+                    "scene_contract": True,
+                    "human_visible": True,
+                }
+
+        src = _image_source_value(value)
+        if src:
+            payload = {"src": src, "url": src, "image": src, "images": [{"src": src, "url": src, "image": src}]}
+            if isinstance(value, dict):
+                for key in ("prompt", "description", "caption", "alt", "mime_type", "width", "height"):
+                    if key in value:
+                        payload[key] = value[key]
+            return {
+                "type": "image",
+                "artifact_type": "image",
+                "renderer": "GalleryBlock",
+                "viewer": "GalleryBlock",
+                "payload": payload,
+                "scene_contract": True,
+                "human_visible": True,
+            }
+        return None
+
+    # Other structured top-level fields already carry a semantic payload.
+    payload = dict(value) if isinstance(value, dict) else (
+        {"content": value} if value not in (None, "") else {}
+    )
+    if not payload:
+        return None
+    return {
+        "type": kind,
+        "artifact_type": kind,
+        "renderer": _render_block_renderer(kind),
+        "viewer": _render_block_renderer(kind),
+        "payload": payload,
+        "scene_contract": True,
+        "human_visible": True,
+    }
+
+
+def _promote_top_level_visual_outputs(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Convert provider top-level visual keys into render blocks/specs once."""
+    if not isinstance(payload, dict):
+        return [], {}
+
+    blocks: list[dict[str, Any]] = []
+    metadata: dict[str, Any] = {}
+    specs: list[dict[str, Any]] = []
+
+    for kind in _TOP_LEVEL_VISUAL_TYPES:
+        if kind not in payload:
+            continue
+        value = payload.get(kind)
+        block = _top_level_visual_block(kind, value)
+        if block:
+            blocks.append(block)
+
+        if kind in {"image", "gallery"}:
+            if kind == "gallery" and isinstance(value, list):
+                values = value[:8]
+            elif isinstance(value, dict) and isinstance(value.get("images"), list):
+                values = value.get("images")[:8]
+            else:
+                values = [value]
+            for item in values:
+                spec = _build_image_generation_spec_from_provider(item)
+                if spec:
+                    specs.append(spec)
+
+    # De-duplicate specs without making the Provider answer another semantic
+    # decision.  Executor owns actual image materialization.
+    unique_specs: list[dict[str, Any]] = []
+    seen = set()
+    for spec in specs:
+        key = json.dumps(spec, ensure_ascii=False, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_specs.append(spec)
+
+    if unique_specs:
+        metadata["image_generation_specs"] = unique_specs[:4]
+        metadata["image_generation_spec"] = unique_specs[0]
+
+    if blocks:
+        metadata["provider_visual_types"] = [
+            _safe_text(block.get("type")).lower()
+            for block in blocks
+            if isinstance(block, dict)
+        ]
+
+    return blocks, metadata
+
+
 def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[str, Any]:
     if isinstance(raw_text, dict) and raw_text.get("type") == "provider_response":
         return raw_text
@@ -2517,11 +2740,13 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             wrapped = parsed.get(wrapper_key)
             if isinstance(wrapped, dict) and any(
                 key in wrapped
-                for key in ("answer", "content", "response", "text", "render_blocks", "artifacts")
+                for key in ("answer", "content", "response", "text", "render_blocks", "artifacts", "image", "gallery", "diagram", "graph", "table")
             ):
                 canonical_payload = wrapped
                 break
 
+    top_level_visual_blocks, top_level_visual_metadata = _promote_top_level_visual_outputs(canonical_payload)
+    top_level_visual_blocks, top_level_visual_metadata = _promote_top_level_visual_outputs(canonical_payload)
     answer = _coerce_human_answer(canonical_payload.get("answer"))
     if not answer:
         answer = _coerce_human_answer(canonical_payload.get("content"))
@@ -2554,7 +2779,8 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
                     break
 
     if not answer and visual_mode == "image_generation":
-        candidate_metadata = canonical_payload.get("metadata") if isinstance(canonical_payload.get("metadata"), dict) else {}
+        candidate_metadata = dict(canonical_payload.get("metadata") or {}) if isinstance(canonical_payload.get("metadata"), dict) else {}
+        candidate_metadata.update(top_level_visual_metadata)
         candidate_spec = candidate_metadata.get("image_generation_spec")
         if not isinstance(candidate_spec, dict):
             candidate_spec = canonical_payload.get("image_generation_spec") if isinstance(canonical_payload.get("image_generation_spec"), dict) else None
@@ -2582,6 +2808,8 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         answer,
     )
 
+    if top_level_visual_blocks:
+        blocks.extend(top_level_visual_blocks)
     if not blocks:
         blocks = [{
             "type": "text",
@@ -2594,6 +2822,15 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
 
     raw_metadata = canonical_payload.get("metadata")
     metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+    if top_level_visual_metadata:
+        if top_level_visual_metadata.get("image_generation_specs"):
+            existing_specs = metadata.get("image_generation_specs")
+            merged_specs = list(existing_specs) if isinstance(existing_specs, list) else []
+            merged_specs.extend(top_level_visual_metadata.get("image_generation_specs") or [])
+            metadata["image_generation_specs"] = merged_specs[:4]
+            metadata["image_generation_spec"] = merged_specs[0]
+        for key, value in top_level_visual_metadata.items():
+            metadata.setdefault(key, value)
     # Transport diagnostics: keep separate measurements for the model output and
     # the canonical fields so a later stage cannot be mistaken for an OpenAI
     # generation truncation. These are machine-only diagnostics.
@@ -2626,7 +2863,6 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
     raw_render_priority = canonical_payload.get("render_priority")
     render_priority = list(raw_render_priority) if isinstance(raw_render_priority, list) else []
 
-    source_payload = machine_request_to_dict(source_request) if source_request is not None else {}
 
     # Current-request authority: when the Processor requested text only, a
     # model-side table/graph/link is not allowed to manufacture a second
