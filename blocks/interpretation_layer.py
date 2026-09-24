@@ -210,6 +210,133 @@ PROVIDER_CONTEXT_PLAN_VERSION = "provider_context_plan_v2_dependency_first"
 
 
 # ---------------------------------------------------------------------------
+# Dialogue obligations / commitments
+# ---------------------------------------------------------------------------
+
+OBLIGATION_SCHEMA_VERSION = "april_dialogue_obligation_v1"
+
+
+def _obligation_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def extract_dialogue_obligations(text: str) -> list[dict[str, Any]]:
+    """Extract explicit future commitments without routing or execution.
+
+    This is intentionally narrow: it records only commitments explicitly stated
+    in the user turn. It never invents an obligation from a generic request.
+    """
+    text = _obligation_text(text)
+    low = text.lower()
+    if not text or "если" not in low:
+        return []
+
+    obligations: list[dict[str, Any]] = []
+
+    # Assistant promise on a correct answer, e.g.:
+    # "если я угадаю, ты мне нарисуешь картинку с фейерверком"
+    correct_match = re.search(
+        r"если\s+я\s+(?:угадаю|отгадаю|решу|дам\s+правильн\w*\s+ответ|отвечу\s+правильно)"
+        r".*?(?:ты\s+мне\s+)?(?:нарисуешь|покажешь|покажешь\s+мне|создашь|сделаешь|пришл[её]шь)"
+        r".*?(?:картин\w*|изображен\w*|рисунок\w*).*?фейерверк", low, re.S
+    )
+    if correct_match:
+        obligations.append({
+            "id": "correct_answer_fireworks_image",
+            "schema": OBLIGATION_SCHEMA_VERSION,
+            "actor": "april",
+            "trigger": "user_answer_correct",
+            "action": "render",
+            "representation": "image",
+            "object": "фейерверк",
+            "prompt": "Красивый реалистичный фейерверк в ночном небе, праздничная сцена, яркие разноцветные вспышки, высокая детализация.",
+            "status": "pending",
+            "source": "explicit_user_commitment",
+            "source_text": text[:1600],
+            "created_at": time.time(),
+        })
+
+    # Explicit negative branch. We keep it because it is part of the same
+    # conditional promise and prevents the next turn from guessing what the
+    # user expected April to say after an incorrect answer.
+    negative_match = re.search(
+        r"если\s+я\s+не\s+(?:угадаю|отгадаю|решу|дам\s+правильн\w*\s+ответ|отвечу\s+правильно)"
+        r".*?(?:ты\s+(?:скажешь|напишешь|ответишь))\s*[«\"']?([^»\"']{10,180})",
+        low, re.S
+    )
+    if negative_match:
+        phrase = _obligation_text(negative_match.group(1))
+        obligations.append({
+            "id": "incorrect_answer_fireworks_text",
+            "schema": OBLIGATION_SCHEMA_VERSION,
+            "actor": "april",
+            "trigger": "user_answer_incorrect",
+            "action": "say",
+            "representation": "text",
+            "object": "",
+            "text": phrase,
+            "status": "pending",
+            "source": "explicit_user_commitment",
+            "source_text": text[:1600],
+            "created_at": time.time(),
+        })
+
+    return obligations
+
+
+def merge_dialogue_obligations(*sources: Any) -> list[dict[str, Any]]:
+    """Merge obligations deterministically while preserving fulfillment state."""
+    items: list[dict[str, Any]] = []
+    for source in sources:
+        if not isinstance(source, list):
+            continue
+        for raw in source:
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            oid = _obligation_text(item.get("id"))
+            if not oid:
+                continue
+            found = next((x for x in items if x.get("id") == oid), None)
+            if found is None:
+                items.append(item)
+                continue
+            # New wording may update the prompt, but terminal state wins.
+            terminal = {"fulfilled", "cancelled"}
+            if found.get("status") not in terminal:
+                found.update({k: v for k, v in item.items() if v not in (None, "", [], {})})
+    return items[-12:]
+
+
+def _obligation_matches_request(obligation: dict[str, Any], text: str) -> bool:
+    if not isinstance(obligation, dict):
+        return False
+    low = _obligation_text(text).lower()
+    if not low:
+        return False
+    obj = _obligation_text(obligation.get("object")).lower()
+    if obj and obj in low:
+        return True
+    return bool(
+        obligation.get("representation") == "image"
+        and any(x in low for x in ("картин", "изображ", "нарис", "покажи", "фейерверк"))
+    )
+
+
+def mark_obligation_status(obligations: Any, *, trigger: str, text: str = "") -> list[dict[str, Any]]:
+    """Return an updated obligation list after a semantic trigger."""
+    result = merge_dialogue_obligations([], obligations)
+    for item in result:
+        if item.get("status") in {"fulfilled", "cancelled"}:
+            continue
+        if item.get("trigger") == trigger:
+            item["status"] = "ready"
+            item["triggered_by"] = _obligation_text(text)[:1600]
+            item["triggered_at"] = time.time()
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Core engine
 # ---------------------------------------------------------------------------
 
@@ -522,6 +649,10 @@ class LiveSceneContinuityEngine:
         if not qa_history:
             qa_history = _list("turns")
         known_clues = _list("known_clues")
+        obligations = [
+            dict(item) for item in _list("obligations")
+            if isinstance(item, dict) and item.get("id")
+        ]
         return {
             "active": True,
             "status": status or "open",
@@ -557,6 +688,8 @@ class LiveSceneContinuityEngine:
             "known_clues": known_clues[-12:],
             "qa_history": qa_history[-12:],
             "turns": qa_history[-12:],
+            "obligations": obligations[-12:],
+            "task_outcome": cls._text(value.get("task_outcome") or value.get("outcome")),
             "awaiting_user": bool(
                 value.get("awaiting_user")
                 or value.get("awaiting_input")
@@ -616,6 +749,7 @@ class LiveSceneContinuityEngine:
         )
         riddle_request = (
             any(x in low for x in ("загадай", "загадку", "придумай загадку"))
+            or ("задай" in low and "задач" in low)
             or ("придумай" in low and any(x in low for x in ("еще", "ещё", "друг", "нов", "слож")))
         )
 
@@ -983,6 +1117,8 @@ class LiveSceneContinuityEngine:
             ("загад" in low and any(x in low for x in ("друг", "нов", "ещ", "занов")))
             or ("придумай" in low and any(x in low for x in ("еще", "ещё", "друг", "нов")))
             or ("загадай" in low and any(x in low for x in ("друг", "нов", "ещ", "занов", "слож")))
+            or ("задай" in low and "задач" in low)
+            or ("если я" in low and any(x in low for x in ("угадаю", "отгадаю", "решу")) and "картин" in low)
         )
 
         explicit_control = any(marker in low for marker in reset_markers)
@@ -5031,6 +5167,238 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
         }
 
 
+class ObligationEngine(InterpretationEngineBase):
+    """Extract and carry user-visible commitments without hard-coding one reward.
+
+    An obligation is a dialogue fact, not a renderer command.  It becomes an
+    executable trigger only when its condition is satisfied by the current turn.
+    """
+    NAME = "ObligationEngine"
+    VERSION = "obligations_v2_generic"
+
+    _IF_PATTERNS = (
+        re.compile(r"если\s+(.+?)\s*[,—-]\s*(?:то\s+)?(.+)$", re.I),
+        re.compile(r"если\s+(.+?)\s+то\s+(.+)$", re.I),
+        re.compile(r"if\s+(.+?)\s*,?\s*then\s+(.+)$", re.I),
+    )
+
+    @classmethod
+    def _normalize_condition(cls, value: str) -> str:
+        value = cls._text(value).lower()
+        if any(x in value for x in ("правильн", "угад", "решишь", "решит", "correct", "solve")):
+            return "user_answer_correct"
+        if any(x in value for x in ("ошиб", "не угада", "неправиль", "incorrect", "wrong")):
+            return "user_answer_incorrect"
+        if any(x in value for x in ("ответ", "ответишь", "ответит", "answer")):
+            return "user_answer_received"
+        return "condition:" + value[:180]
+
+    @classmethod
+    def _action_payload(cls, action: str) -> dict[str, Any]:
+        low = cls._low(action)
+        representation = "text"
+        if any(x in low for x in ("картин", "изображ", "нарис", "рисунок", "фото")):
+            representation = "image"
+        elif any(x in low for x in ("галере", "несколько изображ")):
+            representation = "gallery"
+        elif any(x in low for x in ("таблиц",)):
+            representation = "table"
+        elif any(x in low for x in ("схем", "диаграм")):
+            representation = "diagram"
+        elif any(x in low for x in ("график", "графика")):
+            representation = "graph"
+        elif "код" in low or "python" in low:
+            representation = "code"
+
+        target = ""
+        if representation == "image":
+            for cue in ("картинку", "изображение", "картинка", "рисунок", "фото"):
+                if cue in low:
+                    tail = low.split(cue, 1)[1].strip(" .,:;—-")
+                    target = tail[:180]
+                    break
+        return {
+            "action": "render" if representation != "text" else "answer",
+            "representation": representation,
+            "target": target,
+            "instruction": cls._text(action),
+        }
+
+    @classmethod
+    def _existing(cls, state: dict[str, Any], task: dict[str, Any], history: list[Any]) -> list[dict[str, Any]]:
+        candidates: list[Any] = []
+        for owner in (state, task):
+            if isinstance(owner, dict):
+                for key in ("obligations", "dialogue_obligations", "commitments", "promises", "pending_obligations"):
+                    value = owner.get(key)
+                    if isinstance(value, list):
+                        candidates.extend(value)
+        out = []
+        seen = set()
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            oid = cls._text(item.get("id") or item.get("obligation_id"))
+            if not oid:
+                oid = cls._fingerprint(item.get("source") or item.get("instruction") or repr(item))
+            if oid in seen:
+                continue
+            seen.add(oid)
+            normalized = dict(item)
+            normalized["id"] = oid
+            normalized.setdefault("status", "pending")
+            normalized.setdefault("source", "state")
+            out.append(normalized)
+        return out[-24:]
+
+    def analyze(self, text: str, *, state: dict[str, Any], task: dict[str, Any], history: list[Any]) -> dict[str, Any]:
+        existing = self._existing(state, task.get("task") if task.get("active") else {}, history)
+        found: list[dict[str, Any]] = []
+        for pattern in self._IF_PATTERNS:
+            match = pattern.search(self._text(text))
+            if not match:
+                continue
+            condition, action = match.group(1), match.group(2)
+            payload = self._action_payload(action)
+            found.append({
+                "id": self._fingerprint(text),
+                "condition": self._normalize_condition(condition),
+                "condition_text": self._text(condition),
+                "action": payload["action"],
+                "representation": payload["representation"],
+                "target": payload["target"],
+                "instruction": payload["instruction"],
+                "status": "pending",
+                "source": "current_user_turn",
+                "created_from": self._text(text),
+            })
+            break
+
+        merged = existing[:]
+        known = {item.get("id") for item in merged}
+        for item in found:
+            if item["id"] not in known:
+                merged.append(item)
+                known.add(item["id"])
+
+        low = self._low(text)
+        triggers: list[dict[str, Any]] = []
+        correctness = None
+        if any(x in low for x in ("правильный ответ", "угадал", "решил", "верный ответ", "correct answer")):
+            correctness = True
+        elif any(x in low for x in ("не угадал", "ошибся", "неправильный ответ", "wrong answer")):
+            correctness = False
+
+        for item in merged:
+            if item.get("status") not in {"pending", "active", "ready"}:
+                continue
+            condition = self._text(item.get("condition"))
+            matched = (
+                condition == "user_answer_correct" and correctness is True
+            ) or (
+                condition == "user_answer_incorrect" and correctness is False
+            ) or (
+                condition == "user_answer_received" and bool(text)
+            )
+            if matched:
+                triggers.append({**item, "triggered": True, "trigger_turn": self._text(text)})
+
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "obligations": merged,
+            "new_obligations": found,
+            "triggered": triggers,
+            "pending_count": sum(1 for x in merged if x.get("status") in {"pending", "active", "ready"}),
+            "confidence": 0.96 if (found or triggers) else 0.84,
+        }
+
+
+class VisualMemoryEngine(InterpretationEngineBase):
+    """Build a renderer-neutral visual projection from explicit stored facts.
+
+    It never invents appearance.  Only facts already present in state/memory
+    under visual/Nia/profile namespaces are forwarded to visual renderers.
+    """
+    NAME = "VisualMemoryEngine"
+    VERSION = "visual_memory_v2_renderer_neutral"
+
+    VISUAL_KEYS = (
+        "visual_memory", "visual_facts", "visual_profile", "render_memory",
+        "nia_visual_memory", "nia_profile", "character_profile", "appearance",
+    )
+
+    def analyze(self, *, state: dict[str, Any], memory: dict[str, Any], entity: dict[str, Any], text: str) -> dict[str, Any]:
+        source_items: list[dict[str, Any]] = []
+        for key in self.VISUAL_KEYS:
+            value = state.get(key)
+            if isinstance(value, dict):
+                source_items.append({"source": key, "data": value})
+            elif isinstance(value, list):
+                source_items.append({"source": key, "data": value})
+
+        selected: list[dict[str, Any]] = []
+        for item in source_items:
+            selected.append(item)
+
+        active_entity = self._text(entity.get("active_entity"))
+        is_visual_request = any(x in self._low(text) for x in (
+            "картин", "изображ", "нарис", "покажи", "визуал", "галере", "схем", "диаграм"
+        ))
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "active_entity": active_entity,
+            "available": bool(selected),
+            "explicit_only": True,
+            "visual_memory": selected,
+            "memory_refs": list(memory.get("selected") or []) if is_visual_request else [],
+            "for_renderer": is_visual_request,
+            "do_not_invent_visual_facts": True,
+            "confidence": 0.95 if selected else 0.72,
+        }
+
+
+class SemanticSynchronizationEngine(InterpretationEngineBase):
+    """Final internal contract: one synchronized semantic state for downstream engines."""
+    NAME = "SemanticSynchronizationEngine"
+    VERSION = "semantic_sync_v3"
+
+    def build(self, *, current_turn: dict[str, Any], arbitration: dict[str, Any], topic: dict[str, Any],
+              task: dict[str, Any], entity: dict[str, Any], reference: dict[str, Any],
+              representation: dict[str, Any], obligations: dict[str, Any], visual_memory: dict[str, Any],
+              memory: dict[str, Any], continuity: dict[str, Any]) -> dict[str, Any]:
+        relation = self._text(arbitration.get("relation") or "NEW")
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "authoritative": True,
+            "current_user_request": self._text(current_turn.get("raw_text")),
+            "relation": relation,
+            "topic": self._text(arbitration.get("active_topic") or topic.get("topic")),
+            "active_entity": self._text(arbitration.get("active_entity") or entity.get("active_entity")),
+            "task": task.get("task") if task.get("active") else {},
+            "reference": reference,
+            "representation": self._text(representation.get("representation") or "text"),
+            "obligations": obligations.get("obligations", []),
+            "triggered_obligations": obligations.get("triggered", []),
+            "visual_memory": visual_memory,
+            "memory": memory,
+            "continuity": continuity,
+            "authority_order": [
+                "current_user_turn", "explicit_discourse", "active_task",
+                "active_topic", "resolved_reference", "selected_memory", "semantic_similarity",
+            ],
+            "no_renderer_owns_semantics": True,
+            "no_history_replaces_current_turn": True,
+            "confidence": min(
+                float(arbitration.get("confidence", 0.0) or 0.0),
+                float(obligations.get("confidence", 0.0) or 0.0),
+                float(visual_memory.get("confidence", 0.0) or 0.0),
+            ),
+        }
+
+
 class InterpretationOrchestrator(InterpretationEngineBase):
     NAME = "InterpretationOrchestrator"
     VERSION = "cognitive_interpretation_environment_v1"
@@ -5055,6 +5423,9 @@ class InterpretationOrchestrator(InterpretationEngineBase):
         self.consistency = ConsistencyEngine()
         self.canonical = CanonicalizationEngine()
         self.provider_context = ProviderContextPlanEngine()
+        self.obligations = ObligationEngine()
+        self.visual_memory = VisualMemoryEngine()
+        self.semantic_sync = SemanticSynchronizationEngine()
 
     def run(
         self,
@@ -5142,6 +5513,21 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             text, semantic_measurement=measurement, intent=intent,
             current_turn=current_turn
         )
+        obligations = self.obligations.analyze(
+            text, state=state, task=task, history=history
+        )
+        visual_memory = self.visual_memory.analyze(
+            state=state, memory=memory, entity=entity, text=text
+        )
+        # An obligation can explicitly request a representation after its trigger.
+        # This is a semantic override, not a hard-coded fireworks/image rule.
+        triggered = obligations.get("triggered") or []
+        if triggered and any(item.get("representation") for item in triggered):
+            representation = dict(representation)
+            representation["representation"] = triggered[0].get("representation") or representation.get("representation")
+            representation["explicit"] = True
+            representation["source"] = "triggered_obligation"
+            representation["obligation_id"] = triggered[0].get("id")
         strategy = self.strategy.analyze(
             text, relation=relation, intent=intent, task=task,
             continuity=continuity, representation=representation, knowledge=knowledge
@@ -5160,6 +5546,11 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             knowledge=knowledge,
             representation=representation,
             history_search=history_search,
+        )
+        semantic_sync = self.semantic_sync.build(
+            current_turn=current_turn, arbitration=arbitration, topic=topic, task=task,
+            entity=entity, reference=reference, representation=representation,
+            obligations=obligations, visual_memory=visual_memory, memory=memory, continuity=continuity
         )
         consistency = self.consistency.validate(
             current_turn=current_turn,
@@ -5209,6 +5600,9 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             history_search=history_search,
         )
         canonical["provider_context_plan"] = provider_context_plan
+        canonical["obligations"] = obligations
+        canonical["visual_memory"] = visual_memory
+        canonical["semantic_synchronization"] = semantic_sync
 
         workspace = {
             "version": self.VERSION,
@@ -5231,6 +5625,9 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             "knowledge_source": knowledge,
             "representation_decision": representation,
             "response_strategy": strategy,
+            "obligations": obligations,
+            "visual_memory": visual_memory,
+            "semantic_synchronization": semantic_sync,
             "arbitration": arbitration,
             "consistency": consistency,
             "canonical": canonical,
@@ -6155,6 +6552,15 @@ class QuantumInterpretationEngine:
         state = state if isinstance(state, dict) else {}
         history = history if isinstance(history, list) else []
 
+        # Explicit future commitments are semantic state, not renderer state.
+        # Keep them outside the current topic/task so a task replacement cannot
+        # accidentally erase a promise that must be fulfilled later.
+        detected_obligations = extract_dialogue_obligations(text)
+        if detected_obligations:
+            state["dialogue_obligations"] = merge_dialogue_obligations(
+                state.get("dialogue_obligations"), detected_obligations
+            )
+
         started = time.perf_counter()
 
         # ------------------------------------------------------------------
@@ -7049,9 +7455,21 @@ class QuantumInterpretationEngine:
 
         # Machine-facing state is explicitly task-aware so that the next layer
         # cannot accidentally resurrect a stale entity.
+        dialogue_obligations = merge_dialogue_obligations(
+            state.get("dialogue_obligations"),
+            open_task.get("obligations") if isinstance(open_task, dict) else [],
+        )
+        if dialogue_obligations:
+            state["dialogue_obligations"] = dialogue_obligations
+            if isinstance(open_task, dict) and open_task.get("active"):
+                open_task = dict(open_task)
+                open_task["obligations"] = dialogue_obligations
+                active_task_contract["obligations"] = dialogue_obligations
+
         result["active_task"] = active_task_contract
         result["open_task"] = open_task
         result["interactive_task_state"] = open_task
+        result["dialogue_obligations"] = dialogue_obligations
         result["task_memory"] = {
             "last_question": open_task.get("last_question"),
             "known_clues": list(open_task.get("known_clues") or [])[-12:],
@@ -7149,6 +7567,26 @@ class QuantumInterpretationEngine:
             resolved_live_task if resolved_live_task.get("active")
             else env_task
         )
+
+        # The cognitive council can author a new task while the legacy dialogue
+        # environment still exposes the previous active task. Reconcile that
+        # split before the final canonical handoff. Obligations live outside the
+        # task lifecycle, so they survive task replacement and continue to be
+        # available to Executor/Provider until explicitly fulfilled.
+        task_transition_final = result.get("task_transition") if isinstance(result.get("task_transition"), dict) else {}
+        council_task_final = cognitive_environment.get("active_task_context") if isinstance(cognitive_environment.get("active_task_context"), dict) else {}
+        if task_transition_final.get("replace_task") and council_task_final:
+            effective_env_task = dict(council_task_final)
+        final_obligations = merge_dialogue_obligations(
+            state.get("dialogue_obligations"),
+            result.get("dialogue_obligations"),
+            effective_env_task.get("obligations") if isinstance(effective_env_task, dict) else [],
+        )
+        if final_obligations:
+            effective_env_task = dict(effective_env_task or {})
+            effective_env_task["obligations"] = final_obligations
+            state["dialogue_obligations"] = final_obligations
+
         if dialogue_environment.get("relation") in {"NEW", "CONTINUE", "RECALL"}:
             workspace["turn_relation"] = dialogue_environment.get("turn_relation")
             workspace["relation"] = dialogue_environment.get("relation")
@@ -7163,10 +7601,26 @@ class QuantumInterpretationEngine:
                 or effective_env_task.get("candidate_answer")
                 or effective_env_task.get("target")
             )
+
+            # For an explicitly replaced task, never let a stale entity/topic
+            # from the previous branch overwrite the new task frame.
+            if task_transition_final.get("replace_task") and effective_env_task:
+                workspace["active_topic"] = self.normalize(
+                    effective_env_task.get("topic")
+                    or effective_env_task.get("canonical_topic")
+                    or workspace.get("active_topic")
+                    or "задание"
+                )
+                workspace["active_entity"] = self.normalize(
+                    effective_env_task.get("target")
+                    or effective_env_task.get("candidate_answer")
+                    or ""
+                )
             workspace["operation"] = self.normalize(dialogue_environment.get("operation") or workspace.get("operation") or "answer")
             workspace["goal"] = self.normalize(dialogue_environment.get("goal") or workspace.get("goal") or "answer")
             workspace["representation"] = self.normalize(dialogue_environment.get("representation") or workspace.get("representation") or "text")
             workspace["active_task_context"] = effective_env_task
+            workspace["dialogue_obligations"] = final_obligations
             workspace["previous_user_turn"] = self.normalize(dialogue_environment.get("previous_user_turn"))
             workspace["previous_april_turn"] = self.normalize(dialogue_environment.get("previous_april_turn"))
             workspace["resolved_request"] = self.normalize(dialogue_environment.get("resolved_request") or text)
@@ -7317,9 +7771,11 @@ class QuantumInterpretationEngine:
                 "selected_memory_operand": result.get("selected_memory_operand") or {},
                 "selected_memory_index": result.get("selected_memory_index", -1),
             })
+            contract["dialogue_obligations"] = final_obligations
             result["dialogue_contract"] = contract
             result["interactive_task_state"] = workspace.get("active_task_context") or {}
             result["open_task"] = workspace.get("active_task_context") or {}
+            result["dialogue_obligations"] = final_obligations
             result["task_active"] = bool(workspace.get("task_continuation"))
 
             vector = result.get("dialogue_vector") if isinstance(result.get("dialogue_vector"), dict) else {}
@@ -8194,6 +8650,18 @@ class DialogCognitiveWorkspace:
             add(required, "REQUEST_IDENTIFIERS", identifiers[:12], 0.96, "named_contract_entities", True)
         if task_active:
             add(required, "ACTIVE_TASK", self._task_digest(raw_task), 0.97, "active_task_owner", True)
+
+        obligations = merge_dialogue_obligations(
+            state.get("dialogue_obligations"),
+            raw_task.get("obligations") if isinstance(raw_task, dict) else [],
+        )
+        if obligations:
+            relevant = [
+                item for item in obligations
+                if item.get("status") not in {"fulfilled", "cancelled"}
+            ][-6:]
+            if relevant:
+                add(required if task_active else optional, "ACTIVE_OBLIGATIONS", relevant, 0.965, "explicit_future_commitment", task_active)
 
         if continuation or reference or task_active:
             add(required if (continuation or reference) else optional, "DIALOGUE_ANCHOR", {
