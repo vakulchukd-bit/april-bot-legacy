@@ -1658,6 +1658,46 @@ class ProcessorScene:
         answer = _text(machine_payload.get("answer") or machine_payload.get("content"))
         if not answer:
             raise RuntimeError("EMPTY_PROVIDER_ANSWER")
+
+        # Transport invariant: a human-visible answer must never be represented
+        # by an empty text block. Some provider payloads contain a valid answer
+        # at the MachineResponse level but an empty/partial companion text block.
+        # Hydrate that canonical block from the already-validated answer instead
+        # of letting the Web create an empty assistant bubble.
+        text_like_types = {"text", "markdown"}
+        text_block_found = False
+        hydrated_blocks = []
+        for block in list(blocks or []):
+            item = dict(block) if isinstance(block, dict) else {}
+            kind = _text(
+                item.get("type") or item.get("artifact_type") or item.get("representation") or ""
+            ).lower()
+            if kind in text_like_types:
+                content = _text(item.get("content") or item.get("text") or item.get("answer"))
+                if not content:
+                    item["type"] = "text"
+                    item["renderer"] = "MessageTextBlock"
+                    item["viewer"] = "MessageTextBlock"
+                    item["content"] = answer
+                    item["text"] = answer
+                    item["human_visible"] = True
+                    item["scene_contract"] = True
+                    item["text_recovered_from_answer"] = True
+                    item["recovery_reason"] = "provider_text_block_empty_but_machine_answer_present"
+                text_block_found = True
+            hydrated_blocks.append(item)
+
+        blocks = hydrated_blocks
+
+        # When text is part of the processor-owned output plan, guarantee one
+        # visible text carrier even if the provider emitted only structured blocks.
+        expected_outputs = {
+            _text(x).lower() for x in list(request.requested_outputs or [])
+            if _text(x)
+        }
+        if answer and "text" in expected_outputs and not text_block_found:
+            blocks.insert(0, self._text_block(answer))
+
         if not blocks:
             blocks = [self._text_block(answer)]
 
