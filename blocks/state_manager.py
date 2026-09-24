@@ -3140,6 +3140,12 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "dialogue_sequence_id": str(contract.get("dialogue_sequence_id") or identity_scope.get("dialogue_sequence_id") or ""),
         "sequence_turn_index": int(contract.get("sequence_turn_index") or 0),
         "active_task": deepcopy(contract.get("active_task") or {}),
+        "dialogue_obligations": deepcopy(
+            contract.get("dialogue_obligations")
+            or _dict(contract.get("dialogue_state")).get("dialogue_obligations")
+            or state_obj.get("dialogue_obligations")
+            or []
+        ),
         "dialogue_state": deepcopy(contract.get("dialogue_state") or {}),
         "authenticated_scope": deepcopy(identity_scope or {"user_id": str(user_id), "conversation_id": conversation_id}),
         "active_scene": str(contract.get("active_scene") or ""),
@@ -3262,6 +3268,12 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "sequence_turn_index": int(contract.get("sequence_turn_index") or active_sequence.get("turn_count") or 0),
         "authenticated_scope": deepcopy(contract.get("authenticated_scope") or {"user_id": str(user_id), "conversation_id": conversation_id}),
         "active_task": deepcopy(contract.get("active_task") or state_obj.get("interactive_task_state") or {}),
+        "dialogue_obligations": deepcopy(
+            contract.get("dialogue_obligations")
+            or _dict(contract.get("metadata")).get("dialogue_obligations")
+            or state_obj.get("dialogue_obligations")
+            or []
+        ),
         "scene_type": str(contract.get("active_scene") or "dialogue"),
         "topic": safe_trim_text(
             (
@@ -3374,6 +3386,7 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
             or active_sequence.get("interactive_task_state")
             or {}
         ),
+        "dialogue_obligations": deepcopy(state_obj.get("dialogue_obligations") or []),
         "updated_at": time.time(),
         "live_scene": {
             "scene_id": scene_id,
