@@ -60,6 +60,7 @@ pandas
 # Required by C_APRIL_IMAGES_GENERATOR / Diffusers single-backend route.
 diffusers
 torch
+torchvision
 
 # === Semantic Interpretation Stack ===
 sentence-transformers
