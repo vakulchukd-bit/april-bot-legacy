@@ -224,6 +224,11 @@ def build_default_state():
         "current_object": None,
         "current_topic": None,
         "active_entity": None,
+        "user_profile": {
+            "name": "",
+            "name_source": "",
+            "updated_at": None,
+        },
         # Canonical interactive task owner, separate from generic topic/entity state.
         "interactive_task_state": {},
         "open_task": {},
@@ -1566,6 +1571,13 @@ def get_state(user_id):
                 safe_state_log(f"NEW STATE: {key}")
 
         state[key]["user_id"] = key
+        profile = state[key].get("user_profile")
+        if not isinstance(profile, dict):
+            profile = {}
+        profile.setdefault("name", "")
+        profile.setdefault("name_source", "")
+        profile.setdefault("updated_at", None)
+        state[key]["user_profile"] = profile
         if not state[key].get("conversation_id"):
             state[key]["conversation_id"] = (
                 f"april-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:24]}"
