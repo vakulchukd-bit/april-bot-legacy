@@ -51,6 +51,7 @@
 # =====================================================
 
 from blocks.room_protocol import Room
+from typing import Optional
 from blocks.C_ARTIFACT_CONTRACT import (
     MachineRequest,
     MachineResponse,
@@ -84,6 +85,7 @@ from blocks.science_room import (
 
 import time
 import re
+from copy import deepcopy
 
 # =====================================================
 # 🔥 C ROOMS
@@ -561,30 +563,99 @@ def select_professional_rooms(context):
 class ImageGenerateRoom(Room):
 
     name = "image_generate"
-
     room_type = "visual_generation"
+    artifact_type = "image"
+
+    def _machine_request(self, context):
+        value = context.get("machine_request") if isinstance(context, dict) else None
+        return value if isinstance(value, MachineRequest) else None
+
+    def _semantic_route(self, context):
+        semantic = context.get("semantic") if isinstance(context, dict) else {}
+        return semantic if isinstance(semantic, dict) else {}
 
     def can_handle(
         self,
         text,
         context
     ):
+        """Use the Interpretation-selected representation as the primary signal.
 
-        return detect_image_signal(
-            text
-        )
+        Lexical detection remains only as a legacy compatibility fallback. The
+        canonical Executor path supplies ``machine_request`` + semantic route
+        data, so a continuation such as "нарисуй это иначе" does not need the
+        room to reinterpret the user's words.
+        """
+        semantic = self._semantic_route(context)
+
+        representation = str(
+            semantic.get("representation")
+            or semantic.get("type")
+            or ""
+        ).strip().lower()
+
+        operation = str(
+            semantic.get("operation")
+            or ""
+        ).strip().lower()
+
+        visual_mode = str(
+            semantic.get("visual_production_mode")
+            or semantic.get("production_mode")
+            or ""
+        ).strip().lower()
+
+        route_room = str(
+            semantic.get("room")
+            or ""
+        ).strip().lower()
+
+        if route_room == self.name:
+            return True
+
+        if representation in {"image", "gallery"} and visual_mode in {"", "image_generation", "image"}:
+            if operation in {"build", "generate", "create", "visualize", "transform", "modify", "redraw"}:
+                return True
+
+        request = self._machine_request(context)
+        if request is not None:
+            request_type = str(
+                (request.intent or {}).get("type")
+                or ""
+            ).strip().lower()
+            if request_type in {"image", "gallery"} and visual_mode != "image_present":
+                return True
+
+        return detect_image_signal(text)
 
     def evaluate(
         self,
         text,
         context
     ):
+        semantic = self._semantic_route(context)
+        representation = str(
+            semantic.get("representation")
+            or semantic.get("type")
+            or ""
+        ).strip().lower()
+        operation = str(semantic.get("operation") or "").strip().lower()
+        visual_mode = str(
+            semantic.get("visual_production_mode")
+            or semantic.get("production_mode")
+            or ""
+        ).strip().lower()
 
-        if detect_image_signal(
-            text
-        ):
+        if str(semantic.get("room") or "").strip().lower() == self.name:
+            return 1.0
 
-            return 0.92
+        if representation in {"image", "gallery"} and visual_mode == "image_generation":
+            return 1.0
+
+        if representation == "image" and operation in {
+            "build", "generate", "create", "visualize", "transform", "modify", "redraw"
+        }:
+            return 0.98
 
         return 0.0
 
@@ -595,81 +666,92 @@ class ImageGenerateRoom(Room):
         context,
         run
     ):
+        safe_rooms_log("IMAGE GENERATE START")
 
-        safe_rooms_log(
-            "IMAGE GENERATE START"
-        )
+        state = get_state(context)
+        request = self._machine_request(context)
+        semantic = self._semantic_route(context)
 
-        state = get_state(
-            context
-        )
-
-        if is_image_locked(
-            state
-        ):
-
+        if is_image_locked(state):
             return {
-
                 "type": "text",
-
-                "data":
-                    "⏳ Уже генерирую изображение..."
+                "data": "⏳ Уже генерирую изображение..."
             }
 
-        state[
-            "image_locked"
-        ] = True
+        state["image_locked"] = True
 
         try:
+            # Preserve the authenticated raw request and the resolved semantic
+            # request separately.  The resolved request/spec is used for the
+            # generator; the raw request stays in the route contract for
+            # dialogue continuity and diagnostics.
+            raw_request = str(
+                context.get("current_user_request")
+                or text
+                or ""
+            ).strip()
+
+            semantic_request = str(
+                context.get("semantic_request")
+                or semantic.get("semantic_request")
+                or ""
+            ).strip()
+
+            prompt = semantic_request or raw_request
+
+            image_spec = context.get("image_generation_spec")
+            if not isinstance(image_spec, dict):
+                image_spec = None
+
+            # Keep the entire request context available to the engine, but do
+            # not pass the live StateManager object through the artifact
+            # contract itself.
+            engine_context = {
+                "semantic": deepcopy(semantic),
+                "dialogue_contract": deepcopy(context.get("dialogue_contract") or {}),
+                "dialogue_vector": deepcopy(context.get("dialogue_vector") or {}),
+                "visual_context": deepcopy(context.get("visual_context") or {}),
+                "provider_metadata": deepcopy(context.get("provider_metadata") or {}),
+                "current_user_request": raw_request,
+                "semantic_request": semantic_request,
+                "request_id": str(getattr(request, "request_id", "") or ""),
+            }
 
             result = await run(
-
-                get_chat_id(
-    context
-),
-
+                get_chat_id(context),
                 image_generate(
-
                     user_id,
-                    text,
-                    state
+                    prompt,
+                    state,
+                    spec=image_spec,
+                    context=engine_context,
                 )
             )
 
-            if (
-                result
-                and result.get(
-                    "type"
-                ) == "image"
-            ):
+            if isinstance(result, dict):
+                if result.get("type") == "image":
+                    state["last_image_prompt"] = str(
+                        result.get("prompt") or prompt
+                    ).strip()
+                    mark_generation_time(state)
+                    safe_rooms_log("IMAGE GENERATE SUCCESS")
+                    return result
 
-                state[
-                    "last_image_prompt"
-                ] = text
-
-                mark_generation_time(
-                    state
-                )
-
-                safe_rooms_log(
-                    "IMAGE GENERATE SUCCESS"
-                )
-
+                # Preserve backend diagnostics in the machine response without
+                # turning them into the human-facing provider answer.
+                result.setdefault("room_route", "rooms_registry.image_generate")
+                result.setdefault("artifact_route", "C_ARTIFACT_CONTRACT")
                 return result
 
             return {
-
                 "type": "error",
-
-                "data":
-                    "🎨 Ошибка генерации"
+                "data": "🎨 Ошибка генерации",
+                "error": "ROOM_IMAGE_RESULT_INVALID",
+                "room_route": "rooms_registry.image_generate",
             }
 
         finally:
-
-            unlock_image(
-                state
-            )
+            unlock_image(state)
 
 
 # =====================================================
@@ -1658,6 +1740,216 @@ def _registry_merge_response_payload(target, source):
                 pass
 
     return target
+
+
+def _registry_route_target(machine_request: MachineRequest, state: dict) -> str:
+    """Resolve the concrete visual room from already-authorized semantics.
+
+    This function is intentionally deterministic: it does not reinterpret
+    user text or compete with Interpretation. It only maps the locked
+    representation/operation to a registered room.
+    """
+    intent = dict(getattr(machine_request, "intent", {}) or {})
+    attributes = intent.get("attributes") if isinstance(intent.get("attributes"), dict) else {}
+    representation = str(
+        intent.get("type")
+        or ""
+    ).strip().lower()
+    operation = str(
+        intent.get("operation")
+        or ""
+    ).strip().lower()
+    visual_mode = str(
+        attributes.get("visual_production_mode")
+        or ""
+    ).strip().lower()
+
+    if representation in {"image", "gallery"}:
+        active_image = bool(
+            isinstance(state, dict)
+            and (
+                state.get("image_current")
+                or state.get("image_context")
+                or state.get("active_visual_scene")
+            )
+        )
+        if operation in {"modify", "transform", "redraw", "edit"} and active_image:
+            return "image_edit"
+        if visual_mode in {"image_generation", "image"} or operation in {
+            "build", "generate", "create", "visualize", "modify", "transform", "redraw"
+        }:
+            return "image_generate"
+
+    return ""
+
+
+async def registry_route_machine_request(
+    machine_request: MachineRequest,
+    route_contract: UniversalArtifactContract,
+    *,
+    user_id: str,
+    chat_id=None,
+    state: Optional[dict] = None,
+    provider_response: Optional[MachineResponse] = None,
+    run=None,
+):
+    """Canonical Executor -> C-ARTIFACT -> Room Register entrypoint.
+
+    Provider remains responsible for the single semantic/dialogue call.  The
+    resulting image-generation plan is transported in a C-ARTIFACT envelope,
+    resolved here to a registered room, and executed by that room.  Executor
+    never imports or calls C_APRIL_IMAGES_GENERATOR.
+    """
+    request = machine_request
+    state = state if isinstance(state, dict) else {}
+
+    target_room = _registry_route_target(request, state)
+    if not target_room:
+        return MachineResponse()
+
+    room = next(
+        (
+            candidate for candidate in ROOMS
+            if str(getattr(candidate, "name", "")).strip().lower() == target_room
+        ),
+        None,
+    )
+    if room is None:
+        response = MachineResponse()
+        response.metadata.update({
+            "room_route_status": "missing_room",
+            "room_route": f"rooms_registry.{target_room}",
+            "artifact_route": "C_ARTIFACT_CONTRACT",
+        })
+        return response
+
+    intent = dict(getattr(request, "intent", {}) or {})
+    attributes = intent.get("attributes") if isinstance(intent.get("attributes"), dict) else {}
+    route_context = getattr(route_contract, "payload", None)
+    payload_context = getattr(route_context, "context", {}) if route_context is not None else {}
+    payload_context = payload_context if isinstance(payload_context, dict) else {}
+
+    provider_metadata = {}
+    if provider_response is not None:
+        provider_metadata = dict(getattr(provider_response, "metadata", {}) or {})
+
+    spec = provider_metadata.get("image_generation_spec")
+    if not isinstance(spec, dict):
+        specs = provider_metadata.get("image_generation_specs")
+        if isinstance(specs, list):
+            spec = next((item for item in specs if isinstance(item, dict)), None)
+
+    semantic = {
+        "room": target_room,
+        "intent": "image_generate" if target_room == "image_generate" else "image_edit",
+        "representation": str(intent.get("type") or "image").lower(),
+        "operation": str(intent.get("operation") or "").lower(),
+        "goal": str(intent.get("goal") or "").lower(),
+        "visual_production_mode": str(
+            attributes.get("visual_production_mode")
+            or ""
+        ).lower(),
+        "object": str(intent.get("object") or ""),
+        "topic": str(
+            intent.get("topic")
+            or (
+                (request.dialogue_contract or {}).get("canonical_topic")
+                if hasattr(request, "dialogue_contract")
+                and isinstance(getattr(request, "dialogue_contract", None), dict)
+                else ""
+            )
+            or ""
+        ),
+    }
+
+    current_request = str(
+        payload_context.get("current_user_request")
+        or getattr(request, "conversation", {}).get("current_request", "")
+        or ""
+    ).strip()
+
+    semantic_request = str(
+        payload_context.get("semantic_request")
+        or intent.get("semantic_request")
+        or getattr(request, "conversation", {}).get("resolved_request", "")
+        or ""
+    ).strip()
+
+    context = {
+        "machine_request": request,
+        "route_contract": route_contract,
+        "state": state,
+        "chat_id": chat_id,
+        "semantic": semantic,
+        "current_user_request": current_request,
+        "semantic_request": semantic_request,
+        "dialogue_contract": deepcopy(
+            getattr(request, "conversation", {}).get("dialogue_contract", {})
+            if isinstance(getattr(request, "conversation", {}), dict)
+            else {}
+        ),
+        "dialogue_vector": deepcopy(
+            getattr(request, "conversation", {}).get("dialogue_vector", {})
+            if isinstance(getattr(request, "conversation", {}), dict)
+            else {}
+        ),
+        "visual_context": deepcopy(getattr(request, "visual_context", {}) or {}),
+        "provider_metadata": deepcopy(provider_metadata),
+        "image_generation_spec": deepcopy(spec) if isinstance(spec, dict) else None,
+        "memory": deepcopy(getattr(request, "memory", {}) or {}),
+        "conversation": deepcopy(getattr(request, "conversation", {}) or {}),
+    }
+
+    async def _run(coro):
+        if run is not None:
+            return await run(chat_id, coro)
+        return await coro
+
+    try:
+        if not room.can_handle(current_request, context):
+            response = MachineResponse()
+            response.metadata.update({
+                "room_route_status": "rejected_by_room",
+                "room_route": f"rooms_registry.{target_room}",
+                "artifact_route": "C_ARTIFACT_CONTRACT",
+            })
+            return response
+
+        result = await room.handle(
+            user_id,
+            current_request,
+            context,
+            _run,
+        )
+        response = registry_parent_dispatch(
+            request,
+            [result],
+        )
+        response.metadata = dict(getattr(response, "metadata", {}) or {})
+        response.metadata.update({
+            "room_route_status": "completed",
+            "room_route": f"rooms_registry.{target_room}",
+            "room_name": getattr(room, "name", target_room),
+            "artifact_route": "C_ARTIFACT_CONTRACT",
+            "route_contract_stage": getattr(
+                getattr(route_contract, "transport", None),
+                "pipeline_stage",
+                "artifact_route",
+            ),
+            "semantic_authority": "INTERPRETATION",
+            "provider_calls_added": 0,
+        })
+        return response
+
+    except Exception as exc:
+        response = MachineResponse()
+        response.metadata.update({
+            "room_route_status": "failed",
+            "room_route": f"rooms_registry.{target_room}",
+            "artifact_route": "C_ARTIFACT_CONTRACT",
+            "room_error": str(exc),
+        })
+        return response
 
 
 def registry_accept_request(request: MachineRequest)->MachineRequest:
