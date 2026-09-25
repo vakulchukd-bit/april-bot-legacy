@@ -43,11 +43,6 @@ try:
 except Exception:  # pragma: no cover
     torch = None
 
-try:
-    from compel import Compel, ReturnedEmbeddingsType
-except Exception:  # pragma: no cover
-    Compel = None
-    ReturnedEmbeddingsType = None
 
 
 @dataclass
@@ -66,7 +61,7 @@ class AprilImagesGenerator:
     """The only image producer between Interpretation and C_ARTIFACT."""
 
     ENGINE_NAME = "April Images Generation"
-    ENGINE_VERSION = "2.1.0"
+    ENGINE_VERSION = "2.2.0"
     BACKEND = "diffusers_single_backend"
 
     DEFAULT_SIZE = (1024, 1024)
@@ -78,8 +73,6 @@ class AprilImagesGenerator:
     _edit_pipeline = None
     _pipeline_path = None
     _pipeline_cache_key = None
-    _compel_processor = None
-    _compel_cache_key = None
 
     def __init__(self) -> None:
         self.engine_name = self.ENGINE_NAME
@@ -316,78 +309,284 @@ class AprilImagesGenerator:
             return cls._edit_pipeline
 
     @classmethod
+    def _token_ids_for_long_prompt(cls, tokenizer: Any, text: str) -> list[int]:
+        """Return raw token ids without truncation.
+
+        The 77-token value exposed by CLIP is the native size of one encoder
+        window. It is not an April/OpenAI prompt budget. We split an arbitrarily
+        long prompt into native windows and encode every window separately.
+        No April-side maximum is imposed here.
+        """
+        try:
+            return list(
+                tokenizer.encode(
+                    str(text or ""),
+                    add_special_tokens=False,
+                    truncation=False,
+                )
+            )
+        except Exception as exc:
+            raise RuntimeError("APRIL_IMAGES_TOKENIZATION_FAILED") from exc
+
+    @classmethod
+    def _prompt_chunks(
+        cls,
+        tokenizer: Any,
+        text: str,
+    ) -> list[list[int]]:
+        """Split raw token ids into native tokenizer windows without loss.
+
+        Each window reserves its BOS/EOS slots. The tokenizer/encoder's own
+        ``model_max_length`` defines the size of a single native window; there
+        is deliberately no additional April/OpenAI token cap.
+        """
+        model_max = getattr(tokenizer, "model_max_length", None)
+        try:
+            model_max = int(model_max)
+        except (TypeError, ValueError):
+            model_max = None
+
+        if not model_max or model_max <= 2:
+            config = getattr(getattr(tokenizer, "init_kwargs", {}), "get", lambda *_: None)(
+                "model_max_length"
+            )
+            try:
+                model_max = int(config)
+            except (TypeError, ValueError):
+                model_max = None
+
+        if not model_max or model_max <= 2:
+            raise RuntimeError("APRIL_IMAGES_TOKENIZER_MAX_LENGTH_UNAVAILABLE")
+
+        bos_id = getattr(tokenizer, "bos_token_id", None)
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+        pad_id = getattr(tokenizer, "pad_token_id", None)
+        if bos_id is None:
+            bos_id = getattr(tokenizer, "cls_token_id", None)
+        if eos_id is None:
+            eos_id = getattr(tokenizer, "sep_token_id", None)
+        if pad_id is None:
+            pad_id = eos_id if eos_id is not None else 0
+
+        if bos_id is None or eos_id is None:
+            raise RuntimeError("APRIL_IMAGES_SPECIAL_TOKENS_UNAVAILABLE")
+
+        raw_ids = cls._token_ids_for_long_prompt(tokenizer, text)
+        chunk_body = model_max - 2
+        chunks: list[list[int]] = []
+
+        if not raw_ids:
+            raw_ids = []
+
+        for start in range(0, len(raw_ids), chunk_body):
+            body = raw_ids[start:start + chunk_body]
+            ids = [int(bos_id), *map(int, body), int(eos_id)]
+            ids.extend([int(pad_id)] * (model_max - len(ids)))
+            chunks.append(ids)
+
+        if not chunks:
+            chunks.append([int(bos_id), int(eos_id)] + [int(pad_id)] * (model_max - 2))
+
+        return chunks
+
+    @classmethod
+    def _encode_text_encoder_chunks(
+        cls,
+        tokenizer: Any,
+        text_encoder: Any,
+        text: str,
+        *,
+        device: Any,
+    ) -> tuple[Any, Any, int]:
+        """Encode every native CLIP window and concatenate hidden states.
+
+        Returns ``(hidden_states, pooled_embedding, raw_token_count)``.
+        ``pooled_embedding`` is the mean of the native-window pooled vectors;
+        this preserves information from every window instead of truncating to
+        the first 77 tokens.
+        """
+        raw_ids = cls._token_ids_for_long_prompt(tokenizer, text)
+        raw_token_count = len(raw_ids)
+        chunks = cls._prompt_chunks(tokenizer, text)
+        pad_id = getattr(tokenizer, "pad_token_id", None)
+        if pad_id is None:
+            pad_id = getattr(tokenizer, "eos_token_id", 0)
+
+        if torch is None:
+            raise RuntimeError("APRIL_IMAGES_TORCH_NOT_INSTALLED")
+
+        input_ids = torch.tensor(chunks, dtype=torch.long, device=device)
+        attention_mask = (input_ids != int(pad_id)).long()
+
+        with torch.inference_mode():
+            outputs = text_encoder(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+
+        hidden_states = getattr(outputs, "hidden_states", None)
+        if hidden_states:
+            hidden = hidden_states[-2]
+        else:
+            hidden = getattr(outputs, "last_hidden_state", None)
+            if hidden is None:
+                raise RuntimeError("APRIL_IMAGES_TEXT_ENCODER_HIDDEN_STATE_MISSING")
+
+        pooled = getattr(outputs, "text_embeds", None)
+        if pooled is None:
+            pooled = getattr(outputs, "pooler_output", None)
+        if pooled is None:
+            try:
+                candidate = outputs[0]
+            except Exception:
+                candidate = None
+            if candidate is not None and getattr(candidate, "ndim", 0) == 2:
+                pooled = candidate
+
+        if pooled is not None and getattr(pooled, "ndim", 0) >= 2:
+            pooled = pooled.mean(dim=0, keepdim=True)
+
+        # ``model_max`` is returned for diagnostics; the actual prompt length
+        # can grow without an April-side maximum because more native windows
+        # are simply concatenated.
+        return hidden, pooled, raw_token_count
+
+    @classmethod
+    def _pad_sequence_length(cls, tensor: Any, target_length: int) -> Any:
+        if tensor is None:
+            return None
+        current = int(tensor.shape[1])
+        if current >= target_length:
+            return tensor
+        if torch is None:
+            raise RuntimeError("APRIL_IMAGES_TORCH_NOT_INSTALLED")
+        pad = torch.zeros(
+            (tensor.shape[0], target_length - current, tensor.shape[2]),
+            dtype=tensor.dtype,
+            device=tensor.device,
+        )
+        return torch.cat([tensor, pad], dim=1)
+
+    @classmethod
     def _long_prompt_kwargs(
         cls,
         pipeline: Any,
         prompt: str,
         negative_prompt: str,
     ) -> dict[str, Any]:
-        """Build long-prompt embeddings without imposing an April-side token cap.
+        """Encode long prompts without imposing an April/OpenAI token cap.
 
-        SDXL/CLIP uses 77-token chunks natively.  That is a property of the
-        underlying text encoder, not an OpenAI/April input budget.  Compel
-        handles long prompts by chunking the text and returning the embeddings
-        directly to Diffusers, so the full semantic prompt survives intact.
+        SDXL's CLIP encoders operate on native 77-token windows. That value is
+        a backend window size, not a request limit. This implementation uses
+        every native window and concatenates their hidden states before calling
+        Diffusers. No Compel dependency and no prompt truncation are required.
         """
-        if Compel is None or ReturnedEmbeddingsType is None:
-            raise RuntimeError("APRIL_IMAGES_COMPEL_NOT_INSTALLED")
+        if torch is None:
+            raise RuntimeError("APRIL_IMAGES_TORCH_NOT_INSTALLED")
 
-        tokenizer_2 = getattr(pipeline, "tokenizer_2", None)
-        text_encoder_2 = getattr(pipeline, "text_encoder_2", None)
         tokenizer_1 = getattr(pipeline, "tokenizer", None)
+        tokenizer_2 = getattr(pipeline, "tokenizer_2", None)
         text_encoder_1 = getattr(pipeline, "text_encoder", None)
-        device = cls._device()
-
-        if tokenizer_2 is not None and text_encoder_2 is not None and tokenizer_1 is not None and text_encoder_1 is not None:
-            cache_key = f"sdxl::{id(pipeline)}::{device}"
-            if cls._compel_processor is None or cls._compel_cache_key != cache_key:
-                cls._compel_processor = Compel(
-                    tokenizer=[tokenizer_1, tokenizer_2],
-                    text_encoder=[text_encoder_1, text_encoder_2],
-                    returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
-                    requires_pooled=[False, True],
-                    truncate_long_prompts=False,
-                )
-                cls._compel_cache_key = cache_key
-
-            conditioning, pooled = cls._compel_processor(prompt)
-            negative_conditioning, negative_pooled = cls._compel_processor(negative_prompt or "")
-            conditioning, negative_conditioning = cls._compel_processor.pad_conditioning_tensors_to_same_length(
-                [conditioning, negative_conditioning]
-            )
-            return {
-                "prompt_embeds": conditioning,
-                "negative_prompt_embeds": negative_conditioning,
-                "pooled_prompt_embeds": pooled,
-                "negative_pooled_prompt_embeds": negative_pooled,
-            }
-
-        tokenizer = tokenizer_1
-        text_encoder = text_encoder_1
-        if tokenizer is None or text_encoder is None:
+        text_encoder_2 = getattr(pipeline, "text_encoder_2", None)
+        if tokenizer_1 is None or text_encoder_1 is None:
             raise RuntimeError("APRIL_IMAGES_TEXT_ENCODER_NOT_AVAILABLE")
 
-        cache_key = f"single::{id(pipeline)}::{device}"
-        if cls._compel_processor is None or cls._compel_cache_key != cache_key:
-            cls._compel_processor = Compel(
-                tokenizer=tokenizer,
-                text_encoder=text_encoder,
-                truncate_long_prompts=False,
-            )
-            cls._compel_cache_key = cache_key
+        execution_device = getattr(pipeline, "_execution_device", None)
+        if execution_device is None:
+            execution_device = cls._device()
+        if not hasattr(execution_device, "type"):
+            execution_device = torch.device(str(execution_device))
 
-        conditioning = cls._compel_processor.build_conditioning_tensor(prompt)
-        negative_conditioning = cls._compel_processor.build_conditioning_tensor(negative_prompt or "")
-        conditioning, negative_conditioning = cls._compel_processor.pad_conditioning_tensors_to_same_length(
-            [conditioning, negative_conditioning]
+        hidden_1, _pooled_1, count_1 = cls._encode_text_encoder_chunks(
+            tokenizer_1, text_encoder_1, prompt, device=execution_device
         )
-        return {
-            "prompt_embeds": conditioning,
-            "negative_prompt_embeds": negative_conditioning,
+        neg_hidden_1, _neg_pooled_1, neg_count_1 = cls._encode_text_encoder_chunks(
+            tokenizer_1, text_encoder_1, negative_prompt or "", device=execution_device
+        )
+
+        if tokenizer_2 is not None and text_encoder_2 is not None:
+            hidden_2, pooled_2, count_2 = cls._encode_text_encoder_chunks(
+                tokenizer_2, text_encoder_2, prompt, device=execution_device
+            )
+            neg_hidden_2, neg_pooled_2, neg_count_2 = cls._encode_text_encoder_chunks(
+                tokenizer_2, text_encoder_2, negative_prompt or "", device=execution_device
+            )
+
+            target_prompt_len = max(int(hidden_1.shape[1]), int(hidden_2.shape[1]))
+            target_negative_len = max(
+                int(neg_hidden_1.shape[1]), int(neg_hidden_2.shape[1])
+            )
+            hidden_1 = cls._pad_sequence_length(hidden_1, target_prompt_len)
+            hidden_2 = cls._pad_sequence_length(hidden_2, target_prompt_len)
+            neg_hidden_1 = cls._pad_sequence_length(neg_hidden_1, target_negative_len)
+            neg_hidden_2 = cls._pad_sequence_length(neg_hidden_2, target_negative_len)
+
+            prompt_embeds = torch.cat([hidden_1, hidden_2], dim=-1)
+            negative_prompt_embeds = torch.cat([neg_hidden_1, neg_hidden_2], dim=-1)
+            pooled_prompt_embeds = pooled_2
+            negative_pooled_prompt_embeds = neg_pooled_2
+
+            prompt_chunks = max(count_1, count_2)
+            negative_chunks = max(neg_count_1, neg_count_2)
+        else:
+            prompt_embeds = hidden_1
+            negative_prompt_embeds = neg_hidden_1
+            pooled_prompt_embeds = None
+            negative_pooled_prompt_embeds = None
+            prompt_chunks = count_1
+            negative_chunks = neg_count_1
+
+        if prompt_embeds is None or negative_prompt_embeds is None:
+            raise RuntimeError("APRIL_IMAGES_PROMPT_EMBEDDINGS_MISSING")
+
+        # Match the positive/negative sequence lengths; there is no maximum
+        # here, only equality required by classifier-free guidance.
+        shared_len = max(
+            int(prompt_embeds.shape[1]),
+            int(negative_prompt_embeds.shape[1]),
+        )
+        prompt_embeds = cls._pad_sequence_length(prompt_embeds, shared_len)
+        negative_prompt_embeds = cls._pad_sequence_length(
+            negative_prompt_embeds, shared_len
+        )
+
+        # Keep embeddings compatible with the pipeline's UNet/text dtype.
+        target_dtype = getattr(getattr(pipeline, "unet", None), "dtype", None)
+        if target_dtype is not None and getattr(prompt_embeds, "is_floating_point", lambda: False)():
+            prompt_embeds = prompt_embeds.to(dtype=target_dtype)
+            negative_prompt_embeds = negative_prompt_embeds.to(dtype=target_dtype)
+            if pooled_prompt_embeds is not None:
+                pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=target_dtype)
+            if negative_pooled_prompt_embeds is not None:
+                negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.to(dtype=target_dtype)
+
+        print(
+            "🧠 IMAGE PROMPT ENCODING:",
+            {
+                "prompt_raw_tokens": count_1 if tokenizer_2 is None else max(count_1, count_2),
+                "negative_raw_tokens": neg_count_1 if tokenizer_2 is None else max(neg_count_1, neg_count_2),
+                "prompt_native_windows": prompt_chunks,
+                "negative_native_windows": negative_chunks,
+                "strategy": "native_clip_window_chunking",
+                "april_openai_prompt_cap": None,
+            },
+        )
+
+        result = {
+            "prompt_embeds": prompt_embeds,
+            "negative_prompt_embeds": negative_prompt_embeds,
         }
+        if pooled_prompt_embeds is not None:
+            result["pooled_prompt_embeds"] = pooled_prompt_embeds
+        if negative_pooled_prompt_embeds is not None:
+            result["negative_pooled_prompt_embeds"] = negative_pooled_prompt_embeds
+        return result
 
     @classmethod
     def _diffusion_image(
+
         cls,
         pipeline: Any,
         prompt: str,
@@ -411,8 +610,8 @@ class AprilImagesGenerator:
             "guidance_scale": guidance,
         }
 
-        # Never silently truncate an image prompt to the OpenAI/provider budget.
-        # Use long-prompt embeddings when the backend exposes a text encoder.
+        # Never truncate an image prompt to the OpenAI/provider budget.
+        # Encode every native backend window and concatenate its embeddings.
         prompt_kwargs = cls._long_prompt_kwargs(pipeline, prompt, negative_prompt)
         kwargs.update(prompt_kwargs)
         if seed is not None and torch is not None:
@@ -701,7 +900,8 @@ class AprilImagesGenerator:
             "local_model_configured": bool(self._model_path()),
             "model_id_configured": bool(os.getenv("APRIL_IMAGES_MODEL_ID", "").strip()),
             "diffusers_available": bool(AutoPipelineForText2Image is not None),
-            "long_prompt_support": bool(Compel is not None),
+            "long_prompt_support": True,
+            "long_prompt_strategy": "native_clip_window_chunking",
             "device": self._device(),
             "dtype": str(self._dtype()) if self._dtype() is not None else None,
             "external_image_api": False,
@@ -781,13 +981,18 @@ class AprilImagesGenerator:
         pipeline = self._load_edit_pipeline()
         steps, guidance = self._quality_settings(quality)
         kwargs: dict[str, Any] = {
-            "prompt": prompt,
             "image": source,
             "strength": max(0.05, min(0.95, float(strength))),
             "num_inference_steps": steps,
             "guidance_scale": guidance,
-            "negative_prompt": self._negative_prompt(),
         }
+        kwargs.update(
+            self._long_prompt_kwargs(
+                pipeline,
+                prompt,
+                self._negative_prompt(),
+            )
+        )
         result = pipeline(**kwargs)
         generated = getattr(result, "images", [None])[0]
         if generated is None:
