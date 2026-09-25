@@ -9,7 +9,6 @@ from pathlib import Path
 # Image creation is owned directly by C_APRIL_IMAGES_GENERATOR.
 from blocks.C_APRIL_IMAGES_GENERATOR import (
     generate_from_spec,
-    generate_image_result,
     edit_image_result,
 )
 from blocks.C_ARTIFACT_CONTRACT import _artifact_canonical_render_blocks
@@ -109,23 +108,32 @@ async def generate(
     both forms terminate in the same C_APRIL_IMAGES_GENERATOR backend.
     """
     try:
-        print("🧠 ENGINE: C_APRIL_IMAGES_GENERATOR ACTIVE")
+        print(
+            "🧠 ENGINE: C_APRIL_IMAGES_GENERATOR ACTIVE",
+            {
+                "route": "rooms_registry.image_generate",
+                "artifact_route": "C_ARTIFACT_CONTRACT",
+                "prompt_source": "april_image_spec_v1",
+                "token_limit_enforced_here": False,
+            },
+        )
 
-        clean_spec = dict(spec) if isinstance(spec, dict) else None
-        if clean_spec:
-            clean_spec.setdefault("schema", "april_image_spec_v1")
-            clean_spec.setdefault("prompt", str(prompt or "").strip())
-            result = await generate_from_spec(
-                clean_spec,
-                variant="room_registry",
-            )
-        else:
-            result = await generate_image_result(
-                prompt=str(prompt or "").strip(),
-                size="1024x1024",
-                quality=str((clean_spec or {}).get("quality") or "standard"),
-                variant="room_registry",
-            )
+        clean_spec = dict(spec) if isinstance(spec, dict) else {
+            "schema": "april_image_spec_v1",
+            "prompt": str(prompt or "").strip(),
+            "width": 1024,
+            "height": 1024,
+            "style": "illustration",
+            "quality": "standard",
+            "visual_context": dict(context) if isinstance(context, dict) else {},
+        }
+        clean_spec.setdefault("schema", "april_image_spec_v1")
+        if not str(clean_spec.get("prompt") or "").strip():
+            clean_spec["prompt"] = str(prompt or "").strip()
+        result = await generate_from_spec(
+            clean_spec,
+            variant="room_registry",
+        )
 
         if not result.get("success") or not result.get("image_bytes"):
             return {
