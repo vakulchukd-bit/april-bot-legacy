@@ -581,10 +581,8 @@ class ImageGenerateRoom(Room):
     ):
         """Use the Interpretation-selected representation as the primary signal.
 
-        Lexical detection remains only as a legacy compatibility fallback. The
-        canonical Executor path supplies ``machine_request`` + semantic route
-        data, so a continuation such as "нарисуй это иначе" does not need the
-        room to reinterpret the user's words.
+        The Room accepts only the Interpretation-selected semantic route. The
+        room never reinterprets raw user text and has no lexical routing fallback.
         """
         semantic = self._semantic_route(context)
 
@@ -626,7 +624,7 @@ class ImageGenerateRoom(Room):
             if request_type in {"image", "gallery"} and visual_mode != "image_present":
                 return True
 
-        return detect_image_signal(text)
+        return False
 
     def evaluate(
         self,
@@ -1896,13 +1894,17 @@ async def registry_route_machine_request(
         "visual_context": deepcopy(getattr(request, "visual_context", {}) or {}),
         "provider_metadata": deepcopy(provider_metadata),
         "image_generation_spec": deepcopy(spec) if isinstance(spec, dict) else None,
+        "route_authority": "INTERPRETATION",
+        "route_stage": "C_ARTIFACT→ROOM_REGISTER→ROOM",
         "memory": deepcopy(getattr(request, "memory", {}) or {}),
         "conversation": deepcopy(getattr(request, "conversation", {}) or {}),
     }
 
-    async def _run(coro):
+    async def _run(room_chat_id, coro):
+        """Adapter for Room callbacks: the room supplies its canonical chat_id."""
+        effective_chat_id = room_chat_id if room_chat_id is not None else chat_id
         if run is not None:
-            return await run(chat_id, coro)
+            return await run(effective_chat_id, coro)
         return await coro
 
     try:
