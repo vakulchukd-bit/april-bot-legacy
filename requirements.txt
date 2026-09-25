@@ -61,6 +61,8 @@ pandas
 diffusers
 torch
 torchvision
+accelerate
+compel>=2.4.0
 
 # === Semantic Interpretation Stack ===
 sentence-transformers
