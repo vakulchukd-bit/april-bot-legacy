@@ -576,6 +576,10 @@ ARTIFACT_RENDERER_ALIASES = {
 
 FACTORY_ROOM_MAP = {
 
+    # Visual generation is a real registered room route.  The image room
+    # delegates concrete raster production to C_APRIL_IMAGES_GENERATOR.
+    "image": "image_generate",
+
     "graph": "C_GRAPH_ROOM",
 
     "formula": "C_FORMULA_ROOM",
@@ -637,6 +641,25 @@ FACTORY_STATUS = {
 # =====================================================
 
 FACTORY_ROOM_PROFILES = {
+    "image": {
+        "room": "image_generate",
+        "artifact_type": "image",
+        "renderer": "GalleryBlock",
+        "viewer": "GalleryBlock",
+        "allowed_renderers": ["GalleryBlock"],
+        "semantic_service": "C_APRIL_IMAGES_GENERATOR",
+        "capabilities": [
+            "image_generation",
+            "visual_scene_generation",
+            "image_continuity",
+            "gallery_rendering",
+        ],
+        "machine_input": "MachineRequest",
+        "machine_output": "BaseArtifact",
+        "scene_output": "SceneContract",
+        "single_route": True,
+        "text_companion_required": True,
+    },
     "diagram": {
         "room": "C_DIAGRAM_ROOM",
         "artifact_type": "diagram",
@@ -817,6 +840,76 @@ def _build_artifact_render_signal(
 # =====================================================
 # CREATE ARTIFACT
 # =====================================================
+
+
+def build_room_route_contract(
+    request: Any,
+    *,
+    origin: str = "executor",
+    destination: str = "rooms_registry",
+    pipeline_stage: str = "artifact_route",
+    context: Optional[Dict[str, Any]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> UniversalArtifactContract:
+    """Build the C-ARTIFACT transport envelope used before room execution.
+
+    This is a routing envelope, not a human-visible artifact.  It carries the
+    already-resolved semantic request, dialogue continuity and provider result
+    into Room Register without asking Executor to call a concrete room/engine.
+    """
+    contract = UniversalArtifactContract()
+
+    transport = contract.transport
+    # TransportContract is intentionally lightweight in this project.  These
+    # attributes are attached dynamically so existing consumers remain compatible.
+    transport.origin = str(origin or "executor")
+    transport.destination = str(destination or "rooms_registry")
+    transport.pipeline_stage = str(pipeline_stage or "artifact_route")
+    transport.route_authority = "INTERPRETATION"
+
+    intent = deepcopy(getattr(request, "intent", {}) or {})
+    conversation = deepcopy(getattr(request, "conversation", {}) or {})
+    memory = deepcopy(getattr(request, "memory", {}) or {})
+    visual_context = deepcopy(getattr(request, "visual_context", {}) or {})
+    routing = deepcopy(getattr(request, "routing", {}) or {})
+    constraints = deepcopy(getattr(request, "constraints", {}) or {})
+    requested_outputs = list(getattr(request, "requested_outputs", []) or [])
+    required_artifacts = list(getattr(request, "required_artifacts", []) or [])
+
+    route_context = deepcopy(context or {})
+    route_context.setdefault("current_user_request", conversation.get("current_request", ""))
+    route_context.setdefault("resolved_request", conversation.get("resolved_request", ""))
+    route_context.setdefault("semantic_request", intent.get("semantic_request", ""))
+    route_context.setdefault("conversation", conversation)
+    route_context.setdefault("memory", memory)
+    route_context.setdefault("visual_context", visual_context)
+
+    contract.payload.intent = intent
+    contract.payload.context = route_context
+    contract.payload.knowledge = memory
+    contract.payload.scene = deepcopy(conversation.get("live_scene") or {})
+    contract.payload.executor_notes = {
+        "request_id": str(getattr(request, "request_id", "") or ""),
+        "goal": str(getattr(request, "goal", "") or ""),
+        "requested_outputs": requested_outputs,
+        "required_artifacts": required_artifacts,
+        "routing": routing,
+        "constraints": constraints,
+        "current_user_request": conversation.get("current_request", ""),
+        "resolved_request": conversation.get("resolved_request", ""),
+        "semantic_authority": "INTERPRETATION",
+        "room_registry": "rooms_registry",
+    }
+    contract.metadata = {
+        "contract_type": "ROOM_ROUTE_ENVELOPE",
+        "route_authority": "INTERPRETATION",
+        "source": str(origin or "executor"),
+        "destination": str(destination or "rooms_registry"),
+        "pipeline_stage": str(pipeline_stage or "artifact_route"),
+        **deepcopy(metadata or {}),
+    }
+
+    return contract
 
 
 def create_artifact(
