@@ -18,6 +18,7 @@ from blocks.C_ARTIFACT_CONTRACT import (
     BaseArtifact,
     create_artifact,
     create_diagram_artifact,
+    build_room_route_contract,
     _artifact_canonical_render_blocks,
 )
 from blocks.april_personality import APRIL_IDENTITY
@@ -28,6 +29,7 @@ from blocks.goal_engine import build_goal_evidence, evaluate_goal_progress
 from blocks.response_decision import build_completion_decision
 from blocks.state_manager import get_state, update_scene_context, persist_state, build_dialogue_memory_bridge
 from blocks.presentation_formatter import canonical_payload_for_block, validate_render_block_payload
+from blocks.rooms_registry import registry_route_machine_request
 
 PROCESSOR_VERSION = "april_sequential_processor_v1_fast_memory_scene"
 PROCESSOR_MODE = "SEQUENTIAL_INTERPRETATION_MEMORY_PROVIDER_SCENE"
@@ -1542,9 +1544,17 @@ class ProcessorScene:
             required_competencies=[intent["operation"], representation],
             routing={
                 "decision_owner": "QUANTUM_PROCESSOR",
-                "route": "provider",
+                "route": (
+                    "artifact_room"
+                    if representation in {"image", "gallery"}
+                    else "provider"
+                ),
                 "single_route": True,
-                "engine": "processor->openai->scene",
+                "engine": (
+                    "processor->openai->c_artifact->rooms_registry->room->scene"
+                    if representation in {"image", "gallery"}
+                    else "processor->openai->scene"
+                ),
             },
             constraints={
                 "one_provider_call": True,
@@ -2174,21 +2184,26 @@ async def _visual_input_context(path: str, request_text: str, state: dict) -> Di
         return {"error": "visual_scan_failed"}
 
 
-async def _materialize_image_if_requested(
+async def _route_image_through_room_registry(
     response: MachineResponse,
     request: MachineRequest,
     state: dict,
     user_id: str,
+    chat_id=None,
+    run_with_activity: Optional[Callable[..., Awaitable[Any]]] = None,
 ) -> None:
-    """Materialize all explicit image/gallery requests through the canonical route.
+    """Route an image request through C-ARTIFACT -> Room Register.
 
-    Interpretation selects the representation; Provider may return either a
-    concrete visual or an image description/spec; Executor turns that semantic
-    decision into one canonical GalleryBlock/SceneContract signal. No renderer
-    implementation is called from Interpretation or Provider.
+    Interpretation owns the representation and dialogue continuity. Provider
+    remains a single semantic call. The Room Register then executes the already
+    authorized image task; concrete raster production stays below the room in
+    C_APRIL_IMAGES_GENERATOR. Executor only merges the room result into the
+    canonical SceneContract stream.
     """
     constraints = request.constraints if isinstance(request.constraints, dict) else {}
-    plan = constraints.get("representation_plan") if isinstance(constraints.get("representation_plan"), dict) else {}
+    plan = constraints.get("representation_plan")
+    plan = plan if isinstance(plan, dict) else {}
+
     representation = _text(request.intent.get("type")).lower()
     requested_outputs = {
         _text(x).lower()
@@ -2200,9 +2215,10 @@ async def _materialize_image_if_requested(
         for x in (plan.get("requested_outputs") or [])
         if _text(x)
     )
-    mode = _text(plan.get("visual_production_mode") or "").lower()
 
-    visual_requested = representation in {"image", "gallery"} or bool({"image", "gallery"} & requested_outputs)
+    visual_requested = representation in {"image", "gallery"} or bool(
+        {"image", "gallery"} & requested_outputs
+    )
     if not visual_requested:
         return
 
@@ -2226,224 +2242,132 @@ async def _materialize_image_if_requested(
                 if isinstance(item, str) and item.strip():
                     return True
                 if isinstance(item, dict):
-                    source = (
-                        item.get("src")
-                        or item.get("url")
-                        or item.get("image_url")
-                        or item.get("image")
-                        or item.get("image_data_uri")
-                        or item.get("image_base64")
-                    )
-                    if source:
+                    if any(
+                        item.get(key)
+                        for key in (
+                            "src", "url", "image", "image_url",
+                            "image_data_uri", "image_base64"
+                        )
+                    ):
                         return True
         return False
 
-    # Concrete provider artifacts are already on the unified render route.
-    concrete_present = False
+    # A true concrete image is already a valid artifact result. Preserve it and
+    # do not run a second image operation.
+    concrete_provider_image = False
     for block in list(response.render_blocks or []):
         if not isinstance(block, dict):
             continue
-        kind = _text(block.get("type") or block.get("artifact_type")).lower()
+        kind = _text(
+            block.get("type")
+            or block.get("artifact_type")
+            or block.get("representation")
+        ).lower()
         if kind not in {"image", "gallery"}:
             continue
         payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
         if _concrete_image_payload(payload):
-            concrete_present = True
+            concrete_provider_image = True
             break
 
-    if concrete_present:
-        metadata["image_generation_status"] = "provider_artifact_preserved"
-        metadata["renderer_route"] = "INTERPRETATION→PROVIDER→EXECUTOR→C_ARTIFACT_CONTRACT→WEB"
-        response.metadata = metadata
-        return
-
-    # Collect Provider-issued specs first.
-    specs: list[dict[str, Any]] = []
-    raw_specs = metadata.get("image_generation_specs")
-    if isinstance(raw_specs, list):
-        specs.extend(x for x in raw_specs[:4] if isinstance(x, dict))
-    raw_spec = metadata.get("image_generation_spec")
-    if isinstance(raw_spec, dict) and raw_spec not in specs:
-        specs.append(raw_spec)
-
-    if isinstance(response.scene, dict):
-        scene_spec = response.scene.get("image_generation_spec")
-        if isinstance(scene_spec, dict) and scene_spec not in specs:
-            specs.append(scene_spec)
-
-    # Provider can also place a spec inside a render block.
-    for block in list(response.render_blocks or []):
-        if not isinstance(block, dict):
-            continue
-        spec = block.get("image_generation_spec")
-        if isinstance(spec, dict) and spec not in specs:
-            specs.append(spec)
-        payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-        spec = payload.get("image_generation_spec")
-        if isinstance(spec, dict) and spec not in specs:
-            specs.append(spec)
-
-    # If Provider returned an image description without a formal spec, turn the
-    # description into the same local image-spec contract.
-    for block in list(response.render_blocks or []):
-        if not isinstance(block, dict):
-            continue
-        kind = _text(block.get("type") or block.get("artifact_type")).lower()
-        if kind not in {"image", "gallery"}:
-            continue
-        payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-        description = _text(
-            payload.get("description")
-            or payload.get("prompt")
-            or payload.get("caption")
-            or payload.get("alt")
-        )
-        if description:
-            specs.append({
-                "schema": "april_image_spec_v1",
-                "prompt": description[:1600],
-                "width": 1024,
-                "height": 1024,
-                "style": "illustration",
-                "background": {},
-                "layers": [],
-                "negative": [],
-            })
-
-    # Last-resort semantic materialization: once Interpretation has explicitly
-    # authorized image generation, a missing provider spec must not collapse the
-    # request into text.  The current request and provider answer become the
-    # semantic prompt; no second model call is needed.
-    if not specs:
-        semantic = request.intent if isinstance(request.intent, dict) else {}
-        dialog = request.dialogue_contract if isinstance(request.dialogue_contract, dict) else {}
-        subject = _text(
-            semantic.get("active_entity")
-            or dialog.get("active_entity")
-            or semantic.get("object")
-            or dialog.get("canonical_topic")
-        )
-        current_request = _text(
-            semantic.get("resolved_request")
-            or semantic.get("semantic_request")
-            or dialog.get("current_request")
-            or getattr(request, "raw_text", "")
-        )
-        provider_answer = _text(response.answer or response.content or response.response)
-        parts = [p for p in (current_request, subject, provider_answer) if p]
-        if parts:
-            prompt = " ; ".join(dict.fromkeys(parts))[:1800]
-            specs.append({
-                "schema": "april_image_spec_v1",
-                "prompt": prompt,
-                "width": 1024,
-                "height": 1024,
-                "style": "illustration",
-                "background": {},
-                "layers": [],
-                "negative": [],
-            })
-
-    if not specs:
+    if concrete_provider_image:
         metadata.update({
-            "image_generation_status": "not_materialized",
-            "image_generation_error": "NO_IMAGE_SOURCE_OR_SPEC",
-            "renderer_route": "INTERPRETATION→PROVIDER→EXECUTOR→C_ARTIFACT_CONTRACT→WEB",
+            "image_generation_status": "provider_artifact_preserved",
+            "renderer_route": "INTERPRETATION→PROVIDER→C_ARTIFACT→ROOM_REGISTER→ROOM→C_ARTIFACT→SCENE_CONTRACT→WEB",
+            "room_route_status": "not_needed_provider_artifact",
         })
         response.metadata = metadata
         return
 
-    generated_blocks: list[dict[str, Any]] = []
-    generated_artifacts: list[BaseArtifact] = []
-    generated_pngs: list[bytes] = []
+    provider_metadata = dict(response.metadata or {})
+    provider_answer = _text(
+        response.answer or response.content or response.response
+    )
+
+    conversation = request.conversation if isinstance(request.conversation, dict) else {}
+    dialogue_contract = conversation.get("dialogue_contract")
+    dialogue_contract = dialogue_contract if isinstance(dialogue_contract, dict) else {}
+
+    route_contract = build_room_route_contract(
+        request,
+        origin="executor",
+        destination="rooms_registry",
+        pipeline_stage="artifact_route",
+        context={
+            "current_user_request": _text(conversation.get("current_request") or request.intent.get("normalized_text")),
+            "resolved_request": _text(conversation.get("resolved_request") or request.intent.get("resolved_request")),
+            "semantic_request": _text(request.intent.get("semantic_request") or request.intent.get("resolved_request")),
+            "dialogue_contract": deepcopy(dialogue_contract),
+            "dialogue_vector": deepcopy(conversation.get("dialogue_vector") or {}),
+            "semantic_frame": deepcopy(conversation.get("semantic_frame") or {}),
+            "visual_context": deepcopy(request.visual_context or {}),
+            "provider_metadata": deepcopy(provider_metadata),
+            "provider_answer": provider_answer,
+        },
+        metadata={
+            "request_id": str(request.request_id),
+            "representation": representation,
+            "route": "C_ARTIFACT→ROOM_REGISTER→ROOM",
+        },
+    )
 
     try:
-        from blocks.C_APRIL_IMAGES_GENERATOR import generate_from_spec, generate_image_result
+        room_response = await registry_route_machine_request(
+            request,
+            route_contract,
+            user_id=_text(user_id),
+            chat_id=chat_id,
+            state=state,
+            provider_response=response,
+            run=run_with_activity,
+        )
+    except Exception as exc:
+        metadata.update({
+            "image_generation_status": "failed",
+            "image_generation_error": str(exc),
+            "room_route_status": "dispatch_error",
+            "renderer_route": "INTERPRETATION→PROVIDER→C_ARTIFACT→ROOM_REGISTER→ROOM→C_ARTIFACT→SCENE_CONTRACT→WEB",
+        })
+        response.metadata = metadata
+        print("⚠️ APRIL IMAGE ROOM ROUTE:", exc)
+        return
 
-        for index, spec in enumerate(specs[:4]):
-            clean_spec = dict(spec)
-            if clean_spec.get("schema") != "april_image_spec_v1":
-                clean_spec = {
-                    "schema": "april_image_spec_v1",
-                    "prompt": _text(clean_spec.get("prompt") or clean_spec.get("description") or "")[:1600],
-                    "width": clean_spec.get("width", 1024),
-                    "height": clean_spec.get("height", 1024),
-                    "style": clean_spec.get("style") or "illustration",
-                    "background": clean_spec.get("background") if isinstance(clean_spec.get("background"), dict) else {},
-                    "layers": clean_spec.get("layers") if isinstance(clean_spec.get("layers"), list) else [],
-                    "negative": clean_spec.get("negative") if isinstance(clean_spec.get("negative"), list) else [],
-                }
-            prompt = _text(clean_spec.get("prompt"))
-            if not prompt:
-                continue
+    room_blocks = [
+        dict(block)
+        for block in list(getattr(room_response, "render_blocks", []) or [])
+        if isinstance(block, dict)
+    ]
+    room_artifacts = [
+        artifact
+        for artifact in list(getattr(room_response, "artifacts", []) or [])
+        if isinstance(artifact, BaseArtifact)
+    ]
+    room_metadata = dict(getattr(room_response, "metadata", {}) or {})
 
-            # Formal specs use the structured renderer; simple semantic prompts
-            # use the generator's ordinary route.
-            if clean_spec.get("layers") or clean_spec.get("background") or clean_spec.get("style"):
-                result = await generate_from_spec(clean_spec, variant="unified_scene")
-            else:
-                result = await generate_image_result(
-                    prompt=prompt,
-                    size=f"{int(clean_spec.get('width', 1024))}x{int(clean_spec.get('height', 1024))}",
-                    quality="standard",
-                    variant="unified_scene",
-                )
+    # If the room did not produce a concrete artifact, keep the provider text and
+    # diagnostics intact rather than inventing a visual block.
+    concrete_room_blocks = []
+    for block in room_blocks:
+        kind = _text(
+            block.get("type")
+            or block.get("artifact_type")
+            or block.get("representation")
+        ).lower()
+        if kind in {"image", "gallery"}:
+            payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+            if _concrete_image_payload(payload):
+                concrete_room_blocks.append(block)
 
-            if not result.get("success") or not result.get("image_bytes"):
-                continue
-
-            generated_pngs.append(result["image_bytes"])
-            contract_obj = result.get("contract")
-            artifact = getattr(contract_obj, "artifact", None) if contract_obj is not None else None
-            if isinstance(artifact, BaseArtifact):
-                generated_artifacts.append(artifact)
-                generated_blocks.extend(_artifact_canonical_render_blocks(artifact))
-            else:
-                artifact_dict = result.get("artifact") if isinstance(result.get("artifact"), dict) else {}
-                payload = artifact_dict.get("payload") if isinstance(artifact_dict.get("payload"), dict) else {}
-                data_uri = _text(payload.get("image_data_uri") or payload.get("src") or payload.get("url"))
-                if not data_uri:
-                    base64_value = _text(payload.get("image_base64"))
-                    if base64_value:
-                        data_uri = f"data:image/png;base64,{base64_value}"
-                if not data_uri:
-                    continue
-                generated_blocks.append({
-                    "type": "image",
-                    "artifact_type": "image",
-                    "renderer": "GalleryBlock",
-                    "viewer": "GalleryBlock",
-                    "payload": {
-                        **payload,
-                        "src": data_uri,
-                        "url": data_uri,
-                        "image": data_uri,
-                        "images": [{
-                            "src": data_uri,
-                            "url": data_uri,
-                            "image": data_uri,
-                            "mime_type": "image/png",
-                            "width": result.get("width"),
-                            "height": result.get("height"),
-                            "title": "Image",
-                            "alt": prompt,
-                        }],
-                    },
-                    "scene_contract": True,
-                    "human_visible": True,
-                    "block_id": _stable_id(f"scene-image-{index}", data_uri),
-                })
-
-        if not generated_blocks:
-            raise RuntimeError("IMAGE_ENGINE_EMPTY_RESULT")
-
-        # Remove non-concrete description placeholders and append exactly one
-        # canonical visual stream.  GalleryBlock can carry one or many images.
+    if concrete_room_blocks:
         preserved = []
         for block in list(response.render_blocks or []):
             if not isinstance(block, dict):
                 continue
-            kind = _text(block.get("type") or block.get("artifact_type")).lower()
+            kind = _text(
+                block.get("type")
+                or block.get("artifact_type")
+                or block.get("representation")
+            ).lower()
             if kind not in {"image", "gallery"}:
                 preserved.append(block)
                 continue
@@ -2451,70 +2375,99 @@ async def _materialize_image_if_requested(
             if _concrete_image_payload(payload):
                 preserved.append(block)
 
+        existing_signatures = {
+            json.dumps(
+                {
+                    "type": _text(block.get("type")).lower(),
+                    "payload": block.get("payload", {}),
+                    "content": block.get("content", ""),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+                separators=(",", ":"),
+            )
+            for block in preserved
+        }
+
         response.render_blocks = preserved
-        if len(generated_blocks) == 1:
-            single_block = generated_blocks[0]
-            if representation == "gallery" and isinstance(single_block, dict):
-                single_block["type"] = "gallery"
-                single_block["artifact_type"] = "gallery"
-                single_block["renderer"] = "GalleryBlock"
-                single_block["viewer"] = "GalleryBlock"
-            response.render_blocks.append(single_block)
-        else:
-            # Collapse multiple image artifacts into a single gallery block so
-            # Web sees one canonical multimodal stream.
-            images = []
-            for block in generated_blocks:
-                payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-                raw = payload.get("images")
-                if isinstance(raw, list):
-                    images.extend(x for x in raw if isinstance(x, dict))
-                else:
-                    src = payload.get("src") or payload.get("url") or payload.get("image")
-                    if src:
-                        images.append({"src": src, "url": src, "image": src})
-            gallery_payload = {
-                "artifact_type": "gallery",
-                "images": images[:8],
-                "count": len(images),
-                "presentation": {"mode": "gallery", "renderer": "GalleryBlock", "viewer": "GalleryBlock"},
-                "human_visible": True,
-            }
-            response.render_blocks.append({
-                "type": "gallery",
-                "artifact_type": "gallery",
-                "renderer": "GalleryBlock",
-                "viewer": "GalleryBlock",
-                "payload": gallery_payload,
-                "scene_contract": True,
-                "human_visible": True,
-                "block_id": _stable_id("scene-gallery", gallery_payload),
-            })
+        for block in concrete_room_blocks:
+            sig = json.dumps(
+                {
+                    "type": _text(block.get("type")).lower(),
+                    "payload": block.get("payload", {}),
+                    "content": block.get("content", ""),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+                separators=(",", ":"),
+            )
+            if sig not in existing_signatures:
+                existing_signatures.add(sig)
+                response.render_blocks.append(block)
 
-        if generated_artifacts:
-            response.artifacts = list(response.artifacts or []) + generated_artifacts
-        for png in generated_pngs:
-            state["last_image_png"] = png
+    if room_artifacts:
+        existing_artifacts = [
+            artifact
+            for artifact in list(response.artifacts or [])
+            if isinstance(artifact, BaseArtifact)
+        ]
+        known_ids = {
+            _text(getattr(getattr(item, "metadata", None), "artifact_id", ""))
+            for item in existing_artifacts
+        }
+        for artifact in room_artifacts:
+            artifact_id = _text(
+                getattr(getattr(artifact, "metadata", None), "artifact_id", "")
+            )
+            if not artifact_id or artifact_id not in known_ids:
+                existing_artifacts.append(artifact)
+                if artifact_id:
+                    known_ids.add(artifact_id)
+        response.artifacts = existing_artifacts
+        response.artifacts_payload = [
+            deepcopy(getattr(item, "data", {}) or {})
+            for item in existing_artifacts
+        ]
 
-        metadata.update({
-            "image_generation_status": "success",
-            "image_generation_engine": "C_APRIL_IMAGES_GENERATOR",
-            "image_generation_backend": getattr(generated_artifacts[0].render, "renderer", "") if generated_artifacts else "procedural_or_diffusion",
-            "image_generation_provider_calls_added": 0,
-            "image_generation_count": len(generated_pngs),
-            "image_generation_specs_used": len(specs[:4]),
-            "renderer_route": "INTERPRETATION→PROVIDER→EXECUTOR→C_ARTIFACT_CONTRACT→WEB",
-        })
-        response.metadata = metadata
-        state["image_generation_spec"] = _compact(specs[0], max_depth=5, max_items=12)
-    except Exception as exc:
-        metadata.update({
-            "image_generation_status": "failed",
-            "image_generation_error": str(exc),
-            "renderer_route": "INTERPRETATION→PROVIDER→EXECUTOR→C_ARTIFACT_CONTRACT→WEB",
-        })
-        response.metadata = metadata
-        print("⚠️ APRIL IMAGE ENGINE:", exc)
+    route_status = _text(
+        room_metadata.get("room_route_status")
+        or ("completed" if concrete_room_blocks else "no_artifact")
+    )
+
+    metadata.update(room_metadata)
+    metadata.update({
+        "image_generation_status": (
+            "success" if concrete_room_blocks else
+            room_metadata.get("image_generation_status") or "not_materialized"
+        ),
+        "image_generation_engine": (
+            room_metadata.get("image_generation_engine")
+            or ("C_APRIL_IMAGES_GENERATOR" if concrete_room_blocks else "")
+        ),
+        "room_route_status": route_status,
+        "room_route": room_metadata.get("room_route") or "rooms_registry.image_generate",
+        "artifact_route": "C_ARTIFACT_CONTRACT",
+        "renderer_route": "INTERPRETATION→PROVIDER→C_ARTIFACT→ROOM_REGISTER→ROOM→C_ARTIFACT→SCENE_CONTRACT→WEB",
+        "provider_calls_added": 0,
+        "room_artifact_count": len(room_artifacts),
+        "room_render_block_count": len(concrete_room_blocks),
+    })
+    response.metadata = metadata
+
+    # Keep the canonical generation spec in StateManager so a later visual
+    # continuation can resolve against the same dialogue sequence/artifact.
+    spec = provider_metadata.get("image_generation_spec")
+    if not isinstance(spec, dict):
+        specs = provider_metadata.get("image_generation_specs")
+        if isinstance(specs, list):
+            spec = next((item for item in specs if isinstance(item, dict)), None)
+    if isinstance(spec, dict):
+        state["image_generation_spec"] = deepcopy(spec)
+        state["last_image_generation_route"] = (
+            "INTERPRETATION→C_ARTIFACT→ROOM_REGISTER→image_generate→C_APRIL_IMAGES_GENERATOR"
+        )
 
 async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Callable[..., Awaitable[Any]]] = None, **kwargs):
     request_text = _text(text)
@@ -2536,7 +2489,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
         request.visual_context = {}
 
     print("🧬 APRIL EXECUTOR BUILD:", PROCESSOR_VERSION)
-    print("🧭 APRIL FLOW:", "INPUT → INTERPRETATION+LIVE_MEMORY → OPENAI → SCENE → WEB")
+    print("🧭 APRIL FLOW:", "INPUT → INTERPRETATION+LIVE_MEMORY → OPENAI → C_ARTIFACT → ROOM_REGISTER → ROOM → C_ARTIFACT → SCENE → WEB")
     print("🧠 APRIL INTERPRETATION:", _compact(request.intent))
     print("🧠 APRIL DIALOGUE:", _compact(request.dialogue_contract))
 
@@ -2570,7 +2523,14 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
             scene=dict(machine_preview.get("scene") or {}),
             metadata=dict(machine_preview.get("metadata") or {}),
         )
-        await _materialize_image_if_requested(preview_response, request, state, _text(user_id))
+        await _route_image_through_room_registry(
+            preview_response,
+            request,
+            state,
+            _text(user_id),
+            chat_id=chat_id,
+            run_with_activity=run_with_activity,
+        )
         machine_preview["render_blocks"] = list(preview_response.render_blocks or [])
         machine_preview["metadata"] = dict(preview_response.metadata or {})
         provider_contract["machine_response"] = machine_preview
