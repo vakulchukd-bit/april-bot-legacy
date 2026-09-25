@@ -121,8 +121,8 @@ async def generate(
         clean_spec = dict(spec) if isinstance(spec, dict) else {
             "schema": "april_image_spec_v1",
             "prompt": str(prompt or "").strip(),
-            "width": 1024,
-            "height": 1024,
+            "width": 512,
+            "height": 512,
             "style": "illustration",
             "quality": "standard",
             "visual_context": dict(context) if isinstance(context, dict) else {},
