@@ -43,6 +43,12 @@ try:
 except Exception:  # pragma: no cover
     torch = None
 
+try:
+    from compel import Compel, ReturnedEmbeddingsType
+except Exception:  # pragma: no cover
+    Compel = None
+    ReturnedEmbeddingsType = None
+
 
 @dataclass
 class ImageGenerationResult:
@@ -72,6 +78,8 @@ class AprilImagesGenerator:
     _edit_pipeline = None
     _pipeline_path = None
     _pipeline_cache_key = None
+    _compel_processor = None
+    _compel_cache_key = None
 
     def __init__(self) -> None:
         self.engine_name = self.ENGINE_NAME
@@ -174,7 +182,7 @@ class AprilImagesGenerator:
         text = " ".join(str(prompt or "").split()).strip()
         if not text:
             raise ValueError("APRIL_IMAGES_EMPTY_PROMPT")
-        return text[:8000]
+        return text
 
     @staticmethod
     def _negative_prompt(spec: Optional[dict[str, Any]] = None) -> str:
@@ -185,7 +193,7 @@ class AprilImagesGenerator:
             "watermark", "text artifacts", "cropped subject",
         ]
         if isinstance(spec, dict) and isinstance(spec.get("negative"), list):
-            values.extend(str(x).strip() for x in spec["negative"][:24] if str(x).strip())
+            values.extend(str(x).strip() for x in spec["negative"] if str(x).strip())
         return ", ".join(dict.fromkeys(values))
 
     @staticmethod
@@ -217,7 +225,7 @@ class AprilImagesGenerator:
             "lighting, depth, clean edges, visually rich but faithful to the "
             "requested scene."
         )
-        return "\n".join(parts)[:8000]
+        return "\n".join(parts)
 
     @classmethod
     def _require_backend(cls) -> None:
@@ -240,11 +248,11 @@ class AprilImagesGenerator:
 
     @classmethod
     def _configure_pipeline(cls, pipeline: Any) -> Any:
-        for method_name in (
-            "enable_vae_slicing",
-            "enable_vae_tiling",
-            "enable_attention_slicing",
-        ):
+        device = cls._device()
+        methods = ["enable_vae_slicing", "enable_vae_tiling"]
+        if device != "cpu" or os.getenv("APRIL_IMAGES_CPU_ATTENTION_SLICING", "0").strip().lower() in {"1", "true", "yes", "on"}:
+            methods.append("enable_attention_slicing")
+        for method_name in methods:
             method = getattr(pipeline, method_name, None)
             if callable(method):
                 try:
@@ -252,7 +260,6 @@ class AprilImagesGenerator:
                 except Exception:
                     pass
 
-        device = cls._device()
         if device == "cuda" and os.getenv("APRIL_IMAGES_CPU_OFFLOAD", "0") == "1":
             method = getattr(pipeline, "enable_model_cpu_offload", None)
             if callable(method):
@@ -274,7 +281,7 @@ class AprilImagesGenerator:
             }
             dtype = cls._dtype()
             if dtype is not None:
-                kwargs["torch_dtype"] = dtype
+                kwargs["dtype"] = dtype
             if os.getenv("APRIL_IMAGES_USE_SAFETENSORS", "1").strip().lower() in {"1", "true", "yes"}:
                 kwargs["use_safetensors"] = True
 
@@ -298,7 +305,7 @@ class AprilImagesGenerator:
             }
             dtype = cls._dtype()
             if dtype is not None:
-                kwargs["torch_dtype"] = dtype
+                kwargs["dtype"] = dtype
             if os.getenv("APRIL_IMAGES_USE_SAFETENSORS", "1").strip().lower() in {"1", "true", "yes"}:
                 kwargs["use_safetensors"] = True
 
@@ -307,6 +314,77 @@ class AprilImagesGenerator:
             cls._pipeline_path = source
             cls._pipeline_cache_key = cache_key
             return cls._edit_pipeline
+
+    @classmethod
+    def _long_prompt_kwargs(
+        cls,
+        pipeline: Any,
+        prompt: str,
+        negative_prompt: str,
+    ) -> dict[str, Any]:
+        """Build long-prompt embeddings without imposing an April-side token cap.
+
+        SDXL/CLIP uses 77-token chunks natively.  That is a property of the
+        underlying text encoder, not an OpenAI/April input budget.  Compel
+        handles long prompts by chunking the text and returning the embeddings
+        directly to Diffusers, so the full semantic prompt survives intact.
+        """
+        if Compel is None or ReturnedEmbeddingsType is None:
+            raise RuntimeError("APRIL_IMAGES_COMPEL_NOT_INSTALLED")
+
+        tokenizer_2 = getattr(pipeline, "tokenizer_2", None)
+        text_encoder_2 = getattr(pipeline, "text_encoder_2", None)
+        tokenizer_1 = getattr(pipeline, "tokenizer", None)
+        text_encoder_1 = getattr(pipeline, "text_encoder", None)
+        device = cls._device()
+
+        if tokenizer_2 is not None and text_encoder_2 is not None and tokenizer_1 is not None and text_encoder_1 is not None:
+            cache_key = f"sdxl::{id(pipeline)}::{device}"
+            if cls._compel_processor is None or cls._compel_cache_key != cache_key:
+                cls._compel_processor = Compel(
+                    tokenizer=[tokenizer_1, tokenizer_2],
+                    text_encoder=[text_encoder_1, text_encoder_2],
+                    returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
+                    requires_pooled=[False, True],
+                    truncate_long_prompts=False,
+                )
+                cls._compel_cache_key = cache_key
+
+            conditioning, pooled = cls._compel_processor(prompt)
+            negative_conditioning, negative_pooled = cls._compel_processor(negative_prompt or "")
+            conditioning, negative_conditioning = cls._compel_processor.pad_conditioning_tensors_to_same_length(
+                [conditioning, negative_conditioning]
+            )
+            return {
+                "prompt_embeds": conditioning,
+                "negative_prompt_embeds": negative_conditioning,
+                "pooled_prompt_embeds": pooled,
+                "negative_pooled_prompt_embeds": negative_pooled,
+            }
+
+        tokenizer = tokenizer_1
+        text_encoder = text_encoder_1
+        if tokenizer is None or text_encoder is None:
+            raise RuntimeError("APRIL_IMAGES_TEXT_ENCODER_NOT_AVAILABLE")
+
+        cache_key = f"single::{id(pipeline)}::{device}"
+        if cls._compel_processor is None or cls._compel_cache_key != cache_key:
+            cls._compel_processor = Compel(
+                tokenizer=tokenizer,
+                text_encoder=text_encoder,
+                truncate_long_prompts=False,
+            )
+            cls._compel_cache_key = cache_key
+
+        conditioning = cls._compel_processor.build_conditioning_tensor(prompt)
+        negative_conditioning = cls._compel_processor.build_conditioning_tensor(negative_prompt or "")
+        conditioning, negative_conditioning = cls._compel_processor.pad_conditioning_tensors_to_same_length(
+            [conditioning, negative_conditioning]
+        )
+        return {
+            "prompt_embeds": conditioning,
+            "negative_prompt_embeds": negative_conditioning,
+        }
 
     @classmethod
     def _diffusion_image(
@@ -320,20 +398,32 @@ class AprilImagesGenerator:
         negative_prompt: str,
     ) -> Image.Image:
         steps, guidance = cls._quality_settings(quality)
+        explicit_steps = os.getenv("APRIL_IMAGES_INFERENCE_STEPS", "").strip()
+        if explicit_steps:
+            try:
+                steps = int(explicit_steps)
+            except ValueError:
+                pass
         kwargs: dict[str, Any] = {
-            "prompt": prompt,
             "width": width,
             "height": height,
             "num_inference_steps": steps,
             "guidance_scale": guidance,
         }
-        if negative_prompt:
-            kwargs["negative_prompt"] = negative_prompt
+
+        # Never silently truncate an image prompt to the OpenAI/provider budget.
+        # Use long-prompt embeddings when the backend exposes a text encoder.
+        prompt_kwargs = cls._long_prompt_kwargs(pipeline, prompt, negative_prompt)
+        kwargs.update(prompt_kwargs)
         if seed is not None and torch is not None:
             generator_device = "cuda" if cls._device() == "cuda" else "cpu"
             kwargs["generator"] = torch.Generator(device=generator_device).manual_seed(int(seed))
 
-        result = pipeline(**kwargs)
+        if torch is not None:
+            with torch.inference_mode():
+                result = pipeline(**kwargs)
+        else:
+            result = pipeline(**kwargs)
         image = getattr(result, "images", [None])[0]
         if image is None:
             raise RuntimeError("APRIL_IMAGES_DIFFUSION_EMPTY_RESULT")
@@ -394,9 +484,10 @@ class AprilImagesGenerator:
             "prompt": cls._clean_prompt(spec.get("prompt") or ""),
             "width": width,
             "height": height,
-            "style": str(spec.get("style") or "illustration")[:64],
-            "quality": str(spec.get("quality") or "high")[:32],
-            "negative": [str(x)[:120] for x in (spec.get("negative") or [])[:24]],
+            "style": str(spec.get("style") or "illustration"),
+            "quality": str(spec.get("quality") or "standard"),
+            "negative": [str(x) for x in (spec.get("negative") or []) if str(x).strip()],
+            "steps": spec.get("steps"),
             "visual_context": dict(spec.get("visual_context") or {})
             if isinstance(spec.get("visual_context"), dict) else {},
             "seed": spec.get("seed"),
@@ -610,6 +701,7 @@ class AprilImagesGenerator:
             "local_model_configured": bool(self._model_path()),
             "model_id_configured": bool(os.getenv("APRIL_IMAGES_MODEL_ID", "").strip()),
             "diffusers_available": bool(AutoPipelineForText2Image is not None),
+            "long_prompt_support": bool(Compel is not None),
             "device": self._device(),
             "dtype": str(self._dtype()) if self._dtype() is not None else None,
             "external_image_api": False,
