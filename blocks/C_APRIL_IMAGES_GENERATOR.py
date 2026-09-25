@@ -60,8 +60,8 @@ class AprilImagesGenerator:
     """The only image producer between Interpretation and C_ARTIFACT."""
 
     ENGINE_NAME = "April Images Generation"
-    ENGINE_VERSION = "2.0.0"
-    BACKEND = "local_diffusion"
+    ENGINE_VERSION = "2.1.0"
+    BACKEND = "diffusers_single_backend"
 
     DEFAULT_SIZE = (1024, 1024)
     MIN_SIZE = 256
@@ -71,6 +71,7 @@ class AprilImagesGenerator:
     _text_pipeline = None
     _edit_pipeline = None
     _pipeline_path = None
+    _pipeline_cache_key = None
 
     def __init__(self) -> None:
         self.engine_name = self.ENGINE_NAME
@@ -81,8 +82,39 @@ class AprilImagesGenerator:
     # -------------------------------------------------
 
     @classmethod
+    def _model_source(cls) -> str:
+        """Return the single configured Diffusers model source.
+
+        A local path is preferred when explicitly configured. Otherwise one
+        canonical model id is used. Both are the same Diffusers backend; there
+        is no alternate provider or rendering fallback.
+        """
+        local_path = os.getenv("APRIL_IMAGES_MODEL_PATH", "").strip()
+        if local_path:
+            return local_path
+
+        return (
+            os.getenv(
+                "APRIL_IMAGES_MODEL_ID",
+                "stabilityai/stable-diffusion-xl-base-1.0",
+            ).strip()
+            or "stabilityai/stable-diffusion-xl-base-1.0"
+        )
+
+    @classmethod
     def _model_path(cls) -> str:
+        # Backward-compatible accessor retained for callers that expect it.
         return os.getenv("APRIL_IMAGES_MODEL_PATH", "").strip()
+
+    @classmethod
+    def _model_is_local(cls) -> bool:
+        path = cls._model_path()
+        return bool(path) and os.path.isdir(path)
+
+    @classmethod
+    def _local_files_only(cls) -> bool:
+        configured = os.getenv("APRIL_IMAGES_LOCAL_ONLY", "0").strip().lower()
+        return configured in {"1", "true", "yes", "on"} or cls._model_is_local()
 
     @classmethod
     def _device(cls) -> str:
@@ -110,12 +142,13 @@ class AprilImagesGenerator:
 
     @classmethod
     def _quality_settings(cls, quality: str) -> tuple[int, float]:
+        """Quality profile for the single active Diffusers model."""
         return {
-            "draft": (20, 6.0),
-            "standard": (30, 6.5),
-            "high": (40, 7.0),
-            "ultra": (50, 7.5),
-        }.get(str(quality or "standard").strip().lower(), (30, 6.5))
+            "draft": (28, 6.0),
+            "standard": (40, 6.5),
+            "high": (50, 7.0),
+            "ultra": (60, 7.5),
+        }.get(str(quality or "standard").strip().lower(), (40, 6.5))
 
     @classmethod
     def _parse_size(cls, size: Any) -> tuple[int, int]:
@@ -130,10 +163,11 @@ class AprilImagesGenerator:
                 width, height = int(match.group(1)), int(match.group(2))
             else:
                 width, height = cls.DEFAULT_SIZE
-        return (
-            max(cls.MIN_SIZE, min(cls.MAX_SIZE, width)),
-            max(cls.MIN_SIZE, min(cls.MAX_SIZE, height)),
-        )
+        width = max(cls.MIN_SIZE, min(cls.MAX_SIZE, width))
+        height = max(cls.MIN_SIZE, min(cls.MAX_SIZE, height))
+        width = max(64, (width // 64) * 64)
+        height = max(64, (height // 64) * 64)
+        return width, height
 
     @staticmethod
     def _clean_prompt(prompt: Any) -> str:
@@ -145,9 +179,10 @@ class AprilImagesGenerator:
     @staticmethod
     def _negative_prompt(spec: Optional[dict[str, Any]] = None) -> str:
         values = [
-            "low quality", "blurry", "pixelated", "deformed", "bad anatomy",
-            "extra limbs", "duplicate subject", "distorted face", "watermark",
-            "text artifacts",
+            "low quality", "blurry", "pixelated", "jpeg artifacts",
+            "deformed", "bad anatomy", "extra limbs", "duplicate subject",
+            "distorted face", "disfigured hands", "malformed eyes",
+            "watermark", "text artifacts", "cropped subject",
         ]
         if isinstance(spec, dict) and isinstance(spec.get("negative"), list):
             values.extend(str(x).strip() for x in spec["negative"][:24] if str(x).strip())
@@ -160,23 +195,43 @@ class AprilImagesGenerator:
             style = str(spec.get("style") or "").strip()
             if style and style.lower() not in prompt.lower():
                 parts.append(f"Style: {style}")
+
             context = spec.get("visual_context")
             if isinstance(context, dict):
-                for key in ("subject", "composition", "lighting", "camera", "environment"):
+                # Preserve every useful visual signal without inventing facts.
+                for key in (
+                    "subject", "composition", "lighting", "camera",
+                    "environment", "palette", "mood", "materials",
+                    "character", "pose", "background", "details",
+                ):
                     value = context.get(key)
                     if value:
-                        parts.append(f"{key.replace('_', ' ').title()}: {value}")
+                        label = key.replace("_", " ").title()
+                        parts.append(f"{label}: {value}")
+
+        # Quality guidance improves coherence while leaving scene semantics
+        # authoritative. It does not change the requested subject.
+        parts.append(
+            "High-quality finished artwork, coherent composition, clear subject "
+            "separation, natural perspective, detailed textures, consistent "
+            "lighting, depth, clean edges, visually rich but faithful to the "
+            "requested scene."
+        )
         return "\n".join(parts)[:8000]
 
     @classmethod
     def _require_backend(cls) -> None:
-        if not cls._model_path():
-            raise RuntimeError("APRIL_IMAGES_MODEL_PATH_NOT_CONFIGURED")
+        source = cls._model_source()
+        if not source:
+            raise RuntimeError("APRIL_IMAGES_MODEL_SOURCE_NOT_CONFIGURED")
         if AutoPipelineForText2Image is None or AutoPipelineForImage2Image is None:
             raise RuntimeError("APRIL_IMAGES_DIFFUSERS_NOT_INSTALLED")
         if torch is None:
             raise RuntimeError("APRIL_IMAGES_TORCH_NOT_INSTALLED")
-        if not os.path.isdir(cls._model_path()):
+
+        # An explicitly supplied local path must exist. A model id is allowed
+        # and will be resolved by Diffusers/Hugging Face into the runtime cache.
+        if cls._model_path() and not os.path.isdir(cls._model_path()):
             raise RuntimeError("APRIL_IMAGES_MODEL_PATH_NOT_FOUND")
 
     # -------------------------------------------------
@@ -208,31 +263,49 @@ class AprilImagesGenerator:
     @classmethod
     def _load_text_pipeline(cls):
         cls._require_backend()
+        source = cls._model_source()
+        cache_key = f"text::{source}::{cls._dtype()}::{cls._device()}::{cls._local_files_only()}"
         with cls._pipeline_lock:
-            if cls._text_pipeline is not None and cls._pipeline_path == cls._model_path():
+            if cls._text_pipeline is not None and cls._pipeline_cache_key == cache_key:
                 return cls._text_pipeline
-            kwargs: dict[str, Any] = {"local_files_only": True}
+
+            kwargs: dict[str, Any] = {
+                "local_files_only": cls._local_files_only(),
+            }
             dtype = cls._dtype()
             if dtype is not None:
                 kwargs["torch_dtype"] = dtype
-            pipeline = AutoPipelineForText2Image.from_pretrained(cls._model_path(), **kwargs)
+            if os.getenv("APRIL_IMAGES_USE_SAFETENSORS", "1").strip().lower() in {"1", "true", "yes"}:
+                kwargs["use_safetensors"] = True
+
+            pipeline = AutoPipelineForText2Image.from_pretrained(source, **kwargs)
             cls._text_pipeline = cls._configure_pipeline(pipeline)
-            cls._pipeline_path = cls._model_path()
+            cls._pipeline_path = source
+            cls._pipeline_cache_key = cache_key
             return cls._text_pipeline
 
     @classmethod
     def _load_edit_pipeline(cls):
         cls._require_backend()
+        source = cls._model_source()
+        cache_key = f"edit::{source}::{cls._dtype()}::{cls._device()}::{cls._local_files_only()}"
         with cls._pipeline_lock:
-            if cls._edit_pipeline is not None and cls._pipeline_path == cls._model_path():
+            if cls._edit_pipeline is not None and cls._pipeline_cache_key == cache_key:
                 return cls._edit_pipeline
-            kwargs: dict[str, Any] = {"local_files_only": True}
+
+            kwargs: dict[str, Any] = {
+                "local_files_only": cls._local_files_only(),
+            }
             dtype = cls._dtype()
             if dtype is not None:
                 kwargs["torch_dtype"] = dtype
-            pipeline = AutoPipelineForImage2Image.from_pretrained(cls._model_path(), **kwargs)
+            if os.getenv("APRIL_IMAGES_USE_SAFETENSORS", "1").strip().lower() in {"1", "true", "yes"}:
+                kwargs["use_safetensors"] = True
+
+            pipeline = AutoPipelineForImage2Image.from_pretrained(source, **kwargs)
             cls._edit_pipeline = cls._configure_pipeline(pipeline)
-            cls._pipeline_path = cls._model_path()
+            cls._pipeline_path = source
+            cls._pipeline_cache_key = cache_key
             return cls._edit_pipeline
 
     @classmethod
@@ -260,15 +333,7 @@ class AprilImagesGenerator:
             generator_device = "cuda" if cls._device() == "cuda" else "cpu"
             kwargs["generator"] = torch.Generator(device=generator_device).manual_seed(int(seed))
 
-        try:
-            result = pipeline(**kwargs)
-        except TypeError:
-            # Some model families don't expose CFG arguments. This is not a
-            # fallback engine: it is the same configured model with its native API.
-            kwargs.pop("guidance_scale", None)
-            kwargs.pop("negative_prompt", None)
-            result = pipeline(**kwargs)
-
+        result = pipeline(**kwargs)
         image = getattr(result, "images", [None])[0]
         if image is None:
             raise RuntimeError("APRIL_IMAGES_DIFFUSION_EMPTY_RESULT")
@@ -288,6 +353,28 @@ class AprilImagesGenerator:
         return cls._diffusion_image(
             pipeline, prompt, width, height, quality, seed, negative_prompt
         )
+
+    @classmethod
+    def build_visual_prompt(
+        cls,
+        request: str,
+        *,
+        visual_context: Optional[dict[str, Any]] = None,
+        style: str = "",
+        quality: str = "high",
+    ) -> str:
+        """Build the renderer prompt from the already-authoritative semantic state.
+
+        This method does not inspect or mutate dialogue state; Interpretation
+        remains the authority. It only converts supplied visual signals into a
+        deterministic image prompt.
+        """
+        spec = {
+            "style": style,
+            "quality": quality,
+            "visual_context": visual_context or {},
+        }
+        return cls._compose_prompt(cls._clean_prompt(request), spec)
 
     # -------------------------------------------------
     # Provider image-spec validation
@@ -344,6 +431,9 @@ class AprilImagesGenerator:
             backend=cls.BACKEND,
             variant=variant,
         )
+        payload = artifact.get("payload") if isinstance(artifact, dict) else None
+        if not isinstance(payload, dict) or not payload.get("src") or not payload.get("images"):
+            raise RuntimeError("APRIL_IMAGES_ARTIFACT_DISPLAY_PAYLOAD_MISSING")
         artifact["render_spec"] = clean
         artifact["payload"]["render_spec"] = clean
         artifact["images"] = list(artifact["payload"].get("images") or [])
@@ -515,23 +605,30 @@ class AprilImagesGenerator:
             "version": self.engine_version,
             "status": "ready" if self._can_initialize() else "configuration_required",
             "architecture": "Interpretation -> C_APRIL_IMAGES_GENERATOR -> C_ARTIFACT_CONTRACT -> GalleryBlock",
-            "backend_mode": "diffusers",
+            "backend_mode": "diffusers_single_backend",
+            "model_source": self._model_source(),
             "local_model_configured": bool(self._model_path()),
+            "model_id_configured": bool(os.getenv("APRIL_IMAGES_MODEL_ID", "").strip()),
             "diffusers_available": bool(AutoPipelineForText2Image is not None),
             "device": self._device(),
             "dtype": str(self._dtype()) if self._dtype() is not None else None,
             "external_image_api": False,
             "fallback_backend": None,
+            "display_contract": "C_ARTIFACT_CONTRACT -> GalleryBlock",
         }
 
     @classmethod
     def _can_initialize(cls) -> bool:
+        source = cls._model_source()
         return bool(
-            cls._model_path()
+            source
             and AutoPipelineForText2Image is not None
             and AutoPipelineForImage2Image is not None
             and torch is not None
-            and os.path.isdir(cls._model_path())
+            and (
+                cls._model_is_local()
+                or not cls._model_path()
+            )
         )
 
     async def generate(
@@ -599,12 +696,7 @@ class AprilImagesGenerator:
             "guidance_scale": guidance,
             "negative_prompt": self._negative_prompt(),
         }
-        try:
-            result = pipeline(**kwargs)
-        except TypeError:
-            kwargs.pop("guidance_scale", None)
-            kwargs.pop("negative_prompt", None)
-            result = pipeline(**kwargs)
+        result = pipeline(**kwargs)
         generated = getattr(result, "images", [None])[0]
         if generated is None:
             raise RuntimeError("APRIL_IMAGES_DIFFUSION_EMPTY_EDIT_RESULT")
