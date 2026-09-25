@@ -2575,23 +2575,23 @@ def _build_image_generation_spec_from_provider(value: Any) -> dict[str, Any] | N
     prompt = _image_prompt_from_provider_payload(value)
     if not prompt:
         return None
-    width = 1024
-    height = 1024
+    width = 512
+    height = 512
     if isinstance(value, dict):
         try:
             width = int(value.get("width") or width)
             height = int(value.get("height") or height)
         except (TypeError, ValueError, OverflowError):
-            width, height = 1024, 1024
+            width, height = 512, 512
     return {
         "schema": "april_image_spec_v1",
-        "prompt": prompt[:1600],
+        "prompt": prompt,
         "width": max(256, min(width, 1536)),
         "height": max(256, min(height, 1536)),
         "style": _safe_text(value.get("style") if isinstance(value, dict) else "") or "illustration",
         "background": dict(value.get("background") or {}) if isinstance(value, dict) and isinstance(value.get("background"), dict) else {},
-        "layers": list(value.get("layers") or [])[:96] if isinstance(value, dict) and isinstance(value.get("layers"), list) else [],
-        "negative": list(value.get("negative") or [])[:24] if isinstance(value, dict) and isinstance(value.get("negative"), list) else [],
+        "layers": list(value.get("layers") or []) if isinstance(value, dict) and isinstance(value.get("layers"), list) else [],
+        "negative": list(value.get("negative") or []) if isinstance(value, dict) and isinstance(value.get("negative"), list) else [],
     }
 
 
@@ -2691,9 +2691,9 @@ def _promote_top_level_visual_outputs(payload: dict[str, Any]) -> tuple[list[dic
 
         if kind in {"image", "gallery"}:
             if kind == "gallery" and isinstance(value, list):
-                values = value[:8]
+                values = value
             elif isinstance(value, dict) and isinstance(value.get("images"), list):
-                values = value.get("images")[:8]
+                values = value.get("images")
             else:
                 values = [value]
             for item in values:
@@ -2713,7 +2713,7 @@ def _promote_top_level_visual_outputs(payload: dict[str, Any]) -> tuple[list[dic
         unique_specs.append(spec)
 
     if unique_specs:
-        metadata["image_generation_specs"] = unique_specs[:4]
+        metadata["image_generation_specs"] = unique_specs
         metadata["image_generation_spec"] = unique_specs[0]
 
     if blocks:
@@ -2827,7 +2827,7 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             existing_specs = metadata.get("image_generation_specs")
             merged_specs = list(existing_specs) if isinstance(existing_specs, list) else []
             merged_specs.extend(top_level_visual_metadata.get("image_generation_specs") or [])
-            metadata["image_generation_specs"] = merged_specs[:4]
+            metadata["image_generation_specs"] = merged_specs
             metadata["image_generation_spec"] = merged_specs[0]
         for key, value in top_level_visual_metadata.items():
             metadata.setdefault(key, value)
