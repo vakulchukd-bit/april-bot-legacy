@@ -61,10 +61,10 @@ class AprilImagesGenerator:
     """The only image producer between Interpretation and C_ARTIFACT."""
 
     ENGINE_NAME = "April Images Generation"
-    ENGINE_VERSION = "2.2.0"
+    ENGINE_VERSION = "2.3.0"
     BACKEND = "diffusers_single_backend"
 
-    DEFAULT_SIZE = (1024, 1024)
+    DEFAULT_SIZE = (512, 512)
     MIN_SIZE = 256
     MAX_SIZE = 1536
 
@@ -97,9 +97,9 @@ class AprilImagesGenerator:
         return (
             os.getenv(
                 "APRIL_IMAGES_MODEL_ID",
-                "stabilityai/stable-diffusion-xl-base-1.0",
+                "stabilityai/sdxl-turbo",
             ).strip()
-            or "stabilityai/stable-diffusion-xl-base-1.0"
+            or "stabilityai/sdxl-turbo"
         )
 
     @classmethod
@@ -142,14 +142,31 @@ class AprilImagesGenerator:
         return torch.float16 if cls._device() in {"cuda", "mps"} else torch.float32
 
     @classmethod
+    def _is_turbo_model(cls) -> bool:
+        return "sdxl-turbo" in cls._model_source().strip().lower()
+
+    @classmethod
     def _quality_settings(cls, quality: str) -> tuple[int, float]:
-        """Quality profile for the single active Diffusers model."""
+        """Return sampling settings for the configured image backend.
+
+        SDXL Turbo is explicitly trained for 1-4 denoising steps with guidance
+        disabled.  The ordinary SDXL profile remains available when a different
+        model id is explicitly configured.
+        """
+        normalized = str(quality or "standard").strip().lower()
+        if cls._is_turbo_model():
+            return {
+                "draft": (1, 0.0),
+                "standard": (1, 0.0),
+                "high": (2, 0.0),
+                "ultra": (4, 0.0),
+            }.get(normalized, (1, 0.0))
         return {
             "draft": (28, 6.0),
             "standard": (40, 6.5),
             "high": (50, 7.0),
             "ultra": (60, 7.5),
-        }.get(str(quality or "standard").strip().lower(), (40, 6.5))
+        }.get(normalized, (40, 6.5))
 
     @classmethod
     def _parse_size(cls, size: Any) -> tuple[int, int]:
@@ -242,16 +259,41 @@ class AprilImagesGenerator:
     @classmethod
     def _configure_pipeline(cls, pipeline: Any) -> Any:
         device = cls._device()
-        methods = ["enable_vae_slicing", "enable_vae_tiling"]
-        if device != "cpu" or os.getenv("APRIL_IMAGES_CPU_ATTENTION_SLICING", "0").strip().lower() in {"1", "true", "yes", "on"}:
-            methods.append("enable_attention_slicing")
-        for method_name in methods:
-            method = getattr(pipeline, method_name, None)
+
+        # SDXL Turbo requires trailing timestep spacing.  This is part of the
+        # model's sampling contract, not an alternate backend or a fallback.
+        if cls._is_turbo_model():
+            try:
+                from diffusers import EulerAncestralDiscreteScheduler
+                pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
+                    pipeline.scheduler.config,
+                    timestep_spacing="trailing",
+                )
+            except Exception as exc:
+                raise RuntimeError("APRIL_IMAGES_TURBO_SCHEDULER_CONFIGURATION_FAILED") from exc
+
+        # Do not enable attention slicing by default: on CPU it can make the
+        # already expensive denoising loop slower.  It remains an explicit opt-in.
+        if os.getenv("APRIL_IMAGES_CPU_ATTENTION_SLICING", "0").strip().lower() in {"1", "true", "yes", "on"}:
+            method = getattr(pipeline, "enable_attention_slicing", None)
             if callable(method):
-                try:
-                    method()
-                except Exception:
-                    pass
+                method()
+
+        if device != "cpu":
+            for method_name in ("enable_vae_slicing", "enable_vae_tiling"):
+                method = getattr(pipeline, method_name, None)
+                if callable(method):
+                    try:
+                        method()
+                    except Exception:
+                        pass
+
+        # Hugging Face recommends keeping the default SDXL VAE in float32.
+        # upcast_vae() performs that conversion once for CUDA/MPS inference.
+        if cls._is_turbo_model() and device != "cpu":
+            method = getattr(pipeline, "upcast_vae", None)
+            if callable(method):
+                method()
 
         if device == "cuda" and os.getenv("APRIL_IMAGES_CPU_OFFLOAD", "0") == "1":
             method = getattr(pipeline, "enable_model_cpu_offload", None)
@@ -277,11 +319,25 @@ class AprilImagesGenerator:
                 kwargs["dtype"] = dtype
             if os.getenv("APRIL_IMAGES_USE_SAFETENSORS", "1").strip().lower() in {"1", "true", "yes"}:
                 kwargs["use_safetensors"] = True
+            if cls._is_turbo_model() and cls._device() in {"cuda", "mps"}:
+                kwargs["variant"] = "fp16"
 
             pipeline = AutoPipelineForText2Image.from_pretrained(source, **kwargs)
             cls._text_pipeline = cls._configure_pipeline(pipeline)
             cls._pipeline_path = source
             cls._pipeline_cache_key = cache_key
+            print(
+                "🧠 IMAGE BACKEND READY:",
+                {
+                    "model": source,
+                    "turbo": cls._is_turbo_model(),
+                    "device": cls._device(),
+                    "dtype": str(cls._dtype()),
+                    "default_size": cls.DEFAULT_SIZE,
+                    "standard_steps": cls._quality_settings("standard")[0],
+                    "guidance_scale": cls._quality_settings("standard")[1],
+                },
+            )
             return cls._text_pipeline
 
     @classmethod
@@ -293,6 +349,19 @@ class AprilImagesGenerator:
             if cls._edit_pipeline is not None and cls._pipeline_cache_key == cache_key:
                 return cls._edit_pipeline
 
+            # SDXL Turbo uses the same checkpoint for text-to-image and
+            # image-to-image.  Reuse the loaded pipeline when possible so an
+            # edit request does not download/load the model a second time.
+            if cls._is_turbo_model() and cls._text_pipeline is not None:
+                try:
+                    pipeline = AutoPipelineForImage2Image.from_pipe(cls._text_pipeline)
+                    cls._edit_pipeline = pipeline
+                    cls._pipeline_path = source
+                    cls._pipeline_cache_key = cache_key
+                    return cls._edit_pipeline
+                except Exception as exc:
+                    raise RuntimeError("APRIL_IMAGES_TURBO_EDIT_PIPELINE_CONFIGURATION_FAILED") from exc
+
             kwargs: dict[str, Any] = {
                 "local_files_only": cls._local_files_only(),
             }
@@ -301,6 +370,8 @@ class AprilImagesGenerator:
                 kwargs["dtype"] = dtype
             if os.getenv("APRIL_IMAGES_USE_SAFETENSORS", "1").strip().lower() in {"1", "true", "yes"}:
                 kwargs["use_safetensors"] = True
+            if cls._is_turbo_model() and cls._device() in {"cuda", "mps"}:
+                kwargs["variant"] = "fp16"
 
             pipeline = AutoPipelineForImage2Image.from_pretrained(source, **kwargs)
             cls._edit_pipeline = cls._configure_pipeline(pipeline)
@@ -586,7 +657,6 @@ class AprilImagesGenerator:
 
     @classmethod
     def _diffusion_image(
-
         cls,
         pipeline: Any,
         prompt: str,
@@ -603,6 +673,12 @@ class AprilImagesGenerator:
                 steps = int(explicit_steps)
             except ValueError:
                 pass
+
+        if cls._is_turbo_model():
+            steps = max(1, min(4, int(steps)))
+            guidance = 0.0
+            width, height = cls._parse_size(f"{width}x{height}")
+
         kwargs: dict[str, Any] = {
             "width": width,
             "height": height,
@@ -610,10 +686,42 @@ class AprilImagesGenerator:
             "guidance_scale": guidance,
         }
 
-        # Never truncate an image prompt to the OpenAI/provider budget.
-        # Encode every native backend window and concatenate its embeddings.
-        prompt_kwargs = cls._long_prompt_kwargs(pipeline, prompt, negative_prompt)
-        kwargs.update(prompt_kwargs)
+        # A one-window prompt should use the pipeline's native text path.
+        # Longer prompts are encoded with every native CLIP window, without an
+        # April/OpenAI token cap. For Turbo guidance_scale=0, negative guidance
+        # is disabled by the model and therefore no negative embedding is built.
+        tokenizer = getattr(pipeline, "tokenizer", None)
+        prompt_token_count = len(cls._token_ids_for_long_prompt(tokenizer, prompt)) if tokenizer is not None else 0
+        negative_token_count = len(cls._token_ids_for_long_prompt(tokenizer, negative_prompt or "")) if tokenizer is not None else 0
+        native_limit = int(getattr(tokenizer, "model_max_length", 77) or 77) if tokenizer is not None else 77
+
+        if (
+            tokenizer is not None
+            and prompt_token_count <= native_limit
+            and negative_token_count <= native_limit
+            and not cls._is_turbo_model()
+        ):
+            kwargs["prompt"] = prompt
+            kwargs["negative_prompt"] = negative_prompt or ""
+            print(
+                "🧠 IMAGE PROMPT ENCODING:",
+                {
+                    "prompt_raw_tokens": prompt_token_count,
+                    "negative_raw_tokens": negative_token_count,
+                    "prompt_native_windows": 1,
+                    "negative_native_windows": 1,
+                    "strategy": "pipeline_native_single_window",
+                    "april_openai_prompt_cap": None,
+                },
+            )
+        else:
+            prompt_kwargs = cls._long_prompt_kwargs(
+                pipeline,
+                prompt,
+                "" if guidance == 0.0 else negative_prompt,
+            )
+            kwargs.update(prompt_kwargs)
+
         if seed is not None and torch is not None:
             generator_device = "cuda" if cls._device() == "cuda" else "cpu"
             kwargs["generator"] = torch.Generator(device=generator_device).manual_seed(int(seed))
@@ -976,24 +1084,57 @@ class AprilImagesGenerator:
         if not image_bytes:
             raise ValueError("APRIL_IMAGES_EDIT_SOURCE_EMPTY")
         prompt = self._clean_prompt(prompt)
-        source = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        width, height = source.size
+        source_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        width, height = source_image.size
         pipeline = self._load_edit_pipeline()
         steps, guidance = self._quality_settings(quality)
+        strength_value = max(0.05, min(0.95, float(strength)))
+        if self._is_turbo_model():
+            import math
+            steps = max(2, steps, int(math.ceil(1.0 / strength_value)))
+            steps = min(4, steps)
+            guidance = 0.0
+
         kwargs: dict[str, Any] = {
-            "image": source,
-            "strength": max(0.05, min(0.95, float(strength))),
+            "image": source_image,
+            "strength": strength_value,
             "num_inference_steps": steps,
             "guidance_scale": guidance,
         }
-        kwargs.update(
-            self._long_prompt_kwargs(
-                pipeline,
-                prompt,
-                self._negative_prompt(),
+
+        tokenizer = getattr(pipeline, "tokenizer", None)
+        if tokenizer is not None and not self._is_turbo_model():
+            prompt_tokens = len(self._token_ids_for_long_prompt(tokenizer, prompt))
+            negative = self._negative_prompt()
+            negative_tokens = len(self._token_ids_for_long_prompt(tokenizer, negative))
+            native_limit = int(getattr(tokenizer, "model_max_length", 77) or 77)
+        else:
+            prompt_tokens = negative_tokens = 0
+            native_limit = 77
+            negative = ""
+
+        if (
+            tokenizer is not None
+            and not self._is_turbo_model()
+            and prompt_tokens <= native_limit
+            and negative_tokens <= native_limit
+        ):
+            kwargs["prompt"] = prompt
+            kwargs["negative_prompt"] = negative
+        else:
+            kwargs.update(
+                self._long_prompt_kwargs(
+                    pipeline,
+                    prompt,
+                    "" if guidance == 0.0 else self._negative_prompt(),
+                )
             )
-        )
-        result = pipeline(**kwargs)
+
+        if torch is not None:
+            with torch.inference_mode():
+                result = pipeline(**kwargs)
+        else:
+            result = pipeline(**kwargs)
         generated = getattr(result, "images", [None])[0]
         if generated is None:
             raise RuntimeError("APRIL_IMAGES_DIFFUSION_EMPTY_EDIT_RESULT")
@@ -1018,7 +1159,6 @@ class AprilImagesGenerator:
             contract=contract,
         ))
 
-
 april_images_generator = AprilImagesGenerator()
 
 
@@ -1026,14 +1166,14 @@ async def generate_from_spec(spec: dict[str, Any], *, variant: str = "provider_s
     return await april_images_generator.generate_from_spec(spec, variant=variant)
 
 
-async def generate_image(prompt: str, size: str = "1024x1024", quality: str = "standard") -> Optional[bytes]:
+async def generate_image(prompt: str, size: str = "512x512", quality: str = "standard") -> Optional[bytes]:
     result = await april_images_generator.generate(prompt, size=size, quality=quality)
     return result.get("image_bytes") if result.get("success") else None
 
 
 async def generate_image_result(
     prompt: str,
-    size: str = "1024x1024",
+    size: str = "512x512",
     quality: str = "standard",
     variant: str = "primary",
 ) -> dict[str, Any]:
