@@ -2702,7 +2702,7 @@ def _promote_top_level_visual_outputs(payload: dict[str, Any]) -> tuple[list[dic
                     specs.append(spec)
 
     # De-duplicate specs without making the Provider answer another semantic
-    # decision.  Executor owns actual image materialization.
+    # decision.  Room Register owns image-room execution; the concrete image engine materializes below the room.
     unique_specs: list[dict[str, Any]] = []
     seen = set()
     for spec in specs:
@@ -3242,6 +3242,7 @@ async def analyze_image(path: str, prompt: str):
 
 
 # Image generation has no Provider implementation.
-# Image creation belongs exclusively to C_APRIL_IMAGES_GENERATOR.
+# Provider emits the semantic image plan; Room Register executes image_generate,
+# which delegates concrete raster production to C_APRIL_IMAGES_GENERATOR.
 # Text generation, voice transcription, and visual analysis remain unchanged.
 
