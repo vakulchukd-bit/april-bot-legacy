@@ -123,7 +123,7 @@ async def generate(
             result = await generate_image_result(
                 prompt=str(prompt or "").strip(),
                 size="1024x1024",
-                quality="high",
+                quality=str((clean_spec or {}).get("quality") or "standard"),
                 variant="room_registry",
             )
 
