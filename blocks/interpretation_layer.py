@@ -17,6 +17,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
@@ -2262,9 +2263,72 @@ class DialogueEnvironmentEngine:
         return ""
 
     @classmethod
+    def _identity_query(cls, text: str) -> bool:
+        """Recognize authenticated user-name recall requests as memory queries."""
+        low = cls._low(text).strip(" .,!?:;-—")
+        return bool(re.search(
+            r"(?:^|\b)(?:а\s+|и\s+|так\s+)?как\s+меня\s+(?:зовут|звать)(?:\b|$)|(?:как|так)\s+(?:мое|моё)\s+имя|(?:мое|моё)\s+имя",
+            low,
+            re.IGNORECASE,
+        ))
+
+    @classmethod
     def _memory_query(cls, text: str) -> bool:
         low = cls._low(text)
-        return any(x in low for x in cls._MEMORY_RECALL)
+        return bool(cls._identity_query(text) or any(x in low for x in cls._MEMORY_RECALL))
+
+    @classmethod
+    def _identity_unknown_answer(cls, text: str) -> bool:
+        low = cls._low(text)
+        return bool(
+            ("имя" in low or "зовут" in low)
+            and any(marker in low for marker in (
+                "не говорил", "не говорили", "не указал", "не указали",
+                "не сообщ", "не называл", "не называли", "не знаю",
+            ))
+        )
+
+    @classmethod
+    def _extract_identity_name(cls, text: str) -> str:
+        """Extract an explicit personal-name disclosure only."""
+        value = cls._text(text).strip(" .,!?:;-—")
+        if not value:
+            return ""
+
+        match = re.search(
+            r"\bменя\s+зовут\s+([A-Za-zА-Яа-яЁёЇїІіЄєҐґ][A-Za-zА-Яа-яЁёЇїІіЄєҐґ-]*(?:\s+[A-Za-zА-Яа-яЁёЇїІіЄєҐґ][A-Za-zА-Яа-яЁёЇїІіЄєҐґ-]*){0,2})\b",
+            value,
+            re.IGNORECASE,
+        )
+        if match:
+            return cls._text(match.group(1))[:120]
+
+        tokens = re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ][A-Za-zА-Яа-яЁёЇїІіЄєҐґ-]*", value)
+        if len(tokens) not in {1, 2, 3}:
+            return ""
+        if any(cls._low(token) in {
+            "да", "нет", "не", "здравствуйте", "привет", "почему", "как",
+            "кто", "где", "зачем", "сколько", "дальше", "так", "хорошо",
+        } for token in tokens):
+            return ""
+        if len(tokens) == 1 and len(tokens[0]) > 40:
+            return ""
+        return cls._text(" ".join(tokens))[:120]
+
+    @classmethod
+    def _identity_disclosure(cls, current_text: str, previous_user: str, previous_april: str) -> dict[str, Any]:
+        """Detect the specific continuation: identity question/unknown answer -> user name."""
+        if not (cls._identity_query(previous_user) or cls._identity_unknown_answer(previous_april)):
+            return {}
+        name = cls._extract_identity_name(current_text)
+        if not name:
+            return {}
+        return {
+            "name": name,
+            "source": "explicit_user_disclosure_after_identity_query",
+            "previous_user_turn": previous_user,
+            "previous_april_turn": previous_april,
+        }
 
     @classmethod
     def _riddle_solve_request(cls, text: str) -> bool:
@@ -2617,6 +2681,59 @@ class DialogueEnvironmentEngine:
         prior_question = "?" in previous_april or "？" in previous_april
         semantic_overlap = max(cls._similarity(text, previous_user), cls._similarity(text, previous_april))
 
+        # A direct user-name disclosure belongs to the immediately preceding
+        # identity exchange. Capture it before generic NEW-topic logic.
+        identity_disclosure = cls._identity_disclosure(text, previous_user, previous_april)
+        if identity_disclosure:
+            name = cls._text(identity_disclosure.get("name"))
+            task = {
+                "active": True,
+                "status": "answer_received",
+                "kind": "identity",
+                "role": "user_discloses_name",
+                "phase": "awaiting_assistant_action",
+                "expected_input_type": "assistant_answer",
+                "prompt": previous_user or previous_april,
+                "last_question": previous_user or previous_april,
+                "target": "user_identity",
+                "candidate_answer": name,
+                "last_user_answer": name,
+                "known_clues": [name],
+                "qa_history": [{"user": previous_user, "assistant": previous_april, "user_identity": name}],
+                "turns": [{"user": previous_user, "assistant_prompt": previous_april, "user_identity": name}],
+                "awaiting_user": False,
+                "completed": True,
+                "topic": "user_identity",
+                "goal": "remember_user_name",
+                "sequence_id": scope.get("dialogue_sequence_id", ""),
+                "scene_id": "",
+                "task_revision": 1,
+                "source": "dialogue_environment_identity_disclosure",
+            }
+            return {
+                "turn_relation": "IDENTITY_PROVIDED",
+                "relation": "CONTINUE",
+                "conversation_continuation": bool(scope.get("conversation_id")),
+                "topic_branch": "continue",
+                "context_dependency": "active_dialogue_sequence",
+                "current_topic": "user_identity",
+                "active_entity": name,
+                "operation": "answer",
+                "goal": "remember_user_name",
+                "representation": "text",
+                "active_task": task,
+                "identity_disclosure": identity_disclosure,
+                "previous_user_turn": previous_user,
+                "previous_april_turn": previous_april,
+                "selected_memory": [],
+                "historical_memory_allowed": False,
+                "resolved_request": cls._text(text),
+                "provider_instruction": (
+                    "The user has just explicitly supplied their name. Acknowledge the name naturally and keep it as a persistent authenticated user fact. "
+                    f"User name: {name}. Current user turn: {cls._text(text)}"
+                ),
+            }
+
         # A self-contained request/question is a new topic even when an older
         # interactive task is still present. Short replies and deictic references
         # remain eligible for continuation, but a concrete new command such as
@@ -2801,6 +2918,7 @@ class DialogueEnvironmentEngine:
             "historical_memory_allowed": bool(env.get("historical_memory_allowed")),
             "resolved_request": cls._text(text),
             "provider_instruction": cls._text(env.get("provider_instruction") or ""),
+            "identity_disclosure": deepcopy(env.get("identity_disclosure") if isinstance(env.get("identity_disclosure"), dict) else {}),
             "continuation_content_analysis": continuation_analysis,
             "fenced_historical_entities": stale_entities,
             "diagnostics": diagnostics,
@@ -4891,6 +5009,7 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
         arbitration: dict[str, Any],
         consistency: dict[str, Any],
         history_search: dict[str, Any] | None = None,
+        identity_memory: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         history_search = history_search if isinstance(history_search, dict) else {}
         rel = self._text(arbitration.get("relation") or relation.get("relation") or "NEW").upper()
@@ -4901,6 +5020,7 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
         active_entity = self._text(arbitration.get("active_entity") or entity.get("active_entity"))
         rep = self._text(arbitration.get("representation") or representation.get("representation") or "text").lower()
         source = self._text(knowledge.get("primary_source") or "internal_knowledge").lower()
+        identity_memory = identity_memory if isinstance(identity_memory, dict) else {}
 
         required: list[dict[str, Any]] = []
         optional: list[dict[str, Any]] = []
@@ -5022,6 +5142,14 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
             ])
 
         elif rel == "RECALL":
+            if identity_memory.get("name"):
+                add(required, "USER_IDENTITY", {
+                    "name": self._text(identity_memory.get("name")),
+                    "source": self._text(identity_memory.get("name_source") or "authenticated_user_dialogue"),
+                    "updated_at": identity_memory.get("updated_at"),
+                    "scope": "current_authenticated_user",
+                }, 0.995, "authenticated_user_identity_fact", True, max_depth=2, max_items=4, max_keys=6)
+
             memory_items = self._memory_projection(memory, recall=True, continuation=False)
             history_items = list(history_search.get("selected_evidence") or [])[:5]
             recall_packet = {
@@ -5451,6 +5579,19 @@ class InterpretationOrchestrator(InterpretationEngineBase):
         relation = self.dialogue.analyze(
             text, state=state, history=history, semantic=semantic, identity=identity
         )
+
+        identity_disclosure = relation.get("environment", {}).get("identity_disclosure") if isinstance(relation.get("environment"), dict) else {}
+        if isinstance(identity_disclosure, dict) and identity_disclosure.get("name"):
+            profile = state.get("user_profile")
+            if not isinstance(profile, dict):
+                profile = {}
+            profile.update({
+                "name": self._text(identity_disclosure.get("name")),
+                "name_source": self._text(identity_disclosure.get("source") or "dialogue"),
+                "updated_at": time.time(),
+            })
+            state["user_profile"] = profile
+
         task = self.task.analyze(text, relation=relation, state=state, history=history)
         # Topic dynamics consumes the task decision rather than re-deriving task
         # ownership from raw text. This keeps the council synchronized.
@@ -5598,6 +5739,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             arbitration=arbitration,
             consistency=consistency,
             history_search=history_search,
+            identity_memory=state.get("user_profile") if isinstance(state.get("user_profile"), dict) else {},
         )
         canonical["provider_context_plan"] = provider_context_plan
         canonical["obligations"] = obligations
@@ -5612,6 +5754,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             "current_turn": current_turn,
             "authenticated_scope": identity["scope"],
             "identity_scope": identity,
+            "user_profile": deepcopy(state.get("user_profile") if isinstance(state.get("user_profile"), dict) else {}),
             "dialogue_relation": relation,
             "topic_dynamics": topic,
             "active_task": task,
