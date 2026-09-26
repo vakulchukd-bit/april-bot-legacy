@@ -191,6 +191,41 @@ def _json_safe_snapshot(value, _active=None):
 def safe_json(value):
     return _json_safe_snapshot(value)
 
+def _compact_debug_payload(value: Any, *, max_keys: int = 24) -> Any:
+    """Return a bounded diagnostic view without copying pixel payloads."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        result = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= max_keys:
+                result["__omitted_keys__"] = len(value) - max_keys
+                break
+            key_text = str(key)
+            lowered = key_text.lower()
+            if lowered in {"image_base64", "base64", "data_uri", "image_data_uri", "src", "url"}:
+                if isinstance(item, str):
+                    result[key_text] = {"present": bool(item), "chars": len(item)}
+                else:
+                    result[key_text] = {"present": bool(item)}
+                continue
+            if lowered in {"render_blocks", "blocks", "images", "items", "artifacts", "scene_contract", "signal", "scene", "active_visual_scene"}:
+                if isinstance(item, list):
+                    result[key_text] = {"count": len(item), "types": [
+                        str(x.get("type") or x.get("artifact_type") or x.get("representation") or "").lower()
+                        for x in item[:12] if isinstance(x, dict)
+                    ]}
+                elif isinstance(item, dict):
+                    result[key_text] = _compact_debug_payload(item, max_keys=12)
+                else:
+                    result[key_text] = bool(item)
+                continue
+            result[key_text] = _compact_debug_payload(item, max_keys=12)
+        return result
+    if isinstance(value, (list, tuple, set)):
+        return [_compact_debug_payload(item, max_keys=12) for item in list(value)[:12]]
+    return str(value)[:500]
+
 def _compact_visual_context(analysis: Any) -> dict:
     """Build a bounded visual packet for the CPU hot path.
 
@@ -507,6 +542,49 @@ def scene_contract_view(contract):
     return view
 
 
+def _scene_contract_web_projection(contract):
+    """Build the single lossless Web SceneContract without transport duplicates.
+
+    The CPU keeps its full canonical contract internally. This projection removes
+    redundant mirrors (blocks/signal block copies/metadata.scene_signal) only at
+    the HTTP boundary. The authoritative image payload remains exactly once in
+    SceneContract.render_blocks. No routing or renderer decision occurs here.
+    """
+    scene = scene_contract_view(contract)
+    if not scene:
+        return {}
+
+    projected = dict(scene)
+    render_blocks = list(scene.get("render_blocks") or [])
+    projected["render_blocks"] = render_blocks
+    projected.pop("blocks", None)
+
+    signal = projected.get("signal")
+    if isinstance(signal, dict):
+        signal_projection = dict(signal)
+        signal_projection.pop("blocks", None)
+        signal_projection.pop("render_blocks", None)
+        projected["signal"] = signal_projection
+
+    metadata = projected.get("metadata")
+    if isinstance(metadata, dict):
+        metadata_projection = dict(metadata)
+        metadata_projection.pop("scene_signal", None)
+        projected["metadata"] = metadata_projection
+
+    # active_visual_scene is continuity evidence, not the current Web render.
+    # Never ship a second copy of generated pixels inside the same response.
+    active_visual = projected.get("active_visual_scene")
+    if isinstance(active_visual, dict):
+        projected["active_visual_scene"] = {
+            key: active_visual.get(key)
+            for key in ("scene_id", "scene_type", "topic", "summary", "user_request", "april_answer", "render_block_types", "presentation_types")
+            if key in active_visual
+        }
+
+    return projected
+
+
 
 
 # =========================================================
@@ -582,16 +660,14 @@ def build_gateway_transport_payload(result):
     if not isinstance(result, dict):
         result = gateway_return_cpu_result(result)
 
-    scene = scene_contract_view(result.get("scene_contract"))
+    scene = _scene_contract_web_projection(result.get("scene_contract"))
     machine = result.get("machine_response")
     machine = machine if isinstance(machine, dict) else {}
 
-    # Web receives exactly the SceneContract render stream. No fallback source
-    # may replace or merge it in the Gateway.
+    # Web receives exactly one canonical SceneContract. The gateway envelope
+    # carries identity/state metadata only; it never mirrors render_blocks.
     render_blocks = list(scene.get("render_blocks") or [])
 
-    # SceneContract is already canonical. Transport must not choose between
-    # answer/content/summary or manufacture a new human text field.
     content = scene.get("content") if isinstance(scene.get("content"), str) else result.get("content", "")
     answer = scene.get("answer") if isinstance(scene.get("answer"), str) else result.get("answer", "")
 
@@ -605,22 +681,19 @@ def build_gateway_transport_payload(result):
         "success": True,
         "canonical_route": "/api/v1/chat",
         "single_route": True,
-        "scene_contract": safe_json(scene),
-        "render_blocks": safe_json(render_blocks),
+        "scene_id": scene.get("scene_id"),
+        "turn_id": scene.get("turn_id"),
+        "flow_id": scene.get("flow_id"),
+        "user_id": scene.get("user_id"),
+        "conversation_id": scene.get("conversation_id"),
+        "dialogue_sequence_id": scene.get("dialogue_sequence_id"),
+        "renderer_state": safe_json(scene.get("renderer_state") or {}),
+        "space_continuity": safe_json(scene.get("space_continuity") or {}),
         "content": content,
         "answer": answer,
         "summary": summary,
-        "active_visual_scene": safe_json(
-            result.get("active_visual_scene")
-            or scene.get("active_visual_scene")
-            or {}
-        ),
-        "space_continuity": safe_json(
-            result.get("space_continuity")
-            or scene.get("space_continuity")
-            or {}
-        ),
         "transport_role": "gateway_only",
+        "canonical_render_block_count": len(render_blocks),
     }
 
 
@@ -829,11 +902,9 @@ def normalize_executor_response(
         }
     )
 
-    print("🌐 EXECUTOR RAW:")
-    print(result)
+    print("🌐 EXECUTOR RAW SUMMARY:", _compact_debug_payload(result))
 
-    print("🌐 NORMALIZED:")
-    print(normalized)
+    print("🌐 NORMALIZED SUMMARY:", _compact_debug_payload(normalized))
 
     
     canonical = scene_contract_view(result.get("scene_contract")) if isinstance(result, dict) else None
@@ -1051,7 +1122,7 @@ async def process_web_message(
         return result
 
     visual_turn = prepare_visual_context_for_turn(user_id, text)
-    print("🧠 VISUAL TURN GATE:", visual_turn)
+    print("🧠 VISUAL TURN GATE SUMMARY:", _compact_debug_payload(visual_turn))
     # The current human turn MUST NOT enter state.dialog before interpretation.
     # Interpretation needs the previous completed USER↔APRIL pair as its anchor.
     # Commit the current pair only after a successful canonical response.
@@ -1513,11 +1584,28 @@ def web_chat():
         # a user turn and must never create/replace the current USER↔APRIL scene.
         if not text:
             current_state = get_state(user_id)
+            active = current_state.get("active_visual_scene")
+            active_summary = {}
+            if isinstance(active, dict):
+                active_summary = {
+                    key: active.get(key)
+                    for key in (
+                        "scene_id",
+                        "scene_type",
+                        "topic",
+                        "summary",
+                        "user_request",
+                        "april_answer",
+                        "render_block_types",
+                        "presentation_types",
+                    )
+                    if key in active
+                }
             return jsonify({
                 "success": True,
                 "gateway_transport": {},
                 "scene_contract": safe_json({
-                    "active_visual_scene": current_state.get("active_visual_scene"),
+                    "active_visual_scene": active_summary,
                     "user_id": user_id,
                     "conversation_id": current_state.get("conversation_id"),
                 }),
@@ -1528,7 +1616,7 @@ def web_chat():
                 "renderer_mode": WEB_RENDERER_MODE,
                 "scene_mode": WEB_SCENE_MODE,
                 "visual_summary": safe_json(current_state.get("visual_summary") or {}),
-                "active_visual_scene": safe_json(current_state.get("active_visual_scene")),
+                "active_visual_scene": safe_json(active_summary),
                 "canonical_route": "/api/v1/chat",
                 "memory_sync_only": True,
             })
@@ -1576,13 +1664,10 @@ def web_chat():
         # Keep the frontend ledger current as evidence, but do not promote a
         # plain user_message into active visual scene state.
         state_after_update["visual_summary"] = visual_summary
-        persist_state(user_id)
 
         print(
-            "🧠 VISUAL STATE PRESERVED",
-            state_after_update.get(
-                "active_visual_scene"
-            )
+            "🧠 VISUAL STATE PRESERVED SUMMARY:",
+            _compact_debug_payload(state_after_update.get("active_visual_scene"))
         )
 
         print(
@@ -1619,19 +1704,24 @@ def web_chat():
         #
         # =========================================================
 
-        gt=result.get("gateway_transport",{})
+        gt = result.get("gateway_transport", {})
+        scene = _scene_contract_web_projection(result.get("scene_contract"))
         return jsonify({
             "success": True,
             "gateway_transport": safe_json(gt),
-            "scene_contract": safe_json(gt.get("scene_contract", {})),
-            "render_blocks": safe_json(gt.get("render_blocks", [])),
-            "content": gt.get("content",""),
-            "answer": gt.get("answer",""),
-            "summary": gt.get("summary",""),
+            "scene_contract": safe_json(scene),
+            "content": gt.get("content", ""),
+            "answer": gt.get("answer", ""),
+            "summary": gt.get("summary", ""),
             "renderer_mode": WEB_RENDERER_MODE,
             "scene_mode": WEB_SCENE_MODE,
             "visual_summary": safe_json(visual_summary),
-            "active_visual_scene": safe_json(gt.get("active_visual_scene")),
+            "active_visual_scene": safe_json(
+                scene.get("active_visual_scene") or {}
+            ),
+            "preferred_transport": "scene_contract",
+            "canonical_route": "/api/v1/chat",
+            "single_route": True,
         })
 
     except Exception as e:
