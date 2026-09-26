@@ -541,11 +541,37 @@ class AprilImagesGenerator:
         return torch.cat([tensor, pad], dim=1)
 
     @classmethod
+    def _pad_batch_size(cls, tensor: Any, target_batch: int) -> Any:
+        """Align the number of prompt chunks used by positive/negative embeds.
+
+        Long-prompt chunking can produce multiple positive CLIP windows while
+        an empty/short negative prompt produces only one. Diffusers expects
+        classifier-free positive/negative embeddings to have the same batch
+        dimension. The negative conditioning is therefore repeated across
+        the missing windows rather than allowing a shape mismatch to reach
+        the diffusion pipeline.
+        """
+        if tensor is None:
+            return None
+        current = int(tensor.shape[0])
+        if current == target_batch:
+            return tensor
+        if current <= 0 or target_batch <= 0:
+            raise RuntimeError("APRIL_IMAGES_PROMPT_BATCH_INVALID")
+        if current > target_batch:
+            return tensor[:target_batch]
+        repeats = target_batch - current
+        tail = tensor[-1:].expand(repeats, *tensor.shape[1:])
+        return torch.cat([tensor, tail], dim=0)
+
+    @classmethod
     def _long_prompt_kwargs(
         cls,
         pipeline: Any,
         prompt: str,
         negative_prompt: str,
+        *,
+        include_negative: bool = True,
     ) -> dict[str, Any]:
         """Encode long prompts without imposing an April/OpenAI token cap.
 
@@ -573,61 +599,139 @@ class AprilImagesGenerator:
         hidden_1, _pooled_1, count_1 = cls._encode_text_encoder_chunks(
             tokenizer_1, text_encoder_1, prompt, device=execution_device
         )
-        neg_hidden_1, _neg_pooled_1, neg_count_1 = cls._encode_text_encoder_chunks(
-            tokenizer_1, text_encoder_1, negative_prompt or "", device=execution_device
-        )
+
+        neg_hidden_1 = None
+        _neg_pooled_1 = None
+        neg_count_1 = 0
+        if include_negative:
+            neg_hidden_1, _neg_pooled_1, neg_count_1 = cls._encode_text_encoder_chunks(
+                tokenizer_1, text_encoder_1, negative_prompt or "", device=execution_device
+            )
 
         if tokenizer_2 is not None and text_encoder_2 is not None:
             hidden_2, pooled_2, count_2 = cls._encode_text_encoder_chunks(
                 tokenizer_2, text_encoder_2, prompt, device=execution_device
             )
-            neg_hidden_2, neg_pooled_2, neg_count_2 = cls._encode_text_encoder_chunks(
-                tokenizer_2, text_encoder_2, negative_prompt or "", device=execution_device
-            )
+
+            neg_hidden_2 = None
+            neg_pooled_2 = None
+            neg_count_2 = 0
+            if include_negative:
+                neg_hidden_2, neg_pooled_2, neg_count_2 = cls._encode_text_encoder_chunks(
+                    tokenizer_2, text_encoder_2, negative_prompt or "", device=execution_device
+                )
 
             target_prompt_len = max(int(hidden_1.shape[1]), int(hidden_2.shape[1]))
-            target_negative_len = max(
-                int(neg_hidden_1.shape[1]), int(neg_hidden_2.shape[1])
-            )
             hidden_1 = cls._pad_sequence_length(hidden_1, target_prompt_len)
             hidden_2 = cls._pad_sequence_length(hidden_2, target_prompt_len)
-            neg_hidden_1 = cls._pad_sequence_length(neg_hidden_1, target_negative_len)
-            neg_hidden_2 = cls._pad_sequence_length(neg_hidden_2, target_negative_len)
+
+            prompt_batch = max(int(hidden_1.shape[0]), int(hidden_2.shape[0]))
+            hidden_1 = cls._pad_batch_size(hidden_1, prompt_batch)
+            hidden_2 = cls._pad_batch_size(hidden_2, prompt_batch)
 
             prompt_embeds = torch.cat([hidden_1, hidden_2], dim=-1)
-            negative_prompt_embeds = torch.cat([neg_hidden_1, neg_hidden_2], dim=-1)
             pooled_prompt_embeds = pooled_2
-            negative_pooled_prompt_embeds = neg_pooled_2
+            if pooled_prompt_embeds is not None:
+                pooled_prompt_embeds = cls._pad_batch_size(
+                    pooled_prompt_embeds, prompt_batch
+                )
+
+            if include_negative:
+                target_negative_len = max(
+                    int(neg_hidden_1.shape[1]), int(neg_hidden_2.shape[1])
+                )
+                neg_hidden_1 = cls._pad_sequence_length(neg_hidden_1, target_negative_len)
+                neg_hidden_2 = cls._pad_sequence_length(neg_hidden_2, target_negative_len)
+                negative_batch = max(
+                    int(neg_hidden_1.shape[0]),
+                    int(neg_hidden_2.shape[0]),
+                    prompt_batch,
+                )
+                neg_hidden_1 = cls._pad_batch_size(neg_hidden_1, negative_batch)
+                neg_hidden_2 = cls._pad_batch_size(neg_hidden_2, negative_batch)
+                prompt_embeds = cls._pad_batch_size(prompt_embeds, negative_batch)
+                pooled_prompt_embeds = cls._pad_batch_size(
+                    pooled_prompt_embeds, negative_batch
+                ) if pooled_prompt_embeds is not None else None
+                prompt_batch = negative_batch
+
+                negative_prompt_embeds = torch.cat([neg_hidden_1, neg_hidden_2], dim=-1)
+                negative_pooled_prompt_embeds = neg_pooled_2
+                if negative_pooled_prompt_embeds is not None:
+                    negative_pooled_prompt_embeds = cls._pad_batch_size(
+                        negative_pooled_prompt_embeds, negative_batch
+                    )
+            else:
+                negative_prompt_embeds = None
+                negative_pooled_prompt_embeds = None
 
             prompt_chunks = max(count_1, count_2)
-            negative_chunks = max(neg_count_1, neg_count_2)
+            negative_chunks = max(neg_count_1, neg_count_2) if include_negative else 0
         else:
             prompt_embeds = hidden_1
-            negative_prompt_embeds = neg_hidden_1
             pooled_prompt_embeds = None
-            negative_pooled_prompt_embeds = None
             prompt_chunks = count_1
-            negative_chunks = neg_count_1
+            if include_negative:
+                negative_batch = max(int(prompt_embeds.shape[0]), int(neg_hidden_1.shape[0]))
+                prompt_embeds = cls._pad_batch_size(prompt_embeds, negative_batch)
+                neg_hidden_1 = cls._pad_batch_size(neg_hidden_1, negative_batch)
+                negative_prompt_embeds = neg_hidden_1
+                negative_pooled_prompt_embeds = _neg_pooled_1
+                if negative_pooled_prompt_embeds is not None:
+                    negative_pooled_prompt_embeds = cls._pad_batch_size(
+                        negative_pooled_prompt_embeds, negative_batch
+                    )
+                prompt_chunks = max(count_1, 0)
+                negative_chunks = neg_count_1
+            else:
+                negative_prompt_embeds = None
+                negative_pooled_prompt_embeds = None
+                negative_chunks = 0
 
-        if prompt_embeds is None or negative_prompt_embeds is None:
+        if prompt_embeds is None:
             raise RuntimeError("APRIL_IMAGES_PROMPT_EMBEDDINGS_MISSING")
+        if include_negative and negative_prompt_embeds is None:
+            raise RuntimeError("APRIL_IMAGES_NEGATIVE_PROMPT_EMBEDDINGS_MISSING")
 
         # Match the positive/negative sequence lengths; there is no maximum
         # here, only equality required by classifier-free guidance.
-        shared_len = max(
-            int(prompt_embeds.shape[1]),
-            int(negative_prompt_embeds.shape[1]),
-        )
-        prompt_embeds = cls._pad_sequence_length(prompt_embeds, shared_len)
-        negative_prompt_embeds = cls._pad_sequence_length(
-            negative_prompt_embeds, shared_len
-        )
+        if include_negative:
+            if negative_prompt_embeds is None:
+                raise RuntimeError("APRIL_IMAGES_NEGATIVE_PROMPT_EMBEDDINGS_MISSING")
+            # Match both sequence length and batch size for classifier-free
+            # guidance. The batch dimension equals the number of native CLIP
+            # windows after long-prompt chunking.
+            shared_len = max(
+                int(prompt_embeds.shape[1]),
+                int(negative_prompt_embeds.shape[1]),
+            )
+            prompt_embeds = cls._pad_sequence_length(prompt_embeds, shared_len)
+            negative_prompt_embeds = cls._pad_sequence_length(
+                negative_prompt_embeds, shared_len
+            )
+            shared_batch = max(
+                int(prompt_embeds.shape[0]),
+                int(negative_prompt_embeds.shape[0]),
+            )
+            prompt_embeds = cls._pad_batch_size(prompt_embeds, shared_batch)
+            negative_prompt_embeds = cls._pad_batch_size(
+                negative_prompt_embeds, shared_batch
+            )
+            if pooled_prompt_embeds is not None:
+                pooled_prompt_embeds = cls._pad_batch_size(
+                    pooled_prompt_embeds, shared_batch
+                )
+            if negative_pooled_prompt_embeds is not None:
+                negative_pooled_prompt_embeds = cls._pad_batch_size(
+                    negative_pooled_prompt_embeds, shared_batch
+                )
 
         # Keep embeddings compatible with the pipeline's UNet/text dtype.
         target_dtype = getattr(getattr(pipeline, "unet", None), "dtype", None)
         if target_dtype is not None and getattr(prompt_embeds, "is_floating_point", lambda: False)():
             prompt_embeds = prompt_embeds.to(dtype=target_dtype)
-            negative_prompt_embeds = negative_prompt_embeds.to(dtype=target_dtype)
+            if negative_prompt_embeds is not None:
+                negative_prompt_embeds = negative_prompt_embeds.to(dtype=target_dtype)
             if pooled_prompt_embeds is not None:
                 pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=target_dtype)
             if negative_pooled_prompt_embeds is not None:
@@ -647,8 +751,9 @@ class AprilImagesGenerator:
 
         result = {
             "prompt_embeds": prompt_embeds,
-            "negative_prompt_embeds": negative_prompt_embeds,
         }
+        if negative_prompt_embeds is not None:
+            result["negative_prompt_embeds"] = negative_prompt_embeds
         if pooled_prompt_embeds is not None:
             result["pooled_prompt_embeds"] = pooled_prompt_embeds
         if negative_pooled_prompt_embeds is not None:
@@ -718,7 +823,8 @@ class AprilImagesGenerator:
             prompt_kwargs = cls._long_prompt_kwargs(
                 pipeline,
                 prompt,
-                "" if guidance == 0.0 else negative_prompt,
+                negative_prompt,
+                include_negative=guidance != 0.0,
             )
             kwargs.update(prompt_kwargs)
 
