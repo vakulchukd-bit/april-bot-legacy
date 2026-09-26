@@ -17,7 +17,9 @@ Important contract rule:
 from __future__ import annotations
 
 import base64
+import html
 import io
+import json
 import os
 import re
 import threading
@@ -187,9 +189,94 @@ class AprilImagesGenerator:
         height = max(64, (height // 64) * 64)
         return width, height
 
-    @staticmethod
-    def _clean_prompt(prompt: Any) -> str:
-        text = " ".join(str(prompt or "").split()).strip()
+    @classmethod
+    def _extract_semantic_prompt(cls, value: Any, *, _depth: int = 0) -> str:
+        """Extract a semantic image request without feeding render artifacts to CLIP.
+
+        The local image engine must receive a visual description, not a serialized
+        MachineResponse, SVG/XML markup, data URI, or base64 payload. OpenAI remains
+        the semantic planner; this Diffusers backend remains the only pixel generator.
+        """
+        if _depth > 4 or value is None:
+            return ""
+
+        if isinstance(value, dict):
+            preferred_keys = (
+                "prompt", "description", "visual_prompt", "image_prompt",
+                "image", "visual", "visual_context",
+                "scene", "subject", "request", "title", "summary",
+                "answer", "content", "alt",
+            )
+            for key in preferred_keys:
+                if key in value:
+                    candidate = cls._extract_semantic_prompt(value.get(key), _depth=_depth + 1)
+                    if candidate:
+                        return candidate
+            for key in ("data", "spec"):
+                if key in value:
+                    candidate = cls._extract_semantic_prompt(value.get(key), _depth=_depth + 1)
+                    if candidate:
+                        return candidate
+            return ""
+
+        if isinstance(value, (list, tuple)):
+            parts = []
+            for item in value[:16]:
+                candidate = cls._extract_semantic_prompt(item, _depth=_depth + 1)
+                if candidate:
+                    parts.append(candidate)
+            return " ".join(parts).strip()
+
+        text = str(value or "").strip()
+        if not text:
+            return ""
+
+        if text[:1] in "{[":
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                parsed = None
+            if parsed is not None:
+                candidate = cls._extract_semantic_prompt(parsed, _depth=_depth + 1)
+                if candidate:
+                    return candidate
+
+        lowered = text.lstrip().lower()
+        if (
+            lowered.startswith("<svg")
+            or lowered.startswith("<?xml")
+            or "data:image/" in lowered
+            or "<svg " in lowered
+            or "<path" in lowered
+            or "<rect" in lowered
+            or "<circle" in lowered
+        ):
+            candidates = []
+            patterns = (
+                r"aria-label=[\"']([^\"']+)[\"']",
+                r"data-(?:prompt|description|alt)=[\"']([^\"']+)[\"']",
+                r"<title[^>]*>(.*?)</title>",
+                r"<desc[^>]*>(.*?)</desc>",
+                r"<text[^>]*>(.*?)</text>",
+            )
+            for pattern in patterns:
+                for match in re.findall(pattern, text, flags=re.IGNORECASE | re.DOTALL):
+                    cleaned = html.unescape(re.sub(r"<[^>]+>", " ", str(match)))
+                    cleaned = " ".join(cleaned.split()).strip()
+                    if cleaned:
+                        candidates.append(cleaned)
+            if candidates:
+                return " ".join(dict.fromkeys(candidates))
+            return ""
+
+        text = re.sub(r"^```(?:json|text|xml|svg)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text).strip()
+        text = re.sub(r"^data:image/[^;]+;base64,.*$", "", text, flags=re.IGNORECASE | re.DOTALL)
+        return " ".join(text.split()).strip()
+
+    @classmethod
+    def _clean_prompt(cls, prompt: Any) -> str:
+        text = cls._extract_semantic_prompt(prompt)
         if not text:
             raise ValueError("APRIL_IMAGES_EMPTY_PROMPT")
         return text
@@ -206,17 +293,17 @@ class AprilImagesGenerator:
             values.extend(str(x).strip() for x in spec["negative"] if str(x).strip())
         return ", ".join(dict.fromkeys(values))
 
-    @staticmethod
-    def _compose_prompt(prompt: str, spec: Optional[dict[str, Any]] = None) -> str:
-        parts = [str(prompt).strip()]
+    @classmethod
+    def _compose_prompt(cls, prompt: str, spec: Optional[dict[str, Any]] = None) -> str:
+        semantic_prompt = cls._clean_prompt(prompt)
+        parts = [semantic_prompt]
         if isinstance(spec, dict):
-            style = str(spec.get("style") or "").strip()
-            if style and style.lower() not in prompt.lower():
+            style = cls._clean_prompt(spec.get("style") or "") if str(spec.get("style") or "").strip() else ""
+            if style and style.lower() not in semantic_prompt.lower():
                 parts.append(f"Style: {style}")
 
             context = spec.get("visual_context")
             if isinstance(context, dict):
-                # Preserve every useful visual signal without inventing facts.
                 for key in (
                     "subject", "composition", "lighting", "camera",
                     "environment", "palette", "mood", "materials",
@@ -224,9 +311,10 @@ class AprilImagesGenerator:
                 ):
                     value = context.get(key)
                     if value:
-                        label = key.replace("_", " ").title()
-                        parts.append(f"{label}: {value}")
-
+                        semantic_value = cls._extract_semantic_prompt(value)
+                        if semantic_value:
+                            label = key.replace("_", " " ).title()
+                            parts.append(f"{label}: {semantic_value}")
         # Quality guidance improves coherence while leaving scene semantics
         # authoritative. It does not change the requested subject.
         parts.append(
@@ -915,6 +1003,14 @@ class AprilImagesGenerator:
     ) -> dict[str, Any]:
         clean = cls._validate_render_spec(spec)
         prompt = cls._compose_prompt(clean["prompt"], clean)
+        print(
+            "🧠 IMAGE PROMPT NORMALIZED:",
+            {
+                "semantic_chars": len(prompt),
+                "contains_markup": bool(re.search(r"<(?:svg|path|rect|circle)\b|data:image/", prompt, flags=re.IGNORECASE)),
+                "native_clip_limit_is_window_only": True,
+            },
+        )
         width, height = cls._parse_size(f"{clean['width']}x{clean['height']}")
         image = await __import__("asyncio").to_thread(
             cls._generate_real_image,
@@ -1148,6 +1244,14 @@ class AprilImagesGenerator:
     ) -> dict[str, Any]:
         prompt = self._clean_prompt(prompt)
         width, height = self._parse_size(size)
+        print(
+            "🧠 IMAGE PROMPT NORMALIZED:",
+            {
+                "semantic_chars": len(prompt),
+                "contains_markup": bool(re.search(r"<(?:svg|path|rect|circle)\b|data:image/", prompt, flags=re.IGNORECASE)),
+                "native_clip_limit_is_window_only": True,
+            },
+        )
         image = await __import__("asyncio").to_thread(
             self._generate_real_image,
             prompt,
