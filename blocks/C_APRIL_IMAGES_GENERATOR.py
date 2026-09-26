@@ -405,11 +405,6 @@ class AprilImagesGenerator:
             dtype = cls._dtype()
             if dtype is not None:
                 kwargs["dtype"] = dtype
-            if torch is not None and cls._device() == "cpu":
-                try:
-                    torch.set_float32_matmul_precision("high")
-                except Exception:
-                    pass
             if os.getenv("APRIL_IMAGES_USE_SAFETENSORS", "1").strip().lower() in {"1", "true", "yes"}:
                 kwargs["use_safetensors"] = True
             if cls._is_turbo_model() and cls._device() in {"cuda", "mps"}:
@@ -417,12 +412,6 @@ class AprilImagesGenerator:
 
             pipeline = AutoPipelineForText2Image.from_pretrained(source, **kwargs)
             cls._text_pipeline = cls._configure_pipeline(pipeline)
-            progress_config = getattr(cls._text_pipeline, "set_progress_bar_config", None)
-            if callable(progress_config):
-                try:
-                    progress_config(disable=True)
-                except Exception:
-                    pass
             cls._pipeline_path = source
             cls._pipeline_cache_key = cache_key
             print(
@@ -903,22 +892,17 @@ class AprilImagesGenerator:
             tokenizer is not None
             and prompt_token_count <= native_limit
             and negative_token_count <= native_limit
+            and not cls._is_turbo_model()
         ):
-            # For a prompt that already fits one native CLIP window, always use
-            # Diffusers' native text path — including SDXL Turbo. The custom
-            # long-window encoder is reserved for prompts that actually exceed
-            # the backend window. This preserves the exact local generator while
-            # avoiding unnecessary text-encoder work on ordinary image requests.
             kwargs["prompt"] = prompt
-            if guidance != 0.0:
-                kwargs["negative_prompt"] = negative_prompt or ""
+            kwargs["negative_prompt"] = negative_prompt or ""
             print(
                 "🧠 IMAGE PROMPT ENCODING:",
                 {
                     "prompt_raw_tokens": prompt_token_count,
                     "negative_raw_tokens": negative_token_count,
                     "prompt_native_windows": 1,
-                    "negative_native_windows": 1 if guidance != 0.0 else 0,
+                    "negative_native_windows": 1,
                     "strategy": "pipeline_native_single_window",
                     "april_openai_prompt_cap": None,
                 },
@@ -936,14 +920,11 @@ class AprilImagesGenerator:
             generator_device = "cuda" if cls._device() == "cuda" else "cpu"
             kwargs["generator"] = torch.Generator(device=generator_device).manual_seed(int(seed))
 
-        import time as _time
-        started = _time.perf_counter()
         if torch is not None:
             with torch.inference_mode():
                 result = pipeline(**kwargs)
         else:
             result = pipeline(**kwargs)
-        print("🧠 IMAGE DIFFUSION COMPLETE:", {"seconds": round(_time.perf_counter() - started, 3), "size": [width, height], "steps": steps})
         image = getattr(result, "images", [None])[0]
         if image is None:
             raise RuntimeError("APRIL_IMAGES_DIFFUSION_EMPTY_RESULT")
@@ -1050,12 +1031,82 @@ class AprilImagesGenerator:
             backend=cls.BACKEND,
             variant=variant,
         )
+
+        # The raster is authoritative at this point: generation already
+        # succeeded and the PNG has passed validation.  Reassert the canonical
+        # Web display payload from those bytes instead of turning a transport
+        # normalization mismatch into a failed generation.  This stays on the
+        # existing C_APRIL -> C_ARTIFACT -> SceneContract route and does not
+        # accept or forward a Provider-rendered image.
         payload = artifact.get("payload") if isinstance(artifact, dict) else None
-        if not isinstance(payload, dict) or not payload.get("src") or not payload.get("images"):
-            raise RuntimeError("APRIL_IMAGES_ARTIFACT_DISPLAY_PAYLOAD_MISSING")
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        data_base64 = base64.b64encode(image_bytes).decode("ascii")
+        data_uri = f"data:image/png;base64,{data_base64}"
+        image_item = {
+            "src": data_uri,
+            "url": data_uri,
+            "image": data_uri,
+            "mime_type": "image/png",
+            "width": int(width),
+            "height": int(height),
+            "title": payload.get("title") or "Image",
+            "alt": payload.get("alt") or prompt,
+            "caption": payload.get("caption") or prompt,
+        }
+        payload.update({
+            "kind": "generated_image",
+            "artifact_type": "image",
+            "mime_type": "image/png",
+            "width": int(width),
+            "height": int(height),
+            "image_base64": data_base64,
+            "image_data_uri": data_uri,
+            "src": data_uri,
+            "url": data_uri,
+            "image": data_uri,
+            "prompt": prompt,
+            "engine": cls.ENGINE_NAME,
+            "engine_version": cls.ENGINE_VERSION,
+            "backend": cls.BACKEND,
+            "variant": variant,
+            "images": [image_item],
+        })
+
+        if not isinstance(artifact, dict):
+            artifact = {}
+        artifact["artifact_type"] = "image"
+        artifact["mime_type"] = "image/png"
+        artifact["width"] = int(width)
+        artifact["height"] = int(height)
+        artifact["image_base64"] = data_base64
+        artifact["image_data_uri"] = data_uri
+        artifact["payload"] = payload
+        artifact["images"] = [image_item]
         artifact["render_spec"] = clean
         artifact["payload"]["render_spec"] = clean
-        artifact["images"] = list(artifact["payload"].get("images") or [])
+
+        # Keep the BaseArtifact used by C_ARTIFACT_CONTRACT in sync with the
+        # repaired display payload.  Rebuilding the universal contract here
+        # guarantees that its render block carries the same PNG source.
+        base_artifact = getattr(contract, "artifact", None) if contract is not None else None
+        if base_artifact is not None:
+            base_data = dict(getattr(base_artifact, "data", {}) or {})
+            base_data.update({
+                "artifact_type": "image",
+                "mime_type": "image/png",
+                "width": int(width),
+                "height": int(height),
+                "image_base64": data_base64,
+                "image_data_uri": data_uri,
+                "human_visible": True,
+                "machine_only": False,
+                "payload": payload,
+            })
+            base_artifact.data = base_data
+            contract = build_universal_contract(base_artifact)
+
+        if not artifact["payload"].get("src") or not artifact["payload"].get("images"):
+            raise RuntimeError("APRIL_IMAGES_ARTIFACT_DISPLAY_PAYLOAD_BUILD_FAILED")
         return cls._result_dict(ImageGenerationResult(
             image_bytes=image_bytes,
             mime_type="image/png",
@@ -1103,9 +1154,6 @@ class AprilImagesGenerator:
         data_base64 = base64.b64encode(image_bytes).decode("ascii")
         data_uri = f"data:image/png;base64,{data_base64}"
 
-        # One canonical image source is sufficient for the SceneContract.
-        # Compatibility metadata remains at artifact root, but the render payload
-        # must not repeat the same ~577 KB data URI under src/url/image/base64.
         artifact = create_artifact(
             artifact_type="image",
             room_source="APRIL_IMAGES_GENERATION",
@@ -1133,6 +1181,10 @@ class AprilImagesGenerator:
                     "mime_type": "image/png",
                     "width": width,
                     "height": height,
+                    "image_base64": data_base64,
+                    "image_data_uri": data_uri,
+                    "src": data_uri,
+                    "url": data_uri,
                     "prompt": prompt,
                     "engine": cls.ENGINE_NAME,
                     "engine_version": cls.ENGINE_VERSION,
@@ -1147,6 +1199,8 @@ class AprilImagesGenerator:
                     },
                     "images": [{
                         "src": data_uri,
+                        "url": data_uri,
+                        "image": data_uri,
                         "mime_type": "image/png",
                         "width": width,
                         "height": height,
