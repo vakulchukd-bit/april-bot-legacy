@@ -251,15 +251,9 @@ async def generate(
         ).strip()
 
         # Diffusion is finished at this point and the real image bytes exist.
-        # Move the live status to the existing gallery-rendering phase before
-        # the PNG/asset preparation starts, so Web switches indicators at the
-        # same lifecycle boundary instead of waiting for `success`.
-        set_image_generation_status(
-            flow_id,
-            status="rendering",
-            user_id=str(user_id or ""),
-        )
-
+        # Do not advertise `rendering` before an asset exists: that produced an
+        # empty GalleryBlock during long CPU generations.  The Web lifecycle
+        # switches at the concrete asset-ready boundary below.
         path = save_temp_image(img)
         if path:
             try:
@@ -292,12 +286,18 @@ async def generate(
                 "image_generation_status": "failed",
             }
 
+        # `success` now means: the real PNG is on disk and the canonical
+        # browser asset URL is ready.  Yield once so the Web status poller can
+        # observe that boundary while the final SceneContract is still being
+        # assembled by the same canonical route.
         set_image_generation_status(
             flow_id,
             status="success",
             user_id=str(user_id or ""),
             asset_url=public_asset_url or asset_url,
         )
+        await asyncio.sleep(0)
+
         if path:
             now = time.time()
             state["image_context"] = {
