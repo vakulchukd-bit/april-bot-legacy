@@ -68,7 +68,7 @@ from blocks.image_engine import (
 )
 
 from blocks.image_engine import (
-    edit as image_edit_engine
+    edit as image_edit_engine,
 )
 
 from blocks.image_system import (
@@ -695,22 +695,73 @@ class ImageGenerateRoom(Room):
                 or ""
             ).strip()
 
+            provider_metadata = context.get("provider_metadata") if isinstance(context.get("provider_metadata"), dict) else {}
+            provider_signal = provider_metadata.get("image_generation_signal")
+            if not isinstance(provider_signal, dict):
+                provider_signal = {}
+
+            signal_route = str(provider_signal.get("route") or "").strip().upper()
+            signal_execute = provider_signal.get("execute") is True
+            signal_anchor = str(provider_signal.get("request_anchor") or "").strip()
+            request_anchor = raw_request or semantic_request
+
+            def _request_key(value: str) -> str:
+                return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+            signal_valid = bool(
+                signal_route == "C_APRIL_IMAGES_GENERATOR"
+                and signal_execute
+                and signal_anchor
+                and request_anchor
+                and _request_key(signal_anchor) == _request_key(request_anchor)
+            )
+
             image_spec = context.get("image_generation_spec")
             if not isinstance(image_spec, dict):
                 image_spec = None
+            else:
+                image_spec = dict(image_spec)
 
-            # Image generation does not need the entire semantic dialogue sentence
-            # as CLIP conditioning. For short/simple visual requests, keep the user's
-            # exact request as the rendering prompt. Complex requests continue to use
-            # the richer Provider image spec so visual detail is preserved.
+            # The Provider signal is a same-turn execution handoff, not historical
+            # visual memory. A stale/mismatched signal is never allowed to carry its
+            # old subject into C_APRIL_IMAGES_GENERATOR. The same canonical generator
+            # then receives the current request instead.
+            if image_spec and signal_valid:
+                signal_prompt = str(provider_signal.get("prompt") or "").strip()
+                if signal_prompt:
+                    image_spec["prompt"] = signal_prompt
+                image_spec["generator_signal"] = "C_APRIL_IMAGES_GENERATOR"
+                image_spec["request_anchor"] = request_anchor
+            elif not signal_valid:
+                image_spec = None
+
+            # A valid same-turn signal authorizes the Provider's concise English
+            # Turbo prompt. If the signal is missing/stale, the same canonical
+            # generator receives the current request and no historical prompt.
             spec_prompt = str(image_spec.get("prompt") or "").strip() if image_spec else ""
-            if image_spec and spec_prompt and len(spec_prompt) > 180 and not is_complex_prompt(raw_request):
-                compact_spec = dict(image_spec)
-                compact_spec["prompt"] = raw_request
-                compact_spec["visual_context"] = {}
-                image_spec = compact_spec
+            signal_prompt = str(provider_signal.get("prompt") or "").strip()
+            if signal_valid and signal_prompt:
+                prompt = signal_prompt
+            else:
+                prompt = request_anchor or spec_prompt or semantic_request
+                if image_spec and prompt and not spec_prompt:
+                    image_spec["prompt"] = prompt
 
-            prompt = (str(image_spec.get("prompt") or "").strip() if image_spec else "") or raw_request or semantic_request
+            if image_spec:
+                image_spec["generator_signal"] = "C_APRIL_IMAGES_GENERATOR"
+                image_spec["request_anchor"] = request_anchor
+
+            print(
+                "🧭 IMAGE GENERATION HANDOFF",
+                {
+                    "provider_signal": signal_valid,
+                    "route": signal_route or "none",
+                    "execute": signal_execute,
+                    "request_anchor_match": signal_valid,
+                    "prompt_source": "provider_signal_turbo" if signal_valid and image_spec and spec_prompt else "current_request",
+                    "target": "C_APRIL_IMAGES_GENERATOR",
+                },
+            )
 
             # Keep the entire request context available to the engine, but do
             # not pass the live StateManager object through the artifact
@@ -720,7 +771,8 @@ class ImageGenerateRoom(Room):
                 "dialogue_contract": deepcopy(context.get("dialogue_contract") or {}),
                 "dialogue_vector": deepcopy(context.get("dialogue_vector") or {}),
                 "visual_context": deepcopy(context.get("visual_context") or {}),
-                "provider_metadata": deepcopy(context.get("provider_metadata") or {}),
+                "provider_metadata": deepcopy(provider_metadata),
+                "image_generation_signal": deepcopy(provider_signal),
                 "current_user_request": raw_request,
                 "semantic_request": semantic_request,
                 "request_id": str(getattr(request, "request_id", "") or ""),
