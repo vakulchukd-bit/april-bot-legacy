@@ -5,6 +5,7 @@ import asyncio
 import os
 import tempfile
 import time
+import threading
 from pathlib import Path
 
 # Image creation is owned directly by C_APRIL_IMAGES_GENERATOR.
@@ -17,6 +18,69 @@ from blocks.C_ARTIFACT_CONTRACT import _artifact_canonical_render_blocks
 from blocks.image_system import (
     analyze_image
 )
+
+# =====================================================
+# LIVE IMAGE GENERATION STATUS
+# =====================================================
+# Kept in the existing image engine so Web can observe the
+# actual generator state while /api/v1/chat is still running.
+_IMAGE_STATUS_LOCK = threading.RLock()
+_IMAGE_STATUS: dict[str, dict] = {}
+_IMAGE_STATUS_TTL = 120.0
+
+
+def set_image_generation_status(
+    flow_id: str,
+    *,
+    status: str,
+    user_id: str = "",
+    asset_url: str = "",
+    error: str = "",
+) -> None:
+    key = str(flow_id or user_id or "").strip()
+    if not key:
+        return
+    now = time.time()
+    record = {
+        "flow_id": str(flow_id or key),
+        "user_id": str(user_id or ""),
+        "status": str(status or "idle").strip().lower(),
+        "started_at": now,
+        "updated_at": now,
+        "asset_url": str(asset_url or ""),
+        "error": str(error or ""),
+        "expires_at": now + _IMAGE_STATUS_TTL,
+    }
+    with _IMAGE_STATUS_LOCK:
+        _IMAGE_STATUS[key] = record
+
+
+def get_image_generation_status(flow_id: str = "", user_id: str = "") -> dict:
+    key = str(flow_id or user_id or "").strip()
+    if not key:
+        return {"flow_id": "", "status": "idle", "generating": False}
+
+    now = time.time()
+    with _IMAGE_STATUS_LOCK:
+        record = dict(_IMAGE_STATUS.get(key) or {})
+        # Opportunistic cleanup keeps the in-process registry bounded.
+        for stale_key, stale in list(_IMAGE_STATUS.items()):
+            if float(stale.get("expires_at") or 0) <= now:
+                _IMAGE_STATUS.pop(stale_key, None)
+
+    if not record:
+        return {
+            "flow_id": str(flow_id or key),
+            "user_id": str(user_id or ""),
+            "status": "idle",
+            "generating": False,
+        }
+
+    status = str(record.get("status") or "idle").lower()
+    return {
+        **record,
+        "generating": status == "generating",
+    }
 
 # 🔥 META
 from blocks.state_manager import (
@@ -108,7 +172,16 @@ async def generate(
     Provider produced one.  A plain prompt remains a compatibility path, but
     both forms terminate in the same C_APRIL_IMAGES_GENERATOR backend.
     """
+    flow_id = str((context or {}).get("request_id") or "").strip() if isinstance(context, dict) else ""
+    if not flow_id:
+        flow_id = str(user_id or "").strip()
+
     try:
+        set_image_generation_status(
+            flow_id,
+            status="generating",
+            user_id=str(user_id or ""),
+        )
         print(
             "🧠 ENGINE: C_APRIL_IMAGES_GENERATOR ACTIVE",
             {
@@ -137,10 +210,17 @@ async def generate(
         )
 
         if not result.get("success") or not result.get("image_bytes"):
+            error_value = result.get("error") or result.get("message") or "IMAGE_GENERATION_EMPTY_RESULT"
+            set_image_generation_status(
+                flow_id,
+                status="failed",
+                user_id=str(user_id or ""),
+                error=str(error_value),
+            )
             return {
                 "type": "error",
                 "data": "⚠️ Внутренний April Images Generation не смог создать изображение",
-                "error": result.get("error") or result.get("message") or "IMAGE_GENERATION_EMPTY_RESULT",
+                "error": error_value,
                 "image_generation_status": "failed",
             }
 
@@ -165,6 +245,27 @@ async def generate(
         if public_origin and not public_origin.startswith(("http://", "https://")):
             public_origin = "https://" + public_origin
         public_asset_url = f"{public_origin}{asset_url}" if asset_url else ""
+        if not path or not asset_url:
+            error_value = "IMAGE_ASSET_SAVE_FAILED"
+            set_image_generation_status(
+                flow_id,
+                status="failed",
+                user_id=str(user_id or ""),
+                error=error_value,
+            )
+            return {
+                "type": "error",
+                "data": "⚠️ Изображение создано, но не удалось подготовить его для Web.",
+                "error": error_value,
+                "image_generation_status": "failed",
+            }
+
+        set_image_generation_status(
+            flow_id,
+            status="success",
+            user_id=str(user_id or ""),
+            asset_url=public_asset_url or asset_url,
+        )
         if path:
             now = time.time()
             state["image_context"] = {
@@ -299,6 +400,12 @@ async def generate(
         }
 
     except Exception as e:
+        set_image_generation_status(
+            flow_id,
+            status="failed",
+            user_id=str(user_id or ""),
+            error=str(e),
+        )
         print("ENGINE GENERATE ERROR:", e)
         return {
             "type": "error",
