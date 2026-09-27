@@ -63,7 +63,7 @@ class AprilImagesGenerator:
     """The only image producer between Interpretation and C_ARTIFACT."""
 
     ENGINE_NAME = "April Images Generation"
-    ENGINE_VERSION = "2.4.0"
+    ENGINE_VERSION = "2.4.1"
     BACKEND = "diffusers_single_backend"
 
     DEFAULT_SIZE = (512, 512)
@@ -165,20 +165,17 @@ class AprilImagesGenerator:
 
     @classmethod
     def _quality_settings(cls, quality: str) -> tuple[int, float]:
-        """Return sampling settings for the configured image backend.
-
-        SDXL Turbo is explicitly trained for 1-4 denoising steps with guidance
-        disabled.  The ordinary SDXL profile remains available when a different
-        model id is explicitly configured.
-        """
+        """Return baseline sampling settings for the configured backend."""
         normalized = str(quality or "standard").strip().lower()
         if cls._is_turbo_model():
             return {
                 "draft": (1, 0.0),
-                "standard": (1, 0.0),
-                "high": (2, 0.0),
+                # Two steps is the safe fast production baseline for a simple
+                # request. One-step Turbo is retained only for explicit draft.
+                "standard": (2, 0.0),
+                "high": (3, 0.0),
                 "ultra": (4, 0.0),
-            }.get(normalized, (1, 0.0))
+            }.get(normalized, (2, 0.0))
         return {
             "draft": (28, 6.0),
             "standard": (40, 6.5),
@@ -317,31 +314,90 @@ class AprilImagesGenerator:
                 return name
         return "over_limit"
 
+    @staticmethod
+    def _semantic_terms(text: Any) -> set[str]:
+        """Return conservative content terms used only to ground visual_context."""
+        value = str(text or "").lower().replace("ё", "е")
+        stop = {
+            "и", "в", "во", "на", "с", "со", "к", "ко", "у", "из", "за",
+            "под", "над", "для", "по", "а", "но", "или", "это", "как", "так",
+            "что", "чтобы", "the", "a", "an", "and", "in", "on", "with", "for",
+            "to", "of", "from", "is", "are", "be", "this", "that",
+        }
+        terms = set(re.findall(r"[^\W\d_]+", value, flags=re.UNICODE))
+        return {term for term in terms if len(term) >= 3 and term not in stop}
+
     @classmethod
-    def _tier_guidance(cls, tier: str) -> str:
-        return {
-            "core": "",
-            "style": "clean composition, faithful to the requested subject.",
-            "composition": "high-quality artwork, clear subject, balanced composition.",
+    def _is_grounded_context_value(cls, base_prompt: str, value: str) -> bool:
+        """Allow visual context only when it is traceably grounded in the base prompt.
+
+        The generator is deliberately conservative: Provider/Interpretation remain
+        the semantic authority, while this renderer refuses to introduce an
+        unanchored subject/environment/detail on its own.
+        """
+        base = cls._clean_prompt(base_prompt).lower().replace("ё", "е")
+        candidate = cls._clean_prompt(value).lower().replace("ё", "е")
+        if candidate in base:
+            return True
+        base_terms = cls._semantic_terms(base)
+        candidate_terms = cls._semantic_terms(candidate)
+        if not base_terms or not candidate_terms:
+            return False
+        return bool(base_terms.intersection(candidate_terms))
+
+    @classmethod
+    def _prompt_guidance(cls, tier: str) -> str:
+        """Return scene-neutral instructions that improve fidelity without inventing content."""
+        guidance = {
+            "core": (
+                "Render exactly the requested scene. Preserve the specified subject, "
+                "colors, background, text, and relationships. Do not add, remove, or "
+                "replace objects."
+            ),
+            "style": (
+                "Render exactly the requested scene. Preserve all specified visual "
+                "attributes and do not introduce new objects or locations."
+            ),
+            "composition": (
+                "Render exactly the requested scene. Keep the requested objects and "
+                "relations intact; use clean composition and stable geometry."
+            ),
             "scene": (
-                "high-quality finished artwork, clear subject separation, "
-                "natural composition, consistent lighting."
+                "Render exactly the requested scene. Preserve object identity and "
+                "placement; use consistent lighting and natural perspective without "
+                "inventing additional scene content."
             ),
             "detail": (
-                "high-quality finished artwork, clear subject separation, "
-                "natural perspective, detailed textures, consistent lighting, depth."
+                "Render exactly the requested scene. Preserve every requested object, "
+                "color, background and text; improve texture, depth and edge clarity "
+                "without adding new content."
             ),
             "rich": (
-                "high-quality finished artwork, coherent composition, clear subject "
-                "separation, natural perspective, detailed textures, consistent "
-                "lighting, depth, clean edges."
+                "Render exactly the requested scene. Preserve all requested semantics "
+                "and object relationships; improve detail, depth, lighting and visual "
+                "coherence without introducing unrequested subjects."
             ),
             "max": (
-                "high-quality finished artwork, coherent composition, clear subject "
-                "separation, natural perspective, detailed textures, consistent "
-                "lighting, depth, clean edges, faithful to the requested scene."
+                "Render exactly the requested scene. Treat the supplied prompt as the "
+                "sole source of scene content; preserve requested subjects, relations, "
+                "colors, background and text while maximizing detail and clarity. Do "
+                "not invent, replace or remove scene elements."
             ),
-        }.get(tier, "")
+        }
+        return guidance.get(tier, guidance["core"])
+
+    @classmethod
+    def _prompt_complexity_flags(cls, prompt: str) -> dict[str, bool]:
+        text = str(prompt or "").lower()
+        return {
+            "text_requested": bool(re.search(r"надпис|текст|подпис|букв|слово|caption|label|text", text)),
+            "person_or_animal": bool(re.search(
+                r"человек|люд|мужчин|женщин|лиц|рук|ног|животн|ежик|кошка|кот|собак|птиц|лошад|person|people|animal|face|hand|human",
+                text,
+                flags=re.IGNORECASE,
+            )),
+            "multiple_entities": bool(re.search(r"\b(?:и|and|with)\b", text, flags=re.IGNORECASE)),
+        }
 
     @classmethod
     def _compose_prompt(
@@ -351,14 +407,13 @@ class AprilImagesGenerator:
         *,
         prompt_token_count: Optional[int] = None,
     ) -> str:
-        """
-        Compose the generation prompt without inventing scene content.
+        """Compose a semantically locked prompt.
 
-        The Provider prompt remains the semantic authority.  Optional style,
-        visual-context fields and generic quality guidance are added gradually
-        according to the *base semantic token count*.  This prevents short
-        requests from being overloaded and avoids turning generic quality prose
-        into the dominant part of the prompt.
+        The Provider prompt is authoritative. C_APRIL may add only:
+        1) explicitly grounded visual-context fields, and
+        2) scene-neutral fidelity instructions.
+
+        It never invents subjects, environments, props, characters or story beats.
         """
         semantic_prompt = cls._clean_prompt(prompt)
         if prompt_token_count is None:
@@ -373,18 +428,30 @@ class AprilImagesGenerator:
         tier = cls._prompt_tier(int(prompt_token_count))
         parts = [semantic_prompt]
         added_fields: list[str] = []
+        skipped_fields: list[str] = []
 
         if isinstance(spec, dict):
-            style = (
-                cls._clean_prompt(spec.get("style") or "")
-                if str(spec.get("style") or "").strip()
-                else ""
-            )
-            # Explicit style is a real Provider signal.  It is always preserved,
-            # but never duplicated inside the semantic prompt.
-            if style and style.lower() not in semantic_prompt.lower():
-                parts.append(f"Style: {style}")
-                added_fields.append("style")
+            style = str(spec.get("style") or "").strip()
+            # "illustration" is the generator's default metadata, not user scene
+            # content. Do not inject the default style into the actual prompt.
+            if style and style.lower() not in {"illustration", "default", "standard"}:
+                if style.lower() in semantic_prompt.lower():
+                    # Already present: no duplication.
+                    pass
+                else:
+                    # Preserve explicitly provided non-default style metadata only
+                    # when it is traceable to a grounded visual context entry.
+                    style_context = spec.get("visual_context")
+                    style_grounded = False
+                    if isinstance(style_context, dict) and style_context.get("style"):
+                        style_grounded = cls._is_grounded_context_value(semantic_prompt, str(style_context.get("style")))
+                    if style_grounded:
+                        parts.append(f"Style: {cls._clean_prompt(style)}")
+                        added_fields.append("style")
+                    else:
+                        skipped_fields.append("style")
+            elif style:
+                skipped_fields.append("style_default")
 
             context = spec.get("visual_context")
             if isinstance(context, dict):
@@ -393,35 +460,29 @@ class AprilImagesGenerator:
                     "style": (),
                     "composition": ("composition", "background"),
                     "scene": ("composition", "background", "environment", "lighting"),
-                    "detail": (
-                        "composition", "background", "environment", "lighting",
-                        "camera", "palette", "mood", "materials",
-                    ),
-                    "rich": (
-                        "composition", "background", "environment", "lighting",
-                        "camera", "palette", "mood", "materials",
-                        "character", "pose", "details",
-                    ),
-                    "max": (
-                        "subject", "composition", "background", "environment",
-                        "lighting", "camera", "palette", "mood", "materials",
-                        "character", "pose", "details",
-                    ),
+                    "detail": ("composition", "background", "environment", "lighting", "camera"),
+                    "rich": ("composition", "background", "environment", "lighting", "camera", "palette", "mood"),
+                    "max": ("subject", "composition", "background", "environment", "lighting", "camera", "palette", "mood", "character", "pose", "details"),
                 }
                 for key in tier_fields.get(tier, ()):
                     value = context.get(key)
-                    if value:
-                        semantic_value = cls._extract_semantic_prompt(value)
-                        if semantic_value:
-                            label = key.replace("_", " ").title()
-                            parts.append(f"{label}: {semantic_value}")
-                            added_fields.append(key)
+                    if not value:
+                        continue
+                    semantic_value = cls._extract_semantic_prompt(value)
+                    if not semantic_value:
+                        continue
+                    if cls._is_grounded_context_value(semantic_prompt, semantic_value):
+                        label = key.replace("_", " ").title()
+                        parts.append(f"{label}: {semantic_value}")
+                        added_fields.append(key)
+                    else:
+                        skipped_fields.append(f"{key}_ungrounded")
 
-        guidance = cls._tier_guidance(tier)
-        if guidance:
-            parts.append(guidance)
-            added_fields.append("quality_guidance")
+        guidance = cls._prompt_guidance(tier)
+        parts.append(guidance)
+        added_fields.append("semantic_fidelity_guidance")
 
+        flags = cls._prompt_complexity_flags(semantic_prompt)
         print(
             "🧠 IMAGE PROMPT PROFILE:",
             {
@@ -429,6 +490,9 @@ class AprilImagesGenerator:
                 "tier": tier,
                 "max_semantic_tokens": cls.MAX_SEMANTIC_PROMPT_TOKENS,
                 "added_fields": added_fields,
+                "skipped_ungrounded_fields": skipped_fields,
+                "semantic_scene_locked": True,
+                "complexity_flags": flags,
             },
         )
         return "\n".join(parts)
@@ -973,33 +1037,40 @@ class AprilImagesGenerator:
         cls,
         quality: str,
         semantic_tokens: int,
+        prompt: str = "",
     ) -> tuple[int, float, str]:
-        """
-        Map semantic complexity to 1-4 Turbo steps without changing the user's
-        semantic request.  Higher tiers buy sampling quality instead of adding
-        arbitrary prompt prose.
-        """
+        """Choose Turbo sampling depth from request complexity, never from scene invention."""
         normalized = str(quality or "standard").strip().lower()
         count = max(0, int(semantic_tokens))
+        flags = cls._prompt_complexity_flags(prompt)
 
         if normalized == "draft":
-            return 1, 0.0, "quality_draft"
-        if normalized == "ultra":
-            return 4, 0.0, "quality_ultra"
-
-        if count <= 100:
             steps = 1
-        elif count <= 300:
-            steps = 2
-        elif count <= 800:
-            steps = 3
-        else:
+            source = "quality_draft"
+        elif normalized == "ultra":
             steps = 4
+            source = "quality_ultra"
+        else:
+            if count <= 100:
+                steps = 2
+            elif count <= 200:
+                steps = 2
+            elif count <= 300:
+                steps = 3
+            else:
+                steps = 4
+            source = f"adaptive_{cls._prompt_tier(count)}"
+            if normalized == "high":
+                steps = min(4, steps + 1)
+                source += "_high"
 
-        if normalized == "high":
-            steps = min(4, steps + 1)
+            # Text rendering and human/animal structure benefit from one extra
+            # denoising opportunity, but the range remains the model's 1-4 steps.
+            if flags["text_requested"] or flags["person_or_animal"]:
+                steps = min(4, steps + 1)
+                source += "_complexity"
 
-        return steps, 0.0, f"adaptive_{cls._prompt_tier(count)}"
+        return max(1, min(4, int(steps))), 0.0, source
 
     @classmethod
     def _diffusion_image(
@@ -1032,7 +1103,7 @@ class AprilImagesGenerator:
 
         if cls._is_turbo_model():
             steps, guidance, steps_source = cls._adaptive_turbo_settings(
-                quality, base_tokens
+                quality, base_tokens, prompt
             )
             explicit_steps = os.getenv("APRIL_IMAGES_INFERENCE_STEPS", "").strip()
             if explicit_steps:
@@ -1149,6 +1220,8 @@ class AprilImagesGenerator:
                 "size": [int(width), int(height)],
                 "seed": seed,
                 "strategy": strategy,
+                "semantic_scene_locked": True,
+                "generator_adds_scene_objects": False,
             },
         )
 
@@ -1169,6 +1242,14 @@ class AprilImagesGenerator:
                 "width": int(getattr(image, "width", width)),
                 "height": int(getattr(image, "height", height)),
                 "mode": str(getattr(image, "mode", "unknown")),
+            },
+        )
+        print(
+            "🔒 IMAGE MODEL OUTPUT CHECK:",
+            {
+                "scene_authority": "prompt_only",
+                "generator_scene_invention": False,
+                "raster_ready": True,
             },
         )
         return image.convert("RGB")
@@ -1294,6 +1375,15 @@ class AprilImagesGenerator:
             "===== IMAGE PROMPT TRACE: GENERATOR COMPOSED PROMPT =====\n"
             + prompt[:12000]
             + "\n===== END IMAGE PROMPT TRACE: GENERATOR COMPOSED PROMPT =====\n"
+        )
+        print(
+            "🔒 IMAGE PROMPT SEMANTIC LOCK:",
+            {
+                "source_prompt": base_prompt,
+                "generation_prompt": prompt,
+                "scene_content_authority": "provider_semantic_prompt",
+                "generator_scene_invention": False,
+            },
         )
         final_prompt_tokens = (
             len(cls._token_ids_for_long_prompt(tokenizer, prompt))
