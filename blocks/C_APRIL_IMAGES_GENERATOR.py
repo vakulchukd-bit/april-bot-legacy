@@ -63,7 +63,7 @@ class AprilImagesGenerator:
     """The only image producer between Interpretation and C_ARTIFACT."""
 
     ENGINE_NAME = "April Images Generation"
-    ENGINE_VERSION = "2.4.2"
+    ENGINE_VERSION = "2.4.3"
     BACKEND = "diffusers_single_backend"
 
     DEFAULT_SIZE = (512, 512)
@@ -170,12 +170,14 @@ class AprilImagesGenerator:
         if cls._is_turbo_model():
             return {
                 "draft": (1, 0.0),
-                # Two steps is the safe fast production baseline for a simple
-                # request. One-step Turbo is retained only for explicit draft.
-                "standard": (2, 0.0),
-                "high": (3, 0.0),
+                # SDXL Turbo is designed for very few denoising steps. On the
+                # Railway CPU runtime, one step is the fast production baseline
+                # for standard/simple requests; higher tiers retain an extra
+                # step where additional detail is requested.
+                "standard": (1, 0.0),
+                "high": (2, 0.0),
                 "ultra": (4, 0.0),
-            }.get(normalized, (2, 0.0))
+            }.get(normalized, (1, 0.0))
         return {
             "draft": (28, 6.0),
             "standard": (40, 6.5),
@@ -1022,14 +1024,19 @@ class AprilImagesGenerator:
             steps = 4
             source = "quality_ultra"
         else:
-            if count <= 100:
+            # SDXL Turbo is explicitly optimized for 1-4 denoising steps.
+            # Keep the common/simple CPU path at one step: previous two-step
+            # generation took ~163s per step on the Railway CPU runtime.
+            # More involved prompts keep two or three steps, and high quality /
+            # semantic complexity can still add one step without changing the
+            # canonical route or image size.
+            cpu_fast_path = cls._device() == "cpu"
+            if count <= 200:
+                steps = 1 if cpu_fast_path else 2
+            elif count <= 500:
                 steps = 2
-            elif count <= 200:
-                steps = 2
-            elif count <= 300:
-                steps = 3
             else:
-                steps = 4
+                steps = 3
             source = f"adaptive_{cls._prompt_tier(count)}"
             if normalized == "high":
                 steps = min(4, steps + 1)
