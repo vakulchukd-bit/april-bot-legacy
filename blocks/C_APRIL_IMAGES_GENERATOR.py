@@ -1007,7 +1007,18 @@ class AprilImagesGenerator:
         # Provider -> C_APRIL_IMAGES_GENERATOR boundary.  The next trace shows
         # what C_APRIL itself adds before SDXL sees the prompt.
         print(
-            "\n===== IMAGE PROMPT TRACE: GENERATOR INPUT SPEC =====\n"
+            "\n===== IMAGE PROMPT TRACE: GENERATOR ENTRY =====\n"
+            + json.dumps({
+                "variant": variant,
+                "schema": clean.get("schema"),
+                "prompt_chars": len(str(clean.get("prompt") or "")),
+                "style": clean.get("style"),
+                "quality": clean.get("quality"),
+            }, ensure_ascii=False, indent=2, default=str)
+            + "\n===== END GENERATOR ENTRY =====\n"
+        )
+        print(
+            "===== IMAGE PROMPT TRACE: GENERATOR INPUT SPEC =====\n"
             + json.dumps(clean, ensure_ascii=False, indent=2, default=str)[:12000]
             + "\n===== END GENERATOR INPUT SPEC =====\n"
         )
