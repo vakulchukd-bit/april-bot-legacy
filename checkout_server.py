@@ -43,20 +43,18 @@ import os
 import json
 import asyncio
 import hashlib
-import re
 import time
 import tempfile
 from pathlib import Path
 from typing import Any
-from copy import deepcopy
 
 from flask import (
     Flask,
     request,
     jsonify,
+    send_file,
     render_template,
-    render_template_string,
-    send_file
+    render_template_string
 )
 
 from flask_cors import CORS
@@ -522,124 +520,6 @@ def executor_contract_passthrough(result):
 # 🧠 CANONICAL SCENE CONTRACT ADAPTER (Stage 1)
 # =========================================================
 
-IMAGE_ASSET_ROUTE_PREFIX = "/api/v1/images/"
-IMAGE_ASSET_MAX_AGE = int(os.getenv("APRIL_IMAGE_ASSET_MAX_AGE", str(7 * 24 * 60 * 60)))
-IMAGE_ASSET_FILE_RE = re.compile(r"^april_image_[A-Za-z0-9_-]+\.png$")
-
-
-def _image_public_base_url() -> str:
-    try:
-        origin = request.url_root.rstrip("/")
-        if origin:
-            return origin
-    except RuntimeError:
-        pass
-    return os.getenv(
-        "APRIL_API_PUBLIC_BASE_URL",
-        "https://april-bot-production-cf51.up.railway.app",
-    ).rstrip("/")
-
-
-def _absolute_image_asset_url(asset_path: str) -> str:
-    value = str(asset_path or "").strip()
-    if not value:
-        return ""
-    if value.startswith(("http://", "https://")):
-        return value
-    if value.startswith(IMAGE_ASSET_ROUTE_PREFIX):
-        return f"{_image_public_base_url()}{value}"
-    return ""
-
-
-def _rewrite_web_image_payload(payload: Any) -> Any:
-    if not isinstance(payload, dict):
-        return payload
-
-    projected = deepcopy(payload)
-    asset_path = str(
-        projected.get("image_asset_path")
-        or projected.get("asset_path")
-        or projected.get("image_asset_url")
-        or ""
-    ).strip()
-    asset_url = _absolute_image_asset_url(asset_path)
-    if not asset_url:
-        return projected
-
-    projected["image_asset_path"] = asset_path
-    projected["image_asset_url"] = asset_url
-    for key in ("src", "url", "image", "image_url"):
-        projected[key] = asset_url
-
-    images = projected.get("images")
-    if isinstance(images, list):
-        rewritten = []
-        for item in images:
-            if not isinstance(item, dict):
-                rewritten.append(item)
-                continue
-            child = dict(item)
-            child["image_asset_path"] = asset_path
-            child["image_asset_url"] = asset_url
-            for key in ("src", "url", "image", "image_url"):
-                child[key] = asset_url
-            for key in ("image_base64", "base64", "image_data_uri", "data_uri"):
-                child.pop(key, None)
-            rewritten.append(child)
-        projected["images"] = rewritten
-
-    for key in ("image_base64", "base64", "image_data_uri", "data_uri"):
-        projected.pop(key, None)
-
-    return projected
-
-
-def _rewrite_web_image_blocks(blocks: Any) -> list[Any]:
-    if not isinstance(blocks, list):
-        return []
-    result = []
-    for raw in blocks:
-        if not isinstance(raw, dict):
-            result.append(raw)
-            continue
-        block = deepcopy(raw)
-        kind = str(
-            block.get("type")
-            or block.get("artifact_type")
-            or block.get("representation")
-            or ""
-        ).strip().lower()
-        if kind in {"image", "gallery"}:
-            block["payload"] = _rewrite_web_image_payload(
-                block.get("payload") if isinstance(block.get("payload"), dict) else {}
-            )
-        result.append(block)
-    return result
-
-
-@app.route("/api/v1/images/<path:image_name>", methods=["GET"])
-def serve_generated_image(image_name: str):
-    """Serve generated/edited PNGs referenced by canonical SceneContract."""
-    safe_name = Path(str(image_name or "")).name
-    if not IMAGE_ASSET_FILE_RE.fullmatch(safe_name):
-        return jsonify({"success": False, "error": "IMAGE_ASSET_NOT_FOUND"}), 404
-
-    root = Path(tempfile.gettempdir()).resolve()
-    path = (root / safe_name).resolve()
-    if path.parent != root or not path.is_file():
-        return jsonify({"success": False, "error": "IMAGE_ASSET_NOT_FOUND"}), 404
-
-    response = send_file(
-        path,
-        mimetype="image/png",
-        conditional=True,
-        max_age=IMAGE_ASSET_MAX_AGE,
-    )
-    response.headers["Cache-Control"] = f"public, max-age={IMAGE_ASSET_MAX_AGE}"
-    response.headers["Cross-Origin-Resource-Policy"] = "cross-origin"
-    return response
-
-
 def scene_contract_view(contract):
     """
     Temporary adapter while Gateway migrates from dict to
@@ -676,7 +556,7 @@ def _scene_contract_web_projection(contract):
         return {}
 
     projected = dict(scene)
-    render_blocks = _rewrite_web_image_blocks(list(scene.get("render_blocks") or []))
+    render_blocks = list(scene.get("render_blocks") or [])
     projected["render_blocks"] = render_blocks
     projected.pop("blocks", None)
 
@@ -1678,6 +1558,36 @@ def image_chat():
 # 🌐 APRIL WEB EXECUTION
 # =========================================================
 
+def _bind_backend_asset_urls(value):
+    """Bind canonical image asset paths to this backend origin."""
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if key in {"src", "url", "asset_url", "image_asset_url", "image_url"} and isinstance(item, str) and item.startswith("/api/v1/images/"):
+                out[key] = request.host_url.rstrip("/") + item
+            else:
+                out[key] = _bind_backend_asset_urls(item)
+        return out
+    if isinstance(value, list):
+        return [_bind_backend_asset_urls(item) for item in value]
+    return value
+
+
+@app.route("/api/v1/images/<path:filename>", methods=["GET"])
+def serve_april_image(filename):
+    """Serve only PNG assets created by the April image engine."""
+    try:
+        safe_name = Path(filename).name
+        if safe_name != filename or not safe_name.startswith("april_image_") or not safe_name.endswith(".png"):
+            return jsonify({"success": False, "error": "invalid image asset"}), 400
+        path = Path(tempfile.gettempdir()) / safe_name
+        if not path.is_file():
+            return jsonify({"success": False, "error": "image asset not found"}), 404
+        return send_file(path, mimetype="image/png", max_age=7 * 24 * 60 * 60, conditional=True)
+    except Exception as exc:
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
 @app.route(
     "/api/v1/chat",
     methods=["POST"]
@@ -1825,8 +1735,10 @@ def web_chat():
         #
         # =========================================================
 
-        gt = result.get("gateway_transport", {})
-        scene = _scene_contract_web_projection(result.get("scene_contract"))
+        gt = _bind_backend_asset_urls(result.get("gateway_transport", {}))
+        scene = _bind_backend_asset_urls(_scene_contract_web_projection(result.get("scene_contract")))
+        if isinstance(result.get("scene_contract"), dict):
+            result["scene_contract"] = _bind_backend_asset_urls(result["scene_contract"])
         return jsonify({
             "success": True,
             "gateway_transport": safe_json(gt),
