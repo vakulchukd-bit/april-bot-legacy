@@ -54,7 +54,7 @@ def set_image_generation_status(
         # merely because its normal post-completion TTL elapsed.  Keep the
         # generating record alive until the engine explicitly reports success
         # or failure; completed/failed records retain the existing short TTL.
-        "expires_at": 0.0 if normalized_status == "generating" else now + _IMAGE_STATUS_TTL,
+        "expires_at": 0.0 if normalized_status in {"generating", "rendering"} else now + _IMAGE_STATUS_TTL,
     }
     with _IMAGE_STATUS_LOCK:
         _IMAGE_STATUS[key] = record
@@ -71,7 +71,7 @@ def get_image_generation_status(flow_id: str = "", user_id: str = "") -> dict:
         # Opportunistic cleanup keeps the in-process registry bounded.
         for stale_key, stale in list(_IMAGE_STATUS.items()):
             stale_status = str(stale.get("status") or "idle").strip().lower()
-            if stale_status == "generating":
+            if stale_status in {"generating", "rendering"}:
                 continue
             if float(stale.get("expires_at") or 0) <= now:
                 _IMAGE_STATUS.pop(stale_key, None)
@@ -249,6 +249,16 @@ async def generate(
             or prompt
             or ""
         ).strip()
+
+        # Diffusion is finished at this point and the real image bytes exist.
+        # Move the live status to the existing gallery-rendering phase before
+        # the PNG/asset preparation starts, so Web switches indicators at the
+        # same lifecycle boundary instead of waiting for `success`.
+        set_image_generation_status(
+            flow_id,
+            status="rendering",
+            user_id=str(user_id or ""),
+        )
 
         path = save_temp_image(img)
         if path:
