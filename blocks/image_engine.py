@@ -172,7 +172,13 @@ async def generate(
     Provider produced one.  A plain prompt remains a compatibility path, but
     both forms terminate in the same C_APRIL_IMAGES_GENERATOR backend.
     """
-    flow_id = str((context or {}).get("request_id") or "").strip() if isinstance(context, dict) else ""
+    flow_id = ""
+    if isinstance(context, dict):
+        flow_id = str(
+            context.get("flow_id")
+            or context.get("request_id")
+            or ""
+        ).strip()
     if not flow_id:
         flow_id = str(user_id or "").strip()
 
@@ -189,6 +195,8 @@ async def generate(
                 "artifact_route": "C_ARTIFACT_CONTRACT",
                 "prompt_source": "april_image_spec_v1",
                 "token_limit_enforced_here": False,
+                "flow_id": flow_id,
+                "user_id": str(user_id or ""),
             },
         )
 
@@ -235,6 +243,12 @@ async def generate(
         ).strip()
 
         path = save_temp_image(img)
+        if path:
+            try:
+                if not Path(path).is_file() or Path(path).stat().st_size <= 0:
+                    path = None
+            except Exception:
+                path = None
         asset_name = Path(path).name if path else ""
         asset_url = f"/api/v1/images/{asset_name}" if asset_name else ""
         public_origin = (
