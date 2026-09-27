@@ -296,6 +296,32 @@ class AprilImagesGenerator:
     @classmethod
     def _compose_prompt(cls, prompt: str, spec: Optional[dict[str, Any]] = None) -> str:
         semantic_prompt = cls._clean_prompt(prompt)
+
+        # SDXL Turbo is a low-step model with a native CLIP window.  For the
+        # common image-request path, keep conditioning compact so it stays on
+        # the pipeline's native encoder path instead of the expensive custom
+        # multi-window encoder.  The requested semantics remain untouched; only
+        # renderer boilerplate is omitted.
+        if cls._is_turbo_model():
+            parts = [semantic_prompt]
+            if isinstance(spec, dict):
+                style = cls._clean_prompt(spec.get("style") or "") if str(spec.get("style") or "").strip() else ""
+                if style and style.lower() not in {"illustration", "standard", "high", "low"}:
+                    parts.append(style)
+
+                context = spec.get("visual_context")
+                if isinstance(context, dict):
+                    # Keep only the most semantically useful visual fields.
+                    # This preserves the scene description while avoiding a
+                    # 200+ token conditioning prompt for simple requests.
+                    for key in ("subject", "composition", "environment", "lighting"):
+                        value = context.get(key)
+                        if value:
+                            semantic_value = cls._extract_semantic_prompt(value)
+                            if semantic_value:
+                                parts.append(f"{key.replace('_', ' ')}: {semantic_value}")
+            return "\n".join(parts)
+
         parts = [semantic_prompt]
         if isinstance(spec, dict):
             style = cls._clean_prompt(spec.get("style") or "") if str(spec.get("style") or "").strip() else ""
@@ -315,8 +341,6 @@ class AprilImagesGenerator:
                         if semantic_value:
                             label = key.replace("_", " " ).title()
                             parts.append(f"{label}: {semantic_value}")
-        # Quality guidance improves coherence while leaving scene semantics
-        # authoritative. It does not change the requested subject.
         parts.append(
             "High-quality finished artwork, coherent composition, clear subject "
             "separation, natural perspective, detailed textures, consistent "
@@ -892,7 +916,6 @@ class AprilImagesGenerator:
             tokenizer is not None
             and prompt_token_count <= native_limit
             and negative_token_count <= native_limit
-            and not cls._is_turbo_model()
         ):
             kwargs["prompt"] = prompt
             kwargs["negative_prompt"] = negative_prompt or ""
