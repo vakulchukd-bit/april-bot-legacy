@@ -1063,6 +1063,7 @@ async def gateway_forward_to_cpu(
     visual_input_path=None,
     visual_user_request="",
     visual_output_dir=None,
+    flow_id="",
 ):
     return await execute(
         user_id=user_id,
@@ -1074,6 +1075,7 @@ async def gateway_forward_to_cpu(
         visual_input_path=visual_input_path,
         visual_user_request=visual_user_request,
         visual_output_dir=visual_output_dir,
+        flow_id=flow_id,
     )
 
 
@@ -1092,6 +1094,7 @@ async def gateway_cpu_execute(
     visual_input_path=None,
     visual_user_request="",
     visual_output_dir=None,
+    flow_id="",
 ):
     result = await gateway_forward_to_cpu(
         user_id=user_id,
@@ -1102,6 +1105,7 @@ async def gateway_cpu_execute(
         visual_input_path=visual_input_path,
         visual_user_request=visual_user_request,
         visual_output_dir=visual_output_dir,
+        flow_id=flow_id,
     )
     return gateway_return_cpu_result(result)
 
@@ -1114,6 +1118,7 @@ async def process_web_message(
     visual_input_path=None,
     visual_user_request="",
     visual_output_dir=None,
+    flow_id="",
 ):
 
     async def run_with_activity(chat_id, coro):
@@ -1139,6 +1144,7 @@ async def process_web_message(
             visual_input_path=visual_input_path,
             visual_user_request=visual_user_request,
             visual_output_dir=visual_output_dir,
+            flow_id=flow_id,
         )
 
         result = executor_contract_passthrough(result)
@@ -1654,6 +1660,7 @@ def web_chat():
             "text",
             ""
         ) or "").strip()
+        flow_id = str(data.get("flow_id") or "").strip()
 
         # Browser page-hide sends only visual_ledger synchronization. It is not
         # a user turn and must never create/replace the current USER↔APRIL scene.
@@ -1754,11 +1761,25 @@ def web_chat():
 
             process_web_message(
                 user_id,
-                text
+                text,
+                flow_id=flow_id,
             )
         )
 
         result["gateway_transport"] = build_gateway_transport_payload(result)
+        print(
+            "🌐 WEB CHAT FLOW RESULT:",
+            {
+                "flow_id": flow_id,
+                "scene_flow_id": (result.get("scene_contract") or {}).get("flow_id") if isinstance(result.get("scene_contract"), dict) else "",
+                "render_blocks": len(result.get("render_blocks") or []) if isinstance(result, dict) else 0,
+                "image_blocks": sum(
+                    1
+                    for block in (result.get("render_blocks") or [])
+                    if isinstance(block, dict) and str(block.get("type") or "").lower() in {"image", "gallery"}
+                ) if isinstance(result, dict) else 0,
+            },
+        )
 
         # =========================================================
         # LEGACY TRANSPORT (TEMPORARILY DISABLED)
