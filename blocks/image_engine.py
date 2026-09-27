@@ -41,15 +41,20 @@ def set_image_generation_status(
     if not key:
         return
     now = time.time()
+    normalized_status = str(status or "idle").strip().lower()
     record = {
         "flow_id": str(flow_id or key),
         "user_id": str(user_id or ""),
-        "status": str(status or "idle").strip().lower(),
+        "status": normalized_status,
         "started_at": now,
         "updated_at": now,
         "asset_url": str(asset_url or ""),
         "error": str(error or ""),
-        "expires_at": now + _IMAGE_STATUS_TTL,
+        # A long-running CPU image generation must never fall back to `idle`
+        # merely because its normal post-completion TTL elapsed.  Keep the
+        # generating record alive until the engine explicitly reports success
+        # or failure; completed/failed records retain the existing short TTL.
+        "expires_at": 0.0 if normalized_status == "generating" else now + _IMAGE_STATUS_TTL,
     }
     with _IMAGE_STATUS_LOCK:
         _IMAGE_STATUS[key] = record
@@ -65,6 +70,9 @@ def get_image_generation_status(flow_id: str = "", user_id: str = "") -> dict:
         record = dict(_IMAGE_STATUS.get(key) or {})
         # Opportunistic cleanup keeps the in-process registry bounded.
         for stale_key, stale in list(_IMAGE_STATUS.items()):
+            stale_status = str(stale.get("status") or "idle").strip().lower()
+            if stale_status == "generating":
+                continue
             if float(stale.get("expires_at") or 0) <= now:
                 _IMAGE_STATUS.pop(stale_key, None)
 
