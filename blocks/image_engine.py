@@ -200,18 +200,56 @@ async def generate(
                 payload = dict(block.get("payload") or {}) if isinstance(block.get("payload"), dict) else {}
                 payload.update({"asset_url": public_asset_url or asset_url, "image_asset_url": public_asset_url or asset_url, "asset_path": path or "", "image_asset_path": path or "", "asset_name": asset_name})
                 images = payload.get("images") if isinstance(payload.get("images"), list) else []
+                browser_asset_url = public_asset_url or asset_url
                 if images:
-                    fixed=[]
+                    fixed = []
                     for item in images[:8]:
                         obj = dict(item) if isinstance(item, dict) else {}
-                        obj.update({"src": asset_url, "url": asset_url, "asset_url": asset_url, "image_asset_url": asset_url})
+                        # One canonical raster reference. Descriptive text remains alt/caption only.
+                        obj.update({
+                            "src": browser_asset_url,
+                            "url": browser_asset_url,
+                            "asset_url": browser_asset_url,
+                            "image_asset_url": browser_asset_url,
+                            "image": browser_asset_url,
+                        })
                         fixed.append(obj)
                     payload["images"] = fixed
                 else:
-                    payload.update({"src": asset_url, "url": asset_url, "image": asset_url, "images": [{"src": asset_url, "url": asset_url, "asset_url": asset_url}]})
+                    payload.update({
+                        "src": browser_asset_url,
+                        "url": browser_asset_url,
+                        "image": browser_asset_url,
+                        "images": [{
+                            "src": browser_asset_url,
+                            "url": browser_asset_url,
+                            "asset_url": browser_asset_url,
+                            "image_asset_url": browser_asset_url,
+                            "image": browser_asset_url,
+                        }],
+                    })
+                payload["asset_url"] = browser_asset_url
+                payload["image_asset_url"] = browser_asset_url
                 block["payload"] = payload
-                block["asset_url"] = public_asset_url or asset_url
-                block["image_asset_url"] = public_asset_url or asset_url
+                block["asset_url"] = browser_asset_url
+                block["image_asset_url"] = browser_asset_url
+
+                # Critical: _artifact_canonical_render_blocks returns projected
+                # dictionaries. Persist the same corrected payload into the real
+                # artifact so the later SceneContract projection cannot fall back
+                # to the pre-generation prompt/data-uri envelope.
+                if artifact_obj is not None:
+                    try:
+                        artifact_data = dict(getattr(artifact_obj, "data", {}) or {})
+                        artifact_data["payload"] = payload
+                        artifact_data["asset_url"] = browser_asset_url
+                        artifact_data["image_asset_url"] = browser_asset_url
+                        artifact_data["asset_name"] = asset_name
+                        artifact_data["asset_path"] = path or ""
+                        artifact_data["image_asset_path"] = path or ""
+                        artifact_obj.data = artifact_data
+                    except Exception as exc:
+                        print("⚠️ IMAGE ENGINE ARTIFACT PERSIST:", exc)
 
         artifact_dict = result.get("artifact")
         if isinstance(artifact_dict, dict) and asset_url:
