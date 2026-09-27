@@ -1292,6 +1292,12 @@ class AprilImagesGenerator:
         width, height = cls._parse_size(
             f"{spec.get('width', cls.DEFAULT_SIZE[0])}x{spec.get('height', cls.DEFAULT_SIZE[1])}"
         )
+        generator_signal = str(spec.get("generator_signal") or "").strip()
+        if generator_signal and generator_signal != "C_APRIL_IMAGES_GENERATOR":
+            raise ValueError("APRIL_IMAGES_INVALID_GENERATOR_SIGNAL")
+        request_anchor = str(spec.get("request_anchor") or "").strip()
+        if generator_signal == "C_APRIL_IMAGES_GENERATOR" and not request_anchor:
+            raise ValueError("APRIL_IMAGES_MISSING_REQUEST_ANCHOR")
         return {
             "schema": "april_image_spec_v1",
             "prompt": cls._clean_prompt(spec.get("prompt") or ""),
@@ -1304,6 +1310,8 @@ class AprilImagesGenerator:
             "visual_context": dict(spec.get("visual_context") or {})
             if isinstance(spec.get("visual_context"), dict) else {},
             "seed": spec.get("seed"),
+            "generator_signal": generator_signal,
+            "request_anchor": request_anchor,
         }
 
     @classmethod
@@ -1323,6 +1331,8 @@ class AprilImagesGenerator:
             + json.dumps({
                 "variant": variant,
                 "schema": clean.get("schema"),
+                "generator_signal": clean.get("generator_signal") or "implicit_canonical_route",
+                "request_anchor": clean.get("request_anchor") or "",
                 "prompt_chars": len(str(clean.get("prompt") or "")),
                 "style": clean.get("style"),
                 "quality": clean.get("quality"),
