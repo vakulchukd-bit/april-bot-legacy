@@ -2,6 +2,7 @@
 # Image generation is routed exclusively through C_APRIL_IMAGES_GENERATOR.
 
 import asyncio
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -156,6 +157,14 @@ async def generate(
         path = save_temp_image(img)
         asset_name = Path(path).name if path else ""
         asset_url = f"/api/v1/images/{asset_name}" if asset_name else ""
+        public_origin = (
+            os.getenv("APRIL_PUBLIC_BASE_URL")
+            or os.getenv("RAILWAY_PUBLIC_DOMAIN")
+            or "https://april-bot-production-cf51.up.railway.app"
+        ).strip().rstrip("/")
+        if public_origin and not public_origin.startswith(("http://", "https://")):
+            public_origin = "https://" + public_origin
+        public_asset_url = f"{public_origin}{asset_url}" if asset_url else ""
         if path:
             now = time.time()
             state["image_context"] = {
@@ -189,7 +198,7 @@ async def generate(
                 if kind not in {"image", "gallery"}:
                     continue
                 payload = dict(block.get("payload") or {}) if isinstance(block.get("payload"), dict) else {}
-                payload.update({"asset_url": asset_url, "image_asset_url": asset_url, "asset_path": path or "", "asset_name": asset_name})
+                payload.update({"asset_url": public_asset_url or asset_url, "image_asset_url": public_asset_url or asset_url, "asset_path": path or "", "asset_name": asset_name})
                 images = payload.get("images") if isinstance(payload.get("images"), list) else []
                 if images:
                     fixed=[]
@@ -201,12 +210,13 @@ async def generate(
                 else:
                     payload.update({"src": asset_url, "url": asset_url, "image": asset_url, "images": [{"src": asset_url, "url": asset_url, "asset_url": asset_url}]})
                 block["payload"] = payload
-                block["asset_url"] = asset_url
+                block["asset_url"] = public_asset_url or asset_url
+                block["image_asset_url"] = public_asset_url or asset_url
 
         artifact_dict = result.get("artifact")
         if isinstance(artifact_dict, dict) and asset_url:
             artifact_dict = dict(artifact_dict)
-            artifact_dict.update({"asset_url": asset_url, "asset_path": path or "", "asset_name": asset_name})
+            artifact_dict.update({"asset_url": public_asset_url or asset_url, "image_asset_url": public_asset_url or asset_url, "asset_path": path or "", "asset_name": asset_name})
             result["artifact"] = artifact_dict
         render_signal = (
             artifact_dict.get("render_signal")
@@ -242,7 +252,8 @@ async def generate(
             "image_generation_status": "success",
             "image_generation_backend": result.get("backend"),
             "prompt": effective_prompt,
-            "asset_url": asset_url,
+            "asset_url": public_asset_url or asset_url,
+            "image_asset_url": public_asset_url or asset_url,
             "asset_path": path or "",
             "asset_name": asset_name,
             "width": result.get("width"),
