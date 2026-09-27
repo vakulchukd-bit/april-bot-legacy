@@ -1596,7 +1596,7 @@ def _bind_backend_asset_urls(value):
     return value
 
 
-@app.route("/api/v1/images/<path:filename>", methods=["GET"])
+@app.route("/api/v1/images/<path:filename>", methods=["GET", "HEAD"])
 def serve_april_image(filename):
     """Serve only PNG assets created by the April image engine."""
     try:
@@ -1606,7 +1606,14 @@ def serve_april_image(filename):
         path = Path(tempfile.gettempdir()) / safe_name
         if not path.is_file():
             return jsonify({"success": False, "error": "image asset not found"}), 404
-        return send_file(path, mimetype="image/png", max_age=7 * 24 * 60 * 60, conditional=True)
+        return send_file(
+            path,
+            mimetype="image/png",
+            as_attachment=False,
+            download_name=safe_name,
+            max_age=7 * 24 * 60 * 60,
+            conditional=True,
+        )
     except Exception as exc:
         return jsonify({"success": False, "error": str(exc)}), 500
 
