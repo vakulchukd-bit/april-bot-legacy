@@ -478,9 +478,17 @@ class AprilImagesGenerator:
                     else:
                         skipped_fields.append(f"{key}_ungrounded")
 
-        guidance = cls._prompt_guidance(tier)
-        parts.append(guidance)
-        added_fields.append("semantic_fidelity_guidance")
+        # Keep simple/core requests on the native SDXL-Turbo text path.
+        # The previous unconditional fidelity paragraph could push an otherwise
+        # short user prompt over the native CLIP window (77 tokens), which then
+        # switched a simple request into the custom multi-window encoder. That
+        # path is intended for genuinely long prompts and was the cause of the
+        # current long-running generation. Core semantics are already authoritative
+        # in `semantic_prompt`, so no extra scene text is needed here.
+        if tier != "core":
+            guidance = cls._prompt_guidance(tier)
+            parts.append(guidance)
+            added_fields.append("semantic_fidelity_guidance")
 
         flags = cls._prompt_complexity_flags(semantic_prompt)
         print(
