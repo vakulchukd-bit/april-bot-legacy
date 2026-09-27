@@ -3263,6 +3263,36 @@ async def generate_text(messages: Any, temperature: Any = None,
         response = await asyncio.to_thread(_get_openai_client().responses.create, **request)
         usage = _extract_usage(response)
         raw_text = _extract_openai_text(response)
+
+        # IMAGE PROMPT TRACE: capture the exact textual payload returned by
+        # OpenAI before any local Provider parsing/normalization occurs.
+        # This is intentionally limited to image_generation turns so normal
+        # text traffic is not flooded with model output.
+        source_constraints = source_request.get("constraints") if isinstance(source_request.get("constraints"), dict) else {}
+        source_representation_plan = (
+            source_constraints.get("representation_plan")
+            if isinstance(source_constraints.get("representation_plan"), dict)
+            else {}
+        )
+        source_metadata = (
+            source_constraints.get("metadata")
+            if isinstance(source_constraints.get("metadata"), dict)
+            else {}
+        )
+        image_trace = _safe_text(
+            source_representation_plan.get("visual_production_mode")
+            or source_metadata.get("visual_production_mode")
+            or (provider_plan or {}).get("representation")
+            or (provider_plan or {}).get("visual_production_mode")
+            or ""
+        ).lower() == "image_generation"
+        if image_trace:
+            provider_log(
+                "\n===== IMAGE PROMPT TRACE: OPENAI RAW OUTPUT =====",
+                _safe_text(raw_text)[:12000],
+                "===== END OPENAI RAW OUTPUT =====\n",
+            )
+
         provider_log({
             "provider_output_transport": {
                 "response_type": type(response).__name__,
@@ -3277,6 +3307,24 @@ async def generate_text(messages: Any, temperature: Any = None,
             raise RuntimeError("GPT-5.6 Luna returned no textual output.")
 
         contract = create_provider_contract(raw_text, source_request=messages)
+
+        if image_trace:
+            traced_metadata = {}
+            try:
+                traced_metadata = dict((contract.get("machine_response") or {}).get("metadata") or {})
+            except Exception:
+                traced_metadata = {}
+            traced_spec = traced_metadata.get("image_generation_spec")
+            provider_log(
+                "===== IMAGE PROMPT TRACE: PROVIDER SPEC AFTER PARSE =====",
+                json.dumps(
+                    traced_spec,
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                )[:12000] if isinstance(traced_spec, dict) else _safe_text(traced_spec),
+                "===== END PROVIDER SPEC AFTER PARSE =====",
+            )
         contract = provider_finalize_for_executor(contract)
         contract = provider_transport_audit(contract)
 
