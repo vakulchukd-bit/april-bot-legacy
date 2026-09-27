@@ -63,12 +63,28 @@ class AprilImagesGenerator:
     """The only image producer between Interpretation and C_ARTIFACT."""
 
     ENGINE_NAME = "April Images Generation"
-    ENGINE_VERSION = "2.3.0"
+    ENGINE_VERSION = "2.4.0"
     BACKEND = "diffusers_single_backend"
 
     DEFAULT_SIZE = (512, 512)
     MIN_SIZE = 256
     MAX_SIZE = 1536
+
+    # Semantic prompt budget owned by April.  This is deliberately separate
+    # from the native CLIP window (normally 77 tokens).
+    MAX_SEMANTIC_PROMPT_TOKENS = 2000
+
+    # Complexity tiers control only optional guidance/conditioning and Turbo
+    # sampling steps.  The user's core request is never replaced by these tiers.
+    PROMPT_TIERS = (
+        (100, "core"),
+        (200, "style"),
+        (300, "composition"),
+        (500, "scene"),
+        (800, "detail"),
+        (1200, "rich"),
+        (2000, "max"),
+    )
 
     _pipeline_lock = threading.RLock()
     _text_pipeline = None
@@ -294,34 +310,126 @@ class AprilImagesGenerator:
         return ", ".join(dict.fromkeys(values))
 
     @classmethod
-    def _compose_prompt(cls, prompt: str, spec: Optional[dict[str, Any]] = None) -> str:
+    def _prompt_tier(cls, raw_tokens: int) -> str:
+        count = max(0, int(raw_tokens))
+        for limit, name in cls.PROMPT_TIERS:
+            if count <= limit:
+                return name
+        return "over_limit"
+
+    @classmethod
+    def _tier_guidance(cls, tier: str) -> str:
+        return {
+            "core": "",
+            "style": "clean composition, faithful to the requested subject.",
+            "composition": "high-quality artwork, clear subject, balanced composition.",
+            "scene": (
+                "high-quality finished artwork, clear subject separation, "
+                "natural composition, consistent lighting."
+            ),
+            "detail": (
+                "high-quality finished artwork, clear subject separation, "
+                "natural perspective, detailed textures, consistent lighting, depth."
+            ),
+            "rich": (
+                "high-quality finished artwork, coherent composition, clear subject "
+                "separation, natural perspective, detailed textures, consistent "
+                "lighting, depth, clean edges."
+            ),
+            "max": (
+                "high-quality finished artwork, coherent composition, clear subject "
+                "separation, natural perspective, detailed textures, consistent "
+                "lighting, depth, clean edges, faithful to the requested scene."
+            ),
+        }.get(tier, "")
+
+    @classmethod
+    def _compose_prompt(
+        cls,
+        prompt: str,
+        spec: Optional[dict[str, Any]] = None,
+        *,
+        prompt_token_count: Optional[int] = None,
+    ) -> str:
+        """
+        Compose the generation prompt without inventing scene content.
+
+        The Provider prompt remains the semantic authority.  Optional style,
+        visual-context fields and generic quality guidance are added gradually
+        according to the *base semantic token count*.  This prevents short
+        requests from being overloaded and avoids turning generic quality prose
+        into the dominant part of the prompt.
+        """
         semantic_prompt = cls._clean_prompt(prompt)
+        if prompt_token_count is None:
+            prompt_token_count = len(semantic_prompt.split())
+
+        if int(prompt_token_count) > cls.MAX_SEMANTIC_PROMPT_TOKENS:
+            raise ValueError(
+                f"APRIL_IMAGES_PROMPT_TOO_LONG:{int(prompt_token_count)}>"
+                f"{cls.MAX_SEMANTIC_PROMPT_TOKENS}"
+            )
+
+        tier = cls._prompt_tier(int(prompt_token_count))
         parts = [semantic_prompt]
+        added_fields: list[str] = []
+
         if isinstance(spec, dict):
-            style = cls._clean_prompt(spec.get("style") or "") if str(spec.get("style") or "").strip() else ""
+            style = (
+                cls._clean_prompt(spec.get("style") or "")
+                if str(spec.get("style") or "").strip()
+                else ""
+            )
+            # Explicit style is a real Provider signal.  It is always preserved,
+            # but never duplicated inside the semantic prompt.
             if style and style.lower() not in semantic_prompt.lower():
                 parts.append(f"Style: {style}")
+                added_fields.append("style")
 
             context = spec.get("visual_context")
             if isinstance(context, dict):
-                for key in (
-                    "subject", "composition", "lighting", "camera",
-                    "environment", "palette", "mood", "materials",
-                    "character", "pose", "background", "details",
-                ):
+                tier_fields = {
+                    "core": (),
+                    "style": (),
+                    "composition": ("composition", "background"),
+                    "scene": ("composition", "background", "environment", "lighting"),
+                    "detail": (
+                        "composition", "background", "environment", "lighting",
+                        "camera", "palette", "mood", "materials",
+                    ),
+                    "rich": (
+                        "composition", "background", "environment", "lighting",
+                        "camera", "palette", "mood", "materials",
+                        "character", "pose", "details",
+                    ),
+                    "max": (
+                        "subject", "composition", "background", "environment",
+                        "lighting", "camera", "palette", "mood", "materials",
+                        "character", "pose", "details",
+                    ),
+                }
+                for key in tier_fields.get(tier, ()):
                     value = context.get(key)
                     if value:
                         semantic_value = cls._extract_semantic_prompt(value)
                         if semantic_value:
-                            label = key.replace("_", " " ).title()
+                            label = key.replace("_", " ").title()
                             parts.append(f"{label}: {semantic_value}")
-        # Quality guidance improves coherence while leaving scene semantics
-        # authoritative. It does not change the requested subject.
-        parts.append(
-            "High-quality finished artwork, coherent composition, clear subject "
-            "separation, natural perspective, detailed textures, consistent "
-            "lighting, depth, clean edges, visually rich but faithful to the "
-            "requested scene."
+                            added_fields.append(key)
+
+        guidance = cls._tier_guidance(tier)
+        if guidance:
+            parts.append(guidance)
+            added_fields.append("quality_guidance")
+
+        print(
+            "🧠 IMAGE PROMPT PROFILE:",
+            {
+                "base_semantic_tokens": int(prompt_token_count),
+                "tier": tier,
+                "max_semantic_tokens": cls.MAX_SEMANTIC_PROMPT_TOKENS,
+                "added_fields": added_fields,
+            },
         )
         return "\n".join(parts)
 
@@ -671,6 +779,33 @@ class AprilImagesGenerator:
         return torch.cat([tensor, tail], dim=0)
 
     @classmethod
+    def _flatten_chunk_sequence(cls, hidden: Any) -> Any:
+        """
+        Convert [num_windows, 77, hidden] into one prompt sequence
+        [1, num_windows*77, hidden].  Keeping windows as batch items would
+        accidentally make the diffusion call treat later prompt windows as
+        separate samples.
+        """
+        if hidden is None:
+            return None
+        if getattr(hidden, "ndim", 0) != 3:
+            return hidden
+        if torch is None:
+            raise RuntimeError("APRIL_IMAGES_TORCH_NOT_INSTALLED")
+        return hidden.reshape(1, int(hidden.shape[0]) * int(hidden.shape[1]), int(hidden.shape[2]))
+
+    @classmethod
+    def _select_pooled_embedding(cls, pooled: Any) -> Any:
+        """
+        SDXL consumes one pooled embedding per prompt.  With multiple native
+        windows, keep the final encoder-pooled vector instead of turning the
+        windows into a fake batch.
+        """
+        if pooled is None or getattr(pooled, "ndim", 0) < 2:
+            return pooled
+        return pooled[-1:].contiguous()
+
+    @classmethod
     def _long_prompt_kwargs(
         cls,
         pipeline: Any,
@@ -679,12 +814,14 @@ class AprilImagesGenerator:
         *,
         include_negative: bool = True,
     ) -> dict[str, Any]:
-        """Encode long prompts without imposing an April/OpenAI token cap.
+        """
+        Encode long SDXL prompts without truncation.
 
-        SDXL's CLIP encoders operate on native 77-token windows. That value is
-        a backend window size, not a request limit. This implementation uses
-        every native window and concatenates their hidden states before calling
-        Diffusers. No Compel dependency and no prompt truncation are required.
+        The native CLIP windows remain 77-token windows internally, but the
+        resulting token embeddings are concatenated on the *sequence* axis so
+        they represent one prompt.  This follows the SDXL long-prompt pattern
+        used by Diffusers community tooling rather than using each window as a
+        separate diffusion batch item.
         """
         if torch is None:
             raise RuntimeError("APRIL_IMAGES_TORCH_NOT_INSTALLED")
@@ -727,86 +864,48 @@ class AprilImagesGenerator:
                     tokenizer_2, text_encoder_2, negative_prompt or "", device=execution_device
                 )
 
-            target_prompt_len = max(int(hidden_1.shape[1]), int(hidden_2.shape[1]))
-            hidden_1 = cls._pad_sequence_length(hidden_1, target_prompt_len)
-            hidden_2 = cls._pad_sequence_length(hidden_2, target_prompt_len)
+            hidden_1 = cls._flatten_chunk_sequence(hidden_1)
+            hidden_2 = cls._flatten_chunk_sequence(hidden_2)
 
-            prompt_batch = max(int(hidden_1.shape[0]), int(hidden_2.shape[0]))
-            hidden_1 = cls._pad_batch_size(hidden_1, prompt_batch)
-            hidden_2 = cls._pad_batch_size(hidden_2, prompt_batch)
+            prompt_len = max(int(hidden_1.shape[1]), int(hidden_2.shape[1]))
+            hidden_1 = cls._pad_sequence_length(hidden_1, prompt_len)
+            hidden_2 = cls._pad_sequence_length(hidden_2, prompt_len)
 
             prompt_embeds = torch.cat([hidden_1, hidden_2], dim=-1)
-            pooled_prompt_embeds = pooled_2
-            if pooled_prompt_embeds is not None:
-                pooled_prompt_embeds = cls._pad_batch_size(
-                    pooled_prompt_embeds, prompt_batch
-                )
+            pooled_prompt_embeds = cls._select_pooled_embedding(pooled_2)
 
+            negative_prompt_embeds = None
+            negative_pooled_prompt_embeds = None
             if include_negative:
-                target_negative_len = max(
+                neg_hidden_1 = cls._flatten_chunk_sequence(neg_hidden_1)
+                neg_hidden_2 = cls._flatten_chunk_sequence(neg_hidden_2)
+                negative_len = max(
                     int(neg_hidden_1.shape[1]), int(neg_hidden_2.shape[1])
                 )
-                neg_hidden_1 = cls._pad_sequence_length(neg_hidden_1, target_negative_len)
-                neg_hidden_2 = cls._pad_sequence_length(neg_hidden_2, target_negative_len)
-                negative_batch = max(
-                    int(neg_hidden_1.shape[0]),
-                    int(neg_hidden_2.shape[0]),
-                    prompt_batch,
+                neg_hidden_1 = cls._pad_sequence_length(neg_hidden_1, negative_len)
+                neg_hidden_2 = cls._pad_sequence_length(neg_hidden_2, negative_len)
+                negative_prompt_embeds = torch.cat(
+                    [neg_hidden_1, neg_hidden_2], dim=-1
                 )
-                neg_hidden_1 = cls._pad_batch_size(neg_hidden_1, negative_batch)
-                neg_hidden_2 = cls._pad_batch_size(neg_hidden_2, negative_batch)
-                prompt_embeds = cls._pad_batch_size(prompt_embeds, negative_batch)
-                pooled_prompt_embeds = cls._pad_batch_size(
-                    pooled_prompt_embeds, negative_batch
-                ) if pooled_prompt_embeds is not None else None
-                prompt_batch = negative_batch
-
-                negative_prompt_embeds = torch.cat([neg_hidden_1, neg_hidden_2], dim=-1)
-                negative_pooled_prompt_embeds = neg_pooled_2
-                if negative_pooled_prompt_embeds is not None:
-                    negative_pooled_prompt_embeds = cls._pad_batch_size(
-                        negative_pooled_prompt_embeds, negative_batch
-                    )
-            else:
-                negative_prompt_embeds = None
-                negative_pooled_prompt_embeds = None
-
-            prompt_chunks = max(count_1, count_2)
-            negative_chunks = max(neg_count_1, neg_count_2) if include_negative else 0
+                negative_pooled_prompt_embeds = cls._select_pooled_embedding(neg_pooled_2)
         else:
+            hidden_1 = cls._flatten_chunk_sequence(hidden_1)
             prompt_embeds = hidden_1
             pooled_prompt_embeds = None
-            prompt_chunks = count_1
+
+            negative_prompt_embeds = None
+            negative_pooled_prompt_embeds = None
             if include_negative:
-                negative_batch = max(int(prompt_embeds.shape[0]), int(neg_hidden_1.shape[0]))
-                prompt_embeds = cls._pad_batch_size(prompt_embeds, negative_batch)
-                neg_hidden_1 = cls._pad_batch_size(neg_hidden_1, negative_batch)
+                neg_hidden_1 = cls._flatten_chunk_sequence(neg_hidden_1)
                 negative_prompt_embeds = neg_hidden_1
-                negative_pooled_prompt_embeds = _neg_pooled_1
-                if negative_pooled_prompt_embeds is not None:
-                    negative_pooled_prompt_embeds = cls._pad_batch_size(
-                        negative_pooled_prompt_embeds, negative_batch
-                    )
-                prompt_chunks = max(count_1, 0)
-                negative_chunks = neg_count_1
-            else:
-                negative_prompt_embeds = None
-                negative_pooled_prompt_embeds = None
-                negative_chunks = 0
+                negative_pooled_prompt_embeds = cls._select_pooled_embedding(_neg_pooled_1)
 
         if prompt_embeds is None:
             raise RuntimeError("APRIL_IMAGES_PROMPT_EMBEDDINGS_MISSING")
         if include_negative and negative_prompt_embeds is None:
             raise RuntimeError("APRIL_IMAGES_NEGATIVE_PROMPT_EMBEDDINGS_MISSING")
 
-        # Match the positive/negative sequence lengths; there is no maximum
-        # here, only equality required by classifier-free guidance.
         if include_negative:
-            if negative_prompt_embeds is None:
-                raise RuntimeError("APRIL_IMAGES_NEGATIVE_PROMPT_EMBEDDINGS_MISSING")
-            # Match both sequence length and batch size for classifier-free
-            # guidance. The batch dimension equals the number of native CLIP
-            # windows after long-prompt chunking.
             shared_len = max(
                 int(prompt_embeds.shape[1]),
                 int(negative_prompt_embeds.shape[1]),
@@ -815,49 +914,52 @@ class AprilImagesGenerator:
             negative_prompt_embeds = cls._pad_sequence_length(
                 negative_prompt_embeds, shared_len
             )
-            shared_batch = max(
-                int(prompt_embeds.shape[0]),
-                int(negative_prompt_embeds.shape[0]),
-            )
-            prompt_embeds = cls._pad_batch_size(prompt_embeds, shared_batch)
-            negative_prompt_embeds = cls._pad_batch_size(
-                negative_prompt_embeds, shared_batch
-            )
-            if pooled_prompt_embeds is not None:
-                pooled_prompt_embeds = cls._pad_batch_size(
-                    pooled_prompt_embeds, shared_batch
-                )
-            if negative_pooled_prompt_embeds is not None:
-                negative_pooled_prompt_embeds = cls._pad_batch_size(
-                    negative_pooled_prompt_embeds, shared_batch
-                )
 
-        # Keep embeddings compatible with the pipeline's UNet/text dtype.
         target_dtype = getattr(getattr(pipeline, "unet", None), "dtype", None)
-        if target_dtype is not None and getattr(prompt_embeds, "is_floating_point", lambda: False)():
+        if target_dtype is not None and getattr(
+            prompt_embeds, "is_floating_point", lambda: False
+        )():
             prompt_embeds = prompt_embeds.to(dtype=target_dtype)
             if negative_prompt_embeds is not None:
                 negative_prompt_embeds = negative_prompt_embeds.to(dtype=target_dtype)
             if pooled_prompt_embeds is not None:
                 pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=target_dtype)
             if negative_pooled_prompt_embeds is not None:
-                negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.to(dtype=target_dtype)
+                negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.to(
+                    dtype=target_dtype
+                )
+
+        prompt_chunks = max(int(count_1), int(count_2)) if tokenizer_2 is not None and text_encoder_2 is not None else int(count_1)
+        negative_chunks = 0
+        if include_negative:
+            negative_chunks = (
+                max(int(neg_count_1), int(neg_count_2))
+                if tokenizer_2 is not None and text_encoder_2 is not None
+                else int(neg_count_1)
+            )
 
         print(
             "🧠 IMAGE PROMPT ENCODING:",
             {
-                "prompt_raw_tokens": count_1 if tokenizer_2 is None else max(count_1, count_2),
-                "negative_raw_tokens": neg_count_1 if tokenizer_2 is None else max(neg_count_1, neg_count_2),
+                "prompt_raw_tokens": int(count_1 if tokenizer_2 is None else max(count_1, count_2)),
+                "negative_raw_tokens": int(
+                    neg_count_1 if tokenizer_2 is None else max(neg_count_1, neg_count_2)
+                ),
                 "prompt_native_windows": prompt_chunks,
                 "negative_native_windows": negative_chunks,
-                "strategy": "native_clip_window_chunking",
-                "april_openai_prompt_cap": None,
+                "prompt_embedding_shape": tuple(int(x) for x in prompt_embeds.shape),
+                "negative_embedding_shape": (
+                    tuple(int(x) for x in negative_prompt_embeds.shape)
+                    if negative_prompt_embeds is not None
+                    else None
+                ),
+                "strategy": "native_clip_window_sequence_concat",
+                "batch_semantics": "one_prompt_not_one_window_per_sample",
+                "april_openai_prompt_cap": cls.MAX_SEMANTIC_PROMPT_TOKENS,
             },
         )
 
-        result = {
-            "prompt_embeds": prompt_embeds,
-        }
+        result = {"prompt_embeds": prompt_embeds}
         if negative_prompt_embeds is not None:
             result["negative_prompt_embeds"] = negative_prompt_embeds
         if pooled_prompt_embeds is not None:
@@ -865,6 +967,39 @@ class AprilImagesGenerator:
         if negative_pooled_prompt_embeds is not None:
             result["negative_pooled_prompt_embeds"] = negative_pooled_prompt_embeds
         return result
+
+    @classmethod
+    def _adaptive_turbo_settings(
+        cls,
+        quality: str,
+        semantic_tokens: int,
+    ) -> tuple[int, float, str]:
+        """
+        Map semantic complexity to 1-4 Turbo steps without changing the user's
+        semantic request.  Higher tiers buy sampling quality instead of adding
+        arbitrary prompt prose.
+        """
+        normalized = str(quality or "standard").strip().lower()
+        count = max(0, int(semantic_tokens))
+
+        if normalized == "draft":
+            return 1, 0.0, "quality_draft"
+        if normalized == "ultra":
+            return 4, 0.0, "quality_ultra"
+
+        if count <= 100:
+            steps = 1
+        elif count <= 300:
+            steps = 2
+        elif count <= 800:
+            steps = 3
+        else:
+            steps = 4
+
+        if normalized == "high":
+            steps = min(4, steps + 1)
+
+        return steps, 0.0, f"adaptive_{cls._prompt_tier(count)}"
 
     @classmethod
     def _diffusion_image(
@@ -876,19 +1011,47 @@ class AprilImagesGenerator:
         quality: str,
         seed: Optional[int],
         negative_prompt: str,
+        *,
+        semantic_token_count: Optional[int] = None,
     ) -> Image.Image:
-        steps, guidance = cls._quality_settings(quality)
-        explicit_steps = os.getenv("APRIL_IMAGES_INFERENCE_STEPS", "").strip()
-        if explicit_steps:
-            try:
-                steps = int(explicit_steps)
-            except ValueError:
-                pass
+        tokenizer = getattr(pipeline, "tokenizer", None)
+        base_tokens = (
+            int(semantic_token_count)
+            if semantic_token_count is not None
+            else (
+                len(cls._token_ids_for_long_prompt(tokenizer, prompt))
+                if tokenizer is not None
+                else 0
+            )
+        )
+        if base_tokens > cls.MAX_SEMANTIC_PROMPT_TOKENS:
+            raise ValueError(
+                f"APRIL_IMAGES_PROMPT_TOO_LONG:{base_tokens}>"
+                f"{cls.MAX_SEMANTIC_PROMPT_TOKENS}"
+            )
 
         if cls._is_turbo_model():
-            steps = max(1, min(4, int(steps)))
-            guidance = 0.0
+            steps, guidance, steps_source = cls._adaptive_turbo_settings(
+                quality, base_tokens
+            )
+            explicit_steps = os.getenv("APRIL_IMAGES_INFERENCE_STEPS", "").strip()
+            if explicit_steps:
+                try:
+                    steps = max(1, min(4, int(explicit_steps)))
+                    steps_source = "env_override"
+                except ValueError:
+                    pass
             width, height = cls._parse_size(f"{width}x{height}")
+        else:
+            steps, guidance = cls._quality_settings(quality)
+            steps_source = "quality_profile"
+            explicit_steps = os.getenv("APRIL_IMAGES_INFERENCE_STEPS", "").strip()
+            if explicit_steps:
+                try:
+                    steps = int(explicit_steps)
+                    steps_source = "env_override"
+                except ValueError:
+                    pass
 
         kwargs: dict[str, Any] = {
             "width": width,
@@ -897,35 +1060,43 @@ class AprilImagesGenerator:
             "guidance_scale": guidance,
         }
 
-        # A one-window prompt should use the pipeline's native text path.
-        # Longer prompts are encoded with every native CLIP window, without an
-        # April/OpenAI token cap. For Turbo guidance_scale=0, negative guidance
-        # is disabled by the model and therefore no negative embedding is built.
-        tokenizer = getattr(pipeline, "tokenizer", None)
-        prompt_token_count = len(cls._token_ids_for_long_prompt(tokenizer, prompt)) if tokenizer is not None else 0
-        negative_token_count = len(cls._token_ids_for_long_prompt(tokenizer, negative_prompt or "")) if tokenizer is not None else 0
-        native_limit = int(getattr(tokenizer, "model_max_length", 77) or 77) if tokenizer is not None else 77
+        negative_token_count = (
+            len(cls._token_ids_for_long_prompt(tokenizer, negative_prompt or ""))
+            if tokenizer is not None
+            else 0
+        )
+        native_limit = (
+            int(getattr(tokenizer, "model_max_length", 77) or 77)
+            if tokenizer is not None
+            else 77
+        )
+        prompt_token_count = (
+            len(cls._token_ids_for_long_prompt(tokenizer, prompt))
+            if tokenizer is not None
+            else base_tokens
+        )
 
-        if (
+        # Keep short Turbo prompts on Diffusers' native text path.  The previous
+        # implementation forced every Turbo request through the custom long-
+        # prompt encoder, even when the prompt fit the native CLIP window.
+        use_native_pipeline = (
             tokenizer is not None
             and prompt_token_count <= native_limit
             and negative_token_count <= native_limit
-            and not cls._is_turbo_model()
-        ):
+        )
+
+        if use_native_pipeline:
             kwargs["prompt"] = prompt
-            kwargs["negative_prompt"] = negative_prompt or ""
-            print(
-                "🧠 IMAGE PROMPT ENCODING:",
-                {
-                    "prompt_raw_tokens": prompt_token_count,
-                    "negative_raw_tokens": negative_token_count,
-                    "prompt_native_windows": 1,
-                    "negative_native_windows": 1,
-                    "strategy": "pipeline_native_single_window",
-                    "april_openai_prompt_cap": None,
-                },
-            )
+            if guidance != 0.0:
+                kwargs["negative_prompt"] = negative_prompt or ""
+            strategy = "pipeline_native_single_window"
+            native_windows = 1
         else:
+            if prompt_token_count > cls.MAX_SEMANTIC_PROMPT_TOKENS:
+                raise ValueError(
+                    f"APRIL_IMAGES_PROMPT_TOO_LONG:{prompt_token_count}>"
+                    f"{cls.MAX_SEMANTIC_PROMPT_TOKENS}"
+                )
             prompt_kwargs = cls._long_prompt_kwargs(
                 pipeline,
                 prompt,
@@ -933,10 +1104,53 @@ class AprilImagesGenerator:
                 include_negative=guidance != 0.0,
             )
             kwargs.update(prompt_kwargs)
+            strategy = "native_clip_window_sequence_concat"
+            native_windows = max(
+                1,
+                (prompt_token_count + max(native_limit - 2, 1) - 1)
+                // max(native_limit - 2, 1),
+            )
+
+        print(
+            "🧠 IMAGE GENERATION PROFILE:",
+            {
+                "model": cls._model_source(),
+                "turbo": cls._is_turbo_model(),
+                "semantic_base_tokens": base_tokens,
+                "final_prompt_tokens": prompt_token_count,
+                "negative_prompt_tokens": negative_token_count,
+                "native_clip_limit": native_limit,
+                "prompt_tier": cls._prompt_tier(base_tokens),
+                "sampling_steps": int(steps),
+                "sampling_steps_source": steps_source,
+                "guidance_scale": float(guidance),
+                "width": int(width),
+                "height": int(height),
+                "text_strategy": strategy,
+                "native_windows_estimate": int(native_windows),
+                "max_semantic_prompt_tokens": cls.MAX_SEMANTIC_PROMPT_TOKENS,
+            },
+        )
 
         if seed is not None and torch is not None:
             generator_device = "cuda" if cls._device() == "cuda" else "cpu"
-            kwargs["generator"] = torch.Generator(device=generator_device).manual_seed(int(seed))
+            kwargs["generator"] = torch.Generator(device=generator_device).manual_seed(
+                int(seed)
+            )
+
+        print(
+            "🧠 IMAGE MODEL INPUT:",
+            {
+                "prompt": prompt,
+                "negative_prompt": negative_prompt if guidance != 0.0 else "",
+                "prompt_tokens": prompt_token_count,
+                "steps": int(steps),
+                "guidance_scale": float(guidance),
+                "size": [int(width), int(height)],
+                "seed": seed,
+                "strategy": strategy,
+            },
+        )
 
         if torch is not None:
             with torch.inference_mode():
@@ -946,6 +1160,17 @@ class AprilImagesGenerator:
         image = getattr(result, "images", [None])[0]
         if image is None:
             raise RuntimeError("APRIL_IMAGES_DIFFUSION_EMPTY_RESULT")
+
+        print(
+            "🧠 IMAGE MODEL OUTPUT:",
+            {
+                "result_type": type(result).__name__,
+                "image_type": type(image).__name__,
+                "width": int(getattr(image, "width", width)),
+                "height": int(getattr(image, "height", height)),
+                "mode": str(getattr(image, "mode", "unknown")),
+            },
+        )
         return image.convert("RGB")
 
     @classmethod
@@ -957,10 +1182,20 @@ class AprilImagesGenerator:
         quality: str,
         seed: Optional[int],
         negative_prompt: str,
+        *,
+        pipeline: Any = None,
+        semantic_token_count: Optional[int] = None,
     ) -> Image.Image:
-        pipeline = cls._load_text_pipeline()
+        pipeline = pipeline or cls._load_text_pipeline()
         return cls._diffusion_image(
-            pipeline, prompt, width, height, quality, seed, negative_prompt
+            pipeline,
+            prompt,
+            width,
+            height,
+            quality,
+            seed,
+            negative_prompt,
+            semantic_token_count=semantic_token_count,
         )
 
     @classmethod
@@ -1041,19 +1276,45 @@ class AprilImagesGenerator:
             + "\n===== END GENERATOR INPUT SPEC =====\n"
         )
 
-        prompt = cls._compose_prompt(clean["prompt"], clean)
+        base_prompt = cls._clean_prompt(clean["prompt"])
+        pipeline = cls._load_text_pipeline()
+        tokenizer = getattr(pipeline, "tokenizer", None)
+        base_prompt_tokens = (
+            len(cls._token_ids_for_long_prompt(tokenizer, base_prompt))
+            if tokenizer is not None
+            else len(base_prompt.split())
+        )
+        prompt = cls._compose_prompt(
+            base_prompt,
+            clean,
+            prompt_token_count=base_prompt_tokens,
+        )
 
         print(
             "===== IMAGE PROMPT TRACE: GENERATOR COMPOSED PROMPT =====\n"
             + prompt[:12000]
-            + "\n===== END GENERATOR COMPOSED PROMPT =====\n"
+            + "\n===== END IMAGE PROMPT TRACE: GENERATOR COMPOSED PROMPT =====\n"
+        )
+        final_prompt_tokens = (
+            len(cls._token_ids_for_long_prompt(tokenizer, prompt))
+            if tokenizer is not None
+            else len(prompt.split())
         )
         print(
             "🧠 IMAGE PROMPT NORMALIZED:",
             {
                 "semantic_chars": len(prompt),
-                "contains_markup": bool(re.search(r"<(?:svg|path|rect|circle)\b|data:image/", prompt, flags=re.IGNORECASE)),
+                "base_prompt_tokens": int(base_prompt_tokens),
+                "final_prompt_tokens": int(final_prompt_tokens),
+                "contains_markup": bool(
+                    re.search(
+                        r"<(?:svg|path|rect|circle)\\b|data:image/",
+                        prompt,
+                        flags=re.IGNORECASE,
+                    )
+                ),
                 "native_clip_limit_is_window_only": True,
+                "max_semantic_prompt_tokens": cls.MAX_SEMANTIC_PROMPT_TOKENS,
             },
         )
         width, height = cls._parse_size(f"{clean['width']}x{clean['height']}")
@@ -1065,9 +1326,22 @@ class AprilImagesGenerator:
             clean["quality"],
             clean.get("seed"),
             cls._negative_prompt(clean),
+            pipeline=pipeline,
+            semantic_token_count=base_prompt_tokens,
         )
         image_bytes = cls._png_bytes(image)
         cls._validate_png(image_bytes, width, height)
+        print(
+            "🧠 IMAGE PNG OUTPUT:",
+            {
+                "mime_type": "image/png",
+                "width": int(width),
+                "height": int(height),
+                "bytes": len(image_bytes),
+                "validation": "passed",
+                "variant": variant,
+            },
+        )
         artifact, contract = cls.build_artifact(
             image_bytes=image_bytes,
             prompt=prompt,
@@ -1152,6 +1426,20 @@ class AprilImagesGenerator:
 
         if not artifact["payload"].get("src") or not artifact["payload"].get("images"):
             raise RuntimeError("APRIL_IMAGES_ARTIFACT_DISPLAY_PAYLOAD_BUILD_FAILED")
+        print(
+            "🧠 IMAGE ARTIFACT OUTPUT:",
+            {
+                "artifact_type": artifact.get("artifact_type"),
+                "mime_type": artifact.get("mime_type"),
+                "width": artifact.get("width"),
+                "height": artifact.get("height"),
+                "has_image_base64": bool(artifact.get("image_base64")),
+                "has_image_data_uri": bool(artifact.get("image_data_uri")),
+                "payload_has_src": bool(artifact.get("payload", {}).get("src")),
+                "images_count": len(artifact.get("images") or []),
+                "display_contract": "C_ARTIFACT_CONTRACT -> GalleryBlock",
+            },
+        )
         return cls._result_dict(ImageGenerationResult(
             image_bytes=image_bytes,
             mime_type="image/png",
@@ -1326,7 +1614,8 @@ class AprilImagesGenerator:
             "model_id_configured": bool(os.getenv("APRIL_IMAGES_MODEL_ID", "").strip()),
             "diffusers_available": bool(AutoPipelineForText2Image is not None),
             "long_prompt_support": True,
-            "long_prompt_strategy": "native_clip_window_chunking",
+            "max_semantic_prompt_tokens": cls.MAX_SEMANTIC_PROMPT_TOKENS,
+            "long_prompt_strategy": "native_clip_window_sequence_concat",
             "device": self._device(),
             "dtype": str(self._dtype()) if self._dtype() is not None else None,
             "external_image_api": False,
@@ -1378,6 +1667,17 @@ class AprilImagesGenerator:
         )
         image_bytes = self._png_bytes(image)
         self._validate_png(image_bytes, width, height)
+        print(
+            "🧠 IMAGE PNG OUTPUT:",
+            {
+                "mime_type": "image/png",
+                "width": int(width),
+                "height": int(height),
+                "bytes": len(image_bytes),
+                "validation": "passed",
+                "variant": variant,
+            },
+        )
         artifact, contract = self.build_artifact(
             image_bytes=image_bytes,
             prompt=prompt,
