@@ -1,1504 +1,2983 @@
-# =====================================================
-# APRIL IMAGES GENERATION
-# =====================================================
-"""Canonical April image-generation engine.
-
-Route:
-    April Bot -> Interpretation -> C_APRIL_IMAGES_GENERATOR
-      -> C_ARTIFACT_CONTRACT -> GalleryBlock / April Web
-
-Important contract rule:
-    This module creates real raster pixels only through the configured local
-    Diffusers image model. It does NOT silently fall back to a procedural
-    placeholder or another image provider. The existing C_ARTIFACT/Gallery
-    payload is preserved so Web keeps all existing image signals.
-"""
-
 from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+from copy import deepcopy
+import uuid
+import time
+import hashlib
 
-import base64
-import html
-import io
-import json
-import os
-import re
-import threading
-from dataclasses import dataclass
-from typing import Any, Optional
+# =====================================================
+# ARTIFACT METADATA
+# =====================================================
 
-from PIL import Image
+@dataclass
+class ArtifactMetadata:
 
-from blocks.C_ARTIFACT_CONTRACT import (
-    UniversalArtifactContract,
-    build_universal_contract,
-    create_artifact,
+    artifact_id: str = field(
+        default_factory=lambda: str(uuid.uuid4())
+    )
+
+    artifact_version: str = "1.0"
+
+    created_at: float = field(
+        default_factory=time.time
+    )
+
+    room_source: str = ""
+
+    artifact_type: str = ""
+
+# =====================================================
+# ARTIFACT CONTEXT
+# =====================================================
+
+@dataclass
+class ArtifactContext:
+
+    goal: Optional[str] = None
+
+    purpose: Optional[str] = None
+
+    role: Optional[str] = None
+
+    active_scene: Optional[str] = None
+
+    dependencies: List[str] = field(
+        default_factory=list
+    )
+
+    # =================================================
+    # PROFESSIONAL ROOM PROFILE
+    # =================================================
+
+    domain: Optional[str] = None
+
+    specialization: Optional[str] = None
+
+    knowledge_class: Optional[str] = None
+
+    knowledge_scope: List[str] = field(
+        default_factory=list
+    )
+
+    capabilities: List[str] = field(
+        default_factory=list
+    )
+
+    research_capabilities: List[str] = field(
+        default_factory=list
+    )
+
+    experiment_capabilities: List[str] = field(
+        default_factory=list
+    )
+
+    artifact_outputs: List[str] = field(
+        default_factory=list
+    )
+
+    # =================================================
+    # COGNITIVE CONTRIBUTIONS
+    # =================================================
+
+    scene_contributions: List[Dict] = field(
+        default_factory=list
+    )
+
+    focus_contributions: List[Dict] = field(
+        default_factory=list
+    )
+
+    memory_contributions: List[Dict] = field(
+        default_factory=list
+    )
+
+    trajectory_hints: List[str] = field(
+        default_factory=list
+    )
+
+    scene_hints: List[str] = field(
+        default_factory=list
+    )
+
+
+# =====================================================
+# ARTIFACT QUALITY
+# =====================================================
+
+@dataclass
+class ArtifactQuality:
+
+    quality_score: float = 0.0
+
+    confidence_score: float = 0.0
+
+    completeness_score: float = 0.0
+
+    validation_passed: bool = False
+
+    warnings: List[str] = field(
+        default_factory=list
+    )
+
+
+# =====================================================
+# CANONICAL TEXT / PAYLOAD NORMALIZATION
+# =====================================================
+
+_CANONICAL_TEXT_KEYS = (
+    "answer",
+    "content",
+    "summary",
+    "text",
+    "response",
+    "explanation",
+    "display_text",
+    "title",
+    "message",
 )
 
-try:
-    from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image
-except Exception:  # pragma: no cover
-    AutoPipelineForText2Image = None
-    AutoPipelineForImage2Image = None
+_STRUCTURED_PAYLOAD_KEYS = (
+    "domain",
+    "topic",
+    "analysis",
+    "capabilities",
+    "knowledge_scope",
+    "research_capabilities",
+    "experiment_capabilities",
+    "artifact_outputs",
+    "scene_contributions",
+    "focus_contributions",
+    "memory_contributions",
+    "trajectory_hints",
+    "scene_hints",
+    "room_identity",
+)
 
-try:
-    import torch
-except Exception:  # pragma: no cover
-    torch = None
+def _extract_text_candidate(value: Any, *, allow_topic: bool = False) -> str:
+    """Return a safe human-readable string without stringifying raw dicts."""
+    if value is None:
+        return ""
 
+    if isinstance(value, str):
+        return value.strip()
+
+    if isinstance(value, (int, float, bool)):
+        return str(value).strip()
+
+    if isinstance(value, dict):
+        for key in _CANONICAL_TEXT_KEYS:
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+
+        if allow_topic:
+            topic = value.get("topic")
+            if isinstance(topic, str) and topic.strip():
+                return topic.strip()
+
+        for key in ("label", "name", "kind", "type", "renderer", "viewer"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+
+        return ""
+
+    if isinstance(value, (list, tuple, set)):
+        parts = []
+        for item in value:
+            candidate = _extract_text_candidate(item, allow_topic=allow_topic)
+            if candidate:
+                parts.append(candidate)
+        return ", ".join(parts)
+
+    try:
+        return str(value).strip()
+    except Exception:
+        return ""
+
+
+def _normalize_table_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize table cells without selecting a route or changing semantics."""
+    payload = dict(payload or {})
+    columns = payload.get("columns") or payload.get("headers") or []
+    if isinstance(columns, str):
+        columns = [x.strip() for x in columns.split("|")] if "|" in columns else [columns.strip()]
+    columns = [x for x in columns if x is not None]
+
+    rows = payload.get("rows") or []
+    if isinstance(rows, dict):
+        rows = list(rows.values())
+    elif not isinstance(rows, (list, tuple)):
+        rows = [rows]
+
+    normalized_rows = []
+    for row in rows:
+        if isinstance(row, dict):
+            values = [row.get(column, "") for column in columns] if columns else list(row.values())
+        elif isinstance(row, (list, tuple)):
+            values = list(row)
+        elif isinstance(row, str):
+            if "|" in row:
+                values = [part.strip() for part in row.split("|")]
+            elif "\t" in row:
+                values = [part.strip() for part in row.split("\t")]
+            else:
+                values = [row.strip()]
+        else:
+            values = [row]
+        normalized_rows.append(values)
+
+    width = len(columns) or max((len(row) for row in normalized_rows), default=0)
+    if not columns and width:
+        columns = [f"Column {i + 1}" for i in range(width)]
+    for row in normalized_rows:
+        if len(row) < width:
+            row.extend([""] * (width - len(row)))
+        elif len(row) > width:
+            del row[width:]
+
+    payload["columns"] = columns
+    payload["rows"] = normalized_rows
+    payload["table_schema"] = "april.table.canonical.v2"
+    payload["presentation"] = {
+        **dict(payload.get("presentation") or {}),
+        "renderer": "TableBlock",
+        "engine": "McDowell",
+        "math_engine": "KaTeX",
+        "payload_unchanged": True,
+    }
+    return payload
+
+
+def _normalize_diagram_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep diagram semantics structural: nodes/edges/layout, never keyword routing."""
+    payload = dict(payload or {})
+    nodes = payload.get("nodes") or []
+    edges = payload.get("edges") or []
+    relations = payload.get("relations") or []
+
+    if not isinstance(nodes, list):
+        nodes = list(nodes.values()) if isinstance(nodes, dict) else [nodes]
+    if not isinstance(edges, list):
+        edges = list(edges.values()) if isinstance(edges, dict) else [edges]
+    if not isinstance(relations, list):
+        relations = list(relations.values()) if isinstance(relations, dict) else [relations]
+
+    canonical_nodes = []
+    for i, node in enumerate(nodes):
+        if isinstance(node, dict):
+            item = dict(node)
+            item.setdefault("id", str(item.get("name") or item.get("label") or f"node_{i + 1}"))
+            item.setdefault("label", str(item.get("name") or item.get("id") or ""))
+            canonical_nodes.append(item)
+        else:
+            label = str(node).strip()
+            if label:
+                canonical_nodes.append({"id": f"node_{i + 1}", "label": label, "type": "node"})
+
+    canonical_edges = []
+    for edge in edges + relations:
+        if not isinstance(edge, dict):
+            continue
+        source = edge.get("from") or edge.get("source") or edge.get("start")
+        target = edge.get("to") or edge.get("target") or edge.get("end")
+        if source and target:
+            canonical_edges.append({
+                "from": str(source),
+                "to": str(target),
+                **({"label": str(edge["label"])} if edge.get("label") is not None else {}),
+            })
+
+    payload["nodes"] = canonical_nodes
+    payload["edges"] = canonical_edges
+    payload["layout"] = payload.get("layout") or {"direction": "LR"}
+    payload["diagram_schema"] = "april.diagram.canonical.v2"
+    existing_presentation = dict(payload.get("presentation") or {})
+    concrete_renderer = (
+        payload.get("renderer")
+        or existing_presentation.get("renderer")
+        or "MessageTextBlock"
+    )
+    payload["representation"] = payload.get("representation") or (
+        "geometric_figure"
+        if concrete_renderer in {"GalleryBlock", "SvgBlock", "ArithmeticDiagram"}
+        else "schematic"
+    )
+    payload["presentation"] = {
+        **existing_presentation,
+        "renderer": concrete_renderer,
+        "engine": "McDowell",
+        "payload_unchanged": True,
+        "text_companion_required": True,
+    }
+    return payload
+
+
+def _is_concrete_image_reference(value: Any) -> bool:
+    """Return True only for a real media reference, never human-readable text."""
+    if not isinstance(value, str):
+        return False
+    value = value.strip()
+    if not value:
+        return False
+    lowered = value.lower()
+    if lowered.startswith("data:image/") or lowered.startswith("blob:"):
+        return True
+    if lowered.startswith(("http://", "https://", "/api/v1/images/", "/api/images/")):
+        path = value.split("?", 1)[0].split("#", 1)[0].lower()
+        return bool(re.search(r"\.(?:png|jpe?g|webp|gif|svg)$", path)) or "/api/v1/images/" in path or "/api/images/" in path
+    if lowered.startswith("feather-asset://"):
+        return True
+    return False
+
+
+def _normalize_image_gallery_payload(structured_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize one concrete image source into the GalleryBlock contract.
+
+    Important: descriptive fields such as ``prompt`` or a human sentence in
+    ``image`` are not image bytes/URLs and must never become ``src``.
+    """
+    payload = dict(structured_payload or {})
+    existing = payload.get("images") or payload.get("items") or payload.get("gallery") or payload.get("sources")
+    if isinstance(existing, list) and existing:
+        cleaned = []
+        for item in existing:
+            candidate = item if isinstance(item, dict) else {"src": item}
+            src = (
+                candidate.get("asset_url")
+                or candidate.get("image_asset_url")
+                or candidate.get("image_url")
+                or candidate.get("src")
+                or candidate.get("url")
+                or candidate.get("image_data_uri")
+                or candidate.get("data_uri")
+                or candidate.get("image")
+                or ""
+            )
+            if not _is_concrete_image_reference(src):
+                continue
+            normalized = dict(candidate)
+            normalized["src"] = src
+            normalized.setdefault("url", src)
+            normalized.setdefault("image", src)
+            cleaned.append(normalized)
+        payload["images"] = cleaned
+        if cleaned:
+            return payload
+        payload.pop("images", None)
+
+    direct = (
+        payload.get("asset_url")
+        or payload.get("image_asset_url")
+        or payload.get("image_url")
+        or payload.get("src")
+        or payload.get("url")
+        or payload.get("image_data_uri")
+        or payload.get("data_uri")
+        or payload.get("image")
+        or ""
+    )
+    base64_value = payload.get("image_base64") or payload.get("base64") or ""
+    mime = str(payload.get("mime_type") or "image/png").strip() or "image/png"
+    if not _is_concrete_image_reference(direct) and base64_value:
+        direct = f"data:{mime};base64,{base64_value}"
+    if not _is_concrete_image_reference(direct):
+        return payload
+
+    item = {
+        "src": direct,
+        "url": direct,
+        "image": direct,
+        "mime_type": mime,
+        "width": payload.get("width"),
+        "height": payload.get("height"),
+        "title": payload.get("title") or "Image",
+        "alt": payload.get("alt") or payload.get("prompt") or payload.get("description") or "April image",
+        "caption": payload.get("caption") or payload.get("prompt") or payload.get("description") or "",
+    }
+    payload["images"] = [item]
+    return payload
+
+
+def _canonicalize_artifact_data(
+    data: Dict[str, Any],
+    *,
+    artifact_type: str = "",
+    room_source: str = "",
+) -> Dict[str, Any]:
+    """Keep internal payloads structured while preserving visible text fields."""
+    payload = dict(data or {})
+
+    structured_payload = payload.get("payload")
+    if structured_payload is None:
+        structured_payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in _CANONICAL_TEXT_KEYS
+            and key not in ("presentation", "machine_only", "human_visible")
+        }
+
+    canonical_text = ""
+    for key in _CANONICAL_TEXT_KEYS:
+        canonical_text = _extract_text_candidate(payload.get(key))
+        if canonical_text:
+            break
+
+    if not isinstance(structured_payload, dict):
+        structured_payload = {}
+    if artifact_type in {"image", "gallery", "scene", "visual_context"}:
+        structured_payload = _normalize_image_gallery_payload(structured_payload)
+    elif artifact_type == "table":
+        structured_payload = _normalize_table_payload(structured_payload)
+    elif artifact_type == "diagram":
+        structured_payload = _normalize_diagram_payload(structured_payload)
+
+    machine_only = bool(payload.get("machine_only", False))
+    human_visible = payload.get("human_visible")
+    if human_visible is None:
+        human_visible = not machine_only
+
+    # If the payload is purely structural, default it to machine-only before
+    # any topic/title fallback can leak internal payloads into the UI.
+    if not canonical_text and structured_payload and payload.get("human_visible") is None and payload.get("machine_only") is None:
+        machine_only = True
+        human_visible = False
+
+    if not canonical_text and not human_visible and _extract_text_candidate(payload.get("display_text")):
+        canonical_text = _extract_text_candidate(payload.get("display_text"))
+
+    if not canonical_text and human_visible and not machine_only:
+        canonical_text = _extract_text_candidate(payload.get("topic"), allow_topic=True)
+        if not canonical_text:
+            canonical_text = _extract_text_candidate(payload.get("title"))
+
+    normalized = dict(payload)
+    normalized["artifact_type"] = artifact_type or normalized.get("artifact_type", "")
+    normalized["room_source"] = room_source or normalized.get("room_source", "")
+    normalized["machine_only"] = machine_only
+    normalized["human_visible"] = bool(human_visible)
+    normalized["payload"] = structured_payload
+
+    normalized["answer"] = canonical_text
+    normalized["content"] = canonical_text
+    normalized["summary"] = canonical_text
+    normalized["text"] = canonical_text
+    normalized.setdefault("display_text", canonical_text)
+
+    normalized.setdefault(
+        "signal",
+        {
+            "artifact_type": normalized["artifact_type"],
+            "room_source": normalized["room_source"],
+            "machine_only": normalized["machine_only"],
+            "human_visible": normalized["human_visible"],
+        },
+    )
+
+    return normalized
+
+
+def _scene_is_internal_only(scene: Any) -> bool:
+    metadata = {}
+    if hasattr(scene, "metadata"):
+        metadata = getattr(scene, "metadata") or {}
+    elif isinstance(scene, dict):
+        metadata = scene.get("metadata", {}) or {}
+
+    return bool(metadata.get("machine_only")) or metadata.get("human_visible") is False
+
+
+def _scene_text_fallback(scene: Any) -> str:
+    for attr in ("answer", "content", "summary"):
+        if hasattr(scene, attr):
+            candidate = _extract_text_candidate(getattr(scene, attr))
+            if candidate:
+                return candidate
+    if isinstance(scene, dict):
+        for key in ("answer", "content", "summary"):
+            candidate = _extract_text_candidate(scene.get(key))
+            if candidate:
+                return candidate
+    return ""
+
+# =====================================================
+# RENDER CONTRACT
+# =====================================================
 
 
 @dataclass
-class ImageGenerationResult:
-    image_bytes: bytes
-    mime_type: str
-    width: int
-    height: int
-    backend: str
-    prompt: str
-    artifact: dict[str, Any]
-    contract: UniversalArtifactContract
+class ArtifactRenderContract:
+
+    web_block: str = ""
+
+    viewer: str = ""
+
+    editable: bool = True
+
+    responsive: bool = True
+
+    exportable: bool = True
+
+    machine_only: bool = False
+
+    human_visible: bool = True
+
+    # Stage 1 transport hints
+    payload_type: str = ""
+    scene_block: str = ""
+    renderer: str = ""
+    priority: int = 100
+    complexity: str = "balanced"
+    layout: str = "single"
+
+    # Canonical render-signal identity.
+    # The payload itself remains in BaseArtifact.data["payload"]; this field
+    # only describes how that payload must travel to April Web.
+    signal_version: str = "1.0"
+    signal_type: str = ""
+    # Canonical presentation contract transported with the same Fiber signal.
+    presentation: Dict[str, Any] = field(default_factory=dict)
+
+# =====================================================
+# BASE ARTIFACT
+# =====================================================
+
+@dataclass
+class BaseArtifact:
+
+    metadata: ArtifactMetadata
+
+    context: ArtifactContext
+
+    quality: ArtifactQuality
+
+    render: ArtifactRenderContract
+
+    data: Dict[str, Any] = field(
+        default_factory=dict
+    )
+
+# =====================================================
+# BLOCK MAP
+# =====================================================
+
+# Renderer capability map.
+# artifact_type identifies the produced representation; renderer identifies
+# the concrete Web viewer for this particular artifact. One room may therefore
+# produce multiple concrete renderers without creating a second route.
+WEB_RENDERER_REGISTRY_VERSION = "3.0"
+
+# Exact renderer contract mirrored from the actual April Web RenderMessage
+# registry. This describes the destination component; it never performs routing.
+WEB_RENDERER_REGISTRY = {
+    "text": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "answer"]},
+    "markdown": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "markdown"]},
+    "formula": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["formula", "equation", "expression", "math", "content"], "mode": "force_math"},
+    "graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["series", "x_axis", "data_table", "points"]},
+    "table": {"renderer": "TableBlock", "viewer": "TableBlock", "fallback_renderer": "", "payload_keys": ["rows", "columns", "headers", "data", "values", "items"]},
+    "diagram": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["elements", "svg", "geometry", "points"], "specialized_renderers": ["SvgBlock", "ArithmeticDiagram"]},
+    "image": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "src", "url", "image", "image_data_uri", "image_base64"]},
+    "gallery": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "items", "gallery", "sources"]},
+    "scene": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["elements", "svg", "images", "objects"]},
+    "visual_context": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "elements", "svg", "context"]},
+    "code": {"renderer": "CodeBlock", "viewer": "CodeBlock", "fallback_renderer": "", "payload_keys": ["code", "content", "language"]},
+    "link": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "", "payload_keys": ["url", "href", "title", "description"]},
+    "file": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "", "payload_keys": ["url", "href", "path", "name"]},
+    "audio": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["url", "src", "path", "content"]},
+    "video": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["url", "src", "path", "content"]},
+    "action": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["action", "target", "parameters", "content"]},
+    "memory": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "summary", "memory"]},
+}
+
+ARTIFACT_BLOCK_MAP = {kind: spec["renderer"] for kind, spec in WEB_RENDERER_REGISTRY.items()}
+ARTIFACT_BLOCK_MAP["function"] = "MessageTextBlock"
+
+# Concrete renderers that are allowed to cross the artifact/Fiber boundary.
+SUPPORTED_RENDERERS = {
+    "MessageTextBlock", "GraphBlock", "TableBlock", "GalleryBlock",
+    "CodeBlock", "LinkCard", "FunctionBlock", "FormulaBlock",
+    "SvgBlock", "ArithmeticDiagram",
+}
+
+# Data-driven renderer aliases. They refine a produced representation; they do
+# not perform lexical routing.
+ARTIFACT_RENDERER_ALIASES = {
+    "text": "MessageTextBlock",
+    "markdown": "MessageTextBlock",
+    "message": "MessageTextBlock",
+    "message_text": "MessageTextBlock",
+    "diagram": "GalleryBlock",
+    "diagramblock": "GalleryBlock",
+    "schematic": "GalleryBlock",
+    "gallery": "GalleryBlock",
+    "image": "GalleryBlock",
+    "figure": "GalleryBlock",
+    "geometry": "GalleryBlock",
+    "geometric_figure": "GalleryBlock",
+    "svg": "SvgBlock",
+    "arithmetic_diagram": "ArithmeticDiagram",
+}
+
+# =====================================================
+# FACTORY ROOM MAP
+# =====================================================
+
+FACTORY_ROOM_MAP = {
+
+    # Visual generation is a real registered room route.  The image room
+    # delegates concrete raster production to C_APRIL_IMAGES_GENERATOR.
+    "image": "image_generate",
+
+    "graph": "C_GRAPH_ROOM",
+
+    "formula": "C_FORMULA_ROOM",
+
+    "table": "C_TABLE_ROOM",
+
+    "diagram": "C_DIAGRAM_ROOM",
 
 
-class AprilImagesGenerator:
-    """The only image producer between Interpretation and C_ARTIFACT."""
+    "link": "C_LINK_ROOM",
 
-    ENGINE_NAME = "April Images Generation"
-    ENGINE_VERSION = "2.3.0"
-    BACKEND = "diffusers_single_backend"
+    "gallery": "C_GALLERY_ROOM",
 
-    DEFAULT_SIZE = (512, 512)
-    MIN_SIZE = 256
-    MAX_SIZE = 1536
+    "function": "C_FUNCTION_ROOM",
 
-    _pipeline_lock = threading.RLock()
-    _text_pipeline = None
-    _edit_pipeline = None
-    _pipeline_path = None
-    _pipeline_cache_key = None
+    "mathematics": "C_MATHEMATICS_ROOM",
 
-    def __init__(self) -> None:
-        self.engine_name = self.ENGINE_NAME
-        self.engine_version = self.ENGINE_VERSION
+    "trigonometry": "C_TRIGONOMETRY_ROOM",
 
-    # -------------------------------------------------
-    # Configuration
-    # -------------------------------------------------
+    "physics": "C_PHYSICS_ROOM",
 
-    @classmethod
-    def _model_source(cls) -> str:
-        """Return the single configured Diffusers model source.
+    "chemistry": "C_CHEMISTRY_ROOM",
 
-        A local path is preferred when explicitly configured. Otherwise one
-        canonical model id is used. Both are the same Diffusers backend; there
-        is no alternate provider or rendering fallback.
-        """
-        local_path = os.getenv("APRIL_IMAGES_MODEL_PATH", "").strip()
-        if local_path:
-            return local_path
+    "biology": "C_BIOLOGY_ROOM",
 
-        return (
-            os.getenv(
-                "APRIL_IMAGES_MODEL_ID",
-                "stabilityai/sdxl-turbo",
-            ).strip()
-            or "stabilityai/sdxl-turbo"
+    "literature": "C_LITERATURE_ROOM",
+
+    "web": "C_WEB_ROOM",
+
+    "utc": "C_UTC_ROOM",
+
+    "engineering": "C_ENGINEERING_ROOM",
+
+    "politics": "C_POLITICS_ROOM",
+
+    "news": "C_NEWS_ROOM",
+
+    "social": "C_SOCIAL_ROOM",
+
+    "it": "C_IT_ROOM"
+}
+
+# =====================================================
+# FACTORY STATUS
+# =====================================================
+
+FACTORY_STATUS = {
+
+    "visual_rooms": True,
+
+    "science_rooms": True,
+
+    "knowledge_rooms": True,
+
+    "professional_rooms": True
+}
+# =====================================================
+# CANONICAL FACTORY ROOM PROFILES
+# =====================================================
+
+FACTORY_ROOM_PROFILES = {
+    "image": {
+        "room": "image_generate",
+        "artifact_type": "image",
+        "renderer": "GalleryBlock",
+        "viewer": "GalleryBlock",
+        "allowed_renderers": ["GalleryBlock"],
+        "semantic_service": "C_APRIL_IMAGES_GENERATOR",
+        "capabilities": [
+            "image_generation",
+            "visual_scene_generation",
+            "image_continuity",
+            "gallery_rendering",
+        ],
+        "machine_input": "MachineRequest",
+        "machine_output": "BaseArtifact",
+        "scene_output": "SceneContract",
+        "single_route": True,
+        "text_companion_required": True,
+    },
+    "diagram": {
+        "room": "C_DIAGRAM_ROOM",
+        "artifact_type": "diagram",
+        # Default only. A concrete artifact can select its own viewer.
+        "renderer": "MessageTextBlock",
+        "viewer": "MessageTextBlock",
+        "allowed_renderers": [
+            "MessageTextBlock", "GalleryBlock", "SvgBlock", "ArithmeticDiagram"
+        ],
+        "semantic_service": "APRIL_DIAGRAM_SYSTEM_CORE",
+        "capabilities": [
+            "spatial_semantics",
+            "geometry",
+            "relations",
+            "structure",
+            "engineering_layout",
+            "schematic_rendering",
+            "geometric_figure_rendering",
+        ],
+        "machine_input": "MachineRequest",
+        "machine_output": "BaseArtifact",
+        "scene_output": "SceneContract",
+        "single_route": True,
+        "text_companion_required": True,
+    },
+}
+
+
+def get_factory_room_profile(room_or_artifact_type: str) -> Dict[str, Any]:
+    '''Return the canonical production-room profile without routing logic.'''
+    key = str(room_or_artifact_type or "").strip()
+    if key in FACTORY_ROOM_PROFILES:
+        return dict(FACTORY_ROOM_PROFILES[key])
+    for profile in FACTORY_ROOM_PROFILES.values():
+        if key in {profile.get("room"), profile.get("artifact_type")}:
+            return dict(profile)
+    return {}
+
+
+def build_diagram_room_payload(
+    semantic: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    '''Normalize diagram-room semantics into one artifact payload.'''
+    semantic = dict(semantic or {})
+    payload = dict(payload or {})
+    profile = get_factory_room_profile("diagram")
+    requested_renderer = (
+        payload.get("renderer")
+        or (payload.get("presentation") or {}).get("renderer")
+        or payload.get("viewer")
+        or profile["renderer"]
+    )
+    requested_renderer = ARTIFACT_RENDERER_ALIASES.get(
+        str(requested_renderer or "").strip().lower(),
+        str(requested_renderer or "").strip(),
+    )
+    if requested_renderer not in profile.get("allowed_renderers", []):
+        requested_renderer = profile["renderer"]
+
+    rendering_mode = str(
+        payload.get("rendering_mode")
+        or (payload.get("presentation") or {}).get("rendering_mode")
+        or (
+            "geometric_figure"
+            if requested_renderer in {"GalleryBlock", "SvgBlock", "ArithmeticDiagram"}
+            else "schematic"
         )
+    ).strip().lower()
 
-    @classmethod
-    def _model_path(cls) -> str:
-        # Backward-compatible accessor retained for callers that expect it.
-        return os.getenv("APRIL_IMAGES_MODEL_PATH", "").strip()
+    payload.update({
+        "artifact_type": profile["artifact_type"],
+        "room_source": profile["room"],
+        "renderer": requested_renderer,
+        "viewer": payload.get("viewer") or requested_renderer,
+        "rendering_mode": rendering_mode,
+        "allowed_renderers": list(profile.get("allowed_renderers", [])),
+        "semantic": semantic,
+        "diagram_semantics": semantic,
+        "machine_only": bool(payload.get("machine_only", False)),
+        "text_companion_required": True,
+    })
+    return payload
 
-    @classmethod
-    def _model_is_local(cls) -> bool:
-        path = cls._model_path()
-        return bool(path) and os.path.isdir(path)
 
-    @classmethod
-    def _local_files_only(cls) -> bool:
-        configured = os.getenv("APRIL_IMAGES_LOCAL_ONLY", "0").strip().lower()
-        return configured in {"1", "true", "yes", "on"} or cls._model_is_local()
+# =====================================================
+# CANONICAL RENDER SIGNAL
+# =====================================================
+UNIFIED_RENDER_SIGNAL_VERSION = "3.0"
 
-    @classmethod
-    def _device(cls) -> str:
-        configured = os.getenv("APRIL_IMAGES_DEVICE", "auto").strip().lower()
-        if configured in {"cuda", "cpu", "mps"}:
-            return configured
-        if torch is not None and torch.cuda.is_available():
-            return "cuda"
-        if torch is not None and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return "mps"
-        return "cpu"
 
-    @classmethod
-    def _dtype(cls):
-        configured = os.getenv("APRIL_IMAGES_DTYPE", "auto").strip().lower()
-        if torch is None:
-            return None
-        if configured in {"float16", "fp16"}:
-            return torch.float16
-        if configured in {"bfloat16", "bf16"}:
-            return torch.bfloat16
-        if configured in {"float32", "fp32"}:
-            return torch.float32
-        return torch.float16 if cls._device() in {"cuda", "mps"} else torch.float32
+def _render_signal_metadata(
+    artifact_type: str,
+    room_source: str,
+    renderer: str,
+    *,
+    content: str = "",
+    priority: int = 100,
+    complexity: str = "balanced",
+    layout: str = "single",
+    presentation: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return only transport metadata; payload stays structured and untouched."""
+    registration = WEB_RENDERER_REGISTRY.get(
+        str(artifact_type or "").strip().lower(),
+        WEB_RENDERER_REGISTRY["text"],
+    )
+    exact_renderer = str(registration.get("renderer") or renderer or "MessageTextBlock")
+    fallback_renderer = str(registration.get("fallback_renderer") or "MessageTextBlock")
+    candidates = [exact_renderer]
+    return {
+        "type": artifact_type,
+        "payload_type": artifact_type,
+        "renderer": exact_renderer,
+        "viewer": str(registration.get("viewer") or exact_renderer),
+        "web_renderer": exact_renderer,
+        "fallback_renderer": fallback_renderer,
+        "renderer_candidates": candidates,
+        "web_registry_version": WEB_RENDERER_REGISTRY_VERSION,
+        "signal_channel": "canonical_web_render_signal_v2",
+        "source_room": room_source,
+        "version": UNIFIED_RENDER_SIGNAL_VERSION,
+        "content_present": bool(content),
+        "priority": priority,
+        "complexity": complexity,
+        "layout": layout,
+        "scene_contract": True,
+        "presentation": dict(presentation or {}),
+        "payload_contract_keys": list(registration.get("payload_keys") or []),
+    }
 
-    @classmethod
-    def _is_turbo_model(cls) -> bool:
-        return "sdxl-turbo" in cls._model_source().strip().lower()
 
-    @classmethod
-    def _quality_settings(cls, quality: str) -> tuple[int, float]:
-        """Return sampling settings for the configured image backend.
+def _build_artifact_render_signal(
+    *,
+    artifact_type: str,
+    room_source: str,
+    renderer: str,
+    payload: Dict[str, Any],
+    content: str = "",
+    priority: int = 100,
+    complexity: str = "balanced",
+    layout: str = "single",
+    presentation: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Canonical room -> Fiber render signal.
 
-        SDXL Turbo is explicitly trained for 1-4 denoising steps with guidance
-        disabled.  The ordinary SDXL profile remains available when a different
-        model id is explicitly configured.
-        """
-        normalized = str(quality or "standard").strip().lower()
-        if cls._is_turbo_model():
-            return {
-                "draft": (1, 0.0),
-                "standard": (1, 0.0),
-                "high": (2, 0.0),
-                "ultra": (4, 0.0),
-            }.get(normalized, (1, 0.0))
-        return {
-            "draft": (28, 6.0),
-            "standard": (40, 6.5),
-            "high": (50, 7.0),
-            "ultra": (60, 7.5),
-        }.get(normalized, (40, 6.5))
+    The structured payload is carried once at top-level ``payload``.
+    ``signal`` contains identity/routing metadata only, so no payload is
+    duplicated or rewritten while crossing the single route.
+    """
+    return {
+        "type": artifact_type,
+        "payload_type": artifact_type,
+        "signal_version": UNIFIED_RENDER_SIGNAL_VERSION,
+        "signal": _render_signal_metadata(
+            artifact_type,
+            room_source,
+            renderer,
+            content=content,
+            priority=priority,
+            complexity=complexity,
+            layout=layout,
+            presentation=presentation,
+        ),
+        "renderer": renderer,
+        "viewer": renderer,
+        "source_room": room_source,
+        "content": content,
+        "text": content,
+        "payload": payload,
+        "priority": priority,
+        "complexity": complexity,
+        "layout": layout,
+        "presentation": dict(presentation or {}),
+        "scene_contract": True,
+    }
 
-    @classmethod
-    def _parse_size(cls, size: Any) -> tuple[int, int]:
-        if isinstance(size, (tuple, list)) and len(size) == 2:
-            try:
-                width, height = int(size[0]), int(size[1])
-            except (TypeError, ValueError):
-                width, height = cls.DEFAULT_SIZE
-        else:
-            match = re.match(r"^\s*(\d{2,5})\s*x\s*(\d{2,5})\s*$", str(size or ""))
-            if match:
-                width, height = int(match.group(1)), int(match.group(2))
-            else:
-                width, height = cls.DEFAULT_SIZE
-        width = max(cls.MIN_SIZE, min(cls.MAX_SIZE, width))
-        height = max(cls.MIN_SIZE, min(cls.MAX_SIZE, height))
-        width = max(64, (width // 64) * 64)
-        height = max(64, (height // 64) * 64)
-        return width, height
+# =====================================================
+# CREATE ARTIFACT
+# =====================================================
 
-    @classmethod
-    def _extract_semantic_prompt(cls, value: Any, *, _depth: int = 0) -> str:
-        """Extract a semantic image request without feeding render artifacts to CLIP.
 
-        The local image engine must receive a visual description, not a serialized
-        MachineResponse, SVG/XML markup, data URI, or base64 payload. OpenAI remains
-        the semantic planner; this Diffusers backend remains the only pixel generator.
-        """
-        if _depth > 4 or value is None:
-            return ""
+def build_room_route_contract(
+    request: Any,
+    *,
+    origin: str = "executor",
+    destination: str = "rooms_registry",
+    pipeline_stage: str = "artifact_route",
+    context: Optional[Dict[str, Any]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> UniversalArtifactContract:
+    """Build the C-ARTIFACT transport envelope used before room execution.
 
-        if isinstance(value, dict):
-            preferred_keys = (
-                "prompt", "description", "visual_prompt", "image_prompt",
-                "image", "visual", "visual_context",
-                "scene", "subject", "request", "title", "summary",
-                "answer", "content", "alt",
-            )
-            for key in preferred_keys:
-                if key in value:
-                    candidate = cls._extract_semantic_prompt(value.get(key), _depth=_depth + 1)
-                    if candidate:
-                        return candidate
-            for key in ("data", "spec"):
-                if key in value:
-                    candidate = cls._extract_semantic_prompt(value.get(key), _depth=_depth + 1)
-                    if candidate:
-                        return candidate
-            return ""
+    This is a routing envelope, not a human-visible artifact.  It carries the
+    already-resolved semantic request, dialogue continuity and provider result
+    into Room Register without asking Executor to call a concrete room/engine.
+    """
+    contract = UniversalArtifactContract()
 
-        if isinstance(value, (list, tuple)):
-            parts = []
-            for item in value[:16]:
-                candidate = cls._extract_semantic_prompt(item, _depth=_depth + 1)
-                if candidate:
-                    parts.append(candidate)
-            return " ".join(parts).strip()
+    transport = contract.transport
+    # TransportContract is intentionally lightweight in this project.  These
+    # attributes are attached dynamically so existing consumers remain compatible.
+    transport.origin = str(origin or "executor")
+    transport.destination = str(destination or "rooms_registry")
+    transport.pipeline_stage = str(pipeline_stage or "artifact_route")
+    transport.route_authority = "INTERPRETATION"
 
-        text = str(value or "").strip()
-        if not text:
-            return ""
+    intent = deepcopy(getattr(request, "intent", {}) or {})
+    conversation = deepcopy(getattr(request, "conversation", {}) or {})
+    memory = deepcopy(getattr(request, "memory", {}) or {})
+    visual_context = deepcopy(getattr(request, "visual_context", {}) or {})
+    routing = deepcopy(getattr(request, "routing", {}) or {})
+    constraints = deepcopy(getattr(request, "constraints", {}) or {})
+    requested_outputs = list(getattr(request, "requested_outputs", []) or [])
+    required_artifacts = list(getattr(request, "required_artifacts", []) or [])
 
-        if text[:1] in "{[":
-            try:
-                parsed = json.loads(text)
-            except Exception:
-                parsed = None
-            if parsed is not None:
-                candidate = cls._extract_semantic_prompt(parsed, _depth=_depth + 1)
-                if candidate:
-                    return candidate
+    route_context = deepcopy(context or {})
+    route_context.setdefault("current_user_request", conversation.get("current_request", ""))
+    route_context.setdefault("resolved_request", conversation.get("resolved_request", ""))
+    route_context.setdefault("semantic_request", intent.get("semantic_request", ""))
+    route_context.setdefault("conversation", conversation)
+    route_context.setdefault("memory", memory)
+    route_context.setdefault("visual_context", visual_context)
 
-        lowered = text.lstrip().lower()
-        if (
-            lowered.startswith("<svg")
-            or lowered.startswith("<?xml")
-            or "data:image/" in lowered
-            or "<svg " in lowered
-            or "<path" in lowered
-            or "<rect" in lowered
-            or "<circle" in lowered
-        ):
-            candidates = []
-            patterns = (
-                r"aria-label=[\"']([^\"']+)[\"']",
-                r"data-(?:prompt|description|alt)=[\"']([^\"']+)[\"']",
-                r"<title[^>]*>(.*?)</title>",
-                r"<desc[^>]*>(.*?)</desc>",
-                r"<text[^>]*>(.*?)</text>",
-            )
-            for pattern in patterns:
-                for match in re.findall(pattern, text, flags=re.IGNORECASE | re.DOTALL):
-                    cleaned = html.unescape(re.sub(r"<[^>]+>", " ", str(match)))
-                    cleaned = " ".join(cleaned.split()).strip()
-                    if cleaned:
-                        candidates.append(cleaned)
-            if candidates:
-                return " ".join(dict.fromkeys(candidates))
-            return ""
+    contract.payload.intent = intent
+    contract.payload.context = route_context
+    contract.payload.knowledge = memory
+    contract.payload.scene = deepcopy(conversation.get("live_scene") or {})
+    contract.payload.executor_notes = {
+        "request_id": str(getattr(request, "request_id", "") or ""),
+        "goal": str(getattr(request, "goal", "") or ""),
+        "requested_outputs": requested_outputs,
+        "required_artifacts": required_artifacts,
+        "routing": routing,
+        "constraints": constraints,
+        "current_user_request": conversation.get("current_request", ""),
+        "resolved_request": conversation.get("resolved_request", ""),
+        "semantic_authority": "INTERPRETATION",
+        "room_registry": "rooms_registry",
+    }
+    contract.metadata = {
+        "contract_type": "ROOM_ROUTE_ENVELOPE",
+        "route_authority": "INTERPRETATION",
+        "source": str(origin or "executor"),
+        "destination": str(destination or "rooms_registry"),
+        "pipeline_stage": str(pipeline_stage or "artifact_route"),
+        **deepcopy(metadata or {}),
+    }
 
-        text = re.sub(r"^```(?:json|text|xml|svg)?\s*", "", text, flags=re.IGNORECASE)
-        text = re.sub(r"\s*```$", "", text).strip()
-        text = re.sub(r"^data:image/[^;]+;base64,.*$", "", text, flags=re.IGNORECASE | re.DOTALL)
-        return " ".join(text.split()).strip()
+    return contract
 
-    @classmethod
-    def _clean_prompt(cls, prompt: Any) -> str:
-        text = cls._extract_semantic_prompt(prompt)
-        if not text:
-            raise ValueError("APRIL_IMAGES_EMPTY_PROMPT")
-        return text
 
-    @staticmethod
-    def _negative_prompt(spec: Optional[dict[str, Any]] = None) -> str:
-        values = [
-            "low quality", "blurry", "pixelated", "jpeg artifacts",
-            "deformed", "bad anatomy", "extra limbs", "duplicate subject",
-            "distorted face", "disfigured hands", "malformed eyes",
-            "watermark", "text artifacts", "cropped subject",
-        ]
-        if isinstance(spec, dict) and isinstance(spec.get("negative"), list):
-            values.extend(str(x).strip() for x in spec["negative"] if str(x).strip())
-        return ", ".join(dict.fromkeys(values))
+def create_artifact(
+    artifact_type: str,
+    room_source: str,
+    data: Dict[str, Any]
+):
+    """Create a BaseArtifact with one canonical, lossless render signal."""
+    normalized_data = _canonicalize_artifact_data(
+        data,
+        artifact_type=artifact_type,
+        room_source=room_source,
+    )
 
-    @classmethod
-    def _compose_prompt(cls, prompt: str, spec: Optional[dict[str, Any]] = None) -> str:
-        semantic_prompt = cls._clean_prompt(prompt)
+    room_identity = normalized_data.get("room_identity", {})
+    if not isinstance(room_identity, dict):
+        room_identity = {}
 
-        # SDXL Turbo is a low-step model with a native CLIP window.  For the
-        # common image-request path, keep conditioning compact so it stays on
-        # the pipeline's native encoder path instead of the expensive custom
-        # multi-window encoder.  The requested semantics remain untouched; only
-        # renderer boilerplate is omitted.
-        if cls._is_turbo_model():
-            parts = [semantic_prompt]
-            if isinstance(spec, dict):
-                style = cls._clean_prompt(spec.get("style") or "") if str(spec.get("style") or "").strip() else ""
-                if style and style.lower() not in {"illustration", "standard", "high", "low"}:
-                    parts.append(style)
+    explicit_renderer = (
+        normalized_data.get("renderer")
+        or (normalized_data.get("presentation") or {}).get("renderer")
+        or normalized_data.get("viewer")
+    )
+    explicit_renderer = ARTIFACT_RENDERER_ALIASES.get(
+        str(explicit_renderer or "").strip().lower(),
+        str(explicit_renderer or "").strip(),
+    )
+    render_block = (
+        explicit_renderer
+        if explicit_renderer in SUPPORTED_RENDERERS
+        else ARTIFACT_BLOCK_MAP.get(artifact_type, "FunctionBlock")
+    )
 
-                context = spec.get("visual_context")
-                if isinstance(context, dict):
-                    # Keep only the most semantically useful visual fields.
-                    # This preserves the scene description while avoiding a
-                    # 200+ token conditioning prompt for simple requests.
-                    for key in ("subject", "composition", "environment", "lighting"):
-                        value = context.get(key)
-                        if value:
-                            semantic_value = cls._extract_semantic_prompt(value)
-                            if semantic_value:
-                                parts.append(f"{key.replace('_', ' ')}: {semantic_value}")
-            return "\n".join(parts)
+    priority = normalized_data.get("priority", 100)
+    complexity = normalized_data.get("complexity", "balanced")
+    layout = normalized_data.get("layout", "single")
+    presentation = dict(normalized_data.get("presentation") or {})
+    canonical_text = _extract_text_candidate(normalized_data)
 
-        parts = [semantic_prompt]
-        if isinstance(spec, dict):
-            style = cls._clean_prompt(spec.get("style") or "") if str(spec.get("style") or "").strip() else ""
-            if style and style.lower() not in semantic_prompt.lower():
-                parts.append(f"Style: {style}")
+    structured_payload = normalized_data.get("payload")
+    if not isinstance(structured_payload, dict):
+        structured_payload = {}
 
-            context = spec.get("visual_context")
-            if isinstance(context, dict):
-                for key in (
-                    "subject", "composition", "lighting", "camera",
-                    "environment", "palette", "mood", "materials",
-                    "character", "pose", "background", "details",
-                ):
-                    value = context.get(key)
-                    if value:
-                        semantic_value = cls._extract_semantic_prompt(value)
-                        if semantic_value:
-                            label = key.replace("_", " " ).title()
-                            parts.append(f"{label}: {semantic_value}")
-        parts.append(
-            "High-quality finished artwork, coherent composition, clear subject "
-            "separation, natural perspective, detailed textures, consistent "
-            "lighting, depth, clean edges, visually rich but faithful to the "
-            "requested scene."
+    render_signal = _build_artifact_render_signal(
+        artifact_type=artifact_type,
+        room_source=room_source,
+        renderer=render_block,
+        payload=structured_payload,
+        content=canonical_text,
+        priority=priority,
+        complexity=complexity,
+        layout=layout,
+        presentation=presentation,
+    )
+    normalized_data["render_signal"] = render_signal
+
+    artifact = BaseArtifact(
+        metadata=ArtifactMetadata(
+            artifact_type=artifact_type,
+            room_source=room_source
+        ),
+        context=ArtifactContext(
+            domain=normalized_data.get("domain"),
+            specialization=room_identity.get("specialization"),
+            knowledge_class=room_identity.get("knowledge_class"),
+            knowledge_scope=normalized_data.get("knowledge_scope", []),
+            capabilities=normalized_data.get("capabilities", []),
+            research_capabilities=normalized_data.get("research_capabilities", []),
+            experiment_capabilities=normalized_data.get("experiment_capabilities", []),
+            artifact_outputs=normalized_data.get("artifact_outputs", []),
+            scene_contributions=normalized_data.get("scene_contributions", []),
+            focus_contributions=normalized_data.get("focus_contributions", []),
+            memory_contributions=normalized_data.get("memory_contributions", []),
+            trajectory_hints=normalized_data.get("trajectory_hints", []),
+            scene_hints=normalized_data.get("scene_hints", [])
+        ),
+        quality=ArtifactQuality(),
+        render=ArtifactRenderContract(
+            web_block=render_block,
+            viewer=render_block,
+            renderer=render_block,
+            scene_block=artifact_type,
+            payload_type=artifact_type,
+            priority=priority,
+            complexity=complexity,
+            layout=layout,
+            machine_only=bool(normalized_data.get("machine_only", False)),
+            human_visible=bool(normalized_data.get("human_visible", True)),
+            signal_version=UNIFIED_RENDER_SIGNAL_VERSION,
+            signal_type=artifact_type,
+            presentation=presentation,
+        ),
+        data=normalized_data
+    )
+
+    # Make artifact identity observable without changing the payload.
+    try:
+        artifact.data["render_signal"]["artifact_id"] = artifact.metadata.artifact_id
+        artifact.data["render_signal"]["signal"]["artifact_id"] = artifact.metadata.artifact_id
+    except Exception:
+        pass
+
+    return artifact
+
+
+# =====================================================
+# FIBER INSPECTION API
+# =====================================================
+
+TRACE_STAGES = [
+    "CONTRACT","REGISTRY","ROOM","OPENAI_REQUEST",
+    "OPENAI_RESPONSE","EXECUTOR","SCENE","WEB","DONE"
+]
+
+def build_trace_snapshot(trace: TraceContract) -> Dict[str, Any]:
+    return {
+        "trace_id": trace.trace_id,
+        "lane": trace.lane,
+        "stage": trace.stage,
+        "room": trace.room,
+        "elapsed_ms": trace.elapsed_ms,
+        "status": trace.status,
+    }
+
+def build_metrics_snapshot(metrics: MetricsContract) -> Dict[str, Any]:
+    return {
+        "payload_size": metrics.payload_size,
+        "block_count": metrics.block_count,
+        "attachment_count": metrics.attachment_count,
+        "elapsed_ms": metrics.elapsed_ms,
+        "lane": metrics.lane,
+    }
+
+def build_identity_snapshot(identity: IdentityContract) -> Dict[str, Any]:
+    return {
+        "user_id": identity.user_id,
+        "subscription": identity.subscription,
+        "capabilities": list(identity.capabilities),
+        "limits": dict(identity.limits),
+    }
+
+def build_capability_snapshot(cap: CapabilityContract) -> Dict[str, Any]:
+    return {
+        "tools": list(cap.tools),
+        "renderers": list(cap.renderers),
+        "viewers": list(cap.viewers),
+        "permissions": list(cap.permissions),
+    }
+
+def build_diagnostic_snapshot(diag: DiagnosticContract) -> Dict[str, Any]:
+    return {
+        "stage": diag.stage,
+        "status": diag.status,
+        "message": diag.message,
+    }
+
+
+# =====================================================
+# FIBER FACTORY INTEGRATION
+# =====================================================
+
+
+
+def _text_companion_blocks(
+    artifact_type: str,
+    content: str,
+    data: Dict[str, Any],
+    presentation: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Legacy compatibility hook. Scene-level composition owns text nodes now."""
+    return []
+
+def _artifact_canonical_render_blocks(artifact: BaseArtifact) -> List[Dict[str, Any]]:
+    """Project one artifact into lossless canonical render blocks.
+
+    Concrete renderer identity is preserved from the artifact/presentation.
+    Every human-visible specialized result gets a MessageTextBlock companion
+    so narrative content is never forced into the specialized renderer.
+    """
+    if artifact is None:
+        return []
+
+    data = dict(getattr(artifact, "data", {}) or {})
+    artifact_type = getattr(getattr(artifact, "metadata", None), "artifact_type", "") or data.get("artifact_type", "")
+    room_source = getattr(getattr(artifact, "metadata", None), "room_source", "") or data.get("room_source", "")
+    render = getattr(artifact, "render", None)
+
+    explicit_renderer = (
+        data.get("renderer")
+        or (data.get("presentation") or {}).get("renderer")
+        or data.get("viewer")
+    )
+    explicit_renderer = ARTIFACT_RENDERER_ALIASES.get(
+        str(explicit_renderer or "").strip().lower(),
+        str(explicit_renderer or "").strip(),
+    )
+    renderer = (
+        explicit_renderer
+        if explicit_renderer in SUPPORTED_RENDERERS
+        else getattr(render, "web_block", "")
+        or ARTIFACT_BLOCK_MAP.get(artifact_type, "FunctionBlock")
+    )
+
+    priority = getattr(render, "priority", data.get("priority", 100))
+    complexity = getattr(render, "complexity", data.get("complexity", "balanced"))
+    layout = getattr(render, "layout", data.get("layout", "single"))
+    content = _extract_text_candidate(data)
+
+    structured_payload = data.get("payload")
+    if not isinstance(structured_payload, dict):
+        structured_payload = {
+            key: value for key, value in data.items()
+            if key not in _CANONICAL_TEXT_KEYS
+            and key not in {"render_signal", "presentation", "machine_only", "human_visible"}
+        }
+
+    signal = data.get("render_signal")
+    if not isinstance(signal, dict):
+        signal = _build_artifact_render_signal(
+            artifact_type=artifact_type, room_source=room_source, renderer=renderer,
+            payload=structured_payload, content=content, priority=priority,
+            complexity=complexity, layout=layout, presentation=dict(data.get("presentation") or {}),
         )
-        return "\n".join(parts)
+    signal = dict(signal)
+    presentation = data.get("presentation")
+    if not isinstance(presentation, dict):
+        presentation = dict(signal.get("presentation") or {})
 
-    @classmethod
-    def _require_backend(cls) -> None:
-        source = cls._model_source()
-        if not source:
-            raise RuntimeError("APRIL_IMAGES_MODEL_SOURCE_NOT_CONFIGURED")
-        if AutoPipelineForText2Image is None or AutoPipelineForImage2Image is None:
-            raise RuntimeError("APRIL_IMAGES_DIFFUSERS_NOT_INSTALLED")
-        if torch is None:
-            raise RuntimeError("APRIL_IMAGES_TORCH_NOT_INSTALLED")
+    signal.update({
+        "renderer": renderer,
+        "viewer": data.get("viewer") or renderer,
+        "type": artifact_type,
+        "payload_type": artifact_type,
+        "source_room": room_source,
+        "payload": structured_payload,
+        "presentation": presentation,
+        "signal_version": UNIFIED_RENDER_SIGNAL_VERSION,
+        "artifact_id": signal.get("artifact_id") or getattr(getattr(artifact, "metadata", None), "artifact_id", ""),
+    })
 
-        # An explicitly supplied local path must exist. A model id is allowed
-        # and will be resolved by Diffusers/Hugging Face into the runtime cache.
-        if cls._model_path() and not os.path.isdir(cls._model_path()):
-            raise RuntimeError("APRIL_IMAGES_MODEL_PATH_NOT_FOUND")
+    specialized_block = {
+        "type": artifact_type,
+        "artifact_type": artifact_type,
+        "renderer": renderer,
+        "viewer": data.get("viewer") or renderer,
+        "content": content,
+        "text": content,
+        "payload": structured_payload,
+        "signal": dict(signal.get("signal") or {}),
+        "signal_version": UNIFIED_RENDER_SIGNAL_VERSION,
+        "source_room": room_source,
+        "artifact_id": getattr(getattr(artifact, "metadata", None), "artifact_id", ""),
+        "priority": priority,
+        "complexity": complexity,
+        "layout": layout,
+        "presentation": presentation,
+        "scene_contract": True,
+        "provider_payload": True,
+        "canonical_provider_payload": True,
+        "executor_generated": False,
+        "text_companion_required": bool(data.get("text_companion_required", True)),
+    }
 
-    # -------------------------------------------------
-    # Real Diffusers backend
-    # -------------------------------------------------
+    # A room artifact is exactly one scene node. Narrative text is composed once
+    # at SceneContract level, so an artifact never manufactures duplicate text
+    # companions of its own.
+    return [specialized_block]
 
-    @classmethod
-    def _configure_pipeline(cls, pipeline: Any) -> Any:
-        device = cls._device()
+def _ensure_artifact_render_signal(artifact: BaseArtifact) -> BaseArtifact:
+    """Ensure a room artifact has exactly one lossless render signal."""
+    blocks = _artifact_canonical_render_blocks(artifact)
+    if blocks:
+        specialized = next(
+            (block for block in blocks if str(block.get("renderer") or "") not in {"", "MessageTextBlock", "TextBlock", "MarkdownBlock"}),
+            blocks[-1],
+        )
+        artifact.data["render_signal"] = dict(specialized.get("signal") or blocks[-1].get("signal") or {})
+        artifact.data["render_signal"]["payload"] = specialized.get("payload") if specialized.get("payload") is not None else blocks[-1].get("payload")
+        artifact.data["render_signal"]["renderer"] = specialized.get("renderer") or blocks[-1].get("renderer") or "MessageTextBlock"
+        artifact.data["render_signal"]["viewer"] = specialized.get("viewer") or blocks[-1].get("viewer") or "MessageTextBlock"
+        artifact.data.setdefault("render_blocks", [])
+        artifact.data["render_blocks"] = blocks
+        artifact.render.signal_version = UNIFIED_RENDER_SIGNAL_VERSION
+        artifact.render.signal_type = specialized.get("type", blocks[-1].get("type", ""))
+        artifact.render.web_block = specialized.get("renderer") or blocks[-1].get("renderer", artifact.render.web_block)
+        artifact.render.viewer = specialized.get("viewer") or artifact.render.web_block
+        artifact.render.renderer = artifact.render.web_block
+    return artifact
 
-        # SDXL Turbo requires trailing timestep spacing.  This is part of the
-        # model's sampling contract, not an alternate backend or a fallback.
-        if cls._is_turbo_model():
-            try:
-                from diffusers import EulerAncestralDiscreteScheduler
-                pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
-                    pipeline.scheduler.config,
-                    timestep_spacing="trailing",
-                )
-            except Exception as exc:
-                raise RuntimeError("APRIL_IMAGES_TURBO_SCHEDULER_CONFIGURATION_FAILED") from exc
+def build_universal_contract(
+    artifact: Optional[BaseArtifact] = None,
+    user_id: str = "",
+    subscription: str = "Free",
+) -> UniversalArtifactContract:
+    contract = UniversalArtifactContract()
+    contract.artifact = artifact
+    contract.fiber.identity.user_id = user_id
+    contract.fiber.identity.subscription = subscription
 
-        # Do not enable attention slicing by default: on CPU it can make the
-        # already expensive denoising loop slower.  It remains an explicit opt-in.
-        if os.getenv("APRIL_IMAGES_CPU_ATTENTION_SLICING", "0").strip().lower() in {"1", "true", "yes", "on"}:
-            method = getattr(pipeline, "enable_attention_slicing", None)
-            if callable(method):
-                method()
-
-        if device != "cpu":
-            for method_name in ("enable_vae_slicing", "enable_vae_tiling"):
-                method = getattr(pipeline, method_name, None)
-                if callable(method):
-                    try:
-                        method()
-                    except Exception:
-                        pass
-
-        # Hugging Face recommends keeping the default SDXL VAE in float32.
-        # upcast_vae() performs that conversion once for CUDA/MPS inference.
-        if cls._is_turbo_model() and device != "cpu":
-            method = getattr(pipeline, "upcast_vae", None)
-            if callable(method):
-                method()
-
-        if device == "cuda" and os.getenv("APRIL_IMAGES_CPU_OFFLOAD", "0") == "1":
-            method = getattr(pipeline, "enable_model_cpu_offload", None)
-            if callable(method):
-                method()
-                return pipeline
-        return pipeline.to(device)
-
-    @classmethod
-    def _load_text_pipeline(cls):
-        cls._require_backend()
-        source = cls._model_source()
-        cache_key = f"text::{source}::{cls._dtype()}::{cls._device()}::{cls._local_files_only()}"
-        with cls._pipeline_lock:
-            if cls._text_pipeline is not None and cls._pipeline_cache_key == cache_key:
-                return cls._text_pipeline
-
-            kwargs: dict[str, Any] = {
-                "local_files_only": cls._local_files_only(),
-            }
-            dtype = cls._dtype()
-            if dtype is not None:
-                kwargs["dtype"] = dtype
-            if os.getenv("APRIL_IMAGES_USE_SAFETENSORS", "1").strip().lower() in {"1", "true", "yes"}:
-                kwargs["use_safetensors"] = True
-            if cls._is_turbo_model() and cls._device() in {"cuda", "mps"}:
-                kwargs["variant"] = "fp16"
-
-            pipeline = AutoPipelineForText2Image.from_pretrained(source, **kwargs)
-            cls._text_pipeline = cls._configure_pipeline(pipeline)
-            cls._pipeline_path = source
-            cls._pipeline_cache_key = cache_key
-            print(
-                "🧠 IMAGE BACKEND READY:",
-                {
-                    "model": source,
-                    "turbo": cls._is_turbo_model(),
-                    "device": cls._device(),
-                    "dtype": str(cls._dtype()),
-                    "default_size": cls.DEFAULT_SIZE,
-                    "standard_steps": cls._quality_settings("standard")[0],
-                    "guidance_scale": cls._quality_settings("standard")[1],
+    if artifact is not None:
+        artifact = _ensure_artifact_render_signal(artifact)
+        artifact_payload = _canonicalize_artifact_data(
+            dict(artifact.data or {}),
+            artifact_type=getattr(artifact.metadata, "artifact_type", ""),
+            room_source=getattr(artifact.metadata, "room_source", ""),
+        )
+        presentation = artifact_payload.get("presentation")
+        if not isinstance(presentation, dict):
+            presentation = build_presentation_hint(
+                artifact.metadata.artifact_type,
+                artifact_payload.get("complexity", "balanced")
+            )
+            presentation = {
+                "version": "1.0",
+                "engine": "APRIL-QUANTUM-PRESENTATION-V1",
+                "enabled": True,
+                "decision_owner": "QUANTUM_PROCESSOR",
+                "single_route": True,
+                "mode": "semantic_presentation",
+                "primary_role": "normal",
+                "spans": [],
+                "formulas": [],
+                "key_points": [],
+                "by_block": {},
+                "math": {
+                    "markdown": "react-markdown",
+                    "markdown_extensions": ["remark-gfm"],
+                    "math_parse": "remark-math",
+                    "math_render": "rehype-katex",
+                    "math_css": "katex/dist/katex.min.css",
+                    "structural_only": True,
                 },
-            )
-            return cls._text_pipeline
-
-    @classmethod
-    def _load_edit_pipeline(cls):
-        cls._require_backend()
-        source = cls._model_source()
-        cache_key = f"edit::{source}::{cls._dtype()}::{cls._device()}::{cls._local_files_only()}"
-        with cls._pipeline_lock:
-            if cls._edit_pipeline is not None and cls._pipeline_cache_key == cache_key:
-                return cls._edit_pipeline
-
-            # SDXL Turbo uses the same checkpoint for text-to-image and
-            # image-to-image.  Reuse the loaded pipeline when possible so an
-            # edit request does not download/load the model a second time.
-            if cls._is_turbo_model() and cls._text_pipeline is not None:
-                try:
-                    pipeline = AutoPipelineForImage2Image.from_pipe(cls._text_pipeline)
-                    cls._edit_pipeline = pipeline
-                    cls._pipeline_path = source
-                    cls._pipeline_cache_key = cache_key
-                    return cls._edit_pipeline
-                except Exception as exc:
-                    raise RuntimeError("APRIL_IMAGES_TURBO_EDIT_PIPELINE_CONFIGURATION_FAILED") from exc
-
-            kwargs: dict[str, Any] = {
-                "local_files_only": cls._local_files_only(),
+                **presentation,
             }
-            dtype = cls._dtype()
-            if dtype is not None:
-                kwargs["dtype"] = dtype
-            if os.getenv("APRIL_IMAGES_USE_SAFETENSORS", "1").strip().lower() in {"1", "true", "yes"}:
-                kwargs["use_safetensors"] = True
-            if cls._is_turbo_model() and cls._device() in {"cuda", "mps"}:
-                kwargs["variant"] = "fp16"
+            artifact_payload["presentation"] = presentation
 
-            pipeline = AutoPipelineForImage2Image.from_pretrained(source, **kwargs)
-            cls._edit_pipeline = cls._configure_pipeline(pipeline)
-            cls._pipeline_path = source
-            cls._pipeline_cache_key = cache_key
-            return cls._edit_pipeline
-
-    @classmethod
-    def _token_ids_for_long_prompt(cls, tokenizer: Any, text: str) -> list[int]:
-        """Return raw token ids without truncation.
-
-        The 77-token value exposed by CLIP is the native size of one encoder
-        window. It is not an April/OpenAI prompt budget. We split an arbitrarily
-        long prompt into native windows and encode every window separately.
-        No April-side maximum is imposed here.
-        """
-        try:
-            return list(
-                tokenizer.encode(
-                    str(text or ""),
-                    add_special_tokens=False,
-                    truncation=False,
-                )
-            )
-        except Exception as exc:
-            raise RuntimeError("APRIL_IMAGES_TOKENIZATION_FAILED") from exc
-
-    @classmethod
-    def _prompt_chunks(
-        cls,
-        tokenizer: Any,
-        text: str,
-    ) -> list[list[int]]:
-        """Split raw token ids into native tokenizer windows without loss.
-
-        Each window reserves its BOS/EOS slots. The tokenizer/encoder's own
-        ``model_max_length`` defines the size of a single native window; there
-        is deliberately no additional April/OpenAI token cap.
-        """
-        model_max = getattr(tokenizer, "model_max_length", None)
-        try:
-            model_max = int(model_max)
-        except (TypeError, ValueError):
-            model_max = None
-
-        if not model_max or model_max <= 2:
-            config = getattr(getattr(tokenizer, "init_kwargs", {}), "get", lambda *_: None)(
-                "model_max_length"
-            )
-            try:
-                model_max = int(config)
-            except (TypeError, ValueError):
-                model_max = None
-
-        if not model_max or model_max <= 2:
-            raise RuntimeError("APRIL_IMAGES_TOKENIZER_MAX_LENGTH_UNAVAILABLE")
-
-        bos_id = getattr(tokenizer, "bos_token_id", None)
-        eos_id = getattr(tokenizer, "eos_token_id", None)
-        pad_id = getattr(tokenizer, "pad_token_id", None)
-        if bos_id is None:
-            bos_id = getattr(tokenizer, "cls_token_id", None)
-        if eos_id is None:
-            eos_id = getattr(tokenizer, "sep_token_id", None)
-        if pad_id is None:
-            pad_id = eos_id if eos_id is not None else 0
-
-        if bos_id is None or eos_id is None:
-            raise RuntimeError("APRIL_IMAGES_SPECIAL_TOKENS_UNAVAILABLE")
-
-        raw_ids = cls._token_ids_for_long_prompt(tokenizer, text)
-        chunk_body = model_max - 2
-        chunks: list[list[int]] = []
-
-        if not raw_ids:
-            raw_ids = []
-
-        for start in range(0, len(raw_ids), chunk_body):
-            body = raw_ids[start:start + chunk_body]
-            ids = [int(bos_id), *map(int, body), int(eos_id)]
-            ids.extend([int(pad_id)] * (model_max - len(ids)))
-            chunks.append(ids)
-
-        if not chunks:
-            chunks.append([int(bos_id), int(eos_id)] + [int(pad_id)] * (model_max - 2))
-
-        return chunks
-
-    @classmethod
-    def _encode_text_encoder_chunks(
-        cls,
-        tokenizer: Any,
-        text_encoder: Any,
-        text: str,
-        *,
-        device: Any,
-    ) -> tuple[Any, Any, int]:
-        """Encode every native CLIP window and concatenate hidden states.
-
-        Returns ``(hidden_states, pooled_embedding, raw_token_count)``.
-        ``pooled_embedding`` is the mean of the native-window pooled vectors;
-        this preserves information from every window instead of truncating to
-        the first 77 tokens.
-        """
-        raw_ids = cls._token_ids_for_long_prompt(tokenizer, text)
-        raw_token_count = len(raw_ids)
-        chunks = cls._prompt_chunks(tokenizer, text)
-        pad_id = getattr(tokenizer, "pad_token_id", None)
-        if pad_id is None:
-            pad_id = getattr(tokenizer, "eos_token_id", 0)
-
-        if torch is None:
-            raise RuntimeError("APRIL_IMAGES_TORCH_NOT_INSTALLED")
-
-        input_ids = torch.tensor(chunks, dtype=torch.long, device=device)
-        attention_mask = (input_ids != int(pad_id)).long()
-
-        with torch.inference_mode():
-            outputs = text_encoder(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_hidden_states=True,
-                return_dict=True,
-            )
-
-        hidden_states = getattr(outputs, "hidden_states", None)
-        if hidden_states:
-            hidden = hidden_states[-2]
-        else:
-            hidden = getattr(outputs, "last_hidden_state", None)
-            if hidden is None:
-                raise RuntimeError("APRIL_IMAGES_TEXT_ENCODER_HIDDEN_STATE_MISSING")
-
-        pooled = getattr(outputs, "text_embeds", None)
-        if pooled is None:
-            pooled = getattr(outputs, "pooler_output", None)
-        if pooled is None:
-            try:
-                candidate = outputs[0]
-            except Exception:
-                candidate = None
-            if candidate is not None and getattr(candidate, "ndim", 0) == 2:
-                pooled = candidate
-
-        if pooled is not None and getattr(pooled, "ndim", 0) >= 2:
-            pooled = pooled.mean(dim=0, keepdim=True)
-
-        # ``model_max`` is returned for diagnostics; the actual prompt length
-        # can grow without an April-side maximum because more native windows
-        # are simply concatenated.
-        return hidden, pooled, raw_token_count
-
-    @classmethod
-    def _pad_sequence_length(cls, tensor: Any, target_length: int) -> Any:
-        if tensor is None:
-            return None
-        current = int(tensor.shape[1])
-        if current >= target_length:
-            return tensor
-        if torch is None:
-            raise RuntimeError("APRIL_IMAGES_TORCH_NOT_INSTALLED")
-        pad = torch.zeros(
-            (tensor.shape[0], target_length - current, tensor.shape[2]),
-            dtype=tensor.dtype,
-            device=tensor.device,
-        )
-        return torch.cat([tensor, pad], dim=1)
-
-    @classmethod
-    def _pad_batch_size(cls, tensor: Any, target_batch: int) -> Any:
-        """Align the number of prompt chunks used by positive/negative embeds.
-
-        Long-prompt chunking can produce multiple positive CLIP windows while
-        an empty/short negative prompt produces only one. Diffusers expects
-        classifier-free positive/negative embeddings to have the same batch
-        dimension. The negative conditioning is therefore repeated across
-        the missing windows rather than allowing a shape mismatch to reach
-        the diffusion pipeline.
-        """
-        if tensor is None:
-            return None
-        current = int(tensor.shape[0])
-        if current == target_batch:
-            return tensor
-        if current <= 0 or target_batch <= 0:
-            raise RuntimeError("APRIL_IMAGES_PROMPT_BATCH_INVALID")
-        if current > target_batch:
-            return tensor[:target_batch]
-        repeats = target_batch - current
-        tail = tensor[-1:].expand(repeats, *tensor.shape[1:])
-        return torch.cat([tensor, tail], dim=0)
-
-    @classmethod
-    def _long_prompt_kwargs(
-        cls,
-        pipeline: Any,
-        prompt: str,
-        negative_prompt: str,
-        *,
-        include_negative: bool = True,
-    ) -> dict[str, Any]:
-        """Encode long prompts without imposing an April/OpenAI token cap.
-
-        SDXL's CLIP encoders operate on native 77-token windows. That value is
-        a backend window size, not a request limit. This implementation uses
-        every native window and concatenates their hidden states before calling
-        Diffusers. No Compel dependency and no prompt truncation are required.
-        """
-        if torch is None:
-            raise RuntimeError("APRIL_IMAGES_TORCH_NOT_INSTALLED")
-
-        tokenizer_1 = getattr(pipeline, "tokenizer", None)
-        tokenizer_2 = getattr(pipeline, "tokenizer_2", None)
-        text_encoder_1 = getattr(pipeline, "text_encoder", None)
-        text_encoder_2 = getattr(pipeline, "text_encoder_2", None)
-        if tokenizer_1 is None or text_encoder_1 is None:
-            raise RuntimeError("APRIL_IMAGES_TEXT_ENCODER_NOT_AVAILABLE")
-
-        execution_device = getattr(pipeline, "_execution_device", None)
-        if execution_device is None:
-            execution_device = cls._device()
-        if not hasattr(execution_device, "type"):
-            execution_device = torch.device(str(execution_device))
-
-        hidden_1, _pooled_1, count_1 = cls._encode_text_encoder_chunks(
-            tokenizer_1, text_encoder_1, prompt, device=execution_device
+        canonical_text = _extract_text_candidate(
+            artifact_payload,
+            allow_topic=not artifact_payload.get("machine_only", False),
         )
 
-        neg_hidden_1 = None
-        _neg_pooled_1 = None
-        neg_count_1 = 0
-        if include_negative:
-            neg_hidden_1, _neg_pooled_1, neg_count_1 = cls._encode_text_encoder_chunks(
-                tokenizer_1, text_encoder_1, negative_prompt or "", device=execution_device
-            )
+        artifact_payload["answer"] = canonical_text
+        artifact_payload["content"] = canonical_text
+        artifact_payload["summary"] = canonical_text
+        canonical_artifact_blocks = _artifact_canonical_render_blocks(artifact)
+        existing_room_blocks = list(artifact_payload.get("render_blocks", []) or [])
+        artifact_payload["render_blocks"] = canonical_artifact_blocks or existing_room_blocks
+        artifact_payload.setdefault("scene", artifact_payload.get("scene", {}))
+        artifact_payload["presentation"] = presentation
 
-        if tokenizer_2 is not None and text_encoder_2 is not None:
-            hidden_2, pooled_2, count_2 = cls._encode_text_encoder_chunks(
-                tokenizer_2, text_encoder_2, prompt, device=execution_device
-            )
-
-            neg_hidden_2 = None
-            neg_pooled_2 = None
-            neg_count_2 = 0
-            if include_negative:
-                neg_hidden_2, neg_pooled_2, neg_count_2 = cls._encode_text_encoder_chunks(
-                    tokenizer_2, text_encoder_2, negative_prompt or "", device=execution_device
-                )
-
-            target_prompt_len = max(int(hidden_1.shape[1]), int(hidden_2.shape[1]))
-            hidden_1 = cls._pad_sequence_length(hidden_1, target_prompt_len)
-            hidden_2 = cls._pad_sequence_length(hidden_2, target_prompt_len)
-
-            prompt_batch = max(int(hidden_1.shape[0]), int(hidden_2.shape[0]))
-            hidden_1 = cls._pad_batch_size(hidden_1, prompt_batch)
-            hidden_2 = cls._pad_batch_size(hidden_2, prompt_batch)
-
-            prompt_embeds = torch.cat([hidden_1, hidden_2], dim=-1)
-            pooled_prompt_embeds = pooled_2
-            if pooled_prompt_embeds is not None:
-                pooled_prompt_embeds = cls._pad_batch_size(
-                    pooled_prompt_embeds, prompt_batch
-                )
-
-            if include_negative:
-                target_negative_len = max(
-                    int(neg_hidden_1.shape[1]), int(neg_hidden_2.shape[1])
-                )
-                neg_hidden_1 = cls._pad_sequence_length(neg_hidden_1, target_negative_len)
-                neg_hidden_2 = cls._pad_sequence_length(neg_hidden_2, target_negative_len)
-                negative_batch = max(
-                    int(neg_hidden_1.shape[0]),
-                    int(neg_hidden_2.shape[0]),
-                    prompt_batch,
-                )
-                neg_hidden_1 = cls._pad_batch_size(neg_hidden_1, negative_batch)
-                neg_hidden_2 = cls._pad_batch_size(neg_hidden_2, negative_batch)
-                prompt_embeds = cls._pad_batch_size(prompt_embeds, negative_batch)
-                pooled_prompt_embeds = cls._pad_batch_size(
-                    pooled_prompt_embeds, negative_batch
-                ) if pooled_prompt_embeds is not None else None
-                prompt_batch = negative_batch
-
-                negative_prompt_embeds = torch.cat([neg_hidden_1, neg_hidden_2], dim=-1)
-                negative_pooled_prompt_embeds = neg_pooled_2
-                if negative_pooled_prompt_embeds is not None:
-                    negative_pooled_prompt_embeds = cls._pad_batch_size(
-                        negative_pooled_prompt_embeds, negative_batch
-                    )
-            else:
-                negative_prompt_embeds = None
-                negative_pooled_prompt_embeds = None
-
-            prompt_chunks = max(count_1, count_2)
-            negative_chunks = max(neg_count_1, neg_count_2) if include_negative else 0
-        else:
-            prompt_embeds = hidden_1
-            pooled_prompt_embeds = None
-            prompt_chunks = count_1
-            if include_negative:
-                negative_batch = max(int(prompt_embeds.shape[0]), int(neg_hidden_1.shape[0]))
-                prompt_embeds = cls._pad_batch_size(prompt_embeds, negative_batch)
-                neg_hidden_1 = cls._pad_batch_size(neg_hidden_1, negative_batch)
-                negative_prompt_embeds = neg_hidden_1
-                negative_pooled_prompt_embeds = _neg_pooled_1
-                if negative_pooled_prompt_embeds is not None:
-                    negative_pooled_prompt_embeds = cls._pad_batch_size(
-                        negative_pooled_prompt_embeds, negative_batch
-                    )
-                prompt_chunks = max(count_1, 0)
-                negative_chunks = neg_count_1
-            else:
-                negative_prompt_embeds = None
-                negative_pooled_prompt_embeds = None
-                negative_chunks = 0
-
-        if prompt_embeds is None:
-            raise RuntimeError("APRIL_IMAGES_PROMPT_EMBEDDINGS_MISSING")
-        if include_negative and negative_prompt_embeds is None:
-            raise RuntimeError("APRIL_IMAGES_NEGATIVE_PROMPT_EMBEDDINGS_MISSING")
-
-        # Match the positive/negative sequence lengths; there is no maximum
-        # here, only equality required by classifier-free guidance.
-        if include_negative:
-            if negative_prompt_embeds is None:
-                raise RuntimeError("APRIL_IMAGES_NEGATIVE_PROMPT_EMBEDDINGS_MISSING")
-            # Match both sequence length and batch size for classifier-free
-            # guidance. The batch dimension equals the number of native CLIP
-            # windows after long-prompt chunking.
-            shared_len = max(
-                int(prompt_embeds.shape[1]),
-                int(negative_prompt_embeds.shape[1]),
-            )
-            prompt_embeds = cls._pad_sequence_length(prompt_embeds, shared_len)
-            negative_prompt_embeds = cls._pad_sequence_length(
-                negative_prompt_embeds, shared_len
-            )
-            shared_batch = max(
-                int(prompt_embeds.shape[0]),
-                int(negative_prompt_embeds.shape[0]),
-            )
-            prompt_embeds = cls._pad_batch_size(prompt_embeds, shared_batch)
-            negative_prompt_embeds = cls._pad_batch_size(
-                negative_prompt_embeds, shared_batch
-            )
-            if pooled_prompt_embeds is not None:
-                pooled_prompt_embeds = cls._pad_batch_size(
-                    pooled_prompt_embeds, shared_batch
-                )
-            if negative_pooled_prompt_embeds is not None:
-                negative_pooled_prompt_embeds = cls._pad_batch_size(
-                    negative_pooled_prompt_embeds, shared_batch
-                )
-
-        # Keep embeddings compatible with the pipeline's UNet/text dtype.
-        target_dtype = getattr(getattr(pipeline, "unet", None), "dtype", None)
-        if target_dtype is not None and getattr(prompt_embeds, "is_floating_point", lambda: False)():
-            prompt_embeds = prompt_embeds.to(dtype=target_dtype)
-            if negative_prompt_embeds is not None:
-                negative_prompt_embeds = negative_prompt_embeds.to(dtype=target_dtype)
-            if pooled_prompt_embeds is not None:
-                pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=target_dtype)
-            if negative_pooled_prompt_embeds is not None:
-                negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.to(dtype=target_dtype)
-
-        print(
-            "🧠 IMAGE PROMPT ENCODING:",
-            {
-                "prompt_raw_tokens": count_1 if tokenizer_2 is None else max(count_1, count_2),
-                "negative_raw_tokens": neg_count_1 if tokenizer_2 is None else max(neg_count_1, neg_count_2),
-                "prompt_native_windows": prompt_chunks,
-                "negative_native_windows": negative_chunks,
-                "strategy": "native_clip_window_chunking",
-                "april_openai_prompt_cap": None,
-            },
-        )
-
-        result = {
-            "prompt_embeds": prompt_embeds,
-        }
-        if negative_prompt_embeds is not None:
-            result["negative_prompt_embeds"] = negative_prompt_embeds
-        if pooled_prompt_embeds is not None:
-            result["pooled_prompt_embeds"] = pooled_prompt_embeds
-        if negative_pooled_prompt_embeds is not None:
-            result["negative_pooled_prompt_embeds"] = negative_pooled_prompt_embeds
-        return result
-
-    @classmethod
-    def _diffusion_image(
-        cls,
-        pipeline: Any,
-        prompt: str,
-        width: int,
-        height: int,
-        quality: str,
-        seed: Optional[int],
-        negative_prompt: str,
-    ) -> Image.Image:
-        steps, guidance = cls._quality_settings(quality)
-        explicit_steps = os.getenv("APRIL_IMAGES_INFERENCE_STEPS", "").strip()
-        if explicit_steps:
-            try:
-                steps = int(explicit_steps)
-            except ValueError:
-                pass
-
-        if cls._is_turbo_model():
-            steps = max(1, min(4, int(steps)))
-            guidance = 0.0
-            width, height = cls._parse_size(f"{width}x{height}")
-
-        kwargs: dict[str, Any] = {
-            "width": width,
-            "height": height,
-            "num_inference_steps": steps,
-            "guidance_scale": guidance,
-        }
-
-        # A one-window prompt should use the pipeline's native text path.
-        # Longer prompts are encoded with every native CLIP window, without an
-        # April/OpenAI token cap. For Turbo guidance_scale=0, negative guidance
-        # is disabled by the model and therefore no negative embedding is built.
-        tokenizer = getattr(pipeline, "tokenizer", None)
-        prompt_token_count = len(cls._token_ids_for_long_prompt(tokenizer, prompt)) if tokenizer is not None else 0
-        negative_token_count = len(cls._token_ids_for_long_prompt(tokenizer, negative_prompt or "")) if tokenizer is not None else 0
-        native_limit = int(getattr(tokenizer, "model_max_length", 77) or 77) if tokenizer is not None else 77
-
-        if (
-            tokenizer is not None
-            and prompt_token_count <= native_limit
-            and negative_token_count <= native_limit
-        ):
-            kwargs["prompt"] = prompt
-            kwargs["negative_prompt"] = negative_prompt or ""
-            print(
-                "🧠 IMAGE PROMPT ENCODING:",
-                {
-                    "prompt_raw_tokens": prompt_token_count,
-                    "negative_raw_tokens": negative_token_count,
-                    "prompt_native_windows": 1,
-                    "negative_native_windows": 1,
-                    "strategy": "pipeline_native_single_window",
-                    "april_openai_prompt_cap": None,
-                },
-            )
-        else:
-            prompt_kwargs = cls._long_prompt_kwargs(
-                pipeline,
-                prompt,
-                negative_prompt,
-                include_negative=guidance != 0.0,
-            )
-            kwargs.update(prompt_kwargs)
-
-        if seed is not None and torch is not None:
-            generator_device = "cuda" if cls._device() == "cuda" else "cpu"
-            kwargs["generator"] = torch.Generator(device=generator_device).manual_seed(int(seed))
-
-        if torch is not None:
-            with torch.inference_mode():
-                result = pipeline(**kwargs)
-        else:
-            result = pipeline(**kwargs)
-        image = getattr(result, "images", [None])[0]
-        if image is None:
-            raise RuntimeError("APRIL_IMAGES_DIFFUSION_EMPTY_RESULT")
-        return image.convert("RGB")
-
-    @classmethod
-    def _generate_real_image(
-        cls,
-        prompt: str,
-        width: int,
-        height: int,
-        quality: str,
-        seed: Optional[int],
-        negative_prompt: str,
-    ) -> Image.Image:
-        pipeline = cls._load_text_pipeline()
-        return cls._diffusion_image(
-            pipeline, prompt, width, height, quality, seed, negative_prompt
-        )
-
-    @classmethod
-    def build_visual_prompt(
-        cls,
-        request: str,
-        *,
-        visual_context: Optional[dict[str, Any]] = None,
-        style: str = "",
-        quality: str = "high",
-    ) -> str:
-        """Build the renderer prompt from the already-authoritative semantic state.
-
-        This method does not inspect or mutate dialogue state; Interpretation
-        remains the authority. It only converts supplied visual signals into a
-        deterministic image prompt.
-        """
-        spec = {
-            "style": style,
-            "quality": quality,
-            "visual_context": visual_context or {},
-        }
-        return cls._compose_prompt(cls._clean_prompt(request), spec)
-
-    # -------------------------------------------------
-    # Provider image-spec validation
-    # -------------------------------------------------
-
-    @classmethod
-    def _validate_render_spec(cls, spec: Any) -> dict[str, Any]:
-        if not isinstance(spec, dict):
-            raise ValueError("APRIL_IMAGES_INVALID_SPEC")
-        if spec.get("schema") != "april_image_spec_v1":
-            raise ValueError("APRIL_IMAGES_INVALID_SPEC_SCHEMA")
-        width, height = cls._parse_size(
-            f"{spec.get('width', cls.DEFAULT_SIZE[0])}x{spec.get('height', cls.DEFAULT_SIZE[1])}"
-        )
-        return {
-            "schema": "april_image_spec_v1",
-            "prompt": cls._clean_prompt(spec.get("prompt") or ""),
-            "width": width,
-            "height": height,
-            "style": str(spec.get("style") or "illustration"),
-            "quality": str(spec.get("quality") or "standard"),
-            "negative": [str(x) for x in (spec.get("negative") or []) if str(x).strip()],
-            "steps": spec.get("steps"),
-            "visual_context": dict(spec.get("visual_context") or {})
-            if isinstance(spec.get("visual_context"), dict) else {},
-            "seed": spec.get("seed"),
-        }
-
-    @classmethod
-    async def generate_from_spec(
-        cls,
-        spec: dict[str, Any],
-        *,
-        variant: str = "provider_spec",
-    ) -> dict[str, Any]:
-        clean = cls._validate_render_spec(spec)
-        prompt = cls._compose_prompt(clean["prompt"], clean)
-        print(
-            "🧠 IMAGE PROMPT NORMALIZED:",
-            {
-                "semantic_chars": len(prompt),
-                "contains_markup": bool(re.search(r"<(?:svg|path|rect|circle)\b|data:image/", prompt, flags=re.IGNORECASE)),
-                "native_clip_limit_is_window_only": True,
-            },
-        )
-        width, height = cls._parse_size(f"{clean['width']}x{clean['height']}")
-        image = await __import__("asyncio").to_thread(
-            cls._generate_real_image,
-            prompt,
-            width,
-            height,
-            clean["quality"],
-            clean.get("seed"),
-            cls._negative_prompt(clean),
-        )
-        image_bytes = cls._png_bytes(image)
-        cls._validate_png(image_bytes, width, height)
-        artifact, contract = cls.build_artifact(
-            image_bytes=image_bytes,
-            prompt=prompt,
-            width=width,
-            height=height,
-            backend=cls.BACKEND,
-            variant=variant,
-        )
-
-        # The raster is authoritative at this point: generation already
-        # succeeded and the PNG has passed validation.  Reassert the canonical
-        # Web display payload from those bytes instead of turning a transport
-        # normalization mismatch into a failed generation.  This stays on the
-        # existing C_APRIL -> C_ARTIFACT -> SceneContract route and does not
-        # accept or forward a Provider-rendered image.
-        payload = artifact.get("payload") if isinstance(artifact, dict) else None
-        payload = dict(payload) if isinstance(payload, dict) else {}
-        data_base64 = base64.b64encode(image_bytes).decode("ascii")
-        data_uri = f"data:image/png;base64,{data_base64}"
-        image_item = {
-            "src": data_uri,
-            "url": data_uri,
-            "image": data_uri,
-            "mime_type": "image/png",
-            "width": int(width),
-            "height": int(height),
-            "title": payload.get("title") or "Image",
-            "alt": payload.get("alt") or prompt,
-            "caption": payload.get("caption") or prompt,
-        }
-        payload.update({
-            "kind": "generated_image",
-            "artifact_type": "image",
-            "mime_type": "image/png",
-            "width": int(width),
-            "height": int(height),
-            "image_base64": data_base64,
-            "image_data_uri": data_uri,
-            "src": data_uri,
-            "url": data_uri,
-            "image": data_uri,
-            "prompt": prompt,
-            "engine": cls.ENGINE_NAME,
-            "engine_version": cls.ENGINE_VERSION,
-            "backend": cls.BACKEND,
-            "variant": variant,
-            "images": [image_item],
+        contract.payload.artifacts.append(artifact_payload)
+        contract.payload.scene.update({
+            "presentation": presentation,
+            "answer": artifact_payload.get("answer", ""),
+            "content": artifact_payload.get("content", ""),
+            "summary": artifact_payload.get("summary", ""),
+            "render_blocks": artifact_payload.get("render_blocks", []),
+            "machine_only": artifact_payload.get("machine_only", False),
+            "human_visible": artifact_payload.get("human_visible", True),
         })
 
-        if not isinstance(artifact, dict):
-            artifact = {}
-        artifact["artifact_type"] = "image"
-        artifact["mime_type"] = "image/png"
-        artifact["width"] = int(width)
-        artifact["height"] = int(height)
-        artifact["image_base64"] = data_base64
-        artifact["image_data_uri"] = data_uri
-        artifact["payload"] = payload
-        artifact["images"] = [image_item]
-        artifact["render_spec"] = clean
-        artifact["payload"]["render_spec"] = clean
-
-        # Keep the BaseArtifact used by C_ARTIFACT_CONTRACT in sync with the
-        # repaired display payload.  Rebuilding the universal contract here
-        # guarantees that its render block carries the same PNG source.
-        base_artifact = getattr(contract, "artifact", None) if contract is not None else None
-        if base_artifact is not None:
-            base_data = dict(getattr(base_artifact, "data", {}) or {})
-            base_data.update({
-                "artifact_type": "image",
-                "mime_type": "image/png",
-                "width": int(width),
-                "height": int(height),
-                "image_base64": data_base64,
-                "image_data_uri": data_uri,
-                "human_visible": True,
-                "machine_only": False,
-                "payload": payload,
-            })
-            base_artifact.data = base_data
-            contract = build_universal_contract(base_artifact)
-
-        if not artifact["payload"].get("src") or not artifact["payload"].get("images"):
-            raise RuntimeError("APRIL_IMAGES_ARTIFACT_DISPLAY_PAYLOAD_BUILD_FAILED")
-        return cls._result_dict(ImageGenerationResult(
-            image_bytes=image_bytes,
-            mime_type="image/png",
-            width=width,
-            height=height,
-            backend=cls.BACKEND,
-            prompt=prompt,
-            artifact=artifact,
-            contract=contract,
-        ))
-
-    # -------------------------------------------------
-    # PNG + C_ARTIFACT
-    # -------------------------------------------------
-
-    @staticmethod
-    def _png_bytes(image: Image.Image) -> bytes:
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG", optimize=True)
-        return buffer.getvalue()
-
-    @staticmethod
-    def _validate_png(image_bytes: bytes, expected_width: int, expected_height: int) -> None:
-        if not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
-            raise RuntimeError("APRIL_IMAGES_OUTPUT_NOT_PNG")
-        with Image.open(io.BytesIO(image_bytes)) as image:
-            image.verify()
-        with Image.open(io.BytesIO(image_bytes)) as image:
-            if image.width != int(expected_width) or image.height != int(expected_height):
-                raise RuntimeError("APRIL_IMAGES_OUTPUT_DIMENSIONS_INVALID")
-            if all(lo == hi for lo, hi in image.convert("RGB").getextrema()):
-                raise RuntimeError("APRIL_IMAGES_OUTPUT_EMPTY_PIXELS")
-
-    @classmethod
-    def build_artifact(
-        cls,
-        *,
-        image_bytes: bytes,
-        prompt: str,
-        width: int,
-        height: int,
-        backend: str,
-        variant: str = "primary",
-    ) -> tuple[dict[str, Any], UniversalArtifactContract]:
-        data_base64 = base64.b64encode(image_bytes).decode("ascii")
-        data_uri = f"data:image/png;base64,{data_base64}"
-
-        artifact = create_artifact(
-            artifact_type="image",
-            room_source="APRIL_IMAGES_GENERATION",
-            data={
-                "prompt": prompt,
-                "variant": variant,
-                "backend": backend,
-                "mime_type": "image/png",
-                "width": width,
-                "height": height,
-                "image_base64": data_base64,
-                "image_data_uri": data_uri,
-                "human_visible": True,
-                "machine_only": False,
-                "presentation": {
-                    "mode": "gallery",
-                    "renderer": "GalleryBlock",
-                    "viewer": "GalleryBlock",
-                    "source_engine": cls.ENGINE_NAME,
-                    "generation_backend": backend,
-                },
-                "payload": {
-                    "kind": "generated_image",
-                    "artifact_type": "image",
-                    "mime_type": "image/png",
-                    "width": width,
-                    "height": height,
-                    "image_base64": data_base64,
-                    "image_data_uri": data_uri,
-                    "src": data_uri,
-                    "url": data_uri,
-                    "prompt": prompt,
-                    "engine": cls.ENGINE_NAME,
-                    "engine_version": cls.ENGINE_VERSION,
-                    "backend": backend,
-                    "variant": variant,
-                    "presentation": {
-                        "mode": "gallery",
-                        "renderer": "GalleryBlock",
-                        "viewer": "GalleryBlock",
-                        "payload_type": "image",
-                        "mime_type": "image/png",
-                    },
-                    "images": [{
-                        "src": data_uri,
-                        "url": data_uri,
-                        "image": data_uri,
-                        "mime_type": "image/png",
-                        "width": width,
-                        "height": height,
-                        "title": "Image",
-                        "alt": prompt,
-                        "caption": prompt,
-                    }],
-                },
+        machine_response = MachineResponse(
+            answer=canonical_text,
+            content=canonical_text,
+            response=canonical_text,
+            summary=canonical_text,
+            render_blocks=list(artifact_payload.get("render_blocks", []) or []),
+            artifacts=[artifact],
+            metadata={
+                "artifact_contract_stage": "stage4_final",
+                "room_source": artifact.metadata.room_source,
+                "artifact_type": artifact.metadata.artifact_type,
+                "presentation": presentation,
+                "presentation_engine": "APRIL-QUANTUM-PRESENTATION-V1",
+                "machine_only": artifact_payload.get("machine_only", False),
+                "human_visible": artifact_payload.get("human_visible", True),
             },
         )
-        artifact.quality.validation_passed = True
-        artifact.quality.quality_score = 1.0
-        artifact.quality.confidence_score = 1.0
-        artifact.quality.completeness_score = 1.0
+        machine_response.executor_hints["presentation"] = presentation
+        contract.machine_response = machine_response
 
-        contract = build_universal_contract(artifact)
-        artifact_data = dict(artifact.data or {})
-        payload = artifact_data.get("payload") if isinstance(artifact_data.get("payload"), dict) else {}
-        images = payload.get("images") if isinstance(payload.get("images"), list) else []
-        if not images or not isinstance(images[0], dict) or not images[0].get("src"):
-            raise RuntimeError("APRIL_IMAGES_GALLERY_CONTRACT_INVALID")
-        artifact_data["images"] = list(images)
-        return artifact_data, contract
+        machine_scene = build_machine_scene(machine_response)
+        machine_scene.metadata.update({
+            "artifact_contract_stage": "stage4_final",
+            "presentation": presentation,
+            "presentation_engine": "APRIL-QUANTUM-PRESENTATION-V1",
+            "machine_only": artifact_payload.get("machine_only", False),
+            "human_visible": artifact_payload.get("human_visible", True),
+        })
+        machine_scene.answer = canonical_text
+        machine_scene.content = canonical_text
+        machine_scene.summary = canonical_text
+        machine_scene.blocks = list(machine_response.render_blocks or [])
+        machine_scene.contract.blocks = list(machine_scene.blocks)
+        contract.machine_scene = machine_scene
 
-    @classmethod
-    def build_artifact_from_bytes(
-        cls,
-        image_bytes: bytes,
-        prompt: str,
-        *,
-        width: int | None = None,
-        height: int | None = None,
-        backend: str = BACKEND,
-        variant: str = "generated",
-    ) -> tuple[dict[str, Any], UniversalArtifactContract]:
-        if not image_bytes:
-            raise ValueError("APRIL_IMAGES_EMPTY_IMAGE")
-        if width is None or height is None:
-            with Image.open(io.BytesIO(image_bytes)) as image:
-                width, height = image.size
-        cls._validate_png(image_bytes, int(width), int(height))
-        return cls.build_artifact(
-            image_bytes=image_bytes,
-            prompt=prompt,
-            width=int(width),
-            height=int(height),
-            backend=backend,
-            variant=variant,
+        scene_contract = build_scene_contract(machine_scene)
+        scene_contract.metadata.setdefault("artifact_contract_stage", "stage4_final")
+        scene_contract.metadata.setdefault("presentation", presentation)
+        scene_contract.metadata.setdefault("answer", canonical_text)
+        scene_contract.metadata.setdefault("content", canonical_text)
+        scene_contract.metadata.setdefault("summary", canonical_text)
+        contract.scene_contract = scene_contract
+
+        contract.fiber.metrics.block_count = max(1, len(machine_response.render_blocks or []) or 1)
+        contract.fiber.metrics.payload_size = len(str(artifact_payload))
+        contract.fiber.trace.room = artifact.metadata.room_source
+        contract.fiber.renderer.supported_blocks = list(dict.fromkeys(
+            str(block.get("renderer") or "")
+            for block in canonical_artifact_blocks
+            if isinstance(block, dict) and block.get("renderer")
+        )) or [artifact.render.web_block or "MessageTextBlock"]
+        contract.metadata.setdefault("artifact_contract_stage", "stage4_final")
+
+    return contract
+
+
+def create_diagram_artifact(
+    semantic: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> BaseArtifact:
+    '''Create the canonical C_DIAGRAM_ROOM artifact for the same Fiber route.'''
+    data = build_diagram_room_payload(semantic, payload)
+    return create_artifact(
+        artifact_type="diagram",
+        room_source="C_DIAGRAM_ROOM",
+        data=data,
+    )
+
+
+def create_transport_contract(
+    artifact_type: str,
+    room_source: str,
+    data: Dict[str, Any],
+    user_id: str = "",
+    subscription: str = "Free",
+) -> UniversalArtifactContract:
+    """Canonical transport factory used by text_module and room executors.
+
+    The function accepts a plain artifact payload, converts it into a
+    BaseArtifact, and then materializes the single Fiber transport envelope
+    used throughout the April pipeline.
+    """
+    payload = dict(data or {})
+    payload.setdefault("artifact_type", artifact_type)
+    payload.setdefault("room_source", room_source)
+
+    artifact = create_artifact(
+        artifact_type=artifact_type,
+        room_source=room_source,
+        data=payload,
+    )
+
+    contract = build_universal_contract(
+        artifact=artifact,
+        user_id=user_id,
+        subscription=subscription,
+    )
+
+    # Preserve room-level payload for downstream processors.
+    contract.payload.context = {
+        "artifact_type": artifact_type,
+        "room_source": room_source,
+        "user_id": user_id,
+        "subscription": subscription,
+    }
+    contract.payload.intent = dict(payload.get("intent", {}) or {})
+    contract.payload.context.update(dict(payload.get("context", {}) or {}))
+    contract.payload.knowledge = dict(payload.get("knowledge", {}) or {})
+    contract.payload.attachments = list(payload.get("attachments", []) or [])
+    contract.payload.media = dict(payload.get("media", {}) or contract.payload.media)
+    contract.payload.executor_notes = dict(payload.get("executor_notes", {}) or {})
+
+    # Keep the canonical machine response in sync with the transport payload.
+    if contract.machine_response is None:
+        contract.machine_response = MachineResponse(
+            answer=payload.get("answer", ""),
+            content=payload.get("content", payload.get("answer", "")),
+            response=payload.get("response", payload.get("answer", "")),
+            summary=payload.get("summary", payload.get("answer", "")),
+            explanation=payload.get("explanation", payload.get("summary", payload.get("answer", ""))),
+            render_blocks=list(payload.get("render_blocks", []) or []),
+            scene=dict(payload.get("scene", {}) or {}),
+            metadata=dict(payload.get("metadata", {}) or {}),
         )
 
-    @staticmethod
-    def _result_dict(result: ImageGenerationResult) -> dict[str, Any]:
-        return {
-            "success": True,
-            "image_bytes": result.image_bytes,
-            "mime_type": result.mime_type,
-            "width": result.width,
-            "height": result.height,
-            "backend": result.backend,
-            "prompt": result.prompt,
-            "artifact": result.artifact,
-            "contract": result.contract,
-        }
+    # Ensure scene payload is exposed for compatibility checks.
+    contract.payload.scene.setdefault("answer", payload.get("answer", ""))
+    contract.payload.scene.setdefault("content", payload.get("content", payload.get("answer", "")))
+    contract.payload.scene.setdefault("summary", payload.get("summary", payload.get("answer", "")))
+    contract.payload.scene.setdefault("render_blocks", list(payload.get("render_blocks", []) or []))
 
-    # -------------------------------------------------
-    # Public API
-    # -------------------------------------------------
-
-    def get_engine_info(self) -> dict[str, Any]:
-        return {
-            "engine": self.engine_name,
-            "version": self.engine_version,
-            "status": "ready" if self._can_initialize() else "configuration_required",
-            "architecture": "Interpretation -> C_APRIL_IMAGES_GENERATOR -> C_ARTIFACT_CONTRACT -> GalleryBlock",
-            "backend_mode": "diffusers_single_backend",
-            "model_source": self._model_source(),
-            "local_model_configured": bool(self._model_path()),
-            "model_id_configured": bool(os.getenv("APRIL_IMAGES_MODEL_ID", "").strip()),
-            "diffusers_available": bool(AutoPipelineForText2Image is not None),
-            "long_prompt_support": True,
-            "long_prompt_strategy": "native_clip_window_chunking",
-            "device": self._device(),
-            "dtype": str(self._dtype()) if self._dtype() is not None else None,
-            "external_image_api": False,
-            "fallback_backend": None,
-            "display_contract": "C_ARTIFACT_CONTRACT -> GalleryBlock",
-        }
-
-    @classmethod
-    def _can_initialize(cls) -> bool:
-        source = cls._model_source()
-        return bool(
-            source
-            and AutoPipelineForText2Image is not None
-            and AutoPipelineForImage2Image is not None
-            and torch is not None
-            and (
-                cls._model_is_local()
-                or not cls._model_path()
-            )
-        )
-
-    async def generate(
-        self,
-        prompt: str,
-        *,
-        size: str = "1024x1024",
-        quality: str = "standard",
-        seed: Optional[int] = None,
-        variant: str = "primary",
-    ) -> dict[str, Any]:
-        prompt = self._clean_prompt(prompt)
-        width, height = self._parse_size(size)
-        print(
-            "🧠 IMAGE PROMPT NORMALIZED:",
-            {
-                "semantic_chars": len(prompt),
-                "contains_markup": bool(re.search(r"<(?:svg|path|rect|circle)\b|data:image/", prompt, flags=re.IGNORECASE)),
-                "native_clip_limit_is_window_only": True,
-            },
-        )
-        image = await __import__("asyncio").to_thread(
-            self._generate_real_image,
-            prompt,
-            width,
-            height,
-            quality,
-            seed,
-            self._negative_prompt(),
-        )
-        image_bytes = self._png_bytes(image)
-        self._validate_png(image_bytes, width, height)
-        artifact, contract = self.build_artifact(
-            image_bytes=image_bytes,
-            prompt=prompt,
-            width=width,
-            height=height,
-            backend=self.BACKEND,
-            variant=variant,
-        )
-        return self._result_dict(ImageGenerationResult(
-            image_bytes=image_bytes,
-            mime_type="image/png",
-            width=width,
-            height=height,
-            backend=self.BACKEND,
-            prompt=prompt,
-            artifact=artifact,
-            contract=contract,
-        ))
-
-    async def edit(
-        self,
-        image_bytes: bytes,
-        prompt: str,
-        *,
-        quality: str = "standard",
-        strength: float = 0.65,
-        variant: str = "edit",
-    ) -> dict[str, Any]:
-        if not image_bytes:
-            raise ValueError("APRIL_IMAGES_EDIT_SOURCE_EMPTY")
-        prompt = self._clean_prompt(prompt)
-        source_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        width, height = source_image.size
-        pipeline = self._load_edit_pipeline()
-        steps, guidance = self._quality_settings(quality)
-        strength_value = max(0.05, min(0.95, float(strength)))
-        if self._is_turbo_model():
-            import math
-            steps = max(2, steps, int(math.ceil(1.0 / strength_value)))
-            steps = min(4, steps)
-            guidance = 0.0
-
-        kwargs: dict[str, Any] = {
-            "image": source_image,
-            "strength": strength_value,
-            "num_inference_steps": steps,
-            "guidance_scale": guidance,
-        }
-
-        tokenizer = getattr(pipeline, "tokenizer", None)
-        if tokenizer is not None and not self._is_turbo_model():
-            prompt_tokens = len(self._token_ids_for_long_prompt(tokenizer, prompt))
-            negative = self._negative_prompt()
-            negative_tokens = len(self._token_ids_for_long_prompt(tokenizer, negative))
-            native_limit = int(getattr(tokenizer, "model_max_length", 77) or 77)
-        else:
-            prompt_tokens = negative_tokens = 0
-            native_limit = 77
-            negative = ""
-
-        if (
-            tokenizer is not None
-            and not self._is_turbo_model()
-            and prompt_tokens <= native_limit
-            and negative_tokens <= native_limit
-        ):
-            kwargs["prompt"] = prompt
-            kwargs["negative_prompt"] = negative
-        else:
-            kwargs.update(
-                self._long_prompt_kwargs(
-                    pipeline,
-                    prompt,
-                    "" if guidance == 0.0 else self._negative_prompt(),
-                )
-            )
-
-        if torch is not None:
-            with torch.inference_mode():
-                result = pipeline(**kwargs)
-        else:
-            result = pipeline(**kwargs)
-        generated = getattr(result, "images", [None])[0]
-        if generated is None:
-            raise RuntimeError("APRIL_IMAGES_DIFFUSION_EMPTY_EDIT_RESULT")
-        output = self._png_bytes(generated.convert("RGB"))
-        self._validate_png(output, width, height)
-        artifact, contract = self.build_artifact(
-            image_bytes=output,
-            prompt=prompt,
-            width=width,
-            height=height,
-            backend="local_diffusion_edit",
-            variant=variant,
-        )
-        return self._result_dict(ImageGenerationResult(
-            image_bytes=output,
-            mime_type="image/png",
-            width=width,
-            height=height,
-            backend="local_diffusion_edit",
-            prompt=prompt,
-            artifact=artifact,
-            contract=contract,
-        ))
-
-april_images_generator = AprilImagesGenerator()
+    return contract
 
 
-async def generate_from_spec(spec: dict[str, Any], *, variant: str = "provider_spec") -> dict[str, Any]:
-    return await april_images_generator.generate_from_spec(spec, variant=variant)
+
+# =====================================================
+# FACTORY INSPECTION API
+# =====================================================
+# FACTORY INSPECTION API
+# =====================================================
+
+def extract_room_profile(
+    artifact
+):
+
+    if not artifact:
+
+        return {}
+
+    return {
+
+        "domain":
+            artifact.context.domain,
+
+        "specialization":
+            artifact.context.specialization,
+
+        "knowledge_class":
+            artifact.context.knowledge_class,
+
+        "knowledge_scope":
+            artifact.context.knowledge_scope,
+
+        "capabilities":
+            artifact.context.capabilities,
+
+        "research_capabilities":
+            artifact.context.research_capabilities,
+
+        "experiment_capabilities":
+            artifact.context.experiment_capabilities,
+
+        "artifact_outputs":
+            artifact.context.artifact_outputs,
+
+        "room_source":
+            artifact.metadata.room_source
+    }
+
+# =====================================================
+# FACTORY CAPABILITY API
+# =====================================================
+
+def artifact_has_capability(
+    artifact,
+    capability: str
+):
+
+    if not artifact:
+
+        return False
+
+    return capability in (
+
+        artifact.context.capabilities
+        or []
+    )
+
+# =====================================================
+# FACTORY KNOWLEDGE API
+# =====================================================
+
+def artifact_has_knowledge(
+    artifact,
+    knowledge_area: str
+):
+
+    if not artifact:
+
+        return False
+
+    return knowledge_area in (
+
+        artifact.context.knowledge_scope
+        or []
+    )
+
+# =====================================================
+# FACTORY OUTPUT API
+# =====================================================
+
+def artifact_can_output(
+    artifact,
+    output_type: str
+):
+
+    if not artifact:
+
+        return False
+
+    return output_type in (
+
+        artifact.context.artifact_outputs
+        or []
+    )
 
 
-async def generate_image(prompt: str, size: str = "512x512", quality: str = "standard") -> Optional[bytes]:
-    result = await april_images_generator.generate(prompt, size=size, quality=quality)
-    return result.get("image_bytes") if result.get("success") else None
+
+# =====================================================
+# FIBER CORE FOUNDATION
+# =====================================================
+
+@dataclass
+class FiberLaneContract:
+    lane_id: str = "A"
+    lane_name: str = "Lane A"
+    active: bool = True
+    current_load: int = 0
+    max_parallel_jobs: int = 1
+    status: str = "ready"
+
+@dataclass
+class FiberRouteContract:
+    route_id: str = "APRIL_FIBER_ROUTE"
+    route_version: str = "1.0"
+    dispatcher: str = "default"
+    active_lane: str = "A"
+    lane_count: int = 3
+    transport_policy: str = "single_route_multi_lane"
+    scaling_policy: str = "horizontal_lane_scaling"
+
+@dataclass
+class DispatcherContract:
+    selected_lane: str = "A"
+    selection_reason: str = "available"
+    queue_position: int = 0
+    dispatch_time: float = field(default_factory=time.time)
+
+@dataclass
+class TraceContract:
+    trace_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    lane: str = "A"
+    stage: str = "CONTRACT"
+    room: str = ""
+    elapsed_ms: float = 0.0
+    payload_size: int = 0
+    block_count: int = 0
+    attachment_count: int = 0
+    status: str = "ACTIVE"
+
+@dataclass
+class MetricsContract:
+    payload_size: int = 0
+    block_count: int = 0
+    attachment_count: int = 0
+    elapsed_ms: float = 0.0
+    lane: str = "A"
+
+@dataclass
+class IdentityContract:
+    user_id: str = ""
+    subscription: str = "Free"
+    capabilities: list = field(default_factory=list)
+    limits: dict = field(default_factory=dict)
+
+@dataclass
+class CapabilityContract:
+    tools: list = field(default_factory=list)
+    renderers: list = field(default_factory=list)
+    viewers: list = field(default_factory=list)
+    permissions: list = field(default_factory=list)
+
+@dataclass
+class MemoryContract:
+    working_memory: dict = field(default_factory=dict)
+    persistent_memory: dict = field(default_factory=dict)
+    scene_memory: dict = field(default_factory=dict)
+    visual_memory: dict = field(default_factory=dict)
+
+@dataclass
+class VisualContract:
+    active_images: list = field(default_factory=list)
+    anchors: list = field(default_factory=list)
+    gallery: list = field(default_factory=list)
+    focus: dict = field(default_factory=dict)
+
+@dataclass
+class RendererContract:
+    scene_renderer: str = "default"
+    supported_blocks: list = field(default_factory=list)
+    responsive: bool = True
+
+@dataclass
+class DiagnosticContract:
+    stage: str = "CONTRACT"
+    status: str = "OK"
+    message: str = ""
 
 
-async def generate_image_result(
-    prompt: str,
-    size: str = "512x512",
-    quality: str = "standard",
-    variant: str = "primary",
-) -> dict[str, Any]:
-    return await april_images_generator.generate(prompt, size=size, quality=quality, variant=variant)
+@dataclass
+class FiberCoreContract:
+    route: FiberRouteContract = field(default_factory=FiberRouteContract)
+    dispatcher: DispatcherContract = field(default_factory=DispatcherContract)
+    lane: FiberLaneContract = field(default_factory=FiberLaneContract)
+    trace: TraceContract = field(default_factory=TraceContract)
+    metrics: MetricsContract = field(default_factory=MetricsContract)
+    identity: IdentityContract = field(default_factory=IdentityContract)
+    capabilities: CapabilityContract = field(default_factory=CapabilityContract)
+    memory: MemoryContract = field(default_factory=MemoryContract)
+    visual: VisualContract = field(default_factory=VisualContract)
+    renderer: RendererContract = field(default_factory=RendererContract)
+    diagnostics: DiagnosticContract = field(default_factory=DiagnosticContract)
+
+# =====================================================
+# UNIVERSAL TRANSPORT CONTRACT (APRIL FIBER CHANNEL)
+# =====================================================
+
+@dataclass
+class TransportContract:
+    """Payload envelope only. All routing belongs to FiberCore."""
+    transport_version: str = "2.0"
+
+@dataclass
+class MachinePayload:
+    intent: Dict[str, Any] = field(default_factory=dict)
+    context: Dict[str, Any] = field(default_factory=dict)
+    knowledge: Dict[str, Any] = field(default_factory=dict)
+    artifacts: List[Dict[str, Any]] = field(default_factory=list)
+    scene: Dict[str, Any] = field(default_factory=dict)
+    attachments: List[Dict[str, Any]] = field(default_factory=list)
+    media: Dict[str, Any] = field(default_factory=lambda:{
+        "text":[],
+        "markdown":[],
+        "tables":[],
+        "graphs":[],
+        "formulas":[],
+        "images":[],
+        "gallery":[],
+        "files":[],
+        "audio":[],
+        "video":[],
+        "code":[],
+        "links":[],
+        "diagrams":[],
+        "actions":[]
+    })
+    executor_notes: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class UniversalArtifactContract:
+    # FiberCore is the single owner of routing state.
+    fiber: FiberCoreContract = field(default_factory=FiberCoreContract)
+    transport: TransportContract = field(default_factory=TransportContract)
+    payload: MachinePayload = field(default_factory=MachinePayload)
+    artifact: Optional[BaseArtifact] = None
+    machine_response: Optional["MachineResponse"] = None
+    machine_scene: Optional["MachineScene"] = None
+    scene_contract: Optional["SceneContract"] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-async def edit_image(image_bytes: bytes, prompt: str, quality: str = "standard") -> Optional[bytes]:
-    result = await april_images_generator.edit(image_bytes, prompt, quality=quality)
-    return result.get("image_bytes") if result.get("success") else None
+
+# =====================================================
+# STAGE 2 PRESENTATION TRANSPORT
+# =====================================================
+# STAGE 2 PRESENTATION TRANSPORT (TEST)
+# =====================================================
+# Canonical presentation helper.
 
 
-async def edit_image_result(image_bytes: bytes, prompt: str, quality: str = "standard") -> dict[str, Any]:
-    return await april_images_generator.edit(image_bytes, prompt, quality=quality)
+def build_presentation_hint(artifact_type: str, complexity: str = "balanced") -> dict:
+    registration = get_web_renderer_registration(artifact_type)
+    renderer = registration.get("renderer", "MessageTextBlock")
+    fallback = registration.get("fallback_renderer", "MessageTextBlock")
+    return {
+        "payload_type": artifact_type,
+        "scene_block": artifact_type,
+        "renderer": renderer,
+        "viewer": registration.get("viewer", renderer),
+        "web_renderer": renderer,
+        "fallback_renderer": "",
+        "renderer_candidates": [renderer],
+        "web_registry_version": WEB_RENDERER_REGISTRY_VERSION,
+        "signal_channel": "canonical_web_render_signal_v2",
+        "priority": 100,
+        "complexity": complexity,
+        "layout": "flow" if complexity != "compact" else "flow",
+        "frames": False,
+        "cards": False,
+    }
 
+
+# =====================================================
+# UNIVERSAL PAYLOAD REGISTRY
+# =====================================================
+
+SUPPORTED_PAYLOAD_TYPES = {
+    "text",
+    "markdown",
+    "table",
+    "formula",
+    "graph",
+    "diagram",
+    "image",
+    "gallery",
+    "code",
+    "link",
+    "file",
+    "audio",
+    "video",
+    "action",
+    "memory",
+    "visual_context",
+    "scene"
+}
+
+SCENE_BLOCK_REGISTRY = {
+    kind: spec["renderer"]
+    for kind, spec in WEB_RENDERER_REGISTRY.items()
+}
+
+@dataclass
+class SceneContract:
+    """Canonical one-response scene. All visible renderers are children of it."""
+    scene_version: str = "3.0"
+    scene_id: str = ""
+    turn_id: str = ""
+    flow_id: str = ""
+    topic_group: str = ""
+    continuation: bool = False
+    user_id: str = ""
+    conversation_id: str = ""
+    dialogue_sequence_id: str = ""
+    sequence_turn_index: int = 0
+    active_task: Dict[str, Any] = field(default_factory=dict)
+    dialogue_state: Dict[str, Any] = field(default_factory=dict)
+    authenticated_scope: Dict[str, Any] = field(default_factory=dict)
+    blocks: List[Dict[str, Any]] = field(default_factory=list)
+    render_blocks: List[Dict[str, Any]] = field(default_factory=list)
+    relations: List[Dict[str, Any]] = field(default_factory=list)
+    order: List[str] = field(default_factory=list)
+    active_scene: str = ""
+    space_continuity: Dict[str, Any] = field(default_factory=dict)
+    scene_blueprint: Dict[str, Any] = field(default_factory=dict)
+    signal: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    supported_payloads: List[str] = field(
+        default_factory=lambda: sorted(SUPPORTED_PAYLOAD_TYPES)
+    )
+
+def register_payload_type(payload_type: str) -> None:
+    SUPPORTED_PAYLOAD_TYPES.add(payload_type)
+
+def register_scene_block(payload_type: str, renderer: str) -> None:
+    SCENE_BLOCK_REGISTRY[payload_type] = renderer
+
+# =====================================================
+# UNIVERSAL MACHINE PIPELINE CONTRACTS
+# =====================================================
+
+@dataclass
+class MachineRequest:
+    fiber: FiberCoreContract = field(default_factory=FiberCoreContract)
+    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    goal: str = ""
+    intent: Dict[str, Any] = field(default_factory=dict)
+    conversation: Dict[str, Any] = field(default_factory=dict)
+    memory: Dict[str, Any] = field(default_factory=dict)
+    visual_context: Dict[str, Any] = field(default_factory=dict)
+    available_tools: List[str] = field(default_factory=list)
+    requested_outputs: List[str] = field(default_factory=list)
+    required_competencies: List[str] = field(default_factory=list)
+    required_artifacts: List[str] = field(default_factory=list)
+    routing: Dict[str, Any] = field(default_factory=dict)
+    constraints: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class MachineResponse:
+    # Canonical transport fields
+    fiber: FiberCoreContract = field(default_factory=FiberCoreContract)
+    artifacts: List[BaseArtifact] = field(default_factory=list)
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
+    quality: Dict[str, Any] = field(default_factory=dict)
+    confidence: float = 0.0
+    contributions: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    recommendations: List[str] = field(default_factory=list)
+    executor_hints: Dict[str, Any] = field(default_factory=dict)
+    routing_decision: Dict[str, Any] = field(default_factory=dict)
+
+    answer: str = ""
+    content: str = ""
+    response: str = ""
+    summary: str = ""
+    explanation: str = ""
+
+    # One scene identity follows the complete route.
+    scene_id: str = ""
+    turn_id: str = ""
+    flow_id: str = ""
+    topic_group: str = ""
+    continuation: bool = False
+    render_blocks: List[Dict[str, Any]] = field(default_factory=list)
+    artifacts_payload: List[Dict[str, Any]] = field(default_factory=list)
+    scene: Dict[str, Any] = field(default_factory=dict)
+    scene_blueprint: Dict[str, Any] = field(default_factory=dict)
+    scene_relations: List[Dict[str, Any]] = field(default_factory=list)
+    scene_order: List[str] = field(default_factory=list)
+    scene_plan: List[str] = field(default_factory=lambda:["text"])
+    render_priority: List[str] = field(default_factory=lambda:["text"])
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+def get_web_renderer_registration(payload_type: str) -> Dict[str, Any]:
+    """Return the exact April Web registration for a payload type."""
+    key = str(payload_type or "").strip().lower()
+    return dict(WEB_RENDERER_REGISTRY.get(key) or WEB_RENDERER_REGISTRY["text"])
+
+
+@dataclass
+class MachineScene:
+    fiber: FiberCoreContract = field(default_factory=FiberCoreContract)
+    scene_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    scene_version: str = "3.1"
+    active_scene: str = ""
+    turn_id: str = ""
+    flow_id: str = ""
+    topic_group: str = ""
+    continuation: bool = False
+    user_id: str = ""
+    conversation_id: str = ""
+    dialogue_sequence_id: str = ""
+    sequence_turn_index: int = 0
+    active_task: Dict[str, Any] = field(default_factory=dict)
+    dialogue_state: Dict[str, Any] = field(default_factory=dict)
+    blocks: List[Dict[str, Any]] = field(default_factory=list)
+    relations: List[Dict[str, Any]] = field(default_factory=list)
+    order: List[str] = field(default_factory=list)
+    scene_blueprint: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    contract: SceneContract = field(default_factory=SceneContract)
+
+
+# =====================================================
+# FIBER CORE FINALIZATION
+# =====================================================
+
+# Stage 4: finalized canonical transport contract
+FIBER_CORE_VERSION = "1.0"
+FIBER_CORE_SINGLE_ROUTE = True
+FIBER_ROUTE_NAME = "APRIL_FIBER_ROUTE"
+
+DEFAULT_FIBER_LANES = (
+    "A",
+    "B",
+    "C",
+)
+
+DEFAULT_TRACE_SEQUENCE = (
+    "CONTRACT",
+    "REGISTRY",
+    "ROOM",
+    "OPENAI_REQUEST",
+    "OPENAI_RESPONSE",
+    "EXECUTOR",
+    "SCENE",
+    "WEB",
+    "DONE",
+)
+
+def create_default_scene_contract() -> SceneContract:
+    return SceneContract()
+
+def create_default_machine_request() -> MachineRequest:
+    return MachineRequest()
+
+def create_default_machine_response() -> MachineResponse:
+    return MachineResponse()
+
+def create_default_machine_scene() -> MachineScene:
+    return MachineScene()
+
+def validate_universal_contract(
+    contract: UniversalArtifactContract,
+) -> Dict[str, bool]:
+    return {
+        "has_fiber": contract.fiber is not None,
+        "has_route": contract.fiber.route is not None,
+        "has_trace": contract.fiber.trace is not None,
+        "has_payload": contract.payload is not None,
+        "has_identity": contract.fiber.identity is not None,
+        "has_renderer": contract.fiber.renderer is not None,
+        "has_artifact": contract.artifact is not None,
+    }
 
 __all__ = [
-    "AprilImagesGenerator",
-    "ImageGenerationResult",
-    "april_images_generator",
-    "generate_image",
-    "generate_image_result",
-    "generate_from_spec",
-    "edit_image",
-    "edit_image_result",
+    "ArtifactMetadata",
+    "ArtifactContext",
+    "ArtifactQuality",
+    "ArtifactRenderContract",
+    "BaseArtifact",
+    "TransportContract",
+    "MachinePayload",
+    "UniversalArtifactContract",
+    "MachineRequest",
+    "MachineResponse",
+    "MachineScene",
+    "SceneContract",
+    "FiberRouteContract",
+    "FiberLaneContract",
+    "DispatcherContract",
+    "TraceContract",
+    "MetricsContract",
+    "IdentityContract",
+    "CapabilityContract",
+    "MemoryContract",
+    "VisualContract",
+    "RendererContract",
+    "DiagnosticContract",
+    "build_universal_contract",
+    "create_transport_contract",
+    "validate_universal_contract",
+    "build_machine_scene",
+    "build_presentation_hint",
+    "get_web_renderer_registration",
+    "SUPPORTED_RENDERERS",
+    "WEB_RENDERER_REGISTRY",
+    "WEB_RENDERER_REGISTRY_VERSION",
+    "ARTIFACT_RENDERER_ALIASES",
+    "UNIFIED_RENDER_SIGNAL_VERSION",
+    "build_scene_contract",
+    "build_scene_signal",
+    "CANONICAL_SCENE_VERSION",
+    "ANSWER_RENDER_POLICY",
+    "FACTORY_ROOM_PROFILES",
+    "get_factory_room_profile",
+    "build_diagram_room_payload",
+    "create_diagram_artifact",
+    "FactoryRoomContribution",
+    "QuantumFactoryState",
+    "bind_request_to_fiber",
+    "create_quantum_factory_state",
+    "quantum_factory_room_begin",
+    "quantum_factory_accept_artifact",
+    "quantum_factory_accept_response",
+    "quantum_factory_finalize",
+    "coordinate_factory_response",
+    "validate_quantum_factory_result",
+    "validate_diagram_factory_artifact",
 ]
+
+
+# =====================================================
+# FIBER CORE ACCESS API
+# =====================================================
+
+def get_fiber_core(contract: UniversalArtifactContract) -> FiberCoreContract:
+    """Canonical access point for the single Fiber Route."""
+    return contract.fiber
+
+
+# =====================================================
+# FIBER ROUTE API
+# =====================================================
+
+def dispatch_lane(contract: UniversalArtifactContract) -> str:
+    """Return the active lane from the single Fiber Route."""
+    return contract.fiber.route.active_lane
+
+def current_trace_id(contract: UniversalArtifactContract) -> str:
+    """Canonical trace identifier for the entire pipeline."""
+    return contract.fiber.trace.trace_id
+
+
+# =====================================================
+# FIBER CORE FINAL VALIDATION
+# =====================================================
+
+def validate_fiber_core(contract: UniversalArtifactContract) -> dict:
+    """Validate that the transport is centered on the single Fiber Core."""
+    return {
+        "single_route": True,
+        "route_policy_ok": contract.fiber.route.transport_policy == "single_route_multi_lane",
+        "single_trace": bool(current_trace_id(contract)),
+        "lane": dispatch_lane(contract),
+        "scene_contract": hasattr(contract, "payload"),
+        "artifact_contract": contract.artifact is not None or True,
+    }
+
+
+# =====================================================
+# CANONICAL CONTRIBUTION API
+# =====================================================
+
+def add_room_contribution(response: MachineResponse, room: str, payload: Dict[str, Any]) -> None:
+    """Canonical API: each room writes its named contribution."""
+    response.contributions[room] = payload
+
+
+
+
+# =====================================================
+# CANONICAL MACHINE SCENE BUILDER
+# =====================================================
+
+
+CANONICAL_SCENE_VERSION = "3.0"
+CANONICAL_SCENE_SIGNAL_TYPE = "scene"
+ANSWER_RENDER_POLICY = "render_from_scene_blocks_only"
+
+
+def _scene_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _scene_list(value: Any) -> List[Any]:
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, tuple):
+        return list(value)
+    return []
+
+
+def _scene_text(value: Any) -> str:
+    for key in ("answer", "content", "summary", "text", "display_text"):
+        candidate = value.get(key) if isinstance(value, dict) else getattr(value, key, None)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
+def _scene_hash(value: Any) -> str:
+    try:
+        raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        raw = repr(value)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+
+
+def _scene_block_type(block: Dict[str, Any]) -> str:
+    return str(block.get("type") or block.get("artifact_type") or block.get("representation") or "text").strip().lower()
+
+
+def _scene_block_renderer(block: Dict[str, Any]) -> str:
+    renderer = str(block.get("renderer") or block.get("viewer") or "").strip()
+    if renderer:
+        return renderer
+    return ARTIFACT_BLOCK_MAP.get(_scene_block_type(block), "MessageTextBlock")
+
+
+def _canonical_visual_dedupe_key(block: Dict[str, Any]) -> str:
+    block_type = _scene_block_type(block)
+    if block_type in {"link", "file"}:
+        payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+        url = str(block.get("url") or block.get("href") or payload.get("url") or payload.get("href") or "").strip()
+        if url:
+            return f"link:{url.split('#', 1)[0].rstrip('/').lower()}"
+    if block_type == "graph_data":
+        return f"internal:graph_data:{str(block.get('name') or '')}"
+    return ""
+
+
+def _prefer_canonical_visual_block(existing: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
+    existing_renderer = str(existing.get("renderer") or "").lower()
+    candidate_renderer = str(candidate.get("renderer") or "").lower()
+    if "linkcard" in candidate_renderer and "message" in existing_renderer:
+        return candidate
+    return existing
+
+def _scene_blueprint_blocks(blueprint: Dict[str, Any], *, scene_id: str, turn_id: str, flow_id: str) -> List[Dict[str, Any]]:
+    nodes = []
+    for index, raw in enumerate(_scene_list(blueprint.get("nodes"))):
+        if not isinstance(raw, dict):
+            continue
+        block = dict(raw)
+        block_id = str(block.get("block_id") or block.get("id") or f"block_{index + 1}").strip()
+        block_type = _scene_block_type(block)
+        block["block_id"] = block_id
+        block["type"] = block_type
+        block["renderer"] = _scene_block_renderer(block)
+        block["viewer"] = str(block.get("viewer") or block["renderer"])
+        block["scene_id"] = scene_id
+        block["turn_id"] = turn_id
+        block["flow_id"] = flow_id
+        block.setdefault("payload", {})
+        block["sequence_index"] = index
+        block["render_id"] = str(block.get("render_id") or f"render_{_scene_hash({'scene': scene_id, 'block': block_id, 'renderer': block['renderer']})}")
+        block["scene_contract"] = True
+        nodes.append(block)
+    return nodes
+
+
+def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
+    """Produce one ordered, identity-bound render stream for the scene."""
+    try:
+        from blocks.presentation_formatter import ensure_scene_text_block
+    except Exception:
+        ensure_scene_text_block = None
+
+    blueprint = dict(scene.scene_blueprint or {})
+    blocks = list(scene.blocks or [])
+    if not blocks and blueprint:
+        blocks = _scene_blueprint_blocks(
+            blueprint,
+            scene_id=scene.scene_id,
+            turn_id=scene.turn_id,
+            flow_id=scene.flow_id,
+        )
+
+    # Artifacts contribute one node each; never append a second narrative copy.
+    existing_artifact_ids = {
+        str(block.get("artifact_id"))
+        for block in blocks
+        if isinstance(block, dict) and block.get("artifact_id")
+    }
+    for artifact in list(getattr(scene, "artifacts", []) or []):
+        if not isinstance(artifact, BaseArtifact):
+            continue
+        artifact_id = str(getattr(artifact.metadata, "artifact_id", "") or "")
+        if artifact_id and artifact_id in existing_artifact_ids:
+            continue
+        artifact_blocks = _artifact_canonical_render_blocks(artifact)
+        for block in artifact_blocks[:1]:
+            block = dict(block)
+            block["scene_id"] = scene.scene_id
+            block["turn_id"] = scene.turn_id
+            block["flow_id"] = scene.flow_id
+            block["artifact_id"] = artifact_id
+            blocks.append(block)
+            if artifact_id:
+                existing_artifact_ids.add(artifact_id)
+
+    # The answer is a single normal text node in the same scene, not a fallback.
+    answer = _scene_text(scene)
+    if ensure_scene_text_block is not None:
+        blocks = ensure_scene_text_block(
+            blocks,
+            answer,
+            scene_id=scene.scene_id,
+            turn_id=scene.turn_id,
+            flow_id=scene.flow_id,
+            blueprint=blueprint,
+        )
+    elif answer and not any(_scene_block_type(b) in {"text", "markdown", "formula"} and _scene_text(b) for b in blocks if isinstance(b, dict)):
+        blocks.insert(0, {
+            "type": "text",
+            "artifact_type": "text",
+            "renderer": "MessageTextBlock",
+            "viewer": "MessageTextBlock",
+            "content": answer,
+            "text": answer,
+        })
+
+    order = [str(x).strip() for x in _scene_list(blueprint.get("order")) if str(x).strip()]
+    order_pos = {value: idx for idx, value in enumerate(order)}
+    normalized: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_signatures: set[str] = set()
+    semantic_index: Dict[str, int] = {}
+
+    for index, raw in enumerate(blocks):
+        if not isinstance(raw, dict):
+            continue
+        block = dict(raw)
+        block_type = _scene_block_type(block)
+        if block_type == "graph_data":
+            continue
+        renderer = _scene_block_renderer(block)
+        block["type"] = block_type
+        block["artifact_type"] = str(block.get("artifact_type") or block_type)
+        block["renderer"] = renderer
+        block["viewer"] = str(block.get("viewer") or renderer)
+        block_id = str(block.get("block_id") or block.get("id") or f"block_{index + 1}").strip()
+        block["block_id"] = block_id
+        block["scene_id"] = scene.scene_id
+        block["turn_id"] = scene.turn_id
+        block["flow_id"] = scene.flow_id
+        block["topic_group"] = str(block.get("topic_group") or scene.topic_group or blueprint.get("topic_group") or "").strip()
+        block["continuation"] = bool(block.get("continuation", scene.continuation))
+        block["render_id"] = str(block.get("render_id") or f"render_{_scene_hash({'scene': scene.scene_id, 'block': block_id, 'renderer': renderer})}")
+        block["sequence_index"] = order_pos.get(block_id, index)
+        block["scene_contract"] = True
+        block["signal_version"] = UNIFIED_RENDER_SIGNAL_VERSION
+        related = [str(x).strip() for x in _scene_list(block.get("related_block_ids")) if str(x).strip()]
+        block["related_block_ids"] = list(dict.fromkeys(related))
+        signature = _scene_hash({
+            "type": block_type,
+            "renderer": renderer,
+            "content": _scene_text(block),
+            "payload": block.get("payload", {}),
+        })
+        semantic_key = _canonical_visual_dedupe_key(block)
+        if semantic_key and semantic_key in semantic_index:
+            previous_index = semantic_index[semantic_key]
+            normalized[previous_index] = _prefer_canonical_visual_block(normalized[previous_index], block)
+            continue
+        if block_id in seen_ids or signature in seen_signatures:
+            continue
+        seen_ids.add(block_id)
+        seen_signatures.add(signature)
+        if semantic_key:
+            semantic_index[semantic_key] = len(normalized)
+        normalized.append(block)
+
+    normalized.sort(key=lambda b: int(b.get("sequence_index", 0)))
+    for idx, block in enumerate(normalized):
+        block["sequence_index"] = idx
+    return normalized
+
+
+def _canonical_scene_relations(scene: MachineScene, blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    blueprint = dict(scene.scene_blueprint or {})
+    relations: List[Dict[str, Any]] = []
+    for raw in _scene_list(blueprint.get("relations")):
+        if not isinstance(raw, dict):
+            continue
+        source = str(raw.get("from") or raw.get("source") or "").strip()
+        target = str(raw.get("to") or raw.get("target") or "").strip()
+        if not source or not target:
+            continue
+        relations.append({
+            "from": source,
+            "to": target,
+            "relation": str(raw.get("relation") or raw.get("type") or "related").strip(),
+        })
+    if not relations:
+        for block in blocks:
+            source = str(block.get("block_id") or "").strip()
+            for target in block.get("related_block_ids") or []:
+                if source and str(target).strip():
+                    relations.append({"from": source, "to": str(target).strip(), "relation": "related"})
+    unique: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in relations:
+        key = f"{item['from']}|{item['relation']}|{item['to']}"
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique
+
+
+def build_scene_signal(contract: SceneContract) -> Dict[str, Any]:
+    """Create the single Web signal for the authenticated dialogue scene."""
+    return {
+        "signal_type": CANONICAL_SCENE_SIGNAL_TYPE,
+        "signal_version": UNIFIED_RENDER_SIGNAL_VERSION,
+        "scene_version": contract.scene_version,
+        "scene_id": contract.scene_id,
+        "turn_id": contract.turn_id,
+        "flow_id": contract.flow_id,
+        "topic_group": contract.topic_group,
+        "continuation": contract.continuation,
+        "single_response": True,
+        "single_signal": True,
+        "answer_render_policy": ANSWER_RENDER_POLICY,
+        "answer": str(contract.metadata.get("answer") or ""),
+        "identity": {
+            "user_id": contract.user_id,
+            "conversation_id": contract.conversation_id,
+            "dialogue_sequence_id": contract.dialogue_sequence_id,
+            "sequence_turn_index": int(contract.sequence_turn_index or 0),
+        },
+        "authenticated_scope": deepcopy(contract.authenticated_scope),
+        "dialogue_state": deepcopy(contract.dialogue_state),
+        "active_task": deepcopy(contract.active_task),
+        "order": list(contract.order),
+        "relations": deepcopy(contract.relations),
+        "blocks": deepcopy(contract.render_blocks),
+        "render_blocks": deepcopy(contract.render_blocks),
+        "presentation": deepcopy((contract.metadata.get("presentation") or {})),
+    }
+
+
+def build_machine_scene(response: MachineResponse) -> MachineScene:
+    """Canonical MachineResponse -> one MachineScene transformation."""
+    scene = create_default_machine_scene()
+    scene.fiber = response.fiber
+    metadata = dict(getattr(response, "metadata", {}) or {})
+    source_scene = dict(getattr(response, "scene", {}) or {})
+    blueprint = dict(
+        getattr(response, "scene_blueprint", {})
+        or source_scene.get("scene_blueprint")
+        or source_scene.get("blueprint")
+        or {}
+    )
+
+    scene.scene_id = str(getattr(response, "scene_id", "") or source_scene.get("scene_id") or metadata.get("scene_id") or scene.scene_id)
+    scene.turn_id = str(getattr(response, "turn_id", "") or source_scene.get("turn_id") or metadata.get("turn_id") or "")
+    scene.flow_id = str(getattr(response, "flow_id", "") or source_scene.get("flow_id") or metadata.get("flow_id") or "")
+    scene.topic_group = str(getattr(response, "topic_group", "") or blueprint.get("topic_group") or metadata.get("topic_group") or "")
+    scene.continuation = bool(getattr(response, "continuation", False) or blueprint.get("continuation", False) or metadata.get("continuation", False))
+    scene.active_scene = str(source_scene.get("active_scene") or metadata.get("active_scene") or "")
+    identity_scope = dict(metadata.get("identity_scope") or metadata.get("authenticated_scope") or {})
+    fiber_identity = getattr(getattr(response, "fiber", None), "identity", None)
+    scene.user_id = str(identity_scope.get("user_id") or getattr(response, "user_id", "") or getattr(fiber_identity, "user_id", "") or "")
+    scene.conversation_id = str(identity_scope.get("conversation_id") or getattr(response, "conversation_id", "") or metadata.get("conversation_id") or "")
+    scene.dialogue_sequence_id = str(metadata.get("dialogue_sequence_id") or "")
+    try:
+        scene.sequence_turn_index = int(metadata.get("sequence_turn_index") or 0)
+    except (TypeError, ValueError):
+        scene.sequence_turn_index = 0
+    scene.active_task = deepcopy(metadata.get("active_task") or metadata.get("interactive_task_state") or source_scene.get("active_task") or {}) if isinstance(metadata.get("active_task") or metadata.get("interactive_task_state") or source_scene.get("active_task") or {}, dict) else {}
+    scene.dialogue_state = deepcopy(metadata.get("dialogue_state") or metadata.get("processor_interpretation") or {})
+    scene.scene_blueprint = blueprint
+
+    scene.metadata = {
+        "confidence": getattr(response, "confidence", 0.0),
+        "diagnostics": dict(getattr(response, "diagnostics", {}) or {}),
+        "quality": dict(getattr(response, "quality", {}) or {}),
+        "routing_decision": dict(getattr(response, "routing_decision", {}) or {}),
+        "machine_only": bool(metadata.get("machine_only", False)),
+        "human_visible": metadata.get("human_visible", True),
+        "answer": str(getattr(response, "answer", "") or ""),
+        "content": str(getattr(response, "content", "") or ""),
+        "summary": str(getattr(response, "summary", "") or ""),
+        "contributions": dict(getattr(response, "contributions", {}) or {}),
+        "executor_hints": dict(getattr(response, "executor_hints", {}) or {}),
+        "scene_id": scene.scene_id,
+        "turn_id": scene.turn_id,
+        "flow_id": scene.flow_id,
+        "topic_group": scene.topic_group,
+        "continuation": scene.continuation,
+        "scene_blueprint": deepcopy(blueprint),
+        "user_id": scene.user_id,
+        "conversation_id": scene.conversation_id,
+        "dialogue_sequence_id": scene.dialogue_sequence_id,
+        "sequence_turn_index": scene.sequence_turn_index,
+        "active_task": deepcopy(scene.active_task),
+        "dialogue_state": deepcopy(scene.dialogue_state),
+        "identity_scope": {"user_id": scene.user_id, "conversation_id": scene.conversation_id, "dialogue_sequence_id": scene.dialogue_sequence_id},
+    }
+
+    scene.blocks = list(getattr(response, "render_blocks", []) or [])
+    scene.relations = list(getattr(response, "scene_relations", []) or blueprint.get("relations", []) or [])
+    scene.order = list(getattr(response, "scene_order", []) or blueprint.get("order", []) or [])
+    setattr(scene, "artifacts", list(getattr(response, "artifacts", []) or []))
+    setattr(scene, "answer", getattr(response, "answer", ""))
+    setattr(scene, "content", getattr(response, "content", ""))
+    setattr(scene, "summary", getattr(response, "summary", ""))
+
+    if hasattr(response, "conversation_space"):
+        setattr(scene, "conversation_space", getattr(response, "conversation_space"))
+    return scene
+
+def build_scene_contract(scene: MachineScene) -> SceneContract:
+    """Finalize the one canonical SceneContract and one Web scene signal."""
+    contract = scene.contract if isinstance(scene.contract, SceneContract) else create_default_scene_contract()
+    contract.scene_version = CANONICAL_SCENE_VERSION
+    contract.scene_id = scene.scene_id
+    contract.turn_id = scene.turn_id
+    contract.flow_id = scene.flow_id
+    contract.topic_group = scene.topic_group
+    contract.continuation = scene.continuation
+    contract.user_id = str(scene.user_id or scene.metadata.get("user_id") or "")
+    contract.conversation_id = str(scene.conversation_id or scene.metadata.get("conversation_id") or "")
+    contract.dialogue_sequence_id = str(scene.dialogue_sequence_id or scene.metadata.get("dialogue_sequence_id") or "")
+    contract.sequence_turn_index = int(scene.sequence_turn_index or scene.metadata.get("sequence_turn_index") or 0)
+    contract.active_task = deepcopy(scene.active_task or scene.metadata.get("active_task") or {})
+    contract.dialogue_state = deepcopy(scene.dialogue_state or scene.metadata.get("dialogue_state") or {})
+    contract.authenticated_scope = {
+        "user_id": contract.user_id,
+        "conversation_id": contract.conversation_id,
+        "dialogue_sequence_id": contract.dialogue_sequence_id,
+    }
+    contract.active_scene = scene.active_scene
+    contract.scene_blueprint = deepcopy(scene.scene_blueprint or {})
+
+    canonical_blocks = _canonical_scene_blocks(scene)
+    for block in canonical_blocks:
+        if isinstance(block, dict):
+            block["user_id"] = contract.user_id
+            block["conversation_id"] = contract.conversation_id
+            block["dialogue_sequence_id"] = contract.dialogue_sequence_id
+            block["sequence_turn_index"] = contract.sequence_turn_index
+    relations = _canonical_scene_relations(scene, canonical_blocks)
+    order = [str(block.get("block_id") or "").strip() for block in canonical_blocks if str(block.get("block_id") or "").strip()]
+
+    contract.blocks = canonical_blocks
+    contract.render_blocks = list(canonical_blocks)
+    contract.relations = relations
+    contract.order = order
+    contract.metadata = dict(scene.metadata or {})
+    contract.metadata.update({
+        "scene_id": scene.scene_id,
+        "turn_id": scene.turn_id,
+        "flow_id": scene.flow_id,
+        "topic_group": scene.topic_group,
+        "continuation": scene.continuation,
+        "user_id": contract.user_id,
+        "conversation_id": contract.conversation_id,
+        "dialogue_sequence_id": contract.dialogue_sequence_id,
+        "sequence_turn_index": contract.sequence_turn_index,
+        "active_task": deepcopy(contract.active_task),
+        "dialogue_state": deepcopy(contract.dialogue_state),
+        "authenticated_scope": deepcopy(contract.authenticated_scope),
+        "artifact_count": len(getattr(scene, "artifacts", []) or []),
+        "transport_stage": "artifact_contract_scene_v3",
+        "canonical_scene_contract": True,
+        "single_response": True,
+        "single_signal": True,
+        "answer_render_policy": ANSWER_RENDER_POLICY,
+        "machine_only": bool(contract.metadata.get("machine_only", False) or _scene_is_internal_only(scene)),
+        "human_visible": bool(contract.metadata.get("human_visible", not contract.metadata.get("machine_only", False))),
+    })
+
+    answer = _scene_text(scene)
+    if contract.metadata.get("machine_only"):
+        contract.metadata["answer"] = ""
+        contract.metadata["content"] = ""
+        contract.metadata["summary"] = ""
+    else:
+        contract.metadata["answer"] = answer
+        contract.metadata["content"] = answer
+        contract.metadata["summary"] = answer
+
+    # Presentation is generated once for the canonical scene, never once per
+    # renderer. This keeps all renderers in one visual stream.
+    try:
+        from blocks.presentation_formatter import build_presentation_contract, attach_presentation_signals
+        presentation = build_presentation_contract(
+            scene_id=scene.scene_id,
+            turn_id=scene.turn_id,
+            flow_id=scene.flow_id,
+            topic_group=scene.topic_group,
+            continuation=scene.continuation,
+            layout_mode="flow",
+            user_id=contract.user_id,
+            conversation_id=contract.conversation_id,
+            dialogue_sequence_id=contract.dialogue_sequence_id,
+            sequence_turn_index=contract.sequence_turn_index,
+        )
+        contract.render_blocks = attach_presentation_signals(contract.render_blocks, scene_presentation=presentation)
+        contract.blocks = list(contract.render_blocks)
+    except Exception:
+        presentation = {
+            "version": "presentation_unavailable",
+            "engine": "McDowell",
+            "math_engine": "KaTeX",
+            "single_response": True,
+            "single_signal": True,
+            "layout": {"mode": "flow", "container": "adaptive_full_width", "frames": False, "cards": False},
+        }
+    contract.metadata["presentation"] = presentation
+    contract.metadata["renderer_instances"] = list(dict.fromkeys(
+        str(block.get("renderer") or "MessageTextBlock") for block in contract.render_blocks if isinstance(block, dict)
+    ))
+    contract.space_continuity = {
+        **dict(contract.space_continuity or {}),
+        "active_scene": contract.active_scene,
+        "scene_id": contract.scene_id,
+        "turn_id": contract.turn_id,
+        "flow_id": contract.flow_id,
+        "relations": deepcopy(contract.relations),
+        "order": list(contract.order),
+    }
+    contract.signal = build_scene_signal(contract)
+    contract.metadata["scene_signal"] = deepcopy(contract.signal)
+
+    scene.contract = contract
+    scene.blocks = list(contract.render_blocks)
+    scene.relations = list(contract.relations)
+    scene.order = list(contract.order)
+    return contract
+
+
+# =====================================================
+# QUANTUM FACTORY CONTROL
+# =====================================================
+# The Factory does not become a second processor and does not create a
+# second route.  It is a coordinated production layer controlled by the
+# Quantum Executor through the same Fiber Core.
+#
+# Design invariant:
+#   Quantum Executor
+#       -> one MachineRequest
+#       -> one Fiber Core / one route
+#       -> one factory control session
+#       -> zero or more domain-room contributions
+#       -> one MachineResponse
+#       -> one MachineScene
+#       -> one SceneContract
+#       -> April Web
+#
+# Room selection/meaning comes from the processor's contextual analysis.
+# This layer never uses keyword triggers to select a room.
+# =====================================================
+
+QUANTUM_FACTORY_VERSION = "april_quantum_factory_control_v1"
+QUANTUM_FACTORY_SINGLE_ROUTE = True
+
+
+@dataclass
+class FactoryRoomContribution:
+    """One room's contribution inside the current Fiber transaction."""
+    room: str = ""
+    artifact: Optional[BaseArtifact] = None
+    payload: Dict[str, Any] = field(default_factory=dict)
+    accepted: bool = False
+    sequence: int = 0
+
+
+@dataclass
+class QuantumFactoryState:
+    """Per-request factory state. Never shared between users."""
+    request_id: str = ""
+    flow_id: str = ""
+    user_id: str = ""
+    route_id: str = FIBER_ROUTE_NAME
+    lane: str = "A"
+    status: str = "READY"
+    expected_rooms: List[str] = field(default_factory=list)
+    active_rooms: List[str] = field(default_factory=list)
+    completed_rooms: List[str] = field(default_factory=list)
+    contributions: List[FactoryRoomContribution] = field(default_factory=list)
+    render_blocks: List[Dict[str, Any]] = field(default_factory=list)
+    diagnostics: List[Dict[str, Any]] = field(default_factory=list)
+    started_at: float = field(default_factory=time.time)
+
+
+def _safe_dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _request_flow_id(request: Optional[MachineRequest]) -> str:
+    if request is None:
+        return ""
+    metadata = _safe_dict(getattr(request, "metadata", {}))
+    if metadata.get("flow_id"):
+        return str(metadata["flow_id"])
+    routing = _safe_dict(getattr(request, "routing", {}))
+    return str(routing.get("flow_id", "") or "")
+
+
+def bind_request_to_fiber(
+    request: MachineRequest,
+    *,
+    user_id: str = "",
+    flow_id: str = "",
+    lane: str = "A",
+) -> MachineRequest:
+    """Bind processor identity/trace to the existing Fiber Core.
+
+    This only enriches the canonical request. It does not create a route,
+    Provider, memory, Executor, or renderer.
+    """
+    if request is None:
+        raise ValueError("request is required")
+
+    fiber = request.fiber or FiberCoreContract()
+    request.fiber = fiber
+
+    fiber.identity.user_id = str(user_id or fiber.identity.user_id or "")
+    fiber.route.active_lane = str(lane or fiber.route.active_lane or "A")
+    fiber.lane.lane_id = fiber.route.active_lane
+    fiber.lane.lane_name = f"Lane {fiber.route.active_lane}"
+    fiber.metrics.lane = fiber.route.active_lane
+    fiber.trace.lane = fiber.route.active_lane
+
+    resolved_flow = str(flow_id or _request_flow_id(request) or "")
+    if resolved_flow:
+        request.metadata = dict(getattr(request, "metadata", {}) or {})
+        request.metadata["flow_id"] = resolved_flow
+        request.routing = dict(request.routing or {})
+        request.routing["flow_id"] = resolved_flow
+
+    request.metadata = dict(getattr(request, "metadata", {}) or {})
+    request.metadata.update({
+        "quantum_factory_version": QUANTUM_FACTORY_VERSION,
+        "single_route": True,
+        "fiber_route": FIBER_ROUTE_NAME,
+        "user_bound": bool(fiber.identity.user_id),
+    })
+    request.routing = dict(request.routing or {})
+    request.routing["single_route"] = True
+    request.routing["fiber_route"] = FIBER_ROUTE_NAME
+    return request
+
+
+def create_quantum_factory_state(
+    request: MachineRequest,
+    *,
+    user_id: str = "",
+    flow_id: str = "",
+) -> QuantumFactoryState:
+    """Create isolated factory state for exactly one request/user."""
+    request = bind_request_to_fiber(
+        request,
+        user_id=user_id,
+        flow_id=flow_id,
+        lane=request.fiber.route.active_lane if request.fiber else "A",
+    )
+
+    expected = []
+    for value in (
+        list(getattr(request, "required_competencies", []) or [])
+        + list(getattr(request, "required_artifacts", []) or [])
+    ):
+        value = str(value or "").strip()
+        if value and value not in expected:
+            expected.append(value)
+
+    return QuantumFactoryState(
+        request_id=str(getattr(request, "request_id", "") or ""),
+        flow_id=str(_request_flow_id(request) or ""),
+        user_id=str(user_id or request.fiber.identity.user_id or ""),
+        lane=str(request.fiber.route.active_lane or "A"),
+        expected_rooms=expected,
+    )
+
+
+def quantum_factory_room_begin(
+    factory: QuantumFactoryState,
+    room_name: str,
+) -> None:
+    """Mark a processor-selected room as active on the same Fiber route."""
+    if not factory:
+        return
+    room = str(room_name or "").strip()
+    if not room:
+        return
+
+    factory.status = "RUNNING"
+    if room not in factory.active_rooms:
+        factory.active_rooms.append(room)
+    factory_stage_begin("ROOM_BEGIN", {
+        "room": room,
+        "request_id": factory.request_id,
+        "flow_id": factory.flow_id,
+        "user_id": factory.user_id,
+        "lane": factory.lane,
+        "single_route": True,
+        "quantum_factory_version": QUANTUM_FACTORY_VERSION,
+    })
+
+
+def quantum_factory_accept_artifact(
+    factory: QuantumFactoryState,
+    room_name: str,
+    artifact: Optional[BaseArtifact],
+) -> Optional[FactoryRoomContribution]:
+    """Accept one room artifact without rewriting its payload."""
+    if not factory or artifact is None:
+        return None
+
+    room = str(room_name or getattr(artifact.metadata, "room_source", "") or "").strip()
+    if not room:
+        room = str(getattr(artifact.metadata, "room_source", "") or "UNKNOWN_ROOM")
+
+    # Re-materialize the canonical signal only when the artifact has not
+    # already got one. Existing room payload is never replaced.
+    artifact = _ensure_artifact_render_signal(artifact)
+
+    contribution = FactoryRoomContribution(
+        room=room,
+        artifact=artifact,
+        payload=dict(getattr(artifact, "data", {}) or {}),
+        accepted=True,
+        sequence=len(factory.contributions) + 1,
+    )
+    factory.contributions.append(contribution)
+
+    if room not in factory.completed_rooms:
+        factory.completed_rooms.append(room)
+
+    blocks = _artifact_canonical_render_blocks(artifact)
+    for block in blocks:
+        if block not in factory.render_blocks:
+            factory.render_blocks.append(block)
+
+    factory_stage_success("ROOM_SUCCESS", {
+        "room": room,
+        "request_id": factory.request_id,
+        "flow_id": factory.flow_id,
+        "user_id": factory.user_id,
+        "lane": factory.lane,
+        "artifact": getattr(artifact.metadata, "artifact_type", ""),
+        "render_blocks": len(blocks),
+        "single_route": True,
+    })
+    return contribution
+
+
+def quantum_factory_accept_response(
+    factory: QuantumFactoryState,
+    response: MachineResponse,
+) -> MachineResponse:
+    """Merge room contributions into the canonical MachineResponse."""
+    if not factory or response is None:
+        return response
+
+    response.fiber = response.fiber or FiberCoreContract()
+    response.fiber.identity.user_id = factory.user_id
+    response.fiber.route.active_lane = factory.lane
+    response.fiber.lane.lane_id = factory.lane
+    response.fiber.lane.lane_name = f"Lane {factory.lane}"
+    response.fiber.trace.lane = factory.lane
+    response.fiber.metrics.lane = factory.lane
+
+    existing = list(getattr(response, "render_blocks", []) or [])
+    merged = existing[:]
+
+    for block in factory.render_blocks:
+        if block not in merged:
+            merged.append(block)
+
+    response.render_blocks = merged
+
+    response.artifacts = list(getattr(response, "artifacts", []) or [])
+    for contribution in factory.contributions:
+        if contribution.artifact is not None and contribution.artifact not in response.artifacts:
+            response.artifacts.append(contribution.artifact)
+
+    response.contributions = dict(getattr(response, "contributions", {}) or {})
+    for contribution in factory.contributions:
+        response.contributions[contribution.room] = dict(contribution.payload)
+
+    response.metadata = dict(getattr(response, "metadata", {}) or {})
+    response.metadata.update({
+        "quantum_factory_version": QUANTUM_FACTORY_VERSION,
+        "factory_request_id": factory.request_id,
+        "flow_id": factory.flow_id,
+        "user_id": factory.user_id,
+        "factory_lane": factory.lane,
+        "factory_rooms": list(factory.completed_rooms),
+        "factory_contribution_count": len(factory.contributions),
+        "single_route": True,
+        "canonical_factory_merge": True,
+    })
+
+    return response
+
+
+def quantum_factory_finalize(
+    factory: QuantumFactoryState,
+    response: MachineResponse,
+) -> MachineResponse:
+    """Close the current factory transaction and preserve one route."""
+    response = quantum_factory_accept_response(factory, response)
+
+    if factory:
+        factory.status = "COMPLETE"
+        factory_stage_success("FACTORY_COMPLETE", {
+            "request_id": factory.request_id,
+            "flow_id": factory.flow_id,
+            "user_id": factory.user_id,
+            "lane": factory.lane,
+            "rooms": list(factory.completed_rooms),
+            "contributions": len(factory.contributions),
+            "render_blocks": len(factory.render_blocks),
+            "single_route": True,
+            "quantum_factory_version": QUANTUM_FACTORY_VERSION,
+        })
+
+    return response
+
+
+def coordinate_factory_response(
+    request: MachineRequest,
+    response: MachineResponse,
+    *,
+    user_id: str = "",
+    flow_id: str = "",
+) -> tuple[MachineResponse, QuantumFactoryState]:
+    """Canonical Quantum Executor -> Factory coordination point.
+
+    The processor remains the authority for interpretation. The Factory
+    receives the already-decided request, accepts domain-room artifacts,
+    merges them into the same MachineResponse, and returns that response
+    to the existing SceneContract path.
+    """
+    request = bind_request_to_fiber(
+        request,
+        user_id=user_id,
+        flow_id=flow_id,
+    )
+    factory = create_quantum_factory_state(
+        request,
+        user_id=user_id,
+        flow_id=flow_id,
+    )
+
+    # Existing response artifacts are already authoritative room output.
+    # Accept them without inventing room selection.
+    for artifact in list(getattr(response, "artifacts", []) or []):
+        room = str(getattr(getattr(artifact, "metadata", None), "room_source", "") or "")
+        quantum_factory_accept_artifact(factory, room, artifact)
+
+    response = quantum_factory_finalize(factory, response)
+    return response, factory
+
+
+# =====================================================
+# FACTORY OUTPUT VALIDATION
+# =====================================================
+
+def validate_diagram_factory_artifact(artifact: Optional[BaseArtifact]) -> Dict[str, Any]:
+    '''Validate canonical diagram -> DiagramBlock transport.'''
+    if artifact is None:
+        return {"ok": False, "reason": "missing_artifact"}
+    metadata = getattr(artifact, "metadata", None)
+    render = getattr(artifact, "render", None)
+    artifact_type = getattr(metadata, "artifact_type", "")
+    room = getattr(metadata, "room_source", "")
+    renderer = getattr(render, "web_block", "")
+    return {
+        "ok": (
+            artifact_type == "diagram"
+            and room == "C_DIAGRAM_ROOM"
+            and renderer in {"MessageTextBlock", "GalleryBlock", "SvgBlock", "ArithmeticDiagram"}
+        ),
+        "artifact_type": artifact_type,
+        "room_source": room,
+        "renderer": renderer,
+        "single_route": True,
+    }
+
+
+def validate_quantum_factory_result(
+    request: MachineRequest,
+    response: MachineResponse,
+    factory: QuantumFactoryState,
+) -> Dict[str, Any]:
+    """Check the single-route invariants before SceneContract creation."""
+    request_user = str(getattr(request.fiber.identity, "user_id", "") or "")
+    response_user = str(getattr(response.fiber.identity, "user_id", "") or "")
+
+    return {
+        "ok": bool(
+            factory
+            and factory.status == "COMPLETE"
+            and factory.route_id == FIBER_ROUTE_NAME
+            and request_user == response_user
+        ),
+        "single_route": True,
+        "route_id": FIBER_ROUTE_NAME,
+        "request_id": factory.request_id if factory else "",
+        "flow_id": factory.flow_id if factory else "",
+        "user_id": response_user,
+        "lane": factory.lane if factory else "",
+        "room_count": len(factory.completed_rooms) if factory else 0,
+        "artifact_count": len(getattr(response, "artifacts", []) or []),
+        "render_block_count": len(getattr(response, "render_blocks", []) or []),
+    }
+
+
+# =====================================================
+# CPU COORDINATION API (Stage 1)
+# Factory remains autonomous internally.
+# CPU becomes the single coordinator.
+# =====================================================
+
+FACTORY_CPU_HOOKS = {
+    "begin": None,
+    "success": None,
+    "error": None,
+}
+
+def register_cpu_hooks(begin=None, success=None, error=None):
+    FACTORY_CPU_HOOKS["begin"] = begin
+    FACTORY_CPU_HOOKS["success"] = success
+    FACTORY_CPU_HOOKS["error"] = error
+
+def factory_stage_begin(stage:str,payload:dict|None=None):
+    cb=FACTORY_CPU_HOOKS.get("begin")
+    if cb:
+        cb(stage,payload or {})
+
+def factory_stage_success(stage:str,payload:dict|None=None):
+    cb=FACTORY_CPU_HOOKS.get("success")
+    if cb:
+        cb(stage,payload or {})
+
+def factory_stage_error(stage:str,error):
+    cb=FACTORY_CPU_HOOKS.get("error")
+    if cb:
+        cb(stage,error)
+
+
+# =====================================================
+# CPU FACTORY EVENTS (Stage 2)
+# =====================================================
+
+def factory_room_begin(room_name:str, request:dict|None=None):
+    factory_stage_begin("ROOM_BEGIN",{
+        "room":room_name,
+        "input":request or {}
+    })
+
+def factory_room_success(room_name:str, artifact=None):
+    factory_stage_success("ROOM_SUCCESS",{
+        "room":room_name,
+        "artifact":type(artifact).__name__ if artifact is not None else None
+    })
+
+def factory_room_error(room_name:str, error):
+    factory_stage_error(
+        f"{room_name}: {error}",
+        error,
+    )
+
+def factory_response_complete(response=None):
+    factory_stage_success("FACTORY_COMPLETE",{
+        "response_type":type(response).__name__ if response is not None else None
+    })
+
+
+# =====================================================
+# CPU FACTORY BRIDGE (Stage 3)
+# =====================================================
+
+FACTORY_CPU_REGISTERED = False
+
+def factory_register_cpu_bridge(register_callback):
+    """Register CPU hooks exactly once."""
+    global FACTORY_CPU_REGISTERED
+    if FACTORY_CPU_REGISTERED:
+        return
+    register_callback(
+        begin=factory_stage_begin,
+        success=factory_stage_success,
+        error=factory_stage_error,
+    )
+    FACTORY_CPU_REGISTERED = True
+
+def factory_room_selected(room_name:str):
+    factory_stage_success("ROOM_SELECTED",{
+        "room":room_name
+    })
+
+def factory_machine_response_ready(response):
+    factory_response_complete(response)
