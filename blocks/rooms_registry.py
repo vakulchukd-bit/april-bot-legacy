@@ -695,11 +695,22 @@ class ImageGenerateRoom(Room):
                 or ""
             ).strip()
 
-            prompt = semantic_request or raw_request
-
             image_spec = context.get("image_generation_spec")
             if not isinstance(image_spec, dict):
                 image_spec = None
+
+            # Image generation does not need the entire semantic dialogue sentence
+            # as CLIP conditioning. For short/simple visual requests, keep the user's
+            # exact request as the rendering prompt. Complex requests continue to use
+            # the richer Provider image spec so visual detail is preserved.
+            spec_prompt = str(image_spec.get("prompt") or "").strip() if image_spec else ""
+            if image_spec and spec_prompt and len(spec_prompt) > 180 and not is_complex_prompt(raw_request):
+                compact_spec = dict(image_spec)
+                compact_spec["prompt"] = raw_request
+                compact_spec["visual_context"] = {}
+                image_spec = compact_spec
+
+            prompt = (str(image_spec.get("prompt") or "").strip() if image_spec else "") or raw_request or semantic_request
 
             # Keep the entire request context available to the engine, but do
             # not pass the live StateManager object through the artifact
