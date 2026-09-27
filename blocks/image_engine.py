@@ -93,65 +93,6 @@ def save_temp_image(image_bytes):
         return None
 
 
-def _attach_image_asset_metadata(artifact, asset_path):
-    """Attach a short browser asset locator while preserving the data fallback."""
-    if not asset_path:
-        return artifact
-    if isinstance(artifact, dict):
-        artifact["image_asset_path"] = asset_path
-        payload = artifact.get("payload")
-        if isinstance(payload, dict):
-            payload["image_asset_path"] = asset_path
-            images = payload.get("images")
-            if isinstance(images, list):
-                for item in images:
-                    if isinstance(item, dict):
-                        item["image_asset_path"] = asset_path
-    return artifact
-
-
-def _attach_image_asset_to_base_artifact(base_artifact, asset_path):
-    if base_artifact is None or not asset_path:
-        return base_artifact
-    data = dict(getattr(base_artifact, "data", {}) or {})
-    data["image_asset_path"] = asset_path
-    payload = data.get("payload")
-    if isinstance(payload, dict):
-        payload = dict(payload)
-        payload["image_asset_path"] = asset_path
-        images = payload.get("images")
-        if isinstance(images, list):
-            payload["images"] = [
-                dict(item, image_asset_path=asset_path) if isinstance(item, dict) else item
-                for item in images
-            ]
-        data["payload"] = payload
-    base_artifact.data = data
-    return base_artifact
-
-
-def _attach_image_asset_to_render_blocks(render_blocks, asset_path):
-    if not asset_path:
-        return render_blocks
-    for block in render_blocks or []:
-        if not isinstance(block, dict):
-            continue
-        kind = str(block.get("type") or block.get("artifact_type") or "").strip().lower()
-        if kind not in {"image", "gallery"}:
-            continue
-        payload = block.get("payload")
-        if not isinstance(payload, dict):
-            payload = {}
-            block["payload"] = payload
-        payload["image_asset_path"] = asset_path
-        images = payload.get("images")
-        if isinstance(images, list):
-            for item in images:
-                if isinstance(item, dict):
-                    item["image_asset_path"] = asset_path
-    return render_blocks
-
-
 # ===== GENERATE =====
 async def generate(
     user_id,
@@ -213,47 +154,60 @@ async def generate(
         ).strip()
 
         path = save_temp_image(img)
-        asset_path = ""
+        asset_name = Path(path).name if path else ""
+        asset_url = f"/api/v1/images/{asset_name}" if asset_name else ""
         if path:
-            asset_name = Path(path).name
-            asset_path = f"/api/v1/images/{asset_name}"
             now = time.time()
             state["image_context"] = {
                 "type": "generated",
                 "path": path,
                 "asset_name": asset_name,
-                "asset_path": asset_path,
+                "asset_url": asset_url,
                 "hint": effective_prompt,
                 "created_at": now,
                 "expires_at": now + 7 * 24 * 60 * 60,
             }
             print(f"📂 ENGINE FILE SAVED: {path}")
-            print(f"🖼️ ENGINE IMAGE ASSET: {asset_path}")
+            print(f"🖼️ ENGINE IMAGE ASSET: {asset_url}")
 
         contract_obj = result.get("contract")
         artifact_obj = getattr(contract_obj, "artifact", None) if contract_obj is not None else None
-        artifact_dict = result.get("artifact")
-        _attach_image_asset_metadata(artifact_dict, asset_path)
-        _attach_image_asset_to_base_artifact(artifact_obj, asset_path)
-
-        if artifact_obj is not None and asset_path:
-            try:
-                from blocks.C_ARTIFACT_CONTRACT import build_universal_contract
-                contract_obj = build_universal_contract(artifact_obj)
-            except Exception as exc:
-                print("⚠️ IMAGE ENGINE CONTRACT REBUILD:", exc)
-
-        if contract_obj is not None:
-            artifact_obj = getattr(contract_obj, "artifact", artifact_obj)
-
         render_blocks = []
         if artifact_obj is not None:
             try:
                 render_blocks = _artifact_canonical_render_blocks(artifact_obj)
-                _attach_image_asset_to_render_blocks(render_blocks, asset_path)
             except Exception as exc:
                 print("⚠️ IMAGE ENGINE ARTIFACT BLOCKS:", exc)
 
+        # Canonical media handoff: GalleryBlock receives a concrete asset URL.
+        # Raw bytes stay in the image-engine state and are not used as the UI route.
+        if asset_url:
+            for block in render_blocks:
+                if not isinstance(block, dict):
+                    continue
+                kind = str(block.get("type") or block.get("artifact_type") or block.get("representation") or "").lower()
+                if kind not in {"image", "gallery"}:
+                    continue
+                payload = dict(block.get("payload") or {}) if isinstance(block.get("payload"), dict) else {}
+                payload.update({"asset_url": asset_url, "image_asset_url": asset_url, "asset_path": path or "", "asset_name": asset_name})
+                images = payload.get("images") if isinstance(payload.get("images"), list) else []
+                if images:
+                    fixed=[]
+                    for item in images[:8]:
+                        obj = dict(item) if isinstance(item, dict) else {}
+                        obj.update({"src": asset_url, "url": asset_url, "asset_url": asset_url, "image_asset_url": asset_url})
+                        fixed.append(obj)
+                    payload["images"] = fixed
+                else:
+                    payload.update({"src": asset_url, "url": asset_url, "image": asset_url, "images": [{"src": asset_url, "url": asset_url, "asset_url": asset_url}]})
+                block["payload"] = payload
+                block["asset_url"] = asset_url
+
+        artifact_dict = result.get("artifact")
+        if isinstance(artifact_dict, dict) and asset_url:
+            artifact_dict = dict(artifact_dict)
+            artifact_dict.update({"asset_url": asset_url, "asset_path": path or "", "asset_name": asset_name})
+            result["artifact"] = artifact_dict
         render_signal = (
             artifact_dict.get("render_signal")
             if isinstance(artifact_dict, dict)
@@ -288,10 +242,11 @@ async def generate(
             "image_generation_status": "success",
             "image_generation_backend": result.get("backend"),
             "prompt": effective_prompt,
+            "asset_url": asset_url,
+            "asset_path": path or "",
+            "asset_name": asset_name,
             "width": result.get("width"),
             "height": result.get("height"),
-            "image_asset_path": asset_path,
-            "image_asset_name": Path(path).name if path else "",
         }
 
     except Exception as e:
@@ -338,42 +293,15 @@ async def edit(
         state["image_current"] = img
 
         path = save_temp_image(img)
-        asset_path = ""
         if path:
-            asset_name = Path(path).name
-            asset_path = f"/api/v1/images/{asset_name}"
             now = time.time()
             state["image_context"] = {
                 "type": "edited",
                 "path": path,
-                "asset_name": asset_name,
-                "asset_path": asset_path,
                 "hint": prompt,
                 "created_at": now,
                 "expires_at": now + 7 * 24 * 60 * 60,
             }
-
-        artifact_dict = result.get("artifact")
-        contract_obj = result.get("contract")
-        artifact_obj = getattr(contract_obj, "artifact", None) if contract_obj is not None else None
-        _attach_image_asset_metadata(artifact_dict, asset_path)
-        _attach_image_asset_to_base_artifact(artifact_obj, asset_path)
-        if artifact_obj is not None and asset_path:
-            try:
-                from blocks.C_ARTIFACT_CONTRACT import build_universal_contract
-                contract_obj = build_universal_contract(artifact_obj)
-            except Exception as exc:
-                print("⚠️ IMAGE EDIT CONTRACT REBUILD:", exc)
-        if contract_obj is not None:
-            artifact_obj = getattr(contract_obj, "artifact", artifact_obj)
-
-        render_blocks = []
-        if artifact_obj is not None:
-            try:
-                render_blocks = _artifact_canonical_render_blocks(artifact_obj)
-                _attach_image_asset_to_render_blocks(render_blocks, asset_path)
-            except Exception as exc:
-                print("⚠️ IMAGE EDIT ARTIFACT BLOCKS:", exc)
 
         set_last_entity(
             user_id,
@@ -381,24 +309,19 @@ async def edit(
                 "type": "image",
                 "data": img,
                 "source": "C_APRIL_IMAGES_GENERATOR/edit",
-                "artifact": artifact_dict,
-                "contract": contract_obj,
-                "render_blocks": render_blocks,
-                "image_asset_path": asset_path,
+                "artifact": result.get("artifact"),
+                "contract": result.get("contract"),
             },
         )
 
         return {
             "type": "image",
             "data": img,
-            "artifact": artifact_dict,
-            "contract": contract_obj,
-            "render_blocks": render_blocks,
-            "render_signal": (artifact_dict or {}).get("render_signal"),
+            "artifact": result.get("artifact"),
+            "contract": result.get("contract"),
+            "render_signal": (result.get("artifact") or {}).get("render_signal"),
             "image_engine": "April Images Generation",
             "artifact_route": "C_ARTIFACT_CONTRACT",
-            "image_asset_path": asset_path,
-            "image_asset_name": Path(path).name if path else "",
         }
 
     except Exception as e:
