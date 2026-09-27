@@ -6,6 +6,7 @@ import os
 import tempfile
 import time
 import threading
+import re
 from pathlib import Path
 
 # Image creation is owned directly by C_APRIL_IMAGES_GENERATOR.
@@ -218,8 +219,47 @@ async def generate(
             "visual_context": dict(context) if isinstance(context, dict) else {},
         }
         clean_spec.setdefault("schema", "april_image_spec_v1")
-        if not str(clean_spec.get("prompt") or "").strip():
+        provider_metadata = context.get("provider_metadata") if isinstance(context, dict) and isinstance(context.get("provider_metadata"), dict) else {}
+        provider_signal = context.get("image_generation_signal") if isinstance(context, dict) and isinstance(context.get("image_generation_signal"), dict) else provider_metadata.get("image_generation_signal") if isinstance(provider_metadata.get("image_generation_signal"), dict) else {}
+        current_request = str(context.get("current_user_request") or "").strip() if isinstance(context, dict) else ""
+        signal_route = str(provider_signal.get("route") or "").strip().upper()
+        signal_execute = provider_signal.get("execute") is True
+        signal_anchor = str(provider_signal.get("request_anchor") or "").strip()
+        signal_anchor_matches = bool(
+            signal_anchor
+            and current_request
+            and re.sub(r"\s+", " ", signal_anchor).casefold() == re.sub(r"\s+", " ", current_request).casefold()
+        )
+        signal_valid = signal_route == "C_APRIL_IMAGES_GENERATOR" and signal_execute and signal_anchor_matches
+
+        signal_prompt = str(provider_signal.get("prompt") or "").strip()
+
+        # The canonical same-turn request is the immutable anti-substitution anchor.
+        # A valid Provider signal may supply the concise English Turbo prompt; if its
+        # signal is missing or stale, discard that prompt and use only this turn's request.
+        if signal_valid and signal_prompt:
+            clean_spec["prompt"] = signal_prompt
+            prompt_source = "provider_signal_turbo"
+        elif current_request:
+            clean_spec["prompt"] = current_request
+            prompt_source = "current_request"
+        elif not str(clean_spec.get("prompt") or "").strip():
             clean_spec["prompt"] = str(prompt or "").strip()
+            prompt_source = "room_prompt"
+        else:
+            prompt_source = "spec_prompt"
+        clean_spec["generator_signal"] = "C_APRIL_IMAGES_GENERATOR"
+        clean_spec["request_anchor"] = current_request
+        print(
+            "🧭 IMAGE ENGINE HANDOFF:",
+            {
+                "provider_signal_valid": signal_valid,
+                "signal_route": signal_route or "none",
+                "request_anchor_matches": signal_anchor_matches,
+                "prompt_source": prompt_source,
+                "target": "C_APRIL_IMAGES_GENERATOR",
+            },
+        )
         result = await generate_from_spec(
             clean_spec,
             variant="room_registry",
