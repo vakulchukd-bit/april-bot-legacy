@@ -1558,13 +1558,36 @@ def image_chat():
 # 🌐 APRIL WEB EXECUTION
 # =========================================================
 
+def _backend_public_origin() -> str:
+    """Return the public HTTPS origin used by browser-facing media assets.
+
+    ``request.host_url`` is not safe behind a Railway/Vercel reverse proxy:
+    without ProxyFix it can be built from the internal HTTP request and the
+    browser will reject the resulting image as mixed content.  Keep one
+    canonical backend origin for the existing /api/v1/images route.
+    """
+    configured = (
+        os.getenv("APRIL_PUBLIC_BASE_URL")
+        or os.getenv("RAILWAY_PUBLIC_DOMAIN")
+        or "https://april-bot-production-cf51.up.railway.app"
+    ).strip()
+    if configured and not configured.startswith(("http://", "https://")):
+        configured = "https://" + configured
+    return configured.rstrip("/")
+
+
 def _bind_backend_asset_urls(value):
-    """Bind canonical image asset paths to this backend origin."""
+    """Bind canonical image asset paths to the public backend origin."""
+    public_origin = _backend_public_origin()
     if isinstance(value, dict):
         out = {}
         for key, item in value.items():
-            if key in {"src", "url", "asset_url", "image_asset_url", "image_url"} and isinstance(item, str) and item.startswith("/api/v1/images/"):
-                out[key] = request.host_url.rstrip("/") + item
+            if (
+                key in {"src", "url", "asset_url", "image_asset_url", "image_url"}
+                and isinstance(item, str)
+                and item.startswith("/api/v1/images/")
+            ):
+                out[key] = public_origin + item
             else:
                 out[key] = _bind_backend_asset_urls(item)
         return out
