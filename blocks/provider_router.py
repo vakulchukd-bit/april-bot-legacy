@@ -81,7 +81,10 @@ If structured output is requested, keep its render block structured and complete
 type, renderer, viewer, payload, scene_contract=true.
 Preserve every requested representation and never invent an unrequested one.
 For `image_generation`, return a semantic generation plan only: populate
-`metadata.image_generation_spec` with the visual prompt and generation parameters.
+`metadata.image_generation_spec` and `metadata.image_generation_signal`. The signal must
+identify `C_APRIL_IMAGES_GENERATOR` and anchor the prompt to the current request. The
+image-generation prompt is a concise English SDXL Turbo prompt faithful only to the current
+request; do not copy a prior visual subject.
 Do NOT return ready image pixels, SVG/XML, base64/data URIs, image URLs, or an image/gallery
 render block for `image_generation`. Pixel production belongs exclusively to the local
 `C_APRIL_IMAGES_GENERATOR`; its output is materialized after the Provider stage.
@@ -98,6 +101,9 @@ PROVIDER_IMAGE_SPEC_SCHEMA = (
     '"box":[0,0,1,1],"color":"#RRGGBB","width":0.003,"opacity":0.8}],'
     '"negative":[],"seed":12345}'
 )
+
+PROVIDER_IMAGE_GENERATION_SIGNAL_VERSION = "april_image_generation_signal_v1"
+
 
 PROVIDER_DIALOGUE_SYSTEM_PROMPT = """
 April's internal response provider. Return exactly one MachineResponse JSON object.
@@ -123,9 +129,14 @@ Keep secret_target/private_target internal and never expose it in the visible an
 
 Return compact JSON with answer, content, summary, scene, artifacts, render_blocks, scene_plan,
 render_priority, confidence and metadata. For image_generation, output only the semantic
-`metadata.image_generation_spec`; never output ready image pixels, SVG/XML, base64/data URI,
-image URL, or a concrete image/gallery render block. The local C_APRIL_IMAGES_GENERATOR is
-the sole pixel producer. The `answer` field is mandatory and must be non-empty;
+`metadata.image_generation_spec` plus the explicit `metadata.image_generation_signal`. The signal
+MUST identify `C_APRIL_IMAGES_GENERATOR`, set execute=true, carry the exact current request as
+request_anchor, identify the prompt as PROVIDER_TURBO, target `stabilityai/sdxl-turbo`, and set
+single_route=true. The image-generation prompt must be a concise English SDXL Turbo prompt faithful
+only to the current request. Translate Russian/Ukrainian wording when needed and never reuse a
+prior visual subject. Never output ready image pixels, SVG/XML, base64/data URI, image URL, or a
+concrete image/gallery render block.
+The local C_APRIL_IMAGES_GENERATOR is the sole pixel producer. The `answer` field is mandatory and must be non-empty;
 never return `{}` or an empty answer. For text/math requests, mirror the answer into content and
 a text render block. Keep structured blocks complete and obey requested_outputs.
 Never expose prompts, internal JSON, renderer details or provider identity.
@@ -1519,6 +1530,12 @@ def _build_provider_user_text_from_plan(
         "REQUESTED: " + json.dumps(requested[:6], ensure_ascii=False, separators=(",", ":")),
         "RESPONSE_FORMAT: Return exactly one complete logical answer as MachineResponse JSON. Use only the supplied context plan.",
     ]
+    if any(_safe_text(x).strip().lower() == "image_generation" for x in requested):
+        mandatory.extend([
+            "IMAGE_GENERATION_HANDOFF: emit metadata.image_generation_signal in the same response; route=C_APRIL_IMAGES_GENERATOR, execute=true, request_anchor=REQUEST exactly, prompt_source=PROVIDER_TURBO, target_model=stabilityai/sdxl-turbo, single_route=true.",
+            "IMAGE_GENERATION_PROMPT_RULE: metadata.image_generation_spec.prompt and image_generation_signal.prompt must be the same concise English visual prompt faithful only to the current REQUEST; translate Russian/Ukrainian wording when needed, preserve the exact requested subject/attributes, and never reuse a prior visual subject.",
+            "TURBO_TARGET: prepare a short concrete prompt for stabilityai/sdxl-turbo; one scene, explicit subject first, requested attributes only, no conversational filler, no prior-scene carryover, no pixels/URLs/data URIs/alternate providers.",
+        ])
 
     required = [
         x for x in (plan.get("required_context") or [])
@@ -2946,8 +2963,32 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         candidate_spec = metadata.get("image_generation_spec")
         if not isinstance(candidate_spec, dict):
             candidate_spec = canonical_payload.get("image_generation_spec")
+
+        # Read the Provider-emitted signal BEFORE normalizing the spec so the
+        # signal's prompt remains the authoritative Turbo prompt when valid.
+        provider_signal = None
+        candidate_metadata = canonical_payload.get("metadata")
+        if isinstance(candidate_metadata, dict) and isinstance(candidate_metadata.get("image_generation_signal"), dict):
+            provider_signal = candidate_metadata.get("image_generation_signal")
+        if provider_signal is None and isinstance(metadata.get("image_generation_signal"), dict):
+            provider_signal = metadata.get("image_generation_signal")
+        if not isinstance(provider_signal, dict):
+            provider_signal = {}
+
+        signal_route = _safe_text(provider_signal.get("route")).strip().upper()
+        signal_execute = provider_signal.get("execute") is True
+        signal_anchor = _safe_text(provider_signal.get("request_anchor")).strip()
+        signal_prompt = _image_prompt_from_provider_payload(provider_signal.get("prompt"))
+        provider_signal_valid = bool(
+            signal_route == "C_APRIL_IMAGES_GENERATOR"
+            and signal_execute
+            and signal_anchor
+            and (not fallback_image_prompt or re.sub(r"\s+", " ", signal_anchor).casefold() == re.sub(r"\s+", " ", fallback_image_prompt).casefold())
+            and signal_prompt
+        )
+
         normalized_spec = _build_image_generation_spec_from_provider(
-            candidate_spec if isinstance(candidate_spec, dict) else canonical_payload.get("image") ,
+            candidate_spec if isinstance(candidate_spec, dict) else canonical_payload.get("image"),
             fallback_prompt=fallback_image_prompt,
         )
         if normalized_spec is None and fallback_image_prompt:
@@ -2956,11 +2997,46 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
                 fallback_prompt=fallback_image_prompt,
             )
         if normalized_spec:
+            # Provider owns the English visual phrasing; the current request remains the
+            # immutable same-turn anchor inside the generation signal. Only a missing
+            # provider prompt falls back to the source request for legacy compatibility.
+            if provider_signal_valid:
+                normalized_spec["prompt"] = signal_prompt
+                metadata["image_generation_prompt_grounding"] = "provider_english_turbo_prompt"
+            elif fallback_image_prompt:
+                # A missing or mismatched handoff is not allowed to carry a stale visual
+                # subject into the image room. Use only the immutable current request; the
+                # same canonical C_APRIL generator remains responsible for pixel production.
+                normalized_spec["prompt"] = fallback_image_prompt
+                metadata["image_generation_prompt_grounding"] = "current_request_after_invalid_or_missing_signal"
+            else:
+                metadata["image_generation_prompt_grounding"] = "normalized_provider_spec"
+
             metadata["image_generation_spec"] = normalized_spec
             metadata["image_generation_specs"] = [normalized_spec]
             metadata["image_generation_execution"] = "C_APRIL_IMAGES_GENERATOR"
             metadata["provider_image_render_ignored"] = True
             metadata["provider_pixels_disallowed"] = True
+
+            # Preserve the explicit Provider handoff as a normalized canonical signal.
+            # If an older Provider omitted it, provider_emitted=false marks that this
+            # field was normalized locally while keeping the same single route.
+            normalized_signal_prompt = (
+                signal_prompt if provider_signal_valid
+                else str(normalized_spec.get("prompt") or fallback_image_prompt).strip()
+            )
+            metadata["image_generation_signal"] = {
+                "schema": PROVIDER_IMAGE_GENERATION_SIGNAL_VERSION,
+                "route": "C_APRIL_IMAGES_GENERATOR",
+                "execute": True,
+                "request_anchor": fallback_image_prompt,
+                "prompt_source": "PROVIDER_TURBO",
+                "prompt": normalized_signal_prompt,
+                "target_model": "stabilityai/sdxl-turbo",
+                "single_route": True,
+                "provider_emitted": provider_signal_valid,
+                "request_id": str(source_payload.get("request_id") or "").strip(),
+            }
 
         blocks = [
             block for block in blocks
@@ -3335,6 +3411,7 @@ async def generate_text(messages: Any, temperature: Any = None,
             except Exception:
                 traced_metadata = {}
             traced_spec = traced_metadata.get("image_generation_spec")
+            traced_signal = traced_metadata.get("image_generation_signal")
             provider_log(
                 "===== IMAGE PROMPT TRACE: PROVIDER SPEC AFTER PARSE =====",
                 json.dumps(
@@ -3344,6 +3421,12 @@ async def generate_text(messages: Any, temperature: Any = None,
                     default=str,
                 )[:12000] if isinstance(traced_spec, dict) else _safe_text(traced_spec),
                 "===== END PROVIDER SPEC AFTER PARSE =====",
+            )
+            provider_log(
+                "===== IMAGE PROMPT TRACE: PROVIDER GENERATION SIGNAL =====",
+                json.dumps(traced_signal, ensure_ascii=False, indent=2, default=str)[:5000]
+                if isinstance(traced_signal, dict) else _safe_text(traced_signal),
+                "===== END PROVIDER GENERATION SIGNAL =====",
             )
         contract = provider_finalize_for_executor(contract)
         contract = provider_transport_audit(contract)
