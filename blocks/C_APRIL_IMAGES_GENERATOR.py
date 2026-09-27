@@ -1002,7 +1002,23 @@ class AprilImagesGenerator:
         variant: str = "provider_spec",
     ) -> dict[str, Any]:
         clean = cls._validate_render_spec(spec)
+
+        # IMAGE PROMPT TRACE: this is the exact semantic spec that crossed the
+        # Provider -> C_APRIL_IMAGES_GENERATOR boundary.  The next trace shows
+        # what C_APRIL itself adds before SDXL sees the prompt.
+        print(
+            "\n===== IMAGE PROMPT TRACE: GENERATOR INPUT SPEC =====\n"
+            + json.dumps(clean, ensure_ascii=False, indent=2, default=str)[:12000]
+            + "\n===== END GENERATOR INPUT SPEC =====\n"
+        )
+
         prompt = cls._compose_prompt(clean["prompt"], clean)
+
+        print(
+            "===== IMAGE PROMPT TRACE: GENERATOR COMPOSED PROMPT =====\n"
+            + prompt[:12000]
+            + "\n===== END GENERATOR COMPOSED PROMPT =====\n"
+        )
         print(
             "🧠 IMAGE PROMPT NORMALIZED:",
             {
