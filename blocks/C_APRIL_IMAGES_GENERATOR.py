@@ -63,7 +63,7 @@ class AprilImagesGenerator:
     """The only image producer between Interpretation and C_ARTIFACT."""
 
     ENGINE_NAME = "April Images Generation"
-    ENGINE_VERSION = "2.4.1"
+    ENGINE_VERSION = "2.4.2"
     BACKEND = "diffusers_single_backend"
 
     DEFAULT_SIZE = (512, 512)
@@ -407,13 +407,16 @@ class AprilImagesGenerator:
         *,
         prompt_token_count: Optional[int] = None,
     ) -> str:
-        """Compose a semantically locked prompt.
+        """Return only the authoritative user/provider scene prompt.
 
-        The Provider prompt is authoritative. C_APRIL may add only:
-        1) explicitly grounded visual-context fields, and
-        2) scene-neutral fidelity instructions.
+        C_APRIL_IMAGES_GENERATOR is a pixel renderer, not a scene author.
+        The supplied prompt is treated as the complete visual scene contract:
+        it is preserved as-is after semantic cleaning, with no style enrichment,
+        no visual-context expansion, no fidelity paragraph, and no renderer-side
+        invention.
 
-        It never invents subjects, environments, props, characters or story beats.
+        This is intentionally strict. Any semantic interpretation, scene
+        decomposition, or user-intent resolution must happen before this boundary.
         """
         semantic_prompt = cls._clean_prompt(prompt)
         if prompt_token_count is None:
@@ -426,84 +429,44 @@ class AprilImagesGenerator:
             )
 
         tier = cls._prompt_tier(int(prompt_token_count))
-        parts = [semantic_prompt]
-        added_fields: list[str] = []
-        skipped_fields: list[str] = []
-
-        if isinstance(spec, dict):
-            style = str(spec.get("style") or "").strip()
-            # "illustration" is the generator's default metadata, not user scene
-            # content. Do not inject the default style into the actual prompt.
-            if style and style.lower() not in {"illustration", "default", "standard"}:
-                if style.lower() in semantic_prompt.lower():
-                    # Already present: no duplication.
-                    pass
-                else:
-                    # Preserve explicitly provided non-default style metadata only
-                    # when it is traceable to a grounded visual context entry.
-                    style_context = spec.get("visual_context")
-                    style_grounded = False
-                    if isinstance(style_context, dict) and style_context.get("style"):
-                        style_grounded = cls._is_grounded_context_value(semantic_prompt, str(style_context.get("style")))
-                    if style_grounded:
-                        parts.append(f"Style: {cls._clean_prompt(style)}")
-                        added_fields.append("style")
-                    else:
-                        skipped_fields.append("style")
-            elif style:
-                skipped_fields.append("style_default")
-
-            context = spec.get("visual_context")
-            if isinstance(context, dict):
-                tier_fields = {
-                    "core": (),
-                    "style": (),
-                    "composition": ("composition", "background"),
-                    "scene": ("composition", "background", "environment", "lighting"),
-                    "detail": ("composition", "background", "environment", "lighting", "camera"),
-                    "rich": ("composition", "background", "environment", "lighting", "camera", "palette", "mood"),
-                    "max": ("subject", "composition", "background", "environment", "lighting", "camera", "palette", "mood", "character", "pose", "details"),
-                }
-                for key in tier_fields.get(tier, ()):
-                    value = context.get(key)
-                    if not value:
-                        continue
-                    semantic_value = cls._extract_semantic_prompt(value)
-                    if not semantic_value:
-                        continue
-                    if cls._is_grounded_context_value(semantic_prompt, semantic_value):
-                        label = key.replace("_", " ").title()
-                        parts.append(f"{label}: {semantic_value}")
-                        added_fields.append(key)
-                    else:
-                        skipped_fields.append(f"{key}_ungrounded")
-
-        # Keep simple/core requests on the native SDXL-Turbo text path.
-        # The previous unconditional fidelity paragraph could push an otherwise
-        # short user prompt over the native CLIP window (77 tokens), which then
-        # switched a simple request into the custom multi-window encoder. That
-        # path is intended for genuinely long prompts and was the cause of the
-        # current long-running generation. Core semantics are already authoritative
-        # in `semantic_prompt`, so no extra scene text is needed here.
-        if tier != "core":
-            guidance = cls._prompt_guidance(tier)
-            parts.append(guidance)
-            added_fields.append("semantic_fidelity_guidance")
-
         flags = cls._prompt_complexity_flags(semantic_prompt)
+
+        # HARD SCENE LOCK:
+        # The exact cleaned provider/user scene is the only positive conditioning
+        # text emitted by this renderer. Do not append style, visual_context,
+        # composition, lighting, camera, mood, or any other renderer-authored text.
+        # This keeps the image model from receiving content that was not part of
+        # the authoritative request.
         print(
             "🧠 IMAGE PROMPT PROFILE:",
             {
                 "base_semantic_tokens": int(prompt_token_count),
                 "tier": tier,
                 "max_semantic_tokens": cls.MAX_SEMANTIC_PROMPT_TOKENS,
-                "added_fields": added_fields,
-                "skipped_ungrounded_fields": skipped_fields,
+                "added_fields": [],
+                "skipped_renderer_fields": [
+                    "style",
+                    "visual_context",
+                    "composition",
+                    "background_context",
+                    "environment",
+                    "lighting",
+                    "camera",
+                    "palette",
+                    "mood",
+                    "character",
+                    "pose",
+                    "details",
+                    "semantic_fidelity_guidance",
+                ],
                 "semantic_scene_locked": True,
+                "generator_scene_invention": False,
+                "prompt_passthrough": True,
                 "complexity_flags": flags,
             },
         )
-        return "\n".join(parts)
+
+        return semantic_prompt
 
     @classmethod
     def _require_backend(cls) -> None:
