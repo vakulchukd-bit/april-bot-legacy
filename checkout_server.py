@@ -84,6 +84,8 @@ from blocks.state_manager import (
     restore_visual_context_after_turn,
     persist_state,
 )
+from blocks.image_engine import get_image_generation_status
+
 from blocks.provider_router import (
     transcribe_voice
 )
@@ -1594,6 +1596,18 @@ def _bind_backend_asset_urls(value):
     if isinstance(value, list):
         return [_bind_backend_asset_urls(item) for item in value]
     return value
+
+
+@app.route("/api/v1/image-generation/status", methods=["GET"])
+def image_generation_status_route():
+    """Expose the live state of the current image generator to April Web."""
+    flow_id = str(request.args.get("flow_id") or "").strip()
+    user_id = str(request.args.get("user_id") or "").strip()
+    status = get_image_generation_status(flow_id, user_id)
+    response = jsonify({"success": True, **status})
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.route("/api/v1/images/<path:filename>", methods=["GET", "HEAD"])
