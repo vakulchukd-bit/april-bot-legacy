@@ -401,6 +401,15 @@ class AprilImagesGenerator:
 
             kwargs: dict[str, Any] = {
                 "local_files_only": cls._local_files_only(),
+                # Keep model loading on the existing single image-generation
+                # route, but avoid the large temporary RAM spike that can
+                # restart the Railway process while Diffusers materializes
+                # SDXL Turbo. The generator must survive loading long enough
+                # to produce the real PNG/asset; no alternate provider or
+                # rendering path is introduced here.
+                "low_cpu_mem_usage": os.getenv(
+                    "APRIL_IMAGES_LOW_CPU_MEM_USAGE", "1"
+                ).strip().lower() in {"1", "true", "yes", "on"},
             }
             dtype = cls._dtype()
             if dtype is not None:
@@ -452,6 +461,15 @@ class AprilImagesGenerator:
 
             kwargs: dict[str, Any] = {
                 "local_files_only": cls._local_files_only(),
+                # Keep model loading on the existing single image-generation
+                # route, but avoid the large temporary RAM spike that can
+                # restart the Railway process while Diffusers materializes
+                # SDXL Turbo. The generator must survive loading long enough
+                # to produce the real PNG/asset; no alternate provider or
+                # rendering path is introduced here.
+                "low_cpu_mem_usage": os.getenv(
+                    "APRIL_IMAGES_LOW_CPU_MEM_USAGE", "1"
+                ).strip().lower() in {"1", "true", "yes", "on"},
             }
             dtype = cls._dtype()
             if dtype is not None:
