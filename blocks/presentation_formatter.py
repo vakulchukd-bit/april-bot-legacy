@@ -391,6 +391,12 @@ def canonicalize_scene_blocks(
         block["type"] = block_type
         block.setdefault("artifact_type", block_type)
 
+        # An empty text node is not a meaningful scene element. In image-only
+        # turns it creates a blank MessageTextBlock shell above the real GalleryBlock.
+        # Drop only empty text nodes; non-empty narrative text remains untouched.
+        if block_type in {"text", "markdown"} and not _content(block):
+            continue
+
         if block_type != "graph_data":
             canonical_payload = canonical_payload_for_block(block)
             if block_type in STRUCTURED_RENDER_TYPES or block_type == "formula":
