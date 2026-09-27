@@ -198,7 +198,7 @@ async def generate(
                 if kind not in {"image", "gallery"}:
                     continue
                 payload = dict(block.get("payload") or {}) if isinstance(block.get("payload"), dict) else {}
-                payload.update({"asset_url": public_asset_url or asset_url, "image_asset_url": public_asset_url or asset_url, "asset_path": path or "", "asset_name": asset_name})
+                payload.update({"asset_url": public_asset_url or asset_url, "image_asset_url": public_asset_url or asset_url, "asset_path": path or "", "image_asset_path": path or "", "asset_name": asset_name})
                 images = payload.get("images") if isinstance(payload.get("images"), list) else []
                 if images:
                     fixed=[]
@@ -216,7 +216,7 @@ async def generate(
         artifact_dict = result.get("artifact")
         if isinstance(artifact_dict, dict) and asset_url:
             artifact_dict = dict(artifact_dict)
-            artifact_dict.update({"asset_url": public_asset_url or asset_url, "image_asset_url": public_asset_url or asset_url, "asset_path": path or "", "asset_name": asset_name})
+            artifact_dict.update({"asset_url": public_asset_url or asset_url, "image_asset_url": public_asset_url or asset_url, "asset_path": path or "", "image_asset_path": path or "", "asset_name": asset_name})
             result["artifact"] = artifact_dict
         render_signal = (
             artifact_dict.get("render_signal")
