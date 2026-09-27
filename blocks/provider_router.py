@@ -3279,14 +3279,34 @@ async def generate_text(messages: Any, temperature: Any = None,
             if isinstance(source_constraints.get("metadata"), dict)
             else {}
         )
-        image_trace = _safe_text(
-            source_representation_plan.get("visual_production_mode")
-            or source_metadata.get("visual_production_mode")
-            or (provider_plan or {}).get("representation")
-            or (provider_plan or {}).get("visual_production_mode")
-            or ""
-        ).lower() == "image_generation"
+        source_semantic = source_request.get("semantic") if isinstance(source_request.get("semantic"), dict) else {}
+        source_output_modes = [
+            _safe_text(item).strip().lower()
+            for item in (source_request.get("requested_outputs") or [])
+            if _safe_text(item).strip()
+        ]
+        normalized_input_text = json.dumps(normalized_input, ensure_ascii=False, default=str).lower()
+        image_trace = any(
+            candidate == "image_generation"
+            for candidate in (
+                _safe_text(source_representation_plan.get("visual_production_mode")).strip().lower(),
+                _safe_text(source_metadata.get("visual_production_mode")).strip().lower(),
+                _safe_text(source_semantic.get("visual_production_mode")).strip().lower(),
+                _safe_text(source_semantic.get("representation")).strip().lower(),
+                _safe_text((provider_plan or {}).get("visual_production_mode")).strip().lower(),
+                _safe_text((provider_plan or {}).get("representation")).strip().lower(),
+                *source_output_modes,
+            )
+        ) or "output_mode\": image_generation" in normalized_input_text or "output_mode: image_generation" in normalized_input_text or "\"output_mode\":\"image_generation\"" in normalized_input_text
         if image_trace:
+            provider_log(
+                "\n===== IMAGE PROMPT TRACE: INPUT TO OPENAI =====",
+                json.dumps({
+                    "current_user_request": _extract_request_text(source_request),
+                    "normalized_input": normalized_input,
+                }, ensure_ascii=False, indent=2, default=str)[:12000],
+                "===== END INPUT TO OPENAI =====\n",
+            )
             provider_log(
                 "\n===== IMAGE PROMPT TRACE: OPENAI RAW OUTPUT =====",
                 _safe_text(raw_text)[:12000],
