@@ -2204,7 +2204,13 @@ async def _route_image_through_room_registry(
     plan = constraints.get("representation_plan")
     plan = plan if isinstance(plan, dict) else {}
 
-    representation = _text(request.intent.get("type")).lower()
+    # MachineRequest uses ``intent.type`` as the canonical representation field.
+    # Keep ``representation`` as a compatibility fallback because some older
+    # semantic envelopes only expose ``representation``.
+    representation = _text(
+        request.intent.get("type")
+        or request.intent.get("representation")
+    ).lower()
     requested_outputs = {
         _text(x).lower()
         for x in (request.requested_outputs or [])
@@ -2220,9 +2226,29 @@ async def _route_image_through_room_registry(
         {"image", "gallery"} & requested_outputs
     )
     if not visual_requested:
+        print(
+            "🧭 IMAGE ROUTE DECISION:",
+            {
+                "visual_requested": False,
+                "representation": representation,
+                "requested_outputs": sorted(requested_outputs),
+                "flow_id": str(request.request_id),
+            },
+        )
         return
 
     metadata = dict(response.metadata or {})
+    print(
+        "🧭 IMAGE ROUTE DECISION:",
+        {
+            "visual_requested": True,
+            "representation": representation,
+            "requested_outputs": sorted(requested_outputs),
+            "visual_production_mode": _text(plan.get("visual_production_mode")),
+            "flow_id": str(request.request_id),
+            "user_id": str(user_id or ""),
+        },
+    )
 
     def _concrete_image_payload(payload: dict[str, Any]) -> bool:
         if not isinstance(payload, dict):
@@ -2343,6 +2369,16 @@ async def _route_image_through_room_registry(
         if isinstance(artifact, BaseArtifact)
     ]
     room_metadata = dict(getattr(room_response, "metadata", {}) or {})
+    print(
+        "🧭 IMAGE ROOM RESULT:",
+        {
+            "flow_id": str(request.request_id),
+            "room_route_status": _text(room_metadata.get("room_route_status")),
+            "image_generation_status": _text(room_metadata.get("image_generation_status")),
+            "render_blocks": len(room_blocks),
+            "artifacts": len(room_artifacts),
+        },
+    )
 
     # If the room did not produce a concrete artifact, keep the provider text and
     # diagnostics intact rather than inventing a visual block.
@@ -2481,6 +2517,18 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
     processor = ProcessorScene(state, _text(user_id), request_text)
     request = processor.prepare()
 
+    # Web creates a per-turn flow_id before submitting /api/v1/chat. Reuse that
+    # exact id as the MachineRequest id so image-generation status polling,
+    # SceneContract flow_id, and the generator all refer to the same turn.
+    incoming_flow_id = _text(kwargs.get("flow_id"))
+    if incoming_flow_id:
+        request.request_id = incoming_flow_id
+        if isinstance(request.routing, dict):
+            request.routing["flow_id"] = incoming_flow_id
+        if isinstance(request.conversation, dict):
+            request.conversation["flow_id"] = incoming_flow_id
+        print("🧭 APRIL FLOW ID BOUND:", incoming_flow_id)
+
     visual_input_path = _text(kwargs.get("visual_input_path"))
     if visual_input_path:
         request.visual_context = await _visual_input_context(visual_input_path, request_text, state)
@@ -2509,30 +2557,47 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
 
     # Provider returns the image plan; the local image engine materializes it
     # before the processor creates the final SceneContract. No second provider.
-    machine_preview = provider_contract.get("machine_response") if isinstance(provider_contract, dict) else {}
-    if isinstance(machine_preview, dict):
-        machine_preview = _bridge_provider_artifacts(machine_preview)
-        preview_response = MachineResponse(
-            answer=_text(machine_preview.get("answer")),
-            content=_text(machine_preview.get("content")),
-            response=_text(machine_preview.get("response")),
-            summary=_text(machine_preview.get("summary")),
-            confidence=float(machine_preview.get("confidence") or 1.0),
-            render_blocks=list(machine_preview.get("render_blocks") or []),
-            artifacts_payload=list(machine_preview.get("artifacts_payload") or machine_preview.get("artifacts") or []),
-            scene=dict(machine_preview.get("scene") or {}),
-            metadata=dict(machine_preview.get("metadata") or {}),
-        )
-        await _route_image_through_room_registry(
-            preview_response,
-            request,
-            state,
-            _text(user_id),
-            chat_id=chat_id,
-            run_with_activity=run_with_activity,
-        )
-        machine_preview["render_blocks"] = list(preview_response.render_blocks or [])
-        machine_preview["metadata"] = dict(preview_response.metadata or {})
+    # Do not gate this handoff on the provider envelope shape: the Interpreter
+    # request is already authoritative about the representation, and Provider
+    # intentionally emits only the semantic image plan in image-generation mode.
+    machine_preview = (
+        provider_contract.get("machine_response")
+        if isinstance(provider_contract, dict)
+        else {}
+    )
+    if not isinstance(machine_preview, dict):
+        machine_preview = {}
+
+    machine_preview = _bridge_provider_artifacts(machine_preview)
+    preview_response = MachineResponse(
+        answer=_text(machine_preview.get("answer")),
+        content=_text(machine_preview.get("content")),
+        response=_text(machine_preview.get("response")),
+        summary=_text(machine_preview.get("summary")),
+        confidence=float(machine_preview.get("confidence") or 1.0),
+        render_blocks=list(machine_preview.get("render_blocks") or []),
+        artifacts_payload=list(machine_preview.get("artifacts_payload") or machine_preview.get("artifacts") or []),
+        scene=dict(machine_preview.get("scene") or {}),
+        metadata=dict(machine_preview.get("metadata") or {}),
+    )
+
+    # The image route is decided from the current MachineRequest, not from the
+    # provider's human-facing text block. This is what guarantees that a real
+    # image request reaches Room Register even when Provider returns text only.
+    await _route_image_through_room_registry(
+        preview_response,
+        request,
+        state,
+        _text(user_id),
+        chat_id=chat_id,
+        run_with_activity=run_with_activity,
+    )
+
+    machine_preview["render_blocks"] = list(preview_response.render_blocks or [])
+    machine_preview["artifacts"] = list(preview_response.artifacts_payload or machine_preview.get("artifacts") or [])
+    machine_preview["artifacts_payload"] = list(preview_response.artifacts_payload or [])
+    machine_preview["metadata"] = dict(preview_response.metadata or {})
+    if isinstance(provider_contract, dict):
         provider_contract["machine_response"] = machine_preview
 
     response, scene, contract = processor.build_scene(request, provider_contract)
