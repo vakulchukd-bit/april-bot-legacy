@@ -267,6 +267,10 @@ def build_default_state():
             "last_turn_at": None,
             "last_user_request": "",
             "last_april_answer": "",
+            "last_visual_attachment": {},
+            "last_visual_scene_id": "",
+            "last_visual_turn_index": 0,
+            "visual_turn_count": 0,
             "relation": "NEW",
         },
         "dialogue_sequence_version": "APRIL-DIALOGUE-SEQUENCE-7D-V1",
@@ -762,6 +766,37 @@ class QuantumMemoryEngine:
                 "status": "active",
                 "relation": str(current.get("relation") or "CONTINUE").upper(),
             })
+            # Backfill visual continuity from the durable seven-day turn archive
+            # when an older persisted sequence predates the visual attachment fields.
+            if not isinstance(current.get("last_visual_attachment"), dict) or not current.get("last_visual_attachment"):
+                latest_visual_pair = None
+                timeline = state_obj.get("memory_timeline") if isinstance(state_obj.get("memory_timeline"), dict) else {}
+                for day_index in range(MEMORY_DAYS):
+                    day = timeline.get(f"day_{day_index}")
+                    if not isinstance(day, dict):
+                        continue
+                    for item in day.get("dialog_pairs", []):
+                        if not isinstance(item, dict):
+                            continue
+                        if str(item.get("sequence_id") or "") != sequence_id:
+                            continue
+                        if str(item.get("user_id") or "") != user_id:
+                            continue
+                        attachment = item.get("visual_attachment")
+                        if isinstance(attachment, dict) and attachment:
+                            latest_visual_pair = item
+                if latest_visual_pair:
+                    current["last_visual_attachment"] = deepcopy(latest_visual_pair.get("visual_attachment") or {})
+                    current["last_visual_scene_id"] = str(latest_visual_pair.get("visual_scene_id") or latest_visual_pair.get("scene_contract_id") or "")
+                    current["last_visual_turn_index"] = int(latest_visual_pair.get("sequence_turn_index") or 0)
+                    current["visual_turn_count"] = sum(
+                        1 for day_index in range(MEMORY_DAYS)
+                        for item in ((timeline.get(f"day_{day_index}") or {}).get("dialog_pairs", []) if isinstance(timeline.get(f"day_{day_index}"), dict) else [])
+                        if isinstance(item, dict)
+                        and str(item.get("sequence_id") or "") == sequence_id
+                        and isinstance(item.get("visual_attachment"), dict)
+                        and item.get("visual_attachment")
+                    )
             state_obj["active_dialogue_sequence"] = current
             return current
 
@@ -812,6 +847,10 @@ class QuantumMemoryEngine:
                 "last_turn_at": last.get("created_at") or last.get("timestamp"),
                 "last_user_request": str(last.get("user_request") or last.get("user_meaning") or ""),
                 "last_april_answer": str(last.get("april_answer") or last.get("april_meaning") or ""),
+                "last_visual_attachment": deepcopy(last.get("visual_attachment") or {}),
+                "last_visual_scene_id": str(last.get("visual_scene_id") or last.get("scene_contract_id") or ""),
+                "last_visual_turn_index": int(last.get("sequence_turn_index") or 0),
+                "visual_turn_count": sum(1 for p in pairs if str(p.get("sequence_id") or "") == str(last.get("sequence_id") or "") and isinstance(p.get("visual_attachment"), dict) and p.get("visual_attachment")),
                 "relation": str(last.get("dialogue_relation") or "CONTINUE").upper(),
                 "restored": True,
             }
@@ -2510,6 +2549,7 @@ def build_dialogue_memory_bridge(user_id, query="", limit=8, *, relation="AUTO",
                 "answer_summary": item.get("answer_summary") or item.get("april_meaning"),
                 "dialogue_relation": item.get("dialogue_relation"),
                 "visual_scene_id": item.get("visual_scene_id"),
+                "visual_attachment": deepcopy(item.get("visual_attachment") or {}),
                 "created_at": created,
             }
             records.append(record)
@@ -3046,6 +3086,87 @@ def _scene_has_successful_visual(scene):
     return any(_visual_block_has_payload(block) for block in blocks)
 
 
+def _build_dialogue_visual_attachment(render_blocks, scene_id="", turn_id="", *, created_at=None):
+    """Build a small renderer-neutral visual attachment for the owning dialogue turn.
+
+    The dialogue memory keeps visual identity/metadata, never PNG/base64 payloads.
+    This makes a visual artifact part of the same USER↔APRIL turn without
+    inflating the seven-day dialogue memory or changing renderer ownership.
+    """
+    blocks = render_blocks if isinstance(render_blocks, list) else []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = str(block.get("type") or block.get("artifact_type") or block.get("representation") or "").strip().lower()
+        if kind not in VISUAL_SCENE_BLOCK_TYPES:
+            continue
+
+        payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+        artifact = block.get("artifact") if isinstance(block.get("artifact"), dict) else {}
+        artifact_payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+        presentation = block.get("presentation") if isinstance(block.get("presentation"), dict) else {}
+
+        candidates = [
+            block.get("src"), block.get("url"), block.get("asset_url"),
+            block.get("image_url"), payload.get("src"), payload.get("url"),
+            payload.get("asset_url"), payload.get("image_url"),
+            artifact.get("src"), artifact.get("url"), artifact_payload.get("src"),
+            artifact_payload.get("url"),
+        ]
+        src = next((str(value).strip() for value in candidates if isinstance(value, str) and value.strip()), "")
+
+        images = payload.get("images") if isinstance(payload.get("images"), list) else []
+        if not src and images:
+            for item in images[:8]:
+                if isinstance(item, dict):
+                    src = next((str(item.get(key)).strip() for key in ("src", "url", "asset_url", "image_url", "asset_path") if item.get(key)), "")
+                    if src:
+                        break
+                elif isinstance(item, str) and item.strip():
+                    src = item.strip()
+                    break
+
+        # A visual turn is useful for dialogue recall even when its src is absent
+        # (e.g. a structured diagram), so preserve its stable semantic identity.
+        attachment = {
+            "present": True,
+            "kind": kind,
+            "artifact_id": str(block.get("block_id") or block.get("artifact_id") or artifact.get("artifact_id") or "").strip(),
+            "block_id": str(block.get("block_id") or "").strip(),
+            "scene_id": str(scene_id or block.get("scene_id") or "").strip(),
+            "turn_id": str(turn_id or block.get("turn_id") or "").strip(),
+            "renderer": str(
+                presentation.get("renderer")
+                or block.get("renderer")
+                or block.get("viewer")
+                or ""
+            ).strip(),
+            "src": src,
+            "caption": str(block.get("caption") or payload.get("caption") or "").strip()[:800],
+            "description": str(block.get("description") or payload.get("description") or "").strip()[:1200],
+            "alt": str(block.get("alt") or payload.get("alt") or "").strip()[:800],
+            "prompt": str(payload.get("prompt") or block.get("prompt") or "").strip()[:1600],
+            "mime_type": str(block.get("mime_type") or payload.get("mime_type") or artifact.get("mime_type") or "").strip(),
+            "width": payload.get("width") or block.get("width") or artifact.get("width"),
+            "height": payload.get("height") or block.get("height") or artifact.get("height"),
+            "generation_model": str(
+                payload.get("generation_model")
+                or block.get("generation_model")
+                or artifact.get("generation_model")
+                or ""
+            ).strip(),
+            "generation_quality": str(
+                payload.get("generation_quality")
+                or block.get("generation_quality")
+                or artifact.get("generation_quality")
+                or ""
+            ).strip(),
+            "created_at": created_at if created_at is not None else time.time(),
+        }
+        return {k: v for k, v in attachment.items() if v not in (None, "", [], {})}
+    return {}
+
+
 def update_scene_context(user_id, scene_contract, current_request="", answer="", *, internal_context=False, persist=True):
     """
     One canonical dialogue-scene update.
@@ -3370,6 +3491,25 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "internal_context": False,
     }
 
+    # Attach only compact visual identity/metadata to this same dialogue turn.
+    # The binary image remains owned by C_ARTIFACT_CONTRACT / GalleryBlock.
+    visual_attachment = _build_dialogue_visual_attachment(
+        render_blocks,
+        scene_id=scene_id,
+        turn_id=str(state_obj.get("visual_scene_version")),
+        created_at=time.time(),
+    )
+    if visual_attachment:
+        scene_record["visual_attachment"] = deepcopy(visual_attachment)
+
+        # The active dialogue sequence remains the single continuity owner while
+        # remembering the last successful visual attached to that sequence.
+        active_sequence["last_visual_attachment"] = deepcopy(visual_attachment)
+        active_sequence["last_visual_scene_id"] = scene_id
+        active_sequence["last_visual_turn_index"] = int(active_sequence.get("turn_count") or 0)
+        active_sequence["visual_turn_count"] = int(active_sequence.get("visual_turn_count") or 0) + 1
+        state_obj["active_dialogue_sequence"] = deepcopy(active_sequence)
+
     state_obj["semantic_scene_state"] = deepcopy(semantic_scene_state)
     state_obj["current_topic"] = scene_record.get("topic") or active_sequence.get("topic") or state_obj.get("current_topic")
     state_obj["current_visual_scene"] = deepcopy(scene_record)
@@ -3509,6 +3649,7 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         ),
         "visual_scene_id": scene_id,
         "scene_contract_id": scene_id,
+        "visual_attachment": deepcopy(visual_attachment),
         "dialogue_sequence_id": str(contract.get("dialogue_sequence_id") or active_sequence.get("sequence_id") or ""),
         "continuation": is_continuation,
         "render_block_types": list(block_types),
@@ -3520,6 +3661,7 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
             "scene_id": scene_id,
             "relation": resolved_relation,
             "renderer_signals": deepcopy(render_signal_inventory),
+            "visual_attachment": deepcopy(visual_attachment),
         },
         "created_at": time.time(),
         "expires_after_days": MEMORY_DAYS,
