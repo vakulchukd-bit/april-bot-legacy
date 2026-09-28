@@ -21,7 +21,7 @@ from blocks.presentation_formatter import canonical_payload_for_block, validate_
 # APRIL PROVIDER — CANONICAL LUNA ROUTE
 # ============================================================
 
-APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_3_4_visual_plan_handoff_v1"
+APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_3_5_visual_plan_complement_v2"
 APRIL_QUANTUM_PROVIDER_MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-5.6-luna")
 APRIL_QUANTUM_PROVIDER_SINGLE_CALL = True
 APRIL_QUANTUM_PROVIDER_NO_MODEL_ESCALATION = True
@@ -83,8 +83,9 @@ type, renderer, viewer, payload, scene_contract=true.
 Preserve every requested representation and never invent an unrequested one.
 For `image_generation`, return one semantic generation handoff only:
 `metadata.image_generation_spec` and `metadata.image_generation_signal`.
-The current user request is the immutable scene anchor. The Provider prompt must be a concise,
-concrete English SDXL-Turbo visual instruction derived only from that current request.
+The current user request is the immutable scene anchor and defines WHAT must appear. The Provider
+prompt must preserve that requested scene; it must never replace the scene with a new subject. OpenAI's
+structured visual plan defines HOW to render the requested scene and belongs in visual_context.
 `metadata.image_generation_spec.visual_context` is a complementary visual blueprint, not a
 second interpretation: it may contain only explicit scene geometry, colors, positions, sizes,
 background and requested text that are directly stated by the current request or by a structured
@@ -143,11 +144,12 @@ Keep secret_target/private_target internal and never expose it in the visible an
 Return compact JSON with answer, content, summary, scene, artifacts, render_blocks, scene_plan,
 render_priority, confidence and metadata. For image_generation, output only the semantic
 `metadata.image_generation_spec` plus the explicit `metadata.image_generation_signal`.
-The current request is the sole scene anchor. `image_generation_spec.prompt` MUST be a concise
-English SDXL-Turbo visual prompt faithful only to this turn; translate Russian/Ukrainian wording
-when needed. `image_generation_spec.visual_context` MUST be complementary structured rendering
-information for this same turn: explicit background color, layer geometry, colors, positions,
-dimensions and requested text when known. Do not use visual_context to add any new object,
+The current request is the sole scene anchor and defines WHAT must appear. `image_generation_spec.prompt`
+MUST preserve that current request and never introduce a new subject; translation is allowed only when
+semantically equivalent. The complementary visual_context defines HOW to render it. `image_generation_spec.visual_context` MUST be complementary structured rendering
+information for this same turn: when explicit objects are known, encode their shape/type and color
+as layers/objects; also preserve background color, geometry, positions, dimensions and requested text
+when known. Do not use visual_context to add any new object,
 environment, mood, style, cinematic language or artistic flourish. Do not repeat the whole
 prompt inside visual_context.
 The signal MUST identify `C_APRIL_IMAGES_GENERATOR`, set execute=true, carry the exact current
@@ -2810,6 +2812,129 @@ def _merge_visual_context(base: Any, supplement: Any) -> dict[str, Any]:
     return merged
 
 
+
+
+def _visual_context_from_structured_image(value: Any) -> dict[str, Any]:
+    """Project same-turn OpenAI image objects into rendering constraints.
+
+    The exact current user request remains the immutable scene anchor. This helper
+    only converts OpenAI's structured visual plan into complementary geometry/color
+    evidence for C_APRIL_IMAGES_GENERATOR; it never replaces the request.
+    """
+    if not isinstance(value, dict):
+        return {}
+
+    objects = value.get("objects")
+    background = value.get("background")
+    if not isinstance(objects, list):
+        objects = []
+
+    def clean_color(raw: Any) -> str:
+        text = _safe_text(raw).strip()
+        return text[:24] if text else ""
+
+    def normalized_position(obj: dict[str, Any]) -> list[float] | None:
+        for key in ("center", "position", "location"):
+            pos = obj.get(key)
+            if isinstance(pos, (list, tuple)) and len(pos) >= 2:
+                try:
+                    x, y = float(pos[0]), float(pos[1])
+                    if abs(x) > 1 or abs(y) > 1:
+                        x /= 512.0
+                        y /= 512.0
+                    return [round(max(0.0, min(1.0, x)), 4), round(max(0.0, min(1.0, y)), 4)]
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        return None
+
+    def normalized_box(obj: dict[str, Any]) -> list[float] | None:
+        box = obj.get("box") or obj.get("bbox") or obj.get("bounding_box")
+        if isinstance(box, (list, tuple)) and len(box) >= 4:
+            try:
+                vals = [float(x) for x in box[:4]]
+                if any(abs(v) > 1 for v in vals):
+                    vals = [v / 512.0 for v in vals]
+                return [round(max(0.0, min(1.0, v)), 4) for v in vals]
+            except (TypeError, ValueError, OverflowError):
+                pass
+        return None
+
+    layers: list[dict[str, Any]] = []
+    for obj in objects[:24]:
+        if not isinstance(obj, dict):
+            continue
+        shape = _safe_text(obj.get("shape") or obj.get("kind") or obj.get("type") or "object").strip().lower()
+        color = clean_color(obj.get("color") or obj.get("fill"))
+
+        if shape in {"square", "rectangle", "rect"}:
+            layer: dict[str, Any] = {
+                "kind": "rect",
+                "shape": "square" if shape == "square" else "rectangle",
+            }
+        elif shape in {"circle", "ellipse", "polygon", "line"}:
+            layer = {"kind": shape}
+        else:
+            layer = {"kind": "object", "shape": shape}
+
+        if color:
+            layer["fill"] = color
+        pos = normalized_position(obj)
+        if pos:
+            layer["center"] = pos
+        box = normalized_box(obj)
+        if box:
+            layer["box"] = box
+
+        for key in ("width", "height", "size", "rotation", "radius"):
+            raw = obj.get(key)
+            if raw in (None, ""):
+                continue
+            if isinstance(raw, (int, float)):
+                value_num = float(raw)
+                if key in {"width", "height", "size", "radius"} and abs(value_num) > 1:
+                    value_num /= 512.0
+                layer[key] = round(value_num, 4)
+            else:
+                layer[key] = raw
+
+        text_value = _safe_text(obj.get("text") or obj.get("label") or "").strip()
+        if text_value:
+            layer["text"] = text_value[:240]
+        layers.append(layer)
+
+    result: dict[str, Any] = {
+        "source": "OPENAI_STRUCTURED_VISUAL_PLAN",
+        "authoritative": True,
+        "complements_prompt": True,
+        "object_count": len(layers),
+        "layers": layers[:24],
+    }
+    if isinstance(background, dict):
+        bg_color = clean_color(background.get("color") or background.get("fill"))
+        if bg_color:
+            result["background"] = {"color": bg_color}
+    return {k: v for k, v in result.items() if v not in (None, "", [], {})}
+
+
+def _structured_visual_context_from_provider_value(value: Any) -> dict[str, Any]:
+    """Find same-turn structured visual evidence without treating it as a prompt replacement."""
+    if not isinstance(value, dict):
+        return {}
+    existing = value.get("visual_context")
+    derived = _visual_context_from_structured_image(value)
+    if isinstance(existing, dict) and existing:
+        return _merge_visual_context(existing, derived) if derived else dict(existing)
+    if derived:
+        return derived
+    for key in ("image", "visual", "spec", "data"):
+        nested = value.get(key)
+        if isinstance(nested, dict):
+            nested_context = _structured_visual_context_from_provider_value(nested)
+            if nested_context:
+                return nested_context
+    return {}
+
+
 def _build_image_generation_spec_from_provider(
     value: Any,
     *,
@@ -2826,7 +2951,11 @@ def _build_image_generation_spec_from_provider(
         schema = _safe_text(value.get("schema"))
         if schema == "april_image_spec_v1":
             candidate = dict(value)
-            candidate["visual_context"] = _merge_visual_context(candidate.get("visual_context"), svg_context)
+            structured_context = _structured_visual_context_from_provider_value(candidate)
+            candidate["visual_context"] = _merge_visual_context(
+                _merge_visual_context(candidate.get("visual_context"), structured_context),
+                svg_context,
+            )
             semantic_prompt = _image_prompt_from_provider_payload(candidate.get("prompt"))
             if semantic_prompt:
                 candidate["prompt"] = semantic_prompt
@@ -2851,6 +2980,20 @@ def _build_image_generation_spec_from_provider(
             except (TypeError, ValueError, OverflowError):
                 width, height = 512, 512
 
+    structured_context = _structured_visual_context_from_provider_value(value)
+    explicit_layers = (
+        list(value.get("layers") or [])
+        if isinstance(value, dict) and isinstance(value.get("layers"), list)
+        else []
+    )
+    visual_context = _merge_visual_context(
+        value.get("visual_context")
+        if isinstance(value, dict) and isinstance(value.get("visual_context"), dict)
+        else {},
+        structured_context,
+    )
+    visual_context = _merge_visual_context(visual_context, svg_context)
+
     return {
         "schema": "april_image_spec_v1",
         "prompt": prompt or fallback_prompt.strip(),
@@ -2858,11 +3001,8 @@ def _build_image_generation_spec_from_provider(
         "height": max(256, min(height, 1536)),
         "style": _safe_text(value.get("style") if isinstance(value, dict) else "") or "illustration",
         "background": dict(value.get("background") or {}) if isinstance(value, dict) and isinstance(value.get("background"), dict) else {},
-        "layers": list(value.get("layers") or []) if isinstance(value, dict) and isinstance(value.get("layers"), list) else [],
-        "visual_context": _merge_visual_context(
-            value.get("visual_context") if isinstance(value, dict) and isinstance(value.get("visual_context"), dict) else {},
-            svg_context,
-        ),
+        "layers": explicit_layers,
+        "visual_context": visual_context,
         "negative": list(value.get("negative") or []) if isinstance(value, dict) and isinstance(value.get("negative"), list) else [],
         "seed": value.get("seed") if isinstance(value, dict) else None,
     }
@@ -3197,20 +3337,20 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
                 fallback_prompt=fallback_image_prompt,
             )
         if normalized_spec:
-            # Provider owns the English visual phrasing; the current request remains the
-            # immutable same-turn anchor inside the generation signal. Only a missing
-            # provider prompt falls back to the source request for legacy compatibility.
-            if provider_signal_valid:
-                normalized_spec["prompt"] = signal_prompt
-                metadata["image_generation_prompt_grounding"] = "provider_english_turbo_prompt"
-            elif fallback_image_prompt:
-                # A missing or mismatched handoff is not allowed to carry a stale visual
-                # subject into the image room. Use only the immutable current request; the
-                # same canonical C_APRIL generator remains responsible for pixel production.
+            # The current user request is the immutable WHAT: it is never replaced by
+            # an OpenAI/provider phrasing. OpenAI's structured visual plan is the HOW and
+            # is carried separately through visual_context into C_APRIL_IMAGES_GENERATOR.
+            # This prevents a provider prompt from becoming a new scene description.
+            if fallback_image_prompt:
                 normalized_spec["prompt"] = fallback_image_prompt
-                metadata["image_generation_prompt_grounding"] = "current_request_after_invalid_or_missing_signal"
+                metadata["image_generation_prompt_grounding"] = (
+                    "current_request_anchor_plus_openai_visual_context"
+                )
             else:
                 metadata["image_generation_prompt_grounding"] = "normalized_provider_spec"
+
+            if provider_signal_valid and signal_prompt:
+                metadata["openai_renderer_prompt_received"] = signal_prompt[:1200]
 
             metadata["image_generation_spec"] = normalized_spec
             metadata["image_generation_specs"] = [normalized_spec]
@@ -3221,10 +3361,11 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             # Preserve the explicit Provider handoff as a normalized canonical signal.
             # If an older Provider omitted it, provider_emitted=false marks that this
             # field was normalized locally while keeping the same single route.
-            normalized_signal_prompt = (
-                signal_prompt if provider_signal_valid
-                else str(normalized_spec.get("prompt") or fallback_image_prompt).strip()
-            )
+            # The signal prompt follows the same immutable WHAT rule. Any OpenAI
+            # renderer phrasing is telemetry only; structured visual evidence carries HOW.
+            normalized_signal_prompt = str(
+                fallback_image_prompt or normalized_spec.get("prompt") or signal_prompt
+            ).strip()
             metadata["image_generation_signal"] = {
                 "schema": PROVIDER_IMAGE_GENERATION_SIGNAL_VERSION,
                 "route": "C_APRIL_IMAGES_GENERATOR",
