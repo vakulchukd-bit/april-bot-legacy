@@ -63,7 +63,7 @@ class AprilImagesGenerator:
     """The only image producer between Interpretation and C_ARTIFACT."""
 
     ENGINE_NAME = "April Images Generation"
-    ENGINE_VERSION = "2.4.3"
+    ENGINE_VERSION = "2.5.0"
     BACKEND = "diffusers_single_backend"
 
     DEFAULT_SIZE = (512, 512)
@@ -459,7 +459,9 @@ class AprilImagesGenerator:
                 circles.append(item)
 
             elif kind == "rect":
-                item = f"{fill} rectangle" if fill else "rectangle"
+                shape = str(layer.get("shape") or "rectangle").strip().lower()
+                noun = "square" if shape == "square" else "rectangle"
+                item = f"{fill} {noun}" if fill else noun
                 box = layer.get("box")
                 if isinstance(box, list) and len(box) >= 4:
                     try:
@@ -482,6 +484,11 @@ class AprilImagesGenerator:
             elif kind == "line":
                 shapes.append(f"{fill} line" if fill else "line")
 
+            elif kind == "object":
+                shape = str(layer.get("shape") or "object").strip().lower()
+                item = f"{fill} {shape}" if fill else shape
+                shapes.append(item)
+
             elif kind == "text":
                 value = str(layer.get("text") or "").strip()
                 if value:
@@ -493,10 +500,13 @@ class AprilImagesGenerator:
             parts.append("explicit shapes: " + ", ".join(shapes[:8]))
         if requested_text:
             parts.append("requested text: " + "; ".join(requested_text[:4]))
+        object_count = visual_context.get("object_count")
+        if object_count:
+            parts.append(f"object count: {int(object_count)}")
         if not parts:
             return ""
 
-        parts.append("preserve supplied objects, colors and layout; add no other objects or artistic elements")
+        parts.append("this blueprint complements the user request; preserve supplied objects, colors and layout; add no other objects or artistic elements")
         return ("Provider visual blueprint: " + "; ".join(parts))[:1100]
 
     @classmethod
@@ -1102,19 +1112,20 @@ class AprilImagesGenerator:
             source = "quality_ultra"
         else:
             # SDXL Turbo is explicitly optimized for 1-4 denoising steps.
-            # Keep the common/simple CPU path at one step: previous two-step
-            # generation took ~163s per step on the Railway CPU runtime.
-            # More involved prompts keep two or three steps, and high quality /
-            # semantic complexity can still add one step without changing the
-            # canonical route or image size.
+            # Keep the fast one-step CPU path for ordinary prompts, but give an
+            # explicit same-turn geometry/color blueprint two steps so the model
+            # has an additional denoising opportunity to honor exact simple shapes.
             cpu_fast_path = cls._device() == "cpu"
+            structured_visual = "provider visual blueprint:" in str(prompt or "").lower()
             if count <= 200:
-                steps = 1 if cpu_fast_path else 2
+                steps = 2 if structured_visual else (1 if cpu_fast_path else 2)
             elif count <= 500:
                 steps = 2
             else:
                 steps = 3
             source = f"adaptive_{cls._prompt_tier(count)}"
+            if structured_visual:
+                source += "_structured_visual"
             if normalized == "high":
                 steps = min(4, steps + 1)
                 source += "_high"
