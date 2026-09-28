@@ -64,7 +64,7 @@ class AprilImagesGenerator:
     """The only image producer between Interpretation and C_ARTIFACT."""
 
     ENGINE_NAME = "April Images Generation"
-    ENGINE_VERSION = "2.6.0"
+    ENGINE_VERSION = "2.6.1"
     BACKEND = "diffusers_single_backend"
 
     DEFAULT_SIZE = (512, 512)
@@ -413,6 +413,14 @@ class AprilImagesGenerator:
             "#e53935": "red", "#fdd835": "yellow", "#43a047": "green",
             "#008000": "green", "#ffff00": "yellow", "#ff0000": "red",
             "#00ff00": "green", "#0000ff": "blue",
+            "белый": "white", "белая": "white", "белое": "white",
+            "чёрный": "black", "черный": "black", "чёрная": "black", "черная": "black",
+            "серый": "gray", "серая": "gray", "серое": "gray",
+            "красный": "red", "красная": "red", "красное": "red",
+            "жёлтый": "yellow", "желтый": "yellow", "жёлтая": "yellow", "желтая": "yellow",
+            "зелёный": "green", "зеленый": "green", "зелёная": "green", "зеленая": "green",
+            "синий": "blue", "синяя": "blue",
+            "голубой": "light blue", "голубая": "light blue",
         }
         return exact.get(text, text)
 
@@ -444,9 +452,12 @@ class AprilImagesGenerator:
 
     @classmethod
     def _dedupe_semantic_parts(cls, parts: list[str]) -> list[str]:
+        """Dedupe prompt fragments while allowing optional empty fragments."""
         seen: set[str] = set()
         out: list[str] = []
         for raw in parts:
+            if raw is None or not str(raw).strip():
+                continue
             text = cls._clean_prompt(raw)
             if not text:
                 continue
@@ -564,14 +575,78 @@ class AprilImagesGenerator:
                 for obj in objects[:32]:
                     if not isinstance(obj, dict):
                         continue
-                    layer = {"kind": str(obj.get("kind") or obj.get("shape") or obj.get("type") or "object").lower()}
-                    for key in ("shape", "color", "fill", "center", "position", "box", "bbox", "size", "width", "height", "radius", "rotation", "text", "label"):
+                    layer = {
+                        "kind": str(
+                            obj.get("kind")
+                            or obj.get("shape")
+                            or obj.get("type")
+                            or "object"
+                        ).lower()
+                    }
+                    for key in (
+                        "shape", "color", "fill", "center", "position", "box",
+                        "bbox", "size", "width", "height", "radius", "rotation",
+                        "text", "label"
+                    ):
                         if obj.get(key) not in (None, ""):
                             layer[key] = obj[key]
+                    if layer.get("color") and not layer.get("fill"):
+                        layer["fill"] = layer["color"]
                     layers.append(layer)
-                ctx: dict[str, Any] = {"source": "OPENAI_STRUCTURED_VISUAL_PLAN", "authoritative": True, "complements_prompt": True, "layers": layers, "object_count": len(layers)}
-                if isinstance(plan.get("background"), dict):
-                    ctx["background"] = dict(plan["background"])
+                ctx: dict[str, Any] = {
+                    "source": "OPENAI_STRUCTURED_VISUAL_PLAN",
+                    "authoritative": True,
+                    "complements_prompt": True,
+                    "layers": layers,
+                    "object_count": len(layers),
+                }
+                background = plan.get("background")
+                if isinstance(background, dict):
+                    ctx["background"] = dict(background)
+                elif isinstance(background, str) and background.strip():
+                    ctx["background"] = {"color": background.strip()}
+                description = plan.get("description")
+                if isinstance(description, str) and description.strip():
+                    ctx["description"] = description.strip()
+                return ctx
+
+            # OpenAI may return a compact image plan without an "objects" list.
+            # Preserve that same-turn subject/background as structured render data.
+            if str(plan.get("type") or "").strip().lower() == "image":
+                layers: list[dict[str, Any]] = []
+                subject = str(
+                    plan.get("subject")
+                    or plan.get("object")
+                    or plan.get("name")
+                    or ""
+                ).strip()
+                if subject:
+                    layer: dict[str, Any] = {"kind": "object", "shape": subject}
+                    for key in (
+                        "color", "fill", "center", "position", "box", "bbox",
+                        "size", "width", "height", "radius", "rotation"
+                    ):
+                        if plan.get(key) not in (None, ""):
+                            layer[key] = plan[key]
+                    if layer.get("color") and not layer.get("fill"):
+                        layer["fill"] = layer["color"]
+                    layers.append(layer)
+
+                ctx = {
+                    "source": "OPENAI_STRUCTURED_VISUAL_PLAN",
+                    "authoritative": True,
+                    "complements_prompt": True,
+                    "layers": layers[:32],
+                    "object_count": len(layers),
+                }
+                background = plan.get("background")
+                if isinstance(background, dict):
+                    ctx["background"] = dict(background)
+                elif isinstance(background, str) and background.strip():
+                    ctx["background"] = {"color": background.strip()}
+                description = plan.get("description")
+                if isinstance(description, str) and description.strip():
+                    ctx["description"] = description.strip()
                 return ctx
         return {}
 
@@ -597,7 +672,54 @@ class AprilImagesGenerator:
 
     @classmethod
     def _render_profile_guidance(cls, profile: str) -> str:
-        return cls.RENDER_PROFILE_GUIDANCE.get(str(profile or "neutral_realistic").strip().lower(), cls.RENDER_PROFILE_GUIDANCE["neutral_realistic"])
+        normalized = str(profile or "neutral_realistic").strip().lower()
+        return cls.RENDER_PROFILE_GUIDANCE.get(
+            normalized,
+            cls.RENDER_PROFILE_GUIDANCE["neutral_realistic"],
+        )
+
+    @classmethod
+    def _effective_render_profile(
+        cls,
+        profile: str,
+        semantic_prompt: str,
+        visual_context: Optional[dict[str, Any]] = None,
+    ) -> str:
+        """Sanitize stale automatic profiles without changing explicit specialist styles."""
+        normalized = str(profile or "neutral_realistic").strip().lower()
+        text = str(semantic_prompt or "").lower().replace("ё", "е")
+
+        geometry_terms = (
+            "круг", "квадрат", "треуголь", "геометр", "диаграм", "схем",
+            "формул", "график", "ось", "координат", "geometry", "diagram",
+            "circle", "square", "triangle", "formula", "graph",
+        )
+        natural_terms = (
+            "картофель", "овощ", "фрукт", "животн", "ежик", "кошка", "кот",
+            "собак", "птиц", "лошад", "растен", "цвет", "дерев", "рыб",
+            "помидор", "яблок", "груша", "potato", "vegetable", "fruit",
+            "animal", "plant", "flower", "tree", "fish",
+        )
+
+        # Provider currently uses technical_geometry as a domain default for
+        # some generic image requests. Keep it for actual geometry, otherwise
+        # do not let it distort a natural object render.
+        if normalized == "technical_geometry":
+            if any(term in text for term in geometry_terms):
+                return normalized
+            if any(term in text for term in natural_terms):
+                return (
+                    "naturalistic_wildlife"
+                    if "животн" in text or "animal" in text
+                    else "natural_realistic"
+                )
+            if isinstance(visual_context, dict) and visual_context.get("object_count"):
+                return "neutral_realistic"
+            return "neutral_realistic"
+
+        if normalized in cls.RENDER_PROFILE_GUIDANCE:
+            return normalized
+        return "neutral_realistic"
 
     @classmethod
     def _visual_context_supplement(cls, visual_context: Any) -> str:
@@ -616,6 +738,10 @@ class AprilImagesGenerator:
         bg = visual_context.get("background")
         if isinstance(bg, dict):
             bg_name = cls._visual_color_name(bg.get("color"))
+            if bg_name:
+                parts.append(f"background: solid {bg_name}")
+        elif isinstance(bg, str) and bg.strip():
+            bg_name = cls._visual_color_name(bg)
             if bg_name:
                 parts.append(f"background: solid {bg_name}")
 
@@ -672,8 +798,14 @@ class AprilImagesGenerator:
                 shapes.append(f"{fill} line" if fill else "line")
 
             elif kind == "object":
-                shape = str(layer.get("shape") or "object").strip().lower()
-                item = f"{fill} {shape}" if fill else shape
+                subject = str(
+                    layer.get("shape")
+                    or layer.get("name")
+                    or layer.get("object")
+                    or layer.get("label")
+                    or "object"
+                ).strip().lower()
+                item = f"{fill} {subject}" if fill else subject
                 shapes.append(item)
 
             elif kind == "text":
@@ -722,7 +854,12 @@ class AprilImagesGenerator:
         # If the semantic prompt came only from a short subject word, the raw
         # OpenAI plan still contributes its exact geometry/colors/layout here.
         supplement = cls._visual_context_supplement(visual_context)
-        profile = cls._render_profile_guidance(cfg.get("render_profile") or "neutral_realistic")
+        effective_profile = cls._effective_render_profile(
+            cfg.get("render_profile") or "neutral_realistic",
+            semantic_prompt,
+            visual_context,
+        )
+        profile = cls._render_profile_guidance(effective_profile)
 
         parts = cls._dedupe_semantic_parts([
             semantic_prompt,
@@ -1697,6 +1834,11 @@ class AprilImagesGenerator:
             + prompt[:12000]
             + "\n===== END IMAGE PROMPT TRACE: GENERATOR COMPOSED PROMPT =====\n"
         )
+        effective_profile = cls._effective_render_profile(
+            clean.get("render_profile") or "neutral_realistic",
+            base_prompt,
+            clean.get("visual_context"),
+        )
         print(
             "🔒 IMAGE PROMPT SEMANTIC LOCK:",
             {
@@ -1708,6 +1850,7 @@ class AprilImagesGenerator:
                 "user_request_is_trigger_only": True,
                 "openai_structured_plan_preserved": clean.get("openai_structured_visual_plan_raw") is not None,
                 "render_profile": clean.get("render_profile") or "neutral_realistic",
+                "effective_render_profile": effective_profile,
                 "generator_scene_invention": False,
             },
         )
