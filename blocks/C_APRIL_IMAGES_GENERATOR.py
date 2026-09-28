@@ -72,7 +72,7 @@ class AprilImagesGenerator:
 
     # Semantic prompt budget owned by April.  This is deliberately separate
     # from the native CLIP window (normally 77 tokens).
-    MAX_SEMANTIC_PROMPT_TOKENS = 2000
+    MAX_SEMANTIC_PROMPT_TOKENS = 12000
 
     # Complexity tiers control only optional guidance/conditioning and Turbo
     # sampling steps.  The user's core request is never replaced by these tiers.
@@ -520,7 +520,13 @@ class AprilImagesGenerator:
         *,
         prompt_token_count: Optional[int] = None,
     ) -> str:
-        """Use the authoritative request plus only same-turn Provider visual constraints."""
+        """Use OpenAI semantic meaning plus same-turn structured visual constraints.
+
+        ``prompt`` is expected to be the semantic generation meaning supplied by
+        Provider/OpenAI.  The user's request is carried separately as
+        ``request_anchor`` and is never reintroduced here as duplicate prompt
+        content.
+        """
         semantic_prompt = cls._clean_prompt(prompt)
         if prompt_token_count is None:
             prompt_token_count = len(semantic_prompt.split())
@@ -722,14 +728,24 @@ class AprilImagesGenerator:
 
     @classmethod
     def _token_ids_for_long_prompt(cls, tokenizer: Any, text: str) -> list[int]:
-        """Return raw token ids without truncation.
+        """Return raw token ids without truncation or overlap.
 
-        The 77-token value exposed by CLIP is the native size of one encoder
-        window. It is not an April/OpenAI prompt budget. We split an arbitrarily
-        long prompt into native windows and encode every window separately.
-        No April-side maximum is imposed here.
+        CLIP's native ``model_max_length`` (normally 77) is the size of one
+        encoder window, not an April semantic prompt limit.  Tokenization first
+        collects the complete sequence.  Later, ``_prompt_chunks`` partitions it
+        into sequential, non-overlapping native windows.
         """
+        previous_max_length = getattr(tokenizer, "model_max_length", None)
         try:
+            # Transformers may emit a misleading >77 warning even with
+            # truncation=False because the tokenizer's configured reporting
+            # limit is still 77.  Temporarily disable that reporting limit only
+            # while collecting raw ids; the actual encoder window remains 77
+            # and is enforced by _prompt_chunks().
+            try:
+                tokenizer.model_max_length = 10**9
+            except Exception:
+                pass
             return list(
                 tokenizer.encode(
                     str(text or ""),
@@ -739,6 +755,12 @@ class AprilImagesGenerator:
             )
         except Exception as exc:
             raise RuntimeError("APRIL_IMAGES_TOKENIZATION_FAILED") from exc
+        finally:
+            if previous_max_length is not None:
+                try:
+                    tokenizer.model_max_length = previous_max_length
+                except Exception:
+                    pass
 
     @classmethod
     def _prompt_chunks(
@@ -787,10 +809,9 @@ class AprilImagesGenerator:
         chunk_body = model_max - 2
         chunks: list[list[int]] = []
 
-        if not raw_ids:
-            raw_ids = []
-
         for start in range(0, len(raw_ids), chunk_body):
+            # Deliberately non-overlapping: every raw token belongs to exactly
+            # one native window.  No sliding overlap and no repeated context.
             body = raw_ids[start:start + chunk_body]
             ids = [int(bos_id), *map(int, body), int(eos_id)]
             ids.extend([int(pad_id)] * (model_max - len(ids)))
@@ -1251,6 +1272,23 @@ class AprilImagesGenerator:
                 // max(native_limit - 2, 1),
             )
 
+        if prompt_token_count > native_limit:
+            window_body = max(native_limit - 2, 1)
+            expected_windows = (
+                (prompt_token_count + window_body - 1) // window_body
+            )
+            print(
+                "🧩 IMAGE PROMPT STRUCTURED WINDOWS:",
+                {
+                    "raw_tokens": int(prompt_token_count),
+                    "native_window_tokens": int(native_limit),
+                    "windows": int(expected_windows),
+                    "overlap_tokens": 0,
+                    "truncation": False,
+                    "ordering": "sequential_non_overlapping",
+                },
+            )
+
         print(
             "🧠 IMAGE GENERATION PROFILE:",
             {
@@ -1464,6 +1502,7 @@ class AprilImagesGenerator:
                 "generation_prompt": prompt,
                 "scene_content_authority": "OPENAI_STRUCTURED_VISUAL_PLAN",
                 "generation_prompt_source": "OPENAI_SEMANTIC_PLAN",
+                "user_request_is_trigger_only": True,
                 "generator_scene_invention": False,
             },
         )
@@ -1499,7 +1538,7 @@ class AprilImagesGenerator:
             clean.get("seed"),
             cls._negative_prompt(clean),
             pipeline=pipeline,
-            semantic_token_count=base_prompt_tokens,
+            semantic_token_count=final_prompt_tokens,
         )
         image_bytes = cls._png_bytes(image)
         cls._validate_png(image_bytes, width, height)
