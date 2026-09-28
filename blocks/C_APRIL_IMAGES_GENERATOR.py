@@ -795,6 +795,25 @@ class AprilImagesGenerator:
         return pipeline.to(device)
 
     @classmethod
+    def _require_backend(cls) -> None:
+        """Fail fast when the canonical local Diffusers backend is unavailable.
+
+        This is only a configuration/runtime guard. It does not introduce a
+        fallback provider or alter the existing image-generation route.
+        """
+        if AutoPipelineForText2Image is None or AutoPipelineForImage2Image is None:
+            raise RuntimeError("APRIL_IMAGES_DIFFUSERS_NOT_INSTALLED")
+        if torch is None:
+            raise RuntimeError("APRIL_IMAGES_TORCH_NOT_INSTALLED")
+
+        source = cls._model_source().strip()
+        if not source:
+            raise RuntimeError("APRIL_IMAGES_MODEL_SOURCE_NOT_CONFIGURED")
+
+        if cls._model_path() and not cls._model_is_local():
+            raise RuntimeError("APRIL_IMAGES_LOCAL_MODEL_PATH_INVALID")
+
+    @classmethod
     def _load_text_pipeline(cls):
         cls._require_backend()
         source = cls._model_source()
