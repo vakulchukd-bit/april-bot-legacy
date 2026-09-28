@@ -65,7 +65,7 @@ class AprilImagesGenerator:
     """The only image producer between Interpretation and C_ARTIFACT."""
 
     ENGINE_NAME = "April Images Generation"
-    ENGINE_VERSION = "2.6.1"
+    ENGINE_VERSION = "2.7.0"
     BACKEND = "diffusers_single_backend"
 
     DEFAULT_SIZE = (512, 512)
@@ -76,8 +76,8 @@ class AprilImagesGenerator:
     # from the native CLIP window (normally 77 tokens).
     MAX_SEMANTIC_PROMPT_TOKENS = 12000
 
-    # Complexity tiers control only optional guidance/conditioning and Turbo
-    # sampling steps.  The user's core request is never replaced by these tiers.
+    # Complexity tiers control only Turbo sampling steps.  They never alter
+    # or replace the user/OpenAI visual semantics.
     PROMPT_TIERS = (
         (100, "core"),
         (200, "style"),
@@ -419,6 +419,7 @@ class AprilImagesGenerator:
             "серый": "gray", "серая": "gray", "серое": "gray",
             "красный": "red", "красная": "red", "красное": "red",
             "жёлтый": "yellow", "желтый": "yellow", "жёлтая": "yellow", "желтая": "yellow",
+            "коричневый": "brown", "коричневая": "brown", "коричневое": "brown", "коричневом": "brown",
             "зелёный": "green", "зеленый": "green", "зелёная": "green", "зеленая": "green",
             "синий": "blue", "синяя": "blue",
             "голубой": "light blue", "голубая": "light blue",
@@ -673,11 +674,9 @@ class AprilImagesGenerator:
 
     @classmethod
     def _render_profile_guidance(cls, profile: str) -> str:
-        normalized = str(profile or "neutral_realistic").strip().lower()
-        return cls.RENDER_PROFILE_GUIDANCE.get(
-            normalized,
-            cls.RENDER_PROFILE_GUIDANCE["neutral_realistic"],
-        )
+        # Compatibility shim: render styles are metadata only and are no longer
+        # injected into the Turbo prompt.
+        return ""
 
     @classmethod
     def _effective_render_profile(
@@ -722,9 +721,168 @@ class AprilImagesGenerator:
             return normalized
         return "neutral_realistic"
 
+    # -------------------------------------------------
+    # English-only visual language adapter
+    # -------------------------------------------------
+
+    # Keep this vocabulary intentionally visual and conservative. The Provider
+    # remains responsible for semantic interpretation; this layer only changes
+    # the language presented to the English-centric image model.
+    _RU_EN_VISUAL_PHRASES = {
+        "сделай изображение": "create an image",
+        "сделай картинку": "create an image",
+        "создай изображение": "create an image",
+        "создай картинку": "create an image",
+        "нарисуй изображение": "draw an image",
+        "нарисуй картинку": "draw an image",
+        "на белом фоне": "on a white background",
+        "на черном фоне": "on a black background",
+        "на чёрном фоне": "on a black background",
+        "на синем фоне": "on a blue background",
+        "на зеленом фоне": "on a green background",
+        "на зелёном фоне": "on a green background",
+        "на красном фоне": "on a red background",
+        "на желтом фоне": "on a yellow background",
+        "на жёлтом фоне": "on a yellow background",
+        "на сером фоне": "on a gray background",
+        "в центре": "in the center",
+        "по центру": "centered",
+        "слева": "on the left",
+        "справа": "on the right",
+        "сверху": "at the top",
+        "снизу": "at the bottom",
+        "рядом с": "next to",
+        "деревянный стол": "wooden table",
+        "деревянным столом": "wooden table",
+        "деревянная мебель": "wooden furniture",
+        "у окна": "by the window",
+        "дневной свет": "daylight",
+    }
+
+    _RU_EN_VISUAL_WORDS = {
+        "нарисуй": "draw", "нарисовать": "draw", "изобрази": "depict", "изобразить": "depict",
+        "создай": "create", "создать": "create", "покажи": "show", "показать": "show",
+        "изображение": "image", "изображения": "images", "картинка": "image", "картинку": "image",
+        "рисунок": "drawing", "рисунка": "drawing", "сцена": "scene", "картина": "painting",
+        "круг": "circle", "круга": "circle", "круглый": "round", "круглая": "round",
+        "квадрат": "square", "квадрата": "square", "квадратный": "square", "квадратная": "square",
+        "треугольник": "triangle", "треугольника": "triangle", "треугольный": "triangular",
+        "прямоугольник": "rectangle", "прямоугольника": "rectangle", "овал": "ellipse", "эллипс": "ellipse",
+        "линия": "line", "линии": "line", "точка": "dot", "точку": "dot",
+        "пиксель": "pixel", "пикселей": "pixels", "форма": "shape", "формы": "shapes",
+        "предмет": "object", "объект": "object", "объекта": "object",
+        "цвет": "color", "цвета": "colors", "фон": "background", "фоне": "background",
+        "белый": "white", "белая": "white", "белое": "white", "белом": "white",
+        "черный": "black", "черная": "black", "черное": "black", "черном": "black",
+        "чёрный": "black", "чёрная": "black", "чёрное": "black", "чёрном": "black",
+        "красный": "red", "красная": "red", "красное": "red", "красном": "red",
+        "желтый": "yellow", "желтая": "yellow", "желтое": "yellow", "желтом": "yellow",
+        "жёлтый": "yellow", "жёлтая": "yellow", "жёлтое": "yellow", "жёлтом": "yellow",
+        "зеленый": "green", "зеленая": "green", "зеленое": "green", "зеленом": "green",
+        "зелёный": "green", "зелёная": "green", "зелёное": "green", "зелёном": "green",
+        "синий": "blue", "синяя": "blue", "синее": "blue", "синем": "blue",
+        "голубой": "light blue", "голубая": "light blue", "голубое": "light blue", "голубом": "light blue",
+        "серый": "gray", "серая": "gray", "серое": "gray", "сером": "gray",
+        "коричневый": "brown", "коричневая": "brown", "коричневое": "brown", "коричневом": "brown",
+        "оранжевый": "orange", "оранжевая": "orange", "оранжевое": "orange", "оранжевом": "orange",
+        "фиолетовый": "purple", "фиолетовая": "purple", "фиолетовое": "purple",
+        "розовый": "pink", "розовая": "pink", "розовое": "pink",
+        "человек": "person", "люди": "people", "мужчина": "man", "женщина": "woman",
+        "ребенок": "child", "ребёнок": "child", "дети": "children",
+        "кот": "cat", "кошка": "cat", "кошки": "cats", "собака": "dog", "собаки": "dogs",
+        "заяц": "rabbit", "кролик": "rabbit", "еж": "hedgehog", "ёж": "hedgehog",
+        "ежик": "hedgehog", "ёжик": "hedgehog", "птица": "bird", "птицы": "birds",
+        "лошадь": "horse", "лошад": "horse", "велосипед": "bicycle", "велосипеда": "bicycle",
+        "автомобиль": "car", "машина": "car", "машины": "cars", "дом": "house", "дома": "houses",
+        "здание": "building", "здания": "buildings", "дерево": "tree", "деревья": "trees",
+        "цветок": "flower", "цветы": "flowers", "яблоко": "apple", "яблоки": "apples",
+        "груша": "pear", "картофель": "potato", "картошка": "potato",
+        "овощ": "vegetable", "овощи": "vegetables", "фрукт": "fruit", "фрукты": "fruits",
+        "лес": "forest", "моря": "sea", "море": "sea", "океан": "ocean",
+        "река": "river", "реки": "rivers", "озеро": "lake", "озера": "lakes",
+        "гора": "mountain", "горы": "mountains", "небо": "sky", "облако": "cloud", "облака": "clouds",
+        "солнце": "sun", "солнцем": "sun", "закат": "sunset", "закате": "sunset", "восход": "sunrise",
+        "дорога": "road",
+        "улица": "street", "город": "city", "кухня": "kitchen", "стол": "table",
+        "стул": "chair", "комната": "room", "окно": "window", "дверь": "door",
+        "портрет": "portrait", "пейзаж": "landscape", "красивый": "beautiful",
+        "красивая": "beautiful", "красивое": "beautiful", "простой": "simple",
+        "кухню": "kitchen", "кухне": "kitchen", "кухней": "kitchen",
+        "деревянный": "wooden", "деревянная": "wooden", "деревянное": "wooden",
+        "деревянным": "wooden", "деревянной": "wooden", "деревянную": "wooden",
+        "окно": "window", "окна": "window", "окну": "window",
+        "свет": "light", "света": "light", "светом": "light", "дневной": "daylight",
+
+        "простая": "simple", "простое": "simple", "большой": "large", "большая": "large",
+        "большое": "large", "маленький": "small", "маленькая": "small", "маленькое": "small",
+        "светлый": "light", "светлая": "light", "темный": "dark", "тёмный": "dark",
+        "один": "one", "одна": "one", "одно": "one", "два": "two", "две": "two",
+        "три": "three", "четыре": "four", "пять": "five",
+    }
+
+    _RU_EN_FUNCTION_WORDS = {
+        "и": "and", "или": "or", "с": "with", "со": "with", "без": "without",
+        "в": "in", "во": "in", "на": "on", "под": "under", "над": "above",
+        "перед": "in front of", "за": "behind", "для": "for", "по": "by",
+        "к": "to", "ко": "to", "от": "from", "из": "from", "рядом": "near",
+        "слева": "left", "справа": "right",
+    }
+
+    @classmethod
+    def _to_english_visual_text(cls, value: Any) -> str:
+        """Translate visual content to English without changing its meaning."""
+        text = cls._extract_semantic_prompt(value)
+        if not text:
+            return ""
+
+        text = re.sub(r"\s+", " ", text).strip().casefold()
+
+        for source, target in sorted(
+            cls._RU_EN_VISUAL_PHRASES.items(),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        ):
+            text = text.replace(source.casefold(), target)
+
+        tokens = re.findall(
+            r"[A-Za-zА-Яа-яЁё0-9_#%+-]+|[^\w\s]",
+            text,
+            flags=re.UNICODE,
+        )
+        translated: list[str] = []
+        for token in tokens:
+            if re.search(r"[а-яё]", token, flags=re.IGNORECASE):
+                replacement = (
+                    cls._RU_EN_VISUAL_WORDS.get(token)
+                    or cls._RU_EN_FUNCTION_WORDS.get(token)
+                )
+                translated.append(replacement or token)
+            else:
+                translated.append(token)
+
+        result = " ".join(translated)
+        result = re.sub(r"\s+([,.;:!?])", r"\1", result)
+        result = re.sub(r"\s+", " ", result).strip()
+
+        # Command verbs are not useful as scene content once the renderer is
+        # already executing an image request.
+        result = re.sub(
+            r"^(?:draw|create|depict|show)\s+(?:an?\s+)?(?:image|picture|drawing)\s*(?::|-)?\s*",
+            "",
+            result,
+            flags=re.IGNORECASE,
+        )
+        return result.strip(" ,.;:-")
+
+    @classmethod
+    def _english_request_anchor(cls, spec: Optional[dict[str, Any]]) -> str:
+        if not isinstance(spec, dict):
+            return ""
+        return cls._to_english_visual_text(spec.get("request_anchor") or "")
+
     @classmethod
     def _visual_context_supplement(cls, visual_context: Any) -> str:
-        """Translate only same-turn Provider geometry/color evidence into Turbo text."""
+        """Convert only same-turn OpenAI visual evidence into concise English."""
         if not isinstance(visual_context, dict):
             return ""
         if str(visual_context.get("source") or "").strip().upper() != "OPENAI_STRUCTURED_VISUAL_PLAN":
@@ -733,9 +891,7 @@ class AprilImagesGenerator:
             return ""
 
         parts: list[str] = []
-        # Semantic OpenAI meaning is already carried in spec["prompt"]. Do not
-        # append the same description a second time here; visual_context is reserved
-        # for additional structured geometry/color constraints.
+
         bg = visual_context.get("background")
         if isinstance(bg, dict):
             bg_name = cls._visual_color_name(bg.get("color"))
@@ -746,7 +902,6 @@ class AprilImagesGenerator:
             if bg_name:
                 parts.append(f"background: solid {bg_name}")
 
-        circles: list[str] = []
         shapes: list[str] = []
         requested_text: list[str] = []
         layers = visual_context.get("layers")
@@ -770,7 +925,7 @@ class AprilImagesGenerator:
                         item += f" at {vert} {horiz}"
                     except Exception:
                         pass
-                circles.append(item)
+                shapes.append(item)
 
             elif kind == "rect":
                 shape = str(layer.get("shape") or "rectangle").strip().lower()
@@ -799,35 +954,39 @@ class AprilImagesGenerator:
                 shapes.append(f"{fill} line" if fill else "line")
 
             elif kind == "object":
-                subject = str(
+                subject = cls._to_english_visual_text(
                     layer.get("shape")
                     or layer.get("name")
                     or layer.get("object")
                     or layer.get("label")
                     or "object"
-                ).strip().lower()
+                )
                 item = f"{fill} {subject}" if fill else subject
                 shapes.append(item)
 
             elif kind == "text":
-                value = str(layer.get("text") or "").strip()
+                value = cls._to_english_visual_text(layer.get("text") or "")
                 if value:
                     requested_text.append(value[:100])
 
-        if circles:
-            parts.append("circles: " + ", ".join(circles[:8]))
         if shapes:
             parts.append("explicit shapes: " + ", ".join(shapes[:8]))
         if requested_text:
             parts.append("requested text: " + "; ".join(requested_text[:4]))
+        description = cls._to_english_visual_text(visual_context.get("description") or "")
+        if description:
+            parts.append("OpenAI visual description: " + description)
+
         object_count = visual_context.get("object_count")
         if object_count:
-            parts.append(f"object count: {int(object_count)}")
+            try:
+                parts.append(f"object count: {int(object_count)}")
+            except (TypeError, ValueError):
+                pass
+
         if not parts:
             return ""
-
-        parts.append("this blueprint complements the user request; preserve supplied objects, colors and layout; add no other objects or artistic elements")
-        return ("Provider visual blueprint: " + "; ".join(parts))[:1100]
+        return "OpenAI visual constraints: " + "; ".join(parts)
 
     @classmethod
     def _compose_prompt(
@@ -837,45 +996,47 @@ class AprilImagesGenerator:
         *,
         prompt_token_count: Optional[int] = None,
     ) -> str:
-        """Compile one non-duplicating semantic prompt for the image model.
+        """Compile one English-only semantic prompt from the user + OpenAI plan.
 
-        The user request is an execution trigger/anchor.  ``prompt`` is the
-        OpenAI semantic meaning.  The preserved OpenAI structured plan is parsed
-        into complementary visual constraints and never duplicated verbatim.
+        The user request is included as the visual target.  OpenAI semantic
+        meaning and same-turn structured visual constraints are added once.
+        Render profiles/styles are not injected into the image-model prompt.
         """
         cfg = spec if isinstance(spec, dict) else {}
-        semantic_prompt = cls._clean_prompt(prompt)
-        if prompt_token_count is None:
-            prompt_token_count = len(semantic_prompt.split())
+
+        semantic_prompt = cls._to_english_visual_text(prompt)
+        if not semantic_prompt:
+            raise ValueError("APRIL_IMAGES_EMPTY_ENGLISH_PROMPT")
+
+        request_anchor = cls._english_request_anchor(cfg)
+        openai_semantic = cls._to_english_visual_text(
+            cfg.get("openai_structured_visual_plan_semantic") or ""
+        )
 
         raw_plan = cfg.get("openai_structured_visual_plan_raw")
         raw_context = cls._openai_plan_to_visual_context(raw_plan)
         visual_context = cls._merge_plan_context(cfg.get("visual_context"), raw_context)
-
-        # If the semantic prompt came only from a short subject word, the raw
-        # OpenAI plan still contributes its exact geometry/colors/layout here.
         supplement = cls._visual_context_supplement(visual_context)
-        effective_profile = cls._effective_render_profile(
-            cfg.get("render_profile") or "neutral_realistic",
-            semantic_prompt,
-            visual_context,
-        )
-        profile = cls._render_profile_guidance(effective_profile)
 
-        parts = cls._dedupe_semantic_parts([
-            semantic_prompt,
-            supplement,
-            f"Rendering discipline: {profile}",
-            "Preserve every supplied subject, color, background, geometry and spatial relationship. Do not add, remove or replace scene elements.",
-        ])
+        parts = []
+        if request_anchor:
+            parts.append(f"User requested: {request_anchor}")
+        if openai_semantic and openai_semantic.casefold() != request_anchor.casefold():
+            parts.append(f"OpenAI visual meaning: {openai_semantic}")
+        if semantic_prompt:
+            parts.append(f"Visual target: {semantic_prompt}")
+        if supplement:
+            parts.append(supplement)
+
+        # One neutral renderer instruction. It contains no scene/style content.
+        parts.append(
+            "Render the requested visual content faithfully. Do not add unrelated subjects."
+        )
+
+        parts = cls._dedupe_semantic_parts(parts)
         final_prompt = "\n".join(parts)
 
-        token_count = prompt_token_count
-        if token_count is None:
-            token_count = len(final_prompt.split())
-        if int(len(final_prompt)) > 0 and int(len(final_prompt.split())) > cls.MAX_SEMANTIC_PROMPT_TOKENS:
-            # Do not hard-cut text. The actual tokenizer path below performs the
-            # model-window split; this guard is only for an absurdly large object.
+        if len(final_prompt.split()) > cls.MAX_SEMANTIC_PROMPT_TOKENS:
             raise ValueError(
                 f"APRIL_IMAGES_PROMPT_TOO_LONG:{len(final_prompt.split())}>"
                 f"{cls.MAX_SEMANTIC_PROMPT_TOKENS}"
@@ -1460,7 +1621,10 @@ class AprilImagesGenerator:
             # explicit same-turn geometry/color blueprint two steps so the model
             # has an additional denoising opportunity to honor exact simple shapes.
             cpu_fast_path = cls._device() == "cpu"
-            structured_visual = "provider visual blueprint:" in str(prompt or "").lower()
+            structured_visual = any(
+                marker in str(prompt or "").lower()
+                for marker in ("openai visual constraints:", "openai visual meaning:")
+            )
             if count <= 200:
                 steps = 2 if structured_visual else (1 if cpu_fast_path else 2)
             elif count <= 500:
@@ -1733,6 +1897,7 @@ class AprilImagesGenerator:
             "style": style,
             "quality": quality,
             "visual_context": visual_context or {},
+            "request_anchor": cls._clean_prompt(request),
         }
         return cls._compose_prompt(cls._clean_prompt(request), spec)
 
@@ -1846,12 +2011,14 @@ class AprilImagesGenerator:
                 "request_anchor": clean.get("request_anchor") or "",
                 "source_prompt": base_prompt,
                 "generation_prompt": prompt,
-                "scene_content_authority": "OPENAI_STRUCTURED_VISUAL_PLAN",
-                "generation_prompt_source": "OPENAI_SEMANTIC_PLAN_PLUS_STRUCTURED_PLAN",
-                "user_request_is_trigger_only": True,
+                "scene_content_authority": "USER_REQUEST_PLUS_OPENAI_STRUCTURED_VISUAL_PLAN",
+                "generation_prompt_source": "USER_REQUEST_PLUS_OPENAI_SEMANTIC_PLAN_PLUS_STRUCTURED_PLAN",
+                "user_request_is_trigger_only": False,
                 "openai_structured_plan_preserved": clean.get("openai_structured_visual_plan_raw") is not None,
                 "render_profile": clean.get("render_profile") or "neutral_realistic",
                 "effective_render_profile": effective_profile,
+                "render_profile_injected_into_prompt": False,
+                "final_prompt_language": "en",
                 "generator_scene_invention": False,
             },
         )
@@ -1866,6 +2033,8 @@ class AprilImagesGenerator:
                 "semantic_chars": len(prompt),
                 "base_prompt_tokens": int(base_prompt_tokens),
                 "final_prompt_tokens": int(final_prompt_tokens),
+                "prompt_language": "en",
+                "translation_mode": "local_visual_lexicon",
                 "contains_markup": bool(
                     re.search(
                         r"<(?:svg|path|rect|circle)\\b|data:image/",
