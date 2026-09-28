@@ -426,6 +426,9 @@ class AprilImagesGenerator:
             return ""
 
         parts: list[str] = []
+        # Semantic OpenAI meaning is already carried in spec["prompt"]. Do not
+        # append the same description a second time here; visual_context is reserved
+        # for additional structured geometry/color constraints.
         bg = visual_context.get("background")
         if isinstance(bg, dict):
             bg_name = cls._visual_color_name(bg.get("color"))
@@ -1421,6 +1424,7 @@ class AprilImagesGenerator:
                 "schema": clean.get("schema"),
                 "generator_signal": clean.get("generator_signal") or "implicit_canonical_route",
                 "request_anchor": clean.get("request_anchor") or "",
+                "semantic_generation_prompt": clean.get("prompt") or "",
                 "prompt_chars": len(str(clean.get("prompt") or "")),
                 "style": clean.get("style"),
                 "quality": clean.get("quality"),
@@ -1455,9 +1459,11 @@ class AprilImagesGenerator:
         print(
             "🔒 IMAGE PROMPT SEMANTIC LOCK:",
             {
+                "request_anchor": clean.get("request_anchor") or "",
                 "source_prompt": base_prompt,
                 "generation_prompt": prompt,
-                "scene_content_authority": "provider_semantic_prompt",
+                "scene_content_authority": "OPENAI_STRUCTURED_VISUAL_PLAN",
+                "generation_prompt_source": "OPENAI_SEMANTIC_PLAN",
                 "generator_scene_invention": False,
             },
         )
