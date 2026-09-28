@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import html
+import hashlib
 import io
 import json
 import os
@@ -1901,6 +1902,42 @@ class AprilImagesGenerator:
                 "variant": variant,
             },
         )
+
+        # Diagnostic-only observation point:
+        # the PNG has already been generated and validated, but has NOT yet
+        # entered C_ARTIFACT_CONTRACT.  This block must never mutate, replace,
+        # encode, or otherwise alter image_bytes or the downstream artifact.
+        # Any diagnostic failure is swallowed so logging can never break the
+        # generation route.
+        try:
+            output_sha256 = hashlib.sha256(image_bytes).hexdigest()
+            print(
+                "🔎 APRIL IMAGE GENERATOR RASTER EXIT (OBSERVATION ONLY):",
+                {
+                    "request_anchor": clean.get("request_anchor") or "",
+                    "generator_prompt": prompt,
+                    "model": cls._model_source(),
+                    "backend": cls.BACKEND,
+                    "variant": variant,
+                    "width": int(width),
+                    "height": int(height),
+                    "png_bytes": len(image_bytes),
+                    "png_sha256": output_sha256,
+                    "png_validation": "passed",
+                    "next_route": "C_ARTIFACT_CONTRACT",
+                    "image_bytes_forwarded_unchanged": True,
+                },
+            )
+        except Exception as diag_exc:
+            print(
+                "⚠️ APRIL IMAGE GENERATOR RASTER EXIT DIAGNOSTIC FAILED:",
+                {
+                    "error_type": type(diag_exc).__name__,
+                    "error": str(diag_exc)[:240],
+                    "image_bytes_forwarded_unchanged": True,
+                },
+            )
+
         artifact, contract = cls.build_artifact(
             image_bytes=image_bytes,
             prompt=prompt,
