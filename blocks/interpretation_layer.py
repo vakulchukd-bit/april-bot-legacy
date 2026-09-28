@@ -1992,6 +1992,13 @@ class DialogueEnvironmentEngine:
         "что я спрашивал", "что я спрашивала", "мой прошлый вопрос", "помнишь", "из памяти",
         "вернись к теме", "вернемся к теме", "вернёмся к теме", "к той теме", "к прошлой теме",
     )
+    _VISUAL_REFERENCE = (
+        "как ты себя описала", "как ты описывала себя", "как ты себя видишь", "как ты себя представляешь",
+        "как ты себя представляла", "как ты меня описывала", "по тому описанию", "по твоему описанию",
+        "из нашего диалога", "из предыдущего диалога", "как мы описывали", "покажи ту картинку",
+        "покажи эту картинку", "нарисуй как ты", "нарисуй то, как ты", "так как ты описала",
+        "так, как ты описала", "так как ты себя описала",
+    )
     _NEW_TOPIC = (
         "новая тема", "другая тема", "сменим тему", "перейдем к", "перейдём к",
         "давай про другое", "давай теперь про", "а теперь про", "отдельно поговорим",
@@ -2084,18 +2091,25 @@ class DialogueEnvironmentEngine:
             user = user.get("text") or user.get("content") or user.get("answer") or user.get("user_request")
         if isinstance(april, dict):
             april = april.get("answer") or april.get("content") or april.get("summary") or april.get("april_answer")
-        user = cls._text(user or item.get("user_request"))
-        april = cls._text(april or item.get("april_answer"))
+        user = cls._text(user or item.get("user_request") or item.get("last_user_request"))
+        april = cls._text(april or item.get("april_answer") or item.get("last_april_answer"))
         if not user and not april:
             return {}
+        visual_attachment = item.get("visual_attachment")
+        if not isinstance(visual_attachment, dict):
+            current_turn = item.get("current_turn") if isinstance(item.get("current_turn"), dict) else {}
+            visual_attachment = current_turn.get("visual_attachment") if isinstance(current_turn.get("visual_attachment"), dict) else {}
+        if not visual_attachment and isinstance(item.get("last_visual_attachment"), dict):
+            visual_attachment = item.get("last_visual_attachment")
         return {
             "user": user,
             "april": april,
             "sequence_id": cls._text(item.get("sequence_id") or item.get("dialogue_sequence_id") or scope.get("dialogue_sequence_id")),
-            "scene_id": cls._text(item.get("scene_id") or item.get("visual_scene_id")),
+            "scene_id": cls._text(item.get("scene_id") or item.get("visual_scene_id") or item.get("last_visual_scene_id")),
             "conversation_id": cls._text(item.get("conversation_id") or scope.get("conversation_id")),
             "user_id": cls._text(item.get("user_id") or scope.get("user_id")),
             "timestamp": cls._timestamp(item.get("created_at") or item.get("timestamp") or item.get("updated_at")),
+            "visual_attachment": deepcopy(visual_attachment) if isinstance(visual_attachment, dict) else {},
             "raw": item,
         }
 
@@ -2124,6 +2138,15 @@ class DialogueEnvironmentEngine:
                     push(pair)
                     if len(candidates) >= 2:
                         break
+
+        # The active authenticated sequence is the durable hot anchor. It may be
+        # present after a state restore even when short transport history/legacy
+        # last_* fields have not been rebuilt yet.
+        sequence = state.get("active_dialogue_sequence")
+        if isinstance(sequence, dict):
+            pair = cls._pair_from_item(sequence, scope)
+            if pair:
+                push(pair)
 
         # Prefer actual chronological history over potentially stale convenience
         # fields such as state.last_user_turn/last_april_turn. Those fields can lag
@@ -2276,6 +2299,11 @@ class DialogueEnvironmentEngine:
     def _memory_query(cls, text: str) -> bool:
         low = cls._low(text)
         return bool(cls._identity_query(text) or any(x in low for x in cls._MEMORY_RECALL))
+
+    @classmethod
+    def _visual_reference_query(cls, text: str) -> bool:
+        low = cls._low(text)
+        return any(marker in low for marker in cls._VISUAL_REFERENCE)
 
     @classmethod
     def _identity_unknown_answer(cls, text: str) -> bool:
@@ -2847,19 +2875,34 @@ class DialogueEnvironmentEngine:
         scope = cls._scope(state)
         previous = cls._latest_pair(state, history, scope)
 
-        # Current-turn task starts have priority over the old open task.  Otherwise
-        # an old riddle/question can steal a completely new request.
+        # A visual reference is a dialogue dependency, not a fresh image topic.
+        # Keep the authenticated sequence authoritative when the referenced turn
+        # is immediately available; otherwise fall back to 7-day RECALL.
+        visual_reference = cls._visual_reference_query(text)
         current_task = cls._current_task_start(text, scope)
-        if current_task:
+        explicit_new = cls._explicit_new_topic(text)
+        if explicit_new:
+            env = cls._new_topic_context(text, scope)
+        elif visual_reference and previous:
+            env = cls._continuation_context(text, previous, scope)
+            env["turn_relation"] = "VISUAL_REFERENCE"
+            env["context_dependency"] = "active_dialogue_sequence"
+            env["visual_reference"] = True
+        elif visual_reference:
+            env = cls._recall_context(text, state, history, scope)
+            env["turn_relation"] = "REFERENCE_OLD_VISUAL"
+            env["visual_reference"] = True
+        elif current_task:
             env = cls._new_topic_context(text, scope)
         elif cls._memory_query(text):
             env = cls._recall_context(text, state, history, scope)
-        elif cls._explicit_new_topic(text):
-            env = cls._new_topic_context(text, scope)
         elif previous:
             env = cls._continuation_context(text, previous, scope)
         else:
             env = cls._new_topic_context(text, scope)
+
+        env["visual_reference"] = bool(visual_reference)
+        env["previous_visual_attachment"] = deepcopy(previous.get("visual_attachment") or {}) if isinstance(previous, dict) else {}
 
         active_task = env.get("active_task") if isinstance(env.get("active_task"), dict) else {}
         active_entity = cls._text(env.get("active_entity"))
@@ -2914,6 +2957,8 @@ class DialogueEnvironmentEngine:
             "active_task": active_task,
             "previous_user_turn": cls._text(previous.get("user")),
             "previous_april_turn": cls._text(previous.get("april")),
+            "previous_visual_attachment": deepcopy(previous.get("visual_attachment") or {}),
+            "visual_reference": bool(env.get("visual_reference")),
             "selected_memory": list(env.get("selected_memory") or []),
             "historical_memory_allowed": bool(env.get("historical_memory_allowed")),
             "resolved_request": cls._text(text),
@@ -3082,6 +3127,7 @@ class DialogueRelationEngine(InterpretationEngineBase):
         low = current.lower().strip(" .,!?:;-")
         confirmation = low in DialogueEnvironmentEngine._CONFIRMATION
         rejection = low in DialogueEnvironmentEngine._REJECTION
+        visual_reference = bool(env.get("visual_reference")) or DIALOGUE_ENVIRONMENT_ENGINE._visual_reference_query(current)
         explicit_recall = (
             DIALOGUE_ENVIRONMENT_ENGINE._memory_query(current)
             or (
@@ -3092,7 +3138,13 @@ class DialogueRelationEngine(InterpretationEngineBase):
         )
         explicit_new = DIALOGUE_ENVIRONMENT_ENGINE._explicit_new_topic(current)
 
-        if explicit_recall:
+        if explicit_new:
+            relation = "NEW"
+            turn_relation = "NEW_TOPIC"
+        elif visual_reference and previous_april:
+            relation = "CONTINUE"
+            turn_relation = "VISUAL_REFERENCE"
+        elif explicit_recall:
             relation = "RECALL"
             turn_relation = "REFERENCE_OLD_TOPIC"
         elif confirmation and previous_april:
@@ -3129,6 +3181,8 @@ class DialogueRelationEngine(InterpretationEngineBase):
             "reference": relation == "RECALL",
             "previous_user_turn": previous_user,
             "previous_april_turn": previous_april,
+            "previous_visual_attachment": deepcopy(env.get("previous_visual_attachment") or {}),
+            "visual_reference": visual_reference,
             "active_task": task,
             "task_active": task_active,
             "context_dependency": env.get("context_dependency") or ("continuation" if relation == "CONTINUE" else "new_topic"),
@@ -3795,6 +3849,8 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
         "сумм", "от него", "от этого", "из этого", "это число", "тот ответ",
         "этот ответ", "как я просил", "я задавал", "спрашивал", "просил",
         "посмотри", "просмотри", "в истории", "раньше", "до этого",
+        "как ты себя", "как ты описала", "как ты описывала", "по твоему описанию",
+        "из нашего диалога", "из предыдущего диалога", "ту картинку", "эту картинку",
     )
     _FOLLOWUP_MARKERS = (
         "так сколько", "ну сколько", "и сколько", "сколько получилось",
@@ -3899,35 +3955,122 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
 
     @classmethod
     def _normalize_history(cls, history: Any) -> list[dict[str, Any]]:
-        """Normalize the small transport history without invoking another engine."""
+        """Normalize transport history into complete USER↔APRIL dialogue turns.
+
+        The runtime hot history stores USER and APRIL as adjacent messages.  For
+        recall/continuation we must reunite those two messages before semantic
+        scoring so the assistant's answer (and its visual attachment) cannot be
+        lost merely because transport is message-oriented.
+        """
         turns = history if isinstance(history, list) else []
         out: list[dict[str, Any]] = []
+        pending_user: dict[str, Any] | None = None
+
+        def _visual_from_message(item: dict[str, Any]) -> dict[str, Any]:
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            value = item.get("visual_attachment")
+            if not isinstance(value, dict):
+                value = metadata.get("visual_attachment")
+            return deepcopy(value) if isinstance(value, dict) else {}
+
+        def _append_user_only(item: dict[str, Any]) -> None:
+            nonlocal pending_user
+            user_text = cls._text(item.get("content") or item.get("text") or item.get("user_request"))
+            if not user_text:
+                return
+            pending_user = {
+                "user": user_text,
+                "assistant": "",
+                "turn_id": item.get("turn_id"),
+                "raw_user": item,
+                "visual_attachment": _visual_from_message(item),
+            }
+
+        def _append_assistant_only(item: dict[str, Any]) -> None:
+            assistant_text = cls._text(item.get("answer") or item.get("content") or item.get("summary") or item.get("text"))
+            if not assistant_text:
+                return
+            out.append({
+                "user": "",
+                "assistant": assistant_text,
+                "turn_id": item.get("turn_id"),
+                "raw": item,
+                "visual_attachment": _visual_from_message(item),
+            })
+
+        def _flush_pending() -> None:
+            nonlocal pending_user
+            if pending_user:
+                out.append({
+                    "user": pending_user.get("user", ""),
+                    "assistant": pending_user.get("assistant", ""),
+                    "turn_id": pending_user.get("turn_id"),
+                    "raw": pending_user.get("raw_user") or {},
+                    "visual_attachment": deepcopy(pending_user.get("visual_attachment") or {}),
+                })
+                pending_user = None
+
         for item in turns:
             if not isinstance(item, dict):
                 continue
-            user = ""
-            assistant = ""
-            if isinstance(item.get("user"), dict):
-                user = cls._text(item["user"].get("text") or item["user"].get("content") or item["user"].get("answer"))
-            elif str(item.get("role") or "").lower() in {"user", "human"}:
-                user = cls._text(item.get("content") or item.get("text"))
-            elif item.get("user") not in (None, ""):
-                user = cls._text(item.get("user"))
 
-            if isinstance(item.get("april"), dict):
-                assistant = cls._text(item["april"].get("answer") or item["april"].get("content") or item["april"].get("summary"))
-            elif str(item.get("role") or "").lower() in {"assistant", "april", "bot"}:
-                assistant = cls._text(item.get("answer") or item.get("content") or item.get("summary"))
-            elif item.get("assistant") not in (None, ""):
-                assistant = cls._text(item.get("assistant"))
+            # Explicit pair-shaped records are already complete turns.
+            if item.get("user") not in (None, "") or item.get("april") not in (None, "") or item.get("assistant") not in (None, ""):
+                explicit_user = item.get("user")
+                explicit_april = item.get("april") or item.get("assistant")
+                if isinstance(explicit_user, dict):
+                    explicit_user = explicit_user.get("text") or explicit_user.get("content") or explicit_user.get("answer") or explicit_user.get("user_request")
+                if isinstance(explicit_april, dict):
+                    explicit_april = explicit_april.get("answer") or explicit_april.get("content") or explicit_april.get("summary") or explicit_april.get("april_answer")
+                explicit_user = cls._text(explicit_user)
+                explicit_april = cls._text(explicit_april)
+                if explicit_user or explicit_april:
+                    _flush_pending()
+                    visual = item.get("visual_attachment") if isinstance(item.get("visual_attachment"), dict) else {}
+                    out.append({
+                        "user": explicit_user,
+                        "assistant": explicit_april,
+                        "turn_id": item.get("turn_id"),
+                        "raw": item,
+                        "visual_attachment": deepcopy(visual),
+                    })
+                    continue
 
-            if user or assistant:
+            role = str(item.get("role") or "").lower().strip()
+            if role in {"user", "human"}:
+                if pending_user:
+                    _flush_pending()
+                _append_user_only(item)
+                continue
+
+            if role in {"assistant", "april", "bot"}:
+                assistant_text = cls._text(item.get("answer") or item.get("content") or item.get("summary") or item.get("text"))
+                if pending_user and assistant_text:
+                    visual = _visual_from_message(item) or pending_user.get("visual_attachment") or {}
+                    out.append({
+                        "user": pending_user.get("user", ""),
+                        "assistant": assistant_text,
+                        "turn_id": item.get("turn_id") or pending_user.get("turn_id"),
+                        "raw": item,
+                        "visual_attachment": deepcopy(visual),
+                    })
+                    pending_user = None
+                else:
+                    _append_assistant_only(item)
+                continue
+
+            # Legacy shape: tolerate user_request/april_answer without a role.
+            if item.get("user_request") not in (None, "") or item.get("april_answer") not in (None, ""):
+                _flush_pending()
                 out.append({
-                    "user": user,
-                    "assistant": assistant,
+                    "user": cls._text(item.get("user_request")),
+                    "assistant": cls._text(item.get("april_answer")),
                     "turn_id": item.get("turn_id"),
                     "raw": item,
+                    "visual_attachment": deepcopy(item.get("visual_attachment") or {}) if isinstance(item.get("visual_attachment"), dict) else {},
                 })
+
+        _flush_pending()
         return out
 
     @classmethod
@@ -3946,12 +4089,16 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
         seq = cls._sequence_id(raw) or sequence_id
         scene = cls._scene_id(raw) or scene_id
         result = cls._result_value(assistant, user_request=user)
+        visual_attachment = pair.get("visual_attachment") if isinstance(pair.get("visual_attachment"), dict) else {}
+        if not visual_attachment and isinstance(raw.get("visual_attachment"), dict):
+            visual_attachment = raw.get("visual_attachment")
         return {
             "index": index,
             "source": source,
             "user": user,
             "assistant": assistant,
             "result": result,
+            "visual_attachment": deepcopy(visual_attachment),
             "operation": cls._operation(user),
             "sequence_id": seq,
             "scene_id": scene,
@@ -4006,7 +4153,12 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
             assistant = cls._text(item.get("april_answer") or item.get("answer") or item.get("assistant") or item.get("summary"))
             if not user and not assistant:
                 continue
-            pair = {"user": user, "assistant": assistant, "raw": item}
+            pair = {
+                "user": user,
+                "assistant": assistant,
+                "raw": item,
+                "visual_attachment": deepcopy(item.get("visual_attachment") or {}),
+            }
             records.append(
                 cls._record_from_pair(
                     pair,
@@ -4260,6 +4412,7 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
                 "assistant": self._text(record.get("assistant")),
                 "result": self._text(record.get("result")),
                 "operation": record.get("operation") or {},
+                "visual_attachment": deepcopy(record.get("visual_attachment") or {}),
             })
 
         # A normal conversational continuation needs no result/history ledger.
@@ -4385,6 +4538,7 @@ class ConversationContinuityEngine(InterpretationEngineBase):
             "previous_pair": {
                 "user": previous_user,
                 "april": previous_april,
+                "visual_attachment": deepcopy(relation.get("previous_visual_attachment") or {}),
             },
             "covered_content": covered,
             "avoid_repeat_content": avoid_repeat,
@@ -5088,6 +5242,15 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
                 "sequence_id": relation.get("environment", {}).get("sequence_id") if isinstance(relation.get("environment"), dict) else "",
             }, 0.99, "immediate_authenticated_dialogue_pair", True, max_depth=3, max_items=5, max_keys=8)
 
+            previous_visual = relation.get("previous_visual_attachment") or (relation.get("environment", {}) or {}).get("previous_visual_attachment")
+            if isinstance(previous_visual, dict) and previous_visual:
+                add(required, "DIALOGUE_VISUAL_ANCHOR", {
+                    "reference_to_previous_visual": bool(relation.get("visual_reference")),
+                    "attachment": previous_visual,
+                    "same_dialogue_sequence": True,
+                    "reuse_artifact_when_requested": True,
+                }, 0.987, "visual_attachment_belongs_to_same_dialogue_turn", True, max_depth=4, max_items=5, max_keys=10)
+
             if history_search.get("history_context_required"):
                 compact_history_evidence = {
                     "query_kind": history_search.get("query_kind"),
@@ -5464,6 +5627,14 @@ class VisualMemoryEngine(InterpretationEngineBase):
                 source_items.append({"source": key, "data": value})
             elif isinstance(value, list):
                 source_items.append({"source": key, "data": value})
+
+        active_sequence = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+        last_visual_attachment = active_sequence.get("last_visual_attachment") if isinstance(active_sequence.get("last_visual_attachment"), dict) else {}
+        if last_visual_attachment:
+            source_items.append({
+                "source": "active_dialogue_sequence.visual_attachment",
+                "data": deepcopy(last_visual_attachment),
+            })
 
         selected: list[dict[str, Any]] = []
         for item in source_items:
