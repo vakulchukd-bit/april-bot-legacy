@@ -235,11 +235,11 @@ async def generate(
         signal_prompt = str(provider_signal.get("prompt") or "").strip()
 
         # The canonical same-turn request is the immutable anti-substitution anchor.
-        # A valid Provider signal may supply the concise English Turbo prompt; if its
+        # A valid Provider signal may supply the visual generation prompt for GPT Image 2; if its
         # signal is missing or stale, discard that prompt and use only this turn's request.
         if signal_valid and signal_prompt:
             clean_spec["prompt"] = signal_prompt
-            prompt_source = "provider_signal_turbo"
+            prompt_source = "provider_signal_gpt_image_2"
         elif current_request:
             clean_spec["prompt"] = current_request
             prompt_source = "current_request"
