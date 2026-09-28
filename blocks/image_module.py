@@ -649,7 +649,7 @@ async def process(
 
         generation = await _generate_april_image_result(
             prompt,
-            quality="high",
+            quality="low",
             variant="primary",
         )
         img = generation.get("image_bytes") if generation.get("success") else None
@@ -946,7 +946,7 @@ async def retry_process(
 
         generation = await _generate_april_image_result(
             prompt,
-            quality="high",
+            quality="low",
             variant="retry",
         )
         img = generation.get("image_bytes") if generation.get("success") else None
