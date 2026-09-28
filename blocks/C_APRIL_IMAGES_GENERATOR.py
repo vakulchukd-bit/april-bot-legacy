@@ -401,6 +401,104 @@ class AprilImagesGenerator:
             "multiple_entities": bool(re.search(r"\b(?:и|and|with)\b", text, flags=re.IGNORECASE)),
         }
 
+    @staticmethod
+    def _visual_color_name(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        exact = {
+            "#ffffff": "white", "#fff": "white",
+            "#000000": "black", "#000": "black",
+            "#222222": "dark gray", "#222": "dark gray",
+            "#555555": "gray", "#555": "gray",
+            "#e53935": "red", "#fdd835": "yellow", "#43a047": "green",
+            "#008000": "green", "#ffff00": "yellow", "#ff0000": "red",
+            "#00ff00": "green", "#0000ff": "blue",
+        }
+        return exact.get(text, text)
+
+    @classmethod
+    def _visual_context_supplement(cls, visual_context: Any) -> str:
+        """Translate only same-turn Provider geometry/color evidence into Turbo text."""
+        if not isinstance(visual_context, dict):
+            return ""
+        if str(visual_context.get("source") or "").strip().upper() != "OPENAI_STRUCTURED_VISUAL_PLAN":
+            return ""
+        if visual_context.get("authoritative") is not True or visual_context.get("complements_prompt") is not True:
+            return ""
+
+        parts: list[str] = []
+        bg = visual_context.get("background")
+        if isinstance(bg, dict):
+            bg_name = cls._visual_color_name(bg.get("color"))
+            if bg_name:
+                parts.append(f"background: solid {bg_name}")
+
+        circles: list[str] = []
+        shapes: list[str] = []
+        requested_text: list[str] = []
+        layers = visual_context.get("layers")
+        if not isinstance(layers, list):
+            layers = []
+
+        for layer in layers[:24]:
+            if not isinstance(layer, dict):
+                continue
+            kind = str(layer.get("kind") or "").lower()
+            fill = cls._visual_color_name(layer.get("fill") or "")
+
+            if kind == "circle":
+                item = f"{fill} circle" if fill else "circle"
+                center = layer.get("center")
+                if isinstance(center, list) and len(center) >= 2:
+                    try:
+                        x, y = float(center[0]), float(center[1])
+                        vert = "upper" if y < 0.34 else "lower" if y > 0.66 else "middle"
+                        horiz = "left" if x < 0.34 else "right" if x > 0.66 else "center"
+                        item += f" at {vert} {horiz}"
+                    except Exception:
+                        pass
+                circles.append(item)
+
+            elif kind == "rect":
+                item = f"{fill} rectangle" if fill else "rectangle"
+                box = layer.get("box")
+                if isinstance(box, list) and len(box) >= 4:
+                    try:
+                        w = float(box[2]) - float(box[0])
+                        h = float(box[3]) - float(box[1])
+                        if h > w * 1.25:
+                            item += ", vertical"
+                    except Exception:
+                        pass
+                if layer.get("radius"):
+                    item += ", rounded corners"
+                shapes.append(item)
+
+            elif kind == "ellipse":
+                shapes.append(f"{fill} ellipse" if fill else "ellipse")
+
+            elif kind == "polygon":
+                shapes.append(f"{fill} polygon" if fill else "polygon")
+
+            elif kind == "line":
+                shapes.append(f"{fill} line" if fill else "line")
+
+            elif kind == "text":
+                value = str(layer.get("text") or "").strip()
+                if value:
+                    requested_text.append(value[:100])
+
+        if circles:
+            parts.append("circles: " + ", ".join(circles[:8]))
+        if shapes:
+            parts.append("explicit shapes: " + ", ".join(shapes[:8]))
+        if requested_text:
+            parts.append("requested text: " + "; ".join(requested_text[:4]))
+        if not parts:
+            return ""
+
+        parts.append("preserve supplied objects, colors and layout; add no other objects or artistic elements")
+        return ("Provider visual blueprint: " + "; ".join(parts))[:1100]
+
     @classmethod
     def _compose_prompt(
         cls,
@@ -409,17 +507,7 @@ class AprilImagesGenerator:
         *,
         prompt_token_count: Optional[int] = None,
     ) -> str:
-        """Return only the authoritative user/provider scene prompt.
-
-        C_APRIL_IMAGES_GENERATOR is a pixel renderer, not a scene author.
-        The supplied prompt is treated as the complete visual scene contract:
-        it is preserved as-is after semantic cleaning, with no style enrichment,
-        no visual-context expansion, no fidelity paragraph, and no renderer-side
-        invention.
-
-        This is intentionally strict. Any semantic interpretation, scene
-        decomposition, or user-intent resolution must happen before this boundary.
-        """
+        """Use the authoritative request plus only same-turn Provider visual constraints."""
         semantic_prompt = cls._clean_prompt(prompt)
         if prompt_token_count is None:
             prompt_token_count = len(semantic_prompt.split())
@@ -432,43 +520,32 @@ class AprilImagesGenerator:
 
         tier = cls._prompt_tier(int(prompt_token_count))
         flags = cls._prompt_complexity_flags(semantic_prompt)
+        supplement = cls._visual_context_supplement(
+            (spec or {}).get("visual_context") if isinstance(spec, dict) else None
+        )
 
-        # HARD SCENE LOCK:
-        # The exact cleaned provider/user scene is the only positive conditioning
-        # text emitted by this renderer. Do not append style, visual_context,
-        # composition, lighting, camera, mood, or any other renderer-authored text.
-        # This keeps the image model from receiving content that was not part of
-        # the authoritative request.
+        parts = [semantic_prompt]
+        added_fields: list[str] = []
+        if supplement:
+            parts.append(supplement)
+            added_fields.append("provider_visual_blueprint")
+
         print(
             "🧠 IMAGE PROMPT PROFILE:",
             {
                 "base_semantic_tokens": int(prompt_token_count),
                 "tier": tier,
                 "max_semantic_tokens": cls.MAX_SEMANTIC_PROMPT_TOKENS,
-                "added_fields": [],
-                "skipped_renderer_fields": [
-                    "style",
-                    "visual_context",
-                    "composition",
-                    "background_context",
-                    "environment",
-                    "lighting",
-                    "camera",
-                    "palette",
-                    "mood",
-                    "character",
-                    "pose",
-                    "details",
-                    "semantic_fidelity_guidance",
-                ],
+                "added_fields": added_fields,
+                "provider_visual_context_used": bool(supplement),
                 "semantic_scene_locked": True,
                 "generator_scene_invention": False,
                 "prompt_passthrough": True,
                 "complexity_flags": flags,
             },
         )
+        return "\n".join(parts)
 
-        return semantic_prompt
 
     @classmethod
     def _require_backend(cls) -> None:
