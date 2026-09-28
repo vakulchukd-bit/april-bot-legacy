@@ -93,6 +93,11 @@ second interpretation: it may contain only explicit scene geometry, colors, posi
 background and requested text that are directly stated by the current request or by a structured
 visual plan produced in this same turn. Never add aesthetics, atmosphere, props, characters,
 scenery, decorative objects, camera language, or alternate subjects.
+For image_generation, if the OpenAI same-turn `image` value contains a structured visual plan
+(including `description`, `visual_prompt`, `objects`/layers, or SVG/XML geometry), preserve that exact
+plan in the machine handoff. It is transport data for C_APRIL_IMAGES_GENERATOR and must not be rewritten,
+flattened to the subject name, or repeated into multiple fields. Derive one semantic generation meaning
+from it, while keeping the original structured plan separately so the image engine can use both.
 The signal must identify `C_APRIL_IMAGES_GENERATOR`, set `execute=true`, carry the exact current
 request as `request_anchor`, carry the OpenAI semantic visual meaning as the generation `prompt`,
 target `stabilityai/sdxl-turbo`, and set `single_route=true`.
@@ -2638,6 +2643,145 @@ def _image_prompt_from_provider_payload(value: Any) -> str:
 
 
 
+
+def _image_render_profile_from_context(source_payload: Any, visual_context: Any, semantic_plan: str = "") -> dict[str, str]:
+    """Select a deterministic April render profile only inside the image route.
+
+    The profile changes *rendering discipline*, not scene content.  Interpretation
+    remains authoritative for intent; OpenAI remains authoritative for the same-turn
+    visual plan.  No profile is allowed to add subjects, props, locations or story.
+    """
+    payload = source_payload if isinstance(source_payload, dict) else {}
+    constraints = payload.get("constraints") if isinstance(payload.get("constraints"), dict) else {}
+    metadata = constraints.get("metadata") if isinstance(constraints.get("metadata"), dict) else {}
+    plan = constraints.get("representation_plan") if isinstance(constraints.get("representation_plan"), dict) else {}
+    intent = payload.get("intent") if isinstance(payload.get("intent"), dict) else {}
+    frame = payload.get("semantic_frame") if isinstance(payload.get("semantic_frame"), dict) else {}
+
+    explicit = (
+        metadata.get("render_profile")
+        or metadata.get("image_render_profile")
+        or metadata.get("style_profile")
+        or metadata.get("image_style")
+        or plan.get("render_profile")
+        or plan.get("style_profile")
+        or intent.get("render_profile")
+        or intent.get("style_profile")
+    )
+    explicit_text = re.sub(r"[^a-z0-9_\- ]+", " ", _safe_text(explicit).strip().lower())
+    aliases = {
+        "wildlife": "naturalistic_wildlife",
+        "natural_wildlife": "naturalistic_wildlife",
+        "scientific_wildlife": "scientific_natural_history",
+        "natural_history": "scientific_natural_history",
+        "botanical": "botanical_documentation",
+        "marine": "marine_landscape",
+        "seascape": "marine_landscape",
+        "landscape": "natural_landscape",
+        "cinematic": "cinematic_landscape",
+        "portrait": "portrait_realistic",
+        "product": "product_photography",
+        "architecture": "architectural_visualization",
+        "math": "mathematical_diagram",
+        "mathematics": "mathematical_diagram",
+        "geometry": "technical_geometry",
+        "technical": "technical_diagram",
+        "scientific": "scientific_diagram",
+        "watercolor": "watercolor_illustration",
+        "watercolour": "watercolor_illustration",
+        "oil": "oil_painting",
+        "sketch": "line_art_sketch",
+        "line_art": "line_art_sketch",
+        "isometric": "isometric_illustration",
+        "3d": "three_d_render",
+        "three_d": "three_d_render",
+        "cartoon": "cartoon_illustration",
+        "children": "children_illustration",
+        "documentary": "documentary_visual",
+        "artistic": "artistic_illustration",
+    }
+    if explicit_text:
+        for key, value in aliases.items():
+            if key in explicit_text:
+                return {"name": value, "source": "explicit"}
+        allowed = {
+            "neutral_realistic", "naturalistic_wildlife", "scientific_natural_history",
+            "botanical_documentation", "marine_landscape", "natural_landscape",
+            "cinematic_landscape", "portrait_realistic", "product_photography",
+            "architectural_visualization", "mathematical_diagram", "technical_geometry",
+            "technical_diagram", "scientific_diagram", "watercolor_illustration",
+            "oil_painting", "line_art_sketch", "isometric_illustration", "three_d_render",
+            "cartoon_illustration", "children_illustration", "documentary_visual",
+            "artistic_illustration",
+        }
+        if explicit_text in allowed:
+            return {"name": explicit_text, "source": "explicit"}
+
+    pieces = [
+        _safe_text(intent.get("domain")),
+        _safe_text(intent.get("subject_domain")),
+        _safe_text(intent.get("topic")),
+        _safe_text(intent.get("object")),
+        _safe_text(intent.get("semantic_request")),
+        _safe_text(frame.get("topic")),
+        _safe_text(frame.get("entity")),
+        _safe_text(semantic_plan),
+        json.dumps(visual_context or {}, ensure_ascii=False, default=str),
+    ]
+    text = " ".join(x for x in pieces if x).lower()
+
+    # Explicit user-style words take precedence over domain defaults.
+    style_rules = (
+        (r"акварел|watercolor|watercolour", "watercolor_illustration"),
+        (r"маслян|oil painting|oil-paint", "oil_painting"),
+        (r"скетч|эскиз|line art|линейн", "line_art_sketch"),
+        (r"изометр|isometric", "isometric_illustration"),
+        (r"3d|3-d|рендеринг|three\s*d", "three_d_render"),
+        (r"мультфильм|мультяш|cartoon|анимац", "cartoon_illustration"),
+        (r"детск.*книг|children.*illustration", "children_illustration"),
+        (r"документаль|documentary", "documentary_visual"),
+        (r"кинематограф|cinematic|кадр фильма", "cinematic_landscape"),
+    )
+    for pattern, profile in style_rules:
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            return {"name": profile, "source": "same_turn_style"}
+
+    # Domain-specific professional profiles. These are rendering disciplines,
+    # not new scene content.
+    if re.search(r"математ|formula|формул|график функции|equation|алгебр|тригоном|calculus", text, flags=re.IGNORECASE):
+        return {"name": "mathematical_diagram", "source": "domain"}
+    if re.search(r"геометр|geometry|геометрическ|угол|треугольник|круг|квадрат|размер|dimension|метрическ", text, flags=re.IGNORECASE):
+        return {"name": "technical_geometry", "source": "domain"}
+    if re.search(r"техническ.*схем|схем|диаграм|schematic|technical diagram|blueprint|чертеж", text, flags=re.IGNORECASE):
+        return {"name": "technical_diagram", "source": "domain"}
+    if re.search(r"ботан|растен|цветок|цветы|тюльпан|дерев|лист|флора|botanical|plant|flower|flora", text, flags=re.IGNORECASE):
+        return {"name": "botanical_documentation", "source": "domain"}
+    if re.search(r"биолог|вид животн|зоолог|анатом|species|biology|zoolog|natural history", text, flags=re.IGNORECASE):
+        return {"name": "scientific_natural_history", "source": "domain"}
+    if re.search(r"животн|заяц|черепах|волк|лиса|кот|кошка|собак|лошад|птиц|рыб|ежик|wildlife|animal|bird|fish", text, flags=re.IGNORECASE):
+        return {"name": "naturalistic_wildlife", "source": "domain"}
+    if re.search(r"море|океан|пляж|побереж|морск|sea|ocean|beach|coast|marine", text, flags=re.IGNORECASE):
+        return {"name": "marine_landscape", "source": "domain"}
+    if re.search(r"пейзаж|ландшафт|горы|лес|поле|landscape|mountain|forest", text, flags=re.IGNORECASE):
+        return {"name": "natural_landscape", "source": "domain"}
+    if re.search(r"портрет|лицо человека|человек.*крупн|portrait|headshot", text, flags=re.IGNORECASE):
+        return {"name": "portrait_realistic", "source": "domain"}
+    if re.search(r"товар|продукт|каталог|product photography|e-commerce|предмет.*на белом", text, flags=re.IGNORECASE):
+        return {"name": "product_photography", "source": "domain"}
+    if re.search(r"архитект|здание|дом|интерьер|architecture|building|interior", text, flags=re.IGNORECASE):
+        return {"name": "architectural_visualization", "source": "domain"}
+    if re.search(r"иллюстрац|рисунок|illustration|art", text, flags=re.IGNORECASE):
+        return {"name": "artistic_illustration", "source": "domain"}
+
+    return {"name": "neutral_realistic", "source": "default"}
+
+
+def _image_structured_plan_raw(value: Any) -> Any:
+    """Preserve the same-turn OpenAI visual plan without normalizing or rewriting it."""
+    if isinstance(value, (dict, list, str)):
+        return copy.deepcopy(value)
+    return None
+
 def _svg_attr_number(value: Any, default: float = 0.0) -> float:
     text = _safe_text(value).strip()
     if not text:
@@ -2861,12 +3005,12 @@ def _semantic_prompt_from_visual_context(
     *,
     fallback_prompt: str = "",
 ) -> str:
-    """Turn OpenAI's structured visual plan into the semantic generator prompt.
+    """Compile OpenAI visual meaning without discarding structured geometry.
 
-    The user's request is only a trigger/anchor.  When the Provider has a same-
-    turn structured visual plan, this function makes that plan the actual
-    generation meaning.  It never repeats the trigger sentence when the plan
-    contains usable semantic/structural content.
+    Description, background and explicit layers are complementary operands.  A
+    short description such as ``Черепаха`` must never cause the structured SVG
+    geometry to be dropped.  Duplicate semantic fragments are removed by exact
+    normalized identity; ordering remains stable.
     """
     if not isinstance(visual_context, dict):
         return ""
@@ -2877,7 +3021,20 @@ def _semantic_prompt_from_visual_context(
         text = re.sub(r"\s+", " ", _safe_text(value)).strip()
         return text[:limit] if text else ""
 
-    description = clean(
+    pieces: list[str] = []
+    seen: set[str] = set()
+
+    def add_piece(value: Any) -> None:
+        text = clean(value)
+        if not text:
+            return
+        normalized = text.casefold()
+        if normalized == fallback_norm or normalized in seen:
+            return
+        seen.add(normalized)
+        pieces.append(text)
+
+    description = (
         visual_context.get("description")
         or visual_context.get("visual_description")
         or visual_context.get("visual_prompt")
@@ -2886,49 +3043,53 @@ def _semantic_prompt_from_visual_context(
         or visual_context.get("subject")
         or visual_context.get("entity")
     )
-    if description and re.sub(r"\s+", " ", description).strip().casefold() != fallback_norm:
-        return description
+    add_piece(description)
 
-    layers = _dedupe_visual_layers(visual_context.get("layers"), limit=32)
     bg = visual_context.get("background")
-    parts: list[str] = []
     if isinstance(bg, dict):
         color = clean(bg.get("color") or bg.get("fill"), 40)
         if color:
-            parts.append(f"solid {color} background")
+            add_piece(f"solid {color} background")
 
+    layers = _dedupe_visual_layers(visual_context.get("layers"), limit=32)
     for layer in layers:
         kind = clean(layer.get("kind") or layer.get("shape") or "object", 80).lower()
+        if kind == "rect" and str(layer.get("shape") or "").lower() == "square":
+            kind = "square"
         fill = clean(layer.get("fill") or layer.get("color"), 40)
         color_word = f"{fill} " if fill else ""
+        details: list[str] = []
         center = layer.get("center")
-        suffix = ""
         if isinstance(center, (list, tuple)) and len(center) >= 2:
             try:
-                suffix = f" centered at ({float(center[0]):.3f}, {float(center[1]):.3f})"
+                details.append(f"center ({float(center[0]):.3f}, {float(center[1]):.3f})")
+            except (TypeError, ValueError):
+                pass
+        box = layer.get("box")
+        if isinstance(box, (list, tuple)) and len(box) >= 4:
+            try:
+                details.append(
+                    "box " + ",".join(f"{float(x):.3f}" for x in box[:4])
+                )
             except (TypeError, ValueError):
                 pass
         radius = layer.get("radius")
-        if kind == "rect" and str(layer.get("shape") or "").lower() == "square":
-            kind = "square"
-        item = f"{color_word}{kind}{suffix}".strip()
-        if radius not in (None, "") and kind in {"circle", "ellipse", "object"}:
+        if radius not in (None, ""):
             try:
-                item += f", radius {float(radius):.3f} of canvas"
+                details.append(f"radius {float(radius):.3f}")
             except (TypeError, ValueError):
                 pass
         text_value = clean(layer.get("text") or "", 240)
         if text_value:
-            item += f", text: {text_value!r}"
-        if item:
-            parts.append(item)
+            details.append(f"text {text_value!r}")
+        item = f"{color_word}{kind}".strip()
+        if details:
+            item += " (" + ", ".join(details) + ")"
+        add_piece(item)
 
-    if parts:
-        return "OpenAI visual plan: " + "; ".join(parts)
-
+    if pieces:
+        return "OpenAI visual plan: " + "; ".join(pieces)
     return ""
-
-
 
 
 def _visual_context_from_structured_image(value: Any) -> dict[str, Any]:
@@ -3080,69 +3241,60 @@ def _build_image_generation_spec_from_provider(
     *,
     fallback_prompt: str = "",
 ) -> dict[str, Any] | None:
-    """Normalize Provider image intent while preserving same-turn structured visual evidence."""
+    """Build the image handoff while preserving the original OpenAI plan.
+
+    The current user request is stored only as ``request_anchor``.  The actual
+    generation meaning comes from OpenAI's same-turn visual plan.  The original
+    plan is retained verbatim in ``openai_structured_visual_plan_raw`` so the
+    generator can parse it without Provider rewriting it.
+    """
+    raw_plan = _image_structured_plan_raw(value)
     svg_context = None
     if isinstance(value, str):
         svg_context = _parse_svg_visual_context(value)
     elif isinstance(value, dict) and _safe_text(value.get("format")).strip().lower() in {"svg", "xml"}:
-        svg_context = _parse_svg_visual_context(value.get("content"))
-
-    if isinstance(value, dict):
-        schema = _safe_text(value.get("schema"))
-        if schema == "april_image_spec_v1":
-            candidate = dict(value)
-            structured_context = _structured_visual_context_from_provider_value(candidate)
-            candidate["visual_context"] = _merge_visual_context(
-                _merge_visual_context(candidate.get("visual_context"), structured_context),
-                svg_context,
-            )
-
-            candidate_prompt = _image_prompt_from_provider_payload(candidate.get("prompt"))
-            semantic_plan_prompt = _semantic_prompt_from_visual_context(
-                candidate.get("visual_context"),
-                fallback_prompt=fallback_prompt,
-            )
-            # The user request is only the trigger.  When an OpenAI structured
-            # plan is present and the candidate prompt is merely that trigger,
-            # use the plan as the actual generator meaning.
-            if semantic_plan_prompt:
-                candidate["prompt"] = (
-                    candidate_prompt
-                    if candidate_prompt
-                    and re.sub(r"\s+", " ", candidate_prompt).strip().casefold()
-                    != re.sub(r"\s+", " ", fallback_prompt).strip().casefold()
-                    else semantic_plan_prompt
-                )
-            else:
-                prompt = candidate_prompt or _image_prompt_from_provider_payload(candidate) or fallback_prompt.strip()
-                if not prompt:
-                    return None
-                candidate["prompt"] = prompt
-            return candidate
+        svg_context = _parse_svg_visual_context(value.get("content") or value.get("data"))
 
     structured_context = _structured_visual_context_from_provider_value(value)
-    combined_structured_context = _merge_visual_context(
-        structured_context,
-        svg_context,
-    )
-    semantic_plan_prompt = _semantic_prompt_from_visual_context(
-        combined_structured_context,
-        fallback_prompt=fallback_prompt,
-    )
-    prompt = _image_prompt_from_provider_payload(value)
-    if semantic_plan_prompt:
-        if (
-            not prompt
-            or re.sub(r"\s+", " ", prompt).strip().casefold()
-            == re.sub(r"\s+", " ", fallback_prompt).strip().casefold()
-        ):
-            prompt = semantic_plan_prompt
-    if not prompt:
-        prompt = _safe_text(fallback_prompt).strip()
-    if not prompt and not svg_context and not structured_context:
+    combined_structured_context = _merge_visual_context(structured_context, svg_context)
+
+    # Keep the semantic text operand separate from structured geometry.  The
+    # generator will consume visual_context exactly once, so putting derived
+    # layers into this field as well would duplicate the plan downstream.
+    direct_semantic = _image_prompt_from_provider_payload(value)
+    direct_norm = re.sub(r"\s+", " ", direct_semantic).strip().casefold()
+    fallback_norm = re.sub(r"\s+", " ", fallback_prompt).strip().casefold()
+    semantic_plan_prompt = direct_semantic if direct_semantic and direct_norm != fallback_norm else ""
+    if not semantic_plan_prompt and not direct_semantic:
+        # Structured objects/SVG without a prose description are intentionally
+        # represented through visual_context; no second textual paraphrase is
+        # manufactured here.
+        semantic_plan_prompt = ""
+
+    if isinstance(value, dict) and _safe_text(value.get("schema")).strip() == "april_image_spec_v1":
+        candidate = dict(value)
+        existing_raw = candidate.get("openai_structured_visual_plan_raw")
+        if existing_raw is not None:
+            raw_plan = copy.deepcopy(existing_raw)
+        existing_context = candidate.get("visual_context") if isinstance(candidate.get("visual_context"), dict) else {}
+        candidate["visual_context"] = _merge_visual_context(existing_context, combined_structured_context)
+        if semantic_plan_prompt:
+            candidate["prompt"] = semantic_plan_prompt
+        elif not _safe_text(candidate.get("prompt")).strip():
+            candidate["prompt"] = fallback_prompt.strip()
+        if raw_plan is not None:
+            candidate["openai_structured_visual_plan_raw"] = raw_plan
+        candidate["openai_structured_visual_plan_semantic"] = semantic_plan_prompt or _safe_text(candidate.get("prompt"))
+        return candidate if candidate.get("prompt") else None
+
+    if not semantic_plan_prompt and not direct_semantic and not raw_plan:
         return None
 
     width, height = 512, 512
+    style = "illustration"
+    quality = "standard"
+    negative: list[str] = []
+    seed = None
     if isinstance(value, dict):
         is_render_artifact = _safe_text(value.get("format")).lower() in {"svg", "xml", "png", "jpeg", "jpg", "webp"}
         if not is_render_artifact:
@@ -3151,32 +3303,35 @@ def _build_image_generation_spec_from_provider(
                 height = int(value.get("height") or height)
             except (TypeError, ValueError, OverflowError):
                 width, height = 512, 512
+        style = _safe_text(value.get("style") or "illustration") or "illustration"
+        quality = _safe_text(value.get("quality") or "standard") or "standard"
+        negative = [str(x) for x in (value.get("negative") or []) if str(x).strip()] if isinstance(value.get("negative"), list) else []
+        seed = value.get("seed")
 
-    structured_context = _structured_visual_context_from_provider_value(value)
     explicit_layers = (
         list(value.get("layers") or [])
         if isinstance(value, dict) and isinstance(value.get("layers"), list)
         else []
     )
     visual_context = _merge_visual_context(
-        value.get("visual_context")
-        if isinstance(value, dict) and isinstance(value.get("visual_context"), dict)
-        else {},
-        structured_context,
+        value.get("visual_context") if isinstance(value, dict) and isinstance(value.get("visual_context"), dict) else {},
+        combined_structured_context,
     )
-    visual_context = _merge_visual_context(visual_context, svg_context)
 
     return {
         "schema": "april_image_spec_v1",
-        "prompt": prompt or semantic_plan_prompt or fallback_prompt.strip(),
+        "prompt": semantic_plan_prompt or fallback_prompt.strip(),
         "width": max(256, min(width, 1536)),
         "height": max(256, min(height, 1536)),
-        "style": _safe_text(value.get("style") if isinstance(value, dict) else "") or "illustration",
+        "style": style,
+        "quality": quality,
         "background": dict(value.get("background") or {}) if isinstance(value, dict) and isinstance(value.get("background"), dict) else {},
         "layers": explicit_layers,
         "visual_context": visual_context,
-        "negative": list(value.get("negative") or []) if isinstance(value, dict) and isinstance(value.get("negative"), list) else [],
-        "seed": value.get("seed") if isinstance(value, dict) else None,
+        "openai_structured_visual_plan_raw": raw_plan,
+        "openai_structured_visual_plan_semantic": semantic_plan_prompt or fallback_prompt.strip(),
+        "negative": negative,
+        "seed": seed,
     }
 
 def _top_level_visual_block(kind: str, value: Any) -> dict[str, Any] | None:
@@ -3469,15 +3624,12 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         metadata["image_generation_spec"] = canonical_payload.get("image_generation_spec")
 
     if image_generation_mode:
-        # Hard invariant for this route: Provider supplies semantic intent only;
-        # C_APRIL_IMAGES_GENERATOR owns all pixel production. Any provider image
-        # render block/artifact is discarded from the render stream.
+        # IMAGE ROUTE ONLY. Ordinary dialogue never reaches this branch.
+        # request_anchor = WHAT triggered generation; OpenAI plan = WHAT TO DRAW.
         candidate_spec = metadata.get("image_generation_spec")
         if not isinstance(candidate_spec, dict):
             candidate_spec = canonical_payload.get("image_generation_spec")
 
-        # Read the Provider-emitted signal BEFORE normalizing the spec so the
-        # signal's prompt remains the authoritative Turbo prompt when valid.
         provider_signal = None
         candidate_metadata = canonical_payload.get("metadata")
         if isinstance(candidate_metadata, dict) and isinstance(candidate_metadata.get("image_generation_signal"), dict):
@@ -3505,37 +3657,43 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         )
         if normalized_spec is None and fallback_image_prompt:
             normalized_spec = _build_image_generation_spec_from_provider(
-                {"prompt": fallback_image_prompt},
+                canonical_payload.get("image") if isinstance(canonical_payload.get("image"), (dict, str)) else {"prompt": fallback_image_prompt},
                 fallback_prompt=fallback_image_prompt,
             )
         if normalized_spec:
-            # TWO-OPERAND IMAGE CONTRACT:
-            #   request_anchor = exact user trigger that starts the image route
-            #   prompt         = OpenAI semantic meaning that the pixel generator draws
-            #
-            # Never overwrite an OpenAI semantic prompt with the trigger sentence.
-            semantic_generation_prompt = _image_prompt_from_provider_payload(
-                normalized_spec
+            semantic_generation_prompt = _safe_text(
+                normalized_spec.get("openai_structured_visual_plan_semantic")
+                or normalized_spec.get("prompt")
             ).strip()
-            if not semantic_generation_prompt:
-                semantic_generation_prompt = _safe_text(
-                    normalized_spec.get("prompt")
-                ).strip()
             if not semantic_generation_prompt:
                 semantic_generation_prompt = fallback_image_prompt.strip()
 
+            profile = _image_render_profile_from_context(
+                source_payload,
+                normalized_spec.get("visual_context"),
+                semantic_generation_prompt,
+            )
             normalized_spec["prompt"] = semantic_generation_prompt
             normalized_spec["request_anchor"] = fallback_image_prompt
-            metadata["image_generation_prompt_grounding"] = (
-                "openai_semantic_plan_with_user_trigger_anchor"
-                if semantic_generation_prompt and fallback_image_prompt
-                else "normalized_provider_spec"
-            )
+            normalized_spec["render_profile"] = profile["name"]
+            normalized_spec["render_profile_source"] = profile["source"]
+
+            raw_plan = normalized_spec.get("openai_structured_visual_plan_raw")
+            raw_plan_text = json.dumps(raw_plan, ensure_ascii=False, default=str) if raw_plan is not None else ""
+            metadata["image_generation_prompt_grounding"] = "OPENAI_SEMANTIC_PLAN_PLUS_STRUCTURED_PLAN"
             metadata["image_generation_user_trigger"] = fallback_image_prompt
-            metadata["image_generation_semantic_prompt"] = semantic_generation_prompt[:8000]
+            metadata["image_generation_semantic_prompt"] = semantic_generation_prompt[:12000]
+            metadata["image_render_profile"] = profile["name"]
+            metadata["image_render_profile_source"] = profile["source"]
+            metadata["openai_structured_visual_plan_preserved"] = raw_plan is not None
+            metadata["openai_structured_visual_plan_format"] = (
+                _safe_text(raw_plan.get("format")).strip().lower()
+                if isinstance(raw_plan, dict) else ""
+            )
+            metadata["openai_structured_visual_plan_chars"] = len(raw_plan_text)
 
             if provider_signal_valid and signal_prompt:
-                metadata["openai_renderer_prompt_received"] = signal_prompt[:8000]
+                metadata["openai_renderer_prompt_received"] = signal_prompt[:12000]
 
             metadata["image_generation_spec"] = normalized_spec
             metadata["image_generation_specs"] = [normalized_spec]
@@ -3543,19 +3701,18 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             metadata["provider_image_render_ignored"] = True
             metadata["provider_pixels_disallowed"] = True
 
-            # Canonical handoff: trigger stays in request_anchor; OpenAI semantic
-            # meaning becomes the actual generation prompt consumed by C_APRIL.
-            normalized_signal_prompt = semantic_generation_prompt
             metadata["image_generation_signal"] = {
                 "schema": PROVIDER_IMAGE_GENERATION_SIGNAL_VERSION,
                 "route": "C_APRIL_IMAGES_GENERATOR",
                 "execute": True,
                 "request_anchor": fallback_image_prompt,
                 "prompt_source": "OPENAI_STRUCTURED_VISUAL_PLAN",
-                "prompt": normalized_signal_prompt,
+                "prompt": semantic_generation_prompt,
                 "target_model": "stabilityai/sdxl-turbo",
                 "single_route": True,
-                "provider_emitted": provider_signal_valid,
+                "provider_emitted": True,
+                "openai_plan_preserved": raw_plan is not None,
+                "render_profile": profile["name"],
                 "request_id": str(source_payload.get("request_id") or "").strip(),
             }
 
