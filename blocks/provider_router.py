@@ -2794,24 +2794,139 @@ def _parse_svg_visual_context(svg_text: Any) -> dict[str, Any] | None:
     }
 
 
+def _visual_layer_key(layer: Any) -> str:
+    """Stable structural identity for one OpenAI visual layer.
+
+    Layer identity is semantic/structural rather than textual.  This prevents
+    the same object from being duplicated when the same-turn OpenAI plan is
+    represented both as explicit visual_context and as parsed SVG/XML.
+    """
+    if not isinstance(layer, dict):
+        return json.dumps(layer, ensure_ascii=False, sort_keys=True, default=str)
+    return json.dumps(layer, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _dedupe_visual_layers(layers: Any, *, limit: int = 32) -> list[dict[str, Any]]:
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    if not isinstance(layers, list):
+        return unique
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        key = _visual_layer_key(layer)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(dict(layer))
+        if len(unique) >= max(1, int(limit)):
+            break
+    return unique
+
+
 def _merge_visual_context(base: Any, supplement: Any) -> dict[str, Any]:
     merged = dict(base) if isinstance(base, dict) else {}
     if not isinstance(supplement, dict):
+        if isinstance(merged.get("layers"), list):
+            merged["layers"] = _dedupe_visual_layers(merged.get("layers"), limit=32)
+            if merged["layers"]:
+                merged["object_count"] = len(merged["layers"])
         return merged
     for key, value in supplement.items():
         if key == "layers" and isinstance(value, list):
             current = list(merged.get("layers") or []) if isinstance(merged.get("layers"), list) else []
             current.extend(value)
-            merged["layers"] = current[:32]
+            merged["layers"] = _dedupe_visual_layers(current, limit=32)
+            if merged["layers"]:
+                merged["object_count"] = len(merged["layers"])
         elif key == "background" and isinstance(value, dict):
             bg = dict(merged.get("background") or {}) if isinstance(merged.get("background"), dict) else {}
             for bk, bv in value.items():
                 if bv not in (None, ""):
                     bg.setdefault(bk, bv)
             merged["background"] = bg
+        elif key == "object_count" and merged.get("layers"):
+            merged["object_count"] = len(_dedupe_visual_layers(merged.get("layers"), limit=32))
         elif value not in (None, "", {}, []):
             merged.setdefault(key, value)
+    if isinstance(merged.get("layers"), list):
+        merged["layers"] = _dedupe_visual_layers(merged.get("layers"), limit=32)
+        if merged["layers"]:
+            merged["object_count"] = len(merged["layers"])
     return merged
+
+
+def _semantic_prompt_from_visual_context(
+    visual_context: Any,
+    *,
+    fallback_prompt: str = "",
+) -> str:
+    """Turn OpenAI's structured visual plan into the semantic generator prompt.
+
+    The user's request is only a trigger/anchor.  When the Provider has a same-
+    turn structured visual plan, this function makes that plan the actual
+    generation meaning.  It never repeats the trigger sentence when the plan
+    contains usable semantic/structural content.
+    """
+    if not isinstance(visual_context, dict):
+        return ""
+
+    fallback_norm = re.sub(r"\s+", " ", _safe_text(fallback_prompt)).strip().casefold()
+
+    def clean(value: Any, limit: int = 8000) -> str:
+        text = re.sub(r"\s+", " ", _safe_text(value)).strip()
+        return text[:limit] if text else ""
+
+    description = clean(
+        visual_context.get("description")
+        or visual_context.get("visual_description")
+        or visual_context.get("visual_prompt")
+        or visual_context.get("image_prompt")
+        or visual_context.get("scene")
+        or visual_context.get("subject")
+        or visual_context.get("entity")
+    )
+    if description and re.sub(r"\s+", " ", description).strip().casefold() != fallback_norm:
+        return description
+
+    layers = _dedupe_visual_layers(visual_context.get("layers"), limit=32)
+    bg = visual_context.get("background")
+    parts: list[str] = []
+    if isinstance(bg, dict):
+        color = clean(bg.get("color") or bg.get("fill"), 40)
+        if color:
+            parts.append(f"solid {color} background")
+
+    for layer in layers:
+        kind = clean(layer.get("kind") or layer.get("shape") or "object", 80).lower()
+        fill = clean(layer.get("fill") or layer.get("color"), 40)
+        color_word = f"{fill} " if fill else ""
+        center = layer.get("center")
+        suffix = ""
+        if isinstance(center, (list, tuple)) and len(center) >= 2:
+            try:
+                suffix = f" centered at ({float(center[0]):.3f}, {float(center[1]):.3f})"
+            except (TypeError, ValueError):
+                pass
+        radius = layer.get("radius")
+        if kind == "rect" and str(layer.get("shape") or "").lower() == "square":
+            kind = "square"
+        item = f"{color_word}{kind}{suffix}".strip()
+        if radius not in (None, "") and kind in {"circle", "ellipse", "object"}:
+            try:
+                item += f", radius {float(radius):.3f} of canvas"
+            except (TypeError, ValueError):
+                pass
+        text_value = clean(layer.get("text") or "", 240)
+        if text_value:
+            item += f", text: {text_value!r}"
+        if item:
+            parts.append(item)
+
+    if parts:
+        return "OpenAI visual plan: " + "; ".join(parts)
+
+    return ""
 
 
 
@@ -2864,7 +2979,7 @@ def _visual_context_from_structured_image(value: Any) -> dict[str, Any]:
     # OpenAI may return a semantic-only image plan such as:
     # {"description": "...", "alt_text": "..."} without explicit geometry.
     # Preserve that meaning so it can cross the Provider -> generator boundary.
-    def clean_semantic(raw: Any, limit: int = 1800) -> str:
+    def clean_semantic(raw: Any, limit: int = 8000) -> str:
         text = _safe_text(raw).strip()
         if not text:
             return ""
@@ -2873,9 +2988,9 @@ def _visual_context_from_structured_image(value: Any) -> dict[str, Any]:
     semantic_description = clean_semantic(
         value.get("description") or value.get("visual_description")
         or value.get("visual_prompt") or value.get("prompt")
-        or value.get("scene") or value.get("subject")
+        or value.get("scene") or value.get("subject") or value.get("entity")
     )
-    semantic_alt = clean_semantic(value.get("alt_text") or value.get("alt"), 700)
+    semantic_alt = clean_semantic(value.get("alt_text") or value.get("alt"), 2000)
     semantic_type = clean_semantic(value.get("type") or value.get("style"), 120)
 
     layers: list[dict[str, Any]] = []
@@ -2981,18 +3096,50 @@ def _build_image_generation_spec_from_provider(
                 _merge_visual_context(candidate.get("visual_context"), structured_context),
                 svg_context,
             )
-            semantic_prompt = _image_prompt_from_provider_payload(candidate.get("prompt"))
-            if semantic_prompt:
-                candidate["prompt"] = semantic_prompt
-                return candidate
-            prompt = _image_prompt_from_provider_payload(candidate) or fallback_prompt.strip()
-            if not prompt:
-                return None
-            candidate["prompt"] = prompt
+
+            candidate_prompt = _image_prompt_from_provider_payload(candidate.get("prompt"))
+            semantic_plan_prompt = _semantic_prompt_from_visual_context(
+                candidate.get("visual_context"),
+                fallback_prompt=fallback_prompt,
+            )
+            # The user request is only the trigger.  When an OpenAI structured
+            # plan is present and the candidate prompt is merely that trigger,
+            # use the plan as the actual generator meaning.
+            if semantic_plan_prompt:
+                candidate["prompt"] = (
+                    candidate_prompt
+                    if candidate_prompt
+                    and re.sub(r"\s+", " ", candidate_prompt).strip().casefold()
+                    != re.sub(r"\s+", " ", fallback_prompt).strip().casefold()
+                    else semantic_plan_prompt
+                )
+            else:
+                prompt = candidate_prompt or _image_prompt_from_provider_payload(candidate) or fallback_prompt.strip()
+                if not prompt:
+                    return None
+                candidate["prompt"] = prompt
             return candidate
 
-    prompt = _image_prompt_from_provider_payload(value) or _safe_text(fallback_prompt).strip()
-    if not prompt and not svg_context:
+    structured_context = _structured_visual_context_from_provider_value(value)
+    combined_structured_context = _merge_visual_context(
+        structured_context,
+        svg_context,
+    )
+    semantic_plan_prompt = _semantic_prompt_from_visual_context(
+        combined_structured_context,
+        fallback_prompt=fallback_prompt,
+    )
+    prompt = _image_prompt_from_provider_payload(value)
+    if semantic_plan_prompt:
+        if (
+            not prompt
+            or re.sub(r"\s+", " ", prompt).strip().casefold()
+            == re.sub(r"\s+", " ", fallback_prompt).strip().casefold()
+        ):
+            prompt = semantic_plan_prompt
+    if not prompt:
+        prompt = _safe_text(fallback_prompt).strip()
+    if not prompt and not svg_context and not structured_context:
         return None
 
     width, height = 512, 512
@@ -3021,7 +3168,7 @@ def _build_image_generation_spec_from_provider(
 
     return {
         "schema": "april_image_spec_v1",
-        "prompt": prompt or fallback_prompt.strip(),
+        "prompt": prompt or semantic_plan_prompt or fallback_prompt.strip(),
         "width": max(256, min(width, 1536)),
         "height": max(256, min(height, 1536)),
         "style": _safe_text(value.get("style") if isinstance(value, dict) else "") or "illustration",
@@ -3385,10 +3532,10 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
                 else "normalized_provider_spec"
             )
             metadata["image_generation_user_trigger"] = fallback_image_prompt
-            metadata["image_generation_semantic_prompt"] = semantic_generation_prompt[:2000]
+            metadata["image_generation_semantic_prompt"] = semantic_generation_prompt[:8000]
 
             if provider_signal_valid and signal_prompt:
-                metadata["openai_renderer_prompt_received"] = signal_prompt[:1200]
+                metadata["openai_renderer_prompt_received"] = signal_prompt[:8000]
 
             metadata["image_generation_spec"] = normalized_spec
             metadata["image_generation_specs"] = [normalized_spec]
