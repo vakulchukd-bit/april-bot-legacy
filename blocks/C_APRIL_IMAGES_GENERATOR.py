@@ -24,6 +24,7 @@ import os
 import re
 import threading
 from dataclasses import dataclass
+from xml.etree import ElementTree as ET
 from typing import Any, Optional
 
 from PIL import Image
@@ -63,7 +64,7 @@ class AprilImagesGenerator:
     """The only image producer between Interpretation and C_ARTIFACT."""
 
     ENGINE_NAME = "April Images Generation"
-    ENGINE_VERSION = "2.5.0"
+    ENGINE_VERSION = "2.6.0"
     BACKEND = "diffusers_single_backend"
 
     DEFAULT_SIZE = (512, 512)
@@ -415,6 +416,189 @@ class AprilImagesGenerator:
         }
         return exact.get(text, text)
 
+    RENDER_PROFILE_GUIDANCE = {
+        "neutral_realistic": "accurate subject identity, natural proportions, clean uncluttered presentation",
+        "naturalistic_wildlife": "natural anatomy, species-consistent proportions, realistic surface texture, natural posture, clear subject silhouette",
+        "scientific_natural_history": "scientifically grounded morphology, species-consistent anatomy, clear specimen presentation, restrained natural textures",
+        "botanical_documentation": "accurate botanical morphology, clear leaf and flower structure, species-consistent proportions, natural texture",
+        "marine_landscape": "natural ocean and coastal forms, coherent water and shoreline structure, physically plausible light",
+        "natural_landscape": "coherent natural perspective, plausible terrain and vegetation, natural lighting",
+        "cinematic_landscape": "cinematic composition, controlled depth, coherent lighting, natural perspective",
+        "portrait_realistic": "anatomically coherent face and body proportions, natural skin texture, controlled portrait lighting",
+        "product_photography": "complete object silhouette, accurate visible parts, clean product presentation, controlled lighting",
+        "architectural_visualization": "stable perspective, coherent architectural geometry, accurate structural proportions",
+        "mathematical_diagram": "precise diagram geometry, exact spatial relationships, clean lines, minimal visual noise",
+        "technical_geometry": "precise geometry, stable proportions, dimensionally coherent shapes, clean technical presentation",
+        "technical_diagram": "clean schematic structure, stable geometry, clear relationships, minimal decorative content",
+        "scientific_diagram": "clear scientific structure, coherent labels/relationships, restrained visual presentation",
+        "watercolor_illustration": "controlled watercolor texture and wash, preserve exact subject and composition",
+        "oil_painting": "controlled oil-paint surface texture, preserve exact subject and composition",
+        "line_art_sketch": "clean line-art contours, restrained shading, preserve exact subject geometry",
+        "isometric_illustration": "consistent isometric perspective, stable geometry, preserve exact object relationships",
+        "three_d_render": "coherent 3D form, stable lighting, physically consistent surfaces, preserve exact geometry",
+        "cartoon_illustration": "clean stylized contours, simplified but consistent anatomy, preserve exact requested subjects",
+        "children_illustration": "clear friendly illustration forms, simple readable composition, preserve exact requested subjects",
+        "documentary_visual": "observational visual language, restrained styling, preserve exact scene content",
+        "artistic_illustration": "controlled illustrative composition and texture, preserve exact requested scene",
+    }
+
+    @classmethod
+    def _dedupe_semantic_parts(cls, parts: list[str]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for raw in parts:
+            text = cls._clean_prompt(raw)
+            if not text:
+                continue
+            key = re.sub(r"\s+", " ", text).strip().casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(text)
+        return out
+
+    @classmethod
+    def _openai_plan_to_visual_context(cls, plan: Any) -> dict[str, Any]:
+        """Parse preserved OpenAI structured JSON/SVG only for same-turn rendering."""
+        if not isinstance(plan, (dict, str, list)):
+            return {}
+        if isinstance(plan, dict) and isinstance(plan.get("visual_context"), dict):
+            return dict(plan["visual_context"])
+
+        raw = plan
+        if isinstance(plan, dict) and str(plan.get("format") or "").lower() in {"svg", "xml"}:
+            raw = plan.get("content") or plan.get("data") or ""
+        if isinstance(raw, str) and "<svg" in raw.lower():
+            try:
+                root = ET.fromstring(raw)
+            except (ET.ParseError, ValueError):
+                return {}
+            layers: list[dict[str, Any]] = []
+            background = ""
+
+            def name(tag: Any) -> str:
+                return str(tag).split("}", 1)[-1].lower()
+            def num(v: Any, default: float = 0.0) -> float:
+                m = re.match(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)", str(v or "").strip())
+                try:
+                    return float(m.group(0)) if m else default
+                except (TypeError, ValueError):
+                    return default
+
+            vb = [0.0, 0.0, 400.0, 300.0]
+            view_box = str(root.attrib.get("viewBox") or "").strip()
+            if view_box:
+                vals = re.split(r"[,\s]+", view_box)
+                if len(vals) == 4:
+                    try:
+                        vb = [float(x) for x in vals]
+                    except (TypeError, ValueError):
+                        pass
+            ox, oy, cw, ch = vb
+            def nx(x: float) -> float:
+                return round(max(0.0, min(1.0, (x - ox) / max(cw, 1.0))), 4)
+            def ny(y: float) -> float:
+                return round(max(0.0, min(1.0, (y - oy) / max(ch, 1.0))), 4)
+            def norm_len(v: float) -> float:
+                return round(max(0.0, min(1.0, v / max(cw, ch, 1.0))), 4)
+
+            for el in root.iter():
+                tag = name(el.tag)
+                a = el.attrib
+                fill = str(a.get("fill") or "").strip()
+                if fill.lower() in {"none", "transparent"}:
+                    fill = ""
+                if tag == "rect":
+                    x, y = num(a.get("x")), num(a.get("y"))
+                    w, h = num(a.get("width"), cw), num(a.get("height"), ch)
+                    if x <= ox + 1e-6 and y <= oy + 1e-6 and w >= cw - 1e-6 and h >= ch - 1e-6 and fill and not background:
+                        background = fill
+                        continue
+                    layers.append({
+                        "kind": "rect",
+                        "shape": "square" if abs(w - h) <= max(cw, ch) * 0.01 else "rectangle",
+                        "box": [nx(x), ny(y), nx(x + w), ny(y + h)],
+                        **({"fill": fill} if fill else {}),
+                    })
+                elif tag == "circle":
+                    layers.append({
+                        "kind": "circle",
+                        "center": [nx(num(a.get("cx"))), ny(num(a.get("cy")))],
+                        "radius": norm_len(num(a.get("r"))),
+                        **({"fill": fill} if fill else {}),
+                    })
+                elif tag == "ellipse":
+                    layers.append({
+                        "kind": "ellipse",
+                        "center": [nx(num(a.get("cx"))), ny(num(a.get("cy")))],
+                        "radius_x": round(max(0.0, min(1.0, num(a.get("rx")) / max(cw, 1.0))), 4),
+                        "radius_y": round(max(0.0, min(1.0, num(a.get("ry")) / max(ch, 1.0))), 4),
+                        **({"fill": fill} if fill else {}),
+                    })
+                elif tag == "line":
+                    layers.append({
+                        "kind": "line",
+                        "points": [[nx(num(a.get("x1"))), ny(num(a.get("y1")))], [nx(num(a.get("x2"))), ny(num(a.get("y2")))]],
+                        **({"stroke": str(a.get("stroke"))} if a.get("stroke") else {}),
+                    })
+                elif tag == "text":
+                    value = "".join(el.itertext()).strip()
+                    if value:
+                        layers.append({"kind": "text", "text": value[:240], "position": [nx(num(a.get("x"))), ny(num(a.get("y")))]})
+
+            result: dict[str, Any] = {
+                "source": "OPENAI_STRUCTURED_VISUAL_PLAN",
+                "authoritative": True,
+                "complements_prompt": True,
+                "layers": layers[:32],
+                "object_count": len(layers),
+            }
+            if background:
+                result["background"] = {"color": background}
+            return result
+
+        if isinstance(plan, dict):
+            objects = plan.get("objects")
+            if isinstance(objects, list):
+                layers = []
+                for obj in objects[:32]:
+                    if not isinstance(obj, dict):
+                        continue
+                    layer = {"kind": str(obj.get("kind") or obj.get("shape") or obj.get("type") or "object").lower()}
+                    for key in ("shape", "color", "fill", "center", "position", "box", "bbox", "size", "width", "height", "radius", "rotation", "text", "label"):
+                        if obj.get(key) not in (None, ""):
+                            layer[key] = obj[key]
+                    layers.append(layer)
+                ctx: dict[str, Any] = {"source": "OPENAI_STRUCTURED_VISUAL_PLAN", "authoritative": True, "complements_prompt": True, "layers": layers, "object_count": len(layers)}
+                if isinstance(plan.get("background"), dict):
+                    ctx["background"] = dict(plan["background"])
+                return ctx
+        return {}
+
+    @classmethod
+    def _merge_plan_context(cls, base: Any, extra: Any) -> dict[str, Any]:
+        merged = dict(base) if isinstance(base, dict) else {}
+        if not isinstance(extra, dict):
+            return merged
+        current_layers = list(merged.get("layers") or []) if isinstance(merged.get("layers"), list) else []
+        for layer in list(extra.get("layers") or []) if isinstance(extra.get("layers"), list) else []:
+            if not isinstance(layer, dict):
+                continue
+            key = json.dumps(layer, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+            if not any(json.dumps(x, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str) == key for x in current_layers if isinstance(x, dict)):
+                current_layers.append(layer)
+        if current_layers:
+            merged["layers"] = current_layers[:32]
+            merged["object_count"] = len(merged["layers"])
+        for key in ("background", "description", "alt_text", "plan_type"):
+            if merged.get(key) in (None, "", {}, []) and extra.get(key) not in (None, "", {}, []):
+                merged[key] = extra[key]
+        return merged
+
+    @classmethod
+    def _render_profile_guidance(cls, profile: str) -> str:
+        return cls.RENDER_PROFILE_GUIDANCE.get(str(profile or "neutral_realistic").strip().lower(), cls.RENDER_PROFILE_GUIDANCE["neutral_realistic"])
+
     @classmethod
     def _visual_context_supplement(cls, visual_context: Any) -> str:
         """Translate only same-turn Provider geometry/color evidence into Turbo text."""
@@ -520,66 +704,45 @@ class AprilImagesGenerator:
         *,
         prompt_token_count: Optional[int] = None,
     ) -> str:
-        """Use OpenAI semantic meaning plus same-turn structured visual constraints.
+        """Compile one non-duplicating semantic prompt for the image model.
 
-        ``prompt`` is expected to be the semantic generation meaning supplied by
-        Provider/OpenAI.  The user's request is carried separately as
-        ``request_anchor`` and is never reintroduced here as duplicate prompt
-        content.
+        The user request is an execution trigger/anchor.  ``prompt`` is the
+        OpenAI semantic meaning.  The preserved OpenAI structured plan is parsed
+        into complementary visual constraints and never duplicated verbatim.
         """
+        cfg = spec if isinstance(spec, dict) else {}
         semantic_prompt = cls._clean_prompt(prompt)
         if prompt_token_count is None:
             prompt_token_count = len(semantic_prompt.split())
 
-        if int(prompt_token_count) > cls.MAX_SEMANTIC_PROMPT_TOKENS:
+        raw_plan = cfg.get("openai_structured_visual_plan_raw")
+        raw_context = cls._openai_plan_to_visual_context(raw_plan)
+        visual_context = cls._merge_plan_context(cfg.get("visual_context"), raw_context)
+
+        # If the semantic prompt came only from a short subject word, the raw
+        # OpenAI plan still contributes its exact geometry/colors/layout here.
+        supplement = cls._visual_context_supplement(visual_context)
+        profile = cls._render_profile_guidance(cfg.get("render_profile") or "neutral_realistic")
+
+        parts = cls._dedupe_semantic_parts([
+            semantic_prompt,
+            supplement,
+            f"Rendering discipline: {profile}",
+            "Preserve every supplied subject, color, background, geometry and spatial relationship. Do not add, remove or replace scene elements.",
+        ])
+        final_prompt = "\n".join(parts)
+
+        token_count = prompt_token_count
+        if token_count is None:
+            token_count = len(final_prompt.split())
+        if int(len(final_prompt)) > 0 and int(len(final_prompt.split())) > cls.MAX_SEMANTIC_PROMPT_TOKENS:
+            # Do not hard-cut text. The actual tokenizer path below performs the
+            # model-window split; this guard is only for an absurdly large object.
             raise ValueError(
-                f"APRIL_IMAGES_PROMPT_TOO_LONG:{int(prompt_token_count)}>"
+                f"APRIL_IMAGES_PROMPT_TOO_LONG:{len(final_prompt.split())}>"
                 f"{cls.MAX_SEMANTIC_PROMPT_TOKENS}"
             )
-
-        tier = cls._prompt_tier(int(prompt_token_count))
-        flags = cls._prompt_complexity_flags(semantic_prompt)
-        supplement = cls._visual_context_supplement(
-            (spec or {}).get("visual_context") if isinstance(spec, dict) else None
-        )
-
-        parts = [semantic_prompt]
-        added_fields: list[str] = []
-        if supplement:
-            parts.append(supplement)
-            added_fields.append("provider_visual_blueprint")
-
-        print(
-            "🧠 IMAGE PROMPT PROFILE:",
-            {
-                "base_semantic_tokens": int(prompt_token_count),
-                "tier": tier,
-                "max_semantic_tokens": cls.MAX_SEMANTIC_PROMPT_TOKENS,
-                "added_fields": added_fields,
-                "provider_visual_context_used": bool(supplement),
-                "semantic_scene_locked": True,
-                "generator_scene_invention": False,
-                "prompt_passthrough": True,
-                "complexity_flags": flags,
-            },
-        )
-        return "\n".join(parts)
-
-
-    @classmethod
-    def _require_backend(cls) -> None:
-        source = cls._model_source()
-        if not source:
-            raise RuntimeError("APRIL_IMAGES_MODEL_SOURCE_NOT_CONFIGURED")
-        if AutoPipelineForText2Image is None or AutoPipelineForImage2Image is None:
-            raise RuntimeError("APRIL_IMAGES_DIFFUSERS_NOT_INSTALLED")
-        if torch is None:
-            raise RuntimeError("APRIL_IMAGES_TORCH_NOT_INSTALLED")
-
-        # An explicitly supplied local path must exist. A model id is allowed
-        # and will be resolved by Diffusers/Hugging Face into the runtime cache.
-        if cls._model_path() and not os.path.isdir(cls._model_path()):
-            raise RuntimeError("APRIL_IMAGES_MODEL_PATH_NOT_FOUND")
+        return final_prompt
 
     # -------------------------------------------------
     # Real Diffusers backend
@@ -1277,15 +1440,23 @@ class AprilImagesGenerator:
             expected_windows = (
                 (prompt_token_count + window_body - 1) // window_body
             )
+            ranges = []
+            for window_index in range(expected_windows):
+                start_token = window_index * window_body + 1
+                end_token = min(prompt_token_count, (window_index + 1) * window_body)
+                ranges.append([start_token, end_token])
             print(
                 "🧩 IMAGE PROMPT STRUCTURED WINDOWS:",
                 {
                     "raw_tokens": int(prompt_token_count),
                     "native_window_tokens": int(native_limit),
+                    "content_tokens_per_window": int(window_body),
                     "windows": int(expected_windows),
+                    "window_ranges": ranges,
                     "overlap_tokens": 0,
                     "truncation": False,
                     "ordering": "sequential_non_overlapping",
+                    "semantic_loss": False,
                 },
             )
 
@@ -1438,6 +1609,12 @@ class AprilImagesGenerator:
             "steps": spec.get("steps"),
             "visual_context": dict(spec.get("visual_context") or {})
             if isinstance(spec.get("visual_context"), dict) else {},
+            "openai_structured_visual_plan_raw": spec.get("openai_structured_visual_plan_raw"),
+            "openai_structured_visual_plan_semantic": cls._clean_prompt(
+                spec.get("openai_structured_visual_plan_semantic") or spec.get("prompt") or ""
+            ),
+            "render_profile": str(spec.get("render_profile") or "neutral_realistic"),
+            "render_profile_source": str(spec.get("render_profile_source") or "default"),
             "seed": spec.get("seed"),
             "generator_signal": generator_signal,
             "request_anchor": request_anchor,
@@ -1464,6 +1641,13 @@ class AprilImagesGenerator:
                 "request_anchor": clean.get("request_anchor") or "",
                 "semantic_generation_prompt": clean.get("prompt") or "",
                 "prompt_chars": len(str(clean.get("prompt") or "")),
+                "render_profile": clean.get("render_profile") or "neutral_realistic",
+                "render_profile_source": clean.get("render_profile_source") or "default",
+                "openai_plan_preserved": clean.get("openai_structured_visual_plan_raw") is not None,
+                "openai_plan_format": (
+                    str(clean.get("openai_structured_visual_plan_raw", {}).get("format") or "").lower()
+                    if isinstance(clean.get("openai_structured_visual_plan_raw"), dict) else ""
+                ),
                 "style": clean.get("style"),
                 "quality": clean.get("quality"),
             }, ensure_ascii=False, indent=2, default=str)
@@ -1501,8 +1685,10 @@ class AprilImagesGenerator:
                 "source_prompt": base_prompt,
                 "generation_prompt": prompt,
                 "scene_content_authority": "OPENAI_STRUCTURED_VISUAL_PLAN",
-                "generation_prompt_source": "OPENAI_SEMANTIC_PLAN",
+                "generation_prompt_source": "OPENAI_SEMANTIC_PLAN_PLUS_STRUCTURED_PLAN",
                 "user_request_is_trigger_only": True,
+                "openai_structured_plan_preserved": clean.get("openai_structured_visual_plan_raw") is not None,
+                "render_profile": clean.get("render_profile") or "neutral_realistic",
                 "generator_scene_invention": False,
             },
         )
