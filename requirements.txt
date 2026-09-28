@@ -56,13 +56,6 @@ pandas
 # Tesseract executable is a SYSTEM package, not a Python package:
 # Debian/Ubuntu: tesseract-ocr tesseract-ocr-rus tesseract-ocr-ukr tesseract-ocr-eng
 
-# === April image generation backend ===
-# Required by C_APRIL_IMAGES_GENERATOR / Diffusers single-backend route.
-diffusers
-torch
-torchvision
-accelerate
-
 # === Semantic Interpretation Stack ===
 sentence-transformers
 transformers
