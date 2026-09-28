@@ -3479,6 +3479,29 @@ def _promote_top_level_visual_outputs(
     return blocks, metadata
 
 
+_IMAGE_TECHNICAL_FALLBACK = "Изображение не может быть отображено в текущем ответе."
+
+
+def _strip_image_technical_fallback(value: Any) -> str:
+    """Remove only the known image-provider technical fallback from user-visible text.
+
+    The raw OpenAI response is logged before this sanitizer runs, so diagnostics
+    retain the exact model output while the technical transport phrase never
+    leaks into the canonical user response or image-generation handoff.
+    """
+    text = _safe_text(value)
+    if not text:
+        return ""
+    cleaned = re.sub(re.escape(_IMAGE_TECHNICAL_FALLBACK), "", text, flags=re.IGNORECASE)
+    return re.sub(r"\s{2,}", " ", cleaned).strip(" \t\r\n-—:;")
+
+
+def _is_image_technical_fallback(value: Any) -> bool:
+    raw = re.sub(r"\s+", " ", _safe_text(value)).strip().casefold()
+    expected = _IMAGE_TECHNICAL_FALLBACK.casefold()
+    return raw == expected
+
+
 def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[str, Any]:
     if isinstance(raw_text, dict) and raw_text.get("type") == "provider_response":
         return raw_text
@@ -3545,6 +3568,14 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
                 if candidate:
                     answer = candidate
                     break
+
+    # This is transport-level text emitted by the first OpenAI step. Keep it in
+    # IMAGE PROMPT TRACE: OPENAI RAW OUTPUT, but never allow it into the visible
+    # provider answer or downstream image-generation content.
+    if image_generation_mode:
+        sanitized_answer = _strip_image_technical_fallback(answer)
+        if sanitized_answer != answer:
+            answer = sanitized_answer
 
     if not answer and visual_mode == "image_generation":
         candidate_metadata = dict(canonical_payload.get("metadata") or {}) if isinstance(canonical_payload.get("metadata"), dict) else {}
@@ -3765,14 +3796,23 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         "response_budget": source_payload.get("response_output_tokens"),
     })
 
+    visible_response = _strip_image_technical_fallback(_unwrap_model_answer(canonical_payload.get("response") or answer)) if image_generation_mode else _unwrap_model_answer(canonical_payload.get("response") or answer)
+    visible_summary = _strip_image_technical_fallback(_unwrap_model_answer(canonical_payload.get("summary") or _compact_summary(answer, blocks))) if image_generation_mode else _unwrap_model_answer(canonical_payload.get("summary") or _compact_summary(answer, blocks))
+    if image_generation_mode and not answer:
+        answer = "Готово — изображение подготовлено."
+    if image_generation_mode and not visible_response:
+        visible_response = answer
+    if image_generation_mode and not visible_summary:
+        visible_summary = _compact_summary(answer, blocks)
+
     return {
         "type": "provider_response",
         "machine_response": {
             "answer": answer,
-            "content": content,
-            "response": _unwrap_model_answer(canonical_payload.get("response") or answer),
-            "summary": _unwrap_model_answer(canonical_payload.get("summary") or _compact_summary(answer, blocks)),
-            "explanation": normalize_response_text(canonical_payload.get("explanation") or ""),
+            "content": answer,
+            "response": visible_response,
+            "summary": visible_summary,
+            "explanation": _strip_image_technical_fallback(normalize_response_text(canonical_payload.get("explanation") or "")) if image_generation_mode else normalize_response_text(canonical_payload.get("explanation") or ""),
             "scene": scene,
             "artifacts": artifacts,
             "render_blocks": blocks,
@@ -3800,6 +3840,14 @@ def provider_finalize_for_executor(contract: dict) -> dict:
 
     mr = contract.setdefault("machine_response", {})
     answer = normalize_response_text(mr.get("answer") or mr.get("content") or mr.get("response") or "")
+    source_preview = contract.get("processor_input") if isinstance(contract.get("processor_input"), dict) else {}
+    source_constraints_preview = source_preview.get("constraints") if isinstance(source_preview.get("constraints"), dict) else {}
+    source_plan_preview = source_constraints_preview.get("representation_plan") if isinstance(source_constraints_preview.get("representation_plan"), dict) else {}
+    image_generation_preview = _safe_text(source_plan_preview.get("visual_production_mode") or "").strip().lower() == "image_generation"
+    if image_generation_preview:
+        answer = _strip_image_technical_fallback(answer)
+        if not answer:
+            answer = "Готово — изображение подготовлено."
     if not answer:
         raise RuntimeError("Canonical MachineResponse contains no visible answer.")
 
@@ -3841,7 +3889,9 @@ def provider_finalize_for_executor(contract: dict) -> dict:
 
     mr["answer"] = answer
     mr["content"] = answer
-    mr["response"] = normalize_response_text(mr.get("response") or answer)
+    response_text = normalize_response_text(mr.get("response") or answer)
+    mr["response"] = _strip_image_technical_fallback(response_text) if image_generation_preview else response_text
+    mr["content"] = _strip_image_technical_fallback(mr["content"]) if image_generation_preview else mr["content"]
 
     original_blocks = mr.get("render_blocks") or []
     mr["artifacts"] = list(mr.get("artifacts") or [])
