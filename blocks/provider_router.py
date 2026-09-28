@@ -100,7 +100,7 @@ flattened to the subject name, or repeated into multiple fields. Derive one sema
 from it, while keeping the original structured plan separately so the image engine can use both.
 The signal must identify `C_APRIL_IMAGES_GENERATOR`, set `execute=true`, carry the exact current
 request as `request_anchor`, carry the OpenAI semantic visual meaning as the generation `prompt`,
-target `stabilityai/sdxl-turbo`, and set `single_route=true`.
+target `gpt-image-2`, and set `single_route=true`.
 The signal and spec must complement rather than repeat each other: `prompt` states the scene;
 `visual_context` carries concrete visual constraints needed to render that scene.
 Do NOT return ready image pixels, SVG/XML, base64/data URIs, image URLs, or an image/gallery
@@ -111,7 +111,7 @@ Never call another model. Never fabricate URLs, image bytes or duplicate structu
 """.strip()
 
 PROVIDER_IMAGE_SPEC_SCHEMA = (
-    '{"schema":"april_image_spec_v1","prompt":"concise English SDXL Turbo visual prompt",'
+    '{"schema":"april_image_spec_v1","prompt":"concise visual generation prompt for GPT Image 2",'
     '"width":512,"height":512,"style":"illustration",'
     '"background":{"color":"#RRGGBB"},'
     '"visual_context":{"source":"OPENAI_STRUCTURED_VISUAL_PLAN","authoritative":true,'
@@ -152,7 +152,7 @@ Return compact JSON with answer, content, summary, scene, artifacts, render_bloc
 render_priority, confidence and metadata. For image_generation, output only the semantic
 `metadata.image_generation_spec` plus the explicit `metadata.image_generation_signal`.
 The current user request is the exact generation trigger/anchor and must be preserved as
-`request_anchor`. It is not automatically the SDXL prompt. OpenAI's same-turn structured visual plan
+`request_anchor` is the exact user request. OpenAI's same-turn structured visual plan
 provides the semantic meaning that should be rendered. For image_generation,
 `image_generation_spec.prompt` MUST carry the OpenAI-authored visual generation meaning when present
 (description/visual_prompt/image_prompt/subject/scene), while `request_anchor` carries the exact user
@@ -161,7 +161,7 @@ dimensions and requested text from that same OpenAI plan. Do not replace the Ope
 the trigger sentence and do not invent unrelated scene content.
 The signal MUST identify `C_APRIL_IMAGES_GENERATOR`, set execute=true, carry the exact current
 request as request_anchor, carry the OpenAI semantic generation meaning as its prompt, target
-`stabilityai/sdxl-turbo`, and set single_route=true. Mark `provider_emitted=true` when the signal is
+`gpt-image-2`, and set single_route=true. Mark `provider_emitted=true` when the signal is
 emitted by this Provider response. Never output ready image pixels, SVG/XML, base64/data URI, image
 URL, or a concrete image/gallery render block.
 The local C_APRIL_IMAGES_GENERATOR is the sole pixel producer. The `answer` field is mandatory and must be non-empty;
@@ -1560,9 +1560,9 @@ def _build_provider_user_text_from_plan(
     ]
     if any(_safe_text(x).strip().lower() == "image_generation" for x in requested):
         mandatory.extend([
-            "IMAGE_GENERATION_HANDOFF: emit metadata.image_generation_signal in the same response; route=C_APRIL_IMAGES_GENERATOR, execute=true, request_anchor=REQUEST exactly, prompt_source=OPENAI_STRUCTURED_VISUAL_PLAN, target_model=stabilityai/sdxl-turbo, single_route=true.",
+            "IMAGE_GENERATION_HANDOFF: emit metadata.image_generation_signal in the same response; route=C_APRIL_IMAGES_GENERATOR, execute=true, request_anchor=REQUEST exactly, prompt_source=OPENAI_STRUCTURED_VISUAL_PLAN, target_model=gpt-image-2, single_route=true.",
             "IMAGE_GENERATION_PROMPT_RULE: metadata.image_generation_spec.prompt and image_generation_signal.prompt must carry the OpenAI-authored semantic visual generation meaning; request_anchor remains the exact current user trigger. Preserve the OpenAI-described subject and attributes, and never replace the semantic plan with the trigger sentence.",
-            "TURBO_TARGET: prepare a short concrete prompt for stabilityai/sdxl-turbo; one scene, explicit subject first, requested attributes only, no conversational filler, no prior-scene carryover, no pixels/URLs/data URIs/alternate providers.",
+            "GPT_IMAGE_2_TARGET: prepare a concrete visual generation prompt for gpt-image-2; one scene, explicit subject first, requested attributes only, no conversational filler, no prior-scene carryover, no pixels/URLs/data URIs/alternate providers.",
         ])
 
     required = [
@@ -3708,7 +3708,7 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
                 "request_anchor": fallback_image_prompt,
                 "prompt_source": "OPENAI_STRUCTURED_VISUAL_PLAN",
                 "prompt": semantic_generation_prompt,
-                "target_model": "stabilityai/sdxl-turbo",
+                "target_model": "gpt-image-2",
                 "single_route": True,
                 "provider_emitted": True,
                 "openai_plan_preserved": raw_plan is not None,
