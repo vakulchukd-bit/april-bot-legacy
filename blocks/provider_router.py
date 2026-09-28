@@ -83,17 +83,19 @@ type, renderer, viewer, payload, scene_contract=true.
 Preserve every requested representation and never invent an unrequested one.
 For `image_generation`, return one semantic generation handoff only:
 `metadata.image_generation_spec` and `metadata.image_generation_signal`.
-The current user request is the immutable scene anchor and defines WHAT must appear. The Provider
-prompt must preserve that requested scene; it must never replace the scene with a new subject. OpenAI's
-structured visual plan defines HOW to render the requested scene and belongs in visual_context.
+The current user request is the immutable generation trigger/anchor. It selects the image route
+and identifies the requested action. OpenAI's structured visual plan is the semantic rendering meaning
+that the pixel generator must actually draw. For image_generation, preserve BOTH operands separately:
+request_anchor = exact current user request; generation prompt = OpenAI semantic visual description/plan.
+Never discard the OpenAI semantic description merely because it is nested under image/description/alt_text.
 `metadata.image_generation_spec.visual_context` is a complementary visual blueprint, not a
 second interpretation: it may contain only explicit scene geometry, colors, positions, sizes,
 background and requested text that are directly stated by the current request or by a structured
 visual plan produced in this same turn. Never add aesthetics, atmosphere, props, characters,
 scenery, decorative objects, camera language, or alternate subjects.
 The signal must identify `C_APRIL_IMAGES_GENERATOR`, set `execute=true`, carry the exact current
-request as `request_anchor`, identify the prompt as `PROVIDER_TURBO`, target
-`stabilityai/sdxl-turbo`, and set `single_route=true`.
+request as `request_anchor`, carry the OpenAI semantic visual meaning as the generation `prompt`,
+target `stabilityai/sdxl-turbo`, and set `single_route=true`.
 The signal and spec must complement rather than repeat each other: `prompt` states the scene;
 `visual_context` carries concrete visual constraints needed to render that scene.
 Do NOT return ready image pixels, SVG/XML, base64/data URIs, image URLs, or an image/gallery
@@ -144,19 +146,19 @@ Keep secret_target/private_target internal and never expose it in the visible an
 Return compact JSON with answer, content, summary, scene, artifacts, render_blocks, scene_plan,
 render_priority, confidence and metadata. For image_generation, output only the semantic
 `metadata.image_generation_spec` plus the explicit `metadata.image_generation_signal`.
-The current request is the sole scene anchor and defines WHAT must appear. `image_generation_spec.prompt`
-MUST preserve that current request and never introduce a new subject; translation is allowed only when
-semantically equivalent. The complementary visual_context defines HOW to render it. `image_generation_spec.visual_context` MUST be complementary structured rendering
-information for this same turn: when explicit objects are known, encode their shape/type and color
-as layers/objects; also preserve background color, geometry, positions, dimensions and requested text
-when known. Do not use visual_context to add any new object,
-environment, mood, style, cinematic language or artistic flourish. Do not repeat the whole
-prompt inside visual_context.
+The current user request is the exact generation trigger/anchor and must be preserved as
+`request_anchor`. It is not automatically the SDXL prompt. OpenAI's same-turn structured visual plan
+provides the semantic meaning that should be rendered. For image_generation,
+`image_generation_spec.prompt` MUST carry the OpenAI-authored visual generation meaning when present
+(description/visual_prompt/image_prompt/subject/scene), while `request_anchor` carries the exact user
+request. `image_generation_spec.visual_context` carries additional structured geometry, colors, positions,
+dimensions and requested text from that same OpenAI plan. Do not replace the OpenAI semantic plan with
+the trigger sentence and do not invent unrelated scene content.
 The signal MUST identify `C_APRIL_IMAGES_GENERATOR`, set execute=true, carry the exact current
-request as request_anchor, identify the prompt as PROVIDER_TURBO, target `stabilityai/sdxl-turbo`,
-and set single_route=true. Mark `provider_emitted=true` when the signal is emitted by this
-Provider response. Never output ready image pixels, SVG/XML, base64/data URI, image URL, or a
-concrete image/gallery render block.
+request as request_anchor, carry the OpenAI semantic generation meaning as its prompt, target
+`stabilityai/sdxl-turbo`, and set single_route=true. Mark `provider_emitted=true` when the signal is
+emitted by this Provider response. Never output ready image pixels, SVG/XML, base64/data URI, image
+URL, or a concrete image/gallery render block.
 The local C_APRIL_IMAGES_GENERATOR is the sole pixel producer. The `answer` field is mandatory and must be non-empty;
 never return `{}` or an empty answer. For text/math requests, mirror the answer into content and
 a text render block. Keep structured blocks complete and obey requested_outputs.
@@ -1553,8 +1555,8 @@ def _build_provider_user_text_from_plan(
     ]
     if any(_safe_text(x).strip().lower() == "image_generation" for x in requested):
         mandatory.extend([
-            "IMAGE_GENERATION_HANDOFF: emit metadata.image_generation_signal in the same response; route=C_APRIL_IMAGES_GENERATOR, execute=true, request_anchor=REQUEST exactly, prompt_source=PROVIDER_TURBO, target_model=stabilityai/sdxl-turbo, single_route=true.",
-            "IMAGE_GENERATION_PROMPT_RULE: metadata.image_generation_spec.prompt and image_generation_signal.prompt must be the same concise English visual prompt faithful only to the current REQUEST; translate Russian/Ukrainian wording when needed, preserve the exact requested subject/attributes, and never reuse a prior visual subject.",
+            "IMAGE_GENERATION_HANDOFF: emit metadata.image_generation_signal in the same response; route=C_APRIL_IMAGES_GENERATOR, execute=true, request_anchor=REQUEST exactly, prompt_source=OPENAI_STRUCTURED_VISUAL_PLAN, target_model=stabilityai/sdxl-turbo, single_route=true.",
+            "IMAGE_GENERATION_PROMPT_RULE: metadata.image_generation_spec.prompt and image_generation_signal.prompt must carry the OpenAI-authored semantic visual generation meaning; request_anchor remains the exact current user trigger. Preserve the OpenAI-described subject and attributes, and never replace the semantic plan with the trigger sentence.",
             "TURBO_TARGET: prepare a short concrete prompt for stabilityai/sdxl-turbo; one scene, explicit subject first, requested attributes only, no conversational filler, no prior-scene carryover, no pixels/URLs/data URIs/alternate providers.",
         ])
 
@@ -2859,6 +2861,23 @@ def _visual_context_from_structured_image(value: Any) -> dict[str, Any]:
                 pass
         return None
 
+    # OpenAI may return a semantic-only image plan such as:
+    # {"description": "...", "alt_text": "..."} without explicit geometry.
+    # Preserve that meaning so it can cross the Provider -> generator boundary.
+    def clean_semantic(raw: Any, limit: int = 1800) -> str:
+        text = _safe_text(raw).strip()
+        if not text:
+            return ""
+        return re.sub(r"\s+", " ", text)[:limit]
+
+    semantic_description = clean_semantic(
+        value.get("description") or value.get("visual_description")
+        or value.get("visual_prompt") or value.get("prompt")
+        or value.get("scene") or value.get("subject")
+    )
+    semantic_alt = clean_semantic(value.get("alt_text") or value.get("alt"), 700)
+    semantic_type = clean_semantic(value.get("type") or value.get("style"), 120)
+
     layers: list[dict[str, Any]] = []
     for obj in objects[:24]:
         if not isinstance(obj, dict):
@@ -2909,6 +2928,12 @@ def _visual_context_from_structured_image(value: Any) -> dict[str, Any]:
         "object_count": len(layers),
         "layers": layers[:24],
     }
+    if semantic_description:
+        result["description"] = semantic_description
+    if semantic_alt:
+        result["alt_text"] = semantic_alt
+    if semantic_type:
+        result["plan_type"] = semantic_type
     if isinstance(background, dict):
         bg_color = clean_color(background.get("color") or background.get("fill"))
         if bg_color:
@@ -3337,17 +3362,30 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
                 fallback_prompt=fallback_image_prompt,
             )
         if normalized_spec:
-            # The current user request is the immutable WHAT: it is never replaced by
-            # an OpenAI/provider phrasing. OpenAI's structured visual plan is the HOW and
-            # is carried separately through visual_context into C_APRIL_IMAGES_GENERATOR.
-            # This prevents a provider prompt from becoming a new scene description.
-            if fallback_image_prompt:
-                normalized_spec["prompt"] = fallback_image_prompt
-                metadata["image_generation_prompt_grounding"] = (
-                    "current_request_anchor_plus_openai_visual_context"
-                )
-            else:
-                metadata["image_generation_prompt_grounding"] = "normalized_provider_spec"
+            # TWO-OPERAND IMAGE CONTRACT:
+            #   request_anchor = exact user trigger that starts the image route
+            #   prompt         = OpenAI semantic meaning that the pixel generator draws
+            #
+            # Never overwrite an OpenAI semantic prompt with the trigger sentence.
+            semantic_generation_prompt = _image_prompt_from_provider_payload(
+                normalized_spec
+            ).strip()
+            if not semantic_generation_prompt:
+                semantic_generation_prompt = _safe_text(
+                    normalized_spec.get("prompt")
+                ).strip()
+            if not semantic_generation_prompt:
+                semantic_generation_prompt = fallback_image_prompt.strip()
+
+            normalized_spec["prompt"] = semantic_generation_prompt
+            normalized_spec["request_anchor"] = fallback_image_prompt
+            metadata["image_generation_prompt_grounding"] = (
+                "openai_semantic_plan_with_user_trigger_anchor"
+                if semantic_generation_prompt and fallback_image_prompt
+                else "normalized_provider_spec"
+            )
+            metadata["image_generation_user_trigger"] = fallback_image_prompt
+            metadata["image_generation_semantic_prompt"] = semantic_generation_prompt[:2000]
 
             if provider_signal_valid and signal_prompt:
                 metadata["openai_renderer_prompt_received"] = signal_prompt[:1200]
@@ -3358,20 +3396,15 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             metadata["provider_image_render_ignored"] = True
             metadata["provider_pixels_disallowed"] = True
 
-            # Preserve the explicit Provider handoff as a normalized canonical signal.
-            # If an older Provider omitted it, provider_emitted=false marks that this
-            # field was normalized locally while keeping the same single route.
-            # The signal prompt follows the same immutable WHAT rule. Any OpenAI
-            # renderer phrasing is telemetry only; structured visual evidence carries HOW.
-            normalized_signal_prompt = str(
-                fallback_image_prompt or normalized_spec.get("prompt") or signal_prompt
-            ).strip()
+            # Canonical handoff: trigger stays in request_anchor; OpenAI semantic
+            # meaning becomes the actual generation prompt consumed by C_APRIL.
+            normalized_signal_prompt = semantic_generation_prompt
             metadata["image_generation_signal"] = {
                 "schema": PROVIDER_IMAGE_GENERATION_SIGNAL_VERSION,
                 "route": "C_APRIL_IMAGES_GENERATOR",
                 "execute": True,
                 "request_anchor": fallback_image_prompt,
-                "prompt_source": "PROVIDER_TURBO",
+                "prompt_source": "OPENAI_STRUCTURED_VISUAL_PLAN",
                 "prompt": normalized_signal_prompt,
                 "target_model": "stabilityai/sdxl-turbo",
                 "single_route": True,
