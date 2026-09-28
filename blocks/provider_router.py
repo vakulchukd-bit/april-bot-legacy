@@ -9,6 +9,7 @@ import re
 import time
 import ast
 import operator
+from xml.etree import ElementTree as ET
 from typing import Any, Dict, Optional
 
 from openai import OpenAI
@@ -20,7 +21,7 @@ from blocks.presentation_formatter import canonical_payload_for_block, validate_
 # APRIL PROVIDER — CANONICAL LUNA ROUTE
 # ============================================================
 
-APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_3_3_semantic_scene_preservation_v3"
+APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_3_4_visual_plan_handoff_v1"
 APRIL_QUANTUM_PROVIDER_MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-5.6-luna")
 APRIL_QUANTUM_PROVIDER_SINGLE_CALL = True
 APRIL_QUANTUM_PROVIDER_NO_MODEL_ESCALATION = True
@@ -80,11 +81,20 @@ put the direct answer in `answer` and mirror it in `content` and a text render b
 If structured output is requested, keep its render block structured and complete:
 type, renderer, viewer, payload, scene_contract=true.
 Preserve every requested representation and never invent an unrequested one.
-For `image_generation`, return a semantic generation plan only: populate
-`metadata.image_generation_spec` and `metadata.image_generation_signal`. The signal must
-identify `C_APRIL_IMAGES_GENERATOR` and anchor the prompt to the current request. The
-image-generation prompt is a concise English SDXL Turbo prompt faithful only to the current
-request; do not copy a prior visual subject.
+For `image_generation`, return one semantic generation handoff only:
+`metadata.image_generation_spec` and `metadata.image_generation_signal`.
+The current user request is the immutable scene anchor. The Provider prompt must be a concise,
+concrete English SDXL-Turbo visual instruction derived only from that current request.
+`metadata.image_generation_spec.visual_context` is a complementary visual blueprint, not a
+second interpretation: it may contain only explicit scene geometry, colors, positions, sizes,
+background and requested text that are directly stated by the current request or by a structured
+visual plan produced in this same turn. Never add aesthetics, atmosphere, props, characters,
+scenery, decorative objects, camera language, or alternate subjects.
+The signal must identify `C_APRIL_IMAGES_GENERATOR`, set `execute=true`, carry the exact current
+request as `request_anchor`, identify the prompt as `PROVIDER_TURBO`, target
+`stabilityai/sdxl-turbo`, and set `single_route=true`.
+The signal and spec must complement rather than repeat each other: `prompt` states the scene;
+`visual_context` carries concrete visual constraints needed to render that scene.
 Do NOT return ready image pixels, SVG/XML, base64/data URIs, image URLs, or an image/gallery
 render block for `image_generation`. Pixel production belongs exclusively to the local
 `C_APRIL_IMAGES_GENERATOR`; its output is materialized after the Provider stage.
@@ -93,12 +103,15 @@ Never call another model. Never fabricate URLs, image bytes or duplicate structu
 """.strip()
 
 PROVIDER_IMAGE_SPEC_SCHEMA = (
-    '{"schema":"april_image_spec_v1","prompt":"short visual description","width":1024,'
-    '"height":1024,"style":"photorealistic|illustration|cinematic|graphic|abstract",'
-    '"background":{"top":"#RRGGBB","bottom":"#RRGGBB"},'
-    '"layers":[{"kind":"polygon|ellipse|rect|line|wave|gradient|sun",'
-    '"role":"sky|sea|sand|sun|subject|foreground|detail","points":[[0,0],[1,1]],'
-    '"box":[0,0,1,1],"color":"#RRGGBB","width":0.003,"opacity":0.8}],'
+    '{"schema":"april_image_spec_v1","prompt":"concise English SDXL Turbo visual prompt",'
+    '"width":512,"height":512,"style":"illustration",'
+    '"background":{"color":"#RRGGBB"},'
+    '"visual_context":{"source":"OPENAI_STRUCTURED_VISUAL_PLAN","authoritative":true,'
+    '"complements_prompt":true,"canvas":{"width":512,"height":512},'
+    '"layers":[{"kind":"rect|circle|ellipse|polygon|line|text",'
+    '"box":[0,0,1,1],"center":[0.5,0.5],"radius":0.1,'
+    '"fill":"#RRGGBB","stroke":"#RRGGBB","stroke_width":0.01,'
+    '"rotation":0,"text":"requested text"}]},'
     '"negative":[],"seed":12345}'
 )
 
@@ -129,12 +142,18 @@ Keep secret_target/private_target internal and never expose it in the visible an
 
 Return compact JSON with answer, content, summary, scene, artifacts, render_blocks, scene_plan,
 render_priority, confidence and metadata. For image_generation, output only the semantic
-`metadata.image_generation_spec` plus the explicit `metadata.image_generation_signal`. The signal
-MUST identify `C_APRIL_IMAGES_GENERATOR`, set execute=true, carry the exact current request as
-request_anchor, identify the prompt as PROVIDER_TURBO, target `stabilityai/sdxl-turbo`, and set
-single_route=true. The image-generation prompt must be a concise English SDXL Turbo prompt faithful
-only to the current request. Translate Russian/Ukrainian wording when needed and never reuse a
-prior visual subject. Never output ready image pixels, SVG/XML, base64/data URI, image URL, or a
+`metadata.image_generation_spec` plus the explicit `metadata.image_generation_signal`.
+The current request is the sole scene anchor. `image_generation_spec.prompt` MUST be a concise
+English SDXL-Turbo visual prompt faithful only to this turn; translate Russian/Ukrainian wording
+when needed. `image_generation_spec.visual_context` MUST be complementary structured rendering
+information for this same turn: explicit background color, layer geometry, colors, positions,
+dimensions and requested text when known. Do not use visual_context to add any new object,
+environment, mood, style, cinematic language or artistic flourish. Do not repeat the whole
+prompt inside visual_context.
+The signal MUST identify `C_APRIL_IMAGES_GENERATOR`, set execute=true, carry the exact current
+request as request_anchor, identify the prompt as PROVIDER_TURBO, target `stabilityai/sdxl-turbo`,
+and set single_route=true. Mark `provider_emitted=true` when the signal is emitted by this
+Provider response. Never output ready image pixels, SVG/XML, base64/data URI, image URL, or a
 concrete image/gallery render block.
 The local C_APRIL_IMAGES_GENERATOR is the sole pixel producer. The `answer` field is mandatory and must be non-empty;
 never return `{}` or an empty answer. For text/math requests, mirror the answer into content and
@@ -2614,21 +2633,204 @@ def _image_prompt_from_provider_payload(value: Any) -> str:
     return ""
 
 
+
+def _svg_attr_number(value: Any, default: float = 0.0) -> float:
+    text = _safe_text(value).strip()
+    if not text:
+        return float(default)
+    match = re.match(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", text)
+    if not match:
+        return float(default)
+    try:
+        return float(match.group(0))
+    except (TypeError, ValueError, OverflowError):
+        return float(default)
+
+
+def _parse_svg_visual_context(svg_text: Any) -> dict[str, Any] | None:
+    """Convert a same-turn Provider SVG into explicit geometry/color constraints."""
+    raw = _safe_text(svg_text).strip()
+    if not raw or "<svg" not in raw.lower():
+        return None
+    try:
+        root = ET.fromstring(raw)
+    except (ET.ParseError, ValueError):
+        return None
+
+    def local_name(tag: Any) -> str:
+        return _safe_text(tag).split("}", 1)[-1].lower()
+
+    width = _svg_attr_number(root.attrib.get("width"), 512)
+    height = _svg_attr_number(root.attrib.get("height"), 512)
+    view_box_text = _safe_text(root.attrib.get("viewBox") or root.attrib.get("viewbox")).strip()
+    vb: list[float] = []
+    if view_box_text:
+        parts = re.split(r"[,\s]+", view_box_text)
+        if len(parts) == 4:
+            try:
+                vb = [float(x) for x in parts]
+            except (TypeError, ValueError, OverflowError):
+                vb = []
+    if len(vb) == 4:
+        ox, oy, cw, ch = vb
+        width = width if width > 0 else cw
+        height = height if height > 0 else ch
+    else:
+        ox, oy, cw, ch = 0.0, 0.0, max(width, 1.0), max(height, 1.0)
+
+    def nx(x: float) -> float:
+        return round(max(0.0, min(1.0, (x - ox) / max(cw, 1.0))), 4)
+    def ny(y: float) -> float:
+        return round(max(0.0, min(1.0, (y - oy) / max(ch, 1.0))), 4)
+    def nw(v: float) -> float:
+        return round(max(0.0, min(1.0, v / max(cw, 1.0))), 4)
+    def nh(v: float) -> float:
+        return round(max(0.0, min(1.0, v / max(ch, 1.0))), 4)
+    def color(v: Any) -> str:
+        t = _safe_text(v).strip()
+        return t[:24] if t and t.lower() not in {"none", "transparent"} else ""
+
+    background_color = ""
+    layers: list[dict[str, Any]] = []
+
+    for el in root.iter():
+        tag = local_name(el.tag)
+        attrs = el.attrib
+
+        if tag == "rect":
+            x = _svg_attr_number(attrs.get("x"), 0)
+            y = _svg_attr_number(attrs.get("y"), 0)
+            w = _svg_attr_number(attrs.get("width"), cw)
+            h = _svg_attr_number(attrs.get("height"), ch)
+            fill = color(attrs.get("fill"))
+            if not fill and attrs.get("style"):
+                m = re.search(r"(?:^|;)\s*fill\s*:\s*([^;]+)", _safe_text(attrs.get("style")))
+                fill = color(m.group(1) if m else "")
+            if x <= ox + 1e-6 and y <= oy + 1e-6 and w >= cw - 1e-6 and h >= ch - 1e-6 and fill and not background_color:
+                background_color = fill
+                continue
+            item = {"kind": "rect", "box": [nx(x), ny(y), nx(x+w), ny(y+h)]}
+            if fill:
+                item["fill"] = fill
+            rx = _svg_attr_number(attrs.get("rx"), 0)
+            if rx > 0:
+                item["radius"] = nw(rx)
+            layers.append(item)
+
+        elif tag in {"circle", "ellipse"}:
+            cx = _svg_attr_number(attrs.get("cx"), 0)
+            cy = _svg_attr_number(attrs.get("cy"), 0)
+            item = {"kind": tag, "center": [nx(cx), ny(cy)]}
+            if tag == "circle":
+                r = _svg_attr_number(attrs.get("r"), 0)
+                item["radius"] = round(min(nw(r), nh(r)), 4)
+            else:
+                item["radius_x"] = nw(_svg_attr_number(attrs.get("rx"), 0))
+                item["radius_y"] = nh(_svg_attr_number(attrs.get("ry"), 0))
+            fill = color(attrs.get("fill"))
+            if fill:
+                item["fill"] = fill
+            stroke = color(attrs.get("stroke"))
+            if stroke:
+                item["stroke"] = stroke
+            layers.append(item)
+
+        elif tag in {"polygon", "polyline"}:
+            raw_points = _safe_text(attrs.get("points"))
+            nums = re.findall(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", raw_points)
+            points = []
+            for i in range(0, len(nums)-1, 2):
+                try:
+                    points.append([nx(float(nums[i])), ny(float(nums[i+1]))])
+                except (TypeError, ValueError):
+                    pass
+            if points:
+                item = {"kind": "polygon", "points": points[:64]}
+                fill = color(attrs.get("fill"))
+                if fill:
+                    item["fill"] = fill
+                layers.append(item)
+
+        elif tag == "line":
+            item = {
+                "kind": "line",
+                "points": [
+                    [nx(_svg_attr_number(attrs.get("x1"), 0)), ny(_svg_attr_number(attrs.get("y1"), 0))],
+                    [nx(_svg_attr_number(attrs.get("x2"), 0)), ny(_svg_attr_number(attrs.get("y2"), 0))],
+                ],
+            }
+            stroke = color(attrs.get("stroke"))
+            if stroke:
+                item["stroke"] = stroke
+            layers.append(item)
+
+        elif tag == "text":
+            value = "".join(el.itertext()).strip()
+            if value:
+                layers.append({
+                    "kind": "text",
+                    "text": value[:240],
+                    "position": [nx(_svg_attr_number(attrs.get("x"), 0)), ny(_svg_attr_number(attrs.get("y"), 0))],
+                })
+
+    if not background_color and not layers:
+        return None
+
+    return {
+        "source": "OPENAI_STRUCTURED_VISUAL_PLAN",
+        "authoritative": True,
+        "complements_prompt": True,
+        "canvas": {
+            "width": int(round(width)),
+            "height": int(round(height)),
+            "view_box": [round(x, 4) for x in vb] if vb else [0, 0, int(round(width)), int(round(height))],
+        },
+        "background": {"color": background_color} if background_color else {},
+        "layers": layers[:32],
+    }
+
+
+def _merge_visual_context(base: Any, supplement: Any) -> dict[str, Any]:
+    merged = dict(base) if isinstance(base, dict) else {}
+    if not isinstance(supplement, dict):
+        return merged
+    for key, value in supplement.items():
+        if key == "layers" and isinstance(value, list):
+            current = list(merged.get("layers") or []) if isinstance(merged.get("layers"), list) else []
+            current.extend(value)
+            merged["layers"] = current[:32]
+        elif key == "background" and isinstance(value, dict):
+            bg = dict(merged.get("background") or {}) if isinstance(merged.get("background"), dict) else {}
+            for bk, bv in value.items():
+                if bv not in (None, ""):
+                    bg.setdefault(bk, bv)
+            merged["background"] = bg
+        elif value not in (None, "", {}, []):
+            merged.setdefault(key, value)
+    return merged
+
+
 def _build_image_generation_spec_from_provider(
     value: Any,
     *,
     fallback_prompt: str = "",
 ) -> dict[str, Any] | None:
-    """Normalize a semantic Provider image instruction into the local spec."""
+    """Normalize Provider image intent while preserving same-turn structured visual evidence."""
+    svg_context = None
+    if isinstance(value, str):
+        svg_context = _parse_svg_visual_context(value)
+    elif isinstance(value, dict) and _safe_text(value.get("format")).strip().lower() in {"svg", "xml"}:
+        svg_context = _parse_svg_visual_context(value.get("content"))
+
     if isinstance(value, dict):
         schema = _safe_text(value.get("schema"))
         if schema == "april_image_spec_v1":
             candidate = dict(value)
+            candidate["visual_context"] = _merge_visual_context(candidate.get("visual_context"), svg_context)
             semantic_prompt = _image_prompt_from_provider_payload(candidate.get("prompt"))
             if semantic_prompt:
                 candidate["prompt"] = semantic_prompt
                 return candidate
-            # A malformed spec must not push SVG/XML into the local CLIP encoder.
             prompt = _image_prompt_from_provider_payload(candidate) or fallback_prompt.strip()
             if not prompt:
                 return None
@@ -2636,36 +2838,34 @@ def _build_image_generation_spec_from_provider(
             return candidate
 
     prompt = _image_prompt_from_provider_payload(value) or _safe_text(fallback_prompt).strip()
-    if not prompt:
+    if not prompt and not svg_context:
         return None
-    width = 512
-    height = 512
+
+    width, height = 512, 512
     if isinstance(value, dict):
-        raw_content = value.get("content")
-        is_render_artifact = (
-            _safe_text(value.get("format")).lower() in {"svg", "xml", "png", "jpeg", "jpg", "webp"}
-            or (isinstance(raw_content, str) and bool(
-                re.search(r"<\/?(?:svg|path|rect|circle|ellipse|polygon|g)\b|data:image/", raw_content, flags=re.IGNORECASE)
-            ))
-        )
+        is_render_artifact = _safe_text(value.get("format")).lower() in {"svg", "xml", "png", "jpeg", "jpg", "webp"}
         if not is_render_artifact:
             try:
                 width = int(value.get("width") or width)
                 height = int(value.get("height") or height)
             except (TypeError, ValueError, OverflowError):
                 width, height = 512, 512
+
     return {
         "schema": "april_image_spec_v1",
-        "prompt": prompt,
+        "prompt": prompt or fallback_prompt.strip(),
         "width": max(256, min(width, 1536)),
         "height": max(256, min(height, 1536)),
         "style": _safe_text(value.get("style") if isinstance(value, dict) else "") or "illustration",
         "background": dict(value.get("background") or {}) if isinstance(value, dict) and isinstance(value.get("background"), dict) else {},
         "layers": list(value.get("layers") or []) if isinstance(value, dict) and isinstance(value.get("layers"), list) else [],
+        "visual_context": _merge_visual_context(
+            value.get("visual_context") if isinstance(value, dict) and isinstance(value.get("visual_context"), dict) else {},
+            svg_context,
+        ),
         "negative": list(value.get("negative") or []) if isinstance(value, dict) and isinstance(value.get("negative"), list) else [],
         "seed": value.get("seed") if isinstance(value, dict) else None,
     }
-
 
 def _top_level_visual_block(kind: str, value: Any) -> dict[str, Any] | None:
     """Promote one concrete provider visual into a canonical semantic block."""
