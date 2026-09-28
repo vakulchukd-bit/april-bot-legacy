@@ -1,31 +1,36 @@
 # =====================================================
 # APRIL IMAGES GENERATION
 # =====================================================
-"""Canonical April image-generation engine.
+"""Canonical April image-generation engine backed by OpenAI GPT Image 2.
 
 Route:
-    April Bot -> Interpretation -> C_APRIL_IMAGES_GENERATOR
+    April Bot -> Interpretation -> Provider -> C_APRIL_IMAGES_GENERATOR
       -> C_ARTIFACT_CONTRACT -> GalleryBlock / April Web
 
-Important contract rule:
-    This module creates real raster pixels only through the configured local
-    Diffusers image model. It does NOT silently fall back to a procedural
-    placeholder or another image provider. The existing C_ARTIFACT/Gallery
-    payload is preserved so Web keeps all existing image signals.
+Contract rules:
+    * OpenAI Provider remains the semantic authority.
+    * C_APRIL_IMAGES_GENERATOR is the sole image producer for this route.
+    * The image generator receives the same-turn user request together with the
+      OpenAI structured visual plan and sends that combined semantic payload to
+      ``gpt-image-2`` without adding local artistic styles or unrelated scene
+      content.
+    * GPT Image 2 returns base64 image data; this module decodes the bytes,
+      normalizes the requested Web size when necessary, validates the PNG and
+      forwards the resulting bytes through the existing C_ARTIFACT_CONTRACT.
+    * Diagnostic logging is observer-only and never changes image bytes.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
-import html
 import hashlib
 import io
 import json
+import math
 import os
 import re
-import threading
 from dataclasses import dataclass
-from xml.etree import ElementTree as ET
 from typing import Any, Optional
 
 from PIL import Image
@@ -37,16 +42,9 @@ from blocks.C_ARTIFACT_CONTRACT import (
 )
 
 try:
-    from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image
+    from openai import OpenAI
 except Exception:  # pragma: no cover
-    AutoPipelineForText2Image = None
-    AutoPipelineForImage2Image = None
-
-try:
-    import torch
-except Exception:  # pragma: no cover
-    torch = None
-
+    OpenAI = None
 
 
 @dataclass
@@ -62,130 +60,220 @@ class ImageGenerationResult:
 
 
 class AprilImagesGenerator:
-    """The only image producer between Interpretation and C_ARTIFACT."""
+    """The only image producer between Provider and C_ARTIFACT_CONTRACT."""
 
-    ENGINE_NAME = "April Images Generation"
-    ENGINE_VERSION = "2.6.1"
-    BACKEND = "diffusers_single_backend"
+    ENGINE_NAME = "GPT Image 2.0"
+    ENGINE_VERSION = "2.0.0"
+    MODEL = "gpt-image-2"
+    BACKEND = "openai_gpt_image_2"
 
     DEFAULT_SIZE = (512, 512)
     MIN_SIZE = 256
     MAX_SIZE = 1536
 
-    # Semantic prompt budget owned by April.  This is deliberately separate
-    # from the native CLIP window (normally 77 tokens).
-    MAX_SEMANTIC_PROMPT_TOKENS = 12000
+    # GPT Image 2 minimum output area is 655,360 pixels.  April's Web route
+    # remains 512x512 by decoding the model's compliant raster and then
+    # downsampling it to the requested canonical Web size.
+    API_MIN_PIXELS = 655_360
+    API_MAX_PIXELS = 8_294_400
+    API_MAX_EDGE = 3_840
 
-    # Complexity tiers control only optional guidance/conditioning and Turbo
-    # sampling steps.  The user's core request is never replaced by these tiers.
-    PROMPT_TIERS = (
-        (100, "core"),
-        (200, "style"),
-        (300, "composition"),
-        (500, "scene"),
-        (800, "detail"),
-        (1200, "rich"),
-        (2000, "max"),
-    )
+    # Official GPT Image 2 standard rates used for local cost diagnostics.
+    TEXT_INPUT_USD_PER_MILLION = 2.50
+    IMAGE_INPUT_USD_PER_MILLION = 4.00
+    IMAGE_OUTPUT_USD_PER_MILLION = 15.00
+    LOW_1024_IMAGE_ESTIMATE_USD = 0.006
 
-    _pipeline_lock = threading.RLock()
-    _text_pipeline = None
-    _edit_pipeline = None
-    _pipeline_path = None
-    _pipeline_cache_key = None
+    MAX_SEMANTIC_PROMPT_TOKENS = 12_000
 
     def __init__(self) -> None:
         self.engine_name = self.ENGINE_NAME
         self.engine_version = self.ENGINE_VERSION
 
     # -------------------------------------------------
-    # Configuration
+    # OpenAI client / configuration
     # -------------------------------------------------
 
     @classmethod
+    def _api_key(cls) -> str:
+        return os.getenv("OPENAI_API_KEY", "").strip()
+
+    @classmethod
+    def _client(cls):
+        if OpenAI is None:
+            raise RuntimeError("APRIL_IMAGES_OPENAI_SDK_NOT_INSTALLED")
+        api_key = cls._api_key()
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY_NOT_CONFIGURED")
+        # Do not cache a client globally: the existing Provider path and the
+        # generator use the same environment-backed key without sharing state.
+        return OpenAI(api_key=api_key)
+
+    @classmethod
     def _model_source(cls) -> str:
-        """Return the single configured Diffusers model source.
-
-        A local path is preferred when explicitly configured. Otherwise one
-        canonical model id is used. Both are the same Diffusers backend; there
-        is no alternate provider or rendering fallback.
-        """
-        local_path = os.getenv("APRIL_IMAGES_MODEL_PATH", "").strip()
-        if local_path:
-            return local_path
-
-        return (
-            os.getenv(
-                "APRIL_IMAGES_MODEL_ID",
-                "stabilityai/sdxl-turbo",
-            ).strip()
-            or "stabilityai/sdxl-turbo"
-        )
+        return cls.MODEL
 
     @classmethod
     def _model_path(cls) -> str:
-        # Backward-compatible accessor retained for callers that expect it.
-        return os.getenv("APRIL_IMAGES_MODEL_PATH", "").strip()
-
-    @classmethod
-    def _model_is_local(cls) -> bool:
-        path = cls._model_path()
-        return bool(path) and os.path.isdir(path)
-
-    @classmethod
-    def _local_files_only(cls) -> bool:
-        configured = os.getenv("APRIL_IMAGES_LOCAL_ONLY", "0").strip().lower()
-        return configured in {"1", "true", "yes", "on"} or cls._model_is_local()
+        """Compatibility accessor kept for old callers; GPT Image 2 is API-backed."""
+        return ""
 
     @classmethod
     def _device(cls) -> str:
-        configured = os.getenv("APRIL_IMAGES_DEVICE", "auto").strip().lower()
-        if configured in {"cuda", "cpu", "mps"}:
-            return configured
-        if torch is not None and torch.cuda.is_available():
-            return "cuda"
-        if torch is not None and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return "mps"
-        return "cpu"
+        return "openai_api"
 
     @classmethod
     def _dtype(cls):
-        configured = os.getenv("APRIL_IMAGES_DTYPE", "auto").strip().lower()
-        if torch is None:
-            return None
-        if configured in {"float16", "fp16"}:
-            return torch.float16
-        if configured in {"bfloat16", "bf16"}:
-            return torch.bfloat16
-        if configured in {"float32", "fp32"}:
-            return torch.float32
-        return torch.float16 if cls._device() in {"cuda", "mps"} else torch.float32
+        return None
 
     @classmethod
-    def _is_turbo_model(cls) -> bool:
-        return "sdxl-turbo" in cls._model_source().strip().lower()
+    def _can_initialize(cls) -> bool:
+        return OpenAI is not None and bool(cls._api_key())
 
     @classmethod
-    def _quality_settings(cls, quality: str) -> tuple[int, float]:
-        """Return baseline sampling settings for the configured backend."""
-        normalized = str(quality or "standard").strip().lower()
-        if cls._is_turbo_model():
-            return {
-                "draft": (1, 0.0),
-                # SDXL Turbo is designed for very few denoising steps. On the
-                # Railway CPU runtime, one step is the fast production baseline
-                # for standard/simple requests; higher tiers retain an extra
-                # step where additional detail is requested.
-                "standard": (1, 0.0),
-                "high": (2, 0.0),
-                "ultra": (4, 0.0),
-            }.get(normalized, (1, 0.0))
-        return {
-            "draft": (28, 6.0),
-            "standard": (40, 6.5),
-            "high": (50, 7.0),
-            "ultra": (60, 7.5),
-        }.get(normalized, (40, 6.5))
+    def _require_backend(cls) -> None:
+        if OpenAI is None:
+            raise RuntimeError("APRIL_IMAGES_OPENAI_SDK_NOT_INSTALLED")
+        if not cls._api_key():
+            raise RuntimeError("OPENAI_API_KEY_NOT_CONFIGURED")
+
+    # -------------------------------------------------
+    # Semantic input normalization
+    # -------------------------------------------------
+
+    @staticmethod
+    def _safe_text(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        if value is None:
+            return ""
+        return str(value)
+
+    @classmethod
+    def _extract_semantic_prompt(cls, value: Any, *, _depth: int = 0) -> str:
+        """Extract text without passing serialized artifacts or data URIs."""
+        if _depth > 5 or value is None:
+            return ""
+
+        if isinstance(value, dict):
+            preferred = (
+                "prompt",
+                "description",
+                "visual_prompt",
+                "image_prompt",
+                "visual_generation_prompt",
+                "image",
+                "visual",
+                "visual_context",
+                "scene",
+                "subject",
+                "request",
+                "title",
+                "summary",
+                "answer",
+                "content",
+                "alt",
+            )
+            for key in preferred:
+                if key not in value:
+                    continue
+                candidate = cls._extract_semantic_prompt(value.get(key), _depth=_depth + 1)
+                if candidate:
+                    return candidate
+            return ""
+
+        if isinstance(value, (list, tuple)):
+            parts: list[str] = []
+            for item in value[:24]:
+                candidate = cls._extract_semantic_prompt(item, _depth=_depth + 1)
+                if candidate:
+                    parts.append(candidate)
+            return " ".join(dict.fromkeys(parts)).strip()
+
+        text = cls._safe_text(value).strip()
+        if not text:
+            return ""
+        text = re.sub(r"^```(?:json|text|xml)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text).strip()
+        if re.match(r"^data:image/[^;]+;base64,", text, flags=re.IGNORECASE):
+            return ""
+        return " ".join(text.split())
+
+    @classmethod
+    def _clean_prompt(cls, prompt: Any) -> str:
+        text = cls._extract_semantic_prompt(prompt)
+        if not text:
+            raise ValueError("APRIL_IMAGES_EMPTY_PROMPT")
+        if len(text.split()) > cls.MAX_SEMANTIC_PROMPT_TOKENS:
+            raise ValueError(
+                f"APRIL_IMAGES_PROMPT_TOO_LONG:{len(text.split())}>{cls.MAX_SEMANTIC_PROMPT_TOKENS}"
+            )
+        return text
+
+    @classmethod
+    def _compact_json(cls, value: Any, limit: int = 12_000) -> str:
+        if value in (None, "", [], {}):
+            return ""
+        try:
+            text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+        except Exception:
+            text = cls._safe_text(value)
+        return text[:limit]
+
+    @classmethod
+    def _semantic_plan_for_generation(cls, spec: dict[str, Any]) -> str:
+        """Keep only same-turn OpenAI visual data; no render-profile injection."""
+        raw_plan = spec.get("openai_structured_visual_plan_raw")
+        plan_semantic = cls._clean_prompt(
+            spec.get("openai_structured_visual_plan_semantic")
+            or spec.get("prompt")
+            or ""
+        )
+        visual_context = spec.get("visual_context")
+
+        parts: list[str] = []
+        request_anchor = cls._safe_text(spec.get("request_anchor") or "").strip()
+        if request_anchor:
+            parts.append(f"User request: {request_anchor}")
+
+        parts.append(f"OpenAI visual meaning: {plan_semantic}")
+
+        if isinstance(visual_context, dict) and visual_context:
+            encoded_context = cls._compact_json(visual_context, 8_000)
+            if encoded_context:
+                parts.append(f"OpenAI visual constraints: {encoded_context}")
+
+        if isinstance(raw_plan, dict):
+            # Preserve structured same-turn visual fields when they contain
+            # information beyond the already extracted semantic description.
+            nontrivial_keys = {
+                str(key) for key in raw_plan.keys()
+                if str(key) not in {"description", "prompt", "visual_prompt", "image_prompt"}
+            }
+            if nontrivial_keys:
+                encoded_plan = cls._compact_json(raw_plan, 8_000)
+                if encoded_plan:
+                    parts.append(f"OpenAI structured visual plan: {encoded_plan}")
+
+        parts.append(
+            "Render the supplied visual content faithfully. Do not replace the requested subject, "
+            "do not add unrelated subjects or environments, and do not invent missing scene elements."
+        )
+        return "\n".join(parts)
+
+    @classmethod
+    def _compose_prompt(cls, prompt: str, spec: Optional[dict[str, Any]] = None) -> str:
+        """Compose only user request + same-turn OpenAI visual meaning."""
+        if not isinstance(spec, dict):
+            return cls._clean_prompt(prompt)
+        composed = cls._semantic_plan_for_generation(spec)
+        if composed:
+            return composed
+        return cls._clean_prompt(prompt)
+
+    # -------------------------------------------------
+    # Size / quality
+    # -------------------------------------------------
 
     @classmethod
     def _parse_size(cls, size: Any) -> tuple[int, int]:
@@ -202,1850 +290,293 @@ class AprilImagesGenerator:
                 width, height = cls.DEFAULT_SIZE
         width = max(cls.MIN_SIZE, min(cls.MAX_SIZE, width))
         height = max(cls.MIN_SIZE, min(cls.MAX_SIZE, height))
-        width = max(64, (width // 64) * 64)
-        height = max(64, (height // 64) * 64)
+        width = max(16, (width // 16) * 16)
+        height = max(16, (height // 16) * 16)
         return width, height
 
     @classmethod
-    def _extract_semantic_prompt(cls, value: Any, *, _depth: int = 0) -> str:
-        """Extract a semantic image request without feeding render artifacts to CLIP.
+    def _api_generation_size(cls, width: int, height: int) -> tuple[int, int]:
+        width, height = cls._parse_size((width, height))
+        if max(width, height) > cls.API_MAX_EDGE:
+            raise ValueError("APRIL_IMAGES_GPT_IMAGE_SIZE_EDGE_INVALID")
+        ratio = max(width, height) / max(1, min(width, height))
+        if ratio > 3.0:
+            raise ValueError("APRIL_IMAGES_GPT_IMAGE_ASPECT_RATIO_INVALID")
 
-        The local image engine must receive a visual description, not a serialized
-        MachineResponse, SVG/XML markup, data URI, or base64 payload. OpenAI remains
-        the semantic planner; this Diffusers backend remains the only pixel generator.
-        """
-        if _depth > 4 or value is None:
-            return ""
+        pixels = width * height
+        if pixels < cls.API_MIN_PIXELS:
+            # April's canonical 512x512 Web output maps to the documented
+            # 1024x1024 square generation target, which keeps the low-quality
+            # image price deterministic and then downsamples only at the final
+            # decoder boundary.
+            if width == height:
+                return 1024, 1024
+            scale = math.sqrt(cls.API_MIN_PIXELS / float(pixels))
+            width = int(math.ceil((width * scale) / 16.0) * 16)
+            height = int(math.ceil((height * scale) / 16.0) * 16)
 
-        if isinstance(value, dict):
-            preferred_keys = (
-                "prompt", "description", "visual_prompt", "image_prompt",
-                "image", "visual", "visual_context",
-                "scene", "subject", "request", "title", "summary",
-                "answer", "content", "alt",
-            )
-            for key in preferred_keys:
-                if key in value:
-                    candidate = cls._extract_semantic_prompt(value.get(key), _depth=_depth + 1)
-                    if candidate:
-                        return candidate
-            for key in ("data", "spec"):
-                if key in value:
-                    candidate = cls._extract_semantic_prompt(value.get(key), _depth=_depth + 1)
-                    if candidate:
-                        return candidate
-            return ""
+        width = min(width, cls.API_MAX_EDGE)
+        height = min(height, cls.API_MAX_EDGE)
+        width = max(16, (width // 16) * 16)
+        height = max(16, (height // 16) * 16)
 
-        if isinstance(value, (list, tuple)):
-            parts = []
-            for item in value[:16]:
-                candidate = cls._extract_semantic_prompt(item, _depth=_depth + 1)
-                if candidate:
-                    parts.append(candidate)
-            return " ".join(parts).strip()
+        if width * height > cls.API_MAX_PIXELS:
+            scale = math.sqrt(cls.API_MAX_PIXELS / float(width * height))
+            width = max(16, int((width * scale) // 16) * 16)
+            height = max(16, int((height * scale) // 16) * 16)
 
-        text = str(value or "").strip()
-        if not text:
-            return ""
+        if width * height < cls.API_MIN_PIXELS:
+            # 1024x1024 is the canonical compliant square for April's current Web route.
+            if width == height:
+                return 1024, 1024
+            while width * height < cls.API_MIN_PIXELS:
+                width += 16
+                height += 16
+                if width > cls.API_MAX_EDGE or height > cls.API_MAX_EDGE:
+                    raise ValueError("APRIL_IMAGES_GPT_IMAGE_SIZE_NORMALIZATION_FAILED")
 
-        if text[:1] in "{[":
-            try:
-                parsed = json.loads(text)
-            except Exception:
-                parsed = None
-            if parsed is not None:
-                candidate = cls._extract_semantic_prompt(parsed, _depth=_depth + 1)
-                if candidate:
-                    return candidate
-
-        lowered = text.lstrip().lower()
-        if (
-            lowered.startswith("<svg")
-            or lowered.startswith("<?xml")
-            or "data:image/" in lowered
-            or "<svg " in lowered
-            or "<path" in lowered
-            or "<rect" in lowered
-            or "<circle" in lowered
-        ):
-            candidates = []
-            patterns = (
-                r"aria-label=[\"']([^\"']+)[\"']",
-                r"data-(?:prompt|description|alt)=[\"']([^\"']+)[\"']",
-                r"<title[^>]*>(.*?)</title>",
-                r"<desc[^>]*>(.*?)</desc>",
-                r"<text[^>]*>(.*?)</text>",
-            )
-            for pattern in patterns:
-                for match in re.findall(pattern, text, flags=re.IGNORECASE | re.DOTALL):
-                    cleaned = html.unescape(re.sub(r"<[^>]+>", " ", str(match)))
-                    cleaned = " ".join(cleaned.split()).strip()
-                    if cleaned:
-                        candidates.append(cleaned)
-            if candidates:
-                return " ".join(dict.fromkeys(candidates))
-            return ""
-
-        text = re.sub(r"^```(?:json|text|xml|svg)?\s*", "", text, flags=re.IGNORECASE)
-        text = re.sub(r"\s*```$", "", text).strip()
-        text = re.sub(r"^data:image/[^;]+;base64,.*$", "", text, flags=re.IGNORECASE | re.DOTALL)
-        return " ".join(text.split()).strip()
-
-    @classmethod
-    def _clean_prompt(cls, prompt: Any) -> str:
-        text = cls._extract_semantic_prompt(prompt)
-        if not text:
-            raise ValueError("APRIL_IMAGES_EMPTY_PROMPT")
-        return text
+        return width, height
 
     @staticmethod
-    def _negative_prompt(spec: Optional[dict[str, Any]] = None) -> str:
-        values = [
-            "low quality", "blurry", "pixelated", "jpeg artifacts",
-            "deformed", "bad anatomy", "extra limbs", "duplicate subject",
-            "distorted face", "disfigured hands", "malformed eyes",
-            "watermark", "text artifacts", "cropped subject",
-        ]
-        if isinstance(spec, dict) and isinstance(spec.get("negative"), list):
-            values.extend(str(x).strip() for x in spec["negative"] if str(x).strip())
-        return ", ".join(dict.fromkeys(values))
-
-    @classmethod
-    def _prompt_tier(cls, raw_tokens: int) -> str:
-        count = max(0, int(raw_tokens))
-        for limit, name in cls.PROMPT_TIERS:
-            if count <= limit:
-                return name
-        return "over_limit"
-
-    @staticmethod
-    def _semantic_terms(text: Any) -> set[str]:
-        """Return conservative content terms used only to ground visual_context."""
-        value = str(text or "").lower().replace("ё", "е")
-        stop = {
-            "и", "в", "во", "на", "с", "со", "к", "ко", "у", "из", "за",
-            "под", "над", "для", "по", "а", "но", "или", "это", "как", "так",
-            "что", "чтобы", "the", "a", "an", "and", "in", "on", "with", "for",
-            "to", "of", "from", "is", "are", "be", "this", "that",
+    def _normalize_quality(quality: str) -> str:
+        value = str(quality or "low").strip().lower()
+        mapping = {
+            "draft": "low",
+            "standard": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "ultra": "high",
+            "auto": "auto",
         }
-        terms = set(re.findall(r"[^\W\d_]+", value, flags=re.UNICODE))
-        return {term for term in terms if len(term) >= 3 and term not in stop}
-
-    @classmethod
-    def _is_grounded_context_value(cls, base_prompt: str, value: str) -> bool:
-        """Allow visual context only when it is traceably grounded in the base prompt.
-
-        The generator is deliberately conservative: Provider/Interpretation remain
-        the semantic authority, while this renderer refuses to introduce an
-        unanchored subject/environment/detail on its own.
-        """
-        base = cls._clean_prompt(base_prompt).lower().replace("ё", "е")
-        candidate = cls._clean_prompt(value).lower().replace("ё", "е")
-        if candidate in base:
-            return True
-        base_terms = cls._semantic_terms(base)
-        candidate_terms = cls._semantic_terms(candidate)
-        if not base_terms or not candidate_terms:
-            return False
-        return bool(base_terms.intersection(candidate_terms))
-
-    @classmethod
-    def _prompt_guidance(cls, tier: str) -> str:
-        """Return scene-neutral instructions that improve fidelity without inventing content."""
-        guidance = {
-            "core": (
-                "Render exactly the requested scene. Preserve the specified subject, "
-                "colors, background, text, and relationships. Do not add, remove, or "
-                "replace objects."
-            ),
-            "style": (
-                "Render exactly the requested scene. Preserve all specified visual "
-                "attributes and do not introduce new objects or locations."
-            ),
-            "composition": (
-                "Render exactly the requested scene. Keep the requested objects and "
-                "relations intact; use clean composition and stable geometry."
-            ),
-            "scene": (
-                "Render exactly the requested scene. Preserve object identity and "
-                "placement; use consistent lighting and natural perspective without "
-                "inventing additional scene content."
-            ),
-            "detail": (
-                "Render exactly the requested scene. Preserve every requested object, "
-                "color, background and text; improve texture, depth and edge clarity "
-                "without adding new content."
-            ),
-            "rich": (
-                "Render exactly the requested scene. Preserve all requested semantics "
-                "and object relationships; improve detail, depth, lighting and visual "
-                "coherence without introducing unrequested subjects."
-            ),
-            "max": (
-                "Render exactly the requested scene. Treat the supplied prompt as the "
-                "sole source of scene content; preserve requested subjects, relations, "
-                "colors, background and text while maximizing detail and clarity. Do "
-                "not invent, replace or remove scene elements."
-            ),
-        }
-        return guidance.get(tier, guidance["core"])
-
-    @classmethod
-    def _prompt_complexity_flags(cls, prompt: str) -> dict[str, bool]:
-        text = str(prompt or "").lower()
-        return {
-            "text_requested": bool(re.search(r"надпис|текст|подпис|букв|слово|caption|label|text", text)),
-            "person_or_animal": bool(re.search(
-                r"человек|люд|мужчин|женщин|лиц|рук|ног|животн|ежик|кошка|кот|собак|птиц|лошад|person|people|animal|face|hand|human",
-                text,
-                flags=re.IGNORECASE,
-            )),
-            "multiple_entities": bool(re.search(r"\b(?:и|and|with)\b", text, flags=re.IGNORECASE)),
-        }
-
-    @staticmethod
-    def _visual_color_name(value: Any) -> str:
-        text = str(value or "").strip().lower()
-        exact = {
-            "#ffffff": "white", "#fff": "white",
-            "#000000": "black", "#000": "black",
-            "#222222": "dark gray", "#222": "dark gray",
-            "#555555": "gray", "#555": "gray",
-            "#e53935": "red", "#fdd835": "yellow", "#43a047": "green",
-            "#008000": "green", "#ffff00": "yellow", "#ff0000": "red",
-            "#00ff00": "green", "#0000ff": "blue",
-            "белый": "white", "белая": "white", "белое": "white",
-            "чёрный": "black", "черный": "black", "чёрная": "black", "черная": "black",
-            "серый": "gray", "серая": "gray", "серое": "gray",
-            "красный": "red", "красная": "red", "красное": "red",
-            "жёлтый": "yellow", "желтый": "yellow", "жёлтая": "yellow", "желтая": "yellow",
-            "зелёный": "green", "зеленый": "green", "зелёная": "green", "зеленая": "green",
-            "синий": "blue", "синяя": "blue",
-            "голубой": "light blue", "голубая": "light blue",
-        }
-        return exact.get(text, text)
-
-    RENDER_PROFILE_GUIDANCE = {
-        "neutral_realistic": "accurate subject identity, natural proportions, clean uncluttered presentation",
-        "naturalistic_wildlife": "natural anatomy, species-consistent proportions, realistic surface texture, natural posture, clear subject silhouette",
-        "scientific_natural_history": "scientifically grounded morphology, species-consistent anatomy, clear specimen presentation, restrained natural textures",
-        "botanical_documentation": "accurate botanical morphology, clear leaf and flower structure, species-consistent proportions, natural texture",
-        "marine_landscape": "natural ocean and coastal forms, coherent water and shoreline structure, physically plausible light",
-        "natural_landscape": "coherent natural perspective, plausible terrain and vegetation, natural lighting",
-        "cinematic_landscape": "cinematic composition, controlled depth, coherent lighting, natural perspective",
-        "portrait_realistic": "anatomically coherent face and body proportions, natural skin texture, controlled portrait lighting",
-        "product_photography": "complete object silhouette, accurate visible parts, clean product presentation, controlled lighting",
-        "architectural_visualization": "stable perspective, coherent architectural geometry, accurate structural proportions",
-        "mathematical_diagram": "precise diagram geometry, exact spatial relationships, clean lines, minimal visual noise",
-        "technical_geometry": "precise geometry, stable proportions, dimensionally coherent shapes, clean technical presentation",
-        "technical_diagram": "clean schematic structure, stable geometry, clear relationships, minimal decorative content",
-        "scientific_diagram": "clear scientific structure, coherent labels/relationships, restrained visual presentation",
-        "watercolor_illustration": "controlled watercolor texture and wash, preserve exact subject and composition",
-        "oil_painting": "controlled oil-paint surface texture, preserve exact subject and composition",
-        "line_art_sketch": "clean line-art contours, restrained shading, preserve exact subject geometry",
-        "isometric_illustration": "consistent isometric perspective, stable geometry, preserve exact object relationships",
-        "three_d_render": "coherent 3D form, stable lighting, physically consistent surfaces, preserve exact geometry",
-        "cartoon_illustration": "clean stylized contours, simplified but consistent anatomy, preserve exact requested subjects",
-        "children_illustration": "clear friendly illustration forms, simple readable composition, preserve exact requested subjects",
-        "documentary_visual": "observational visual language, restrained styling, preserve exact scene content",
-        "artistic_illustration": "controlled illustrative composition and texture, preserve exact requested scene",
-    }
-
-    @classmethod
-    def _dedupe_semantic_parts(cls, parts: list[str]) -> list[str]:
-        """Dedupe prompt fragments while allowing optional empty fragments."""
-        seen: set[str] = set()
-        out: list[str] = []
-        for raw in parts:
-            if raw is None or not str(raw).strip():
-                continue
-            text = cls._clean_prompt(raw)
-            if not text:
-                continue
-            key = re.sub(r"\s+", " ", text).strip().casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(text)
-        return out
-
-    @classmethod
-    def _openai_plan_to_visual_context(cls, plan: Any) -> dict[str, Any]:
-        """Parse preserved OpenAI structured JSON/SVG only for same-turn rendering."""
-        if not isinstance(plan, (dict, str, list)):
-            return {}
-        if isinstance(plan, dict) and isinstance(plan.get("visual_context"), dict):
-            return dict(plan["visual_context"])
-
-        raw = plan
-        if isinstance(plan, dict) and str(plan.get("format") or "").lower() in {"svg", "xml"}:
-            raw = plan.get("content") or plan.get("data") or ""
-        if isinstance(raw, str) and "<svg" in raw.lower():
-            try:
-                root = ET.fromstring(raw)
-            except (ET.ParseError, ValueError):
-                return {}
-            layers: list[dict[str, Any]] = []
-            background = ""
-
-            def name(tag: Any) -> str:
-                return str(tag).split("}", 1)[-1].lower()
-            def num(v: Any, default: float = 0.0) -> float:
-                m = re.match(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)", str(v or "").strip())
-                try:
-                    return float(m.group(0)) if m else default
-                except (TypeError, ValueError):
-                    return default
-
-            vb = [0.0, 0.0, 400.0, 300.0]
-            view_box = str(root.attrib.get("viewBox") or "").strip()
-            if view_box:
-                vals = re.split(r"[,\s]+", view_box)
-                if len(vals) == 4:
-                    try:
-                        vb = [float(x) for x in vals]
-                    except (TypeError, ValueError):
-                        pass
-            ox, oy, cw, ch = vb
-            def nx(x: float) -> float:
-                return round(max(0.0, min(1.0, (x - ox) / max(cw, 1.0))), 4)
-            def ny(y: float) -> float:
-                return round(max(0.0, min(1.0, (y - oy) / max(ch, 1.0))), 4)
-            def norm_len(v: float) -> float:
-                return round(max(0.0, min(1.0, v / max(cw, ch, 1.0))), 4)
-
-            for el in root.iter():
-                tag = name(el.tag)
-                a = el.attrib
-                fill = str(a.get("fill") or "").strip()
-                if fill.lower() in {"none", "transparent"}:
-                    fill = ""
-                if tag == "rect":
-                    x, y = num(a.get("x")), num(a.get("y"))
-                    w, h = num(a.get("width"), cw), num(a.get("height"), ch)
-                    if x <= ox + 1e-6 and y <= oy + 1e-6 and w >= cw - 1e-6 and h >= ch - 1e-6 and fill and not background:
-                        background = fill
-                        continue
-                    layers.append({
-                        "kind": "rect",
-                        "shape": "square" if abs(w - h) <= max(cw, ch) * 0.01 else "rectangle",
-                        "box": [nx(x), ny(y), nx(x + w), ny(y + h)],
-                        **({"fill": fill} if fill else {}),
-                    })
-                elif tag == "circle":
-                    layers.append({
-                        "kind": "circle",
-                        "center": [nx(num(a.get("cx"))), ny(num(a.get("cy")))],
-                        "radius": norm_len(num(a.get("r"))),
-                        **({"fill": fill} if fill else {}),
-                    })
-                elif tag == "ellipse":
-                    layers.append({
-                        "kind": "ellipse",
-                        "center": [nx(num(a.get("cx"))), ny(num(a.get("cy")))],
-                        "radius_x": round(max(0.0, min(1.0, num(a.get("rx")) / max(cw, 1.0))), 4),
-                        "radius_y": round(max(0.0, min(1.0, num(a.get("ry")) / max(ch, 1.0))), 4),
-                        **({"fill": fill} if fill else {}),
-                    })
-                elif tag == "line":
-                    layers.append({
-                        "kind": "line",
-                        "points": [[nx(num(a.get("x1"))), ny(num(a.get("y1")))], [nx(num(a.get("x2"))), ny(num(a.get("y2")))]],
-                        **({"stroke": str(a.get("stroke"))} if a.get("stroke") else {}),
-                    })
-                elif tag == "text":
-                    value = "".join(el.itertext()).strip()
-                    if value:
-                        layers.append({"kind": "text", "text": value[:240], "position": [nx(num(a.get("x"))), ny(num(a.get("y")))]})
-
-            result: dict[str, Any] = {
-                "source": "OPENAI_STRUCTURED_VISUAL_PLAN",
-                "authoritative": True,
-                "complements_prompt": True,
-                "layers": layers[:32],
-                "object_count": len(layers),
-            }
-            if background:
-                result["background"] = {"color": background}
-            return result
-
-        if isinstance(plan, dict):
-            objects = plan.get("objects")
-            if isinstance(objects, list):
-                layers = []
-                for obj in objects[:32]:
-                    if not isinstance(obj, dict):
-                        continue
-                    layer = {
-                        "kind": str(
-                            obj.get("kind")
-                            or obj.get("shape")
-                            or obj.get("type")
-                            or "object"
-                        ).lower()
-                    }
-                    for key in (
-                        "shape", "color", "fill", "center", "position", "box",
-                        "bbox", "size", "width", "height", "radius", "rotation",
-                        "text", "label"
-                    ):
-                        if obj.get(key) not in (None, ""):
-                            layer[key] = obj[key]
-                    if layer.get("color") and not layer.get("fill"):
-                        layer["fill"] = layer["color"]
-                    layers.append(layer)
-                ctx: dict[str, Any] = {
-                    "source": "OPENAI_STRUCTURED_VISUAL_PLAN",
-                    "authoritative": True,
-                    "complements_prompt": True,
-                    "layers": layers,
-                    "object_count": len(layers),
-                }
-                background = plan.get("background")
-                if isinstance(background, dict):
-                    ctx["background"] = dict(background)
-                elif isinstance(background, str) and background.strip():
-                    ctx["background"] = {"color": background.strip()}
-                description = plan.get("description")
-                if isinstance(description, str) and description.strip():
-                    ctx["description"] = description.strip()
-                return ctx
-
-            # OpenAI may return a compact image plan without an "objects" list.
-            # Preserve that same-turn subject/background as structured render data.
-            if str(plan.get("type") or "").strip().lower() == "image":
-                layers: list[dict[str, Any]] = []
-                subject = str(
-                    plan.get("subject")
-                    or plan.get("object")
-                    or plan.get("name")
-                    or ""
-                ).strip()
-                if subject:
-                    layer: dict[str, Any] = {"kind": "object", "shape": subject}
-                    for key in (
-                        "color", "fill", "center", "position", "box", "bbox",
-                        "size", "width", "height", "radius", "rotation"
-                    ):
-                        if plan.get(key) not in (None, ""):
-                            layer[key] = plan[key]
-                    if layer.get("color") and not layer.get("fill"):
-                        layer["fill"] = layer["color"]
-                    layers.append(layer)
-
-                ctx = {
-                    "source": "OPENAI_STRUCTURED_VISUAL_PLAN",
-                    "authoritative": True,
-                    "complements_prompt": True,
-                    "layers": layers[:32],
-                    "object_count": len(layers),
-                }
-                background = plan.get("background")
-                if isinstance(background, dict):
-                    ctx["background"] = dict(background)
-                elif isinstance(background, str) and background.strip():
-                    ctx["background"] = {"color": background.strip()}
-                description = plan.get("description")
-                if isinstance(description, str) and description.strip():
-                    ctx["description"] = description.strip()
-                return ctx
-        return {}
-
-    @classmethod
-    def _merge_plan_context(cls, base: Any, extra: Any) -> dict[str, Any]:
-        merged = dict(base) if isinstance(base, dict) else {}
-        if not isinstance(extra, dict):
-            return merged
-        current_layers = list(merged.get("layers") or []) if isinstance(merged.get("layers"), list) else []
-        for layer in list(extra.get("layers") or []) if isinstance(extra.get("layers"), list) else []:
-            if not isinstance(layer, dict):
-                continue
-            key = json.dumps(layer, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-            if not any(json.dumps(x, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str) == key for x in current_layers if isinstance(x, dict)):
-                current_layers.append(layer)
-        if current_layers:
-            merged["layers"] = current_layers[:32]
-            merged["object_count"] = len(merged["layers"])
-        for key in ("background", "description", "alt_text", "plan_type"):
-            if merged.get(key) in (None, "", {}, []) and extra.get(key) not in (None, "", {}, []):
-                merged[key] = extra[key]
-        return merged
-
-    @classmethod
-    def _render_profile_guidance(cls, profile: str) -> str:
-        normalized = str(profile or "neutral_realistic").strip().lower()
-        return cls.RENDER_PROFILE_GUIDANCE.get(
-            normalized,
-            cls.RENDER_PROFILE_GUIDANCE["neutral_realistic"],
-        )
-
-    @classmethod
-    def _effective_render_profile(
-        cls,
-        profile: str,
-        semantic_prompt: str,
-        visual_context: Optional[dict[str, Any]] = None,
-    ) -> str:
-        """Sanitize stale automatic profiles without changing explicit specialist styles."""
-        normalized = str(profile or "neutral_realistic").strip().lower()
-        text = str(semantic_prompt or "").lower().replace("ё", "е")
-
-        geometry_terms = (
-            "круг", "квадрат", "треуголь", "геометр", "диаграм", "схем",
-            "формул", "график", "ось", "координат", "geometry", "diagram",
-            "circle", "square", "triangle", "formula", "graph",
-        )
-        natural_terms = (
-            "картофель", "овощ", "фрукт", "животн", "ежик", "кошка", "кот",
-            "собак", "птиц", "лошад", "растен", "цвет", "дерев", "рыб",
-            "помидор", "яблок", "груша", "potato", "vegetable", "fruit",
-            "animal", "plant", "flower", "tree", "fish",
-        )
-
-        # Provider currently uses technical_geometry as a domain default for
-        # some generic image requests. Keep it for actual geometry, otherwise
-        # do not let it distort a natural object render.
-        if normalized == "technical_geometry":
-            if any(term in text for term in geometry_terms):
-                return normalized
-            if any(term in text for term in natural_terms):
-                return (
-                    "naturalistic_wildlife"
-                    if "животн" in text or "animal" in text
-                    else "natural_realistic"
-                )
-            if isinstance(visual_context, dict) and visual_context.get("object_count"):
-                return "neutral_realistic"
-            return "neutral_realistic"
-
-        if normalized in cls.RENDER_PROFILE_GUIDANCE:
-            return normalized
-        return "neutral_realistic"
-
-    @classmethod
-    def _visual_context_supplement(cls, visual_context: Any) -> str:
-        """Translate only same-turn Provider geometry/color evidence into Turbo text."""
-        if not isinstance(visual_context, dict):
-            return ""
-        if str(visual_context.get("source") or "").strip().upper() != "OPENAI_STRUCTURED_VISUAL_PLAN":
-            return ""
-        if visual_context.get("authoritative") is not True or visual_context.get("complements_prompt") is not True:
-            return ""
-
-        parts: list[str] = []
-        # Semantic OpenAI meaning is already carried in spec["prompt"]. Do not
-        # append the same description a second time here; visual_context is reserved
-        # for additional structured geometry/color constraints.
-        bg = visual_context.get("background")
-        if isinstance(bg, dict):
-            bg_name = cls._visual_color_name(bg.get("color"))
-            if bg_name:
-                parts.append(f"background: solid {bg_name}")
-        elif isinstance(bg, str) and bg.strip():
-            bg_name = cls._visual_color_name(bg)
-            if bg_name:
-                parts.append(f"background: solid {bg_name}")
-
-        circles: list[str] = []
-        shapes: list[str] = []
-        requested_text: list[str] = []
-        layers = visual_context.get("layers")
-        if not isinstance(layers, list):
-            layers = []
-
-        for layer in layers[:24]:
-            if not isinstance(layer, dict):
-                continue
-            kind = str(layer.get("kind") or "").lower()
-            fill = cls._visual_color_name(layer.get("fill") or "")
-
-            if kind == "circle":
-                item = f"{fill} circle" if fill else "circle"
-                center = layer.get("center")
-                if isinstance(center, list) and len(center) >= 2:
-                    try:
-                        x, y = float(center[0]), float(center[1])
-                        vert = "upper" if y < 0.34 else "lower" if y > 0.66 else "middle"
-                        horiz = "left" if x < 0.34 else "right" if x > 0.66 else "center"
-                        item += f" at {vert} {horiz}"
-                    except Exception:
-                        pass
-                circles.append(item)
-
-            elif kind == "rect":
-                shape = str(layer.get("shape") or "rectangle").strip().lower()
-                noun = "square" if shape == "square" else "rectangle"
-                item = f"{fill} {noun}" if fill else noun
-                box = layer.get("box")
-                if isinstance(box, list) and len(box) >= 4:
-                    try:
-                        w = float(box[2]) - float(box[0])
-                        h = float(box[3]) - float(box[1])
-                        if h > w * 1.25:
-                            item += ", vertical"
-                    except Exception:
-                        pass
-                if layer.get("radius"):
-                    item += ", rounded corners"
-                shapes.append(item)
-
-            elif kind == "ellipse":
-                shapes.append(f"{fill} ellipse" if fill else "ellipse")
-
-            elif kind == "polygon":
-                shapes.append(f"{fill} polygon" if fill else "polygon")
-
-            elif kind == "line":
-                shapes.append(f"{fill} line" if fill else "line")
-
-            elif kind == "object":
-                subject = str(
-                    layer.get("shape")
-                    or layer.get("name")
-                    or layer.get("object")
-                    or layer.get("label")
-                    or "object"
-                ).strip().lower()
-                item = f"{fill} {subject}" if fill else subject
-                shapes.append(item)
-
-            elif kind == "text":
-                value = str(layer.get("text") or "").strip()
-                if value:
-                    requested_text.append(value[:100])
-
-        if circles:
-            parts.append("circles: " + ", ".join(circles[:8]))
-        if shapes:
-            parts.append("explicit shapes: " + ", ".join(shapes[:8]))
-        if requested_text:
-            parts.append("requested text: " + "; ".join(requested_text[:4]))
-        object_count = visual_context.get("object_count")
-        if object_count:
-            parts.append(f"object count: {int(object_count)}")
-        if not parts:
-            return ""
-
-        parts.append("this blueprint complements the user request; preserve supplied objects, colors and layout; add no other objects or artistic elements")
-        return ("Provider visual blueprint: " + "; ".join(parts))[:1100]
-
-    @classmethod
-    def _compose_prompt(
-        cls,
-        prompt: str,
-        spec: Optional[dict[str, Any]] = None,
-        *,
-        prompt_token_count: Optional[int] = None,
-    ) -> str:
-        """Compile one non-duplicating semantic prompt for the image model.
-
-        The user request is an execution trigger/anchor.  ``prompt`` is the
-        OpenAI semantic meaning.  The preserved OpenAI structured plan is parsed
-        into complementary visual constraints and never duplicated verbatim.
-        """
-        cfg = spec if isinstance(spec, dict) else {}
-        semantic_prompt = cls._clean_prompt(prompt)
-        if prompt_token_count is None:
-            prompt_token_count = len(semantic_prompt.split())
-
-        raw_plan = cfg.get("openai_structured_visual_plan_raw")
-        raw_context = cls._openai_plan_to_visual_context(raw_plan)
-        visual_context = cls._merge_plan_context(cfg.get("visual_context"), raw_context)
-
-        # If the semantic prompt came only from a short subject word, the raw
-        # OpenAI plan still contributes its exact geometry/colors/layout here.
-        supplement = cls._visual_context_supplement(visual_context)
-        effective_profile = cls._effective_render_profile(
-            cfg.get("render_profile") or "neutral_realistic",
-            semantic_prompt,
-            visual_context,
-        )
-        profile = cls._render_profile_guidance(effective_profile)
-
-        parts = cls._dedupe_semantic_parts([
-            semantic_prompt,
-            supplement,
-            f"Rendering discipline: {profile}",
-            "Preserve every supplied subject, color, background, geometry and spatial relationship. Do not add, remove or replace scene elements.",
-        ])
-        final_prompt = "\n".join(parts)
-
-        token_count = prompt_token_count
-        if token_count is None:
-            token_count = len(final_prompt.split())
-        if int(len(final_prompt)) > 0 and int(len(final_prompt.split())) > cls.MAX_SEMANTIC_PROMPT_TOKENS:
-            # Do not hard-cut text. The actual tokenizer path below performs the
-            # model-window split; this guard is only for an absurdly large object.
-            raise ValueError(
-                f"APRIL_IMAGES_PROMPT_TOO_LONG:{len(final_prompt.split())}>"
-                f"{cls.MAX_SEMANTIC_PROMPT_TOKENS}"
-            )
-        return final_prompt
+        normalized = mapping.get(value, "low")
+        if normalized == "auto":
+            # April currently prefers deterministic cost control over automatic upsizing.
+            return "low"
+        return normalized
 
     # -------------------------------------------------
-    # Real Diffusers backend
+    # GPT Image 2 request / base64 decoder
     # -------------------------------------------------
 
     @classmethod
-    def _configure_pipeline(cls, pipeline: Any) -> Any:
-        device = cls._device()
-
-        # SDXL Turbo requires trailing timestep spacing.  This is part of the
-        # model's sampling contract, not an alternate backend or a fallback.
-        if cls._is_turbo_model():
-            try:
-                from diffusers import EulerAncestralDiscreteScheduler
-                pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
-                    pipeline.scheduler.config,
-                    timestep_spacing="trailing",
-                )
-            except Exception as exc:
-                raise RuntimeError("APRIL_IMAGES_TURBO_SCHEDULER_CONFIGURATION_FAILED") from exc
-
-        # Do not enable attention slicing by default: on CPU it can make the
-        # already expensive denoising loop slower.  It remains an explicit opt-in.
-        if os.getenv("APRIL_IMAGES_CPU_ATTENTION_SLICING", "0").strip().lower() in {"1", "true", "yes", "on"}:
-            method = getattr(pipeline, "enable_attention_slicing", None)
-            if callable(method):
-                method()
-
-        if device != "cpu":
-            for method_name in ("enable_vae_slicing", "enable_vae_tiling"):
-                method = getattr(pipeline, method_name, None)
-                if callable(method):
-                    try:
-                        method()
-                    except Exception:
-                        pass
-
-        # Hugging Face recommends keeping the default SDXL VAE in float32.
-        # upcast_vae() performs that conversion once for CUDA/MPS inference.
-        if cls._is_turbo_model() and device != "cpu":
-            method = getattr(pipeline, "upcast_vae", None)
-            if callable(method):
-                method()
-
-        if device == "cuda" and os.getenv("APRIL_IMAGES_CPU_OFFLOAD", "0") == "1":
-            method = getattr(pipeline, "enable_model_cpu_offload", None)
-            if callable(method):
-                method()
-                return pipeline
-        return pipeline.to(device)
+    def _extract_response_data(cls, response: Any) -> tuple[str, dict[str, Any]]:
+        data = getattr(response, "data", None)
+        if data is None and isinstance(response, dict):
+            data = response.get("data")
+        if not isinstance(data, (list, tuple)) or not data:
+            raise RuntimeError("APRIL_IMAGES_GPT_IMAGE_EMPTY_RESPONSE")
+        first = data[0]
+        if isinstance(first, dict):
+            encoded = first.get("b64_json") or first.get("base64") or first.get("image")
+            meta = dict(first)
+        else:
+            encoded = getattr(first, "b64_json", None) or getattr(first, "base64", None)
+            meta = {}
+        encoded = cls._safe_text(encoded).strip()
+        if not encoded:
+            raise RuntimeError("APRIL_IMAGES_GPT_IMAGE_NO_BASE64")
+        return encoded, meta
 
     @classmethod
-    def _require_backend(cls) -> None:
-        """Fail fast when the canonical local Diffusers backend is unavailable.
-
-        This is only a configuration/runtime guard. It does not introduce a
-        fallback provider or alter the existing image-generation route.
-        """
-        if AutoPipelineForText2Image is None or AutoPipelineForImage2Image is None:
-            raise RuntimeError("APRIL_IMAGES_DIFFUSERS_NOT_INSTALLED")
-        if torch is None:
-            raise RuntimeError("APRIL_IMAGES_TORCH_NOT_INSTALLED")
-
-        source = cls._model_source().strip()
-        if not source:
-            raise RuntimeError("APRIL_IMAGES_MODEL_SOURCE_NOT_CONFIGURED")
-
-        if cls._model_path() and not cls._model_is_local():
-            raise RuntimeError("APRIL_IMAGES_LOCAL_MODEL_PATH_INVALID")
-
-    @classmethod
-    def _load_text_pipeline(cls):
-        cls._require_backend()
-        source = cls._model_source()
-        cache_key = f"text::{source}::{cls._dtype()}::{cls._device()}::{cls._local_files_only()}"
-        with cls._pipeline_lock:
-            if cls._text_pipeline is not None and cls._pipeline_cache_key == cache_key:
-                return cls._text_pipeline
-
-            kwargs: dict[str, Any] = {
-                "local_files_only": cls._local_files_only(),
-                # Keep model loading on the existing single image-generation
-                # route, but avoid the large temporary RAM spike that can
-                # restart the Railway process while Diffusers materializes
-                # SDXL Turbo. The generator must survive loading long enough
-                # to produce the real PNG/asset; no alternate provider or
-                # rendering path is introduced here.
-                "low_cpu_mem_usage": os.getenv(
-                    "APRIL_IMAGES_LOW_CPU_MEM_USAGE", "1"
-                ).strip().lower() in {"1", "true", "yes", "on"},
-            }
-            dtype = cls._dtype()
-            if dtype is not None:
-                kwargs["dtype"] = dtype
-            if os.getenv("APRIL_IMAGES_USE_SAFETENSORS", "1").strip().lower() in {"1", "true", "yes"}:
-                kwargs["use_safetensors"] = True
-            if cls._is_turbo_model() and cls._device() in {"cuda", "mps"}:
-                kwargs["variant"] = "fp16"
-
-            pipeline = AutoPipelineForText2Image.from_pretrained(source, **kwargs)
-            cls._text_pipeline = cls._configure_pipeline(pipeline)
-            cls._pipeline_path = source
-            cls._pipeline_cache_key = cache_key
-            print(
-                "🧠 IMAGE BACKEND READY:",
-                {
-                    "model": source,
-                    "turbo": cls._is_turbo_model(),
-                    "device": cls._device(),
-                    "dtype": str(cls._dtype()),
-                    "default_size": cls.DEFAULT_SIZE,
-                    "standard_steps": cls._quality_settings("standard")[0],
-                    "guidance_scale": cls._quality_settings("standard")[1],
-                },
-            )
-            return cls._text_pipeline
-
-    @classmethod
-    def _load_edit_pipeline(cls):
-        cls._require_backend()
-        source = cls._model_source()
-        cache_key = f"edit::{source}::{cls._dtype()}::{cls._device()}::{cls._local_files_only()}"
-        with cls._pipeline_lock:
-            if cls._edit_pipeline is not None and cls._pipeline_cache_key == cache_key:
-                return cls._edit_pipeline
-
-            # SDXL Turbo uses the same checkpoint for text-to-image and
-            # image-to-image.  Reuse the loaded pipeline when possible so an
-            # edit request does not download/load the model a second time.
-            if cls._is_turbo_model() and cls._text_pipeline is not None:
-                try:
-                    pipeline = AutoPipelineForImage2Image.from_pipe(cls._text_pipeline)
-                    cls._edit_pipeline = pipeline
-                    cls._pipeline_path = source
-                    cls._pipeline_cache_key = cache_key
-                    return cls._edit_pipeline
-                except Exception as exc:
-                    raise RuntimeError("APRIL_IMAGES_TURBO_EDIT_PIPELINE_CONFIGURATION_FAILED") from exc
-
-            kwargs: dict[str, Any] = {
-                "local_files_only": cls._local_files_only(),
-                # Keep model loading on the existing single image-generation
-                # route, but avoid the large temporary RAM spike that can
-                # restart the Railway process while Diffusers materializes
-                # SDXL Turbo. The generator must survive loading long enough
-                # to produce the real PNG/asset; no alternate provider or
-                # rendering path is introduced here.
-                "low_cpu_mem_usage": os.getenv(
-                    "APRIL_IMAGES_LOW_CPU_MEM_USAGE", "1"
-                ).strip().lower() in {"1", "true", "yes", "on"},
-            }
-            dtype = cls._dtype()
-            if dtype is not None:
-                kwargs["dtype"] = dtype
-            if os.getenv("APRIL_IMAGES_USE_SAFETENSORS", "1").strip().lower() in {"1", "true", "yes"}:
-                kwargs["use_safetensors"] = True
-            if cls._is_turbo_model() and cls._device() in {"cuda", "mps"}:
-                kwargs["variant"] = "fp16"
-
-            pipeline = AutoPipelineForImage2Image.from_pretrained(source, **kwargs)
-            cls._edit_pipeline = cls._configure_pipeline(pipeline)
-            cls._pipeline_path = source
-            cls._pipeline_cache_key = cache_key
-            return cls._edit_pipeline
-
-    @classmethod
-    def _token_ids_for_long_prompt(cls, tokenizer: Any, text: str) -> list[int]:
-        """Return raw token ids without truncation or overlap.
-
-        CLIP's native ``model_max_length`` (normally 77) is the size of one
-        encoder window, not an April semantic prompt limit.  Tokenization first
-        collects the complete sequence.  Later, ``_prompt_chunks`` partitions it
-        into sequential, non-overlapping native windows.
-        """
-        previous_max_length = getattr(tokenizer, "model_max_length", None)
+    def _decode_gpt_image(cls, response: Any) -> tuple[bytes, dict[str, Any]]:
+        encoded, item_meta = cls._extract_response_data(response)
+        if encoded.startswith("data:image/"):
+            encoded = encoded.split(",", 1)[1]
         try:
-            # Transformers may emit a misleading >77 warning even with
-            # truncation=False because the tokenizer's configured reporting
-            # limit is still 77.  Temporarily disable that reporting limit only
-            # while collecting raw ids; the actual encoder window remains 77
-            # and is enforced by _prompt_chunks().
-            try:
-                tokenizer.model_max_length = 10**9
-            except Exception:
-                pass
-            return list(
-                tokenizer.encode(
-                    str(text or ""),
-                    add_special_tokens=False,
-                    truncation=False,
-                )
-            )
+            image_bytes = base64.b64decode(encoded, validate=True)
         except Exception as exc:
-            raise RuntimeError("APRIL_IMAGES_TOKENIZATION_FAILED") from exc
-        finally:
-            if previous_max_length is not None:
+            raise RuntimeError("APRIL_IMAGES_GPT_IMAGE_BASE64_DECODE_FAILED") from exc
+        if not image_bytes:
+            raise RuntimeError("APRIL_IMAGES_GPT_IMAGE_DECODED_EMPTY")
+        return image_bytes, item_meta
+
+    @classmethod
+    def _usage_dict(cls, response: Any) -> dict[str, Any]:
+        usage = getattr(response, "usage", None)
+        if usage is None and isinstance(response, dict):
+            usage = response.get("usage")
+        if usage is None:
+            return {}
+        if isinstance(usage, dict):
+            return dict(usage)
+        for method_name in ("model_dump", "to_dict", "dict"):
+            method = getattr(usage, method_name, None)
+            if callable(method):
                 try:
-                    tokenizer.model_max_length = previous_max_length
+                    value = method()
+                    if isinstance(value, dict):
+                        return dict(value)
                 except Exception:
                     pass
-
-    @classmethod
-    def _prompt_chunks(
-        cls,
-        tokenizer: Any,
-        text: str,
-    ) -> list[list[int]]:
-        """Split raw token ids into native tokenizer windows without loss.
-
-        Each window reserves its BOS/EOS slots. The tokenizer/encoder's own
-        ``model_max_length`` defines the size of a single native window; there
-        is deliberately no additional April/OpenAI token cap.
-        """
-        model_max = getattr(tokenizer, "model_max_length", None)
-        try:
-            model_max = int(model_max)
-        except (TypeError, ValueError):
-            model_max = None
-
-        if not model_max or model_max <= 2:
-            config = getattr(getattr(tokenizer, "init_kwargs", {}), "get", lambda *_: None)(
-                "model_max_length"
-            )
-            try:
-                model_max = int(config)
-            except (TypeError, ValueError):
-                model_max = None
-
-        if not model_max or model_max <= 2:
-            raise RuntimeError("APRIL_IMAGES_TOKENIZER_MAX_LENGTH_UNAVAILABLE")
-
-        bos_id = getattr(tokenizer, "bos_token_id", None)
-        eos_id = getattr(tokenizer, "eos_token_id", None)
-        pad_id = getattr(tokenizer, "pad_token_id", None)
-        if bos_id is None:
-            bos_id = getattr(tokenizer, "cls_token_id", None)
-        if eos_id is None:
-            eos_id = getattr(tokenizer, "sep_token_id", None)
-        if pad_id is None:
-            pad_id = eos_id if eos_id is not None else 0
-
-        if bos_id is None or eos_id is None:
-            raise RuntimeError("APRIL_IMAGES_SPECIAL_TOKENS_UNAVAILABLE")
-
-        raw_ids = cls._token_ids_for_long_prompt(tokenizer, text)
-        chunk_body = model_max - 2
-        chunks: list[list[int]] = []
-
-        for start in range(0, len(raw_ids), chunk_body):
-            # Deliberately non-overlapping: every raw token belongs to exactly
-            # one native window.  No sliding overlap and no repeated context.
-            body = raw_ids[start:start + chunk_body]
-            ids = [int(bos_id), *map(int, body), int(eos_id)]
-            ids.extend([int(pad_id)] * (model_max - len(ids)))
-            chunks.append(ids)
-
-        if not chunks:
-            chunks.append([int(bos_id), int(eos_id)] + [int(pad_id)] * (model_max - 2))
-
-        return chunks
-
-    @classmethod
-    def _encode_text_encoder_chunks(
-        cls,
-        tokenizer: Any,
-        text_encoder: Any,
-        text: str,
-        *,
-        device: Any,
-    ) -> tuple[Any, Any, int]:
-        """Encode every native CLIP window and concatenate hidden states.
-
-        Returns ``(hidden_states, pooled_embedding, raw_token_count)``.
-        ``pooled_embedding`` is the mean of the native-window pooled vectors;
-        this preserves information from every window instead of truncating to
-        the first 77 tokens.
-        """
-        raw_ids = cls._token_ids_for_long_prompt(tokenizer, text)
-        raw_token_count = len(raw_ids)
-        chunks = cls._prompt_chunks(tokenizer, text)
-        pad_id = getattr(tokenizer, "pad_token_id", None)
-        if pad_id is None:
-            pad_id = getattr(tokenizer, "eos_token_id", 0)
-
-        if torch is None:
-            raise RuntimeError("APRIL_IMAGES_TORCH_NOT_INSTALLED")
-
-        input_ids = torch.tensor(chunks, dtype=torch.long, device=device)
-        attention_mask = (input_ids != int(pad_id)).long()
-
-        with torch.inference_mode():
-            outputs = text_encoder(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_hidden_states=True,
-                return_dict=True,
-            )
-
-        hidden_states = getattr(outputs, "hidden_states", None)
-        if hidden_states:
-            hidden = hidden_states[-2]
-        else:
-            hidden = getattr(outputs, "last_hidden_state", None)
-            if hidden is None:
-                raise RuntimeError("APRIL_IMAGES_TEXT_ENCODER_HIDDEN_STATE_MISSING")
-
-        pooled = getattr(outputs, "text_embeds", None)
-        if pooled is None:
-            pooled = getattr(outputs, "pooler_output", None)
-        if pooled is None:
-            try:
-                candidate = outputs[0]
-            except Exception:
-                candidate = None
-            if candidate is not None and getattr(candidate, "ndim", 0) == 2:
-                pooled = candidate
-
-        if pooled is not None and getattr(pooled, "ndim", 0) >= 2:
-            pooled = pooled.mean(dim=0, keepdim=True)
-
-        # ``model_max`` is returned for diagnostics; the actual prompt length
-        # can grow without an April-side maximum because more native windows
-        # are simply concatenated.
-        return hidden, pooled, raw_token_count
-
-    @classmethod
-    def _pad_sequence_length(cls, tensor: Any, target_length: int) -> Any:
-        if tensor is None:
-            return None
-        current = int(tensor.shape[1])
-        if current >= target_length:
-            return tensor
-        if torch is None:
-            raise RuntimeError("APRIL_IMAGES_TORCH_NOT_INSTALLED")
-        pad = torch.zeros(
-            (tensor.shape[0], target_length - current, tensor.shape[2]),
-            dtype=tensor.dtype,
-            device=tensor.device,
-        )
-        return torch.cat([tensor, pad], dim=1)
-
-    @classmethod
-    def _pad_batch_size(cls, tensor: Any, target_batch: int) -> Any:
-        """Align the number of prompt chunks used by positive/negative embeds.
-
-        Long-prompt chunking can produce multiple positive CLIP windows while
-        an empty/short negative prompt produces only one. Diffusers expects
-        classifier-free positive/negative embeddings to have the same batch
-        dimension. The negative conditioning is therefore repeated across
-        the missing windows rather than allowing a shape mismatch to reach
-        the diffusion pipeline.
-        """
-        if tensor is None:
-            return None
-        current = int(tensor.shape[0])
-        if current == target_batch:
-            return tensor
-        if current <= 0 or target_batch <= 0:
-            raise RuntimeError("APRIL_IMAGES_PROMPT_BATCH_INVALID")
-        if current > target_batch:
-            return tensor[:target_batch]
-        repeats = target_batch - current
-        tail = tensor[-1:].expand(repeats, *tensor.shape[1:])
-        return torch.cat([tensor, tail], dim=0)
-
-    @classmethod
-    def _flatten_chunk_sequence(cls, hidden: Any) -> Any:
-        """
-        Convert [num_windows, 77, hidden] into one prompt sequence
-        [1, num_windows*77, hidden].  Keeping windows as batch items would
-        accidentally make the diffusion call treat later prompt windows as
-        separate samples.
-        """
-        if hidden is None:
-            return None
-        if getattr(hidden, "ndim", 0) != 3:
-            return hidden
-        if torch is None:
-            raise RuntimeError("APRIL_IMAGES_TORCH_NOT_INSTALLED")
-        return hidden.reshape(1, int(hidden.shape[0]) * int(hidden.shape[1]), int(hidden.shape[2]))
-
-    @classmethod
-    def _select_pooled_embedding(cls, pooled: Any) -> Any:
-        """
-        SDXL consumes one pooled embedding per prompt.  With multiple native
-        windows, keep the final encoder-pooled vector instead of turning the
-        windows into a fake batch.
-        """
-        if pooled is None or getattr(pooled, "ndim", 0) < 2:
-            return pooled
-        return pooled[-1:].contiguous()
-
-    @classmethod
-    def _long_prompt_kwargs(
-        cls,
-        pipeline: Any,
-        prompt: str,
-        negative_prompt: str,
-        *,
-        include_negative: bool = True,
-    ) -> dict[str, Any]:
-        """
-        Encode long SDXL prompts without truncation.
-
-        The native CLIP windows remain 77-token windows internally, but the
-        resulting token embeddings are concatenated on the *sequence* axis so
-        they represent one prompt.  This follows the SDXL long-prompt pattern
-        used by Diffusers community tooling rather than using each window as a
-        separate diffusion batch item.
-        """
-        if torch is None:
-            raise RuntimeError("APRIL_IMAGES_TORCH_NOT_INSTALLED")
-
-        tokenizer_1 = getattr(pipeline, "tokenizer", None)
-        tokenizer_2 = getattr(pipeline, "tokenizer_2", None)
-        text_encoder_1 = getattr(pipeline, "text_encoder", None)
-        text_encoder_2 = getattr(pipeline, "text_encoder_2", None)
-        if tokenizer_1 is None or text_encoder_1 is None:
-            raise RuntimeError("APRIL_IMAGES_TEXT_ENCODER_NOT_AVAILABLE")
-
-        execution_device = getattr(pipeline, "_execution_device", None)
-        if execution_device is None:
-            execution_device = cls._device()
-        if not hasattr(execution_device, "type"):
-            execution_device = torch.device(str(execution_device))
-
-        hidden_1, _pooled_1, count_1 = cls._encode_text_encoder_chunks(
-            tokenizer_1, text_encoder_1, prompt, device=execution_device
-        )
-
-        neg_hidden_1 = None
-        _neg_pooled_1 = None
-        neg_count_1 = 0
-        if include_negative:
-            neg_hidden_1, _neg_pooled_1, neg_count_1 = cls._encode_text_encoder_chunks(
-                tokenizer_1, text_encoder_1, negative_prompt or "", device=execution_device
-            )
-
-        if tokenizer_2 is not None and text_encoder_2 is not None:
-            hidden_2, pooled_2, count_2 = cls._encode_text_encoder_chunks(
-                tokenizer_2, text_encoder_2, prompt, device=execution_device
-            )
-
-            neg_hidden_2 = None
-            neg_pooled_2 = None
-            neg_count_2 = 0
-            if include_negative:
-                neg_hidden_2, neg_pooled_2, neg_count_2 = cls._encode_text_encoder_chunks(
-                    tokenizer_2, text_encoder_2, negative_prompt or "", device=execution_device
-                )
-
-            hidden_1 = cls._flatten_chunk_sequence(hidden_1)
-            hidden_2 = cls._flatten_chunk_sequence(hidden_2)
-
-            prompt_len = max(int(hidden_1.shape[1]), int(hidden_2.shape[1]))
-            hidden_1 = cls._pad_sequence_length(hidden_1, prompt_len)
-            hidden_2 = cls._pad_sequence_length(hidden_2, prompt_len)
-
-            prompt_embeds = torch.cat([hidden_1, hidden_2], dim=-1)
-            pooled_prompt_embeds = cls._select_pooled_embedding(pooled_2)
-
-            negative_prompt_embeds = None
-            negative_pooled_prompt_embeds = None
-            if include_negative:
-                neg_hidden_1 = cls._flatten_chunk_sequence(neg_hidden_1)
-                neg_hidden_2 = cls._flatten_chunk_sequence(neg_hidden_2)
-                negative_len = max(
-                    int(neg_hidden_1.shape[1]), int(neg_hidden_2.shape[1])
-                )
-                neg_hidden_1 = cls._pad_sequence_length(neg_hidden_1, negative_len)
-                neg_hidden_2 = cls._pad_sequence_length(neg_hidden_2, negative_len)
-                negative_prompt_embeds = torch.cat(
-                    [neg_hidden_1, neg_hidden_2], dim=-1
-                )
-                negative_pooled_prompt_embeds = cls._select_pooled_embedding(neg_pooled_2)
-        else:
-            hidden_1 = cls._flatten_chunk_sequence(hidden_1)
-            prompt_embeds = hidden_1
-            pooled_prompt_embeds = None
-
-            negative_prompt_embeds = None
-            negative_pooled_prompt_embeds = None
-            if include_negative:
-                neg_hidden_1 = cls._flatten_chunk_sequence(neg_hidden_1)
-                negative_prompt_embeds = neg_hidden_1
-                negative_pooled_prompt_embeds = cls._select_pooled_embedding(_neg_pooled_1)
-
-        if prompt_embeds is None:
-            raise RuntimeError("APRIL_IMAGES_PROMPT_EMBEDDINGS_MISSING")
-        if include_negative and negative_prompt_embeds is None:
-            raise RuntimeError("APRIL_IMAGES_NEGATIVE_PROMPT_EMBEDDINGS_MISSING")
-
-        if include_negative:
-            shared_len = max(
-                int(prompt_embeds.shape[1]),
-                int(negative_prompt_embeds.shape[1]),
-            )
-            prompt_embeds = cls._pad_sequence_length(prompt_embeds, shared_len)
-            negative_prompt_embeds = cls._pad_sequence_length(
-                negative_prompt_embeds, shared_len
-            )
-
-        target_dtype = getattr(getattr(pipeline, "unet", None), "dtype", None)
-        if target_dtype is not None and getattr(
-            prompt_embeds, "is_floating_point", lambda: False
-        )():
-            prompt_embeds = prompt_embeds.to(dtype=target_dtype)
-            if negative_prompt_embeds is not None:
-                negative_prompt_embeds = negative_prompt_embeds.to(dtype=target_dtype)
-            if pooled_prompt_embeds is not None:
-                pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=target_dtype)
-            if negative_pooled_prompt_embeds is not None:
-                negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.to(
-                    dtype=target_dtype
-                )
-
-        prompt_chunks = max(int(count_1), int(count_2)) if tokenizer_2 is not None and text_encoder_2 is not None else int(count_1)
-        negative_chunks = 0
-        if include_negative:
-            negative_chunks = (
-                max(int(neg_count_1), int(neg_count_2))
-                if tokenizer_2 is not None and text_encoder_2 is not None
-                else int(neg_count_1)
-            )
-
-        print(
-            "🧠 IMAGE PROMPT ENCODING:",
-            {
-                "prompt_raw_tokens": int(count_1 if tokenizer_2 is None else max(count_1, count_2)),
-                "negative_raw_tokens": int(
-                    neg_count_1 if tokenizer_2 is None else max(neg_count_1, neg_count_2)
-                ),
-                "prompt_native_windows": prompt_chunks,
-                "negative_native_windows": negative_chunks,
-                "prompt_embedding_shape": tuple(int(x) for x in prompt_embeds.shape),
-                "negative_embedding_shape": (
-                    tuple(int(x) for x in negative_prompt_embeds.shape)
-                    if negative_prompt_embeds is not None
-                    else None
-                ),
-                "strategy": "native_clip_window_sequence_concat",
-                "batch_semantics": "one_prompt_not_one_window_per_sample",
-                "april_openai_prompt_cap": cls.MAX_SEMANTIC_PROMPT_TOKENS,
-            },
-        )
-
-        result = {"prompt_embeds": prompt_embeds}
-        if negative_prompt_embeds is not None:
-            result["negative_prompt_embeds"] = negative_prompt_embeds
-        if pooled_prompt_embeds is not None:
-            result["pooled_prompt_embeds"] = pooled_prompt_embeds
-        if negative_pooled_prompt_embeds is not None:
-            result["negative_pooled_prompt_embeds"] = negative_pooled_prompt_embeds
+        result: dict[str, Any] = {}
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "image_input_tokens",
+            "image_output_tokens",
+            "text_input_tokens",
+        ):
+            value = getattr(usage, key, None)
+            if value is not None:
+                result[key] = value
         return result
 
     @classmethod
-    def _adaptive_turbo_settings(
-        cls,
-        quality: str,
-        semantic_tokens: int,
-        prompt: str = "",
-    ) -> tuple[int, float, str]:
-        """Choose Turbo sampling depth from request complexity, never from scene invention."""
-        normalized = str(quality or "standard").strip().lower()
-        count = max(0, int(semantic_tokens))
-        flags = cls._prompt_complexity_flags(prompt)
-
-        if normalized == "draft":
-            steps = 1
-            source = "quality_draft"
-        elif normalized == "ultra":
-            steps = 4
-            source = "quality_ultra"
-        else:
-            # SDXL Turbo is explicitly optimized for 1-4 denoising steps.
-            # Keep the fast one-step CPU path for ordinary prompts, but give an
-            # explicit same-turn geometry/color blueprint two steps so the model
-            # has an additional denoising opportunity to honor exact simple shapes.
-            cpu_fast_path = cls._device() == "cpu"
-            structured_visual = "provider visual blueprint:" in str(prompt or "").lower()
-            if count <= 200:
-                steps = 2 if structured_visual else (1 if cpu_fast_path else 2)
-            elif count <= 500:
-                steps = 2
+    def _estimate_prompt_tokens(cls, text: str) -> int:
+        # Conservative local diagnostic only; billing truth is the API response/account.
+        total = 0.0
+        for ch in str(text or ""):
+            if ch.isspace():
+                total += 0.15
+            elif ord(ch) > 127:
+                total += 0.50
+            elif ch in '{}[]":,;|_-':
+                total += 0.35
             else:
-                steps = 3
-            source = f"adaptive_{cls._prompt_tier(count)}"
-            if structured_visual:
-                source += "_structured_visual"
-            if normalized == "high":
-                steps = min(4, steps + 1)
-                source += "_high"
-
-            # Text rendering and human/animal structure benefit from one extra
-            # denoising opportunity, but the range remains the model's 1-4 steps.
-            if flags["text_requested"] or flags["person_or_animal"]:
-                steps = min(4, steps + 1)
-                source += "_complexity"
-
-        return max(1, min(4, int(steps))), 0.0, source
+                total += 0.25
+        return max(1, int(total + 0.999))
 
     @classmethod
-    def _diffusion_image(
+    def _log_cost(
         cls,
-        pipeline: Any,
+        *,
+        response: Any,
         prompt: str,
-        width: int,
-        height: int,
+        requested_size: tuple[int, int],
+        api_size: tuple[int, int],
         quality: str,
-        seed: Optional[int],
-        negative_prompt: str,
-        *,
-        semantic_token_count: Optional[int] = None,
-    ) -> Image.Image:
-        tokenizer = getattr(pipeline, "tokenizer", None)
-        base_tokens = (
-            int(semantic_token_count)
-            if semantic_token_count is not None
-            else (
-                len(cls._token_ids_for_long_prompt(tokenizer, prompt))
-                if tokenizer is not None
-                else 0
-            )
-        )
-        if base_tokens > cls.MAX_SEMANTIC_PROMPT_TOKENS:
-            raise ValueError(
-                f"APRIL_IMAGES_PROMPT_TOO_LONG:{base_tokens}>"
-                f"{cls.MAX_SEMANTIC_PROMPT_TOKENS}"
-            )
-
-        if cls._is_turbo_model():
-            steps, guidance, steps_source = cls._adaptive_turbo_settings(
-                quality, base_tokens, prompt
-            )
-            explicit_steps = os.getenv("APRIL_IMAGES_INFERENCE_STEPS", "").strip()
-            if explicit_steps:
-                try:
-                    steps = max(1, min(4, int(explicit_steps)))
-                    steps_source = "env_override"
-                except ValueError:
-                    pass
-            width, height = cls._parse_size(f"{width}x{height}")
-        else:
-            steps, guidance = cls._quality_settings(quality)
-            steps_source = "quality_profile"
-            explicit_steps = os.getenv("APRIL_IMAGES_INFERENCE_STEPS", "").strip()
-            if explicit_steps:
-                try:
-                    steps = int(explicit_steps)
-                    steps_source = "env_override"
-                except ValueError:
-                    pass
-
-        kwargs: dict[str, Any] = {
-            "width": width,
-            "height": height,
-            "num_inference_steps": steps,
-            "guidance_scale": guidance,
-        }
-
-        negative_token_count = (
-            len(cls._token_ids_for_long_prompt(tokenizer, negative_prompt or ""))
-            if tokenizer is not None
-            else 0
-        )
-        native_limit = (
-            int(getattr(tokenizer, "model_max_length", 77) or 77)
-            if tokenizer is not None
-            else 77
-        )
-        prompt_token_count = (
-            len(cls._token_ids_for_long_prompt(tokenizer, prompt))
-            if tokenizer is not None
-            else base_tokens
-        )
-
-        # Keep short Turbo prompts on Diffusers' native text path.  The previous
-        # implementation forced every Turbo request through the custom long-
-        # prompt encoder, even when the prompt fit the native CLIP window.
-        use_native_pipeline = (
-            tokenizer is not None
-            and prompt_token_count <= native_limit
-            and negative_token_count <= native_limit
-        )
-
-        if use_native_pipeline:
-            kwargs["prompt"] = prompt
-            if guidance != 0.0:
-                kwargs["negative_prompt"] = negative_prompt or ""
-            strategy = "pipeline_native_single_window"
-            native_windows = 1
-        else:
-            if prompt_token_count > cls.MAX_SEMANTIC_PROMPT_TOKENS:
-                raise ValueError(
-                    f"APRIL_IMAGES_PROMPT_TOO_LONG:{prompt_token_count}>"
-                    f"{cls.MAX_SEMANTIC_PROMPT_TOKENS}"
-                )
-            prompt_kwargs = cls._long_prompt_kwargs(
-                pipeline,
-                prompt,
-                negative_prompt,
-                include_negative=guidance != 0.0,
-            )
-            kwargs.update(prompt_kwargs)
-            strategy = "native_clip_window_sequence_concat"
-            native_windows = max(
-                1,
-                (prompt_token_count + max(native_limit - 2, 1) - 1)
-                // max(native_limit - 2, 1),
-            )
-
-        if prompt_token_count > native_limit:
-            window_body = max(native_limit - 2, 1)
-            expected_windows = (
-                (prompt_token_count + window_body - 1) // window_body
-            )
-            ranges = []
-            for window_index in range(expected_windows):
-                start_token = window_index * window_body + 1
-                end_token = min(prompt_token_count, (window_index + 1) * window_body)
-                ranges.append([start_token, end_token])
-            print(
-                "🧩 IMAGE PROMPT STRUCTURED WINDOWS:",
-                {
-                    "raw_tokens": int(prompt_token_count),
-                    "native_window_tokens": int(native_limit),
-                    "content_tokens_per_window": int(window_body),
-                    "windows": int(expected_windows),
-                    "window_ranges": ranges,
-                    "overlap_tokens": 0,
-                    "truncation": False,
-                    "ordering": "sequential_non_overlapping",
-                    "semantic_loss": False,
-                },
-            )
-
-        print(
-            "🧠 IMAGE GENERATION PROFILE:",
-            {
-                "model": cls._model_source(),
-                "turbo": cls._is_turbo_model(),
-                "semantic_base_tokens": base_tokens,
-                "final_prompt_tokens": prompt_token_count,
-                "negative_prompt_tokens": negative_token_count,
-                "native_clip_limit": native_limit,
-                "prompt_tier": cls._prompt_tier(base_tokens),
-                "sampling_steps": int(steps),
-                "sampling_steps_source": steps_source,
-                "guidance_scale": float(guidance),
-                "width": int(width),
-                "height": int(height),
-                "text_strategy": strategy,
-                "native_windows_estimate": int(native_windows),
-                "max_semantic_prompt_tokens": cls.MAX_SEMANTIC_PROMPT_TOKENS,
-            },
-        )
-
-        if seed is not None and torch is not None:
-            generator_device = "cuda" if cls._device() == "cuda" else "cpu"
-            kwargs["generator"] = torch.Generator(device=generator_device).manual_seed(
-                int(seed)
-            )
-
-        print(
-            "🧠 IMAGE MODEL INPUT:",
-            {
-                "prompt": prompt,
-                "negative_prompt": negative_prompt if guidance != 0.0 else "",
-                "prompt_tokens": prompt_token_count,
-                "steps": int(steps),
-                "guidance_scale": float(guidance),
-                "size": [int(width), int(height)],
-                "seed": seed,
-                "strategy": strategy,
-                "semantic_scene_locked": True,
-                "generator_adds_scene_objects": False,
-            },
-        )
-
-        if torch is not None:
-            with torch.inference_mode():
-                result = pipeline(**kwargs)
-        else:
-            result = pipeline(**kwargs)
-        image = getattr(result, "images", [None])[0]
-        if image is None:
-            raise RuntimeError("APRIL_IMAGES_DIFFUSION_EMPTY_RESULT")
-
-        print(
-            "🧠 IMAGE MODEL OUTPUT:",
-            {
-                "result_type": type(result).__name__,
-                "image_type": type(image).__name__,
-                "width": int(getattr(image, "width", width)),
-                "height": int(getattr(image, "height", height)),
-                "mode": str(getattr(image, "mode", "unknown")),
-            },
-        )
-        print(
-            "🔒 IMAGE MODEL OUTPUT CHECK:",
-            {
-                "scene_authority": "prompt_only",
-                "generator_scene_invention": False,
-                "raster_ready": True,
-            },
-        )
-        return image.convert("RGB")
-
-    @classmethod
-    def _generate_real_image(
-        cls,
-        prompt: str,
-        width: int,
-        height: int,
-        quality: str,
-        seed: Optional[int],
-        negative_prompt: str,
-        *,
-        pipeline: Any = None,
-        semantic_token_count: Optional[int] = None,
-    ) -> Image.Image:
-        pipeline = pipeline or cls._load_text_pipeline()
-        return cls._diffusion_image(
-            pipeline,
-            prompt,
-            width,
-            height,
-            quality,
-            seed,
-            negative_prompt,
-            semantic_token_count=semantic_token_count,
-        )
-
-    @classmethod
-    def build_visual_prompt(
-        cls,
-        request: str,
-        *,
-        visual_context: Optional[dict[str, Any]] = None,
-        style: str = "",
-        quality: str = "high",
-    ) -> str:
-        """Build the renderer prompt from the already-authoritative semantic state.
-
-        This method does not inspect or mutate dialogue state; Interpretation
-        remains the authority. It only converts supplied visual signals into a
-        deterministic image prompt.
-        """
-        spec = {
-            "style": style,
-            "quality": quality,
-            "visual_context": visual_context or {},
-        }
-        return cls._compose_prompt(cls._clean_prompt(request), spec)
-
-    # -------------------------------------------------
-    # Provider image-spec validation
-    # -------------------------------------------------
-
-    @classmethod
-    def _validate_render_spec(cls, spec: Any) -> dict[str, Any]:
-        if not isinstance(spec, dict):
-            raise ValueError("APRIL_IMAGES_INVALID_SPEC")
-        if spec.get("schema") != "april_image_spec_v1":
-            raise ValueError("APRIL_IMAGES_INVALID_SPEC_SCHEMA")
-        width, height = cls._parse_size(
-            f"{spec.get('width', cls.DEFAULT_SIZE[0])}x{spec.get('height', cls.DEFAULT_SIZE[1])}"
-        )
-        generator_signal = str(spec.get("generator_signal") or "").strip()
-        if generator_signal and generator_signal != "C_APRIL_IMAGES_GENERATOR":
-            raise ValueError("APRIL_IMAGES_INVALID_GENERATOR_SIGNAL")
-        request_anchor = str(spec.get("request_anchor") or "").strip()
-        if generator_signal == "C_APRIL_IMAGES_GENERATOR" and not request_anchor:
-            raise ValueError("APRIL_IMAGES_MISSING_REQUEST_ANCHOR")
-        return {
-            "schema": "april_image_spec_v1",
-            "prompt": cls._clean_prompt(spec.get("prompt") or ""),
-            "width": width,
-            "height": height,
-            "style": str(spec.get("style") or "illustration"),
-            "quality": str(spec.get("quality") or "standard"),
-            "negative": [str(x) for x in (spec.get("negative") or []) if str(x).strip()],
-            "steps": spec.get("steps"),
-            "visual_context": dict(spec.get("visual_context") or {})
-            if isinstance(spec.get("visual_context"), dict) else {},
-            "openai_structured_visual_plan_raw": spec.get("openai_structured_visual_plan_raw"),
-            "openai_structured_visual_plan_semantic": cls._clean_prompt(
-                spec.get("openai_structured_visual_plan_semantic") or spec.get("prompt") or ""
-            ),
-            "render_profile": str(spec.get("render_profile") or "neutral_realistic"),
-            "render_profile_source": str(spec.get("render_profile_source") or "default"),
-            "seed": spec.get("seed"),
-            "generator_signal": generator_signal,
-            "request_anchor": request_anchor,
-        }
-
-    @classmethod
-    async def generate_from_spec(
-        cls,
-        spec: dict[str, Any],
-        *,
-        variant: str = "provider_spec",
+        item_meta: dict[str, Any],
     ) -> dict[str, Any]:
-        clean = cls._validate_render_spec(spec)
+        usage = cls._usage_dict(response)
+        input_tokens = usage.get("text_input_tokens")
+        if input_tokens is None:
+            input_tokens = usage.get("input_tokens")
+        image_output_tokens = usage.get("image_output_tokens")
 
-        # IMAGE PROMPT TRACE: this is the exact semantic spec that crossed the
-        # Provider -> C_APRIL_IMAGES_GENERATOR boundary.  The next trace shows
-        # what C_APRIL itself adds before SDXL sees the prompt.
-        print(
-            "\n===== IMAGE PROMPT TRACE: GENERATOR ENTRY =====\n"
-            + json.dumps({
-                "variant": variant,
-                "schema": clean.get("schema"),
-                "generator_signal": clean.get("generator_signal") or "implicit_canonical_route",
-                "request_anchor": clean.get("request_anchor") or "",
-                "semantic_generation_prompt": clean.get("prompt") or "",
-                "prompt_chars": len(str(clean.get("prompt") or "")),
-                "render_profile": clean.get("render_profile") or "neutral_realistic",
-                "render_profile_source": clean.get("render_profile_source") or "default",
-                "openai_plan_preserved": clean.get("openai_structured_visual_plan_raw") is not None,
-                "openai_plan_format": (
-                    str(clean.get("openai_structured_visual_plan_raw", {}).get("format") or "").lower()
-                    if isinstance(clean.get("openai_structured_visual_plan_raw"), dict) else ""
-                ),
-                "style": clean.get("style"),
-                "quality": clean.get("quality"),
-            }, ensure_ascii=False, indent=2, default=str)
-            + "\n===== END GENERATOR ENTRY =====\n"
-        )
-        print(
-            "===== IMAGE PROMPT TRACE: GENERATOR INPUT SPEC =====\n"
-            + json.dumps(clean, ensure_ascii=False, indent=2, default=str)[:12000]
-            + "\n===== END GENERATOR INPUT SPEC =====\n"
+        estimated_text_tokens = cls._estimate_prompt_tokens(prompt)
+        text_cost = (
+            float(input_tokens) * cls.TEXT_INPUT_USD_PER_MILLION / 1_000_000
+            if input_tokens is not None else
+            float(estimated_text_tokens) * cls.TEXT_INPUT_USD_PER_MILLION / 1_000_000
         )
 
-        base_prompt = cls._clean_prompt(clean["prompt"])
-        pipeline = cls._load_text_pipeline()
-        tokenizer = getattr(pipeline, "tokenizer", None)
-        base_prompt_tokens = (
-            len(cls._token_ids_for_long_prompt(tokenizer, base_prompt))
-            if tokenizer is not None
-            else len(base_prompt.split())
-        )
-        prompt = cls._compose_prompt(
-            base_prompt,
-            clean,
-            prompt_token_count=base_prompt_tokens,
-        )
+        if image_output_tokens is not None:
+            image_cost = float(image_output_tokens) * cls.IMAGE_OUTPUT_USD_PER_MILLION / 1_000_000
+            image_cost_method = "api_usage_image_output_tokens"
+        elif api_size == (1024, 1024) and quality == "low":
+            image_cost = cls.LOW_1024_IMAGE_ESTIMATE_USD
+            image_cost_method = "official_1024x1024_low_price"
+        else:
+            image_cost = None
+            image_cost_method = "usage_not_returned_custom_size"
 
-        print(
-            "===== IMAGE PROMPT TRACE: GENERATOR COMPOSED PROMPT =====\n"
-            + prompt[:12000]
-            + "\n===== END IMAGE PROMPT TRACE: GENERATOR COMPOSED PROMPT =====\n"
-        )
-        effective_profile = cls._effective_render_profile(
-            clean.get("render_profile") or "neutral_realistic",
-            base_prompt,
-            clean.get("visual_context"),
-        )
-        print(
-            "🔒 IMAGE PROMPT SEMANTIC LOCK:",
-            {
-                "request_anchor": clean.get("request_anchor") or "",
-                "source_prompt": base_prompt,
-                "generation_prompt": prompt,
-                "scene_content_authority": "OPENAI_STRUCTURED_VISUAL_PLAN",
-                "generation_prompt_source": "OPENAI_SEMANTIC_PLAN_PLUS_STRUCTURED_PLAN",
-                "user_request_is_trigger_only": True,
-                "openai_structured_plan_preserved": clean.get("openai_structured_visual_plan_raw") is not None,
-                "render_profile": clean.get("render_profile") or "neutral_realistic",
-                "effective_render_profile": effective_profile,
-                "generator_scene_invention": False,
-            },
-        )
-        final_prompt_tokens = (
-            len(cls._token_ids_for_long_prompt(tokenizer, prompt))
-            if tokenizer is not None
-            else len(prompt.split())
-        )
-        print(
-            "🧠 IMAGE PROMPT NORMALIZED:",
-            {
-                "semantic_chars": len(prompt),
-                "base_prompt_tokens": int(base_prompt_tokens),
-                "final_prompt_tokens": int(final_prompt_tokens),
-                "contains_markup": bool(
-                    re.search(
-                        r"<(?:svg|path|rect|circle)\\b|data:image/",
-                        prompt,
-                        flags=re.IGNORECASE,
-                    )
-                ),
-                "native_clip_limit_is_window_only": True,
-                "max_semantic_prompt_tokens": cls.MAX_SEMANTIC_PROMPT_TOKENS,
-            },
-        )
-        width, height = cls._parse_size(f"{clean['width']}x{clean['height']}")
-        image = await __import__("asyncio").to_thread(
-            cls._generate_real_image,
-            prompt,
-            width,
-            height,
-            clean["quality"],
-            clean.get("seed"),
-            cls._negative_prompt(clean),
-            pipeline=pipeline,
-            semantic_token_count=final_prompt_tokens,
-        )
-        image_bytes = cls._png_bytes(image)
-        cls._validate_png(image_bytes, width, height)
-        print(
-            "🧠 IMAGE PNG OUTPUT:",
-            {
-                "mime_type": "image/png",
-                "width": int(width),
-                "height": int(height),
-                "bytes": len(image_bytes),
-                "validation": "passed",
-                "variant": variant,
-            },
-        )
-
-        # Diagnostic-only observation point:
-        # the PNG has already been generated and validated, but has NOT yet
-        # entered C_ARTIFACT_CONTRACT.  This block must never mutate, replace,
-        # encode, or otherwise alter image_bytes or the downstream artifact.
-        # Any diagnostic failure is swallowed so logging can never break the
-        # generation route.
-        try:
-            output_sha256 = hashlib.sha256(image_bytes).hexdigest()
-            print(
-                "🔎 APRIL IMAGE GENERATOR RASTER EXIT (OBSERVATION ONLY):",
-                {
-                    "request_anchor": clean.get("request_anchor") or "",
-                    "generator_prompt": prompt,
-                    "model": cls._model_source(),
-                    "backend": cls.BACKEND,
-                    "variant": variant,
-                    "width": int(width),
-                    "height": int(height),
-                    "png_bytes": len(image_bytes),
-                    "png_sha256": output_sha256,
-                    "png_validation": "passed",
-                    "next_route": "C_ARTIFACT_CONTRACT",
-                    "image_bytes_forwarded_unchanged": True,
-                },
-            )
-        except Exception as diag_exc:
-            print(
-                "⚠️ APRIL IMAGE GENERATOR RASTER EXIT DIAGNOSTIC FAILED:",
-                {
-                    "error_type": type(diag_exc).__name__,
-                    "error": str(diag_exc)[:240],
-                    "image_bytes_forwarded_unchanged": True,
-                },
-            )
-
-        artifact, contract = cls.build_artifact(
-            image_bytes=image_bytes,
-            prompt=prompt,
-            width=width,
-            height=height,
-            backend=cls.BACKEND,
-            variant=variant,
-        )
-
-        # The raster is authoritative at this point: generation already
-        # succeeded and the PNG has passed validation.  Reassert the canonical
-        # Web display payload from those bytes instead of turning a transport
-        # normalization mismatch into a failed generation.  This stays on the
-        # existing C_APRIL -> C_ARTIFACT -> SceneContract route and does not
-        # accept or forward a Provider-rendered image.
-        payload = artifact.get("payload") if isinstance(artifact, dict) else None
-        payload = dict(payload) if isinstance(payload, dict) else {}
-        data_base64 = base64.b64encode(image_bytes).decode("ascii")
-        data_uri = f"data:image/png;base64,{data_base64}"
-        image_item = {
-            "src": data_uri,
-            "url": data_uri,
-            "image": data_uri,
-            "mime_type": "image/png",
-            "width": int(width),
-            "height": int(height),
-            "title": payload.get("title") or "Image",
-            "alt": payload.get("alt") or prompt,
-            "caption": payload.get("caption") or prompt,
+        total_cost = (text_cost + image_cost) if image_cost is not None else None
+        request_id = getattr(response, "_request_id", None) or getattr(response, "request_id", None)
+        log_payload = {
+            "model": cls.MODEL,
+            "quality": quality,
+            "requested_size": f"{requested_size[0]}x{requested_size[1]}",
+            "api_generation_size": f"{api_size[0]}x{api_size[1]}",
+            "output_format": "png",
+            "image_count": 1,
+            "request_id": cls._safe_text(request_id),
+            "input_text_tokens_api": input_tokens,
+            "input_text_tokens_estimated": estimated_text_tokens,
+            "image_output_tokens_api": image_output_tokens,
+            "image_output_cost_usd": round(image_cost, 8) if image_cost is not None else None,
+            "text_input_cost_usd": round(text_cost, 8),
+            "estimated_total_cost_usd": round(total_cost, 8) if total_cost is not None else None,
+            "cost_method": image_cost_method,
+            "api_response_item": item_meta,
+            "usage": usage,
         }
-        payload.update({
-            "kind": "generated_image",
-            "artifact_type": "image",
-            "mime_type": "image/png",
-            "width": int(width),
-            "height": int(height),
-            "image_base64": data_base64,
-            "image_data_uri": data_uri,
-            "src": data_uri,
-            "url": data_uri,
-            "image": data_uri,
+        print("💰 GPT IMAGE 2 COST:", json.dumps(log_payload, ensure_ascii=False, default=str))
+        return log_payload
+
+    @classmethod
+    def _resize_to_requested(cls, image_bytes: bytes, requested_width: int, requested_height: int) -> bytes:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            source.load()
+            if source.size == (requested_width, requested_height):
+                converted = source.copy()
+            else:
+                # Preserve the raster returned by GPT Image 2; only normalize to the
+                # existing April Web contract size at the final decoder boundary.
+                converted = source.resize(
+                    (requested_width, requested_height),
+                    Image.Resampling.LANCZOS,
+                )
+            output = io.BytesIO()
+            converted.save(output, format="PNG", optimize=True)
+            return output.getvalue()
+
+    @classmethod
+    def _generate_gpt_image_bytes(
+        cls,
+        prompt: str,
+        *,
+        requested_width: int,
+        requested_height: int,
+        quality: str,
+    ) -> tuple[bytes, dict[str, Any]]:
+        cls._require_backend()
+        api_width, api_height = cls._api_generation_size(requested_width, requested_height)
+        normalized_quality = cls._normalize_quality(quality)
+
+        request = {
+            "model": cls.MODEL,
             "prompt": prompt,
-            "engine": cls.ENGINE_NAME,
-            "engine_version": cls.ENGINE_VERSION,
-            "backend": cls.BACKEND,
-            "variant": variant,
-            "images": [image_item],
-        })
-
-        if not isinstance(artifact, dict):
-            artifact = {}
-        artifact["artifact_type"] = "image"
-        artifact["mime_type"] = "image/png"
-        artifact["width"] = int(width)
-        artifact["height"] = int(height)
-        artifact["image_base64"] = data_base64
-        artifact["image_data_uri"] = data_uri
-        artifact["payload"] = payload
-        artifact["images"] = [image_item]
-        artifact["render_spec"] = clean
-        artifact["payload"]["render_spec"] = clean
-
-        # Keep the BaseArtifact used by C_ARTIFACT_CONTRACT in sync with the
-        # repaired display payload.  Rebuilding the universal contract here
-        # guarantees that its render block carries the same PNG source.
-        base_artifact = getattr(contract, "artifact", None) if contract is not None else None
-        if base_artifact is not None:
-            base_data = dict(getattr(base_artifact, "data", {}) or {})
-            base_data.update({
-                "artifact_type": "image",
-                "mime_type": "image/png",
-                "width": int(width),
-                "height": int(height),
-                "image_base64": data_base64,
-                "image_data_uri": data_uri,
-                "human_visible": True,
-                "machine_only": False,
-                "payload": payload,
-            })
-            base_artifact.data = base_data
-            contract = build_universal_contract(base_artifact)
-
-        if not artifact["payload"].get("src") or not artifact["payload"].get("images"):
-            raise RuntimeError("APRIL_IMAGES_ARTIFACT_DISPLAY_PAYLOAD_BUILD_FAILED")
+            "size": f"{api_width}x{api_height}",
+            "quality": normalized_quality,
+            "output_format": "png",
+            "n": 1,
+        }
         print(
-            "🧠 IMAGE ARTIFACT OUTPUT:",
-            {
-                "artifact_type": artifact.get("artifact_type"),
-                "mime_type": artifact.get("mime_type"),
-                "width": artifact.get("width"),
-                "height": artifact.get("height"),
-                "has_image_base64": bool(artifact.get("image_base64")),
-                "has_image_data_uri": bool(artifact.get("image_data_uri")),
-                "payload_has_src": bool(artifact.get("payload", {}).get("src")),
-                "images_count": len(artifact.get("images") or []),
-                "display_contract": "C_ARTIFACT_CONTRACT -> GalleryBlock",
-            },
+            "🧠 GPT IMAGE 2 REQUEST:",
+            json.dumps(
+                {
+                    "model": cls.MODEL,
+                    "quality": normalized_quality,
+                    "requested_size": f"{requested_width}x{requested_height}",
+                    "api_generation_size": f"{api_width}x{api_height}",
+                    "output_format": "png",
+                    "image_count": 1,
+                    "prompt_chars": len(prompt),
+                },
+                ensure_ascii=False,
+            ),
         )
-        return cls._result_dict(ImageGenerationResult(
-            image_bytes=image_bytes,
-            mime_type="image/png",
-            width=width,
-            height=height,
-            backend=cls.BACKEND,
+
+        client = cls._client()
+        response = client.images.generate(**request)
+        decoded_bytes, item_meta = cls._decode_gpt_image(response)
+        decoded_bytes = cls._resize_to_requested(
+            decoded_bytes,
+            requested_width,
+            requested_height,
+        )
+
+        cost = cls._log_cost(
+            response=response,
             prompt=prompt,
-            artifact=artifact,
-            contract=contract,
-        ))
+            requested_size=(requested_width, requested_height),
+            api_size=(api_width, api_height),
+            quality=normalized_quality,
+            item_meta=item_meta,
+        )
+        meta = {
+            "api_generation_size": (api_width, api_height),
+            "requested_size": (requested_width, requested_height),
+            "effective_quality": normalized_quality,
+            "cost": cost,
+            "request_id": cls._safe_text(
+                getattr(response, "_request_id", None)
+                or getattr(response, "request_id", None)
+            ),
+        }
+        return decoded_bytes, meta
 
     # -------------------------------------------------
     # PNG + C_ARTIFACT
@@ -2077,12 +608,22 @@ class AprilImagesGenerator:
         prompt: str,
         width: int,
         height: int,
-        backend: str,
+        backend: str = BACKEND,
         variant: str = "primary",
     ) -> tuple[dict[str, Any], UniversalArtifactContract]:
         data_base64 = base64.b64encode(image_bytes).decode("ascii")
         data_uri = f"data:image/png;base64,{data_base64}"
-
+        image_item = {
+            "src": data_uri,
+            "url": data_uri,
+            "image": data_uri,
+            "mime_type": "image/png",
+            "width": width,
+            "height": height,
+            "title": "Image",
+            "alt": prompt,
+            "caption": prompt,
+        }
         artifact = create_artifact(
             artifact_type="image",
             room_source="APRIL_IMAGES_GENERATION",
@@ -2126,17 +667,7 @@ class AprilImagesGenerator:
                         "payload_type": "image",
                         "mime_type": "image/png",
                     },
-                    "images": [{
-                        "src": data_uri,
-                        "url": data_uri,
-                        "image": data_uri,
-                        "mime_type": "image/png",
-                        "width": width,
-                        "height": height,
-                        "title": "Image",
-                        "alt": prompt,
-                        "caption": prompt,
-                    }],
+                    "images": [image_item],
                 },
             },
         )
@@ -2203,33 +734,306 @@ class AprilImagesGenerator:
             "engine": self.engine_name,
             "version": self.engine_version,
             "status": "ready" if self._can_initialize() else "configuration_required",
-            "architecture": "Interpretation -> C_APRIL_IMAGES_GENERATOR -> C_ARTIFACT_CONTRACT -> GalleryBlock",
-            "backend_mode": "diffusers_single_backend",
-            "model_source": self._model_source(),
-            "local_model_configured": bool(self._model_path()),
-            "model_id_configured": bool(os.getenv("APRIL_IMAGES_MODEL_ID", "").strip()),
-            "diffusers_available": bool(AutoPipelineForText2Image is not None),
+            "architecture": "Interpretation -> Provider -> GPT Image 2.0 -> C_ARTIFACT_CONTRACT -> GalleryBlock",
+            "backend_mode": self.BACKEND,
+            "model_source": self.MODEL,
+            "local_model_configured": False,
+            "model_id_configured": True,
+            "diffusers_available": False,
             "long_prompt_support": True,
-            "max_semantic_prompt_tokens": cls.MAX_SEMANTIC_PROMPT_TOKENS,
-            "long_prompt_strategy": "native_clip_window_sequence_concat",
+            "max_semantic_prompt_tokens": self.MAX_SEMANTIC_PROMPT_TOKENS,
+            "long_prompt_strategy": "provider_semantic_plan_passthrough",
             "device": self._device(),
-            "dtype": str(self._dtype()) if self._dtype() is not None else None,
-            "external_image_api": False,
+            "dtype": None,
+            "external_image_api": True,
             "fallback_backend": None,
             "display_contract": "C_ARTIFACT_CONTRACT -> GalleryBlock",
+            "default_quality": "low",
+            "default_web_size": "512x512",
+            "api_generation_size_for_512": "1024x1024",
         }
 
     @classmethod
-    def _can_initialize(cls) -> bool:
-        source = cls._model_source()
-        return bool(
-            source
-            and AutoPipelineForText2Image is not None
-            and AutoPipelineForImage2Image is not None
-            and torch is not None
-            and (
-                cls._model_is_local()
-                or not cls._model_path()
+    def build_visual_prompt(
+        cls,
+        request: str,
+        *,
+        visual_context: Optional[dict[str, Any]] = None,
+        style: str = "",
+        quality: str = "low",
+    ) -> str:
+        # Compatibility method. Style is intentionally not injected.
+        spec = {
+            "prompt": request,
+            "quality": quality,
+            "visual_context": visual_context or {},
+            "request_anchor": request,
+            "openai_structured_visual_plan_semantic": request,
+        }
+        return cls._compose_prompt(cls._clean_prompt(request), spec)
+
+    # -------------------------------------------------
+    # Provider image-spec validation / execution
+    # -------------------------------------------------
+
+    @classmethod
+    def _validate_render_spec(cls, spec: Any) -> dict[str, Any]:
+        if not isinstance(spec, dict):
+            raise ValueError("APRIL_IMAGES_INVALID_SPEC")
+        if spec.get("schema") != "april_image_spec_v1":
+            raise ValueError("APRIL_IMAGES_INVALID_SPEC_SCHEMA")
+
+        width, height = cls._parse_size(
+            f"{spec.get('width', cls.DEFAULT_SIZE[0])}x{spec.get('height', cls.DEFAULT_SIZE[1])}"
+        )
+        generator_signal = cls._safe_text(spec.get("generator_signal") or "").strip()
+        if generator_signal and generator_signal != "C_APRIL_IMAGES_GENERATOR":
+            raise ValueError("APRIL_IMAGES_INVALID_GENERATOR_SIGNAL")
+
+        request_anchor = cls._safe_text(spec.get("request_anchor") or "").strip()
+        if generator_signal == "C_APRIL_IMAGES_GENERATOR" and not request_anchor:
+            raise ValueError("APRIL_IMAGES_MISSING_REQUEST_ANCHOR")
+
+        semantic = cls._clean_prompt(
+            spec.get("openai_structured_visual_plan_semantic")
+            or spec.get("prompt")
+            or ""
+        )
+        return {
+            "schema": "april_image_spec_v1",
+            "prompt": semantic,
+            "width": width,
+            "height": height,
+            "style": cls._safe_text(spec.get("style") or ""),
+            "quality": cls._normalize_quality(cls._safe_text(spec.get("quality") or "low")),
+            "negative": [str(x) for x in (spec.get("negative") or []) if str(x).strip()],
+            "visual_context": dict(spec.get("visual_context") or {}) if isinstance(spec.get("visual_context"), dict) else {},
+            "openai_structured_visual_plan_raw": spec.get("openai_structured_visual_plan_raw"),
+            "openai_structured_visual_plan_semantic": semantic,
+            "render_profile": "",
+            "render_profile_source": "",
+            "seed": None,
+            "generator_signal": generator_signal,
+            "request_anchor": request_anchor,
+        }
+
+    @classmethod
+    async def generate_from_spec(
+        cls,
+        spec: dict[str, Any],
+        *,
+        variant: str = "provider_spec",
+    ) -> dict[str, Any]:
+        clean = cls._validate_render_spec(spec)
+        width, height = cls._parse_size(f"{clean['width']}x{clean['height']}")
+        prompt = cls._compose_prompt(clean["prompt"], clean)
+        final_prompt_tokens = cls._estimate_prompt_tokens(prompt)
+
+        print(
+            "\n===== IMAGE PROMPT TRACE: GENERATOR ENTRY =====\n"
+            + json.dumps(
+                {
+                    "variant": variant,
+                    "schema": clean.get("schema"),
+                    "generator_signal": clean.get("generator_signal") or "implicit_canonical_route",
+                    "request_anchor": clean.get("request_anchor") or "",
+                    "semantic_generation_prompt": clean.get("prompt") or "",
+                    "prompt_chars": len(prompt),
+                    "openai_plan_preserved": clean.get("openai_structured_visual_plan_raw") is not None,
+                    "provider_model": cls.MODEL,
+                    "quality": clean.get("quality") or "low",
+                },
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+            + "\n===== END GENERATOR ENTRY =====\n"
+        )
+        print(
+            "===== IMAGE PROMPT TRACE: GENERATOR COMPOSED PROMPT =====\n"
+            + prompt[:12000]
+            + "\n===== END IMAGE PROMPT TRACE: GENERATOR COMPOSED PROMPT =====\n"
+        )
+        print(
+            "🔒 IMAGE PROMPT SEMANTIC LOCK:",
+            {
+                "request_anchor": clean.get("request_anchor") or "",
+                "source_prompt": clean.get("prompt") or "",
+                "generation_prompt": prompt,
+                "scene_content_authority": "USER_REQUEST_PLUS_OPENAI_STRUCTURED_VISUAL_PLAN",
+                "generation_prompt_source": "USER_REQUEST_PLUS_OPENAI_SEMANTIC_PLAN_PLUS_STRUCTURED_PLAN",
+                "user_request_is_trigger_only": False,
+                "openai_structured_plan_preserved": clean.get("openai_structured_visual_plan_raw") is not None,
+                "render_profile_injected_into_prompt": False,
+                "provider_model": cls.MODEL,
+                "generator_scene_invention": False,
+            },
+        )
+        print(
+            "🧠 IMAGE PROMPT NORMALIZED:",
+            {
+                "semantic_chars": len(prompt),
+                "estimated_prompt_tokens": int(final_prompt_tokens),
+                "contains_markup": bool(re.search(r"<(?:svg|path|rect|circle)\\b|data:image/", prompt, flags=re.IGNORECASE)),
+                "generation_model": cls.MODEL,
+                "quality": clean["quality"],
+                "output_format": "png",
+            },
+        )
+
+        image_bytes, meta = await asyncio.to_thread(
+            cls._generate_gpt_image_bytes,
+            prompt,
+            requested_width=width,
+            requested_height=height,
+            quality=clean["quality"],
+        )
+        cls._validate_png(image_bytes, width, height)
+
+        try:
+            output_sha256 = hashlib.sha256(image_bytes).hexdigest()
+            print(
+                "🔎 APRIL IMAGE GENERATOR RASTER EXIT (OBSERVATION ONLY):",
+                {
+                    "request_anchor": clean.get("request_anchor") or "",
+                    "generator_prompt": prompt,
+                    "model": cls.MODEL,
+                    "backend": cls.BACKEND,
+                    "variant": variant,
+                    "width": int(width),
+                    "height": int(height),
+                    "png_bytes": len(image_bytes),
+                    "png_sha256": output_sha256,
+                    "png_validation": "passed",
+                    "next_route": "C_ARTIFACT_CONTRACT",
+                    "decoded_png_forwarded_unchanged_to_artifact": True,
+                    "api_raster_resized_to_web_contract": bool(
+                        meta["api_generation_size"] != (width, height)
+                    ),
+                    "api_generation_size": f"{meta['api_generation_size'][0]}x{meta['api_generation_size'][1]}",
+                    "effective_quality": meta["effective_quality"],
+                },
+            )
+        except Exception as diag_exc:
+            print(
+                "⚠️ APRIL IMAGE GENERATOR RASTER EXIT DIAGNOSTIC FAILED:",
+                {
+                    "error_type": type(diag_exc).__name__,
+                    "error": str(diag_exc)[:240],
+                    "decoded_png_forwarded_unchanged_to_artifact": True,
+                },
+            )
+
+        artifact, contract = cls.build_artifact(
+            image_bytes=image_bytes,
+            prompt=prompt,
+            width=width,
+            height=height,
+            backend=cls.BACKEND,
+            variant=variant,
+        )
+
+        payload = artifact.get("payload") if isinstance(artifact, dict) else None
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        data_base64 = base64.b64encode(image_bytes).decode("ascii")
+        data_uri = f"data:image/png;base64,{data_base64}"
+        image_item = {
+            "src": data_uri,
+            "url": data_uri,
+            "image": data_uri,
+            "mime_type": "image/png",
+            "width": int(width),
+            "height": int(height),
+            "title": payload.get("title") or "Image",
+            "alt": payload.get("alt") or clean.get("request_anchor") or prompt,
+            "caption": payload.get("caption") or clean.get("request_anchor") or prompt,
+        }
+        payload.update({
+            "kind": "generated_image",
+            "artifact_type": "image",
+            "mime_type": "image/png",
+            "width": int(width),
+            "height": int(height),
+            "image_base64": data_base64,
+            "image_data_uri": data_uri,
+            "src": data_uri,
+            "url": data_uri,
+            "image": data_uri,
+            "prompt": prompt,
+            "engine": cls.ENGINE_NAME,
+            "engine_version": cls.ENGINE_VERSION,
+            "backend": cls.BACKEND,
+            "variant": variant,
+            "images": [image_item],
+            "generation_model": cls.MODEL,
+            "generation_quality": meta["effective_quality"],
+        })
+
+        if not isinstance(artifact, dict):
+            artifact = {}
+        artifact.update({
+            "artifact_type": "image",
+            "mime_type": "image/png",
+            "width": int(width),
+            "height": int(height),
+            "image_base64": data_base64,
+            "image_data_uri": data_uri,
+            "payload": payload,
+            "images": [image_item],
+            "render_spec": clean,
+            "generation_model": cls.MODEL,
+            "generation_quality": meta["effective_quality"],
+        })
+        artifact["payload"]["render_spec"] = clean
+        artifact["payload"]["generation_model"] = cls.MODEL
+        artifact["payload"]["generation_quality"] = meta["effective_quality"]
+
+        base_artifact = getattr(contract, "artifact", None) if contract is not None else None
+        if base_artifact is not None:
+            try:
+                base_data = dict(getattr(base_artifact, "data", {}) or {})
+                base_data.update({
+                    "artifact_type": "image",
+                    "mime_type": "image/png",
+                    "width": int(width),
+                    "height": int(height),
+                    "image_base64": data_base64,
+                    "image_data_uri": data_uri,
+                    "human_visible": True,
+                    "machine_only": False,
+                    "payload": payload,
+                })
+                base_artifact.data = base_data
+                contract = build_universal_contract(base_artifact)
+            except Exception as exc:
+                print("⚠️ GPT IMAGE 2 ARTIFACT CONTRACT REFRESH:", exc)
+
+        print(
+            "🧠 IMAGE ARTIFACT OUTPUT:",
+            {
+                "artifact_type": artifact.get("artifact_type"),
+                "mime_type": artifact.get("mime_type"),
+                "width": artifact.get("width"),
+                "height": artifact.get("height"),
+                "has_image_base64": bool(artifact.get("image_base64")),
+                "has_image_data_uri": bool(artifact.get("image_data_uri")),
+                "payload_has_src": bool(artifact.get("payload", {}).get("src")),
+                "images_count": len(artifact.get("images") or []),
+                "display_contract": "C_ARTIFACT_CONTRACT -> GalleryBlock",
+                "generation_model": cls.MODEL,
+                "generation_quality": meta["effective_quality"],
+            },
+        )
+        return cls._result_dict(
+            ImageGenerationResult(
+                image_bytes=image_bytes,
+                mime_type="image/png",
+                width=width,
+                height=height,
+                backend=cls.BACKEND,
+                prompt=prompt,
+                artifact=artifact,
+                contract=contract,
             )
         )
 
@@ -2237,148 +1041,110 @@ class AprilImagesGenerator:
         self,
         prompt: str,
         *,
-        size: str = "1024x1024",
-        quality: str = "standard",
+        size: str = "512x512",
+        quality: str = "low",
         seed: Optional[int] = None,
         variant: str = "primary",
     ) -> dict[str, Any]:
-        prompt = self._clean_prompt(prompt)
+        # Direct legacy callers still end in the same GPT Image 2 route.
+        request = self._clean_prompt(prompt)
         width, height = self._parse_size(size)
-        print(
-            "🧠 IMAGE PROMPT NORMALIZED:",
-            {
-                "semantic_chars": len(prompt),
-                "contains_markup": bool(re.search(r"<(?:svg|path|rect|circle)\b|data:image/", prompt, flags=re.IGNORECASE)),
-                "native_clip_limit_is_window_only": True,
-            },
-        )
-        image = await __import__("asyncio").to_thread(
-            self._generate_real_image,
-            prompt,
-            width,
-            height,
-            quality,
-            seed,
-            self._negative_prompt(),
-        )
-        image_bytes = self._png_bytes(image)
-        self._validate_png(image_bytes, width, height)
-        print(
-            "🧠 IMAGE PNG OUTPUT:",
-            {
-                "mime_type": "image/png",
-                "width": int(width),
-                "height": int(height),
-                "bytes": len(image_bytes),
-                "validation": "passed",
-                "variant": variant,
-            },
-        )
-        artifact, contract = self.build_artifact(
-            image_bytes=image_bytes,
-            prompt=prompt,
-            width=width,
-            height=height,
-            backend=self.BACKEND,
-            variant=variant,
-        )
-        return self._result_dict(ImageGenerationResult(
-            image_bytes=image_bytes,
-            mime_type="image/png",
-            width=width,
-            height=height,
-            backend=self.BACKEND,
-            prompt=prompt,
-            artifact=artifact,
-            contract=contract,
-        ))
+        spec = {
+            "schema": "april_image_spec_v1",
+            "prompt": request,
+            "width": width,
+            "height": height,
+            "quality": self._normalize_quality(quality),
+            "visual_context": {},
+            "openai_structured_visual_plan_semantic": request,
+            "openai_structured_visual_plan_raw": None,
+            "request_anchor": request,
+            "generator_signal": "C_APRIL_IMAGES_GENERATOR",
+        }
+        return await self.generate_from_spec(spec, variant=variant)
 
     async def edit(
         self,
         image_bytes: bytes,
         prompt: str,
         *,
-        quality: str = "standard",
+        quality: str = "low",
         strength: float = 0.65,
         variant: str = "edit",
     ) -> dict[str, Any]:
+        """GPT Image 2 image edit compatibility path.
+
+        ``strength`` is accepted for API compatibility with the old Diffusers
+        implementation but is not sent to GPT Image 2 because the Images API
+        controls edits by prompt + input image rather than a diffusion strength.
+        """
+        cls = type(self)
+        cls._require_backend()
         if not image_bytes:
             raise ValueError("APRIL_IMAGES_EDIT_SOURCE_EMPTY")
-        prompt = self._clean_prompt(prompt)
-        source_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        width, height = source_image.size
-        pipeline = self._load_edit_pipeline()
-        steps, guidance = self._quality_settings(quality)
-        strength_value = max(0.05, min(0.95, float(strength)))
-        if self._is_turbo_model():
-            import math
-            steps = max(2, steps, int(math.ceil(1.0 / strength_value)))
-            steps = min(4, steps)
-            guidance = 0.0
+        clean_prompt = cls._clean_prompt(prompt)
+        quality_value = cls._normalize_quality(quality)
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            source.load()
+            original_size = source.size
+        api_width, api_height = cls._api_generation_size(*original_size)
 
-        kwargs: dict[str, Any] = {
-            "image": source_image,
-            "strength": strength_value,
-            "num_inference_steps": steps,
-            "guidance_scale": guidance,
-        }
-
-        tokenizer = getattr(pipeline, "tokenizer", None)
-        if tokenizer is not None and not self._is_turbo_model():
-            prompt_tokens = len(self._token_ids_for_long_prompt(tokenizer, prompt))
-            negative = self._negative_prompt()
-            negative_tokens = len(self._token_ids_for_long_prompt(tokenizer, negative))
-            native_limit = int(getattr(tokenizer, "model_max_length", 77) or 77)
-        else:
-            prompt_tokens = negative_tokens = 0
-            native_limit = 77
-            negative = ""
-
-        if (
-            tokenizer is not None
-            and not self._is_turbo_model()
-            and prompt_tokens <= native_limit
-            and negative_tokens <= native_limit
-        ):
-            kwargs["prompt"] = prompt
-            kwargs["negative_prompt"] = negative
-        else:
-            kwargs.update(
-                self._long_prompt_kwargs(
-                    pipeline,
-                    prompt,
-                    "" if guidance == 0.0 else self._negative_prompt(),
-                )
+        def _do_edit() -> tuple[bytes, dict[str, Any]]:
+            client = cls._client()
+            handle = io.BytesIO(image_bytes)
+            handle.name = "april_input.png"
+            response = client.images.edit(
+                model=cls.MODEL,
+                image=handle,
+                prompt=clean_prompt,
+                size=f"{api_width}x{api_height}",
+                quality=quality_value,
+                output_format="png",
             )
+            output, item_meta = cls._decode_gpt_image(response)
+            output = cls._resize_to_requested(output, original_size[0], original_size[1])
+            usage = cls._usage_dict(response)
+            print(
+                "💰 GPT IMAGE 2 EDIT COST:",
+                json.dumps(
+                    {
+                        "model": cls.MODEL,
+                        "quality": quality_value,
+                        "requested_size": f"{original_size[0]}x{original_size[1]}",
+                        "api_generation_size": f"{api_width}x{api_height}",
+                        "usage": usage,
+                        "estimated_text_input_tokens": cls._estimate_prompt_tokens(clean_prompt),
+                        "note": "Image edit input tokens depend on the supplied source image; see API billing usage/account for exact charge.",
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            )
+            return output, item_meta
 
-        if torch is not None:
-            with torch.inference_mode():
-                result = pipeline(**kwargs)
-        else:
-            result = pipeline(**kwargs)
-        generated = getattr(result, "images", [None])[0]
-        if generated is None:
-            raise RuntimeError("APRIL_IMAGES_DIFFUSION_EMPTY_EDIT_RESULT")
-        output = self._png_bytes(generated.convert("RGB"))
-        self._validate_png(output, width, height)
-        artifact, contract = self.build_artifact(
+        output, _item_meta = await asyncio.to_thread(_do_edit)
+        cls._validate_png(output, original_size[0], original_size[1])
+        artifact, contract = cls.build_artifact(
             image_bytes=output,
-            prompt=prompt,
-            width=width,
-            height=height,
-            backend="local_diffusion_edit",
+            prompt=clean_prompt,
+            width=original_size[0],
+            height=original_size[1],
+            backend=cls.BACKEND,
             variant=variant,
         )
-        return self._result_dict(ImageGenerationResult(
-            image_bytes=output,
-            mime_type="image/png",
-            width=width,
-            height=height,
-            backend="local_diffusion_edit",
-            prompt=prompt,
-            artifact=artifact,
-            contract=contract,
-        ))
+        return cls._result_dict(
+            ImageGenerationResult(
+                image_bytes=output,
+                mime_type="image/png",
+                width=original_size[0],
+                height=original_size[1],
+                backend=cls.BACKEND,
+                prompt=clean_prompt,
+                artifact=artifact,
+                contract=contract,
+            )
+        )
+
 
 april_images_generator = AprilImagesGenerator()
 
@@ -2387,7 +1153,7 @@ async def generate_from_spec(spec: dict[str, Any], *, variant: str = "provider_s
     return await april_images_generator.generate_from_spec(spec, variant=variant)
 
 
-async def generate_image(prompt: str, size: str = "512x512", quality: str = "standard") -> Optional[bytes]:
+async def generate_image(prompt: str, size: str = "512x512", quality: str = "low") -> Optional[bytes]:
     result = await april_images_generator.generate(prompt, size=size, quality=quality)
     return result.get("image_bytes") if result.get("success") else None
 
@@ -2395,18 +1161,18 @@ async def generate_image(prompt: str, size: str = "512x512", quality: str = "sta
 async def generate_image_result(
     prompt: str,
     size: str = "512x512",
-    quality: str = "standard",
+    quality: str = "low",
     variant: str = "primary",
 ) -> dict[str, Any]:
     return await april_images_generator.generate(prompt, size=size, quality=quality, variant=variant)
 
 
-async def edit_image(image_bytes: bytes, prompt: str, quality: str = "standard") -> Optional[bytes]:
+async def edit_image(image_bytes: bytes, prompt: str, quality: str = "low") -> Optional[bytes]:
     result = await april_images_generator.edit(image_bytes, prompt, quality=quality)
     return result.get("image_bytes") if result.get("success") else None
 
 
-async def edit_image_result(image_bytes: bytes, prompt: str, quality: str = "standard") -> dict[str, Any]:
+async def edit_image_result(image_bytes: bytes, prompt: str, quality: str = "low") -> dict[str, Any]:
     return await april_images_generator.edit(image_bytes, prompt, quality=quality)
 
 
