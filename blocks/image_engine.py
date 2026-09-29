@@ -5,6 +5,7 @@ import asyncio
 import os
 import tempfile
 import time
+from copy import deepcopy
 import threading
 import re
 from pathlib import Path
@@ -182,12 +183,20 @@ async def generate(
     both forms terminate in the same C_APRIL_IMAGES_GENERATOR backend.
     """
     flow_id = ""
+    turn_id = ""
+    scene_id = ""
+    conversation_id = ""
+    dialogue_sequence_id = ""
     if isinstance(context, dict):
         flow_id = str(
             context.get("flow_id")
             or context.get("request_id")
             or ""
         ).strip()
+        turn_id = str(context.get("turn_id") or "").strip()
+        scene_id = str(context.get("scene_id") or "").strip()
+        conversation_id = str(context.get("conversation_id") or "").strip()
+        dialogue_sequence_id = str(context.get("dialogue_sequence_id") or "").strip()
     if not flow_id:
         flow_id = str(user_id or "").strip()
 
@@ -250,6 +259,11 @@ async def generate(
             prompt_source = "spec_prompt"
         clean_spec["generator_signal"] = "C_APRIL_IMAGES_GENERATOR"
         clean_spec["request_anchor"] = current_request
+        clean_spec["flow_id"] = flow_id
+        clean_spec["turn_id"] = turn_id
+        clean_spec["scene_id"] = scene_id
+        clean_spec["conversation_id"] = conversation_id
+        clean_spec["dialogue_sequence_id"] = dialogue_sequence_id
         print(
             "🧭 IMAGE ENGINE HANDOFF:",
             {
@@ -354,6 +368,47 @@ async def generate(
 
         contract_obj = result.get("contract")
         artifact_obj = getattr(contract_obj, "artifact", None) if contract_obj is not None else None
+        if contract_obj is not None:
+            try:
+                contract_obj.fiber.identity.user_id = str(user_id or contract_obj.fiber.identity.user_id or "")
+                identity_meta = {
+                    "flow_id": flow_id,
+                    "turn_id": turn_id,
+                    "scene_id": scene_id or f"{flow_id}:scene",
+                    "conversation_id": conversation_id,
+                    "dialogue_sequence_id": dialogue_sequence_id,
+                    "dialogue_development": context.get("dialogue_development", {}) if isinstance(context, dict) else {},
+                }
+                if isinstance(getattr(contract_obj, "metadata", None), dict):
+                    contract_obj.metadata.update(identity_meta)
+                scene_contract = getattr(contract_obj, "scene_contract", None)
+                if scene_contract is not None:
+                    scene_contract.user_id = str(user_id or getattr(scene_contract, "user_id", "") or "")
+                    scene_contract.flow_id = flow_id
+                    scene_contract.turn_id = turn_id
+                    scene_contract.scene_id = identity_meta["scene_id"]
+                    scene_contract.conversation_id = conversation_id
+                    scene_contract.dialogue_sequence_id = dialogue_sequence_id
+                    scene_contract.dialogue_development = deepcopy(identity_meta["dialogue_development"]) if isinstance(identity_meta["dialogue_development"], dict) else {}
+                    scene_contract.authenticated_scope = {
+                        "user_id": scene_contract.user_id,
+                        "conversation_id": conversation_id,
+                        "dialogue_sequence_id": dialogue_sequence_id,
+                    }
+                    if isinstance(getattr(scene_contract, "metadata", None), dict):
+                        scene_contract.metadata.update(identity_meta)
+                    for scene_block in getattr(scene_contract, "render_blocks", []) or []:
+                        if isinstance(scene_block, dict):
+                            scene_block.update({
+                                "scene_id": scene_contract.scene_id,
+                                "turn_id": turn_id,
+                                "flow_id": flow_id,
+                                "user_id": scene_contract.user_id,
+                                "conversation_id": conversation_id,
+                                "dialogue_sequence_id": dialogue_sequence_id,
+                            })
+            except Exception as identity_exc:
+                print("⚠️ IMAGE ENGINE CONTRACT IDENTITY BIND:", identity_exc)
         render_blocks = []
         if artifact_obj is not None:
             try:
@@ -370,6 +425,12 @@ async def generate(
                 kind = str(block.get("type") or block.get("artifact_type") or block.get("representation") or "").lower()
                 if kind not in {"image", "gallery"}:
                     continue
+                block["scene_id"] = scene_id or block.get("scene_id") or f"{flow_id}:scene"
+                block["turn_id"] = turn_id or block.get("turn_id") or ""
+                block["flow_id"] = flow_id or block.get("flow_id") or ""
+                block["user_id"] = str(user_id or block.get("user_id") or "")
+                block["conversation_id"] = conversation_id or block.get("conversation_id") or ""
+                block["dialogue_sequence_id"] = dialogue_sequence_id or block.get("dialogue_sequence_id") or ""
                 payload = dict(block.get("payload") or {}) if isinstance(block.get("payload"), dict) else {}
                 payload.update({"asset_url": public_asset_url or asset_url, "image_asset_url": public_asset_url or asset_url, "asset_path": path or "", "image_asset_path": path or "", "asset_name": asset_name})
                 images = payload.get("images") if isinstance(payload.get("images"), list) else []
