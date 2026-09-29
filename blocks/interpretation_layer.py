@@ -4558,6 +4558,109 @@ class ConversationContinuityEngine(InterpretationEngineBase):
         }
 
 
+class DialogueDevelopmentEngine(InterpretationEngineBase):
+    """Keep one semantic trajectory for the authenticated dialogue."""
+    NAME = "DialogueDevelopmentEngine"
+    VERSION = "dialogue_development_v1_single_route"
+
+    @classmethod
+    def _compact_loop(cls, item: Any) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        out = {
+            "id": cls._text(item.get("id") or item.get("loop_id")),
+            "topic": cls._text(item.get("topic") or item.get("goal") or item.get("description")),
+            "status": cls._text(item.get("status") or "open"),
+            "next_step": cls._text(item.get("next_step") or item.get("next_action")),
+        }
+        return {k:v for k,v in out.items() if v not in (None,"",[],{})}
+
+    def analyze(self, text: str, *, state: dict[str, Any], relation: dict[str, Any],
+                topic: dict[str, Any], task: dict[str, Any], entity: dict[str, Any],
+                history_search: dict[str, Any], continuity: dict[str, Any],
+                obligations: dict[str, Any], visual_memory: dict[str, Any]) -> dict[str, Any]:
+        rel=self._text(relation.get("relation") or "NEW").upper()
+        env=relation.get("environment") if isinstance(relation.get("environment"),dict) else {}
+        seq=env.get("active_sequence") if isinstance(env.get("active_sequence"),dict) else {}
+        active_topic=self._text(seq.get("topic") or relation.get("active_topic") or topic.get("topic")
+                                 or state.get("april_active_topic") or state.get("current_topic") or text)[:500]
+        task_frame=task.get("task") if isinstance(task.get("task"),dict) else {}
+        active_goal=self._text(task_frame.get("goal") or task.get("goal") or state.get("april_active_goal") or active_topic)[:500]
+        active_entity=self._text(entity.get("active_entity") or state.get("april_active_entity"))
+        last_result=history_search.get("latest_operation_result")
+        if not isinstance(last_result,dict) or not last_result:
+            last_result=history_search.get("carry_forward_result")
+        if not isinstance(last_result,dict): last_result={}
+        previous_result={k:v for k,v in {
+            "value":self._text(last_result.get("value") or last_result.get("result")),
+            "operation":self._text(last_result.get("operation")),
+            "source_user_request":self._text(last_result.get("user_request") or last_result.get("source_user_request")),
+            "source_assistant_answer":self._text(last_result.get("assistant_answer") or last_result.get("source_assistant_answer")),
+            "scene_id":self._text(last_result.get("scene_id")),
+            "turn_id":last_result.get("turn_id"),
+        }.items() if v not in (None,"",[],{})}
+        loops=[]
+        for item in list(state.get("open_loops") or [])[-8:]:
+            c=self._compact_loop(item)
+            if c: loops.append(c)
+        pending=[]; ready=[]
+        for item in (list(obligations.get("obligations") or [])[-12:] if isinstance(obligations,dict) else []):
+            if not isinstance(item,dict): continue
+            status=self._text(item.get("status") or "pending").lower()
+            c={k:v for k,v in {
+                "id":self._text(item.get("id") or item.get("obligation_id")),
+                "condition":self._text(item.get("condition")),
+                "condition_type":self._text(item.get("condition_type")),
+                "action":self._text(item.get("action")),
+                "representation":self._text(item.get("representation") or "text"),
+                "target":self._text(item.get("target")),
+                "instruction":self._text(item.get("instruction")),
+                "status":status,
+            }.items() if v not in (None,"",[],{})}
+            if status in {"pending","active"}: pending.append(c)
+            elif status=="ready": ready.append(c)
+        result_event=state.get("dialogue_result_event") if isinstance(state.get("dialogue_result_event"),dict) else {}
+        result_event={k:v for k,v in result_event.items() if k in {"turn_id","scene_id","topic","goal","representation","summary","completed","created_at"} and v not in (None,"",[],{})}
+        # Initiative is driven by semantic state, not trigger words.  A short turn by
+        # itself is not enough to initiate anything; an open loop or an active task
+        # without a resolved next question is the stronger signal.
+        continuity_guidance = bool(continuity.get("user_needs_guidance"))
+        task_stalled = bool(task_frame.get("active") and not task_frame.get("last_question") and not task_frame.get("last_user_answer"))
+        user_needs_guidance = bool(rel == "CONTINUE" and (continuity_guidance or bool(loops) or task_stalled))
+        if ready: next_step="consider_ready_user_requested_follow_up_without_forcing_it"
+        elif pending and rel=="CONTINUE": next_step="continue_current_topic_while_preserving_pending_obligations"
+        elif user_needs_guidance: next_step="guide_user_with_one_small_next_step"
+        elif rel=="NEW": next_step="establish_new_topic_and_keep_it_open_for_development"
+        else: next_step=continuity.get("next_logical_step")
+        return {
+            "engine":self.NAME,"version":self.VERSION,"route_policy":"single_dialogue_route",
+            "relation":rel,"same_dialogue":rel in {"CONTINUE","RECALL"},
+            "sequence_id":self._text(seq.get("sequence_id") or relation.get("sequence_id")),
+            "active_topic":active_topic,"active_goal":active_goal,"active_entity":active_entity,
+            "current_request":self._text(text),"previous_result":previous_result,"latest_result_event":result_event,
+            "open_loops":loops,"pending_obligations":pending,"ready_obligations":ready,
+            "user_needs_guidance":user_needs_guidance,
+            "initiative_policy":{
+                "user_leads_topic":True,"assist_when_stalled":True,"offer_one_next_step":True,
+                "use_semantic_state_not_keywords":True,"never_invent_goal":True,
+                "never_repeat_covered_answer":True,"never_create_parallel_route":True,
+                "never_force_question":True,"ready_obligation_requires_relevance":True,
+            },
+            "next_logical_step":next_step,
+            "continuation_anchor":{
+                "previous_user_turn":self._text(relation.get("previous_user_turn")),
+                "previous_april_turn":self._text(relation.get("previous_april_turn")),
+                "previous_visual_attachment":deepcopy(relation.get("previous_visual_attachment") or {}),
+                "same_sequence":rel=="CONTINUE",
+            },
+            "visual_continuity":{
+                "available":bool(visual_memory.get("available")),"for_renderer":bool(visual_memory.get("for_renderer")),
+                "memory_refs":list(visual_memory.get("memory_refs") or [])[:4],"preserve_existing_visual":True,
+            },
+            "confidence":round(min(float(continuity.get("confidence",0.0) or 0.0),float(obligations.get("confidence",0.0) or 0.0),0.96),4),
+        }
+
+
 class KnowledgeSourceEngine(InterpretationEngineBase):
     NAME = "KnowledgeSourceEngine"
     VERSION = "knowledge_source_v2"
@@ -5164,6 +5267,7 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
         consistency: dict[str, Any],
         history_search: dict[str, Any] | None = None,
         identity_memory: dict[str, Any] | None = None,
+        dialogue_development: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         history_search = history_search if isinstance(history_search, dict) else {}
         rel = self._text(arbitration.get("relation") or relation.get("relation") or "NEW").upper()
@@ -5175,6 +5279,7 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
         rep = self._text(arbitration.get("representation") or representation.get("representation") or "text").lower()
         source = self._text(knowledge.get("primary_source") or "internal_knowledge").lower()
         identity_memory = identity_memory if isinstance(identity_memory, dict) else {}
+        dialogue_development = dialogue_development if isinstance(dialogue_development, dict) else {}
 
         required: list[dict[str, Any]] = []
         optional: list[dict[str, Any]] = []
@@ -5213,6 +5318,7 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
         # Compact semantic core is always required; it is the smallest representation
         # of what Interpretation already understood.
         add(required, "SEMANTIC_CORE", semantic_core, 0.98, "interpretation_semantic_decision", True, max_depth=3, max_items=8, max_keys=10)
+        add(required, "DIALOGUE_DEVELOPMENT", dialogue_development, 0.965, "single_dialogue_semantic_trajectory", True, max_depth=4, max_items=8, max_keys=14)
         add(required, "OUTPUT_CONTRACT", output_contract, 0.96, "response_shape_contract", True, max_depth=3, max_items=5, max_keys=8)
 
         directives = current_turn.get("request_directives") or []
@@ -5450,9 +5556,15 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
                 "knowledge_source",
                 "representation",
                 "response_strategy",
+                "dialogue_development",
             ],
             "budget_policy": "relevance_first_then_progressive_compression",
             "provider_role": "consume_plan_and_answer_current_request",
+            "dialogue_development": {
+                "version": self._text(dialogue_development.get("version") or "dialogue_development_v1_single_route"),
+                "authoritative": True,
+                "route": "single_dialogue_route",
+            },
             "exclusions_are_authoritative": True,
             "confidence": 0.97 if consistency.get("valid") else 0.72,
         }
@@ -5471,6 +5583,9 @@ class ObligationEngine(InterpretationEngineBase):
         re.compile(r"если\s+(.+?)\s*[,—-]\s*(?:то\s+)?(.+)$", re.I),
         re.compile(r"если\s+(.+?)\s+то\s+(.+)$", re.I),
         re.compile(r"if\s+(.+?)\s*,?\s*then\s+(.+)$", re.I),
+        re.compile(r"после\s+того\s+как\s+(.+?)\s*[,—-]\s*(.+)$", re.I),
+        re.compile(r"когда\s+(?:будет\s+)?(?:получен|получим|получишь|достигнут|достигнем)\s+(.+?)\s*[,—-]\s*(.+)$", re.I),
+        re.compile(r"после\s+(?:достижения|получения|достижении)\s+(.+?)\s*[,—-]\s*(.+)$", re.I),
     )
 
     @classmethod
@@ -5482,6 +5597,8 @@ class ObligationEngine(InterpretationEngineBase):
             return "user_answer_incorrect"
         if any(x in value for x in ("ответ", "ответишь", "ответит", "answer")):
             return "user_answer_received"
+        if any(x in value for x in ("результат", "результата", "результат готов", "получим", "получен", "получишь", "достигнем", "достигнут", "итог", "цель достиг")):
+            return "after_result"
         return "condition:" + value[:180]
 
     @classmethod
@@ -5554,8 +5671,11 @@ class ObligationEngine(InterpretationEngineBase):
             found.append({
                 "id": self._fingerprint(text),
                 "condition": self._normalize_condition(condition),
+                "condition_type": self._normalize_condition(condition),
                 "condition_text": self._text(condition),
                 "action": payload["action"],
+                "trigger_mode": "semantic_milestone" if self._normalize_condition(condition) == "after_result" else "semantic_condition",
+                "created_turn_id": int(state.get("april_turn_id") or 0),
                 "representation": payload["representation"],
                 "target": payload["target"],
                 "instruction": payload["instruction"],
@@ -5593,6 +5713,16 @@ class ObligationEngine(InterpretationEngineBase):
             )
             if matched:
                 triggers.append({**item, "triggered": True, "trigger_turn": self._text(text)})
+            elif condition == "after_result":
+                result_event = state.get("dialogue_result_event") if isinstance(state.get("dialogue_result_event"), dict) else {}
+                try:
+                    created_turn = int(item.get("created_turn_id") or 0)
+                    result_turn = int(result_event.get("turn_id") or 0)
+                except (TypeError, ValueError):
+                    created_turn, result_turn = 0, 0
+                if bool(result_event.get("completed")) and result_turn > created_turn:
+                    item["status"] = "ready"
+                    item["ready_reason"] = "result_milestone_reached"
 
         return {
             "engine": self.NAME,
@@ -5666,7 +5796,7 @@ class SemanticSynchronizationEngine(InterpretationEngineBase):
     def build(self, *, current_turn: dict[str, Any], arbitration: dict[str, Any], topic: dict[str, Any],
               task: dict[str, Any], entity: dict[str, Any], reference: dict[str, Any],
               representation: dict[str, Any], obligations: dict[str, Any], visual_memory: dict[str, Any],
-              memory: dict[str, Any], continuity: dict[str, Any]) -> dict[str, Any]:
+              memory: dict[str, Any], continuity: dict[str, Any], dialogue_development: dict[str, Any] | None = None) -> dict[str, Any]:
         relation = self._text(arbitration.get("relation") or "NEW")
         return {
             "engine": self.NAME,
@@ -5681,6 +5811,7 @@ class SemanticSynchronizationEngine(InterpretationEngineBase):
             "representation": self._text(representation.get("representation") or "text"),
             "obligations": obligations.get("obligations", []),
             "triggered_obligations": obligations.get("triggered", []),
+            "dialogue_development": dialogue_development or {},
             "visual_memory": visual_memory,
             "memory": memory,
             "continuity": continuity,
@@ -5724,6 +5855,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
         self.provider_context = ProviderContextPlanEngine()
         self.obligations = ObligationEngine()
         self.visual_memory = VisualMemoryEngine()
+        self.dialogue_development = DialogueDevelopmentEngine()
         self.semantic_sync = SemanticSynchronizationEngine()
 
     def run(
@@ -5831,6 +5963,11 @@ class InterpretationOrchestrator(InterpretationEngineBase):
         visual_memory = self.visual_memory.analyze(
             state=state, memory=memory, entity=entity, text=text
         )
+        dialogue_development = self.dialogue_development.analyze(
+            text, state=state, relation=relation, topic=topic, task=task, entity=entity,
+            history_search=history_search, continuity=continuity, obligations=obligations,
+            visual_memory=visual_memory,
+        )
         # An obligation can explicitly request a representation after its trigger.
         # This is a semantic override, not a hard-coded fireworks/image rule.
         triggered = obligations.get("triggered") or []
@@ -5862,7 +5999,8 @@ class InterpretationOrchestrator(InterpretationEngineBase):
         semantic_sync = self.semantic_sync.build(
             current_turn=current_turn, arbitration=arbitration, topic=topic, task=task,
             entity=entity, reference=reference, representation=representation,
-            obligations=obligations, visual_memory=visual_memory, memory=memory, continuity=continuity
+            obligations=obligations, visual_memory=visual_memory, memory=memory, continuity=continuity,
+            dialogue_development=dialogue_development
         )
         consistency = self.consistency.validate(
             current_turn=current_turn,
@@ -5911,8 +6049,10 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             consistency=consistency,
             history_search=history_search,
             identity_memory=state.get("user_profile") if isinstance(state.get("user_profile"), dict) else {},
+            dialogue_development=dialogue_development,
         )
         canonical["provider_context_plan"] = provider_context_plan
+        canonical["dialogue_development"] = dialogue_development
         canonical["obligations"] = obligations
         canonical["visual_memory"] = visual_memory
         canonical["semantic_synchronization"] = semantic_sync
@@ -5940,6 +6080,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             "representation_decision": representation,
             "response_strategy": strategy,
             "obligations": obligations,
+            "dialogue_development": dialogue_development,
             "visual_memory": visual_memory,
             "semantic_synchronization": semantic_sync,
             "arbitration": arbitration,
