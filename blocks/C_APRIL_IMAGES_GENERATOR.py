@@ -610,6 +610,7 @@ class AprilImagesGenerator:
         height: int,
         backend: str = BACKEND,
         variant: str = "primary",
+        dialogue_context: Optional[dict[str, Any]] = None,
     ) -> tuple[dict[str, Any], UniversalArtifactContract]:
         data_base64 = base64.b64encode(image_bytes).decode("ascii")
         data_uri = f"data:image/png;base64,{data_base64}"
@@ -624,6 +625,7 @@ class AprilImagesGenerator:
             "alt": prompt,
             "caption": prompt,
         }
+        dialogue_context = dict(dialogue_context or {}) if isinstance(dialogue_context, dict) else {}
         artifact = create_artifact(
             artifact_type="image",
             room_source="APRIL_IMAGES_GENERATION",
@@ -668,6 +670,12 @@ class AprilImagesGenerator:
                         "mime_type": "image/png",
                     },
                     "images": [image_item],
+                    "dialogue_context": dialogue_context,
+                    "flow_id": dialogue_context.get("flow_id", ""),
+                    "turn_id": dialogue_context.get("turn_id", ""),
+                    "scene_id": dialogue_context.get("scene_id", ""),
+                    "conversation_id": dialogue_context.get("conversation_id", ""),
+                    "dialogue_sequence_id": dialogue_context.get("dialogue_sequence_id", ""),
                 },
             },
         )
@@ -676,7 +684,7 @@ class AprilImagesGenerator:
         artifact.quality.confidence_score = 1.0
         artifact.quality.completeness_score = 1.0
 
-        contract = build_universal_contract(artifact)
+        contract = build_universal_contract(artifact, user_id=str(dialogue_context.get("user_id") or ""))
         artifact_data = dict(artifact.data or {})
         payload = artifact_data.get("payload") if isinstance(artifact_data.get("payload"), dict) else {}
         images = payload.get("images") if isinstance(payload.get("images"), list) else []
@@ -815,6 +823,13 @@ class AprilImagesGenerator:
             "seed": None,
             "generator_signal": generator_signal,
             "request_anchor": request_anchor,
+            "flow_id": cls._safe_text(spec.get("flow_id") or ""),
+            "turn_id": cls._safe_text(spec.get("turn_id") or ""),
+            "scene_id": cls._safe_text(spec.get("scene_id") or ""),
+            "user_id": cls._safe_text(spec.get("user_id") or ""),
+            "conversation_id": cls._safe_text(spec.get("conversation_id") or ""),
+            "dialogue_sequence_id": cls._safe_text(spec.get("dialogue_sequence_id") or ""),
+            "dialogue_development": dict(spec.get("dialogue_development") or {}) if isinstance(spec.get("dialogue_development"), dict) else {},
         }
 
     @classmethod
@@ -931,6 +946,15 @@ class AprilImagesGenerator:
             height=height,
             backend=cls.BACKEND,
             variant=variant,
+            dialogue_context={
+                "user_id": clean.get("user_id", ""),
+                "flow_id": clean.get("flow_id", ""),
+                "turn_id": clean.get("turn_id", ""),
+                "scene_id": clean.get("scene_id", ""),
+                "conversation_id": clean.get("conversation_id", ""),
+                "dialogue_sequence_id": clean.get("dialogue_sequence_id", ""),
+                "dialogue_development": clean.get("dialogue_development", {}),
+            },
         )
 
         payload = artifact.get("payload") if isinstance(artifact, dict) else None
