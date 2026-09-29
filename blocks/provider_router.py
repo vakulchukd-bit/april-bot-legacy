@@ -71,6 +71,12 @@ requested outputs and reference resolution. Treat those fields as authoritative.
 Answer the resolved current request only. For continuation/reference turns use only the
 supplied live dialogue context. For independent turns do not import historical context.
 
+DIALOGUE_DEVELOPMENT is the authoritative semantic trajectory: preserve the active topic,
+goal, relevant result, open work and user-requested future actions. Help a hesitant user with
+one useful next step when the semantic state shows a stall, but never invent a goal, turn
+keywords into commands, force a question, repeat covered content, or create another route.
+Keep all structured and visual output inside the same current SceneContract response.
+
 Return compact JSON with:
 answer, content, summary, scene, artifacts, render_blocks, scene_plan, render_priority,
 confidence, metadata.
@@ -1511,6 +1517,23 @@ def _minimal_plan_context(plan: dict[str, Any]) -> dict[str, Any]:
             if anchor.get(key) not in (None, "", [], {})
         }
 
+    development = by_key.get("DIALOGUE_DEVELOPMENT")
+    if isinstance(development, dict):
+        keep = (
+            "relation", "same_dialogue", "sequence_id", "active_topic", "active_goal",
+            "active_entity", "current_request", "previous_result", "latest_result_event",
+            "open_loops", "pending_obligations", "ready_obligations",
+            "user_needs_guidance", "initiative_policy", "next_logical_step",
+            "continuation_anchor", "visual_continuity",
+        )
+        out["dialogue_development"] = {
+            key: _compact_value(development.get(key), max_depth=3, max_items=6, max_keys=8)
+            for key in keep
+            if development.get(key) not in (None, "", [], {})
+        }
+    elif development not in (None, "", [], {}):
+        out["dialogue_development"] = _semantic_excerpt(development, 520)
+
     memory = by_key.get("MEMORY_RECALL")
     if relation == "RECALL" and memory not in (None, "", [], {}):
         if isinstance(memory, list):
@@ -1558,6 +1581,12 @@ def _build_provider_user_text_from_plan(
         "REQUESTED: " + json.dumps(requested[:6], ensure_ascii=False, separators=(",", ":")),
         "RESPONSE_FORMAT: Return exactly one complete logical answer as MachineResponse JSON. Use only the supplied context plan.",
     ]
+
+    development = plan.get("dialogue_development")
+    if development not in (None, "", [], {}):
+        mandatory.append(
+            _json_piece("DIALOGUE_DEVELOPMENT", development, depth=4, items=6, keys=10)
+        )
     if any(_safe_text(x).strip().lower() == "image_generation" for x in requested):
         mandatory.extend([
             "IMAGE_GENERATION_HANDOFF: emit metadata.image_generation_signal in the same response; route=C_APRIL_IMAGES_GENERATOR, execute=true, request_anchor=REQUEST exactly, prompt_source=OPENAI_STRUCTURED_VISUAL_PLAN, target_model=gpt-image-2, single_route=true.",
