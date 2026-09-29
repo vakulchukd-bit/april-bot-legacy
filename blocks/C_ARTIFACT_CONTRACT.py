@@ -517,21 +517,21 @@ class BaseArtifact:
 # artifact_type identifies the produced representation; renderer identifies
 # the concrete Web viewer for this particular artifact. One room may therefore
 # produce multiple concrete renderers without creating a second route.
-WEB_RENDERER_REGISTRY_VERSION = "3.0"
+WEB_RENDERER_REGISTRY_VERSION = "3.1"
 
 # Exact renderer contract mirrored from the actual April Web RenderMessage
 # registry. This describes the destination component; it never performs routing.
 WEB_RENDERER_REGISTRY = {
     "text": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "answer"]},
     "markdown": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "markdown"]},
-    "formula": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["formula", "equation", "expression", "math", "content"], "mode": "force_math"},
+    "formula": {"renderer": "FormulaRenderer", "viewer": "FormulaRenderer", "fallback_renderer": "", "payload_keys": ["formula", "equation", "expression", "math", "content"], "mode": "force_math"},
     "graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["series", "x_axis", "data_table", "points"]},
     "table": {"renderer": "TableBlock", "viewer": "TableBlock", "fallback_renderer": "", "payload_keys": ["rows", "columns", "headers", "data", "values", "items"]},
-    "diagram": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["elements", "svg", "geometry", "points"], "specialized_renderers": ["SvgBlock", "ArithmeticDiagram"]},
+    "diagram": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["elements", "svg", "geometry", "points"], "specialized_renderers": ["SvgBlock", "ArithmeticDiagram"]},
     "image": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "src", "url", "image", "image_data_uri", "image_base64"]},
     "gallery": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "items", "gallery", "sources"]},
-    "scene": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["elements", "svg", "images", "objects"]},
-    "visual_context": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "elements", "svg", "context"]},
+    "scene": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["elements", "svg", "images", "objects"]},
+    "visual_context": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["images", "elements", "svg", "context"]},
     "code": {"renderer": "CodeBlock", "viewer": "CodeBlock", "fallback_renderer": "", "payload_keys": ["code", "content", "language"]},
     "link": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "", "payload_keys": ["url", "href", "title", "description"]},
     "file": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "", "payload_keys": ["url", "href", "path", "name"]},
@@ -547,7 +547,7 @@ ARTIFACT_BLOCK_MAP["function"] = "MessageTextBlock"
 # Concrete renderers that are allowed to cross the artifact/Fiber boundary.
 SUPPORTED_RENDERERS = {
     "MessageTextBlock", "GraphBlock", "TableBlock", "GalleryBlock",
-    "CodeBlock", "LinkCard", "FunctionBlock", "FormulaBlock",
+    "CodeBlock", "LinkCard", "FunctionBlock", "FormulaBlock", "FormulaRenderer",
     "SvgBlock", "ArithmeticDiagram",
 }
 
@@ -558,7 +558,7 @@ ARTIFACT_RENDERER_ALIASES = {
     "markdown": "MessageTextBlock",
     "message": "MessageTextBlock",
     "message_text": "MessageTextBlock",
-    "diagram": "GalleryBlock",
+    "diagram": "DiagramRenderer",
     "diagramblock": "GalleryBlock",
     "schematic": "GalleryBlock",
     "gallery": "GalleryBlock",
@@ -1737,6 +1737,10 @@ class SceneContract:
     sequence_turn_index: int = 0
     active_task: Dict[str, Any] = field(default_factory=dict)
     dialogue_state: Dict[str, Any] = field(default_factory=dict)
+    dialogue_development: Dict[str, Any] = field(default_factory=dict)
+    result_event: Dict[str, Any] = field(default_factory=dict)
+    open_loops: List[Dict[str, Any]] = field(default_factory=list)
+    pending_obligations: List[Dict[str, Any]] = field(default_factory=list)
     authenticated_scope: Dict[str, Any] = field(default_factory=dict)
     blocks: List[Dict[str, Any]] = field(default_factory=list)
     render_blocks: List[Dict[str, Any]] = field(default_factory=list)
@@ -1834,6 +1838,10 @@ class MachineScene:
     sequence_turn_index: int = 0
     active_task: Dict[str, Any] = field(default_factory=dict)
     dialogue_state: Dict[str, Any] = field(default_factory=dict)
+    dialogue_development: Dict[str, Any] = field(default_factory=dict)
+    result_event: Dict[str, Any] = field(default_factory=dict)
+    open_loops: List[Dict[str, Any]] = field(default_factory=list)
+    pending_obligations: List[Dict[str, Any]] = field(default_factory=list)
     blocks: List[Dict[str, Any]] = field(default_factory=list)
     relations: List[Dict[str, Any]] = field(default_factory=list)
     order: List[str] = field(default_factory=list)
@@ -2265,6 +2273,10 @@ def build_scene_signal(contract: SceneContract) -> Dict[str, Any]:
         },
         "authenticated_scope": deepcopy(contract.authenticated_scope),
         "dialogue_state": deepcopy(contract.dialogue_state),
+        "dialogue_development": deepcopy(contract.dialogue_development),
+        "result_event": deepcopy(contract.result_event),
+        "open_loops": deepcopy(contract.open_loops),
+        "pending_obligations": deepcopy(contract.pending_obligations),
         "active_task": deepcopy(contract.active_task),
         "order": list(contract.order),
         "relations": deepcopy(contract.relations),
@@ -2304,6 +2316,14 @@ def build_machine_scene(response: MachineResponse) -> MachineScene:
         scene.sequence_turn_index = 0
     scene.active_task = deepcopy(metadata.get("active_task") or metadata.get("interactive_task_state") or source_scene.get("active_task") or {}) if isinstance(metadata.get("active_task") or metadata.get("interactive_task_state") or source_scene.get("active_task") or {}, dict) else {}
     scene.dialogue_state = deepcopy(metadata.get("dialogue_state") or metadata.get("processor_interpretation") or {})
+    scene.dialogue_development = deepcopy(
+        metadata.get("dialogue_development")
+        or scene.dialogue_state.get("dialogue_development")
+        or {}
+    ) if isinstance(metadata.get("dialogue_development") or scene.dialogue_state.get("dialogue_development") or {}, dict) else {}
+    scene.result_event = deepcopy(metadata.get("result_event") or scene.dialogue_development.get("latest_result_event") or {}) if isinstance(metadata.get("result_event") or scene.dialogue_development.get("latest_result_event") or {}, dict) else {}
+    scene.open_loops = deepcopy(metadata.get("open_loops") or scene.dialogue_development.get("open_loops") or []) if isinstance(metadata.get("open_loops") or scene.dialogue_development.get("open_loops") or [], list) else []
+    scene.pending_obligations = deepcopy(metadata.get("pending_obligations") or scene.dialogue_development.get("pending_obligations") or []) if isinstance(metadata.get("pending_obligations") or scene.dialogue_development.get("pending_obligations") or [], list) else []
     scene.scene_blueprint = blueprint
 
     scene.metadata = {
@@ -2330,6 +2350,10 @@ def build_machine_scene(response: MachineResponse) -> MachineScene:
         "sequence_turn_index": scene.sequence_turn_index,
         "active_task": deepcopy(scene.active_task),
         "dialogue_state": deepcopy(scene.dialogue_state),
+        "dialogue_development": deepcopy(scene.dialogue_development),
+        "result_event": deepcopy(scene.result_event),
+        "open_loops": deepcopy(scene.open_loops),
+        "pending_obligations": deepcopy(scene.pending_obligations),
         "identity_scope": {"user_id": scene.user_id, "conversation_id": scene.conversation_id, "dialogue_sequence_id": scene.dialogue_sequence_id},
     }
 
@@ -2360,6 +2384,10 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
     contract.sequence_turn_index = int(scene.sequence_turn_index or scene.metadata.get("sequence_turn_index") or 0)
     contract.active_task = deepcopy(scene.active_task or scene.metadata.get("active_task") or {})
     contract.dialogue_state = deepcopy(scene.dialogue_state or scene.metadata.get("dialogue_state") or {})
+    contract.dialogue_development = deepcopy(scene.dialogue_development or scene.metadata.get("dialogue_development") or {})
+    contract.result_event = deepcopy(scene.result_event or scene.metadata.get("result_event") or {})
+    contract.open_loops = deepcopy(scene.open_loops or scene.metadata.get("open_loops") or [])
+    contract.pending_obligations = deepcopy(scene.pending_obligations or scene.metadata.get("pending_obligations") or [])
     contract.authenticated_scope = {
         "user_id": contract.user_id,
         "conversation_id": contract.conversation_id,
@@ -2375,6 +2403,9 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
             block["conversation_id"] = contract.conversation_id
             block["dialogue_sequence_id"] = contract.dialogue_sequence_id
             block["sequence_turn_index"] = contract.sequence_turn_index
+            block["scene_id"] = contract.scene_id
+            block["turn_id"] = contract.turn_id
+            block["flow_id"] = contract.flow_id
     relations = _canonical_scene_relations(scene, canonical_blocks)
     order = [str(block.get("block_id") or "").strip() for block in canonical_blocks if str(block.get("block_id") or "").strip()]
 
@@ -2395,6 +2426,10 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
         "sequence_turn_index": contract.sequence_turn_index,
         "active_task": deepcopy(contract.active_task),
         "dialogue_state": deepcopy(contract.dialogue_state),
+        "dialogue_development": deepcopy(contract.dialogue_development),
+        "result_event": deepcopy(contract.result_event),
+        "open_loops": deepcopy(contract.open_loops),
+        "pending_obligations": deepcopy(contract.pending_obligations),
         "authenticated_scope": deepcopy(contract.authenticated_scope),
         "artifact_count": len(getattr(scene, "artifacts", []) or []),
         "transport_stage": "artifact_contract_scene_v3",
@@ -2455,6 +2490,10 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
         "flow_id": contract.flow_id,
         "relations": deepcopy(contract.relations),
         "order": list(contract.order),
+        "dialogue_development": deepcopy(contract.dialogue_development),
+        "result_event": deepcopy(contract.result_event),
+        "open_loops": deepcopy(contract.open_loops),
+        "pending_obligations": deepcopy(contract.pending_obligations),
     }
     contract.signal = build_scene_signal(contract)
     contract.metadata["scene_signal"] = deepcopy(contract.signal)
