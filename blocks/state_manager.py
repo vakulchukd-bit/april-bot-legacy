@@ -188,6 +188,11 @@ def build_default_state():
         "dynamic_focus": {},
         "goal_hierarchy": {},
         "open_loops": [],
+        "dialogue_obligations": [],
+        "dialogue_development": {},
+        "result_chain": [],
+        "turn_progression": [],
+        "dialogue_result_event": {},
         "memory_signals": {},
         "image_context": None,
         "image_memory": [],
@@ -3279,6 +3284,12 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
             or state_obj.get("dialogue_obligations")
             or []
         ),
+        "dialogue_development": deepcopy(
+            contract.get("dialogue_development")
+            or _dict(contract.get("metadata")).get("dialogue_development")
+            or state_obj.get("dialogue_development")
+            or {}
+        ),
         "dialogue_state": deepcopy(contract.get("dialogue_state") or {}),
         "authenticated_scope": deepcopy(identity_scope or {"user_id": str(user_id), "conversation_id": conversation_id}),
         "active_scene": str(contract.get("active_scene") or ""),
@@ -3390,6 +3401,16 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
     # Canonical "visual dialogue scene": request + answer + semantic state +
     # render/presentation inventory. This is the active scene regardless of
     # whether the visible content is text, formula, table, graph or media.
+    dialogue_development = deepcopy(
+        contract.get("dialogue_development")
+        or _dict(contract.get("metadata")).get("dialogue_development")
+        or state_obj.get("dialogue_development")
+        or {}
+    )
+    if not isinstance(dialogue_development, dict):
+        dialogue_development = {}
+    state_obj["dialogue_development"] = deepcopy(dialogue_development)
+
     scene_record = {
         "scene_id": scene_id,
         "scene_version": str(contract.get("scene_version") or ""),
@@ -3445,11 +3466,11 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
             or {}
         ),
         "development_state": deepcopy(
-            dialogue_resolution.get("development_state")
-            if isinstance(dialogue_resolution, dict)
-            else {}
+            dialogue_development
+            or (dialogue_resolution.get("development_state") if isinstance(dialogue_resolution, dict) else {})
         ),
         "previous_scene_id": previous_scene_id,
+        "dialogue_development": deepcopy(dialogue_development),
         "render_block_types": block_types,
         "presentation_types": presentation_types,
         "renderer_state": deepcopy(contract.get("renderer_state") or {}),
@@ -3513,6 +3534,39 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
     state_obj["semantic_scene_state"] = deepcopy(semantic_scene_state)
     state_obj["current_topic"] = scene_record.get("topic") or active_sequence.get("topic") or state_obj.get("current_topic")
     state_obj["current_visual_scene"] = deepcopy(scene_record)
+    state_obj["dialogue_development"] = deepcopy(dialogue_development)
+    state_obj["dialogue_obligations"] = deepcopy(scene_record.get("dialogue_obligations") or state_obj.get("dialogue_obligations") or [])
+
+    result_record = {
+        "turn_id": scene_record.get("turn_id"),
+        "scene_id": scene_id,
+        "flow_id": scene_record.get("flow_id"),
+        "conversation_id": conversation_id,
+        "sequence_id": active_sequence.get("sequence_id"),
+        "topic": scene_record.get("topic"),
+        "goal": state_obj.get("april_active_goal") or active_sequence.get("topic"),
+        "user_request": safe_trim_text(current_request_text, 700),
+        "assistant_answer": safe_trim_text(answer_text, 1200),
+        "representation": block_types[0] if block_types else "text",
+        "render_block_types": list(block_types),
+        "result_available": bool(answer_text),
+        "created_at": time.time(),
+    }
+    result_chain = list(state_obj.get("result_chain") or [])
+    result_chain.append(result_record)
+    state_obj["result_chain"] = result_chain[-12:]
+
+    progression = list(state_obj.get("turn_progression") or [])
+    progression.append({
+        "turn_id": scene_record.get("turn_id"),
+        "sequence_id": active_sequence.get("sequence_id"),
+        "relation": resolved_relation,
+        "topic": scene_record.get("topic"),
+        "goal": state_obj.get("april_active_goal") or active_sequence.get("topic"),
+        "result_available": bool(answer_text),
+        "dialogue_development": deepcopy(dialogue_development),
+    })
+    state_obj["turn_progression"] = progression[-12:]
 
     # Canonical live dialogue scene. This is the hot conversational context and
     # exists independently of whether the turn produced a visual artifact.
@@ -3539,6 +3593,7 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
             or {}
         ),
         "dialogue_obligations": deepcopy(state_obj.get("dialogue_obligations") or []),
+        "dialogue_development": deepcopy(state_obj.get("dialogue_development") or {}),
         "updated_at": time.time(),
         "live_scene": {
             "scene_id": scene_id,
@@ -3556,6 +3611,7 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
                 or active_sequence.get("interactive_task_state")
                 or {}
             ),
+            "dialogue_development": deepcopy(state_obj.get("dialogue_development") or {}),
         },
     }
     state_obj["live_dialogue_scene"] = deepcopy(state_obj["scene_state"]["live_scene"])
@@ -3643,10 +3699,11 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "selected_memory_index": selected_index,
         "selected_memory_operand": deepcopy(selected_operand),
         "development_state": deepcopy(
-            dialogue_resolution.get("development_state")
-            if isinstance(dialogue_resolution, dict)
-            else {}
+            state_obj.get("dialogue_development")
+            or (dialogue_resolution.get("development_state") if isinstance(dialogue_resolution, dict) else {})
         ),
+        "dialogue_development": deepcopy(state_obj.get("dialogue_development") or {}),
+        "dialogue_obligations": deepcopy(state_obj.get("dialogue_obligations") or []),
         "visual_scene_id": scene_id,
         "scene_contract_id": scene_id,
         "visual_attachment": deepcopy(visual_attachment),
