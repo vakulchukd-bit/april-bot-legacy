@@ -211,6 +211,11 @@ PROVIDER_CONTEXT_PLAN_VERSION = "provider_context_plan_v2_dependency_first"
 
 
 SEMANTIC_ANCHOR_VERSION = "semantic_anchor_v1_topic_entity_direction_development"
+
+# Continuation resolution is staged. The live dialogue is authoritative; the
+# seven-day window is a recovery surface only after a live CONTINUE has failed.
+LIVE_CONTINUITY_SCORE_THRESHOLD = 0.24
+SEVEN_DAY_RECOVERY_SCORE_THRESHOLD = 0.30
 SEMANTIC_ENTITY_TYPES = (
     "USER_IDENTITY", "PERSON", "STORY_ELEMENT", "OBJECT", "DOCUMENT",
     "LOCATION", "PRODUCT", "VEHICLE", "CONCEPT", "RESULT", "ARTIFACT",
@@ -1469,8 +1474,10 @@ class LiveSceneContinuityEngine:
             and (
                 task_answer.get("is_answer")
                 or task_answer.get("is_task_action")
+                or str((open_task or {}).get("role") or "").strip() == "april_guesses_user_object"
             )
         )
+        task_handoff = str((open_task or {}).get("source") or "") == "dialogue_task_handoff"
 
         strong_boundary = bool(
             boundary.get("explicit")
@@ -1488,6 +1495,7 @@ class LiveSceneContinuityEngine:
             "task_answer": task_answer,
             "task_transition": task_transition,
             "protected_by_open_task": protected_by_task,
+            "task_handoff": task_handoff,
             "new_topic": strong_boundary,
             "source": "semantic_scene_boundary_v2",
             "evidence_only": True,
@@ -2468,6 +2476,66 @@ class DialogueEnvironmentEngine:
         )
 
     @classmethod
+    def _user_holds_interactive_object(cls, text: str) -> bool:
+        """Detect a handoff: the user takes the active game/riddle turn."""
+        low = cls._low(text)
+        return bool(
+            re.search(r"\bя\s+(?:загадал|загадала|загадую|загадываю)\b", low)
+            and any(marker in low for marker in (
+                "задавай вопросы", "задавать вопросы", "можешь задовать",
+                "можеш задовать", "можешь задавать", "можеш задавать",
+                "угадывай", "отгадывай", "задай вопросы", "задавай наводящие",
+                "наводящие вопросы",
+            ))
+        )
+
+    @classmethod
+    def _build_user_owned_game_task(
+        cls,
+        text: str,
+        previous_task: dict[str, Any],
+        scope: dict[str, str],
+    ) -> dict[str, Any]:
+        """Create a new task revision inside the same conversational game."""
+        previous_task = dict(previous_task or {})
+        revision = int(previous_task.get("task_revision", 0) or 0) + 1
+        parent = {
+            "kind": cls._text(previous_task.get("kind")),
+            "role": cls._text(previous_task.get("role")),
+            "phase": cls._text(previous_task.get("phase")),
+            "goal": cls._text(previous_task.get("goal")),
+            "candidate_answer": cls._text(previous_task.get("candidate_answer")),
+            "last_user_answer": cls._text(previous_task.get("last_user_answer")),
+        }
+        return {
+            "active": True,
+            "status": "assistant_turn",
+            "kind": "game",
+            "role": "april_guesses_user_object",
+            "phase": "asking_questions",
+            "expected_input_type": "assistant_question",
+            "prompt": cls._text(text),
+            "last_question": "",
+            "target": "",
+            "secret_target": "",
+            "candidate_answer": "",
+            "last_user_answer": "",
+            "known_clues": [cls._text(text)],
+            "qa_history": [],
+            "turns": [],
+            "awaiting_user": False,
+            "completed": False,
+            "topic": "игра",
+            "goal": "guess_user_object",
+            "sequence_id": scope.get("dialogue_sequence_id", ""),
+            "scene_id": "",
+            "task_revision": revision,
+            "parent_task": parent,
+            "owner": "USER",
+            "source": "dialogue_task_handoff",
+        }
+
+    @classmethod
     def _generic_task_from_pair(cls, previous_user: str, previous_april: str, scope: dict[str, str]) -> dict[str, Any]:
         if not previous_user and not previous_april:
             return {}
@@ -2917,6 +2985,43 @@ class DialogueEnvironmentEngine:
                 "provider_instruction": (
                     "The user has just explicitly supplied their name. Acknowledge the name naturally and keep it as a persistent authenticated user fact. "
                     f"User name: {name}. Current user turn: {cls._text(text)}"
+                ),
+            }
+
+
+        # A game/riddle can remain the same conversational topic while its active
+        # task owner changes from April to the user. This is a task handoff, not a
+        # new topic and not an answer to April's previous riddle.
+        if cls._user_holds_interactive_object(text) and task:
+            handoff_task = cls._build_user_owned_game_task(text, task, scope)
+            return {
+                "turn_relation": "TASK_HANDOFF",
+                "relation": "CONTINUE",
+                "conversation_continuation": bool(scope.get("conversation_id")),
+                "topic_branch": "continue",
+                "context_dependency": "active_dialogue_sequence",
+                "current_topic": "игра",
+                "active_entity": "",
+                "operation": "answer",
+                "goal": "guess_user_object",
+                "representation": "text",
+                "active_task": handoff_task,
+                "previous_user_turn": previous_user,
+                "previous_april_turn": previous_april,
+                "selected_memory": [],
+                "historical_memory_allowed": False,
+                "resolved_request": cls._text(text),
+                "task_handoff": {
+                    "from_role": cls._text(task.get("role")),
+                    "to_role": "april_guesses_user_object",
+                    "parent_revision": int(task.get("task_revision", 0) or 0),
+                    "new_revision": int(handoff_task.get("task_revision", 1) or 1),
+                },
+                "provider_instruction": (
+                    "The user has taken the next turn in the same game and supplied a new riddle. "
+                    "Do not answer the old April-owned riddle. Ask a concise guiding question about "
+                    "the user's current riddle and keep the game branch alive. "
+                    f"Current user riddle: {cls._text(text)}"
                 ),
             }
 
@@ -5433,8 +5538,8 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
             "history_context_required": needs_history,
             "same_authenticated_branch_first": relation_value == "CONTINUE",
             "seven_day_cross_branch_allowed": relation_value == "RECALL",
-            "semantic_slider_cross_branch_allowed": relation_value in {"CONTINUE", "RECALL"},
-            "memory_slider_enabled": relation_value in {"CONTINUE", "RECALL"},
+            "semantic_slider_cross_branch_allowed": relation_value == "RECALL" or bool(history_search.get("continuity_resolution", {}).get("recovery_attempted") and history_search.get("memory_slider", {}).get("selected_memory_operand")),
+            "memory_slider_enabled": bool(history_search.get("memory_slider", {}).get("enabled")),
             "historical_memory_is_evidence_only": True,
             "recommended_turn_relation": recommended,
             "provider_instruction": (
@@ -5457,13 +5562,15 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
 
 
 class DialogueMemorySliderEngine(InterpretationEngineBase):
-    """Sequential semantic slider over the authenticated seven-day dialogue.
+    """Interpretation's staged continuity slider.
 
-    The slider is deliberately narrower than generic memory search:
-      * NEW turns never invoke it.
-      * CONTINUE/RECALL turns scan prior USER↔APRIL records chronologically.
+    The slider is not a second dialogue brain:
+      * LIVE CONTINUE scans only the active authenticated sequence.
+      * SEVEN_DAY is a recovery stage entered only after LIVE CONTINUE fails.
+      * Explicit RECALL may use the seven-day stage directly.
       * Every candidate is measured by the same QuantumInterpretationEngine.
-      * The first sufficiently related candidate becomes a semantic operand.
+      * The first sufficiently related candidate in the active scan direction
+        becomes evidence; it never owns routing or reclassifies the turn by itself.
     """
 
     NAME = "DialogueMemorySliderEngine"
@@ -5571,6 +5678,22 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
             "semantic_anchor": deepcopy(anchor),
             "dialogue_obligations": deepcopy(obligations[-8:]),
             "semantic_relation": deepcopy(semantic_relation),
+            "active_task": deepcopy(
+                record.get("interactive_task_state")
+                or raw.get("interactive_task_state")
+                or record.get("active_task")
+                or raw.get("active_task")
+                or raw.get("open_task")
+                or {}
+            ),
+            "owner": cls._text(
+                record.get("owner")
+                or raw.get("owner")
+                or (
+                    (record.get("interactive_task_state") or {}).get("owner")
+                    if isinstance(record.get("interactive_task_state"), dict) else ""
+                )
+            ),
             "created_at": cls._timestamp(record),
         }
 
@@ -5586,14 +5709,36 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
         active_entity: str = "",
         active_goal: str = "",
         task: dict[str, Any] | None = None,
+        search_stage: str = "LIVE",
+        escalation_reason: str = "",
     ) -> dict[str, Any]:
+        """Resolve continuation evidence in explicit stages.
+
+        LIVE:
+            only the authenticated active sequence is inspected.
+        SEVEN_DAY:
+            the seven-day timeline may be inspected only after Interpretation has
+            declared a live CONTINUE unresolved and explicitly escalated here.
+
+        The slider is evidence for Interpretation. It never decides that a new
+        topic exists and never replaces the current user turn.
+        """
         relation_value = self._text(relation or "NEW").upper()
         query = self._text(text)
+        stage = self._text(search_stage or "LIVE").upper()
+        if stage not in {"LIVE", "SEVEN_DAY"}:
+            stage = "LIVE"
+
+        enabled = bool(query) and (
+            relation_value == "CONTINUE"
+            or relation_value == "RECALL"
+        )
         result: dict[str, Any] = {
             "version": self.VERSION,
-            "enabled": relation_value in {"CONTINUE", "RECALL"} and bool(query),
+            "enabled": enabled,
             "relation": relation_value,
             "query": query,
+            "search_stage": stage,
             "scanned": 0,
             "selected": [],
             "selected_memory_index": -1,
@@ -5601,7 +5746,12 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
             "selected_memory_operand": {},
             "reason": "new_vector" if relation_value == "NEW" else "no_match",
             "selection_mode": "disabled",
+            "escalation_reason": escalation_reason,
+            "scan_scope": "active_sequence" if stage == "LIVE" else "seven_day",
+            "decision_owner": "INTERPRETATION",
+            "evidence_only": True,
         }
+
         if relation_value not in {"CONTINUE", "RECALL"}:
             return result
         if not query:
@@ -5609,10 +5759,14 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
             return result
 
         scope = self._scope(identity, state)
+        current_sequence_id = self._text(scope.get("dialogue_sequence_id"))
+        if relation_value == "CONTINUE" and stage == "LIVE" and not current_sequence_id:
+            result["enabled"] = False
+            result["reason"] = "live_sequence_missing"
+            result["selection_mode"] = "live_sequence_required"
+            return result
+
         try:
-            # RECALL mode exposes all seven-day dialogue records to the slider.
-            # This is still authenticated/scope-filtered below. The slider itself
-            # decides relevance; provider never searches the raw timeline.
             records = DialogueHistorySearchEngine._timeline_records(
                 state,
                 identity,
@@ -5624,36 +5778,39 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
             result["error"] = str(exc)
             return result
 
-        # De-duplicate by concrete dialogue identity so the same pair from hot
-        # history + day_0 memory does not count twice.
         deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
         for record in records:
             if not isinstance(record, dict) or not self._same_scope(record, scope):
                 continue
+            record_sequence_id = self._text(record.get("sequence_id") or record.get("dialogue_sequence_id"))
+            # LIVE is strictly hot-branch only. It is not allowed to inspect another
+            # sequence, even when another sequence is semantically similar.
+            if relation_value == "CONTINUE" and stage == "LIVE" and record_sequence_id != current_sequence_id:
+                continue
             key = (
                 record.get("turn_id"),
-                record.get("sequence_id"),
+                record_sequence_id,
                 self._text(record.get("user")),
                 self._text(record.get("assistant")),
                 record.get("scene_id"),
             )
-            if key in deduped:
-                # Prefer the richer memory record.
-                previous = deduped[key]
-                if len(self._record_text(record)) > len(self._record_text(previous)):
-                    deduped[key] = record
-            else:
+            previous = deduped.get(key)
+            if previous is None or len(self._record_text(record)) > len(self._record_text(previous)):
                 deduped[key] = record
+
         ordered = list(deduped.values())
+        # Current continuation walks from the newest live turn backwards. This makes
+        # slider position 0 the nearest live antecedent rather than the oldest one.
         ordered.sort(
             key=lambda r: (
                 self._timestamp(r),
                 int(r.get("sequence_turn_index") or 0),
                 int(r.get("turn_id") or 0) if str(r.get("turn_id") or "").isdigit() else 0,
                 int(r.get("index") or 0),
-            )
+            ),
+            reverse=True,
         )
-        ordered = ordered[-self.MAX_SCAN:]
+        ordered = ordered[:self.MAX_SCAN]
 
         candidates: list[dict[str, Any]] = []
         for position, record in enumerate(ordered):
@@ -5663,11 +5820,9 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
 
             user_text = self._text(record.get("user"))
             assistant_text = self._text(record.get("assistant"))
-            # _timeline_records can expose the active scene snapshot. It is the
-            # current turn, not historical evidence, and must never be selected by
-            # the slider as the answer to the question currently being processed.
             if user_text and user_text == query and not assistant_text:
                 continue
+
             candidate_topic = self._text(record.get("topic"))
             candidate_entity = self._text(record.get("entity"))
             candidate_anchor = record.get("semantic_anchor") if isinstance(record.get("semantic_anchor"), dict) else {}
@@ -5697,8 +5852,7 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
                 entity_probe = QUANTUM_INTERPRETATION_ENGINE.similarity(
                     query, candidate_entity or active_entity or candidate_text
                 )
-            except Exception as exc:
-                # A single candidate must never break the entire dialogue turn.
+            except Exception:
                 continue
 
             semantic = float(direct.get("score", 0.0) or 0.0)
@@ -5709,19 +5863,12 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
             topic_context = float(context_scores.get("active_topic", 0.0) or 0.0)
             continuation_probe = float(dialogue_scores.get("continuation_score", 0.0) or 0.0)
             reference_probe = float(dialogue_scores.get("reference_score", 0.0) or 0.0)
-            same_sequence = bool(
-                scope.get("dialogue_sequence_id")
-                and self._text(record.get("sequence_id")) == scope["dialogue_sequence_id"]
-            )
+            same_sequence = bool(current_sequence_id and self._text(record.get("sequence_id")) == current_sequence_id)
             substance = min(
                 1.0,
-                len(self._text(user_text).split()) / 12.0
-                + len(self._text(assistant_text).split()) / 20.0,
+                len(user_text.split()) / 12.0 + len(assistant_text.split()) / 20.0,
             )
 
-            # Interpretation-first score: the candidate is related when the same
-            # semantic engine sees it as a contextual antecedent, not merely when
-            # it shares a keyword.
             score = (
                 0.34 * semantic
                 + 0.18 * max(prev_assistant, prev_user, topic_context)
@@ -5731,17 +5878,11 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
                 + 0.06 * (1.0 if same_sequence else 0.0)
                 + 0.06 * substance
             )
-            if relation_value == "RECALL":
-                # Recall can resolve an older branch; chronological order remains
-                # the tie-breaker after semantic evidence.
-                score += min(0.08, 0.08 * ((position + 1) / max(1, len(ordered))))
-            elif same_sequence:
-                score += 0.06
 
             threshold = (
-                self.RECALL_THRESHOLD
-                if relation_value == "RECALL"
-                else self.CONTINUE_THRESHOLD
+                SEVEN_DAY_RECOVERY_SCORE_THRESHOLD
+                if stage == "SEVEN_DAY"
+                else max(LIVE_CONTINUITY_SCORE_THRESHOLD, self.CONTINUE_THRESHOLD)
             )
             if score < threshold:
                 continue
@@ -5753,22 +5894,13 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
                 "semantic_relation": relation_probe,
             })
 
-        # The slider is sequential, not a global top-k search: scan old dialogue
-        # in chronological order and stop at the first candidate that the same
-        # interpretation engine recognizes as a valid antecedent.
         if not candidates:
-            result["reason"] = "no_semantic_match"
+            result["reason"] = "live_no_match" if stage == "LIVE" else "seven_day_no_match"
             result["scanned"] = len(ordered)
-            result["selection_mode"] = "enabled_no_match"
+            result["selection_mode"] = "live_no_match" if stage == "LIVE" else "enabled_no_match"
             return result
 
-        candidates.sort(
-            key=lambda item: (
-                int(item["position"]),
-                self._timestamp(item["record"]),
-                int(item["record"].get("index") or 0),
-            )
-        )
+        # Preserve slider order: nearest antecedent first, not global top-k.
         primary = candidates[0]
         selected = candidates[: self.MAX_SELECTED]
         primary_record = primary["record"]
@@ -5800,13 +5932,13 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
             "selected_memory_index": primary_record.get("index", primary["position"]),
             "selected_memory_record": deepcopy(primary_record),
             "selected_memory_operand": primary_operand,
-            "reason": "semantic_match",
-            "selection_mode": "dialogue_memory_slider",
-            "scan_order": "chronological",
+            "reason": "live_match" if stage == "LIVE" else "seven_day_match",
+            "selection_mode": "live_dialogue_slider" if stage == "LIVE" else "dialogue_memory_slider_recovery",
+            "scan_order": "latest_first",
             "stop_position": primary["position"],
             "same_sequence": bool(
-                scope.get("dialogue_sequence_id")
-                and self._text(primary_record.get("sequence_id")) == scope["dialogue_sequence_id"]
+                current_sequence_id
+                and self._text(primary_record.get("sequence_id")) == current_sequence_id
             ),
         })
         return result
@@ -7875,6 +8007,135 @@ class InterpretationOrchestrator(InterpretationEngineBase):
         self.semantic_anchor = SemanticContextAnchorEngine()
         self.semantic_sync = SemanticSynchronizationEngine()
 
+    @classmethod
+    def _live_continuity_gate(
+        cls,
+        text: str,
+        *,
+        relation: dict[str, Any],
+        task: dict[str, Any],
+        topic: dict[str, Any],
+        entity: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Decide whether CONTINUE is explainable by the live dialogue alone.
+
+        The gate is intentionally before seven-day retrieval. A historical search is
+        justified only when the live branch cannot explain the current turn.
+        """
+        rel = cls._text(relation.get("relation") or "NEW").upper()
+        previous_user = cls._text(relation.get("previous_user_turn"))
+        previous_april = cls._text(relation.get("previous_april_turn"))
+        active_topic = cls._text(topic.get("topic") or relation.get("environment", {}).get("current_topic"))
+        active_goal = cls._text(task.get("goal") or relation.get("goal"))
+        active_entity = cls._text(entity.get("active_entity"))
+        turn_relation = cls._text(relation.get("turn_relation")).upper()
+
+        if rel != "CONTINUE":
+            return {
+                "relation": rel,
+                "live_supported": False,
+                "escalate_to_7d": False,
+                "reason": "not_continue",
+                "decision_owner": "INTERPRETATION",
+            }
+
+        low = cls._text(text).lower()
+        deictic = bool(re.search(
+            r"\\b(?:это|этот|эта|эту|этой|этим|он|она|оно|они|тот|та|те|там|здесь|выше|ниже|дальше)\\b",
+            low,
+        ))
+        task_role = cls._text(task.get("role"))
+        task_active = bool(task.get("active"))
+        task_handoff = turn_relation == "TASK_HANDOFF" or task_role == "april_guesses_user_object"
+
+        try:
+            probe = QUANTUM_INTERPRETATION_ENGINE.measure(
+                cls._text(text),
+                previous_assistant=previous_april,
+                previous_user=previous_user,
+                active_topic=active_topic,
+                active_goal=active_goal,
+            )
+        except Exception:
+            probe = {"context_scores": {}}
+
+        context_scores = probe.get("context_scores") if isinstance(probe, dict) else {}
+        previous_assistant_score = float(context_scores.get("previous_assistant", 0.0) or 0.0)
+        previous_user_score = float(context_scores.get("previous_user", 0.0) or 0.0)
+        topic_score = float(context_scores.get("active_topic", 0.0) or 0.0)
+        goal_score = float(context_scores.get("active_goal", 0.0) or 0.0)
+        direct_live_score = max(
+            previous_assistant_score,
+            previous_user_score,
+            topic_score,
+            goal_score,
+        )
+
+        semantic_overlap = max(
+            DialogueEnvironmentEngine._similarity(text, previous_user),
+            DialogueEnvironmentEngine._similarity(text, previous_april),
+            DialogueEnvironmentEngine._similarity(text, active_topic),
+            DialogueEnvironmentEngine._similarity(text, active_entity),
+        )
+
+        task_link = task_active and (
+            task_handoff
+            or turn_relation.startswith("TASK_")
+            or semantic_overlap >= 0.08
+        )
+        live_supported = bool(
+            task_link
+            or deictic
+            or direct_live_score >= LIVE_CONTINUITY_SCORE_THRESHOLD
+            or semantic_overlap >= 0.22
+        )
+
+        # A command can be genuinely self-contained even when the linguistic matrix
+        # initially called it CONTINUE. Do not escalate commands whose subject is
+        # explicit and independent.
+        command_like = bool(re.match(
+            r"^(?:расскажи|объясни|покажи|нарисуй|создай|сделай|напиши|построй|проверь|"
+            r"опиши|сравни|найди|выведи|подскажи|скажи|дай|предложи|разработай|"
+            r"исправь|сформулируй|составь|перепиши|переделай)\\b",
+            low,
+        ))
+        explicit_object = bool(
+            re.search(r"\\b(?:про|обо?|насч(?:ё|ё)т)\\s+[^?!。！？]{2,}", low)
+            or re.search(r'[«"][^»"]{3,}[»"]', cls._text(text))
+        )
+        suspicious_continue = not live_supported
+        if command_like and explicit_object:
+            suspicious_continue = True
+
+        return {
+            "relation": rel,
+            "live_supported": live_supported,
+            "escalate_to_7d": suspicious_continue,
+            "reason": (
+                "task_handoff"
+                if task_handoff else
+                "live_context_supported"
+                if live_supported else
+                "live_context_mismatch"
+            ),
+            "current_request": cls._text(text),
+            "previous_user_turn": previous_user,
+            "previous_april_turn": previous_april,
+            "active_topic": active_topic,
+            "active_goal": active_goal,
+            "active_entity": active_entity,
+            "turn_relation": turn_relation,
+            "semantic_overlap": round(float(semantic_overlap), 6),
+            "context_scores": {
+                "previous_assistant": round(previous_assistant_score, 6),
+                "previous_user": round(previous_user_score, 6),
+                "active_topic": round(topic_score, 6),
+                "active_goal": round(goal_score, 6),
+            },
+            "decision_owner": "INTERPRETATION",
+            "historical_memory_policy": "BLOCKED_UNTIL_LIVE_MISS",
+        }
+
     def run(
         self,
         text: str,
@@ -7919,7 +8180,161 @@ class InterpretationOrchestrator(InterpretationEngineBase):
 
         task = self.task.analyze(text, relation=relation, state=state, history=history)
 
-        # Resolve the current semantic object before topic dynamics.  Topic root and
+        # ------------------------------------------------------------------
+        # STAGED CONTINUATION RESOLUTION
+        # ------------------------------------------------------------------
+        # 1) CONTINUE -> inspect only the live authenticated sequence.
+        # 2) If live evidence cannot explain the turn -> escalate to 7-day memory.
+        # 3) If 7-day memory also fails -> Interpretation is allowed to reclassify
+        #    the turn as independent/current-turn-only.
+        live_gate = self._live_continuity_gate(
+            text,
+            relation=relation,
+            task=task,
+            topic={},
+            entity={},
+        )
+        state["continuity_resolution"] = deepcopy(live_gate)
+
+        memory_slider = self.memory_slider.scan(
+            text,
+            relation=self._text(relation.get("relation") or "NEW").upper(),
+            identity=identity,
+            state=state,
+            history=history,
+            active_topic=self._text(relation.get("environment", {}).get("current_topic") if isinstance(relation.get("environment"), dict) else ""),
+            active_entity="",
+            active_goal=self._text(task.get("goal")),
+            task=task,
+            search_stage="LIVE",
+        )
+
+        recovery_attempted = False
+        if (
+            self._text(relation.get("relation") or "NEW").upper() == "CONTINUE"
+            and live_gate.get("escalate_to_7d")
+        ):
+            recovery_attempted = True
+            live_gate["historical_memory_policy"] = "ALLOW_SEVEN_DAY_RECOVERY"
+            state["continuity_resolution"] = deepcopy(live_gate)
+            memory_slider = self.memory_slider.scan(
+                text,
+                relation="CONTINUE",
+                identity=identity,
+                state=state,
+                history=history,
+                active_topic=self._text(relation.get("environment", {}).get("current_topic") if isinstance(relation.get("environment"), dict) else ""),
+                active_entity="",
+                active_goal=self._text(task.get("goal")),
+                task=task,
+                search_stage="SEVEN_DAY",
+                escalation_reason=live_gate.get("reason") or "live_context_mismatch",
+            )
+
+            if memory_slider.get("selected_memory_operand"):
+                recovered = deepcopy(memory_slider.get("selected_memory_operand") or {})
+                recovered_sequence = self._text(recovered.get("sequence_id"))
+                current_sequence = self._text(identity.get("scope", {}).get("dialogue_sequence_id"))
+                if recovered_sequence and recovered_sequence != current_sequence:
+                    branch_target = {
+                        "branch_id": recovered_sequence,
+                        "sequence_id": recovered_sequence,
+                        "topic": self._text(recovered.get("topic")),
+                        "canonical_entity": self._text(recovered.get("entity")),
+                        "focus": self._text(recovered.get("focus")),
+                        "direction": self._text(recovered.get("direction")),
+                        "goal": self._text(recovered.get("goal")),
+                        "last_user_request": self._text(recovered.get("user_request")),
+                        "last_april_answer": self._text(recovered.get("april_answer")),
+                        "active_task": deepcopy(recovered.get("active_task") if isinstance(recovered.get("active_task"), dict) else {}),
+                        "semantic_anchor": deepcopy(recovered.get("semantic_anchor") if isinstance(recovered.get("semantic_anchor"), dict) else {}),
+                    }
+                    relation = deepcopy(relation)
+                    relation.update({
+                        "relation": "CONTINUE",
+                        "continuation": True,
+                        "reference_to_previous": True,
+                        "turn_relation": "RESUME_BRANCH",
+                        "context_dependency": "seven_day_branch_recovery",
+                        "previous_user_turn": self._text(recovered.get("user_request")),
+                        "previous_april_turn": self._text(recovered.get("april_answer")),
+                        "target_sequence_id": recovered_sequence,
+                        "target_branch_id": recovered_sequence,
+                        "target_branch": branch_target,
+                        "active_task": deepcopy(branch_target.get("active_task") or {}),
+                        "historical_memory_allowed": False,
+                        "continuation_recovery": True,
+                    })
+                    # Feed the recovered branch back into the downstream semantic
+                    # engines for this turn. The slider remains evidence, but the
+                    # selected historical branch becomes the explicit resume target.
+                    branch_index = deepcopy(branch_index)
+                    branch_index.update({
+                        "selected_branch": deepcopy(branch_target),
+                        "resume_candidate": True,
+                        "explicit_resume": True,
+                        "target_sequence_id": recovered_sequence,
+                        "target_branch_id": recovered_sequence,
+                        "target_topic": self._text(recovered.get("topic")),
+                        "target_entity": self._text(recovered.get("entity")),
+                        "target_last_user_request": self._text(recovered.get("user_request")),
+                        "target_last_april_answer": self._text(recovered.get("april_answer")),
+                        "target_goal": self._text(recovered.get("goal")),
+                        "resolution_mode": "RESUME_BRANCH",
+                    })
+                    relation_env = deepcopy(relation.get("environment") if isinstance(relation.get("environment"), dict) else {})
+                    relation_env.update({
+                        "relation": "CONTINUE",
+                        "turn_relation": "RESUME_BRANCH",
+                        "context_dependency": "seven_day_branch_recovery",
+                        "current_topic": self._text(recovered.get("topic")),
+                        "active_entity": self._text(recovered.get("entity")),
+                        "target_sequence_id": recovered_sequence,
+                        "target_branch_id": recovered_sequence,
+                        "target_branch": deepcopy(branch_target),
+                    })
+                    relation["environment"] = relation_env
+                    live_gate["selected_sequence_id"] = recovered_sequence
+                    state["continuity_resolution"] = deepcopy(live_gate)
+                    task = self.task.analyze(text, relation=relation, state=state, history=history)
+                    live_gate["escalation_result"] = "RECOVERED_HISTORICAL_BRANCH"
+                else:
+                    live_gate["selected_sequence_id"] = recovered_sequence
+                    live_gate["escalation_result"] = "RECOVERED_SAME_SEQUENCE"
+            else:
+                # Nothing in the seven-day window explains the current request.
+                # Give Interpretation ownership back to the current turn and fence
+                # all stale task/history state from the provider.
+                relation = deepcopy(relation)
+                relation.update({
+                    "relation": "NEW",
+                    "continuation": False,
+                    "reference_to_previous": False,
+                    "turn_relation": "REINTERPRETED_INDEPENDENT",
+                    "context_dependency": "current_turn_only",
+                    "historical_memory_allowed": False,
+                    "selected_memory": [],
+                    "reinterpreted_from": "CONTINUE",
+                    "continuation_recovery": False,
+                })
+                task = self.task.analyze(text, relation=relation, state=state, history=history)
+                memory_slider = {
+                    **dict(memory_slider),
+                    "enabled": False,
+                    "selection_mode": "reclassified_after_recovery_miss",
+                    "selected_memory_index": -1,
+                    "selected_memory_record": {},
+                    "selected_memory_operand": {},
+                    "reason": "reclassified_after_recovery_miss",
+                }
+                live_gate["historical_memory_policy"] = "BLOCKED_AFTER_RECOVERY_MISS"
+                live_gate["escalation_result"] = "NO_MATCH_RECLASSIFIED_NEW"
+
+        live_gate["recovery_attempted"] = recovery_attempted
+        live_gate["final_relation"] = self._text(relation.get("relation") or "NEW").upper()
+        state["continuity_resolution"] = deepcopy(live_gate)
+
+        # Resolve the current semantic object before topic dynamics. Topic root and
         # moving focus are related but not identical; this prevents stale topic state
         # from winning simply because topic was computed first.
         entity = self.entity.analyze(
@@ -7978,22 +8393,26 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             history=history, task=task, reference=reference,
         )
 
-        # Semantic memory slider: only CONTINUE/RECALL turns may scan the seven-day
-        # dialogue. NEW vectors deliberately bypass this mechanism.
         current_relation_value = self._text(relation.get("relation") or "NEW").upper()
-        memory_slider = self.memory_slider.scan(
-            text,
-            relation=current_relation_value,
-            identity=identity,
-            state=state,
-            history=history,
-            active_topic=self._text(topic.get("topic") or topic.get("topic_root")),
-            active_entity=self._text(entity.get("active_entity")),
-            active_goal=self._text(task.get("goal")),
-            task=task,
-        )
         history_search = deepcopy(history_search)
         history_search["memory_slider"] = memory_slider
+        history_search["continuity_resolution"] = deepcopy(live_gate)
+
+        if current_relation_value == "RECALL":
+            memory_slider = self.memory_slider.scan(
+                text,
+                relation="RECALL",
+                identity=identity,
+                state=state,
+                history=history,
+                active_topic=self._text(topic.get("topic") or topic.get("topic_root")),
+                active_entity=self._text(entity.get("active_entity")),
+                active_goal=self._text(task.get("goal")),
+                task=task,
+                search_stage="SEVEN_DAY",
+                escalation_reason="explicit_recall",
+            )
+            history_search["memory_slider"] = memory_slider
 
         if memory_slider.get("enabled") and memory_slider.get("selected_memory_operand"):
             selected_operand = deepcopy(memory_slider.get("selected_memory_operand") or {})
