@@ -313,6 +313,76 @@ def _apply_continuation(result: Dict[str, Any], state: Dict[str, Any]) -> bool:
     return False
 
 
+def build_visual_dialogue_context(
+    text: str,
+    state: Optional[dict] = None,
+    semantic: Optional[dict] = None,
+) -> Dict[str, Any]:
+    """Return one compact visual view of the existing dialogue state.
+
+    Image processing may read this context, but it never owns routing. The
+    same conversation/sequence/turn/scene identity is carried into visual
+    analysis and generation so visual turns remain part of the user's
+    existing dialogue rather than becoming a separate conversation.
+    """
+    state = state if isinstance(state, dict) else {}
+    semantic = semantic if isinstance(semantic, dict) else {}
+    development = state.get("dialogue_development")
+    development = development if isinstance(development, dict) else {}
+    contract = semantic.get("dialogue_contract")
+    contract = contract if isinstance(contract, dict) else {}
+    identity = state.get("identity_scope")
+    identity = identity if isinstance(identity, dict) else {}
+    sequence = state.get("active_dialogue_sequence")
+    sequence = sequence if isinstance(sequence, dict) else {}
+    active_scene = state.get("active_scene")
+    active_scene = active_scene if isinstance(active_scene, dict) else {}
+    return {
+        "current_user_request": str(text or "").strip()[:1200],
+        "user_id": str(identity.get("user_id") or state.get("user_id") or "").strip(),
+        "conversation_id": str(identity.get("conversation_id") or state.get("conversation_id") or "").strip(),
+        "dialogue_sequence_id": str(
+            contract.get("sequence_id")
+            or sequence.get("sequence_id")
+            or state.get("dialogue_sequence_id")
+            or ""
+        ).strip(),
+        "turn_id": str(contract.get("turn_id") or state.get("turn_id") or "").strip(),
+        "scene_id": str(
+            contract.get("scene_id")
+            or active_scene.get("scene_id")
+            or state.get("active_scene_id")
+            or ""
+        ).strip(),
+        "active_topic": str(
+            development.get("active_topic")
+            or contract.get("canonical_topic")
+            or state.get("april_active_topic")
+            or ""
+        ).strip()[:300],
+        "active_goal": str(
+            development.get("active_goal")
+            or contract.get("active_goal")
+            or state.get("april_active_goal")
+            or ""
+        ).strip()[:400],
+        "dialogue_relation": str(
+            development.get("relation")
+            or contract.get("relation")
+            or semantic.get("dialogue_relation")
+            or "NEW"
+        ).strip().upper(),
+        "result_anchor": deepcopy(development.get("last_result") or state.get("last_artifact") or {}),
+        "pending_actions": deepcopy(development.get("pending_actions") or development.get("post_result_actions") or []),
+        "visual_memory": deepcopy(
+            state.get("active_visual_scene")
+            or state.get("visual_continuity_summary")
+            or {}
+        ),
+        "single_route": True,
+    }
+
+
 def detect_intent(text: str, state: Optional[dict] = None) -> Dict[str, Any]:
     """
     Produce intent evidence without becoming a hard router.
@@ -332,9 +402,11 @@ def detect_intent(text: str, state: Optional[dict] = None) -> Dict[str, Any]:
     # -------------------------------------------------
     # Continuity evidence
     # -------------------------------------------------
-    if _apply_continuation(result, state):
-        result.pop("_text", None)
-        return result
+    continuation_detected = _apply_continuation(result, state)
+    # Continuation is evidence, not a return-path. Keep collecting independent
+    # visual/question/edit signals so a short continuation can still mean
+    # "change the previous image", "show the graph", or "explain the result".
+    result["continuation_evidence"] = bool(continuation_detected)
 
     result["exploration"] = is_exploration_request(t)
     result["discussion_intent"] = is_discussion_request(t)
@@ -434,6 +506,8 @@ def detect_intent(text: str, state: Optional[dict] = None) -> Dict[str, Any]:
         "continuation": result["continuation"],
         "active_flow": active_flow or {},
         "active_visual_scene": state.get("active_visual_scene", {}),
+        "dialogue_development": deepcopy(state.get("dialogue_development") or {}),
+        "visual_dialogue_context": build_visual_dialogue_context(t, state, result),
         "trajectory_priority": result["trajectory_priority"],
     }
 
@@ -452,6 +526,7 @@ def detect_intent(text: str, state: Optional[dict] = None) -> Dict[str, Any]:
     return result
 
 import asyncio
+from copy import deepcopy
 import hashlib
 import math
 import os
