@@ -10,6 +10,7 @@ No final route, room, renderer, or execution authority.
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Optional
+from copy import deepcopy
 
 
 APRIL_FILE_ID = "APRIL_GOAL_ENGINE_QUANTUM_V1"
@@ -36,6 +37,27 @@ def _clamp(value: Any) -> float:
         return 0.0
 
 
+def _dialogue_development(state: Dict[str, Any], semantic: Dict[str, Any]) -> Dict[str, Any]:
+    dev = semantic.get("dialogue_development")
+    if isinstance(dev, dict):
+        return dev
+    dev = state.get("dialogue_development")
+    return dev if isinstance(dev, dict) else {}
+
+
+def _pending_actions(dev: Dict[str, Any]) -> list[dict[str, Any]]:
+    raw = dev.get("pending_actions") or dev.get("post_result_actions") or dev.get("obligations") or []
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw:
+        if isinstance(item, dict):
+            action = dict(item)
+            action.setdefault("status", "pending")
+            out.append(action)
+    return out[:6]
+
+
 def build_goal_evidence(
     text: str,
     state: Dict[str, Any] | None = None,
@@ -46,9 +68,12 @@ def build_goal_evidence(
 
     active_flow = state.get("active_flow") if isinstance(state.get("active_flow"), dict) else {}
     scene = state.get("scene_state") if isinstance(state.get("scene_state"), dict) else {}
+    development = _dialogue_development(state, semantic)
+    pending_actions = _pending_actions(development)
 
     goal = _text(
-        semantic.get("goal")
+        development.get("active_goal")
+        or semantic.get("goal")
         or semantic.get("active_goal")
         or scene.get("goal")
         or ""
@@ -69,12 +94,28 @@ def build_goal_evidence(
         "goal": goal[:500],
         "active_goal": goal[:500],
         "trajectory": _text(
-            scene.get("trajectory")
+            development.get("trajectory")
+            or scene.get("trajectory")
             or active_flow.get("type")
             or semantic.get("trajectory")
             or operation
             or ""
         )[:300],
+        "topic": _text(
+            development.get("active_topic")
+            or semantic.get("active_topic")
+            or semantic.get("current_topic")
+            or state.get("april_active_topic")
+            or ""
+        )[:240],
+        "last_result": deepcopy(development.get("last_result") or state.get("last_artifact") or {}),
+        "pending_actions": pending_actions,
+        "initiative": {
+            "allowed": bool(development.get("initiative_allowed", True)),
+            "when_stuck": bool(development.get("user_stuck") or development.get("needs_next_step")),
+            "natural_only": True,
+            "no_trigger_route": True,
+        },
         "task_phase": task_phase,
         "operation": operation,
         "requested_representation": _text(
@@ -161,6 +202,8 @@ def evaluate_goal_progress(
     has_result = bool(answer)
     structured_result = bool(reps & {"image", "diagram", "graph", "table", "formula", "code", "link", "file"})
 
+    development = _dialogue_development(state, semantic)
+    pending_actions = _pending_actions(development)
     history = task.get("qa_history") if isinstance(task.get("qa_history"), list) else []
     turn_count = max(len(history), int(task.get("task_revision") or 0))
     revision_count = int(task.get("task_revision") or 0)
@@ -198,8 +241,12 @@ def evaluate_goal_progress(
     if representation in {"diagram", "graph", "table", "formula", "code", "image"}:
         achievement = f"получен готовый результат в формате {representation}"
 
+    pending_due = [
+        item for item in pending_actions
+        if _low(item.get("status")) in {"pending", "ready", "due"}
+    ]
     return {
-        "version": "april_goal_progress_v2",
+        "version": "april_goal_progress_v3",
         "goal": _text(frame.get("goal") or contract.get("active_goal") or semantic.get("active_goal") or text)[:320],
         "topic": topic,
         "status": "achieved" if completed else "in_progress",
@@ -208,6 +255,18 @@ def evaluate_goal_progress(
         "turn_count": turn_count,
         "revision_count": revision_count,
         "structured_result": structured_result,
+        "pending_actions": pending_due[:4],
+        "next_step": _text(
+            development.get("next_step")
+            or development.get("recommended_next_step")
+            or ""
+        )[:320],
+        "initiative_policy": {
+            "allowed": bool(development.get("initiative_allowed", True)),
+            "only_when_useful": True,
+            "only_one_next_step": True,
+            "avoid_triggering": True,
+        },
         "closure": {
             "eligible_if_completed": eligible_if_completed,
             "allowed_now": closure_allowed,
