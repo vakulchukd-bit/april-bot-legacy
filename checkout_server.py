@@ -1395,6 +1395,7 @@ def image_chat():
             or request.form.get("aprilId")
             or ""
         ).strip()
+        flow_id = str(request.form.get("flow_id") or "").strip()
 
         if not image_file:
             return jsonify({
@@ -1454,6 +1455,7 @@ def image_chat():
                 text=user_text,
                 internal_context=False,
                 request_source="april_web_image",
+                flow_id=flow_id,
                 visual_input_path=temp_path,
                 visual_user_request=visual_user_request or user_text,
                 visual_output_dir=visual_output_dir,
