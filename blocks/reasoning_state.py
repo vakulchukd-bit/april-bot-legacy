@@ -395,6 +395,10 @@ def build_reasoning_state(
 
     scene_evidence = _scene_evidence(state, semantic)
     scene_blueprint = _as_dict(semantic.get("scene_blueprint"))
+    dialogue_development = _as_dict(
+        semantic.get("dialogue_development")
+        or state.get("dialogue_development")
+    )
 
     # =================================================
     # 🔥 SCENE
@@ -431,6 +435,7 @@ def build_reasoning_state(
 
     continuation_target = (
         semantic.get("continuation_target")
+        or dialogue_development.get("continuation_target")
         or dialogue_contract.get("reply_to")
         or scene_evidence.get("scene_id")
         or scene_evidence.get("topic_group")
@@ -525,6 +530,8 @@ def build_reasoning_state(
 
         active_flow
         or scene_trajectory
+        or dialogue_development.get("active_goal")
+        or dialogue_development.get("active_topic")
     )
 
     trajectory_locked = bool(
@@ -588,6 +595,15 @@ def build_reasoning_state(
     # 🔥 MACHINE STATE
     # =================================================
 
+    dialogue_direction = {
+        "active_topic": _text(dialogue_development.get("active_topic"), 240),
+        "active_goal": _text(dialogue_development.get("active_goal"), 320),
+        "next_step": _text(dialogue_development.get("next_step") or dialogue_development.get("recommended_next_step"), 320),
+        "user_stuck": bool(dialogue_development.get("user_stuck")),
+        "initiative_allowed": bool(dialogue_development.get("initiative_allowed", True)),
+        "pending_actions": _as_list(dialogue_development.get("pending_actions") or dialogue_development.get("post_result_actions"))[:6],
+    }
+
     reasoning = {
 
         # =================================================
@@ -595,6 +611,8 @@ def build_reasoning_state(
         # =====================================================
 
         "input": text,
+        "dialogue_development": deepcopy(dialogue_development),
+        "dialogue_direction": dialogue_direction,
 
         "conversation_alive": True,
 
