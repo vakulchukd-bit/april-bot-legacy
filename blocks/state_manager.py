@@ -238,6 +238,16 @@ def build_default_state():
         "interactive_task_state": {},
         "open_task": {},
         "active_task": {},
+        "continuity_resolution": {
+            "version": "continuity_resolution_v1",
+            "final_relation": "NEW",
+            "live_supported": False,
+            "recovery_attempted": False,
+            "escalation_result": "",
+            "historical_memory_policy": "BLOCKED_UNTIL_LIVE_MISS",
+            "selected_sequence_id": "",
+            "updated_at": None,
+        },
         "machine_runtime": True,
         "renderer_safe": True,
         "continuity_alive": True,
@@ -1291,6 +1301,11 @@ class QuantumMemoryEngine:
         self.ensure_runtime(state_obj)
         query = str(query or "").strip()
         retrieval_mode = str(retrieval_mode or "semantic").strip().lower()
+        continuity_policy = state_obj.get("continuity_resolution") if isinstance(state_obj.get("continuity_resolution"), dict) else {}
+        active_sequence_id = str(
+            (state_obj.get("active_dialogue_sequence") or {}).get("sequence_id")
+            if isinstance(state_obj.get("active_dialogue_sequence"), dict) else ""
+        ).strip()
 
         if not query:
             return {
@@ -1310,6 +1325,28 @@ class QuantumMemoryEngine:
         current_visual = state_obj.get("active_visual_scene")
 
         candidates = list(self.iter_memory_records(state_obj))
+
+        if retrieval_mode == "continuation_live":
+            # Live continuation is sequence-local. It must never search another
+            # seven-day branch merely because the text is semantically similar.
+            if not active_sequence_id:
+                candidates = []
+            else:
+                candidates = [
+                    record for record in candidates
+                    if str(record.get("sequence_id") or "") == active_sequence_id
+                ]
+
+        elif retrieval_mode == "continuation_recovery":
+            # Seven-day recovery is an explicit Interpretation decision, not a
+            # default memory query. Without the gate, return no historical evidence.
+            recovery_allowed = bool(
+                continuity_policy.get("recovery_attempted")
+                and str(continuity_policy.get("historical_memory_policy") or "") == "ALLOW_SEVEN_DAY_RECOVERY"
+            )
+            if not recovery_allowed:
+                candidates = []
+
         if retrieval_mode == "memory_query":
             # A recall request asks "what did I ask / discuss", so the memory
             # field should search completed dialogue pairs first rather than
@@ -1445,6 +1482,7 @@ class QuantumMemoryEngine:
             "active_visual_context_relevant": active_visual_context_relevant,
             "active_topic_similarity": round(active_topic_score, 6),
             "retrieval_mode": retrieval_mode,
+            "continuity_resolution": deepcopy(continuity_policy),
             "focus_state": deepcopy(focus),
             "decision_owner": "QUANTUM_PROCESSOR",
             "evidence_only": True,
@@ -2633,7 +2671,8 @@ def build_dialogue_memory_bridge(user_id, query="", limit=8, *, relation="AUTO",
     """Build mode-specific authenticated-user dialogue memory after interpretation.
 
     NEW -> current-turn metadata only.
-    CONTINUE -> selected live sequence turns only.
+    CONTINUE -> selected live sequence turns only, unless Interpretation has
+    explicitly resolved a seven-day branch recovery target.
     RECALL -> selected historical 7-day evidence only.
     """
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
