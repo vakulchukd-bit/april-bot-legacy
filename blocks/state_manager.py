@@ -263,6 +263,7 @@ def build_default_state():
         "active_dialogue_sequence": {
             "version": "april_dialogue_sequence_v1",
             "sequence_id": None,
+            "branch_id": None,
             "topic": None,
             "status": "inactive",
             "user_id": None,
@@ -279,6 +280,15 @@ def build_default_state():
             "relation": "NEW",
         },
         "dialogue_sequence_version": "APRIL-DIALOGUE-SEQUENCE-7D-V1",
+        "dialogue_branch_index": {
+            "version": "dialogue_branch_index_v1_user_bound",
+            "active_sequence_id": "",
+            "target_sequence_id": "",
+            "target_branch_id": "",
+            "resolution_mode": "NO_BRANCH_RESOLUTION",
+            "branches": [],
+        },
+        "active_dialogue_branch_id": "",
         "focus_snapshot": {},
         "focus_state": {
             "active_topic": None,
@@ -907,11 +917,87 @@ class QuantumMemoryEngine:
 
         target_id = str(dialogue_vector.get("target_sequence_id") or dialogue_vector.get("sequence_id") or "").strip()
         if relation == "RECALL":
-            target_id = str(selected_operand.get("sequence_id") or target_id or current_id).strip()
+            # RECALL reads historical evidence; it does not move the active
+            # dialogue branch. An explicit RESUME_BRANCH is the only operation
+            # allowed to switch the active conversation branch.
+            target_id = current_id
+
+        branch_target = dialogue_vector.get("target_branch") if isinstance(dialogue_vector.get("target_branch"), dict) else {}
+        if relation == "RECALL":
+            # A recall packet may contain a historical operand, but that operand
+            # must not overwrite the hot branch metadata.
+            branch_target = {}
+        branch_index = dialogue_vector.get("branch_index") if isinstance(dialogue_vector.get("branch_index"), dict) else {}
+        if not branch_target and isinstance(branch_index.get("target_branch"), dict):
+            branch_target = branch_index.get("target_branch")
+
+        # A branch resume is an intentional switch of the active semantic sequence.
+        # Rehydrate the selected branch from its compact index; never merge its task
+        # into the branch that was just suspended.
+        resume_branch = bool(
+            relation == "CONTINUE"
+            and target_id
+            and (dialogue_vector.get("turn_relation") or dialogue_vector.get("subtype")) == "RESUME_BRANCH"
+            and (target_id != current_id or str(dialogue_vector.get("target_branch_id") or branch_target.get("branch_id") or "") != str(state_obj.get("active_dialogue_branch_id") or current.get("branch_id") or ""))
+        )
+        if resume_branch and branch_target:
+            current = {
+                "version": "april_dialogue_sequence_v1",
+                "sequence_id": target_id,
+                "branch_id": str(branch_target.get("branch_id") or dialogue_vector.get("target_branch_id") or target_id),
+                "topic": str(branch_target.get("topic") or dialogue_vector.get("active_topic") or "").strip() or None,
+                "status": "active",
+                "user_id": str(user_id),
+                "conversation_id": conversation_id,
+                "turn_count": int(branch_target.get("turn_count") or 0),
+                "started_at": branch_target.get("started_at") or time.time(),
+                "last_turn_at": branch_target.get("last_turn_at"),
+                "last_user_request": str(branch_target.get("last_user_request") or "").strip()[:1200],
+                "last_april_answer": str(branch_target.get("last_april_answer") or "").strip()[:2200],
+                "relation": "CONTINUE",
+                "restored_from_branch_index": True,
+                "target_branch_id": str(branch_target.get("branch_id") or target_id),
+                "interactive_task_state": {},
+                "open_task": {},
+                "task_state": {},
+                "active_task": {},
+            }
+            # Rehydrate durable visual/task fields from the source sequence where possible.
+            timeline = state_obj.get("memory_timeline") if isinstance(state_obj.get("memory_timeline"), dict) else {}
+            matching = []
+            for day_index in range(MEMORY_DAYS):
+                day = timeline.get(f"day_{day_index}")
+                if not isinstance(day, dict):
+                    continue
+                for item in day.get("dialog_pairs", []):
+                    if not isinstance(item, dict):
+                        continue
+                    if str(item.get("sequence_id") or "") != target_id:
+                        continue
+                    if str(item.get("user_id") or user_id) != str(user_id):
+                        continue
+                    if conversation_id and str(item.get("conversation_id") or conversation_id) not in {"", conversation_id}:
+                        continue
+                    matching.append(item)
+            matching.sort(key=lambda x: float(x.get("created_at") or x.get("timestamp") or 0.0))
+            if matching:
+                last = matching[-1]
+                current.update({
+                    "turn_count": max(int(current.get("turn_count") or 0), len(matching)),
+                    "started_at": matching[0].get("created_at") or matching[0].get("timestamp") or current.get("started_at"),
+                    "last_turn_at": last.get("created_at") or last.get("timestamp") or current.get("last_turn_at"),
+                    "last_user_request": str(last.get("user_request") or last.get("user_meaning") or current.get("last_user_request") or "")[:1200],
+                    "last_april_answer": str(last.get("april_answer") or last.get("april_meaning") or current.get("last_april_answer") or "")[:2200],
+                    "last_visual_attachment": deepcopy(last.get("visual_attachment") or {}),
+                    "last_visual_scene_id": str(last.get("visual_scene_id") or last.get("scene_contract_id") or ""),
+                    "last_visual_turn_index": int(last.get("sequence_turn_index") or 0),
+                    "visual_turn_count": sum(1 for item in matching if isinstance(item.get("visual_attachment"), dict) and item.get("visual_attachment")),
+                })
 
         topic = str(
             dialogue_vector.get("canonical_topic")
             or dialogue_vector.get("active_topic")
+            or branch_target.get("topic")
             or selected_operand.get("topic")
             or current.get("topic")
             or ""
@@ -925,14 +1011,20 @@ class QuantumMemoryEngine:
         )
         if not isinstance(interactive_task_state, dict):
             interactive_task_state = {}
+        if resume_branch:
+            # Never carry a stale task from the branch we just left. Only the
+            # selected branch may contribute an active task.
+            branch_task = branch_target.get("active_task") if isinstance(branch_target.get("active_task"), dict) else {}
+            interactive_task_state = deepcopy(branch_task) if branch_task.get("active") else {}
 
-        if relation == "NEW" or not current_id or (target_id and target_id != current_id and relation == "RECALL"):
-            if not target_id or (relation == "NEW" and target_id == current_id):
+        if relation == "NEW" or not current_id or (target_id and target_id != current_id and relation in {"RECALL", "CONTINUE"} and not resume_branch):
+            if not target_id or relation == "NEW" or (target_id == current_id):
                 raw = f"{user_id}|{conversation_id}|{time.time_ns()}|{current_request}|{topic}"
                 target_id = "seq-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
             sequence = {
                 "version": "april_dialogue_sequence_v1",
                 "sequence_id": target_id,
+                "branch_id": str(dialogue_vector.get("target_branch_id") or target_id),
                 "topic": topic or None,
                 "status": "active",
                 "user_id": str(user_id),
@@ -951,7 +1043,17 @@ class QuantumMemoryEngine:
         else:
             sequence = deepcopy(current)
             sequence["version"] = "april_dialogue_sequence_v1"
-            sequence["sequence_id"] = current_id
+            sequence["sequence_id"] = target_id or current_id
+            sequence["branch_id"] = str(
+                (
+                    sequence.get("branch_id")
+                    if relation == "RECALL"
+                    else dialogue_vector.get("target_branch_id")
+                    or branch_target.get("branch_id")
+                    or sequence.get("branch_id")
+                )
+                or sequence["sequence_id"]
+            )
             sequence["user_id"] = str(user_id)
             sequence["conversation_id"] = conversation_id
             sequence["status"] = "active"
@@ -975,6 +1077,13 @@ class QuantumMemoryEngine:
         sequence["relation"] = relation
         sequence["restored"] = False
         state_obj["active_dialogue_sequence"] = sequence
+        state_obj["active_dialogue_branch_id"] = str(
+            sequence.get("branch_id")
+            or dialogue_vector.get("target_branch_id")
+            or target_id
+            or current_id
+            or ""
+        )
         state_obj["interactive_task_state"] = deepcopy(interactive_task_state)
         state_obj["open_task"] = deepcopy(interactive_task_state)
         state_obj["active_task"] = deepcopy(interactive_task_state)
@@ -3935,6 +4044,19 @@ def update_dialog_context(user_id, semantic_result):
         "updated_at": now,
     }
     state_obj["dialogue_resolution"] = resolution
+    branch_index_state = semantic_result.get("dialogue_branch_index") or dialogue_vector.get("branch_index")
+    if isinstance(branch_index_state, dict) and branch_index_state:
+        state_obj["dialogue_branch_index"] = {
+            "version": str(branch_index_state.get("version") or "dialogue_branch_index_v1_user_bound"),
+            "active_sequence_id": str(branch_index_state.get("active_sequence_id") or ""),
+            "target_sequence_id": str(branch_index_state.get("target_sequence_id") or ""),
+            "target_branch_id": str(branch_index_state.get("target_branch_id") or ""),
+            "active_branch_id": str(state_obj.get("active_dialogue_branch_id") or ""),
+            "resolution_mode": str(branch_index_state.get("resolution_mode") or "NO_BRANCH_RESOLUTION"),
+            "selected_score": float(branch_index_state.get("selected_score") or 0.0),
+            "branches": deepcopy(branch_index_state.get("branches") or [])[:12],
+            "updated_at": now,
+        }
 
     dialogue_state = state_obj.get("dialog_state")
     if not isinstance(dialogue_state, dict):
@@ -3967,6 +4089,32 @@ def update_dialog_context(user_id, semantic_result):
     })
 
     state_obj["dialogue_vector"] = deepcopy(dialogue_vector)
+    state_obj["dialogue_vector"]["branch_index"] = deepcopy(
+        semantic_result.get("dialogue_branch_index")
+        or dialogue_vector.get("branch_index")
+        or {}
+    )
+    state_obj["dialogue_vector"]["target_sequence_id"] = str(
+        dialogue_vector.get("target_sequence_id")
+        or contract.get("target_sequence_id")
+        or ""
+    )
+    state_obj["dialogue_vector"]["target_branch_id"] = str(
+        dialogue_vector.get("target_branch_id")
+        or contract.get("target_branch_id")
+        or ""
+    )
+    state_obj["dialogue_vector"]["target_branch"] = deepcopy(
+        dialogue_vector.get("target_branch")
+        or contract.get("target_branch")
+        or {}
+    )
+    state_obj["dialogue_vector"]["turn_relation"] = str(
+        dialogue_vector.get("turn_relation")
+        or contract.get("turn_relation")
+        or semantic_result.get("dialogue_subtype")
+        or ""
+    )
     state_obj["dialogue_vector"]["interactive_task_state"] = deepcopy(interactive_task_state)
     state_obj["dialogue_vector"]["open_task"] = deepcopy(interactive_task_state)
     state_obj["turn_progression"] = {
