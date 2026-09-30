@@ -1047,6 +1047,23 @@ class ProcessorScene:
             else {}
         )
 
+        # Dialogue development is produced by Interpretation and must be bound
+        # before it is inserted into the provider context/contract below.  The
+        # previous revision referenced this name without defining it inside
+        # prepare(), causing every web chat turn to fail with NameError.
+        dialogue_development = (
+            semantic_result.get("dialogue_development")
+            if isinstance(semantic_result.get("dialogue_development"), dict)
+            else {}
+        )
+        if not dialogue_development and cognitive_workspace:
+            workspace_development = cognitive_workspace.get("dialogue_development")
+            dialogue_development = (
+                workspace_development
+                if isinstance(workspace_development, dict)
+                else {}
+            )
+
         provider_context_plan = (
             semantic_result.get("provider_context_plan")
             if isinstance(semantic_result.get("provider_context_plan"), dict)
