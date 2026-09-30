@@ -3866,7 +3866,113 @@ class DialogueBranchIndexEngine(InterpretationEngineBase):
 
 class DialogueRelationEngine(InterpretationEngineBase):
     NAME = "DialogueRelationEngine"
-    VERSION = "dialogue_relation_v4_synced"
+    VERSION = "dialogue_relation_v5_live_reference_first"
+
+    @classmethod
+    def _semantic_continuation_evidence(
+        cls,
+        current: str,
+        *,
+        previous_user: str,
+        previous_april: str,
+        task: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve obvious continuation moves before topic/representation can fence them.
+
+        This is deliberately narrow. It does not turn arbitrary questions into
+        CONTINUE. It only repairs cases where the current turn explicitly refers
+        to the immediately preceding answer/task, or where the active interactive
+        game clearly hands the next move to the user.
+        """
+        text = cls._text(current)
+        low = text.lower()
+        previous_user = cls._text(previous_user)
+        previous_april = cls._text(previous_april)
+        task = task if isinstance(task, dict) else {}
+        reasons: list[str] = []
+
+        reference_phrases = (
+            "твой правильный ответ", "мой правильный ответ",
+            "твоя правильный ответ", "правильный ответ",
+            "как ты угадал", "как ты угадала",
+            "как ты угадал", "почему ты угадал",
+            "объясни свой ответ", "объясни свой правильный ответ",
+            "объясни твой ответ", "объясни твой правильный ответ",
+            "примени к этому формулу", "применить к этому формулу",
+            "какую формулу ты применил", "по какой формуле",
+            "твои вычисления", "это вычисление", "к этому",
+            "о чем я просил", "о чём я просил",
+            "что я просил", "что ты должна была", "что ты должен был",
+        )
+        direct_reference = any(phrase in low for phrase in reference_phrases)
+        pronoun_reference = bool(re.search(
+            r"\b(?:это|этот|эта|эту|этого|этой|этим|он|она|оно|его|ее|её|свой|свою|своего)\b",
+            low,
+        ))
+
+        previous_question = bool("?" in previous_april or "？" in previous_april)
+        short_confirmation = low.strip(" .,!?:;-—") in {
+            "да", "ага", "верно", "правильно", "точно", "именно", "хорошо",
+        }
+
+        interactive = state.get("interactive_task_state")
+        if not isinstance(interactive, dict):
+            interactive = state.get("active_task") if isinstance(state.get("active_task"), dict) else {}
+        task_kind = cls._text(
+            task.get("kind") or interactive.get("kind") or ""
+        ).lower()
+        task_role = cls._text(
+            task.get("role") or interactive.get("role") or ""
+        ).lower()
+        task_active = bool(task.get("active") or interactive.get("active"))
+        explicit_new_game = any(x in low for x in (
+            "хочу предложить тебе игру", "хочу предложить игру",
+            "давай сыграем", "давай играть", "сыграем",
+            "начнем игру", "начнём игру",
+        ))
+        game_handoff = bool(
+            task_active
+            and not explicit_new_game
+            and (task_kind in {"game", "riddle", "question"} or "guess" in task_role or "угады" in task_role)
+            and (
+                any(x in low for x in ("угадай", "отгадай", "разгадай", "я загад", "я загадываю", "я загадую"))
+                or ("сколько" in low and any(x in low for x in ("купил", "осталось", "съел", "скушал")))
+                or any(x in low for x in ("задавай вопросы", "наводящие вопросы"))
+            )
+        )
+        if direct_reference:
+            reasons.append("explicit_reference_to_previous_result")
+        if pronoun_reference and previous_april:
+            reasons.append("deictic_reference_to_previous_turn")
+        if short_confirmation and (previous_question or previous_april):
+            reasons.append("confirmation_of_previous_assistant_turn")
+        if game_handoff:
+            reasons.append("interactive_game_continuation")
+
+        # A longer current request can continue an active task when it explicitly
+        # analyzes the immediately preceding result, even if no exact marker fired.
+        analysis_continuation = bool(
+            task_active
+            and previous_april
+            and any(x in low for x in ("объясни", "расскажи", "проверь", "почему", "разбери", "разъясни"))
+            and any(x in low for x in ("ответ", "результат", "угадал", "вычисл", "решил", "решила"))
+        )
+        if analysis_continuation:
+            reasons.append("active_task_result_analysis")
+
+        if explicit_new_game:
+            reasons = []
+
+        return {
+            "matched": bool(reasons),
+            "confidence": 0.99 if direct_reference or game_handoff else 0.96 if reasons else 0.0,
+            "reasons": list(dict.fromkeys(reasons)),
+            "game_handoff": game_handoff,
+            "direct_reference": direct_reference,
+            "short_confirmation": short_confirmation,
+            "previous_question": previous_question,
+        }
 
     def analyze(
         self,
@@ -3913,10 +4019,38 @@ class DialogueRelationEngine(InterpretationEngineBase):
                 low,
             )
         )
+        semantic_continuation = self._semantic_continuation_evidence(
+            current,
+            previous_user=previous_user,
+            previous_april=previous_april,
+            task=task,
+            state=state,
+        )
 
         if explicit_new:
             relation = "NEW"
             turn_relation = "NEW_TOPIC"
+        elif semantic_continuation.get("matched") and previous_april:
+            # Current-turn references to the immediately preceding answer/task are
+            # stronger than a weak representation/domain signal. A formula/image
+            # request can therefore remain CONTINUE while changing representation.
+            relation = "CONTINUE"
+            turn_relation = (
+                "TASK_CONFIRMATION"
+                if semantic_continuation.get("short_confirmation") and task_active
+                else "CONTINUE_ANALYSIS"
+                if semantic_continuation.get("direct_reference")
+                else "TASK_HANDOFF"
+                if semantic_continuation.get("game_handoff")
+                else "CONTINUE_ANALYSIS"
+            )
+            env = dict(env)
+            env.update({
+                "relation": "CONTINUE",
+                "turn_relation": turn_relation,
+                "context_dependency": "active_dialogue_sequence",
+                "historical_memory_allowed": False,
+            })
         elif explicit_recall and not branch_index.get("explicit_resume"):
             relation = "RECALL"
             turn_relation = "REFERENCE_OLD_TOPIC"
@@ -3985,10 +4119,13 @@ class DialogueRelationEngine(InterpretationEngineBase):
         else:
             continuation_score = 0.0
 
-        confidence = 0.98 if turn_relation in {
-            "TASK_ANSWER", "TASK_CONFIRMATION", "TASK_CORRECTION",
-            "REFERENCE_OLD_TOPIC", "NEW_TOPIC"
-        } else float(env.get("diagnostics", {}).get("current_turn_authority", False))
+        confidence = (
+            0.995 if semantic_continuation.get("matched") else
+            0.98 if turn_relation in {
+                "TASK_ANSWER", "TASK_CONFIRMATION", "TASK_CORRECTION",
+                "REFERENCE_OLD_TOPIC", "NEW_TOPIC"
+            } else float(env.get("diagnostics", {}).get("current_turn_authority", False))
+        )
 
         return {
             "engine": self.NAME,
@@ -4014,6 +4151,7 @@ class DialogueRelationEngine(InterpretationEngineBase):
                 "rejection": rejection,
                 "explicit_recall": explicit_recall,
                 "explicit_new_topic": explicit_new,
+                "semantic_continuation": deepcopy(semantic_continuation),
             },
             "confidence": max(0.20, confidence),
             "evidence": [
@@ -5538,8 +5676,11 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
             "history_context_required": needs_history,
             "same_authenticated_branch_first": relation_value == "CONTINUE",
             "seven_day_cross_branch_allowed": relation_value == "RECALL",
-            "semantic_slider_cross_branch_allowed": relation_value == "RECALL" or bool(history_search.get("continuity_resolution", {}).get("recovery_attempted") and history_search.get("memory_slider", {}).get("selected_memory_operand")),
-            "memory_slider_enabled": bool(history_search.get("memory_slider", {}).get("enabled")),
+            # Cross-branch recovery is decided by InterpretationOrchestrator,
+            # never by this low-level history search.  This engine must not read
+            # an as-yet-uncreated local ``history_search`` variable.
+            "semantic_slider_cross_branch_allowed": relation_value == "RECALL",
+            "memory_slider_enabled": False,
             "historical_memory_is_evidence_only": True,
             "recommended_turn_relation": recommended,
             "provider_instruction": (
@@ -6819,6 +6960,10 @@ class DecisionArbitrationEngine(InterpretationEngineBase):
                 semantic_relation = "TASK_CONFIRMATION"
             elif turn == "TASK_CORRECTION":
                 semantic_relation = "TASK_CORRECTION"
+            elif turn == "TASK_HANDOFF":
+                semantic_relation = "TASK_HANDOFF"
+            elif turn == "CONTINUE_ANALYSIS":
+                semantic_relation = "CONTINUE_ANALYSIS"
             else:
                 semantic_relation = "TASK_CONTINUE"
         elif canonical == "RECALL":
@@ -8041,9 +8186,24 @@ class InterpretationOrchestrator(InterpretationEngineBase):
 
         low = cls._text(text).lower()
         deictic = bool(re.search(
-            r"\\b(?:это|этот|эта|эту|этой|этим|он|она|оно|они|тот|та|те|там|здесь|выше|ниже|дальше)\\b",
+            r"\b(?:это|этот|эта|эту|этой|этим|он|она|оно|они|тот|та|те|там|здесь|выше|ниже|дальше)\b",
             low,
         ))
+        explicit_result_reference = any(
+            marker in low
+            for marker in (
+                "как ты угадал", "как ты угадала", "почему ты угадал",
+                "правильный ответ", "объясни свой ответ",
+                "объясни твой ответ", "объясни твой правильный ответ",
+                "объясни мой ответ", "твои вычисления",
+                "примени к этому формулу", "применить к этому формулу",
+                "по какой формуле", "о чем я просил", "о чём я просил",
+                "что я просил", "что ты должна была", "что ты должен был",
+            )
+        )
+        short_confirmation = low.strip(" .,!?:;-—") in {
+            "да", "ага", "верно", "правильно", "точно", "именно", "хорошо"
+        }
         task_role = cls._text(task.get("role"))
         task_active = bool(task.get("active"))
         task_handoff = turn_relation == "TASK_HANDOFF" or task_role == "april_guesses_user_object"
@@ -8086,6 +8246,8 @@ class InterpretationOrchestrator(InterpretationEngineBase):
         live_supported = bool(
             task_link
             or deictic
+            or explicit_result_reference
+            or (short_confirmation and bool(previous_april))
             or direct_live_score >= LIVE_CONTINUITY_SCORE_THRESHOLD
             or semantic_overlap >= 0.22
         )
@@ -8114,6 +8276,10 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             "reason": (
                 "task_handoff"
                 if task_handoff else
+                "explicit_result_reference"
+                if explicit_result_reference else
+                "confirmation_of_previous_turn"
+                if short_confirmation and bool(previous_april) else
                 "live_context_supported"
                 if live_supported else
                 "live_context_mismatch"
@@ -8125,6 +8291,8 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             "active_goal": active_goal,
             "active_entity": active_entity,
             "turn_relation": turn_relation,
+            "explicit_result_reference": explicit_result_reference,
+            "short_confirmation": short_confirmation,
             "semantic_overlap": round(float(semantic_overlap), 6),
             "context_scores": {
                 "previous_assistant": round(previous_assistant_score, 6),
@@ -8180,6 +8348,45 @@ class InterpretationOrchestrator(InterpretationEngineBase):
 
         task = self.task.analyze(text, relation=relation, state=state, history=history)
 
+        # When the task engine has no fresh task projection, retain the authenticated
+        # live interactive task from state for CONTINUE turns. This prevents a
+        # representation/analysis request (for example "примени к этому формулу")
+        # from silently losing the game/riddle that owns the current branch.
+        if (
+            relation.get("relation") == "CONTINUE"
+            and not task.get("active")
+        ):
+            persisted_task = None
+            for candidate in (
+                state.get("interactive_task_state"),
+                state.get("active_task"),
+                state.get("open_task"),
+                (state.get("active_dialogue_sequence") or {}).get("interactive_task_state")
+                if isinstance(state.get("active_dialogue_sequence"), dict) else None,
+            ):
+                if isinstance(candidate, dict) and candidate.get("active"):
+                    persisted_task = candidate
+                    break
+            if persisted_task:
+                task = {
+                    "engine": self.task.NAME,
+                    "version": self.task.VERSION,
+                    "active": True,
+                    "task": deepcopy(persisted_task),
+                    "kind": self._text(persisted_task.get("kind")),
+                    "role": self._text(persisted_task.get("role")),
+                    "phase": self._text(persisted_task.get("phase")),
+                    "expected_input_type": self._text(persisted_task.get("expected_input_type")),
+                    "task_action": str(relation.get("turn_relation") or "").upper().startswith("TASK_"),
+                    "ownership": "CURRENT_ACTIVE_TASK",
+                    "goal": self._text(persisted_task.get("goal")),
+                    "topic": self._text(persisted_task.get("topic")),
+                    "candidate_answer": self._text(persisted_task.get("candidate_answer")),
+                    "known_clues": list(persisted_task.get("known_clues") or [])[-12:],
+                    "qa_history": list(persisted_task.get("qa_history") or [])[-12:],
+                    "confidence": 0.97,
+                }
+
         # ------------------------------------------------------------------
         # STAGED CONTINUATION RESOLUTION
         # ------------------------------------------------------------------
@@ -8191,8 +8398,20 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             text,
             relation=relation,
             task=task,
-            topic={},
-            entity={},
+            topic={
+                "topic": self._text(
+                    (relation.get("environment") or {}).get("current_topic")
+                    if isinstance(relation.get("environment"), dict)
+                    else ""
+                )
+            },
+            entity={
+                "active_entity": self._text(
+                    (relation.get("environment") or {}).get("active_entity")
+                    if isinstance(relation.get("environment"), dict)
+                    else ""
+                )
+            },
         )
         state["continuity_resolution"] = deepcopy(live_gate)
 
