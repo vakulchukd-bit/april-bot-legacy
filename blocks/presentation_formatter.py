@@ -43,13 +43,13 @@ RENDERER_ALIASES = {
     "chart": "GraphBlock",
     "plot": "GraphBlock",
     "table": "TableBlock",
-    "diagram": "GalleryBlock",
+    "diagram": "DiagramRenderer",
     "schematic": "GalleryBlock",
     "image": "GalleryBlock",
     "gallery": "GalleryBlock",
     "code": "CodeBlock",
     "link": "LinkCard",
-    "formula": "MessageTextBlock",
+    "formula": "FormulaRenderer",
     "math": "MessageTextBlock",
 }
 
@@ -368,6 +368,9 @@ def canonicalize_scene_blocks(
     turn_id: str = "",
     flow_id: str = "",
     blueprint: dict[str, Any] | None = None,
+    user_id: str = "",
+    conversation_id: str = "",
+    dialogue_sequence_id: str = "",
 ) -> list[dict[str, Any]]:
     """Normalize and deduplicate blocks without changing their semantics.
 
@@ -431,6 +434,9 @@ def canonicalize_scene_blocks(
         block["scene_id"] = _s(block.get("scene_id")) or scene_id
         block["turn_id"] = _s(block.get("turn_id")) or turn_id
         block["flow_id"] = _s(block.get("flow_id")) or flow_id
+        block["user_id"] = _s(block.get("user_id")) or user_id
+        block["conversation_id"] = _s(block.get("conversation_id")) or conversation_id
+        block["dialogue_sequence_id"] = _s(block.get("dialogue_sequence_id")) or dialogue_sequence_id
         block["topic_group"] = _s(block.get("topic_group")) or _s(blueprint.get("topic_group"))
         block["continuation"] = bool(block.get("continuation", blueprint.get("continuation", False)))
         block["sequence_index"] = bp_order.get(block_id, index)
@@ -481,6 +487,9 @@ def ensure_scene_text_block(
     turn_id: str = "",
     flow_id: str = "",
     blueprint: dict[str, Any] | None = None,
+    user_id: str = "",
+    conversation_id: str = "",
+    dialogue_sequence_id: str = "",
 ) -> list[dict[str, Any]]:
     """Add the scene's single human text node only when it is genuinely absent.
 
@@ -493,6 +502,9 @@ def ensure_scene_text_block(
         turn_id=turn_id,
         flow_id=flow_id,
         blueprint=blueprint,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        dialogue_sequence_id=dialogue_sequence_id,
     )
     text = _s(answer)
     if not text:
@@ -511,6 +523,9 @@ def ensure_scene_text_block(
         "scene_id": scene_id,
         "turn_id": turn_id,
         "flow_id": flow_id,
+        "user_id": user_id,
+        "conversation_id": conversation_id,
+        "dialogue_sequence_id": dialogue_sequence_id,
         "topic_group": _s(_d(blueprint).get("topic_group")),
         "continuation": bool(_d(blueprint).get("continuation", False)),
         "scene_contract": True,
@@ -537,6 +552,7 @@ def build_presentation_contract(
     conversation_id: str = "",
     dialogue_sequence_id: str = "",
     sequence_turn_index: int = 0,
+    dialogue_development: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Describe how Web should lay out the already-decided scene.
 
@@ -554,6 +570,7 @@ def build_presentation_contract(
         "flow_id": flow_id,
         "topic_group": topic_group,
         "continuation": bool(continuation),
+        "dialogue_development": deepcopy(dialogue_development or {}),
         "identity": {
             "user_id": _s(user_id),
             "conversation_id": _s(conversation_id),
@@ -639,6 +656,14 @@ def build_scene_presentation(
     continuation = bool(scene_map.get("continuation", blueprint.get("continuation", metadata.get("continuation", False))))
     answer = _s(scene_map.get("answer") or metadata.get("answer"))
     identity = _d(scene_map.get("identity") or metadata.get("identity_scope") or {})
+    # Accept both canonical nested identity and flat SceneContract fields. The
+    # formatter never invents identity; it only carries already-known values.
+    identity = {
+        "user_id": _s(identity.get("user_id") or scene_map.get("user_id")),
+        "conversation_id": _s(identity.get("conversation_id") or scene_map.get("conversation_id")),
+        "dialogue_sequence_id": _s(identity.get("dialogue_sequence_id") or scene_map.get("dialogue_sequence_id")),
+        "sequence_turn_index": int(scene_map.get("sequence_turn_index") or identity.get("sequence_turn_index") or 0),
+    }
 
     source_blocks = blocks if blocks is not None else scene_map.get("render_blocks") or scene_map.get("blocks") or []
     canonical_blocks = ensure_scene_text_block(
@@ -648,6 +673,9 @@ def build_scene_presentation(
         turn_id=turn_id,
         flow_id=flow_id,
         blueprint=blueprint,
+        user_id=_s(identity.get("user_id") or scene_map.get("user_id")),
+        conversation_id=_s(identity.get("conversation_id") or scene_map.get("conversation_id")),
+        dialogue_sequence_id=_s(identity.get("dialogue_sequence_id") or scene_map.get("dialogue_sequence_id")),
     )
     presentation = build_presentation_contract(
         scene_id=scene_id,
@@ -660,6 +688,11 @@ def build_scene_presentation(
         conversation_id=_s(identity.get("conversation_id") or scene_map.get("conversation_id")),
         dialogue_sequence_id=_s(identity.get("dialogue_sequence_id") or scene_map.get("dialogue_sequence_id")),
         sequence_turn_index=int(scene_map.get("sequence_turn_index") or identity.get("sequence_turn_index") or 0),
+        dialogue_development=_d(
+            scene_map.get("dialogue_development")
+            or metadata.get("dialogue_development")
+            or _d(blueprint.get("dialogue_development"))
+        ),
     )
     presented_blocks = attach_presentation_signals(canonical_blocks, scene_presentation=presentation)
 
@@ -698,6 +731,13 @@ def build_scene_presentation(
         "order": order,
         "presentation": presentation,
         "identity": deepcopy(identity),
+        "user_id": _s(identity.get("user_id")),
+        "conversation_id": _s(identity.get("conversation_id")),
+        "dialogue_development": deepcopy(
+            scene_map.get("dialogue_development")
+            or metadata.get("dialogue_development")
+            or _d(blueprint.get("dialogue_development"))
+        ),
         "dialogue_sequence_id": _s(identity.get("dialogue_sequence_id") or scene_map.get("dialogue_sequence_id")),
         "sequence_turn_index": int(scene_map.get("sequence_turn_index") or identity.get("sequence_turn_index") or 0),
     }
