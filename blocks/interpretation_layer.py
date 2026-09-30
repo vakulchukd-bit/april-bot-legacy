@@ -2270,6 +2270,19 @@ class DialogueEnvironmentEngine:
             return subject
         answer = cls._text(previous_april)
         if answer:
+            # Concrete answer patterns must outrank polite discourse words.
+            # This fixes "Правильно! Это ёлка." -> entity="ёлка".
+            answer_patterns = (
+                r"(?:^|[.!?]\s*)это\s+([^.!?]+)",
+                r"(?:правильн(?:ый|о)|верно)\s*!?\s*это\s+([^.!?]+)",
+                r"(?:ответ|правильный ответ)\s*[:—-]\s*([^.!?]+)",
+            )
+            for pattern in answer_patterns:
+                match = re.search(pattern, answer, flags=re.IGNORECASE)
+                if match:
+                    value = cls._text(match.group(1)).strip(" ,:;—-\t")
+                    if value and not cls._reference_led_subject(value):
+                        return value[:180]
             matches = re.findall(
                 r"\b[А-ЯЁA-Z][\wЁёЇїІіЄєҐґ-]+(?:\s+[А-ЯЁA-Z][\wЁёЇїІіЄєҐґ-]+){0,3}\b",
                 answer,
@@ -2298,7 +2311,20 @@ class DialogueEnvironmentEngine:
     @classmethod
     def _memory_query(cls, text: str) -> bool:
         low = cls._low(text)
-        return bool(cls._identity_query(text) or any(x in low for x in cls._MEMORY_RECALL))
+        history_query = bool(
+            re.search(r"\b(?:последн\w*|недавн\w*)\b", low)
+            and re.search(r"\b(?:диалог\w*|разговор\w*|обсуждени\w*)\b", low)
+        )
+        history_list_request = bool(
+            re.search(r"(?:что|какие|какое|какую).*(?:мы|ты|я).*(?:обсуждал|говорил|спрашивал|делал)", low)
+            and any(x in low for x in ("перечисли", "пронумеруй", "последн", "недавн", "диалог", "разговор"))
+        )
+        return bool(
+            cls._identity_query(text)
+            or any(x in low for x in cls._MEMORY_RECALL)
+            or history_query
+            or history_list_request
+        )
 
     @classmethod
     def _visual_reference_query(cls, text: str) -> bool:
@@ -3100,6 +3126,394 @@ class CurrentTurnEngine(InterpretationEngineBase):
         }
 
 
+class DialogueBranchIndexEngine(InterpretationEngineBase):
+    """Build a compact, user-bound index of dialogue branches.
+
+    The index is derived from the durable seven-day dialogue records and the
+    current hot sequence.  It is not a second memory store and it never becomes
+    provider context by itself.  Its job is to answer one question before the
+    rest of interpretation runs:
+
+        "Which authenticated branch does this turn belong to, if any?"
+
+    A branch is a stable semantic sequence identified by ``sequence_id``.  The
+    current active sequence is only one candidate; an old branch can be resumed
+    when the current turn explicitly points back to it ("вернёмся к схеме", "а
+    что там с ёлкой", etc.) or when the turn is a strong semantic continuation of
+    that branch.
+    """
+
+    NAME = "DialogueBranchIndexEngine"
+    VERSION = "dialogue_branch_index_v1_user_bound"
+    MAX_BRANCHES = 24
+    MAX_RECORDS_PER_BRANCH = 48
+    RESUME_MARKERS = (
+        "вернись к", "вернемся к", "вернёмся к", "возвратимся к",
+        "вернуться к", "вернёмся", "вернемся", "давай обратно к",
+        "снова к", "опять к", "продолжим про", "продолжить про",
+        "к той теме", "к прошлой теме", "по той теме", "про ту схему",
+        "про ту машину", "про ту ёлку", "про ту картинку", "про ту тему",
+    )
+    LOOKBACK_MARKERS = (
+        "там", "ту тему", "той теме", "тот разговор", "прошлый разговор",
+        "раньше", "до этого", "мы обсуждали", "мы говорили", "я спрашивал",
+        "я спрашивала", "ты говорила", "ты говорил", "как там",
+    )
+    # Lightweight morphology for branch routing. This is intentionally small:
+    # it normalizes common Russian inflectional endings so "ёлка" and
+    # "ёлкой/ёлку/ёлке" resolve to the same branch without adding a
+    # heavyweight NLP dependency to the hot path.
+    RU_SUFFIXES = (
+        "иями", "ями", "ами", "ого", "ему", "ому", "ыми", "ими",
+        "ов", "ев", "ей", "ой", "ах", "ях", "ам", "ям", "ом", "ем",
+        "ым", "им", "ою", "ею", "ую", "юю", "ая", "яя", "ое",
+        "ее", "ые", "ие", "ую", "юю", "ою", "ею", "ы", "и",
+        "а", "я", "у", "ю", "о", "е", "ь",
+    )
+
+    @classmethod
+    def _lexical_forms(cls, text: str) -> set[str]:
+        forms: set[str] = set()
+        for token in cls._tokens(text):
+            token = token.replace("ё", "е")
+            if len(token) < 3:
+                continue
+            forms.add(token)
+            for suffix in cls.RU_SUFFIXES:
+                if token.endswith(suffix) and len(token) - len(suffix) >= 3:
+                    forms.add(token[: -len(suffix)])
+                    break
+        return forms - {x.replace("ё", "е") for x in cls.STOPWORDS}
+
+    STOPWORDS = {
+        "а", "и", "но", "да", "нет", "это", "этот", "эта", "эту", "это", "тот", "та", "те",
+        "там", "здесь", "теперь", "тогда", "сейчас", "дальше", "потом", "уже", "ещё", "еще",
+        "про", "об", "о", "по", "к", "ко", "из", "от", "для", "на", "в", "во", "с", "со",
+        "как", "что", "кто", "где", "когда", "почему", "зачем", "сколько", "какой", "какая",
+        "какое", "какие", "чем", "можешь", "можно", "давай", "продолжим", "вернись", "вернемся",
+        "вернёмся", "нарисуй", "покажи", "создай", "сделай", "напиши", "расскажи", "объясни",
+        "опиши", "проверь", "сравни", "найди", "скажи", "дай", "построй", "помнишь", "вспомни",
+        "напомни", "правильно", "неправильно", "верно", "точно",
+    }
+    INVALID_ANCHORS = STOPWORDS | {
+        "подключите", "подключить", "подключи", "подключение", "напиши",
+        "напишите", "скажи", "расскажи", "покажи", "сделай", "создай",
+        "нарисуй", "объясни", "опиши", "не", "доброе", "утро",
+    }
+
+    @classmethod
+    def _scope(cls, state: dict[str, Any]) -> dict[str, str]:
+        seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+        return {
+            "user_id": cls._text(state.get("user_id") or seq.get("user_id")),
+            "conversation_id": cls._text(state.get("conversation_id") or seq.get("conversation_id")),
+            "dialogue_sequence_id": cls._text(seq.get("sequence_id") or state.get("dialogue_sequence_id")),
+        }
+
+    @classmethod
+    def _source_items(cls, state: dict[str, Any], history: list[Any]) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        if isinstance(history, list):
+            items.extend(x for x in history if isinstance(x, dict))
+
+        seq = state.get("active_dialogue_sequence")
+        if isinstance(seq, dict) and seq:
+            items.append(seq)
+
+        timeline = state.get("memory_timeline")
+        if isinstance(timeline, dict):
+            for key in sorted(timeline.keys(), reverse=True):
+                day = timeline.get(key)
+                if not isinstance(day, dict):
+                    continue
+                pairs = day.get("dialog_pairs")
+                if isinstance(pairs, list):
+                    items.extend(x for x in pairs if isinstance(x, dict))
+
+        for key in ("active_visual_scene", "current_visual_scene", "scene_state", "active_scene"):
+            value = state.get(key)
+            if isinstance(value, dict) and value:
+                items.append(value)
+        return items
+
+    @classmethod
+    def _pair(cls, item: dict[str, Any]) -> tuple[str, str]:
+        user = item.get("user")
+        april = item.get("april") or item.get("assistant")
+        if isinstance(user, dict):
+            user = user.get("text") or user.get("content") or user.get("answer") or user.get("user_request")
+        if isinstance(april, dict):
+            april = april.get("answer") or april.get("content") or april.get("summary") or april.get("april_answer")
+        user = cls._text(user or item.get("user_request") or item.get("last_user_request"))
+        april = cls._text(april or item.get("april_answer") or item.get("last_april_answer"))
+        return user, april
+
+    @classmethod
+    def _subject_from_answer(cls, text: str) -> str:
+        text = cls._text(text)
+        if not text:
+            return ""
+        patterns = (
+            r"(?:^|[.!?]\s*)это\s+([^.!?]+)",
+            r"(?:правильн(?:ый|о)|верно)\s*!?\s*это\s+([^.!?]+)",
+            r"ответ\s*[:—-]\s*([^.!?]+)",
+            r"правильный ответ\s*[:—-]\s*([^.!?]+)",
+        )
+        for pattern in patterns:
+            m = re.search(pattern, text, flags=re.IGNORECASE)
+            if m:
+                value = cls._text(m.group(1)).strip(" ,:;—-\t")
+                if value and len(value) <= 180:
+                    return value
+        return ""
+
+    @classmethod
+    def _candidate_entity(cls, user: str, april: str, raw: dict[str, Any]) -> str:
+        for key in ("canonical_entity", "active_entity", "entity", "current_entity", "object"):
+            value = cls._text(raw.get(key))
+            if value and value.lower() not in cls.INVALID_ANCHORS:
+                return value[:180]
+
+        # Direct topic/object in the user's command.
+        subject = DialogueEnvironmentEngine._subject_from_current(user)
+        if subject and not DialogueEnvironmentEngine._reference_led_subject(subject):
+            return cls._text(subject)[:180]
+
+        # Short answer/result subjects, e.g. "Ёлка" or "Да, это ёлка".
+        answer_subject = cls._subject_from_answer(april)
+        if answer_subject:
+            return answer_subject[:180]
+
+        # Single lexical noun-like user answers are useful branch anchors.
+        tokens = cls._tokens(user)
+        if 1 <= len(tokens) <= 3 and tokens:
+            joined = cls._text(user)
+            if not any(tok in cls.STOPWORDS for tok in tokens) and len(joined) <= 80:
+                return joined[:180]
+        return ""
+
+    @classmethod
+    def _topic(cls, user: str, april: str, raw: dict[str, Any]) -> str:
+        for key in ("canonical_topic", "topic", "sequence_topic", "active_topic"):
+            value = cls._text(raw.get(key))
+            if value and value.lower() not in cls.INVALID_ANCHORS and value.lower() not in {"вопрос", "ответ", "тема"}:
+                return value[:180]
+        entity = cls._candidate_entity(user, april, raw)
+        return entity or cls._text(user or april)[:180]
+
+    @classmethod
+    def _record(cls, item: dict[str, Any]) -> dict[str, Any]:
+        user, april = cls._pair(item)
+        return {
+            "user": user,
+            "april": april,
+            "sequence_id": cls._text(item.get("sequence_id") or item.get("dialogue_sequence_id")),
+            "scene_id": cls._text(item.get("scene_id") or item.get("visual_scene_id") or item.get("scene_contract_id")),
+            "topic": cls._topic(user, april, item),
+            "entity": cls._candidate_entity(user, april, item),
+            "goal": cls._text(item.get("goal") or item.get("active_goal"))[:160],
+            "turn_index": item.get("sequence_turn_index") or item.get("turn_index") or item.get("turn_id"),
+            "created_at": item.get("created_at") or item.get("timestamp") or item.get("updated_at"),
+            "active_task": deepcopy(item.get("interactive_task_state") or item.get("active_task") or item.get("open_task") or {}),
+        }
+
+    @classmethod
+    def _score(cls, query: str, branch: dict[str, Any]) -> float:
+        low = cls._low(query)
+        q_forms = cls._lexical_forms(query)
+        q_tokens = set(cls._tokens(query)) - cls.STOPWORDS
+        if not q_forms:
+            return 0.0
+        candidates = []
+        for key in ("topic", "entity", "last_user_request", "last_april_answer"):
+            candidates.append(cls._text(branch.get(key)))
+        for record in list(branch.get("records") or [])[-6:]:
+            candidates.extend((
+                cls._text(record.get("user")),
+                cls._text(record.get("april")),
+                cls._text(record.get("topic")),
+                cls._text(record.get("entity")),
+            ))
+        best = 0.0
+        best_exact = False
+        for value in candidates:
+            if not value:
+                continue
+            v_forms = cls._lexical_forms(value)
+            if not v_forms:
+                continue
+            overlap = len(q_forms & v_forms) / max(1, min(len(q_forms), len(v_forms)))
+            phrase = 0.18 if any(form in cls._lexical_forms(cls._text(branch.get("canonical_entity"))) for form in q_forms if form) else 0.0
+            best_exact = best_exact or bool(q_tokens & set(cls._tokens(value)))
+            best = max(best, overlap + phrase)
+        marker_boost = 0.25 if any(marker in low for marker in cls.RESUME_MARKERS) else 0.0
+        lookback_boost = 0.14 if any(marker in low for marker in cls.LOOKBACK_MARKERS) else 0.0
+        lexical_boost = 0.10 if best_exact else 0.0
+        return min(1.0, best + marker_boost + lookback_boost + lexical_boost)
+
+    @classmethod
+    def _build_branches(cls, state: dict[str, Any], history: list[Any], scope: dict[str, str]) -> list[dict[str, Any]]:
+        grouped: dict[str, dict[str, Any]] = {}
+        active_seq = scope.get("dialogue_sequence_id")
+        now = time.time()
+        for raw in cls._source_items(state, history):
+            user_id = cls._text(raw.get("user_id") or scope.get("user_id"))
+            conversation_id = cls._text(raw.get("conversation_id") or scope.get("conversation_id"))
+            if scope.get("user_id") and user_id and user_id != scope["user_id"]:
+                continue
+            if scope.get("conversation_id") and conversation_id and conversation_id != scope["conversation_id"]:
+                continue
+            rec = cls._record(raw)
+            seq = rec["sequence_id"]
+            if not seq:
+                continue
+            branch = grouped.setdefault(seq, {
+                "branch_id": seq,
+                "sequence_id": seq,
+                "user_id": scope.get("user_id") or user_id,
+                "conversation_id": scope.get("conversation_id") or conversation_id,
+                "topic": rec["topic"],
+                "canonical_entity": rec["entity"],
+                "goal": rec["goal"],
+                "records": [],
+                "turn_count": 0,
+                "last_turn_at": None,
+                "last_user_request": "",
+                "last_april_answer": "",
+                "active": seq == active_seq,
+                "status": "ACTIVE" if seq == active_seq else "DORMANT",
+            })
+            # More explicit semantics win over generic placeholders.
+            if rec["topic"] and rec["topic"].lower() not in {"вопрос", "ответ", "тема", "правильно"}:
+                branch["topic"] = rec["topic"]
+            if rec["entity"] and rec["entity"].lower() not in {"вопрос", "ответ", "правильно"}:
+                branch["canonical_entity"] = rec["entity"]
+            if rec["goal"]:
+                branch["goal"] = rec["goal"]
+            branch["records"].append(rec)
+
+        branches = []
+        for branch in grouped.values():
+            branch["records"] = branch["records"][-cls.MAX_RECORDS_PER_BRANCH:]
+            branch["turn_count"] = len(branch["records"])
+            last = branch["records"][-1] if branch["records"] else {}
+            branch["last_user_request"] = cls._text(last.get("user"))
+            branch["last_april_answer"] = cls._text(last.get("april"))
+            branch["last_turn_at"] = last.get("created_at")
+            stamp = last.get("created_at")
+            try:
+                age = max(0.0, now - float(stamp)) if stamp not in (None, "") else None
+            except Exception:
+                age = None
+            branch["age_seconds"] = age
+            # Prevent dead branches from winning indefinitely without a signal.
+            branch["base_weight"] = 1.0 if branch["active"] else 0.82
+            branches.append(branch)
+
+        branches.sort(key=lambda x: (bool(x.get("active")), x.get("last_turn_at") or 0), reverse=True)
+        return branches[: cls.MAX_BRANCHES]
+
+    def analyze(self, text: str, *, state: dict[str, Any], history: list[Any], identity: dict[str, Any]) -> dict[str, Any]:
+        state_scope = self._scope(state)
+        identity_scope = identity.get("scope") if isinstance(identity, dict) else {}
+        identity_scope = identity_scope if isinstance(identity_scope, dict) else {}
+        # Identity scope is authoritative for user/conversation binding, while the
+        # hot dialogue sequence may only exist in runtime state. Merge both instead
+        # of letting an incomplete identity scope erase the active sequence id.
+        scope = {
+            "user_id": self._text(identity_scope.get("user_id") or state_scope.get("user_id")),
+            "conversation_id": self._text(identity_scope.get("conversation_id") or state_scope.get("conversation_id")),
+            "dialogue_sequence_id": self._text(identity_scope.get("dialogue_sequence_id") or state_scope.get("dialogue_sequence_id")),
+        }
+        branches = self._build_branches(state, history, scope)
+        current_seq = self._text(scope.get("dialogue_sequence_id"))
+        low = self._low(text)
+        explicit_resume = any(marker in low for marker in self.RESUME_MARKERS)
+        lookback = any(marker in low for marker in self.LOOKBACK_MARKERS)
+
+        scored = []
+        for branch in branches:
+            score = self._score(text, branch)
+            if branch.get("active"):
+                score += 0.08
+            branch_view = {
+                "branch_id": branch.get("branch_id"),
+                "sequence_id": branch.get("sequence_id"),
+                "topic": branch.get("topic"),
+                "canonical_entity": branch.get("canonical_entity"),
+                "goal": branch.get("goal"),
+                "turn_count": branch.get("turn_count"),
+                "last_user_request": branch.get("last_user_request"),
+                "last_april_answer": branch.get("last_april_answer"),
+                "last_turn_at": branch.get("last_turn_at"),
+                "active_task": deepcopy(branch.get("active_task") or {}),
+                "active": bool(branch.get("active")),
+                "status": branch.get("status"),
+            }
+            scored.append({"branch": branch_view, "score": round(min(1.0, score), 4)})
+        scored.sort(key=lambda x: x["score"], reverse=True)
+
+        selected = scored[0] if scored else None
+        target = selected["branch"] if selected else {}
+        # Pronoun/deictic turns such as "нарисуй её" may have no useful lexical
+        # overlap. In that case the authenticated active branch remains the sole
+        # candidate for entity inheritance, but it is never promoted to a branch
+        # resume unless there is an explicit historical reference.
+        deictic_turn = bool(re.search(r"\b(?:это|этот|эта|эту|этой|он|она|оно|они|его|ее|её|тот|та|там|этим|этой)\b", low))
+        active_branch = next((item["branch"] for item in scored if item["branch"].get("active")), {})
+        if (not target or (selected and selected["score"] < 0.30)) and active_branch and deictic_turn:
+            target = active_branch
+            selected = {"branch": active_branch, "score": 0.30}
+        target_seq = self._text(target.get("sequence_id"))
+        strong_target = bool(selected and selected["score"] >= (0.45 if explicit_resume else 0.62 if lookback else 0.72))
+        resume_candidate = bool(
+            strong_target
+            and target_seq
+            and target_seq != current_seq
+            and (explicit_resume or lookback)
+        )
+        # A direct branch reference can also be expressed with a named entity
+        # without a literal "вернись": "а что там с ёлкой?".
+        entity_resume = bool(
+            strong_target
+            and target_seq
+            and target_seq != current_seq
+            and not explicit_resume
+            and not current_seq == target_seq
+            and self._text(target.get("canonical_entity"))
+            and self._score(text, target) >= 0.88
+        )
+        resume = resume_candidate or entity_resume
+        active_branch_view = next((
+            item["branch"] for item in scored if item["branch"].get("active")
+        ), {})
+
+        return {
+            "engine": self.NAME,
+            "version": self.VERSION,
+            "scope": scope,
+            "index_size": len(branches),
+            "active_sequence_id": current_seq,
+            "branches": scored[:12],
+            "selected_branch": target if strong_target else {},
+            "active_branch": active_branch_view,
+            "selected_score": float(selected["score"] if strong_target and selected else 0.0),
+            "explicit_resume": explicit_resume,
+            "lookback_signal": lookback,
+            "resume_candidate": resume,
+            "target_sequence_id": target_seq if resume else "",
+            "target_branch_id": target.get("branch_id") if resume else "",
+            "target_topic": target.get("topic") if resume else "",
+            "target_entity": target.get("canonical_entity") if resume else "",
+            "target_last_user_request": target.get("last_user_request") if resume else "",
+            "target_last_april_answer": target.get("last_april_answer") if resume else "",
+            "target_goal": target.get("goal") if resume else "",
+            "resolution_mode": "RESUME_BRANCH" if resume else "ACTIVE_BRANCH" if target.get("active") else "NO_BRANCH_RESOLUTION",
+            "historical_branch_as_evidence_only": not resume,
+            "confidence": 0.98 if resume else 0.86 if strong_target else 0.70,
+        }
+
+
 class DialogueRelationEngine(InterpretationEngineBase):
     NAME = "DialogueRelationEngine"
     VERSION = "dialogue_relation_v4_synced"
@@ -3112,7 +3526,9 @@ class DialogueRelationEngine(InterpretationEngineBase):
         history: list[Any],
         semantic: dict[str, Any],
         identity: dict[str, Any],
+        branch_index: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        branch_index = branch_index if isinstance(branch_index, dict) else {}
         env = DIALOGUE_ENVIRONMENT_ENGINE.build(text, state, history)
         relation = str(env.get("relation") or "NEW").upper()
         turn_relation = str(env.get("turn_relation") or "").upper()
@@ -3137,10 +3553,62 @@ class DialogueRelationEngine(InterpretationEngineBase):
             or "помнишь" in low
         )
         explicit_new = DIALOGUE_ENVIRONMENT_ENGINE._explicit_new_topic(current)
+        branch_resume = bool(branch_index.get("resume_candidate"))
+        branch_target = branch_index.get("selected_branch") if isinstance(branch_index.get("selected_branch"), dict) else {}
+        active_branch = branch_index.get("active_branch") if isinstance(branch_index.get("active_branch"), dict) else {}
+        active_branch_deictic = bool(
+            active_branch
+            and re.search(
+                r"\b(?:это|этот|эта|эту|этой|этим|он|она|оно|они|его|ее|её|тот|та|те|там|здесь)\b",
+                low,
+            )
+        )
 
         if explicit_new:
             relation = "NEW"
             turn_relation = "NEW_TOPIC"
+        elif explicit_recall and not branch_index.get("explicit_resume"):
+            relation = "RECALL"
+            turn_relation = "REFERENCE_OLD_TOPIC"
+        elif branch_resume:
+            relation = "CONTINUE"
+            turn_relation = "RESUME_BRANCH"
+            previous_user = self._text(branch_index.get("target_last_user_request")) or previous_user
+            previous_april = self._text(branch_index.get("target_last_april_answer")) or previous_april
+            env = dict(env)
+            env.update({
+                "relation": "CONTINUE",
+                "turn_relation": "RESUME_BRANCH",
+                "context_dependency": "branch_resume",
+                "topic_branch": "resume",
+                "active_entity": self._text(branch_index.get("target_entity")),
+                "current_topic": self._text(branch_index.get("target_topic")) or self._text(env.get("current_topic")),
+                "sequence_id": self._text(branch_index.get("target_sequence_id")),
+                "target_sequence_id": self._text(branch_index.get("target_sequence_id")),
+                "target_branch_id": self._text(branch_index.get("target_branch_id")),
+                "target_branch": deepcopy(branch_target),
+                "historical_memory_allowed": False,
+            })
+        elif active_branch_deictic:
+            # A deictic follow-up ("нарисуй её", "покажи это", "объясни тот")
+            # belongs to the authenticated active branch even when the hot scene
+            # has incomplete previous-pair metadata. The branch index supplies the
+            # last stable pair; no historical branch is activated.
+            relation = "CONTINUE"
+            turn_relation = "CONTINUE_TOPIC"
+            previous_user = self._text(active_branch.get("last_user_request")) or previous_user
+            previous_april = self._text(active_branch.get("last_april_answer")) or previous_april
+            env = dict(env)
+            env.update({
+                "relation": "CONTINUE",
+                "turn_relation": "CONTINUE_TOPIC",
+                "context_dependency": "active_dialogue_sequence",
+                "topic_branch": "active",
+                "active_entity": self._text(active_branch.get("canonical_entity")),
+                "current_topic": self._text(active_branch.get("topic")) or self._text(env.get("current_topic")),
+                "sequence_id": self._text(active_branch.get("sequence_id")),
+                "historical_memory_allowed": False,
+            })
         elif visual_reference and previous_april:
             relation = "CONTINUE"
             turn_relation = "VISUAL_REFERENCE"
@@ -3187,6 +3655,10 @@ class DialogueRelationEngine(InterpretationEngineBase):
             "task_active": task_active,
             "context_dependency": env.get("context_dependency") or ("continuation" if relation == "CONTINUE" else "new_topic"),
             "environment": env,
+            "branch_index": deepcopy(branch_index),
+            "target_sequence_id": self._text(branch_index.get("target_sequence_id") if branch_resume else ""),
+            "target_branch_id": self._text(branch_index.get("target_branch_id") if branch_resume else ""),
+            "target_branch": deepcopy(branch_target) if branch_resume else {},
             "signals": {
                 "confirmation": confirmation,
                 "rejection": rejection,
@@ -3214,8 +3686,10 @@ class TopicDynamicsEngine(InterpretationEngineBase):
         relation: dict[str, Any],
         semantic: dict[str, Any],
         state: dict[str, Any],
+        branch_index: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         env = relation.get("environment") if isinstance(relation.get("environment"), dict) else {}
+        branch_index = branch_index if isinstance(branch_index, dict) else {}
         task = relation.get("active_task") if isinstance(relation.get("active_task"), dict) else {}
         previous_topic = self._text(
             env.get("current_topic")
@@ -3225,7 +3699,10 @@ class TopicDynamicsEngine(InterpretationEngineBase):
         task_topic = self._text(task.get("topic"))
         current = self._text(text)
 
-        if relation.get("relation") == "RECALL":
+        if relation.get("turn_relation") == "RESUME_BRANCH" and branch_index.get("resume_candidate"):
+            branch_action = "resume_branch"
+            topic = self._text(branch_index.get("target_topic") or env.get("current_topic") or current)
+        elif relation.get("relation") == "RECALL":
             branch_action = "recall_branch"
             topic = task_topic or self._text(env.get("current_topic")) or current
         elif relation.get("relation") == "CONTINUE":
@@ -3484,11 +3961,26 @@ class EntityResolutionEngine(InterpretationEngineBase):
         task: dict[str, Any],
         semantic: dict[str, Any],
         state: dict[str, Any],
+        branch_index: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         current = self._text(text)
         candidates: list[str] = []
         relation_value = self._text(relation.get("relation")).upper()
         env = relation.get("environment") if isinstance(relation.get("environment"), dict) else {}
+        branch_index = branch_index if isinstance(branch_index, dict) else {}
+        target_branch = branch_index.get("selected_branch") if isinstance(branch_index.get("selected_branch"), dict) else {}
+        active_branch = branch_index.get("active_branch") if isinstance(branch_index.get("active_branch"), dict) else {}
+        target_entity = self._text(
+            branch_index.get("target_entity")
+            or (target_branch.get("canonical_entity") if target_branch.get("active") else "")
+            or (active_branch.get("canonical_entity") if relation_value == "CONTINUE" else "")
+        )
+        target_topic = self._text(
+            branch_index.get("target_topic")
+            or target_branch.get("topic")
+            or (active_branch.get("topic") if relation_value == "CONTINUE" else "")
+        )
+        branch_resume = bool(branch_index.get("resume_candidate"))
         current_subject = DIALOGUE_ENVIRONMENT_ENGINE._subject_from_current(current)
         current_subject_is_reference = DIALOGUE_ENVIRONMENT_ENGINE._reference_led_subject(current_subject)
         command_heads = {
@@ -3513,6 +4005,8 @@ class EntityResolutionEngine(InterpretationEngineBase):
             return item
 
         # Environment owns the stable subject; legacy semantic fields are only evidence.
+        if branch_resume and target_entity:
+            candidates.insert(0, target_entity)
         if relation_value == "CONTINUE":
             env_entity = usable(env.get("active_entity"))
             if env_entity and not DIALOGUE_ENVIRONMENT_ENGINE._reference_led_subject(env_entity):
@@ -3652,7 +4146,9 @@ class ReferenceResolutionEngine(InterpretationEngineBase):
         entity: dict[str, Any],
         topic: dict[str, Any],
         task: dict[str, Any],
+        branch_index: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        branch_index = branch_index if isinstance(branch_index, dict) else {}
         low = self._low(text)
         signals = [cue for cue in self.DEICTIC if cue in low]
         eligible = (
@@ -3666,7 +4162,12 @@ class ReferenceResolutionEngine(InterpretationEngineBase):
             )
         )
 
+        target_branch = branch_index.get("selected_branch") if isinstance(branch_index.get("selected_branch"), dict) else {}
+        branch_entity = self._text(branch_index.get("target_entity") or target_branch.get("canonical_entity"))
+        branch_topic = self._text(branch_index.get("target_topic") or target_branch.get("topic"))
         candidates = [
+            branch_entity,
+            branch_topic,
             self._text(entity.get("active_entity")),
             self._text(task.get("candidate_answer")),
             self._text(task.get("topic")),
@@ -3685,6 +4186,12 @@ class ReferenceResolutionEngine(InterpretationEngineBase):
             "eligible_for_resolution": eligible,
             "resolved_reference": resolved[:180],
             "candidate_antecedents": candidates[:10],
+            "branch_target": {
+                "branch_id": self._text(branch_index.get("target_branch_id")),
+                "sequence_id": self._text(branch_index.get("target_sequence_id")),
+                "topic": branch_topic,
+                "entity": branch_entity,
+            },
             "resolution_policy": (
                 "active_task_then_current_topic_then_immediate_pair"
                 if eligible else "no_reference_resolution"
@@ -4890,8 +5397,14 @@ class DecisionArbitrationEngine(InterpretationEngineBase):
             canonical = "NEW"
             reason = "self_contained_current_turn"
 
+        # An explicit branch resume is a higher-order discourse act than a
+        # stale interactive task. The selected branch must own the turn, otherwise
+        # an old question (for example a forgotten name prompt) can swallow the
+        # resumed topic.
+        if canonical == "CONTINUE" and (turn == "RESUME_BRANCH" or relation.get("target_branch_id") and relation.get("branch_index", {}).get("resume_candidate")):
+            semantic_relation = "RESUME_BRANCH"
         # Active task answers always get task-level semantic ownership.
-        if canonical == "CONTINUE" and task.get("active"):
+        elif canonical == "CONTINUE" and task.get("active"):
             if turn == "TASK_ANSWER":
                 semantic_relation = "TASK_RESPONSE"
             elif turn == "TASK_CONFIRMATION":
@@ -4952,6 +5465,10 @@ class DecisionArbitrationEngine(InterpretationEngineBase):
                 "operand_anchor": (history_search or {}).get("operand_anchor", {})
                 if isinstance(history_search, dict) else {},
             },
+            "target_sequence_id": self._text(relation.get("target_sequence_id")),
+            "target_branch_id": self._text(relation.get("target_branch_id")),
+            "target_branch": deepcopy(relation.get("target_branch") if isinstance(relation.get("target_branch"), dict) else {}),
+            "resume_branch": bool(turn == "RESUME_BRANCH"),
             "confidence": 0.97,
         }
 
@@ -5100,7 +5617,13 @@ class CanonicalizationEngine(InterpretationEngineBase):
                 "turn_relation": arbitration.get("turn_relation") or relation.get("turn_relation"),
                 "continuation": relation_value == "CONTINUE",
                 "reference": relation_value == "RECALL",
-                "sequence_id": identity.get("scope", {}).get("dialogue_sequence_id", ""),
+                "sequence_id": self._text(
+                    relation.get("target_sequence_id")
+                    or (relation.get("environment", {}) or {}).get("target_sequence_id")
+                    or identity.get("scope", {}).get("dialogue_sequence_id", "")
+                ),
+                "target_sequence_id": self._text(relation.get("target_sequence_id")),
+                "target_branch_id": self._text(relation.get("target_branch_id")),
                 "previous_user_turn": relation.get("previous_user_turn"),
                 "previous_april_turn": relation.get("previous_april_turn"),
             },
@@ -5130,6 +5653,13 @@ class CanonicalizationEngine(InterpretationEngineBase):
             "representation": representation,
             "response_strategy": strategy,
             "continuation_analysis": continuity,
+            "branch": {
+                "branch_id": self._text(relation.get("target_branch_id") or (relation.get("branch_index") or {}).get("target_branch_id")),
+                "sequence_id": self._text(relation.get("target_sequence_id") or (relation.get("branch_index") or {}).get("target_sequence_id")),
+                "topic": self._text((relation.get("branch_index") or {}).get("target_topic")),
+                "entity": self._text((relation.get("branch_index") or {}).get("target_entity")),
+                "resume": bool(relation.get("turn_relation") == "RESUME_BRANCH"),
+            },
             "consistency": consistency,
             "execution_instruction": execution_instruction,
             "provider_input_policy": {
@@ -5315,11 +5845,21 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
         # hard envelope requires it; it can never replace it with historical text.
         add(required, "CURRENT_REQUEST", raw_request, 1.0, "current_user_turn", True)
 
-        # Compact semantic core is always required; it is the smallest representation
-        # of what Interpretation already understood.
-        add(required, "SEMANTIC_CORE", semantic_core, 0.98, "interpretation_semantic_decision", True, max_depth=3, max_items=8, max_keys=10)
-        add(required, "DIALOGUE_DEVELOPMENT", dialogue_development, 0.965, "single_dialogue_semantic_trajectory", True, max_depth=4, max_items=8, max_keys=14)
-        add(required, "OUTPUT_CONTRACT", output_contract, 0.96, "response_shape_contract", True, max_depth=3, max_items=5, max_keys=8)
+        # NEW topic turns are intentionally minimal: the provider already knows
+        # how to produce MachineResponse JSON from its system contract. Do not ship
+        # prior topic/entity/task state when there is no semantic dependency.
+        # For CONTINUE/RECALL we keep the compact semantic core because the current
+        # request may contain anaphora or omitted operands.
+        if rel != "NEW":
+            add(required, "SEMANTIC_CORE", semantic_core, 0.98, "interpretation_semantic_decision", True, max_depth=3, max_items=8, max_keys=10)
+            if rel == "RECALL":
+                add(required, "DIALOGUE_DEVELOPMENT", dialogue_development, 0.965, "memory_recall_dialogue_connection", True, max_depth=4, max_items=8, max_keys=14)
+            else:
+                # CONTINUATION_INTEREST below is the single compact progression
+                # contract. Keep the verbose development object out of the
+                # provider-required set for CONTINUE.
+                add(optional, "DIALOGUE_DEVELOPMENT", dialogue_development, 0.55, "debug_only_dialogue_trajectory", False, max_depth=3, max_items=5, max_keys=7)
+            add(required, "OUTPUT_CONTRACT", output_contract, 0.96, "response_shape_contract", True, max_depth=3, max_items=5, max_keys=8)
 
         directives = current_turn.get("request_directives") or []
         if directives:
@@ -5339,14 +5879,42 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
             add(required, "ACTIVE_TASK", active_task, 0.97, "active_task_owner", True, max_depth=4, max_items=8, max_keys=12)
 
         if rel == "CONTINUE":
-            add(required, "DIALOGUE_ANCHOR", {
+            branch_index = relation.get("branch_index") if isinstance(relation.get("branch_index"), dict) else {}
+            target_branch = branch_index.get("selected_branch") if isinstance(branch_index.get("selected_branch"), dict) else {}
+            active_branch = branch_index.get("active_branch") if isinstance(branch_index.get("active_branch"), dict) else {}
+            target_sequence_id = self._text(
+                relation.get("target_sequence_id")
+                or (relation.get("environment", {}) or {}).get("target_sequence_id")
+                or branch_index.get("target_sequence_id")
+                or (target_branch.get("sequence_id") if turn_rel == "RESUME_BRANCH" else active_branch.get("sequence_id"))
+            )
+            anchor = {
+                "branch_id": self._text(
+                    relation.get("target_branch_id")
+                    or branch_index.get("target_branch_id")
+                    or target_branch.get("branch_id")
+                    or active_branch.get("branch_id")
+                ),
+                "sequence_id": target_sequence_id,
                 "previous_user_turn": relation.get("previous_user_turn"),
                 "previous_april_turn": relation.get("previous_april_turn"),
                 "topic": active_topic,
                 "entity": active_entity,
-                "turn_relation": history_search.get("recommended_turn_relation") or turn_rel,
-                "sequence_id": relation.get("environment", {}).get("sequence_id") if isinstance(relation.get("environment"), dict) else "",
-            }, 0.99, "immediate_authenticated_dialogue_pair", True, max_depth=3, max_items=5, max_keys=8)
+                "turn_relation": turn_rel or history_search.get("recommended_turn_relation"),
+            }
+            add(required, "DIALOGUE_ANCHOR", anchor, 0.99, "selected_authenticated_branch_anchor", True, max_depth=3, max_items=6, max_keys=9)
+            continuation_interest = {
+                "mode": "RESUME_BRANCH" if turn_rel == "RESUME_BRANCH" else "CONTINUE_BRANCH",
+                "what_user_continues": raw_request,
+                "resolved_entity": active_entity,
+                "active_topic": active_topic,
+                "branch_id": self._text(anchor.get("branch_id") or active_branch.get("branch_id")),
+                "sequence_id": target_sequence_id,
+                "previous_result": self._text((history_search.get("latest_operation_result") or {}).get("value")),
+                "next_step": self._text(continuity.get("next_logical_step")),
+                "avoid_repeat": list(continuity.get("avoid_repeat_content") or [])[:2],
+            }
+            add(required, "CONTINUATION_INTEREST", continuation_interest, 0.988, "current_turn_progression_interest", True, max_depth=3, max_items=6, max_keys=10)
 
             previous_visual = relation.get("previous_visual_attachment") or (relation.get("environment", {}) or {}).get("previous_visual_attachment")
             if isinstance(previous_visual, dict) and previous_visual:
@@ -5526,9 +6094,18 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
             "provider_must_not_reselect_context": True,
             "memory_policy": (
                 "explicit_recall_only" if rel == "RECALL"
-                else "same_authenticated_branch_only" if rel == "CONTINUE"
+                else "selected_authenticated_branch_only" if rel == "CONTINUE"
                 else "disabled"
             ),
+            "branch_index": {
+                "version": self._text((relation.get("branch_index") or {}).get("version") or "dialogue_branch_index_v1_user_bound"),
+                "active_sequence_id": self._text((relation.get("branch_index") or {}).get("active_sequence_id")),
+                "target_sequence_id": self._text((relation.get("branch_index") or {}).get("target_sequence_id")),
+                "target_branch_id": self._text((relation.get("branch_index") or {}).get("target_branch_id")),
+                "active_branch_id": self._text(((relation.get("branch_index") or {}).get("active_branch") or {}).get("branch_id")),
+                "resolution_mode": self._text((relation.get("branch_index") or {}).get("resolution_mode")),
+                "selected_score": float((relation.get("branch_index") or {}).get("selected_score") or 0.0),
+            },
             "required_context": required,
             "optional_context": optional,
             "excluded_context": excluded,
@@ -5560,6 +6137,27 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
             ],
             "budget_policy": "relevance_first_then_progressive_compression",
             "provider_role": "consume_plan_and_answer_current_request",
+            "new_topic_minimal_context": bool(rel == "NEW"),
+            "continuation_interest": (
+                {
+                    "mode": "RESUME_BRANCH" if turn_rel == "RESUME_BRANCH" else "CONTINUE_BRANCH",
+                    "branch_id": self._text(
+                        relation.get("target_branch_id")
+                        or (relation.get("branch_index") or {}).get("target_branch_id")
+                        or ((relation.get("branch_index") or {}).get("active_branch") or {}).get("branch_id")
+                    ),
+                    "sequence_id": self._text(
+                        relation.get("target_sequence_id")
+                        or (relation.get("branch_index") or {}).get("target_sequence_id")
+                        or ((relation.get("branch_index") or {}).get("active_branch") or {}).get("sequence_id")
+                    ),
+                    "topic": active_topic,
+                    "entity": active_entity,
+                    "current_request": raw_request,
+                    "next_step": self._text(continuity.get("next_logical_step")),
+                }
+                if rel == "CONTINUE" else {}
+            ),
             "dialogue_development": {
                 "version": self._text(dialogue_development.get("version") or "dialogue_development_v1_single_route"),
                 "authoritative": True,
@@ -5836,6 +6434,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
     def __init__(self):
         self.identity = IdentityScopeEngine()
         self.current_turn = CurrentTurnEngine()
+        self.branch_index = DialogueBranchIndexEngine()
         self.dialogue = DialogueRelationEngine()
         self.topic = TopicDynamicsEngine()
         self.task = ActiveTaskEngine()
@@ -5877,10 +6476,15 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             text, semantic=semantic, cognition=cognition, state=state, identity=identity
         )
 
+        branch_index = self.branch_index.analyze(
+            text, state=state, history=history, identity=identity
+        )
+
         # The existing environment is a specialized dialogue/task engine. It is
         # consulted here as evidence, then its result is reconciled by arbitration.
         relation = self.dialogue.analyze(
-            text, state=state, history=history, semantic=semantic, identity=identity
+            text, state=state, history=history, semantic=semantic, identity=identity,
+            branch_index=branch_index,
         )
 
         identity_disclosure = relation.get("environment", {}).get("identity_disclosure") if isinstance(relation.get("environment"), dict) else {}
@@ -5902,7 +6506,10 @@ class InterpretationOrchestrator(InterpretationEngineBase):
         relation_with_task["active_task_engine"] = task
         if task.get("active") and isinstance(task.get("task"), dict):
             relation_with_task["active_task"] = task.get("task")
-        topic = self.topic.analyze(text, relation=relation_with_task, semantic=semantic, state=state)
+        topic = self.topic.analyze(
+            text, relation=relation_with_task, semantic=semantic, state=state,
+            branch_index=branch_index,
+        )
 
         # Quantum matrix measurement is an evidence engine. This call is safe:
         # during normal execution QUANTUM_INTERPRETATION_ENGINE already exists.
@@ -5933,10 +6540,12 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             text, semantic_measurement=measurement, relation=relation, intent=intent
         )
         entity = self.entity.analyze(
-            text, relation=relation, topic=topic, task=task, semantic=semantic, state=state
+            text, relation=relation, topic=topic, task=task, semantic=semantic, state=state,
+            branch_index=branch_index,
         )
         reference = self.reference.analyze(
-            text, relation=relation, entity=entity, topic=topic, task=task
+            text, relation=relation, entity=entity, topic=topic, task=task,
+            branch_index=branch_index,
         )
         memory = self.memory.analyze(
             text, relation=relation, topic=topic, identity=identity, state=state
@@ -6063,6 +6672,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             "current_request_raw": current_turn["raw_text"],
             "current_user_request": current_turn["raw_text"],
             "current_turn": current_turn,
+            "dialogue_branch_index": branch_index,
             "authenticated_scope": identity["scope"],
             "identity_scope": identity,
             "user_profile": deepcopy(state.get("user_profile") if isinstance(state.get("user_profile"), dict) else {}),
@@ -6100,7 +6710,13 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             "continuation": arbitration["relation"] == "CONTINUE",
             "reference": arbitration["relation"] == "RECALL",
             "conversation_continuation": bool(identity["scope"].get("conversation_id")),
-            "sequence_id": identity["scope"].get("dialogue_sequence_id", ""),
+            "sequence_id": self._text(
+                arbitration.get("target_sequence_id")
+                or relation.get("target_sequence_id")
+                or identity["scope"].get("dialogue_sequence_id", "")
+            ),
+            "target_sequence_id": self._text(arbitration.get("target_sequence_id") or relation.get("target_sequence_id")),
+            "target_branch_id": self._text(arbitration.get("target_branch_id") or relation.get("target_branch_id")),
             "active_topic": canonical["topic"]["active"],
             "active_entity": canonical["semantic"]["active_entity"],
             "operation": canonical["semantic"]["operation"],
@@ -6125,6 +6741,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             "engine_order": [
                 self.identity.NAME,
                 self.current_turn.NAME,
+                self.branch_index.NAME,
                 self.dialogue.NAME,
                 self.topic.NAME,
                 self.task.NAME,
@@ -6153,6 +6770,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             "engines": {
                 "identity": identity,
                 "current_turn": current_turn,
+                "branch_index": branch_index,
                 "dialogue": relation,
                 "topic": topic,
                 "task": task,
@@ -8148,12 +8766,21 @@ class QuantumInterpretationEngine:
             result["history_dependent_task"] = bool(workspace.get("task_continuation"))
             result["current_turn_authority"] = True
             result["historical_memory_is_evidence_only"] = True
+            result["dialogue_branch_index"] = deepcopy(workspace.get("dialogue_branch_index") or {})
             if workspace.get("conversation_continuation") and (workspace.get("continuation") or workspace.get("reference")):
-                result["continuation_authority"] = "active_dialogue_sequence"
+                result["continuation_authority"] = (
+                    "resumed_dialogue_branch" if workspace.get("target_sequence_id")
+                    else "active_dialogue_sequence"
+                )
                 result["selected_memory_index"] = -1
+                branch_index = workspace.get("dialogue_branch_index") if isinstance(workspace.get("dialogue_branch_index"), dict) else {}
+                selected_branch = branch_index.get("selected_branch") if isinstance(branch_index.get("selected_branch"), dict) else {}
                 result["selected_memory_operand"] = {
-                    "source": "active_dialogue_sequence",
-                    "sequence_id": workspace.get("sequence_id"),
+                    "source": "dialogue_branch_index" if workspace.get("target_sequence_id") else "active_dialogue_sequence",
+                    "sequence_id": workspace.get("target_sequence_id") or workspace.get("sequence_id"),
+                    "branch_id": workspace.get("target_branch_id") or selected_branch.get("branch_id"),
+                    "topic": selected_branch.get("topic") or workspace.get("active_topic"),
+                    "entity": selected_branch.get("canonical_entity") or workspace.get("active_entity"),
                     "user_request": workspace.get("previous_user_turn"),
                     "april_answer": workspace.get("previous_april_turn"),
                     "user_id": (workspace.get("authenticated_scope") or {}).get("user_id", ""),
@@ -8225,6 +8852,9 @@ class QuantumInterpretationEngine:
                 "continuation_authority": result.get("continuation_authority"),
                 "selected_memory_operand": result.get("selected_memory_operand") or {},
                 "selected_memory_index": result.get("selected_memory_index", -1),
+                "target_sequence_id": workspace.get("target_sequence_id") or contract.get("target_sequence_id") or "",
+                "target_branch_id": workspace.get("target_branch_id") or contract.get("target_branch_id") or "",
+                "target_branch": deepcopy((workspace.get("dialogue_branch_index") or {}).get("selected_branch") or contract.get("target_branch") or {}),
             })
             contract["dialogue_obligations"] = final_obligations
             result["dialogue_contract"] = contract
@@ -8250,7 +8880,11 @@ class QuantumInterpretationEngine:
                 "previous_april_turn": workspace.get("previous_april_turn"),
                 "resolved_request": workspace.get("resolved_request"),
                 "sequence_id": workspace.get("sequence_id"),
-                "target_sequence_id": workspace.get("sequence_id"),
+                "target_sequence_id": workspace.get("target_sequence_id") or "",
+                "target_branch_id": workspace.get("target_branch_id") or "",
+                "target_branch": deepcopy((workspace.get("dialogue_branch_index") or {}).get("selected_branch") or {}),
+                "branch_index": deepcopy(workspace.get("dialogue_branch_index") or {}),
+                "turn_relation": workspace.get("turn_relation") or "",
                 "continuation_authority": result.get("continuation_authority"),
                 "continuation_content_analysis": workspace.get("continuation_content_analysis") or {},
             })
