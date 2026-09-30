@@ -681,6 +681,11 @@ class SequentialInterpretation:
         continuation_analysis = continuation_analysis if isinstance(continuation_analysis, dict) else {}
         dialogue_strategy = self.semantic_result.get("dialogue_strategy")
         dialogue_strategy = dialogue_strategy if isinstance(dialogue_strategy, dict) else {}
+        dialogue_development = self.semantic_result.get("dialogue_development")
+        dialogue_development = dialogue_development if isinstance(dialogue_development, dict) else {}
+        if not dialogue_development and isinstance(cognitive_workspace, dict):
+            workspace_development = cognitive_workspace.get("dialogue_development")
+            dialogue_development = workspace_development if isinstance(workspace_development, dict) else {}
         resolved_entity = _text(
             cognitive_workspace.get("active_entity")
             or self.semantic_result.get("resolved_entity")
@@ -732,6 +737,7 @@ class SequentialInterpretation:
             "active_entity": resolved_entity,
             "continuation_content_analysis": continuation_analysis,
             "dialogue_strategy": dialogue_strategy,
+            "dialogue_development": _compact(dialogue_development, max_depth=6, max_items=12),
             "continuation_authority": _text(
                 self.semantic_result.get("continuation_authority")
                 or contract.get("continuation_authority")
@@ -1343,6 +1349,7 @@ class ProcessorScene:
             "last_user_turn": _compact(self.state.get("last_user_turn", "")),
             "last_april_turn": _compact(self.state.get("last_april_turn", "")),
             "canonical_topic": _compact(dialogue.get("canonical_topic")),
+            "dialogue_development": _compact(dialogue_development, max_depth=6, max_items=12),
             "sequence_id": _text(dialogue.get("sequence_id")),
             "target_sequence_id": _text(
                 dialogue.get("sequence_id") or dialogue.get("target_sequence_id")
@@ -1411,6 +1418,7 @@ class ProcessorScene:
             "semantic_understanding": _compact(semantic_result.get("semantic_understanding") or {}, max_depth=5, max_items=10),
             "continuation_content_analysis": _compact(continuation_analysis, max_depth=4, max_items=8),
             "dialogue_strategy": _compact(dialogue_strategy, max_depth=3, max_items=8),
+            "dialogue_development": _compact(dialogue_development, max_depth=6, max_items=12),
             "resolved_request": resolved_request,
             "canonical_topic": _compact(dialogue.get("canonical_topic")),
             "sequence_id": _text(dialogue.get("sequence_id")),
@@ -2119,6 +2127,7 @@ def _set_live_state(state: dict, request: MachineRequest, response: MachineRespo
             "qa_history": task.get("qa_history"),
             "candidate_answer": task.get("candidate_answer"),
         }, max_depth=5, max_items=16) if task else {},
+        "dialogue_development": _compact(dialogue.get("dialogue_development") if isinstance(dialogue, dict) else {}, max_depth=6, max_items=12),
     }
 
     state["dialogue_resolution"] = {
@@ -2158,6 +2167,7 @@ def _set_live_state(state: dict, request: MachineRequest, response: MachineRespo
         "active_entity": _text(state.get("april_active_entity")),
         "dialogue_strategy": _compact(dialogue.get("dialogue_strategy") if isinstance(dialogue, dict) else {}),
         "continuation_content_analysis": _compact(dialogue.get("continuation_content_analysis") if isinstance(dialogue, dict) else {}),
+        "dialogue_development": _compact(dialogue.get("dialogue_development") if isinstance(dialogue, dict) else {}, max_depth=6, max_items=12),
         "scene_id": _text(getattr(contract, "scene_id", "")),
         "render_types": [_text(b.get("type")).lower() for b in blocks if isinstance(b, dict)],
         "current_user_request": _text(request.conversation.get("current_request")),
@@ -2626,6 +2636,22 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
     completion_decision = build_completion_decision(goal_progress, semantic_for_goal)
     response.metadata["goal_progress"] = goal_progress
     response.metadata["completion_decision"] = completion_decision
+
+    # Keep milestone information in the same state used by dialogue interpretation.
+    # This is not a trigger route: it is durable semantic evidence for a later turn.
+    if bool(goal_progress.get("goal_completed") or goal_progress.get("structured_result")):
+        response_scene_id = _text(getattr(contract, "scene_id", ""))
+        semantic_frame = request.dialogue_contract.get("semantic_frame") if isinstance(request.dialogue_contract, dict) else {}
+        state["dialogue_result_event"] = {
+            "turn_id": int(state.get("april_turn_id") or 0) + 1,
+            "scene_id": response_scene_id,
+            "topic": _text(goal_progress.get("topic") or (request.dialogue_contract or {}).get("canonical_topic")),
+            "goal": _text(goal_progress.get("goal") or (request.intent or {}).get("goal")),
+            "representation": _text(semantic_frame.get("representation") if isinstance(semantic_frame, dict) else ""),
+            "summary": _text(response.answer)[:900],
+            "completed": True,
+            "created_at": time.time(),
+        }
 
     _set_live_state(state, request, response, contract)
 
