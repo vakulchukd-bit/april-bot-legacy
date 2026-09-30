@@ -252,6 +252,7 @@ def build_default_state():
             "selected_memory_index": -1,
             "selected_memory_operand": {},
             "selected_memory_record": {},
+            "memory_slider": {},
             "previous_result": {},
             "development_state": {},
             "source_scene_id": "",
@@ -2114,6 +2115,20 @@ def _archive_dialog_pair(state_obj, user_id, user_msg, april_msg):
         "selected_memory_operand": deepcopy(
             state_obj.get("dialogue_resolution", {}).get("selected_memory_operand") or {}
         ),
+        "selected_memory_index": int(
+            state_obj.get("dialogue_resolution", {}).get("selected_memory_index", -1) or -1
+        ),
+        "selected_memory_record": deepcopy(
+            state_obj.get("dialogue_resolution", {}).get("selected_memory_record") or {}
+        ),
+        "memory_slider": deepcopy(
+            state_obj.get("dialogue_resolution", {}).get("memory_slider") or {}
+        ),
+        "semantic_anchor": deepcopy(
+            state_obj.get("semantic_anchor")
+            or _dict(state_obj.get("dialogue_resolution")).get("development_state", {}).get("semantic_anchor")
+            or {}
+        ),
         "continuation_hint": "available_for_reference",
         "created_at": time.time(),
         "expires_after_days": MEMORY_DAYS,
@@ -3375,6 +3390,19 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         semantic_scene_state = deepcopy(metadata["semantic_scene_state"])
 
     identity_scope = _dict(contract.get("authenticated_scope") or _dict(contract.get("metadata")).get("identity_scope"))
+    active_sequence = state_obj.get("active_dialogue_sequence") if isinstance(state_obj.get("active_dialogue_sequence"), dict) else {}
+    contract_selected_memory_index = contract.get("selected_memory_index")
+    try:
+        contract_selected_memory_index = int(contract_selected_memory_index)
+    except (TypeError, ValueError):
+        contract_selected_memory_index = int(
+            _dict(state_obj.get("dialogue_resolution")).get("selected_memory_index", -1) or -1
+        )
+    if not str(identity_scope.get("dialogue_sequence_id") or "").strip():
+        sequence_id = str(active_sequence.get("sequence_id") or contract.get("dialogue_sequence_id") or "").strip()
+        if sequence_id:
+            identity_scope = deepcopy(identity_scope)
+            identity_scope["dialogue_sequence_id"] = sequence_id
     state_obj["active_scene_contract"] = {
         "scene_version": str(contract.get("scene_version") or ""),
         "scene_id": str(contract.get("scene_id") or ""),
@@ -3397,6 +3425,29 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
             contract.get("dialogue_development")
             or _dict(contract.get("metadata")).get("dialogue_development")
             or state_obj.get("dialogue_development")
+            or {}
+        ),
+        "memory_slider": deepcopy(
+            contract.get("memory_slider")
+            or _dict(contract.get("dialogue_state")).get("memory_slider")
+            or _dict(state_obj.get("dialogue_resolution")).get("memory_slider")
+            or {}
+        ),
+        "semantic_anchor": deepcopy(
+            contract.get("semantic_anchor")
+            or _dict(contract.get("metadata")).get("semantic_anchor")
+            or state_obj.get("semantic_anchor")
+            or {}
+        ),
+        "selected_memory_index": contract_selected_memory_index,
+        "selected_memory_operand": deepcopy(
+            contract.get("selected_memory_operand")
+            or _dict(state_obj.get("dialogue_resolution")).get("selected_memory_operand")
+            or {}
+        ),
+        "selected_memory_record": deepcopy(
+            contract.get("selected_memory_record")
+            or _dict(state_obj.get("dialogue_resolution")).get("selected_memory_record")
             or {}
         ),
         "dialogue_state": deepcopy(contract.get("dialogue_state") or {}),
@@ -3529,7 +3580,10 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "conversation_id": str(contract.get("conversation_id") or conversation_id),
         "dialogue_sequence_id": str(contract.get("dialogue_sequence_id") or active_sequence.get("sequence_id") or ""),
         "sequence_turn_index": int(contract.get("sequence_turn_index") or active_sequence.get("turn_count") or 0),
-        "authenticated_scope": deepcopy(contract.get("authenticated_scope") or {"user_id": str(user_id), "conversation_id": conversation_id}),
+        "authenticated_scope": deepcopy(
+            identity_scope
+            or {"user_id": str(user_id), "conversation_id": conversation_id}
+        ),
         "active_task": deepcopy(contract.get("active_task") or state_obj.get("interactive_task_state") or {}),
         "dialogue_obligations": deepcopy(
             contract.get("dialogue_obligations")
@@ -3569,6 +3623,20 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "dialogue_relation": resolved_relation,
         "selected_memory_index": selected_index,
         "selected_memory_operand": deepcopy(selected_operand),
+        "selected_memory_record": deepcopy(
+            _dict(dialogue_resolution).get("selected_memory_record") or {}
+            if isinstance(dialogue_resolution, dict) else {}
+        ),
+        "memory_slider": deepcopy(
+            _dict(dialogue_resolution).get("memory_slider") or {}
+            if isinstance(dialogue_resolution, dict) else {}
+        ),
+        "semantic_anchor": deepcopy(
+            contract.get("semantic_anchor")
+            or _dict(contract.get("metadata")).get("semantic_anchor")
+            or state_obj.get("semantic_anchor")
+            or {}
+        ),
         "interactive_task_state": deepcopy(
             state_obj.get("interactive_task_state")
             or active_sequence.get("interactive_task_state")
@@ -3936,10 +4004,20 @@ def update_dialog_context(user_id, semantic_result):
         else:
             relation = "NEW"
 
+    memory_slider = deepcopy(
+        dialogue_vector.get("memory_slider")
+        or contract.get("memory_slider")
+        or semantic_result.get("memory_slider")
+        or {}
+    )
+    if not isinstance(memory_slider, dict):
+        memory_slider = {}
+
     selected_operand = deepcopy(
         dialogue_vector.get("selected_memory_operand")
         or contract.get("selected_memory_operand")
         or semantic_result.get("selected_memory_operand")
+        or memory_slider.get("selected_memory_operand")
         or {}
     )
     try:
@@ -4016,6 +4094,7 @@ def update_dialog_context(user_id, semantic_result):
         "selected_memory_index": selected_index,
         "selected_memory_operand": selected_operand,
         "selected_memory_record": selected_record,
+        "memory_slider": memory_slider,
         "previous_result": {
             "user": (
                 selected_operand.get("user")
@@ -4083,6 +4162,8 @@ def update_dialog_context(user_id, semantic_result):
         "delta": deepcopy(semantic_result.get("dialogue_delta") or {}),
         "selected_memory_index": selected_index,
         "selected_memory_operand": deepcopy(selected_operand),
+        "selected_memory_record": deepcopy(selected_record),
+        "memory_slider": deepcopy(memory_slider),
         "development_state": deepcopy(development_state),
         "resolved_request": resolved_request,
         "interactive_task_state": deepcopy(interactive_task_state),
