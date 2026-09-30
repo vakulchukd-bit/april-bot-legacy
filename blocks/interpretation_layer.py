@@ -4994,6 +4994,7 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
             "scene_id": scene,
             "turn_id": raw.get("turn_id") or pair.get("turn_id"),
             "semantic_anchor": deepcopy(anchor),
+            "raw": deepcopy(raw),
             "topic": cls._text(
                 anchor.get("topic_root")
                 or raw.get("topic")
@@ -5034,18 +5035,44 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
             )
 
         # Same authenticated sequence records can exist in seven-day memory even
-        # when the transport history only contains a short recent window.
+        # when the transport history contains only a short recent window. The
+        # canonical state schema stores these records inside day_0..day_6 buckets,
+        # so flatten the bucket lists explicitly instead of treating each day
+        # dictionary as one dialogue record.
         memory_raw = state.get("memory_timeline", {})
-        values: list[Any] = []
+        memory_records: list[dict[str, Any]] = []
         if isinstance(memory_raw, dict):
-            for value in memory_raw.values():
-                values.extend(value if isinstance(value, list) else [value])
+            day_items = []
+            for day_index in range(7):
+                day = memory_raw.get(f"day_{day_index}")
+                if not isinstance(day, dict):
+                    continue
+                for field in ("dialog_pairs", "visual_scenes", "topics", "intent_signals", "objects", "A", "B", "C", "D", "E"):
+                    values = day.get(field)
+                    if not isinstance(values, list):
+                        continue
+                    for value in values:
+                        if isinstance(value, dict):
+                            item = dict(value)
+                            item["_memory_day_index"] = day_index
+                            item["_memory_field"] = field
+                            day_items.append(item)
+            memory_records = day_items
         elif isinstance(memory_raw, list):
-            values = list(memory_raw)
+            memory_records = [dict(x) for x in memory_raw if isinstance(x, dict)]
+
         base = len(records)
-        for offset, item in enumerate(reversed(values[-cls.MAX_INDEX_TURNS:])):
-            if not isinstance(item, dict):
-                continue
+        # Preserve chronological order in the underlying timeline. Slider/recall
+        # logic may request RECALL to see cross-branch records; normal CONTINUE
+        # history remains branch-fenced by _branch_records below.
+        memory_records.sort(
+            key=lambda item: (
+                float(item.get("created_at") or item.get("timestamp") or 0.0),
+                int(item.get("sequence_turn_index") or 0),
+                int(item.get("_memory_day_index") or 0),
+            )
+        )
+        for offset, item in enumerate(memory_records[-cls.MAX_INDEX_TURNS:]):
             if scope.get("user_id") and item.get("user_id") and str(item.get("user_id")) != str(scope.get("user_id")):
                 continue
             if scope.get("conversation_id") and item.get("conversation_id") and str(item.get("conversation_id")) != str(scope.get("conversation_id")):
@@ -5053,14 +5080,22 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
             item_seq = cls._sequence_id(item)
             if relation != "RECALL" and sequence_id and item_seq and item_seq != sequence_id:
                 continue
-            user = cls._text(item.get("user_request") or item.get("user") or item.get("text"))
-            assistant = cls._text(item.get("april_answer") or item.get("answer") or item.get("assistant") or item.get("summary"))
+            user = cls._text(item.get("user_request") or item.get("user_meaning") or item.get("user") or item.get("text"))
+            assistant = cls._text(
+                item.get("april_answer")
+                or item.get("april_meaning")
+                or item.get("answer_summary")
+                or item.get("answer")
+                or item.get("assistant")
+                or item.get("summary")
+            )
             if not user and not assistant:
                 continue
             pair = {
                 "user": user,
                 "assistant": assistant,
                 "raw": item,
+                "turn_id": item.get("turn_id"),
                 "visual_attachment": deepcopy(item.get("visual_attachment") or {}),
             }
             records.append(
@@ -5072,6 +5107,7 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
                     scene_id=cls._scene_id(item) or scene_id,
                 )
             )
+
 
         # A compact active-sequence snapshot can contain the prior pair even if
         # neither history nor memory_timeline carries it verbatim.
@@ -5397,6 +5433,8 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
             "history_context_required": needs_history,
             "same_authenticated_branch_first": relation_value == "CONTINUE",
             "seven_day_cross_branch_allowed": relation_value == "RECALL",
+            "semantic_slider_cross_branch_allowed": relation_value in {"CONTINUE", "RECALL"},
+            "memory_slider_enabled": relation_value in {"CONTINUE", "RECALL"},
             "historical_memory_is_evidence_only": True,
             "recommended_turn_relation": recommended,
             "provider_instruction": (
@@ -5415,6 +5453,363 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
                 4,
             ),
         }
+
+
+
+class DialogueMemorySliderEngine(InterpretationEngineBase):
+    """Sequential semantic slider over the authenticated seven-day dialogue.
+
+    The slider is deliberately narrower than generic memory search:
+      * NEW turns never invoke it.
+      * CONTINUE/RECALL turns scan prior USER↔APRIL records chronologically.
+      * Every candidate is measured by the same QuantumInterpretationEngine.
+      * The first sufficiently related candidate becomes a semantic operand.
+    """
+
+    NAME = "DialogueMemorySliderEngine"
+    VERSION = "dialogue_memory_slider_v1_sequential_semantic"
+    MAX_SCAN = 48
+    MAX_SELECTED = 4
+    CONTINUE_THRESHOLD = 0.16
+    RECALL_THRESHOLD = 0.12
+
+    @staticmethod
+    def _scope(identity: dict[str, Any], state: dict[str, Any]) -> dict[str, str]:
+        scope = identity.get("scope") if isinstance(identity, dict) else {}
+        scope = scope if isinstance(scope, dict) else {}
+        user_id = str(scope.get("user_id") or state.get("user_id") or "").strip()
+        conversation_id = str(
+            scope.get("conversation_id") or state.get("conversation_id") or ""
+        ).strip()
+        sequence_id = str(
+            scope.get("dialogue_sequence_id")
+            or ((state.get("active_dialogue_sequence") or {}).get("sequence_id")
+                if isinstance(state.get("active_dialogue_sequence"), dict) else "")
+            or ""
+        ).strip()
+        return {
+            "user_id": user_id,
+            "conversation_id": conversation_id,
+            "dialogue_sequence_id": sequence_id,
+        }
+
+    @classmethod
+    def _record_text(cls, record: dict[str, Any]) -> str:
+        raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+        parts = (
+            record.get("topic"),
+            record.get("entity"),
+            record.get("focus"),
+            record.get("direction"),
+            record.get("user"),
+            record.get("assistant"),
+            raw.get("sequence_topic"),
+            raw.get("summary"),
+            raw.get("user_meaning"),
+            raw.get("april_meaning"),
+            raw.get("answer_summary"),
+        )
+        return cls._text(" ".join(str(x) for x in parts if x))
+
+    @staticmethod
+    def _timestamp(record: dict[str, Any]) -> float:
+        for key in ("created_at", "timestamp", "turn_timestamp", "updated_at"):
+            try:
+                value = float(record.get(key) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if value:
+                return value
+        return 0.0
+
+    @classmethod
+    def _same_scope(cls, record: dict[str, Any], scope: dict[str, str]) -> bool:
+        if scope.get("user_id") and record.get("user_id"):
+            if str(record.get("user_id")) != scope["user_id"]:
+                return False
+        if scope.get("conversation_id") and record.get("conversation_id"):
+            if str(record.get("conversation_id")) != scope["conversation_id"]:
+                return False
+        return True
+
+    @classmethod
+    def _operand(
+        cls,
+        record: dict[str, Any],
+        *,
+        score: float,
+        position: int,
+        semantic_relation: dict[str, Any],
+        relation: str,
+    ) -> dict[str, Any]:
+        raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+        anchor = record.get("semantic_anchor") if isinstance(record.get("semantic_anchor"), dict) else {}
+        obligations = (
+            raw.get("dialogue_obligations")
+            if isinstance(raw.get("dialogue_obligations"), list)
+            else raw.get("obligations")
+            if isinstance(raw.get("obligations"), list)
+            else []
+        )
+        return {
+            "source": "dialogue_memory_slider",
+            "relation": relation,
+            "memory_index": record.get("index", position),
+            "slider_position": position,
+            "score": round(float(score), 6),
+            "sequence_id": cls._text(record.get("sequence_id") or raw.get("sequence_id")),
+            "scene_id": cls._text(record.get("scene_id") or raw.get("scene_id")),
+            "turn_id": record.get("turn_id") or raw.get("turn_id"),
+            "topic": cls._text(anchor.get("topic_root") or record.get("topic") or raw.get("topic") or raw.get("sequence_topic")),
+            "entity": cls._text(anchor.get("primary_entity") or record.get("entity") or raw.get("active_entity") or raw.get("entity")),
+            "focus": cls._text(anchor.get("active_focus") or record.get("focus") or raw.get("active_focus") or raw.get("focus")),
+            "direction": cls._text(anchor.get("direction") or record.get("direction") or raw.get("direction")),
+            "goal": cls._text(anchor.get("goal") or raw.get("goal")),
+            "user_request": cls._text(record.get("user") or raw.get("user_request") or raw.get("user")),
+            "april_answer": cls._text(record.get("assistant") or raw.get("april_answer") or raw.get("assistant") or raw.get("answer") or raw.get("summary")),
+            "summary": cls._text(raw.get("summary") or raw.get("answer_summary") or record.get("assistant")),
+            "semantic_anchor": deepcopy(anchor),
+            "dialogue_obligations": deepcopy(obligations[-8:]),
+            "semantic_relation": deepcopy(semantic_relation),
+            "created_at": cls._timestamp(record),
+        }
+
+    def scan(
+        self,
+        text: str,
+        *,
+        relation: str,
+        identity: dict[str, Any],
+        state: dict[str, Any],
+        history: list[Any],
+        active_topic: str = "",
+        active_entity: str = "",
+        active_goal: str = "",
+        task: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        relation_value = self._text(relation or "NEW").upper()
+        query = self._text(text)
+        result: dict[str, Any] = {
+            "version": self.VERSION,
+            "enabled": relation_value in {"CONTINUE", "RECALL"} and bool(query),
+            "relation": relation_value,
+            "query": query,
+            "scanned": 0,
+            "selected": [],
+            "selected_memory_index": -1,
+            "selected_memory_record": {},
+            "selected_memory_operand": {},
+            "reason": "new_vector" if relation_value == "NEW" else "no_match",
+            "selection_mode": "disabled",
+        }
+        if relation_value not in {"CONTINUE", "RECALL"}:
+            return result
+        if not query:
+            result["reason"] = "empty_request"
+            return result
+
+        scope = self._scope(identity, state)
+        try:
+            # RECALL mode exposes all seven-day dialogue records to the slider.
+            # This is still authenticated/scope-filtered below. The slider itself
+            # decides relevance; provider never searches the raw timeline.
+            records = DialogueHistorySearchEngine._timeline_records(
+                state,
+                identity,
+                history,
+                relation="RECALL",
+            )
+        except Exception as exc:
+            result["reason"] = "timeline_read_error"
+            result["error"] = str(exc)
+            return result
+
+        # De-duplicate by concrete dialogue identity so the same pair from hot
+        # history + day_0 memory does not count twice.
+        deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for record in records:
+            if not isinstance(record, dict) or not self._same_scope(record, scope):
+                continue
+            key = (
+                record.get("turn_id"),
+                record.get("sequence_id"),
+                self._text(record.get("user")),
+                self._text(record.get("assistant")),
+                record.get("scene_id"),
+            )
+            if key in deduped:
+                # Prefer the richer memory record.
+                previous = deduped[key]
+                if len(self._record_text(record)) > len(self._record_text(previous)):
+                    deduped[key] = record
+            else:
+                deduped[key] = record
+        ordered = list(deduped.values())
+        ordered.sort(
+            key=lambda r: (
+                self._timestamp(r),
+                int(r.get("sequence_turn_index") or 0),
+                int(r.get("turn_id") or 0) if str(r.get("turn_id") or "").isdigit() else 0,
+                int(r.get("index") or 0),
+            )
+        )
+        ordered = ordered[-self.MAX_SCAN:]
+
+        candidates: list[dict[str, Any]] = []
+        for position, record in enumerate(ordered):
+            candidate_text = self._record_text(record)
+            if not candidate_text:
+                continue
+
+            user_text = self._text(record.get("user"))
+            assistant_text = self._text(record.get("assistant"))
+            # _timeline_records can expose the active scene snapshot. It is the
+            # current turn, not historical evidence, and must never be selected by
+            # the slider as the answer to the question currently being processed.
+            if user_text and user_text == query and not assistant_text:
+                continue
+            candidate_topic = self._text(record.get("topic"))
+            candidate_entity = self._text(record.get("entity"))
+            candidate_anchor = record.get("semantic_anchor") if isinstance(record.get("semantic_anchor"), dict) else {}
+            candidate_topic = self._text(candidate_anchor.get("topic_root") or candidate_topic)
+            candidate_entity = self._text(candidate_anchor.get("primary_entity") or candidate_entity)
+
+            try:
+                direct = QUANTUM_INTERPRETATION_ENGINE.similarity(query, candidate_text)
+                measurement = QUANTUM_INTERPRETATION_ENGINE.measure(
+                    query,
+                    previous_assistant=assistant_text,
+                    previous_user=user_text,
+                    active_topic=candidate_topic or active_topic,
+                    active_goal=active_goal,
+                )
+                relation_probe = QUANTUM_INTERPRETATION_ENGINE.dialogue(
+                    query,
+                    previous_assistant=assistant_text,
+                    previous_user=user_text,
+                    active_topic=candidate_topic or active_topic,
+                    active_goal=active_goal,
+                    open_task=task if isinstance(task, dict) else None,
+                )
+                topic_probe = QUANTUM_INTERPRETATION_ENGINE.similarity(
+                    query, candidate_topic or active_topic or candidate_text
+                )
+                entity_probe = QUANTUM_INTERPRETATION_ENGINE.similarity(
+                    query, candidate_entity or active_entity or candidate_text
+                )
+            except Exception as exc:
+                # A single candidate must never break the entire dialogue turn.
+                continue
+
+            semantic = float(direct.get("score", 0.0) or 0.0)
+            context_scores = measurement.get("context_scores") if isinstance(measurement, dict) else {}
+            dialogue_scores = relation_probe.get("dialogue") if isinstance(relation_probe, dict) else {}
+            prev_assistant = float(context_scores.get("previous_assistant", 0.0) or 0.0)
+            prev_user = float(context_scores.get("previous_user", 0.0) or 0.0)
+            topic_context = float(context_scores.get("active_topic", 0.0) or 0.0)
+            continuation_probe = float(dialogue_scores.get("continuation_score", 0.0) or 0.0)
+            reference_probe = float(dialogue_scores.get("reference_score", 0.0) or 0.0)
+            same_sequence = bool(
+                scope.get("dialogue_sequence_id")
+                and self._text(record.get("sequence_id")) == scope["dialogue_sequence_id"]
+            )
+            substance = min(
+                1.0,
+                len(self._text(user_text).split()) / 12.0
+                + len(self._text(assistant_text).split()) / 20.0,
+            )
+
+            # Interpretation-first score: the candidate is related when the same
+            # semantic engine sees it as a contextual antecedent, not merely when
+            # it shares a keyword.
+            score = (
+                0.34 * semantic
+                + 0.18 * max(prev_assistant, prev_user, topic_context)
+                + 0.16 * max(continuation_probe, reference_probe)
+                + 0.12 * float(topic_probe.get("score", 0.0) or 0.0)
+                + 0.08 * float(entity_probe.get("score", 0.0) or 0.0)
+                + 0.06 * (1.0 if same_sequence else 0.0)
+                + 0.06 * substance
+            )
+            if relation_value == "RECALL":
+                # Recall can resolve an older branch; chronological order remains
+                # the tie-breaker after semantic evidence.
+                score += min(0.08, 0.08 * ((position + 1) / max(1, len(ordered))))
+            elif same_sequence:
+                score += 0.06
+
+            threshold = (
+                self.RECALL_THRESHOLD
+                if relation_value == "RECALL"
+                else self.CONTINUE_THRESHOLD
+            )
+            if score < threshold:
+                continue
+
+            candidates.append({
+                "score": round(min(1.0, score), 6),
+                "position": position,
+                "record": record,
+                "semantic_relation": relation_probe,
+            })
+
+        # The slider is sequential, not a global top-k search: scan old dialogue
+        # in chronological order and stop at the first candidate that the same
+        # interpretation engine recognizes as a valid antecedent.
+        if not candidates:
+            result["reason"] = "no_semantic_match"
+            result["scanned"] = len(ordered)
+            result["selection_mode"] = "enabled_no_match"
+            return result
+
+        candidates.sort(
+            key=lambda item: (
+                int(item["position"]),
+                self._timestamp(item["record"]),
+                int(item["record"].get("index") or 0),
+            )
+        )
+        primary = candidates[0]
+        selected = candidates[: self.MAX_SELECTED]
+        primary_record = primary["record"]
+        primary_operand = self._operand(
+            primary_record,
+            score=primary["score"],
+            position=primary["position"],
+            semantic_relation=primary["semantic_relation"],
+            relation=relation_value,
+        )
+        selected_records = []
+        for item in selected:
+            rec = item["record"]
+            selected_records.append({
+                "score": item["score"],
+                "position": item["position"],
+                "memory_index": rec.get("index", item["position"]),
+                "sequence_id": self._text(rec.get("sequence_id")),
+                "turn_id": rec.get("turn_id"),
+                "topic": self._text(rec.get("topic")),
+                "entity": self._text(rec.get("entity")),
+                "user": self._text(rec.get("user")),
+                "assistant": self._text(rec.get("assistant")),
+            })
+
+        result.update({
+            "scanned": len(ordered),
+            "selected": selected_records,
+            "selected_memory_index": primary_record.get("index", primary["position"]),
+            "selected_memory_record": deepcopy(primary_record),
+            "selected_memory_operand": primary_operand,
+            "reason": "semantic_match",
+            "selection_mode": "dialogue_memory_slider",
+            "scan_order": "chronological",
+            "stop_position": primary["position"],
+            "same_sequence": bool(
+                scope.get("dialogue_sequence_id")
+                and self._text(primary_record.get("sequence_id")) == scope["dialogue_sequence_id"]
+            ),
+        })
+        return result
 
 
 class ConversationContinuityEngine(InterpretationEngineBase):
@@ -5516,11 +5911,21 @@ class DialogueDevelopmentEngine(InterpretationEngineBase):
         rel=self._text(relation.get("relation") or "NEW").upper()
         env=relation.get("environment") if isinstance(relation.get("environment"),dict) else {}
         seq=env.get("active_sequence") if isinstance(env.get("active_sequence"),dict) else {}
+        slider = history_search.get("memory_slider") if isinstance(history_search.get("memory_slider"), dict) else {}
+        slider_operand = slider.get("selected_memory_operand") if isinstance(slider.get("selected_memory_operand"), dict) else {}
+        slider_enabled = bool(slider.get("enabled") and slider_operand and rel in {"CONTINUE", "RECALL"})
+        slider_topic = self._text(slider_operand.get("topic"))
+        slider_entity = self._text(slider_operand.get("entity"))
         active_topic=self._text(seq.get("topic") or relation.get("active_topic") or topic.get("topic")
                                  or state.get("april_active_topic") or state.get("current_topic") or text)[:500]
+        if slider_enabled and (rel == "RECALL" or active_topic.lower() in {"", "text", "вопрос", "ответ", "тема", "загадка"}):
+            active_topic = slider_topic or active_topic
         task_frame=task.get("task") if isinstance(task.get("task"),dict) else {}
-        active_goal=self._text(task_frame.get("goal") or task.get("goal") or state.get("april_active_goal") or active_topic)[:500]
+        active_goal=self._text(task_frame.get("goal") or task.get("goal") or slider_operand.get("goal")
+                               or state.get("april_active_goal") or active_topic)[:500]
         active_entity=self._text(entity.get("active_entity") or state.get("april_active_entity"))
+        if slider_enabled and (rel == "RECALL" or not active_entity or active_entity.lower() in {"text", "вопрос", "ответ", "ну"}):
+            active_entity = slider_entity or active_entity
         last_result=history_search.get("latest_operation_result")
         if not isinstance(last_result,dict) or not last_result:
             last_result=history_search.get("carry_forward_result")
@@ -5561,7 +5966,13 @@ class DialogueDevelopmentEngine(InterpretationEngineBase):
         continuity_guidance = bool(continuity.get("user_needs_guidance"))
         task_stalled = bool(task_frame.get("active") and not task_frame.get("last_question") and not task_frame.get("last_user_answer"))
         user_needs_guidance = bool(rel == "CONTINUE" and (continuity_guidance or bool(loops) or task_stalled))
-        if ready: next_step="consider_ready_user_requested_follow_up_without_forcing_it"
+        if slider_enabled:
+            next_step = (
+                "answer_current_turn_using_recalled_dialogue_operand"
+                if rel == "RECALL"
+                else "continue_current_topic_using_selected_dialogue_operand"
+            )
+        elif ready: next_step="consider_ready_user_requested_follow_up_without_forcing_it"
         elif pending and rel=="CONTINUE": next_step="continue_current_topic_while_preserving_pending_obligations"
         elif user_needs_guidance: next_step="guide_user_with_one_small_next_step"
         elif rel=="NEW": next_step="establish_new_topic_and_keep_it_open_for_development"
@@ -5572,6 +5983,17 @@ class DialogueDevelopmentEngine(InterpretationEngineBase):
             "sequence_id":self._text(seq.get("sequence_id") or relation.get("sequence_id")),
             "active_topic":active_topic,"active_goal":active_goal,"active_entity":active_entity,
             "current_request":self._text(text),"previous_result":previous_result,"latest_result_event":result_event,
+            "memory_slider": {
+                "enabled": slider_enabled,
+                "selection_mode": self._text(slider.get("selection_mode")),
+                "selected_memory_index": slider.get("selected_memory_index", -1),
+                "stop_position": slider.get("stop_position"),
+                "score": slider_operand.get("score") if slider_enabled else 0.0,
+                "semantic_operand": deepcopy(slider_operand) if slider_enabled else {},
+            },
+            "selected_memory_index": slider.get("selected_memory_index", -1) if slider_enabled else -1,
+            "selected_memory_record": deepcopy(slider.get("selected_memory_record") or {}) if slider_enabled else {},
+            "selected_memory_operand": deepcopy(slider_operand) if slider_enabled else {},
             "open_loops":loops,"pending_obligations":pending,"ready_obligations":ready,
             "user_needs_guidance":user_needs_guidance,
             "initiative_policy":{
@@ -5935,8 +6357,15 @@ class SemanticContextAnchorEngine(InterpretationEngineBase):
         branch = branch_index.get("selected_branch") if isinstance(branch_index.get("selected_branch"), dict) else {}
         active_branch = branch_index.get("active_branch") if isinstance(branch_index.get("active_branch"), dict) else {}
 
-        recalled_topic = ""
-        if rel == "RECALL":
+        memory_slider = history_search.get("memory_slider") if isinstance(history_search.get("memory_slider"), dict) else {}
+        slider_operand = memory_slider.get("selected_memory_operand") if isinstance(memory_slider.get("selected_memory_operand"), dict) else {}
+        slider_enabled = bool(memory_slider.get("enabled") and slider_operand and rel in {"CONTINUE", "RECALL"})
+
+        recalled_topic = self._clean_text(
+            slider_operand.get("topic")
+            if slider_enabled else ""
+        )
+        if not recalled_topic and rel == "RECALL":
             evidence_items = history_search.get("selected_evidence") if isinstance(history_search.get("selected_evidence"), list) else []
             for item in evidence_items:
                 if not isinstance(item, dict):
@@ -5952,7 +6381,7 @@ class SemanticContextAnchorEngine(InterpretationEngineBase):
 
         topic_root = self._clean_text(
             recalled_topic
-            if rel == "RECALL" and recalled_topic
+            if slider_enabled and recalled_topic
             else topic.get("topic_root")
             or topic.get("topic")
             or branch.get("topic")
@@ -5984,6 +6413,14 @@ class SemanticContextAnchorEngine(InterpretationEngineBase):
             ):
                 focus_candidate = candidate_text
                 break
+        if slider_enabled:
+            slider_focus = self._clean_text(slider_operand.get("focus"))
+            if slider_focus and (
+                not focus_candidate
+                or self._low(focus_candidate) in {"продолжим", "дальше", "вспомни", "ну", "теперь", "вопрос", "ответ"}
+            ):
+                focus_candidate = slider_focus
+
         if not focus_candidate and rel == "NEW":
             current_text = self._clean_text(current_request, 220)
             meta_only = bool(
@@ -6009,8 +6446,11 @@ class SemanticContextAnchorEngine(InterpretationEngineBase):
 
         task_frame = task.get("task") if isinstance(task.get("task"), dict) else {}
         task_target = self._text(task_frame.get("target"))
-        recalled_entity = ""
-        if rel == "RECALL":
+        recalled_entity = self._clean_text(
+            slider_operand.get("entity")
+            if slider_enabled else ""
+        )
+        if not recalled_entity and rel == "RECALL":
             evidence_items = history_search.get("selected_evidence") if isinstance(history_search.get("selected_evidence"), list) else []
             for item in evidence_items:
                 if not isinstance(item, dict):
@@ -6026,7 +6466,7 @@ class SemanticContextAnchorEngine(InterpretationEngineBase):
 
         primary_entity = self._clean_text(
             recalled_entity
-            if rel == "RECALL" and recalled_entity
+            if recalled_entity and slider_enabled
             else entity.get("active_entity")
             or reference.get("resolved")
             or task_target
@@ -6057,17 +6497,27 @@ class SemanticContextAnchorEngine(InterpretationEngineBase):
         entity_type = self._entity_type(primary_entity, relation=rel, representation=rep, task=task.get("task") if isinstance(task.get("task"), dict) else {})
 
         goal = self._clean_text(
-            intent.get("goal")
-            or task.get("goal")
-            or branch.get("goal")
-            or continuity.get("next_logical_step")
-            or "answer"
+            (
+                slider_operand.get("goal")
+                if slider_enabled and slider_operand.get("goal")
+                else intent.get("goal")
+                or task.get("goal")
+                or branch.get("goal")
+                or continuity.get("next_logical_step")
+                or "answer"
+            )
         )
         operation = self._text(intent.get("operation") or "answer").lower()
 
         if rel == "NEW":
             direction = self._clean_text(
                 f"{operation}: {goal}" if operation and goal else current_request
+            )
+        elif slider_enabled:
+            direction = self._clean_text(
+                f"{operation}: {goal}" if operation and goal
+                else slider_operand.get("direction")
+                or current_request
             )
         elif operation and goal:
             direction = f"{operation}: {goal}"
@@ -6124,8 +6574,22 @@ class SemanticContextAnchorEngine(InterpretationEngineBase):
             "representation": rep,
             "development": dev,
             "next_step": self._clean_text(
-                dev.get("next_step") or continuity.get("next_logical_step")
+                (
+                    "answer_current_turn_using_recalled_dialogue_operand"
+                    if slider_enabled and rel == "RECALL"
+                    else "continue_current_topic_using_selected_dialogue_operand"
+                    if slider_enabled and rel == "CONTINUE"
+                    else dev.get("next_step") or continuity.get("next_logical_step")
+                )
             ),
+            "memory_resolution": {
+                "enabled": slider_enabled,
+                "mode": self._text(memory_slider.get("selection_mode")),
+                "memory_index": memory_slider.get("selected_memory_index", -1) if slider_enabled else -1,
+                "score": float(slider_operand.get("score", 0.0) or 0.0) if slider_enabled else 0.0,
+                "sequence_id": self._text(slider_operand.get("sequence_id")),
+                "source": "dialogue_memory_slider" if slider_enabled else "",
+            },
             "current_request": current_request,
             "source": "semantic_context_synthesis",
             "historical_memory_is_evidence_only": True,
@@ -6687,6 +7151,12 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
         active_task = task.get("task") if isinstance(task.get("task"), dict) and task.get("active") else {}
         active_topic = self._text(arbitration.get("active_topic") or topic.get("topic"))
         active_entity = self._text(arbitration.get("active_entity") or entity.get("active_entity"))
+        slider = history_search.get("memory_slider") if isinstance(history_search.get("memory_slider"), dict) else {}
+        slider_operand = slider.get("selected_memory_operand") if isinstance(slider.get("selected_memory_operand"), dict) else {}
+        if slider.get("enabled") and slider_operand and rel in {"CONTINUE", "RECALL"}:
+            active_topic = self._text(slider_operand.get("topic") or active_topic)
+            if slider_operand.get("entity"):
+                active_entity = self._text(slider_operand.get("entity"))
         rep = self._text(arbitration.get("representation") or representation.get("representation") or "text").lower()
         source = self._text(knowledge.get("primary_source") or "internal_knowledge").lower()
         identity_memory = identity_memory if isinstance(identity_memory, dict) else {}
@@ -6746,6 +7216,22 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
                     "development": semantic_anchor.get("development"),
                     "next_step": semantic_anchor.get("next_step"),
                 }, 0.995, "canonical_semantic_anchor_for_continuation", True, max_depth=4, max_items=6, max_keys=10)
+            slider = history_search.get("memory_slider") if isinstance(history_search.get("memory_slider"), dict) else {}
+            slider_operand = slider.get("selected_memory_operand") if isinstance(slider.get("selected_memory_operand"), dict) else {}
+            if rel == "RECALL" and slider.get("enabled") and slider_operand:
+                add(required, "MEMORY_SELECTION", {
+                    "memory_index": slider.get("selected_memory_index", -1),
+                    "sequence_id": slider_operand.get("sequence_id"),
+                    "topic": slider_operand.get("topic"),
+                    "entity": slider_operand.get("entity"),
+                    "focus": slider_operand.get("focus"),
+                    "direction": slider_operand.get("direction"),
+                    "goal": slider_operand.get("goal"),
+                    "previous_user_turn": slider_operand.get("user_request"),
+                    "previous_april_turn": slider_operand.get("april_answer"),
+                    "summary": slider_operand.get("summary"),
+                    "semantic_relation": slider_operand.get("semantic_relation"),
+                }, 0.998, "sequential_semantic_memory_slider", True, max_depth=4, max_items=6, max_keys=12)
             if rel == "RECALL":
                 add(required, "DIALOGUE_DEVELOPMENT", dialogue_development, 0.965, "memory_recall_dialogue_connection", True, max_depth=4, max_items=8, max_keys=14)
             else:
@@ -6809,6 +7295,39 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
                 "avoid_repeat": list(continuity.get("avoid_repeat_content") or [])[:2],
             }
             add(required, "CONTINUATION_INTEREST", continuation_interest, 0.988, "current_turn_progression_interest", True, max_depth=3, max_items=6, max_keys=10)
+
+            # If the semantic slider found a historical branch/topic, that single
+            # operand is the only cross-branch memory allowed into CONTINUE.
+            slider = history_search.get("memory_slider") if isinstance(history_search.get("memory_slider"), dict) else {}
+            slider_operand = slider.get("selected_memory_operand") if isinstance(slider.get("selected_memory_operand"), dict) else {}
+            if slider.get("enabled") and slider_operand:
+                add(required, "CONTINUATION_MEMORY_OPERAND", {
+                    "memory_index": slider.get("selected_memory_index", -1),
+                    "sequence_id": slider_operand.get("sequence_id"),
+                    "scene_id": slider_operand.get("scene_id"),
+                    "topic": slider_operand.get("topic"),
+                    "entity": slider_operand.get("entity"),
+                    "focus": slider_operand.get("focus"),
+                    "direction": slider_operand.get("direction"),
+                    "goal": slider_operand.get("goal"),
+                    "previous_user_turn": slider_operand.get("user_request"),
+                    "previous_april_turn": slider_operand.get("april_answer"),
+                    "summary": slider_operand.get("summary"),
+                    "dialogue_obligations": slider_operand.get("dialogue_obligations"),
+                    "semantic_relation": slider_operand.get("semantic_relation"),
+                    "instruction": (
+                        "Resolve the current continuation against this selected "
+                        "historical operand. The current user request stays authoritative."
+                    ),
+                }, 0.998, "sequential_semantic_memory_slider", True, max_depth=4, max_items=8, max_keys=14)
+                add(optional, "MEMORY_SLIDER_TRACE", {
+                    "enabled": True,
+                    "selection_mode": slider.get("selection_mode"),
+                    "selected_memory_index": slider.get("selected_memory_index", -1),
+                    "stop_position": slider.get("stop_position"),
+                    "same_sequence": slider.get("same_sequence"),
+                    "score": slider_operand.get("score"),
+                }, 0.70, "memory_slider_diagnostics", False, max_depth=3, max_items=4, max_keys=8)
 
             previous_visual = relation.get("previous_visual_attachment") or (relation.get("environment", {}) or {}).get("previous_visual_attachment")
             if isinstance(previous_visual, dict) and previous_visual:
@@ -6987,7 +7506,9 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
             "context_selection_done_before_provider": True,
             "provider_must_not_reselect_context": True,
             "memory_policy": (
-                "explicit_recall_only" if rel == "RECALL"
+                "explicit_recall_with_semantic_slider" if rel == "RECALL" and history_search.get("memory_slider", {}).get("selected_memory_operand")
+                else "selected_authenticated_branch_plus_semantic_slider" if rel == "CONTINUE" and history_search.get("memory_slider", {}).get("selected_memory_operand")
+                else "explicit_recall_only" if rel == "RECALL"
                 else "selected_authenticated_branch_only" if rel == "CONTINUE"
                 else "disabled"
             ),
@@ -7024,6 +7545,7 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
                 "entity/reference",
                 "memory_relevance",
                 "dialogue_history_search",
+                "semantic_memory_slider",
                 "knowledge_source",
                 "representation",
                 "response_strategy",
@@ -7338,6 +7860,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
         self.reference = ReferenceResolutionEngine()
         self.memory = MemoryRelevanceEngine()
         self.history_search = DialogueHistorySearchEngine()
+        self.memory_slider = DialogueMemorySliderEngine()
         self.continuity = ConversationContinuityEngine()
         self.knowledge = KnowledgeSourceEngine()
         self.representation = RepresentationDecisionEngine()
@@ -7454,6 +7977,81 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             text, relation=relation, topic=topic, identity=identity, state=state,
             history=history, task=task, reference=reference,
         )
+
+        # Semantic memory slider: only CONTINUE/RECALL turns may scan the seven-day
+        # dialogue. NEW vectors deliberately bypass this mechanism.
+        current_relation_value = self._text(relation.get("relation") or "NEW").upper()
+        memory_slider = self.memory_slider.scan(
+            text,
+            relation=current_relation_value,
+            identity=identity,
+            state=state,
+            history=history,
+            active_topic=self._text(topic.get("topic") or topic.get("topic_root")),
+            active_entity=self._text(entity.get("active_entity")),
+            active_goal=self._text(task.get("goal")),
+            task=task,
+        )
+        history_search = deepcopy(history_search)
+        history_search["memory_slider"] = memory_slider
+
+        if memory_slider.get("enabled") and memory_slider.get("selected_memory_operand"):
+            selected_operand = deepcopy(memory_slider.get("selected_memory_operand") or {})
+            selected_record = deepcopy(memory_slider.get("selected_memory_record") or {})
+            history_search["selected_memory_index"] = int(memory_slider.get("selected_memory_index", -1)) if str(memory_slider.get("selected_memory_index", -1)).strip() not in {"", "None"} else -1
+            history_search["selected_memory_record"] = selected_record
+            history_search["selected_memory_operand"] = selected_operand
+            history_search["history_context_required"] = True
+            history_search["recommended_turn_relation"] = (
+                "HISTORY_SUPPORTED_CONTINUATION"
+                if current_relation_value == "CONTINUE"
+                else "HISTORY_LOOKUP"
+            )
+            history_search["provider_instruction"] = (
+                "Use the selected chronological seven-day dialogue operand to resolve "
+                "the current continuation before answering. Keep the current user "
+                "request authoritative and do not invent missing historical details."
+            )
+            history_search["selection_mode"] = "dialogue_memory_slider"
+
+            selected_evidence = list(history_search.get("selected_evidence") or [])
+            if selected_record:
+                primary_key = (
+                    selected_record.get("turn_id"),
+                    selected_record.get("sequence_id"),
+                    self._text(selected_record.get("user")),
+                    self._text(selected_record.get("assistant")),
+                )
+                filtered = []
+                for item in selected_evidence:
+                    if not isinstance(item, dict):
+                        continue
+                    item_key = (
+                        item.get("turn_id"),
+                        item.get("sequence_id"),
+                        self._text(item.get("user")),
+                        self._text(item.get("assistant")),
+                    )
+                    if item_key != primary_key:
+                        filtered.append(item)
+                history_search["selected_evidence"] = [selected_operand] + filtered
+
+            memory = deepcopy(memory)
+            selected_memory = list(memory.get("selected") or []) if isinstance(memory, dict) else []
+            memory["selected"] = [selected_operand] + [
+                item for item in selected_memory if isinstance(item, dict) and (
+                    item.get("sequence_id") != selected_operand.get("sequence_id")
+                    or item.get("turn_id") != selected_operand.get("turn_id")
+                )
+            ]
+            memory["allowed"] = True
+            memory["selection_mode"] = "dialogue_memory_slider"
+            memory["slider_enabled"] = True
+        else:
+            history_search["selected_memory_index"] = -1
+            history_search["selected_memory_record"] = {}
+            history_search["selected_memory_operand"] = {}
+
         continuity = self.continuity.analyze(
             text, relation=relation, topic=topic, task=task, entity=entity, reference=reference,
             history_search=history_search,
@@ -7638,6 +8236,14 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             "reference_resolution": reference,
             "memory_relevance": memory,
             "dialogue_history_search": history_search,
+            "memory_slider": deepcopy(memory_slider),
+            "selected_memory_index": (
+                int(memory_slider.get("selected_memory_index", -1))
+                if str(memory_slider.get("selected_memory_index", -1)).strip() not in {"", "None"}
+                and memory_slider.get("selected_memory_operand") else -1
+            ),
+            "selected_memory_operand": deepcopy(memory_slider.get("selected_memory_operand") or {}),
+            "selected_memory_record": deepcopy(memory_slider.get("selected_memory_record") or {}),
             "conversation_continuity": continuity,
             "knowledge_source": knowledge,
             "representation_decision": representation,
@@ -7710,6 +8316,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
                 self.reference.NAME,
                 self.memory.NAME,
                 self.history_search.NAME,
+                self.memory_slider.NAME,
                 self.continuity.NAME,
                 self.knowledge.NAME,
                 self.representation.NAME,
@@ -7769,6 +8376,11 @@ class QuantumInterpretationEngine:
         self._runtime_ready = True
         self._heavy_ready = False
         self._compile_matrix()
+
+    @staticmethod
+    def _text(value: Any) -> str:
+        """Compatibility normalization used by all semantic adapters."""
+        return QuantumInterpretationEngine.normalize(value)
 
     # ----------------------------- primitives -----------------------------
 
@@ -9082,6 +9694,18 @@ class QuantumInterpretationEngine:
         if task_active and not active_entity:
             active_entity = self.normalize(open_task.get("target") if isinstance(open_task, dict) else "")
 
+        semantic_anchor = (
+            cognitive_environment.get("semantic_anchor")
+            if isinstance(cognitive_environment.get("semantic_anchor"), dict)
+            else {}
+        )
+        if not semantic_anchor:
+            semantic_anchor = (
+                canonical_cognitive.get("semantic_anchor")
+                if isinstance(canonical_cognitive.get("semantic_anchor"), dict)
+                else {}
+            )
+
         task_answer = live_scene.get("task_answer", {})
         if not isinstance(task_answer, dict):
             task_answer = {}
@@ -9580,6 +10204,20 @@ class QuantumInterpretationEngine:
         result["provider_instruction"] = canonical_cognitive.get("execution_instruction", "")
         result["provider_context_plan"] = cognitive_environment.get("provider_context_plan", {})
         result["dialogue_history_search"] = history_search
+        result["memory_slider"] = deepcopy(history_search.get("memory_slider") or {})
+        result["selected_memory_index"] = (
+            int(history_search.get("selected_memory_index", -1)) if str(history_search.get("selected_memory_index", -1)).strip() not in {"", "None"} else -1
+            if isinstance(history_search.get("memory_slider"), dict)
+            and history_search.get("memory_slider", {}).get("selected_memory_operand")
+            else result.get("selected_memory_index", -1)
+        )
+        if result.get("memory_slider", {}).get("selected_memory_operand"):
+            result["selected_memory_operand"] = deepcopy(
+                history_search.get("selected_memory_operand") or {}
+            )
+            result["selected_memory_record"] = deepcopy(
+                history_search.get("selected_memory_record") or {}
+            )
         result["result_dependency"] = {
             "carry_forward": history_search.get("carry_forward_result") or {},
             "operand_anchor": history_search.get("operand_anchor") or {},
@@ -9667,6 +10305,49 @@ class QuantumInterpretationEngine:
             workspace["historical_memory_allowed"] = bool(dialogue_environment.get("historical_memory_allowed"))
             workspace["selected_memory"] = list(dialogue_environment.get("selected_memory") or [])
             workspace["continuation_content_analysis"] = dialogue_environment.get("continuation_content_analysis") or {}
+
+            # The semantic memory slider is the only mechanism that may cross an
+            # active-branch boundary during CONTINUE/RECALL. Its decision is made
+            # before ProviderContextPlanEngine and must survive the legacy workspace
+            # reconciliation below.
+            slider = history_search.get("memory_slider") if isinstance(history_search.get("memory_slider"), dict) else {}
+            slider_operand = slider.get("selected_memory_operand") if isinstance(slider.get("selected_memory_operand"), dict) else {}
+            slider_enabled = bool(
+                slider.get("enabled")
+                and slider_operand
+                and str(workspace.get("relation") or dialogue_environment.get("relation") or "").upper() in {"CONTINUE", "RECALL"}
+            )
+            workspace["memory_slider"] = deepcopy(slider)
+            workspace["memory_slider_enabled"] = slider_enabled
+            workspace["selected_memory_index"] = (
+                int(slider.get("selected_memory_index", -1)) if str(slider.get("selected_memory_index", -1)).strip() not in {"", "None"} else -1
+                if slider_enabled else -1
+            )
+            workspace["selected_memory_record"] = (
+                deepcopy(slider.get("selected_memory_record") or {})
+                if slider_enabled else {}
+            )
+            workspace["selected_memory_operand"] = (
+                deepcopy(slider_operand) if slider_enabled else {}
+            )
+            if slider_enabled:
+                workspace["historical_memory_allowed"] = True
+                workspace["selected_memory"] = [{
+                    "text": self.normalize(
+                        " ".join(
+                            x for x in (
+                                slider_operand.get("user_request"),
+                                slider_operand.get("april_answer"),
+                                slider_operand.get("summary"),
+                            ) if x
+                        )
+                    )[:700],
+                    "sequence_id": slider_operand.get("sequence_id"),
+                    "scene_id": slider_operand.get("scene_id"),
+                    "score": slider_operand.get("score", 0.0),
+                    "memory_index": slider_operand.get("memory_index", -1),
+                    "source": "dialogue_memory_slider",
+                }]
             workspace["fenced_historical_entities"] = list(dialogue_environment.get("fenced_historical_entities") or [])
             workspace["authority_chain"] = list(dialogue_environment.get("authority_chain") or workspace.get("authority_chain") or [])
 
@@ -9674,10 +10355,11 @@ class QuantumInterpretationEngine:
             # memory. Recall is the only mode that is allowed to rank historical
             # topics into provider context.
             optional_context = list(workspace.get("optional_context") or [])
-            if not workspace["historical_memory_allowed"]:
+            slider_memory_allowed = bool(workspace.get("memory_slider_enabled"))
+            if not workspace["historical_memory_allowed"] and not slider_memory_allowed:
                 optional_context = [
                     entry for entry in optional_context
-                    if not isinstance(entry, dict) or entry.get("key") not in {"RELEVANT_MEMORY", "SEVEN_DAY_DIALOGUE_MEMORY", "HISTORICAL_MEMORY"}
+                    if not isinstance(entry, dict) or entry.get("key") not in {"RELEVANT_MEMORY", "SEVEN_DAY_DIALOGUE_MEMORY", "HISTORICAL_MEMORY", "CONTINUATION_MEMORY_OPERAND"}
                 ]
                 excluded_context = list(workspace.get("excluded_context") or [])
                 excluded_context.append({
@@ -9685,13 +10367,28 @@ class QuantumInterpretationEngine:
                     "reason": "current_turn_or_active_sequence_has_priority",
                 })
                 workspace["excluded_context"] = excluded_context
+            elif slider_memory_allowed:
+                # Remove competing generic memory entries. The selected slider
+                # operand is already a protected, semantically resolved dependency.
+                optional_context = [
+                    entry for entry in optional_context
+                    if not isinstance(entry, dict) or entry.get("key") not in {"RELEVANT_MEMORY", "SEVEN_DAY_DIALOGUE_MEMORY", "HISTORICAL_MEMORY"}
+                ]
             workspace["optional_context"] = optional_context
-            workspace["selected_memory"] = list(workspace.get("selected_memory") or []) if workspace["historical_memory_allowed"] else []
+            workspace["selected_memory"] = (
+                list(workspace.get("selected_memory") or [])
+                if workspace["historical_memory_allowed"] or slider_memory_allowed else []
+            )
 
             # Rebuild the provider section index after the memory fence without
             # changing the provider or renderer route.
             provider_sections = list(workspace.get("provider_sections") or [])
-            if not workspace["historical_memory_allowed"]:
+            if not workspace["historical_memory_allowed"] and not slider_memory_allowed:
+                provider_sections = [
+                    entry for entry in provider_sections
+                    if not isinstance(entry, dict) or entry.get("name") not in {"RELEVANT_MEMORY", "SEVEN_DAY_DIALOGUE_MEMORY", "HISTORICAL_MEMORY", "CONTINUATION_MEMORY_OPERAND"}
+                ]
+            elif slider_memory_allowed:
                 provider_sections = [
                     entry for entry in provider_sections
                     if not isinstance(entry, dict) or entry.get("name") not in {"RELEVANT_MEMORY", "SEVEN_DAY_DIALOGUE_MEMORY", "HISTORICAL_MEMORY"}
@@ -9734,7 +10431,13 @@ class QuantumInterpretationEngine:
             result["current_turn_authority"] = True
             result["historical_memory_is_evidence_only"] = True
             result["dialogue_branch_index"] = deepcopy(workspace.get("dialogue_branch_index") or {})
-            if workspace.get("conversation_continuation") and (workspace.get("continuation") or workspace.get("reference")):
+            if workspace.get("memory_slider_enabled") and workspace.get("selected_memory_operand"):
+                result["continuation_authority"] = "semantic_memory_slider"
+                result["selected_memory_index"] = int(workspace.get("selected_memory_index", -1)) if str(workspace.get("selected_memory_index", -1)).strip() not in {"", "None"} else -1
+                result["selected_memory_operand"] = deepcopy(workspace.get("selected_memory_operand") or {})
+                result["selected_memory_record"] = deepcopy(workspace.get("selected_memory_record") or {})
+                result["memory_slider"] = deepcopy(workspace.get("memory_slider") or {})
+            elif workspace.get("conversation_continuation") and (workspace.get("continuation") or workspace.get("reference")):
                 result["continuation_authority"] = (
                     "resumed_dialogue_branch" if workspace.get("target_sequence_id")
                     else "active_dialogue_sequence"
@@ -9753,10 +10456,13 @@ class QuantumInterpretationEngine:
                     "user_id": (workspace.get("authenticated_scope") or {}).get("user_id", ""),
                     "conversation_id": (workspace.get("authenticated_scope") or {}).get("conversation_id", ""),
                 }
+                result["selected_memory_record"] = {}
             else:
                 result["continuation_authority"] = "current_turn"
                 result["selected_memory_index"] = -1
                 result["selected_memory_operand"] = {}
+                result["selected_memory_record"] = {}
+                result["memory_slider"] = {}
 
             # Keep the immediately preceding authenticated USER↔APRIL pair on the
             # top-level result too. Older consumers may still read these fields
@@ -9777,7 +10483,10 @@ class QuantumInterpretationEngine:
                     else "current_turn_only"
                 ),
                 "memory_policy": (
-                    "selected_live_sequence_only" if workspace.get("continuation") or workspace.get("reference")
+                    "semantic_memory_slider_selected_operand"
+                    if workspace.get("memory_slider_enabled")
+                    else "selected_live_sequence_only"
+                    if workspace.get("continuation") or workspace.get("reference")
                     else "no_historical_content"
                 ),
                 "current_turn_authority": True,
@@ -9817,7 +10526,9 @@ class QuantumInterpretationEngine:
                 "task_continuation": bool(workspace.get("task_continuation")),
                 "continuation_content_analysis": workspace.get("continuation_content_analysis") or {},
                 "continuation_authority": result.get("continuation_authority"),
+                "memory_slider": deepcopy(workspace.get("memory_slider") or {}),
                 "selected_memory_operand": result.get("selected_memory_operand") or {},
+                "selected_memory_record": result.get("selected_memory_record") or {},
                 "selected_memory_index": result.get("selected_memory_index", -1),
                 "target_sequence_id": workspace.get("target_sequence_id") or contract.get("target_sequence_id") or "",
                 "target_branch_id": workspace.get("target_branch_id") or contract.get("target_branch_id") or "",
@@ -9853,6 +10564,10 @@ class QuantumInterpretationEngine:
                 "branch_index": deepcopy(workspace.get("dialogue_branch_index") or {}),
                 "turn_relation": workspace.get("turn_relation") or "",
                 "continuation_authority": result.get("continuation_authority"),
+                "memory_slider": deepcopy(workspace.get("memory_slider") or {}),
+                "selected_memory_index": result.get("selected_memory_index", -1),
+                "selected_memory_operand": result.get("selected_memory_operand") or {},
+                "selected_memory_record": result.get("selected_memory_record") or {},
                 "continuation_content_analysis": workspace.get("continuation_content_analysis") or {},
             })
             result["dialogue_vector"] = vector
@@ -10606,6 +11321,14 @@ class DialogCognitiveWorkspace:
         frame = semantic_result.get("semantic_frame") if isinstance(semantic_result.get("semantic_frame"), dict) else {}
         control = semantic_result.get("interpretation_control") if isinstance(semantic_result.get("interpretation_control"), dict) else {}
         relation = self._text(dialogue.get("relation") or semantic_result.get("three_way_relation") or "NEW").upper()
+        memory_slider = semantic_result.get("dialogue_history_search", {}).get("memory_slider") if isinstance(semantic_result.get("dialogue_history_search"), dict) else {}
+        memory_slider = memory_slider if isinstance(memory_slider, dict) else {}
+        slider_operand = memory_slider.get("selected_memory_operand") if isinstance(memory_slider.get("selected_memory_operand"), dict) else {}
+        slider_enabled = bool(
+            memory_slider.get("enabled")
+            and slider_operand
+            and relation in {"CONTINUE", "RECALL"}
+        )
         representation = self._text(frame.get("representation") or control.get("representation") or semantic_result.get("subtype") or "text").lower()
         directives = self._request_directives(text)
         operation = self._safe_operation(frame.get("operation") or control.get("operation"), representation, directives)
@@ -10633,7 +11356,15 @@ class DialogCognitiveWorkspace:
             "вопрос", "ответ", "запрос", "тема", "опрос", "question", "request", "answer"
         }:
             topic = bridge_topic
+        if slider_enabled:
+            slider_topic = self._text(slider_operand.get("topic"))
+            if slider_topic and (relation == "RECALL" or topic.lower() in {"", "text", "вопрос", "ответ", "тема"}):
+                topic = slider_topic
         relation = self._text(continuation_bridge.get("topic_relation") or relation).upper()
+        if slider_enabled:
+            # A selected semantic memory operand keeps the original relation alive
+            # even if the legacy bridge could not infer it from the short turn.
+            relation = "RECALL" if relation == "RECALL" else "CONTINUE"
 
         signals = self._instruction_signals(text)
         output_modes = list(semantic_result.get("requested_outputs") or semantic_result.get("candidate_representations") or [])
@@ -10787,7 +11518,46 @@ class DialogCognitiveWorkspace:
                 "scene_id": item.get("scene_id"),
                 "score": round(score, 4),
             })
-        if selected_memory:
+        if slider_enabled:
+            slider_memory = {
+                "text": self._excerpt(
+                    " ".join(
+                        x for x in (
+                            slider_operand.get("user_request"),
+                            slider_operand.get("april_answer"),
+                            slider_operand.get("summary"),
+                        ) if x
+                    ),
+                    700,
+                ),
+                "sequence_id": slider_operand.get("sequence_id"),
+                "scene_id": slider_operand.get("scene_id"),
+                "memory_index": slider_operand.get("memory_index", -1),
+                "topic": slider_operand.get("topic"),
+                "entity": slider_operand.get("entity"),
+                "focus": slider_operand.get("focus"),
+                "direction": slider_operand.get("direction"),
+                "score": slider_operand.get("score", 0.0),
+                "source": "dialogue_memory_slider",
+            }
+            add(required, "CONTINUATION_MEMORY_OPERAND", {
+                **slider_memory,
+                "previous_user_turn": slider_operand.get("user_request"),
+                "previous_april_turn": slider_operand.get("april_answer"),
+                "goal": slider_operand.get("goal"),
+                "dialogue_obligations": slider_operand.get("dialogue_obligations"),
+                "semantic_relation": slider_operand.get("semantic_relation"),
+                "instruction": "Resolve the current user request against this selected historical dialogue operand; current request remains authoritative.",
+            }, 0.998, "sequential_semantic_memory_slider", True)
+            selected_memory = [slider_memory] + [
+                item for item in selected_memory
+                if isinstance(item, dict)
+                and not (
+                    item.get("sequence_id") == slider_memory.get("sequence_id")
+                    and item.get("scene_id") == slider_memory.get("scene_id")
+                )
+            ]
+        elif selected_memory:
             add(optional, "RELEVANT_MEMORY", selected_memory, 0.76 if continuation or reference else 0.48, "semantic_memory_selection")
 
         # Visual state is explicitly excluded unless the current task depends on
@@ -10876,7 +11646,12 @@ class DialogCognitiveWorkspace:
             "protected_context": protected,
             "excluded_context": excluded,
             "selected_memory": selected_memory,
-            "context_dependency": continuation_bridge.get("context_dependency") or "independent",
+            "memory_slider": memory_slider if isinstance(memory_slider, dict) else {},
+            "selected_memory_index": memory_slider.get("selected_memory_index", -1) if slider_enabled else -1,
+            "selected_memory_record": deepcopy(memory_slider.get("selected_memory_record") or {}) if slider_enabled else {},
+            "selected_memory_operand": deepcopy(slider_operand) if slider_enabled else {},
+            "historical_memory_allowed": bool(slider_enabled or reference),
+            "context_dependency": continuation_bridge.get("context_dependency") or ("continuation" if slider_enabled and relation == "CONTINUE" else "recall" if slider_enabled else "independent"),
             "task_relation": {
                 "owned": bool(continuation_bridge.get("task_continuation")),
                 "current_turn_fit": bool(continuation_bridge.get("task_continuation")),
@@ -10902,6 +11677,7 @@ class DialogCognitiveWorkspace:
                     "semantic_frame",
                     "active_task" if task_active else "",
                     "dialogue_anchor" if continuation or reference or task_active else "",
+                    "continuation_memory_operand" if slider_enabled else "",
                     "active_artifact" if artifact_reference else "",
                 ) if x
             ],
@@ -10914,8 +11690,9 @@ class DialogCognitiveWorkspace:
                 "budget_policy": "relevance_before_budget",
                 "provider_role": "consume_selected_context; do_not_reinterpret_or_reselect",
                 "stale_visual_state": "excluded_without_artifact_dependency",
-                "historical_memory": "evidence_only",
+                "historical_memory": "selected_slider_operand_only" if slider_enabled else "evidence_only",
                 "current_request_policy": "preserve_semantically; compact only when provider envelope requires it",
+                "memory_slider": "scan chronologically; compare each candidate with the same interpretation engine; stop on the strongest related operand",
                 "output_contract_policy": "protected",
             },
             "confidence": round(min(1.0, confidence), 4),
