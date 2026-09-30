@@ -635,8 +635,65 @@ class SequentialInterpretation:
         try:
             semantic_result = interpret_request(request, history=history, state=state)
         except Exception as exc:
-            print("⚠️ APRIL SEMANTIC DIALOGUE:", exc)
-            semantic_result = {}
+            # Never drop to an empty legacy semantic packet. A single specialist
+            # failure must not erase live dialogue continuity. Keep the current turn
+            # authoritative and build the smallest deterministic recovery packet;
+            # downstream code can then answer the current request without importing
+            # stale historical state.
+            print("⚠️ APRIL SEMANTIC DIALOGUE RECOVERY:", exc)
+            active_sequence = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+            previous_april = _text(active_sequence.get("last_april_answer"))
+            previous_user = _text(active_sequence.get("last_user_request"))
+            low = _text(request).lower().strip(" .,!?:;-—")
+            confirmation = low in {"да", "ага", "верно", "правильно", "точно", "именно", "хорошо"}
+            relation = "CONTINUE" if previous_april and confirmation else "NEW"
+            dependency = "active_dialogue_sequence" if relation == "CONTINUE" else "current_turn_only"
+            semantic_result = {
+                "three_way_relation": relation,
+                "dialogue_relation": {
+                    "relation": relation,
+                    "three_way_relation": relation,
+                    "continuation": relation == "CONTINUE",
+                    "reference_to_previous": False,
+                    "previous_user_turn": previous_user,
+                    "previous_april_turn": previous_april,
+                    "context_dependency": dependency,
+                    "turn_relation": "CONFIRMATION" if relation == "CONTINUE" else "NEW_TOPIC",
+                    "confidence": 0.72,
+                    "source": "safe_semantic_recovery",
+                },
+                "dialogue_vector": {
+                    "relation": relation,
+                    "three_way_relation": relation,
+                    "continuation": relation == "CONTINUE",
+                    "sequence_id": _text(active_sequence.get("sequence_id")),
+                    "previous_user_turn": previous_user,
+                    "previous_april_turn": previous_april,
+                },
+                "canonical_user_request": _text(request),
+                "semantic_request": _text(request),
+                "context_dependency": dependency,
+                "provider_context_plan": {
+                    "version": "safe_recovery_v1",
+                    "relation": relation,
+                    "current_user_request": _text(request),
+                    "current_request_authoritative": True,
+                    "context_selection_done_before_provider": True,
+                    "provider_must_not_reselect_context": True,
+                    "required_context": (
+                        [{"key": "DIALOGUE_ANCHOR", "value": {"previous_user_turn": previous_user, "previous_april_turn": previous_april}}]
+                        if relation == "CONTINUE" and previous_april else []
+                    ),
+                    "optional_context": [],
+                    "excluded_context": ["FULL_HISTORY", "SEVEN_DAY_MEMORY", "OTHER_TOPIC_BRANCHES"],
+                },
+                "cognitive_workspace": {
+                    "relation": relation,
+                    "current_request": _text(request),
+                    "sequence_id": _text(active_sequence.get("sequence_id")),
+                    "provider_context_plan_version": "safe_recovery_v1",
+                },
+            }
         self.semantic_result = semantic_result if isinstance(semantic_result, dict) else {}
 
         cognitive_workspace = self.semantic_result.get("cognitive_workspace") if isinstance(self.semantic_result.get("cognitive_workspace"), dict) else {}
