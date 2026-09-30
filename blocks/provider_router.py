@@ -1574,6 +1574,29 @@ def _build_provider_user_text_from_plan(
         requested = [requested]
     requested = [x for x in requested if _safe_text(x).strip()]
 
+    # A NEW topic is intentionally isolated.  The current request is the only
+    # conversational operand; semantic metadata is already encoded in the request
+    # and provider system contract. This prevents stale topic/entity leakage.
+    if relation == "NEW" and bool(plan.get("new_topic_minimal_context")):
+        minimal = "APRIL CANONICAL REQUEST\nREQUEST: " + current_request
+        return minimal, {
+            "provider_context_plan_version": _safe_text(plan.get("version")),
+            "provider_context_authority": "INTERPRETATION",
+            "provider_must_not_reselect_context": True,
+            "plan_required_selected": ["CURRENT_REQUEST"],
+            "plan_optional_candidates": [],
+            "plan_excluded": [
+                _safe_text(x.get("key") or x.get("name"))
+                for x in list(plan.get("excluded_context") or [])[:32]
+                if isinstance(x, dict)
+            ],
+            "new_topic_minimal_context": True,
+            "current_request_length_chars": len(current_request),
+            "estimated_input_tokens": _estimate_input_tokens(minimal),
+            "hard_budget_tokens": int(plan.get("hard_budget_tokens") or INPUT_TOKEN_BUDGET),
+            "soft_target_tokens": int(plan.get("soft_target_tokens") or min(850, INPUT_TOKEN_BUDGET)),
+        }
+
     mandatory: list[str] = [
         "APRIL CANONICAL REQUEST",
         "REQUEST: " + current_request,
@@ -1583,9 +1606,13 @@ def _build_provider_user_text_from_plan(
     ]
 
     development = plan.get("dialogue_development")
-    if development not in (None, "", [], {}):
+    # CONTINUE already carries the compact DIALOGUE_ANCHOR +
+    # CONTINUATION_INTEREST sections. Serializing a second development object
+    # duplicates the same state and consumes the hard input envelope. Keep the
+    # development section only for RECALL/other non-continuation paths.
+    if development not in (None, "", [], {}) and relation != "CONTINUE":
         mandatory.append(
-            _json_piece("DIALOGUE_DEVELOPMENT", development, depth=4, items=6, keys=10)
+            _json_piece("DIALOGUE_DEVELOPMENT", development, depth=3, items=4, keys=7)
         )
     if any(_safe_text(x).strip().lower() == "image_generation" for x in requested):
         mandatory.extend([
@@ -1606,6 +1633,10 @@ def _build_provider_user_text_from_plan(
     optional.sort(key=lambda x: (-float(x.get("priority", 0.0) or 0.0), _safe_text(x.get("key") or x.get("name"))))
 
     for section in required:
+        key = _safe_text(section.get("key") or section.get("name")).upper()
+        if relation == "CONTINUE" and key == "DIALOGUE_DEVELOPMENT":
+            # CONTINUATION_INTEREST is the single compact progression contract.
+            continue
         piece = _plan_section_text(section)
         if piece:
             mandatory.append(piece)
