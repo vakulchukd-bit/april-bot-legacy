@@ -429,6 +429,57 @@ def detect_image_signal(text):
 # 🔥 ROOM INTENT VECTOR
 # =====================================================
 
+def _dialogue_transport_context(context):
+    """Extract one stable dialogue identity/context packet for every room."""
+    context = context if isinstance(context, dict) else {}
+    request = context.get("machine_request")
+    conversation = {}
+    if request is not None:
+        conversation = getattr(request, "conversation", {})
+        conversation = conversation if isinstance(conversation, dict) else {}
+    contract = context.get("dialogue_contract")
+    contract = contract if isinstance(contract, dict) else {}
+    return {
+        "user_id": str(context.get("user_id") or getattr(request, "user_id", "") or "").strip(),
+        "conversation_id": str(
+            context.get("conversation_id")
+            or conversation.get("conversation_id")
+            or contract.get("conversation_id")
+            or ""
+        ).strip(),
+        "dialogue_sequence_id": str(
+            context.get("dialogue_sequence_id")
+            or conversation.get("sequence_id")
+            or contract.get("sequence_id")
+            or ""
+        ).strip(),
+        "turn_id": str(
+            context.get("turn_id")
+            or conversation.get("turn_id")
+            or contract.get("turn_id")
+            or ""
+        ).strip(),
+        "flow_id": str(
+            context.get("flow_id")
+            or conversation.get("flow_id")
+            or getattr(request, "flow_id", "")
+            or ""
+        ).strip(),
+        "scene_id": str(
+            context.get("scene_id")
+            or conversation.get("scene_id")
+            or contract.get("scene_id")
+            or ""
+        ).strip(),
+        "dialogue_development": deepcopy(
+            context.get("dialogue_development")
+            or conversation.get("dialogue_development")
+            or contract.get("dialogue_development")
+            or {}
+        ),
+    }
+
+
 def build_room_intent_vector(text, context):
 
     vector = {
@@ -1911,6 +1962,11 @@ async def registry_route_machine_request(
             or ""
         ).lower(),
         "object": str(intent.get("object") or ""),
+        "dialogue_development": deepcopy(
+            (request.dialogue_contract or {}).get("dialogue_development", {})
+            if hasattr(request, "dialogue_contract") and isinstance(getattr(request, "dialogue_contract", None), dict)
+            else {}
+        ),
         "topic": str(
             intent.get("topic")
             or (
@@ -1941,6 +1997,14 @@ async def registry_route_machine_request(
         "route_contract": route_contract,
         "state": state,
         "chat_id": chat_id,
+        **_dialogue_transport_context({
+            "machine_request": request,
+            "dialogue_contract": getattr(request, "conversation", {}).get("dialogue_contract", {}) if isinstance(getattr(request, "conversation", {}), dict) else {},
+            "user_id": user_id,
+            "flow_id": getattr(request, "flow_id", ""),
+            "conversation_id": getattr(request, "conversation_id", ""),
+            "dialogue_development": getattr(request, "conversation", {}).get("dialogue_development", {}) if isinstance(getattr(request, "conversation", {}), dict) else {},
+        }),
         "semantic": semantic,
         "current_user_request": current_request,
         "semantic_request": semantic_request,
