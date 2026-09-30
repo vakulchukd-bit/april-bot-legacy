@@ -301,6 +301,43 @@ def _continuity_signals(cognition: Dict[str, Any], state: Dict[str, Any]) -> Dic
     }
 
 
+def _dialogue_development(semantic: Dict[str, Any], cognition: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+    for source in (
+        semantic.get("dialogue_development"),
+        cognition.get("dialogue_development"),
+        state.get("dialogue_development"),
+    ):
+        if isinstance(source, dict):
+            return source
+    return {}
+
+
+def _initiative_policy(development: Dict[str, Any], dialogue: Dict[str, Any], ambiguity: float) -> Dict[str, Any]:
+    """Decide whether April may naturally help move a live topic forward.
+
+    This is a semantic permission signal, not a trigger and not an execution
+    route. It never overrides explicit user direction.
+    """
+    user_stuck = bool(
+        development.get("user_stuck")
+        or development.get("needs_next_step")
+        or development.get("blocked_by_ambiguity")
+    )
+    active_goal = bool(development.get("active_goal"))
+    useful = bool(active_goal and (user_stuck or development.get("unresolved_items")))
+    allowed = bool(development.get("initiative_allowed", True)) and ambiguity < 0.75
+    return {
+        "allowed": allowed and useful,
+        "user_stuck": user_stuck,
+        "active_goal": active_goal,
+        "one_next_step": True,
+        "natural_language_only": True,
+        "no_trigger_route": True,
+        "no_autonomous_execution": True,
+        "dialogue_active": dialogue.get("dialogue_active", True),
+    }
+
+
 def _dialogue_signals(semantic: Dict[str, Any], cognition: Dict[str, Any]) -> Dict[str, Any]:
     flags = (
         "discussion_mode",
@@ -516,6 +553,7 @@ def build_response_decision(
     scene = _scene_snapshot(semantic, state)
 
     ambiguity = _clamp(semantic.get("ambiguity_level", 0.0))
+    development = _dialogue_development(semantic, cognition, state)
     scene_continuity = _d(state.get("visual_continuity_summary"))
     active_scene = _d(state.get("active_scene"))
     scene_has_visual = bool(visual_reference or scene_continuity)
@@ -537,6 +575,7 @@ def build_response_decision(
 
     # Continuation never creates a new route; it only protects trajectory.
     should_continue = continuity["continuation"]
+    initiative = _initiative_policy(development, dialogue, ambiguity)
 
     final_action = _canonical_action(
         semantic=semantic,
@@ -623,6 +662,8 @@ def build_response_decision(
 
         "decision_evidence": {
             "dialogue": dialogue,
+            "dialogue_development": development,
+            "initiative": initiative,
             "continuity": continuity,
             "representation": representation,
             "scene_has_visual": scene_has_visual,
@@ -643,6 +684,8 @@ def build_response_decision(
 
         "should_guide": final_action == "guide",
         "guidance_allowed": final_action == "guide",
+        "initiative_allowed": initiative["allowed"],
+        "initiative_policy": initiative,
 
         "should_continue_trajectory": should_continue,
         "maintain_dialog_continuity": True,
@@ -672,6 +715,10 @@ def build_response_decision(
         "avoid_context_rebuild": True,
 
         "dialogue_still_alive": True,
+        "dialogue_development": development,
+        "last_result_anchor": _d(development.get("last_result")),
+        "pending_actions": list(development.get("pending_actions") or development.get("post_result_actions") or [])[:6],
+        "next_step": _s(development.get("next_step") or development.get("recommended_next_step")),
         "goal_completed": False,
         "scene_practical_goal_alive": bool(execution_score >= 0.45),
         "scene_completion_required": bool(semantic.get("unresolved_intent", True)),
