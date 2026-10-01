@@ -452,8 +452,8 @@ class QuantumMemoryEngine:
         if not isinstance(record, dict):
             return 0.0
         for key in (
-            "created_at", "timestamp", "archived_at", "updated_at",
-            "turn_timestamp", "expires_at", "last_turn_at",
+            "created_at", "created_at_utc", "timestamp", "archived_at", "updated_at",
+            "turn_timestamp", "task_definition_at", "expires_at", "last_turn_at",
         ):
             value = record.get(key)
             try:
@@ -732,7 +732,12 @@ class QuantumMemoryEngine:
         return removed
 
     def rollover(self, state_obj):
-        self.ensure(state_obj)
+        # `ensure()` may reconstruct legacy active dialogue/task state. Rollover
+        # is the destructive boundary and must never revive a task immediately
+        # before deciding what belongs to the new UTC window. Callers already
+        # normalize the state before entering this method.
+        if not isinstance(state_obj, dict):
+            return False
         now = time.time()
         current_start = utc_window_start(now).timestamp()
         current_key = utc_window_key(now)
@@ -815,7 +820,21 @@ class QuantumMemoryEngine:
         if not user_id:
             return
 
-        # Preserve the old record as an archival visual scene.
+        # Never re-stamp legacy content with `time.time()`. That turns an old
+        # visual scene into a fresh 12-hour record and defeats the UTC boundary.
+        # Only a record whose original timestamp is already inside the current
+        # 12-hour window may be migrated, and its original timestamp is preserved.
+        now = time.time()
+        scene_ts = self._record_timestamp(scene)
+        window_start = utc_window_start(now).timestamp()
+        if not scene_ts or scene_ts < (window_start - DIALOGUE_WINDOW_SECONDS) or scene_ts > now:
+            state_obj["active_visual_scene"] = None
+            state_obj["current_visual_scene"] = None
+            state_obj["active_visual_scene_turn"] = None
+            state_obj["stored_visual_scene_turn"] = None
+            state_obj["active_visual_topic"] = None
+            return
+
         archived = deepcopy(scene)
         archived["memory_kind"] = "visual_dialogue_archive"
         archived["legacy_hot_pointer_migrated"] = True
@@ -825,7 +844,7 @@ class QuantumMemoryEngine:
             or state_obj.get("conversation_id")
             or ""
         )
-        archived["archived_at"] = time.time()
+        archived["archived_at"] = scene_ts
 
         day0 = state_obj["memory_timeline"]["day_0"]
         day0.setdefault("visual_scenes", []).append(archived)
@@ -1016,7 +1035,40 @@ class QuantumMemoryEngine:
         state_obj["active_dialogue_sequence"] = empty
         return empty
 
-    @staticmethod
+    def _task_belongs_to_sequence(self, task, sequence, *, now=None):
+        """Validate that an interactive task belongs to the active authenticated branch."""
+        if not isinstance(task, dict) or not task or not task.get("active"):
+            return {}
+        sequence = sequence if isinstance(sequence, dict) else {}
+        seq_id = str(sequence.get("sequence_id") or "").strip()
+        task_id = str(task.get("sequence_id") or task.get("active_sequence_id") or "").strip()
+        if seq_id and task_id and task_id != seq_id:
+            return {}
+
+        current = float(now if now is not None else time.time())
+        task_ts = QuantumMemoryEngine._record_timestamp(task)
+        seq_ts = 0.0
+        try:
+            seq_ts = float(sequence.get("last_turn_at") or 0.0)
+        except (TypeError, ValueError):
+            seq_ts = 0.0
+        if task_ts and self._is_expired(task_ts, now=current):
+            return {}
+        if not task_ts and not seq_ts:
+            # Untimestamped task state is legacy residue, not authenticated live state.
+            return {}
+
+        seq_topic = str(sequence.get("topic") or "").strip().lower()
+        task_topic = str(task.get("topic") or task.get("canonical_topic") or "").strip().lower()
+        if seq_topic and task_topic:
+            seq_tokens = set(re.findall(r"[a-zа-яё0-9]+", seq_topic))
+            task_tokens = set(re.findall(r"[a-zа-яё0-9]+", task_topic))
+            overlap = len(seq_tokens & task_tokens) / max(1, len(seq_tokens | task_tokens))
+            # Generic word "игра" is not sufficient to make two tasks identical.
+            if overlap < 0.25 and task_topic not in seq_topic and seq_topic not in task_topic:
+                return {}
+        return deepcopy(task)
+
     def _advance_active_dialogue_sequence(
         state_obj, user_id, relation, current_request, answer, dialogue_vector=None, selected_operand=None
     ):
@@ -1144,19 +1196,37 @@ class QuantumMemoryEngine:
             current_branch = str(current.get("branch_id") or target_id)
         else:
             # CONTINUE is identity-preserving: never replace the sequence just because
-            # the wording or representation changed.
+            # the wording or representation changed. A persisted task is copied only
+            # when Interpretation explicitly marked it as owned by this turn.
             current["version"] = "april_dialogue_sequence_v2"
             current["sequence_id"] = current_id
             current["branch_id"] = current_branch or current_id
             current["user_id"] = str(user_id)
             current["conversation_id"] = conversation_id
             current["status"] = "active"
-            task = deepcopy(dv.get("interactive_task_state") or dv.get("open_task") or dv.get("task_state") or current.get("active_task") or {})
+            raw_task = deepcopy(
+                dv.get("interactive_task_state")
+                or dv.get("open_task")
+                or dv.get("task_state")
+                or {}
+            )
+            task_owned = bool(
+                dv.get("task_continuation")
+                or dv.get("task_owned_by_current_turn")
+                or str(dv.get("turn_relation") or "").upper().startswith("TASK_")
+            )
+            task = self._task_belongs_to_sequence(raw_task, current, now=now) if task_owned else {}
             if task:
                 current["interactive_task_state"] = deepcopy(task)
                 current["open_task"] = deepcopy(task)
                 current["task_state"] = deepcopy(task)
                 current["active_task"] = deepcopy(task)
+            else:
+                # Do not let an unrelated unfinished task survive a clean CONTINUE.
+                current["interactive_task_state"] = {}
+                current["open_task"] = {}
+                current["task_state"] = {}
+                current["active_task"] = {}
 
         current["turn_count"] = int(current.get("turn_count") or 0) + 1
         current["last_turn_at"] = now
@@ -1884,6 +1954,22 @@ def get_state(user_id):
             cycle["window_key"] = utc_window_key(time.time() - DIALOGUE_WINDOW_SECONDS)
             state[key]["memory_cycle"] = cycle
         rolled = QUANTUM_MEMORY_ENGINE.rollover(state[key])
+
+        # Fixed-UTC memory owns the live task. Reject stale/foreign task objects
+        # even when a legacy persistence record accidentally carries today's
+        # window key or omits task timestamps.
+        active_sequence = state[key].get("active_dialogue_sequence") if isinstance(state[key].get("active_dialogue_sequence"), dict) else {}
+        for task_key in ("interactive_task_state", "open_task", "active_task"):
+            candidate = state[key].get(task_key) if isinstance(state[key].get(task_key), dict) else {}
+            valid = QUANTUM_MEMORY_ENGINE._task_belongs_to_sequence(candidate, active_sequence, now=time.time())
+            state[key][task_key] = valid
+            if isinstance(active_sequence, dict) and task_key in {"interactive_task_state", "open_task", "active_task"}:
+                seq_field = task_key if task_key != "open_task" else "open_task"
+                active_sequence[seq_field] = deepcopy(valid)
+        if isinstance(active_sequence, dict):
+            active_sequence["task_state"] = deepcopy(active_sequence.get("active_task") or {})
+            state[key]["active_dialogue_sequence"] = active_sequence
+
         removed_hot = _cleanup_hot_content(state[key])
         if removed_hot or rolled:
             QUANTUM_MEMORY_ENGINE.refresh_scene(state[key])
@@ -3078,20 +3164,33 @@ def build_dialogue_memory_bridge(
                 if score >= 0.30
             ]
 
-    interactive_task_state = deepcopy(
-        (
-            selected_sequence_meta.get("active_task")
-            if isinstance(selected_sequence_meta, dict)
-            else {}
+    # Task memory is branch-owned, not global user memory. Never fall back to a
+    # stale top-level task when the selected 12-hour sequence has no task.
+    interactive_task_state = {}
+    task_sources = []
+    if isinstance(selected_sequence_meta, dict):
+        task_sources.extend([
+            selected_sequence_meta.get("active_task"),
+            selected_sequence_meta.get("interactive_task_state"),
+            selected_sequence_meta.get("open_task"),
+            selected_sequence_meta.get("task_state"),
+        ])
+    if mode == "CONTINUE" and selected_sequence_id == active_id:
+        task_sources.extend([
+            active.get("active_task"),
+            active.get("interactive_task_state"),
+            active.get("open_task"),
+            active.get("task_state"),
+        ])
+    for candidate in task_sources:
+        valid = QUANTUM_MEMORY_ENGINE._task_belongs_to_sequence(
+            candidate,
+            selected_sequence_meta if isinstance(selected_sequence_meta, dict) else {},
+            now=now,
         )
-        or state_obj.get("interactive_task_state")
-        or active.get("interactive_task_state")
-        or active.get("open_task")
-        or active.get("task_state")
-        or {}
-    )
-    if not isinstance(interactive_task_state, dict):
-        interactive_task_state = {}
+        if valid:
+            interactive_task_state = valid
+            break
 
     active_meta = {
         "sequence_id": selected_sequence_meta.get("sequence_id"),
@@ -4440,6 +4539,72 @@ def update_dialog_context(user_id, semantic_result):
             relation = "RECALL"
         else:
             relation = "NEW"
+
+    # The active interactive task is branch-owned. A 12-hour memory window may
+    # retain conversation evidence, but an unfinished task from another branch
+    # must never become the task for the current turn.
+    active_sequence = state_obj.get("active_dialogue_sequence") if isinstance(state_obj.get("active_dialogue_sequence"), dict) else {}
+    validation_sequence = deepcopy(active_sequence)
+    if relation == "RECALL":
+        target_sequence_id = str(
+            dialogue_vector.get("target_sequence_id")
+            or contract.get("target_sequence_id")
+            or semantic_result.get("target_sequence_id")
+            or ""
+        ).strip()
+        target_branch = (
+            dialogue_vector.get("target_branch")
+            if isinstance(dialogue_vector.get("target_branch"), dict)
+            else contract.get("target_branch")
+            if isinstance(contract.get("target_branch"), dict)
+            else {}
+        )
+        if target_sequence_id:
+            validation_sequence["sequence_id"] = target_sequence_id
+        if target_branch.get("topic"):
+            validation_sequence["topic"] = target_branch.get("topic")
+    task_sequence_id = str(validation_sequence.get("sequence_id") or "").strip()
+    candidate_task = interactive_task_state if isinstance(interactive_task_state, dict) else {}
+    task_owned = bool(
+        dialogue_vector.get("task_continuation")
+        or dialogue_vector.get("task_owned_by_current_turn")
+        or dialogue_vector.get("task_action")
+        or contract.get("task_continuation")
+        or contract.get("task_action")
+        or semantic_result.get("task_continuation")
+        or semantic_result.get("task_action")
+        or str(dialogue_vector.get("turn_relation") or contract.get("turn_relation") or semantic_result.get("dialogue_subtype") or "").upper().startswith("TASK_")
+    )
+    if relation == "NEW":
+        # A NEW task must be defined by this turn; never inherit a persisted task.
+        task_owned = bool(
+            semantic_result.get("task_definition")
+            or dialogue_vector.get("task_definition")
+            or contract.get("task_definition")
+            or semantic_result.get("task_action")
+            or dialogue_vector.get("task_action")
+        )
+    if candidate_task and (relation == "NEW" and not task_owned or relation == "CONTINUE" and not task_owned):
+        interactive_task_state = {}
+    elif candidate_task:
+        validated_task = QUANTUM_MEMORY_ENGINE._task_belongs_to_sequence(
+            candidate_task, validation_sequence, now=time.time()
+        )
+        if task_sequence_id and not validated_task:
+            interactive_task_state = {}
+        else:
+            interactive_task_state = validated_task
+    else:
+        interactive_task_state = {}
+
+    if relation in {"NEW", "CONTINUE"} and not interactive_task_state:
+        state_obj["interactive_task_state"] = {}
+        state_obj["open_task"] = {}
+        state_obj["active_task"] = {}
+        if isinstance(active_sequence, dict) and active_sequence.get("sequence_id"):
+            for field in ("interactive_task_state", "open_task", "task_state", "active_task"):
+                active_sequence[field] = {}
+            state_obj["active_dialogue_sequence"] = active_sequence
 
     memory_slider = deepcopy(
         dialogue_vector.get("memory_slider")
