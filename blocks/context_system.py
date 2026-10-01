@@ -447,7 +447,7 @@ def stabilize_active_flow(state: Dict[str, Any], scene_state: Dict[str, Any]) ->
         flow["scene_bound"] = True
         flow["continuity_priority"] = True
 
-def _v7_clear_stale_scene(state: Dict[str, Any], current_text: str) -> bool:
+def _clear_stale_scene(state: Dict[str, Any], current_text: str) -> bool:
     """Measure a possible transition without mutating dialogue state.
 
     Context owns available state; Interpretation/Quantum Processor own semantic
@@ -754,14 +754,18 @@ def build_executor_context_packet(state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def build_memory_context_evidence(state: Dict[str, Any], text: Any) -> Dict[str, Any]:
-    """Expose compact seven-day dialogue evidence without making routing decisions.
+    """Expose compact 12-hour dialogue evidence without making routing decisions.
 
     The active dialogue sequence is the hot semantic anchor for an authenticated
-    user. The full seven-day archive remains in State Manager; only a compact,
+    user. The full 12-hour archive remains in State Manager; only a compact,
     user-scoped evidence slice is exposed here.
     """
     dialog = state.get("dialog") or []
-    substantive = _v7_latest_substantive_user_message(dialog)
+    active_ctx = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
+    last_result = active_ctx.get("last_completed_result") if isinstance(active_ctx.get("last_completed_result"), dict) else {}
+    substantive = _latest_substantive_user_message(dialog)
+    if last_result.get("user_request"):
+        substantive = safe_slice(last_result.get("user_request"), 500)
     scene = _dict(state.get("active_visual_scene") or state.get("current_visual_scene"))
     latest_scene_user = safe_slice(
         scene.get("user_request") or scene.get("current_request") or "",
@@ -778,7 +782,7 @@ def build_memory_context_evidence(state: Dict[str, Any], text: Any) -> Dict[str,
     conversation_id = str(state.get("conversation_id") or "")
     recent_sequence_turns = []
     timeline = _dict(state.get("memory_timeline"))
-    for day_index in range(7):
+    for day_index in range(1):
         day = _dict(timeline.get(f"day_{day_index}"))
         for item in day.get("dialog_pairs", []):
             if not isinstance(item, dict):
@@ -818,14 +822,27 @@ def build_memory_context_evidence(state: Dict[str, Any], text: Any) -> Dict[str,
         "dynamic_memory_available": bool(
             _dict(state.get("memory_timeline")).get("day_0")
         ),
+        "active_dialogue_context": {
+            "objective": safe_slice(active_ctx.get("objective"), 700),
+            "task": _dict(active_ctx.get("task")),
+            "intent": safe_slice(active_ctx.get("intent"), 180),
+            "goal": safe_slice(active_ctx.get("goal"), 180),
+            "topic": safe_slice(active_ctx.get("topic"), 260),
+            "active_entity": safe_slice(active_ctx.get("active_entity"), 220),
+            "last_completed_result": {
+                "user_request": safe_slice(last_result.get("user_request"), 500),
+                "assistant_answer": safe_slice(last_result.get("assistant_answer") or last_result.get("april_answer"), 700),
+                "created_at": last_result.get("created_at"),
+            },
+        },
         "active_dialogue_sequence": {
             "sequence_id": active_sequence.get("sequence_id"),
             "topic": active_sequence.get("topic"),
             "turn_count": active_sequence.get("turn_count", 0),
             "status": active_sequence.get("status", "inactive"),
         },
-        "seven_day_sequence_turns": recent_sequence_turns,
-        "dialogue_memory_window_days": 7,
+        "dialogue_window_sequence_turns": recent_sequence_turns,
+        "dialogue_memory_window_hours": 12,
         "authenticated_scope": {
             "user_id": user_id,
             "conversation_id": conversation_id,
@@ -834,7 +851,7 @@ def build_memory_context_evidence(state: Dict[str, Any], text: Any) -> Dict[str,
         "archived_memory_role": "sequence_evidence_only",
     }
 
-def _v7_latest_substantive_user_message(dialog: List[Dict[str, Any]]) -> str:
+def _latest_substantive_user_message(dialog: List[Dict[str, Any]]) -> str:
     for msg in reversed(dialog):
         if normalize_lower(msg.get("role")) not in {"user", "human"}:
             continue
@@ -1099,12 +1116,12 @@ MAX_IMAGE_HINT = MAX_IMAGE_HINT
 MAX_MATH_EXPR = MAX_MATH_EXPR
 MAX_GOAL_LENGTH = MAX_GOAL_LENGTH
 
-# V7 compatibility helpers.
-_v7_tokens = _tokens
-_v7_is_reference = _is_reference
-_v7_is_low_information = _is_low_information
-_v7_topic_overlap = _overlap
-_CONTEXT_STOPWORDS_V7 = CONTEXT_STOPWORDS
-_REFERENCE_MARKERS_V7 = REFERENCE_MARKERS
-_LOW_INFORMATION_V7 = LOW_VALUE_MESSAGES
+# Live-window compatibility helpers.
+_live_tokens = _tokens
+_live_is_reference = _is_reference
+_live_is_low_information = _is_low_information
+_live_topic_overlap = _overlap
+_CONTEXT_STOPWORDS_LIVE = CONTEXT_STOPWORDS
+_REFERENCE_MARKERS_LIVE = REFERENCE_MARKERS
+_LOW_INFORMATION_LIVE = LOW_VALUE_MESSAGES
 _CONTEXT_STOPWORDS = CONTEXT_STOPWORDS
