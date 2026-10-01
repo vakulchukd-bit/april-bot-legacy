@@ -1012,6 +1012,11 @@ class ProcessorScene:
                     dialogue.get("target_sequence_id")
                     or dialogue.get("sequence_id")
                 ),
+                target_task_id=_text(
+                    dialogue.get("target_task_id")
+                    or (dialogue.get("active_task") or {}).get("task_id")
+                    or semantic_result.get("task_id")
+                ),
             )
         else:
             dialogue_memory = {
