@@ -628,353 +628,119 @@ class SequentialInterpretation:
         self.semantic_result: Dict[str, Any] = {}
 
     def dialogue(self, request: str, state: dict) -> Dict[str, Any]:
-        state = state if isinstance(state, dict) else {}
-        history = state.get("dialog")
-        if not isinstance(history, list):
-            history = state.get("dialogue_history") if isinstance(state.get("dialogue_history"), list) else []
-        try:
-            semantic_result = interpret_request(request, history=history, state=state)
-        except Exception as exc:
-            # Never drop to an empty legacy semantic packet. A single specialist
-            # failure must not erase live dialogue continuity. Keep the current turn
-            # authoritative and build the smallest deterministic recovery packet;
-            # downstream code can then answer the current request without importing
-            # stale historical state.
-            print("⚠️ APRIL SEMANTIC DIALOGUE RECOVERY:", exc)
-            active_sequence = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
-            previous_april = _text(active_sequence.get("last_april_answer"))
-            previous_user = _text(active_sequence.get("last_user_request"))
-            low = _text(request).lower().strip(" .,!?:;-—")
-            confirmation = low in {"да", "ага", "верно", "правильно", "точно", "именно", "хорошо"}
-            relation = "CONTINUE" if previous_april and confirmation else "NEW"
-            dependency = "active_dialogue_sequence" if relation == "CONTINUE" else "current_turn_only"
-            semantic_result = {
-                "three_way_relation": relation,
-                "dialogue_relation": {
-                    "relation": relation,
-                    "three_way_relation": relation,
-                    "continuation": relation == "CONTINUE",
-                    "reference_to_previous": False,
-                    "previous_user_turn": previous_user,
-                    "previous_april_turn": previous_april,
-                    "context_dependency": dependency,
-                    "turn_relation": "CONFIRMATION" if relation == "CONTINUE" else "NEW_TOPIC",
-                    "confidence": 0.72,
-                    "source": "safe_semantic_recovery",
-                },
-                "dialogue_vector": {
-                    "relation": relation,
-                    "three_way_relation": relation,
-                    "continuation": relation == "CONTINUE",
-                    "sequence_id": _text(active_sequence.get("sequence_id")),
-                    "previous_user_turn": previous_user,
-                    "previous_april_turn": previous_april,
-                },
-                "canonical_user_request": _text(request),
-                "semantic_request": _text(request),
-                "context_dependency": dependency,
-                "provider_context_plan": {
-                    "version": "safe_recovery_v1",
-                    "relation": relation,
-                    "current_user_request": _text(request),
-                    "current_request_authoritative": True,
-                    "context_selection_done_before_provider": True,
-                    "provider_must_not_reselect_context": True,
-                    "required_context": (
-                        [{"key": "DIALOGUE_ANCHOR", "value": {"previous_user_turn": previous_user, "previous_april_turn": previous_april}}]
-                        if relation == "CONTINUE" and previous_april else []
-                    ),
-                    "optional_context": [],
-                    "excluded_context": ["FULL_HISTORY", "SEVEN_DAY_MEMORY", "OTHER_TOPIC_BRANCHES"],
-                },
-                "cognitive_workspace": {
-                    "relation": relation,
-                    "current_request": _text(request),
-                    "sequence_id": _text(active_sequence.get("sequence_id")),
-                    "provider_context_plan_version": "safe_recovery_v1",
-                },
-            }
-        self.semantic_result = semantic_result if isinstance(semantic_result, dict) else {}
+        """Read the single authoritative interpretation result.
 
-        cognitive_workspace = self.semantic_result.get("cognitive_workspace") if isinstance(self.semantic_result.get("cognitive_workspace"), dict) else {}
-        vector = self.semantic_result.get("dialogue_vector") if isinstance(self.semantic_result.get("dialogue_vector"), dict) else {}
-        contract = self.semantic_result.get("dialogue_contract") if isinstance(self.semantic_result.get("dialogue_contract"), dict) else {}
+        Executor does not reinterpret the turn and does not choose a second
+        relation. It only projects the canonical runtime packet into the
+        compatibility shape expected by the existing ProcessorScene code.
+        """
+        state = state if isinstance(state, dict) else {}
+        history = state.get("dialog") if isinstance(state.get("dialog"), list) else []
+        if not history and isinstance(state.get("dialogue_history"), list):
+            history = state.get("dialogue_history")
+        semantic_result = interpret_request(request, history=history, state=state)
+        if not isinstance(semantic_result, dict):
+            raise RuntimeError("INTERPRETATION_RETURNED_NO_PACKET")
+        self.semantic_result = semantic_result
+
+        contract = semantic_result.get("dialogue_contract") if isinstance(semantic_result.get("dialogue_contract"), dict) else {}
+        vector = semantic_result.get("dialogue_vector") if isinstance(semantic_result.get("dialogue_vector"), dict) else {}
+        workspace = semantic_result.get("cognitive_workspace") if isinstance(semantic_result.get("cognitive_workspace"), dict) else {}
         relation = _text(
-            cognitive_workspace.get("relation")
-            or cognitive_workspace.get("topic_relation")
-            or vector.get("three_way_relation")
-            or contract.get("three_way_relation")
-            or contract.get("relation")
+            contract.get("relation")
+            or semantic_result.get("three_way_relation")
+            or vector.get("relation")
             or "NEW"
         ).upper()
-        relation = {
-            "CONTINUE_TOPIC": "CONTINUE",
-            "CONTINUATION": "CONTINUE",
-            "CONTINUE": "CONTINUE",
-            "ARTIFACT_REFERENCE": "CONTINUE",
-            "NEW_TOPIC": "NEW",
-            "NEW": "NEW",
-            "INDEPENDENT": "NEW",
-            "RECALL": "RECALL",
-        }.get(relation, relation)
-        if relation not in {"CONTINUE", "RECALL", "NEW"}:
-            relation = "NEW"
-
-        trajectory = vector.get("trajectory") if isinstance(vector.get("trajectory"), dict) else self.semantic_result.get("dialogue_trajectory")
-        trajectory = trajectory if isinstance(trajectory, dict) else {}
-        canonical_topic = _text(vector.get("canonical_topic") or contract.get("canonical_topic") or self.semantic_result.get("canonical_topic"))
-        pending = state.get("april_pending_task") if isinstance(state.get("april_pending_task"), dict) else {}
-        pending_resolved = bool(pending.get("active") and relation == "CONTINUE")
-        reference = bool(
-            cognitive_workspace.get("reference")
-            if cognitive_workspace
-            else (relation == "RECALL" or contract.get("reference_to_previous"))
-        )
-        dependency = _text(contract.get("context_dependency"))
-        if not dependency:
-            dependency = "pending" if pending_resolved else "recall" if reference else "continuation" if relation == "CONTINUE" else "independent"
-        anchor = "pending_task" if pending_resolved else "last_turn" if relation == "CONTINUE" else "memory" if reference else "none"
-        continuation_analysis = self.semantic_result.get("continuation_content_analysis")
-        continuation_analysis = continuation_analysis if isinstance(continuation_analysis, dict) else {}
-        dialogue_strategy = self.semantic_result.get("dialogue_strategy")
-        dialogue_strategy = dialogue_strategy if isinstance(dialogue_strategy, dict) else {}
-        dialogue_development = self.semantic_result.get("dialogue_development")
-        dialogue_development = dialogue_development if isinstance(dialogue_development, dict) else {}
-        if not dialogue_development and isinstance(cognitive_workspace, dict):
-            workspace_development = cognitive_workspace.get("dialogue_development")
-            dialogue_development = workspace_development if isinstance(workspace_development, dict) else {}
-        resolved_entity = _text(
-            cognitive_workspace.get("active_entity")
-            or self.semantic_result.get("resolved_entity")
-            or contract.get("resolved_entity")
-            or vector.get("resolved_entity")
-            or continuation_analysis.get("active_entity")
-        )
-        if cognitive_workspace:
-            task_state = (
-                cognitive_workspace.get("active_task_context")
-                if bool(cognitive_workspace.get("task_continuation")) and isinstance(cognitive_workspace.get("active_task_context"), dict)
-                else {}
-            )
-        else:
-            task_state = (
-                self.semantic_result.get("interactive_task_state")
-                if isinstance(self.semantic_result.get("interactive_task_state"), dict)
-                else self.semantic_result.get("open_task")
-                if isinstance(self.semantic_result.get("open_task"), dict)
-                else contract.get("interactive_task_state")
-                if isinstance(contract.get("interactive_task_state"), dict)
-                else contract.get("open_task")
-                if isinstance(contract.get("open_task"), dict)
-                else {}
-            )
-        task_memory = (
-            self.semantic_result.get("task_memory")
-            if isinstance(self.semantic_result.get("task_memory"), dict)
-            else contract.get("task_memory")
-            if isinstance(contract.get("task_memory"), dict)
+        if relation not in {"NEW", "CONTINUE", "RECALL"}:
+            raise RuntimeError(f"INVALID_INTERPRETATION_RELATION:{relation}")
+        task_state = (
+            semantic_result.get("interactive_task_state")
+            if isinstance(semantic_result.get("interactive_task_state"), dict)
+            else contract.get("interactive_task_state")
+            if isinstance(contract.get("interactive_task_state"), dict)
             else {}
         )
-
+        task_memory = semantic_result.get("task_memory") if isinstance(semantic_result.get("task_memory"), dict) else {}
+        development = semantic_result.get("dialogue_development") if isinstance(semantic_result.get("dialogue_development"), dict) else {}
         return {
             "relation": relation,
             "continuation": relation == "CONTINUE",
-            "reference": reference,
-            "dependency": dependency,
-            "anchor": anchor,
-            "pending_resolved": pending_resolved,
-            "resolved_request": _text(self.semantic_result.get("resolved_request") or contract.get("resolved_request") or request),
-            "resolved_reference": _text(self.semantic_result.get("resolved_reference") or contract.get("resolved_reference")),
-            "resolved_entity": resolved_entity,
-            "resolved_entity_source": _text(
-                self.semantic_result.get("resolved_entity_source")
-                or contract.get("resolved_entity_source")
-                or continuation_analysis.get("active_entity_source")
-            ),
-            "active_entity": resolved_entity,
-            "continuation_content_analysis": continuation_analysis,
-            "dialogue_strategy": dialogue_strategy,
-            "dialogue_development": _compact(dialogue_development, max_depth=6, max_items=12),
-            "continuation_authority": _text(
-                self.semantic_result.get("continuation_authority")
-                or contract.get("continuation_authority")
-                or "active_dialogue_sequence"
-            ),
-            "previous_user_turn": _text(
-                self.semantic_result.get("previous_user_turn")
-                or contract.get("previous_user_turn")
-                or continuation_analysis.get("previous_user_turn")
-            ),
-            "previous_april_turn": _text(
-                self.semantic_result.get("previous_april_turn")
-                or contract.get("previous_april_turn")
-                or continuation_analysis.get("previous_answer")
-            ),
-            "selected_memory_index": self.semantic_result.get("selected_memory_index", vector.get("selected_memory_index", -1)),
+            "reference": relation == "RECALL" or bool(contract.get("reference_to_previous")),
+            "dependency": _text(contract.get("context_dependency") or ("recall" if relation == "RECALL" else "continuation" if relation == "CONTINUE" else "independent")),
+            "anchor": "live_branch" if relation == "CONTINUE" else "recalled_branch" if relation == "RECALL" else "none",
+            "pending_resolved": bool(semantic_result.get("pending_resolved")),
+            "resolved_request": _text(semantic_result.get("resolved_request") or request),
+            "resolved_reference": _text(semantic_result.get("resolved_reference") or ""),
+            "resolved_entity": _text(semantic_result.get("resolved_entity") or contract.get("resolved_entity") or workspace.get("active_entity")),
+            "resolved_entity_source": _text(contract.get("resolved_entity_source") or "INTERPRETATION_RUNTIME"),
+            "active_entity": _text(semantic_result.get("resolved_entity") or contract.get("active_entity") or workspace.get("active_entity")),
+            "continuation_content_analysis": semantic_result.get("continuation_content_analysis") if isinstance(semantic_result.get("continuation_content_analysis"), dict) else {},
+            "dialogue_strategy": semantic_result.get("dialogue_strategy") if isinstance(semantic_result.get("dialogue_strategy"), dict) else {},
+            "dialogue_development": _compact(development, max_depth=6, max_items=12),
+            "continuation_authority": "INTERPRETATION_RUNTIME",
+            "previous_user_turn": _text(contract.get("previous_user_turn") or vector.get("previous_user_turn") or ((semantic_result.get("provider_context_plan") or {}).get("required_context") or [{}])[0].get("value",{}).get("previous_user_turn") if isinstance(semantic_result.get("provider_context_plan"), dict) else ""),
+            "previous_april_turn": _text(contract.get("previous_april_turn") or vector.get("previous_april_turn") or ""),
+            "selected_memory_index": semantic_result.get("selected_memory_index", -1),
             "selected_memory_operand": vector.get("selected_memory_operand") or contract.get("selected_memory_operand") or {},
-            "trajectory": trajectory,
-            "canonical_topic": canonical_topic,
+            "trajectory": vector.get("trajectory") if isinstance(vector.get("trajectory"), dict) else {},
+            "canonical_topic": _text(vector.get("canonical_topic") or contract.get("canonical_topic") or workspace.get("active_topic")),
             "active_task": task_state,
             "open_task": task_state,
             "interactive_task_state": task_state,
             "task_memory": task_memory,
-            "task_relation": contract.get("task_relation") or self.semantic_result.get("task_relation") or {},
-            "task_transition": contract.get("task_transition") or self.semantic_result.get("task_transition") or {},
-            "task_action": bool(contract.get("task_action") or self.semantic_result.get("task_action")),
-            "sequence_id": _text(
-                cognitive_workspace.get("sequence_id")
-                or vector.get("sequence_id")
-                or contract.get("sequence_id")
-                or (
-                    (vector.get("trajectory") or {}).get("sequence_id")
-                    if isinstance(vector.get("trajectory"), dict)
-                    else ""
-                )
-            ),
-            "conversation_continuation": bool(cognitive_workspace.get("conversation_continuation")) if cognitive_workspace else bool(relation == "CONTINUE"),
-            "semantic_continuation": bool(cognitive_workspace.get("semantic_continuation")) if cognitive_workspace else bool(relation == "CONTINUE"),
-            "task_continuation": bool(cognitive_workspace.get("task_continuation")) if cognitive_workspace else bool(task_state),
-            "target_sequence_id": _text(
-                vector.get("target_sequence_id")
-                or contract.get("target_sequence_id")
-                or vector.get("sequence_id")
-                or contract.get("sequence_id")
-            ),
-            "semantic_result": self.semantic_result,
+            "task_relation": semantic_result.get("task_relation") or contract.get("task_relation") or {},
+            "task_transition": contract.get("task_transition") or {},
+            "task_action": bool(contract.get("task_action")),
+            "sequence_id": _text(vector.get("sequence_id") or contract.get("sequence_id") or workspace.get("sequence_id")),
+            "conversation_continuation": relation == "CONTINUE",
+            "semantic_continuation": relation == "CONTINUE",
+            "task_continuation": bool(task_state),
+            "target_sequence_id": _text(vector.get("target_sequence_id") or contract.get("target_sequence_id") or vector.get("sequence_id") or contract.get("sequence_id")),
+            "semantic_result": semantic_result,
         }
 
     def intent(self, request: str, state: dict, dialogue: Dict[str, Any]) -> Dict[str, Any]:
-        text = request.lower()
-
-        active = state.get("april_active_task") if isinstance(state.get("april_active_task"), dict) else {}
-        pending = state.get("april_pending_task") if isinstance(state.get("april_pending_task"), dict) else {}
-
-        # Pending task owns the representation when the user resolves it.
-        if dialogue["pending_resolved"] and pending:
-            representation = _text(pending.get("representation") or "text").lower()
-            operation = _text(pending.get("operation") or "answer")
-            topic = _text(pending.get("topic") or representation)
-            attrs = {
-                "resolved_pending_input": request,
-                "pending_kind": _text(pending.get("expected_input_type")),
-            }
-            if pending.get("expected_input_type") == "telegram_target_kind":
-                attrs["telegram_target_kind"] = self._telegram_kind(text)
-            return self._make_intent(operation, pending.get("object") or representation, representation,
-                                     pending.get("goal") or "obtain", topic, attrs)
-
-        lexical_representation = self._representation(text)
+        """Project rendering/operation decisions already made by Interpretation."""
         semantic_result = dialogue.get("semantic_result") if isinstance(dialogue.get("semantic_result"), dict) else self.semantic_result
-        semantic_task = semantic_result.get("semantic_task") if isinstance(semantic_result.get("semantic_task"), dict) else {}
-        semantic_representation = _text(
-            semantic_result.get("production_representation")
-            or semantic_result.get("representation")
-            or semantic_task.get("representation")
+        control = semantic_result.get("interpretation_control") if isinstance(semantic_result.get("interpretation_control"), dict) else {}
+        render_plan = semantic_result.get("render_plan") if isinstance(semantic_result.get("render_plan"), dict) else {}
+        representation = _text(
+            semantic_result.get("representation")
+            or render_plan.get("representation")
+            or "text"
         ).lower()
-        interpretation_control = semantic_result.get("interpretation_control") if isinstance(semantic_result.get("interpretation_control"), dict) else {}
-        authority_mode = _text(interpretation_control.get("render_mode")).upper()
-
-        # Interpretation is the only production-modality authority. The previous
-        # active representation may be inherited only for a proven artifact
-        # continuation; ordinary CONTINUE must not turn text into a stale graph.
-        representation = semantic_representation or lexical_representation or "text"
-        if (
-            representation == "text"
-            and authority_mode == "ARTIFACT_CONTINUATION"
-            and bool(interpretation_control.get("render_authorized"))
-            and isinstance(active, dict)
-        ):
-            representation = _text(active.get("representation") or "text").lower() or "text"
-
-        if semantic_task.get("operation"):
-            operation = _text(semantic_task.get("operation")).lower()
-        else:
-            operation = self._operation(text, representation)
-        if semantic_task.get("goal"):
-            goal = _text(semantic_task.get("goal")).lower()
-        else:
-            goal = self._goal(operation, representation)
-        semantic_object = _text(semantic_task.get("object"))
-        live_scene = semantic_result.get("live_scene") if isinstance(semantic_result.get("live_scene"), dict) else {}
-        semantic_topic = _text(
-            semantic_task.get("topic")
-            or semantic_result.get("canonical_topic")
-            or live_scene.get("topic")
-            or semantic_result.get("active_topic")
-        )
-        generic_objects = {"", "action", "text", representation}
-        if authority_mode == "ARTIFACT_CONTINUATION" and bool(interpretation_control.get("render_authorized")) and active and semantic_object.lower() in generic_objects:
-            object_name = _text(active.get("object")) or semantic_topic or self._object(text, representation)
-        elif semantic_object and semantic_object.lower() not in generic_objects:
-            object_name = semantic_object
-        else:
-            object_name = semantic_topic or self._object(text, representation)
-        topic = semantic_topic or object_name or _text(request)[:120]
-        attributes: Dict[str, Any] = {}
-
-        semantic_understanding = semantic_result.get("semantic_understanding") if isinstance(semantic_result.get("semantic_understanding"), dict) else {}
-        semantic_representation_state = semantic_understanding.get("representation") if isinstance(semantic_understanding.get("representation"), dict) else {}
-        semantic_mode = _text(
-            semantic_result.get("visual_production_mode")
-            or semantic_representation_state.get("production_mode")
-        ).lower()
-
-        if representation == "image":
-            # A current-turn image build is a production request.  The previous
-            # code trusted a stale `image_present` semantic field even when the
-            # current operation was `build`, which made Provider return only text
-            # and prevented C_APRIL_IMAGES_GENERATOR from ever materializing the
-            # image.  Artifact continuation is still one semantic image route; it
-            # simply uses the previous scene as the operand.
-            artifact_reference = bool(
-                interpretation_control.get("artifact_reference")
-                or interpretation_control.get("render_mode") == "ARTIFACT_CONTINUATION"
-            )
-            if operation in {"build", "visualize", "modify", "transform", "redraw"}:
-                attributes["visual_production_mode"] = "image_generation"
-            elif semantic_mode in {"image_generation", "image_present"}:
-                attributes["visual_production_mode"] = semantic_mode
-            else:
-                attributes["visual_production_mode"] = "image_present"
-            attributes["artifact_reference"] = artifact_reference
-        elif representation == "diagram":
-            attributes["visual_production_mode"] = "diagram"
-        elif representation == "graph":
-            attributes["visual_production_mode"] = "graph"
-        elif representation == "table":
-            attributes["visual_production_mode"] = "table"
-        elif representation == "code":
-            # Code is a structured presentation too. Keep it explicit so the
-            # provider is instructed to materialize a real CodeBlock instead
-            # of returning only a prose introduction.
-            attributes["visual_production_mode"] = "code"
-        elif representation == "formula":
-            # Formula follows the same explicit structured-output contract.
-            attributes["visual_production_mode"] = "formula"
-        elif representation == "link":
-            attributes["visual_production_mode"] = "link"
-
-        if representation == "link" and ("telegram" in text or "телеграм" in text) and not self._telegram_target_present(text):
-            attributes["telegram_pending"] = True
-            attributes["pending_question"] = "Какой Telegram нужен: официальный канал, чат или пользовательский аккаунт?"
-
-        intent = self._make_intent(operation, object_name, representation, goal, topic, attributes)
-        intent.update({
-            "requested_outputs": list(semantic_result.get("requested_outputs") or (["text"] if representation == "text" else ["text", representation])),
-            "production_representation_locked": bool(semantic_result.get("production_representation_locked", False)),
-            "render_authorized": bool(interpretation_control.get("render_authorized")),
-            "render_mode": authority_mode or "TEXT_ONLY",
-            "interpretation_control": _compact(interpretation_control, max_depth=3, max_items=8),
+        operation = _text(semantic_result.get("operation") or "answer")
+        goal = _text(semantic_result.get("goal") or "answer")
+        topic = _text(semantic_result.get("canonical_topic") or dialogue.get("canonical_topic") or representation)
+        entity = _text(semantic_result.get("resolved_entity") or dialogue.get("resolved_entity") or representation)
+        requested = [
+            _text(x).lower() for x in (semantic_result.get("requested_outputs") or render_plan.get("requested_outputs") or ["text"])
+            if _text(x).strip()
+        ]
+        attrs = {
+            "visual_production_mode": _text((render_plan.get("mode") or representation)).lower(),
+            "artifact_reference": bool(render_plan.get("artifact_reference")),
+            "dialogue_relation": _text(dialogue.get("relation")),
+            "sequence_id": _text(dialogue.get("sequence_id")),
+            "task": _compact(dialogue.get("active_task") or {}, max_depth=5, max_items=10),
+        }
+        if representation == "image" and operation in {"build", "visualize", "modify", "transform", "redraw"}:
+            attrs["visual_production_mode"] = "image_generation"
+        if representation == "link" and ("telegram" in request.lower() or "телеграм" in request.lower()):
+            attrs["visual_production_mode"] = "link"
+        return_intent = self._make_intent(operation, entity or representation, representation, goal, topic, attrs)
+        return_intent.update({
+            "requested_outputs": requested or ["text"],
+            "production_representation_locked": True,
+            "render_authorized": bool(control.get("render_authorized") or render_plan.get("authorized")),
+            "render_mode": _text(control.get("render_mode") or render_plan.get("mode") or "TEXT_ONLY"),
+            "interpretation_control": _compact(control, max_depth=4, max_items=12),
             "semantic_understanding": _compact(semantic_result.get("semantic_understanding") or {}, max_depth=5, max_items=10),
-            "semantic_request": _text(
-                semantic_result.get("semantic_request")
-                or _as_dict(semantic_result.get("semantic_understanding")).get("provider", {}).get("semantic_request")
-                or dialogue.get("resolved_request")
-                or self.request
-            ),
+            "semantic_request": _text(semantic_result.get("semantic_request") or dialogue.get("resolved_request") or request),
             "semantic_result": semantic_result,
         })
-        return intent
+        return return_intent
 
     @staticmethod
     def _make_intent(operation: str, object_name: str, representation: str, goal: str, topic: str, attributes: Dict[str, Any]) -> Dict[str, Any]:
@@ -1154,27 +920,6 @@ class ProcessorScene:
         # image/diagram/table but interpretation_control was empty, so Provider
         # was instructed to return text only.
         resolved_control = intent.get("interpretation_control") if isinstance(intent.get("interpretation_control"), dict) else {}
-        if intent.get("representation") in _STRUCTURED_TYPES and not resolved_control.get("render_authorized"):
-            live_visual = (
-                self.state.get("active_visual_scene")
-                if isinstance(self.state.get("active_visual_scene"), dict)
-                else self.state.get("current_visual_scene")
-                if isinstance(self.state.get("current_visual_scene"), dict)
-                else {}
-            )
-            resolved_control = QuantumInterpretationEngine._build_interpretation_control(
-                text=self.request,
-                representation=_text(intent.get("representation")),
-                operation=_text(intent.get("operation")),
-                relation=_text(dialogue.get("relation")),
-                previous_user=_text(self.state.get("last_user_turn")),
-                previous_assistant=_text(self.state.get("last_april_turn")),
-                live_scene=live_visual,
-                explicit_boundary=False,
-            )
-            intent["interpretation_control"] = resolved_control
-            intent["render_authorized"] = bool(resolved_control.get("render_authorized"))
-            intent["render_mode"] = _text(resolved_control.get("render_mode") or "STRUCTURED_OUTPUT")
         relation = dialogue["relation"]
 
         requested_outputs = ["text"]
@@ -1226,13 +971,22 @@ class ProcessorScene:
             base_topic = _text(pending_task.get("topic") or pending_task.get("representation"))
             resolved_request = f"Продолжение задания: {base_topic}. Ответ пользователя: {self.request}"
 
-        dialogue_memory = build_dialogue_memory_bridge(
-            self.user_id,
-            query=self.request,
-            limit=6,
-            relation=relation,
-            target_sequence_id=_text(dialogue.get("target_sequence_id") or dialogue.get("sequence_id")),
-        )
+        if relation in {"CONTINUE", "RECALL"}:
+            dialogue_memory = build_dialogue_memory_bridge(
+                self.user_id,
+                query=self.request,
+                limit=6,
+                relation=relation,
+                target_sequence_id=_text(dialogue.get("target_sequence_id") or dialogue.get("sequence_id")),
+            )
+        else:
+            dialogue_memory = {
+                "relation": "NEW",
+                "current_turn_only": True,
+                "selected_sequence_id": _text(dialogue.get("sequence_id")),
+                "selected_records": [],
+                "dialogue_pairs": [],
+            }
 
         continuation_analysis = semantic_result.get("continuation_content_analysis") if isinstance(semantic_result.get("continuation_content_analysis"), dict) else {}
         dialogue_strategy = semantic_result.get("dialogue_strategy") if isinstance(semantic_result.get("dialogue_strategy"), dict) else {}
