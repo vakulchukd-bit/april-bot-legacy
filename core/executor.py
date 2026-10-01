@@ -651,6 +651,12 @@ class SequentialInterpretation:
             "conversation_continuation": relation == "CONTINUE",
             "semantic_continuation": relation == "CONTINUE",
             "task_continuation": bool(task_state),
+            "task_id": _text(vector.get("task_id") or contract.get("task_id") or task_state.get("task_id")),
+            "target_task_id": _text(vector.get("target_task_id") or contract.get("target_task_id") or task_state.get("task_id")),
+            "dialogue_rules": deepcopy(vector.get("dialogue_rules") or contract.get("dialogue_rules") or task_state.get("dialogue_rules") or {}),
+            "response_sequence": deepcopy(vector.get("response_sequence") or contract.get("response_sequence") or {}),
+            "previous_result": deepcopy(vector.get("previous_result") or contract.get("previous_result") or task_state.get("last_result") or {}),
+            "answer_basis": deepcopy(vector.get("answer_basis") or contract.get("answer_basis") or task_state.get("last_answer_basis") or {}),
             "target_sequence_id": _text(vector.get("target_sequence_id") or contract.get("target_sequence_id") or vector.get("sequence_id") or contract.get("sequence_id")),
             "semantic_result": semantic_result,
         }
@@ -1299,8 +1305,15 @@ class ProcessorScene:
             "resolved_request": resolved_request,
             "canonical_topic": _compact(dialogue.get("canonical_topic")),
             "sequence_id": _text(dialogue.get("sequence_id")),
+            "task_id": _text(dialogue.get("task_id") or (dialogue.get("active_task") or {}).get("task_id")),
+            "target_task_id": _text(dialogue.get("target_task_id") or (dialogue.get("active_task") or {}).get("task_id")),
             "target_sequence_id": _text(dialogue.get("sequence_id") or dialogue.get("target_sequence_id")),
-            "sequence_turn_index": int((dialogue_memory.get("active_sequence") or {}).get("turn_count", 0) or 0) + (1 if relation in {"NEW", "CONTINUE"} else 0),
+            "sequence_turn_index": int((dialogue_memory.get("active_sequence") or {}).get("turn_count", 0) or 0) + (1 if relation in {"NEW", "CONTINUE", "RECALL"} else 0),
+            "task_response_number": int((dialogue.get("response_sequence") or {}).get("task_response_number") or 0),
+            "dialogue_rules": _compact(dialogue.get("dialogue_rules") or {}, max_depth=3, max_items=8),
+            "response_sequence": _compact(dialogue.get("response_sequence") or {}, max_depth=3, max_items=8),
+            "previous_result": _compact(dialogue.get("previous_result") or {}, max_depth=4, max_items=8),
+            "answer_basis": _compact(dialogue.get("answer_basis") or {}, max_depth=4, max_items=8),
             "resolved_reference": _compact(dialogue.get("resolved_reference")),
             "selected_memory_index": dialogue.get("selected_memory_index", -1),
             "selected_memory_operand": _compact(dialogue.get("selected_memory_operand") or {}),
@@ -1341,6 +1354,11 @@ class ProcessorScene:
             "active_topic": _compact(dialogue.get("canonical_topic")) if relation != "NEW" else "",
             "active_goal": _compact(intent.get("goal")) if relation != "NEW" else "",
             "active_task": _compact_task_state(turn_active_task) if semantic_task_active else {},
+            "task_id": _text(dialogue.get("task_id") or (turn_active_task or {}).get("task_id")),
+            "dialogue_rules": _compact(dialogue.get("dialogue_rules") or (turn_active_task or {}).get("dialogue_rules") or {}, max_depth=3, max_items=8),
+            "response_sequence": _compact(dialogue.get("response_sequence") or {}, max_depth=3, max_items=8),
+            "previous_result": _compact(dialogue.get("previous_result") or (turn_active_task or {}).get("last_result") or {}, max_depth=4, max_items=8),
+            "answer_basis": _compact(dialogue.get("answer_basis") or (turn_active_task or {}).get("last_answer_basis") or {}, max_depth=4, max_items=8),
             "active_dialogue_context": _compact(
                 dialogue_memory.get("active_dialogue_context") or {},
                 max_depth=6,
@@ -1516,6 +1534,12 @@ class ProcessorScene:
             "selected_memory_operand": _compact(dialogue.get("selected_memory_operand") or {}),
             "trajectory": _compact(dialogue.get("trajectory") or {}),
             "sequence_id": _text(dialogue.get("sequence_id")),
+            "task_id": _text(dialogue.get("task_id") or (dialogue.get("active_task") or {}).get("task_id")),
+            "target_task_id": _text(dialogue.get("target_task_id") or (dialogue.get("active_task") or {}).get("task_id")),
+            "dialogue_rules": deepcopy(dialogue.get("dialogue_rules") or {}),
+            "response_sequence": deepcopy(dialogue.get("response_sequence") or {}),
+            "previous_result": deepcopy(dialogue.get("previous_result") or {}),
+            "answer_basis": deepcopy(dialogue.get("answer_basis") or {}),
             "active_entity": resolved_entity,
             "continuation_content_analysis": _compact(continuation_analysis, max_depth=4, max_items=8),
             "dialogue_strategy": _compact(dialogue_strategy, max_depth=3, max_items=8),
@@ -1654,7 +1678,11 @@ class ProcessorScene:
             "user_id": self.user_id,
             "conversation_id": _text(request.memory.get("authenticated_user_scope", {}).get("conversation_id")),
             "dialogue_sequence_id": _text(request.dialogue_contract.get("sequence_id")),
+            "task_id": _text(request.dialogue_contract.get("task_id")),
+            "task_response_number": int(request.dialogue_contract.get("task_response_number") or (request.dialogue_contract.get("response_sequence") or {}).get("task_response_number") or 0),
             "sequence_turn_index": int(request.dialogue_contract.get("sequence_turn_index") or 0),
+            "dialogue_rules": deepcopy(request.dialogue_contract.get("dialogue_rules") or {}),
+            "response_sequence": deepcopy(request.dialogue_contract.get("response_sequence") or {}),
             "identity_scope": {
                 "user_id": self.user_id,
                 "conversation_id": _text(request.memory.get("authenticated_user_scope", {}).get("conversation_id")),
@@ -1793,8 +1821,9 @@ def _normalize_interactive_task(value: Any) -> dict[str, Any]:
         merged.get("active")
         or merged.get("open")
         or merged.get("pending_input")
-        or merged.get("status") in {"open", "active", "answer_received", "assistant_turn"}
-        or merged.get("kind") in {"game", "riddle", "question", "choice"}
+        or merged.get("status") in {"open", "active", "answer_received", "assistant_turn", "suspended", "paused", "completed"}
+        or merged.get("kind") in {"game", "riddle", "question", "choice", "task", "topic_task", "dialogue_task"}
+        or merged.get("task_id")
     )
     if not active:
         return {}
@@ -1826,9 +1855,23 @@ def _normalize_interactive_task(value: Any) -> dict[str, Any]:
             or merged.get("expected_input_type") in {"answer", "user_answer"}
         ),
         "completed": bool(merged.get("completed")),
+        "task_id": _text(merged.get("task_id")),
         "topic": _text(merged.get("topic") or merged.get("canonical_topic")),
         "goal": _text(merged.get("goal") or merged.get("task_goal")),
         "sequence_id": _text(merged.get("sequence_id") or merged.get("active_sequence_id")),
+        "dialogue_rules": deepcopy(merged.get("dialogue_rules") or {}),
+        "response_sequence": deepcopy(merged.get("response_sequence") or {}),
+        "last_result": deepcopy(merged.get("last_result") or {}),
+        "last_answer_basis": deepcopy(merged.get("last_answer_basis") or merged.get("answer_basis") or {}),
+        "result_history": list(merged.get("result_history") or merged.get("completed_results") or [])[-30:],
+        "response_count": int(merged.get("response_count") or merged.get("task_response_count") or 0),
+        "task_response_count": int(merged.get("task_response_count") or merged.get("response_count") or 0),
+        "last_user_request": _text(merged.get("last_user_request")),
+        "last_april_answer": _text(merged.get("last_april_answer") or merged.get("last_answer")),
+        "objective": _text(merged.get("objective") or merged.get("task_objective")),
+        "instruction": _text(merged.get("instruction") or merged.get("task_instruction")),
+        "created_at": float(merged.get("created_at") or merged.get("task_definition_at") or 0.0),
+        "updated_at": float(merged.get("updated_at") or merged.get("last_turn_at") or merged.get("created_at") or 0.0),
         "scene_id": _text(merged.get("scene_id") or merged.get("source_scene_id")),
         "task_revision": int(merged.get("task_revision") or 0),
         "source": _text(merged.get("source") or "executor_task_bridge"),
@@ -1859,58 +1902,143 @@ def _provider_task_state(response: MachineResponse) -> dict[str, Any]:
     return {}
 
 
-def _advance_task_from_answer(task: dict[str, Any], request_text: str, answer: str) -> dict[str, Any]:
-    """Merge the provider turn into the task state while preserving its history."""
-    task = _normalize_interactive_task(task)
-    if not task:
+def _advance_task_from_answer(
+    task: dict[str, Any],
+    request_text: str,
+    answer: str,
+    *,
+    response_sequence: dict[str, Any] | None = None,
+    dialogue_rules: dict[str, Any] | None = None,
+    previous_result: dict[str, Any] | None = None,
+    answer_basis: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Project the provider result into task state without owning the canonical commit.
+
+    StateManager is the single writer of USER↔APRIL result history and counters.
+    Executor must never create a second pair or increment the task counter again.
+    """
+    normalized = _normalize_interactive_task(task)
+    if not normalized:
         return {}
+    merged = dict(normalized)
+    if isinstance(response_sequence, dict) and response_sequence:
+        merged["response_sequence"] = deepcopy(response_sequence)
+    if isinstance(dialogue_rules, dict) and dialogue_rules:
+        merged["dialogue_rules"] = deepcopy(dialogue_rules)
+    if isinstance(previous_result, dict) and previous_result:
+        merged["previous_result"] = deepcopy(previous_result)
+    if isinstance(answer_basis, dict) and answer_basis:
+        merged["previous_answer_basis"] = deepcopy(answer_basis)
 
     answer_text = _text(answer)
-    merged = dict(task)
-
-    # Provider metadata is authoritative when present; this fallback only derives
-    # the next waiting phase from the semantic shape of the actual answer.
+    # Provider status may close a task, but the actual answer/result is committed
+    # by StateManager so the task counter can advance exactly once.
     lower_answer = answer_text.lower()
-    qa_history = list(merged.get("qa_history") or [])
-
-    if request_text:
-        last_kind = "task_action" if not merged.get("awaiting_user") and merged.get("last_user_action") else "turn"
-        if merged.get("candidate_answer") == _text(request_text):
-            last_kind = "answer"
-        if not qa_history or qa_history[-1].get("user") != _text(request_text):
-            qa_history.append({
-                "user": _text(request_text),
-                "assistant_prompt": _text(merged.get("last_question") or merged.get("prompt")),
-                "kind": last_kind,
-            })
-
-    merged["qa_history"] = qa_history[-12:]
-    merged["turns"] = list(merged["qa_history"])
-
-    # A provider question means the user now owns the next turn.
-    if "?" in answer_text or "？" in answer_text:
+    if "угадал" in lower_answer and "не угадал" not in lower_answer:
+        merged["completed"] = True
+        merged["status"] = "completed"
+        merged["phase"] = "completed"
+        merged["awaiting_user"] = False
+    elif "?" in answer_text or "？" in answer_text:
         merged["last_question"] = answer_text
         merged["prompt"] = answer_text
         merged["phase"] = "awaiting_user_answer"
         merged["status"] = "open"
         merged["expected_input_type"] = "answer"
         merged["awaiting_user"] = True
-    elif merged.get("role") == "april_holds_secret":
-        # The setup response establishes the game and asks the user to begin.
-        if any(x in lower_answer for x in ("загадал", "загадала", "уже загад", "задавай вопросы", "угадай слово")):
-            merged["phase"] = "awaiting_user_input"
-            merged["status"] = "open"
-            merged["expected_input_type"] = "answer"
-            merged["awaiting_user"] = True
-    if "угадал" in lower_answer and not ("не угадал" in lower_answer):
-        merged["completed"] = True
-        merged["status"] = "completed"
-        merged["phase"] = "completed"
-        merged["awaiting_user"] = False
 
-    merged["task_revision"] = int(merged.get("task_revision") or 0) + 1
-    merged["source"] = "executor_live_task_state"
+    # Preserve canonical state supplied by Interpretation. Do not replace task_id,
+    # sequence_id or counters with anything invented by the Provider.
+    if _text(task.get("task_id")):
+        merged["task_id"] = _text(task.get("task_id"))
+    if _text(task.get("sequence_id")):
+        merged["sequence_id"] = _text(task.get("sequence_id"))
+    merged["source"] = "executor_provider_projection"
     return merged
+
+
+_DIALOGUE_ALPHABET_RU = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
+
+
+def _apply_dialogue_output_contract(machine_payload: dict[str, Any], dialogue_contract: dict[str, Any]) -> dict[str, Any]:
+    """Deterministically enforce a persistent dialogue numbering/alphabet rule.
+
+    The Provider answers semantically. The contract carries the authoritative
+    task response number; this final normalization prevents a model from resetting
+    a counter or dropping a user-requested sequence marker.
+    """
+    if not isinstance(machine_payload, dict) or not isinstance(dialogue_contract, dict):
+        return machine_payload
+    rules = dialogue_contract.get("dialogue_rules")
+    rules = rules if isinstance(rules, dict) else {}
+    if not rules.get("enabled") or _text(rules.get("scope")).lower() != "dialogue":
+        return machine_payload
+    sequence = dialogue_contract.get("response_sequence")
+    sequence = sequence if isinstance(sequence, dict) else {}
+    try:
+        number = int(sequence.get("task_response_number") or dialogue_contract.get("task_response_number") or 0)
+    except (TypeError, ValueError):
+        number = 0
+    if number <= 0:
+        return machine_payload
+    mode = _text(rules.get("mode") or "numeric").lower()
+    marker = f"{number}. "
+    if mode == "alphabetic":
+        idx = min(number, len(_DIALOGUE_ALPHABET_RU)) - 1
+        marker = f"{_DIALOGUE_ALPHABET_RU[idx]} — "
+    elif mode not in {"numeric", "sequential"}:
+        return machine_payload
+
+    def enforce(text: Any) -> str:
+        value = _text(text)
+        if not value:
+            return value
+        if mode in {"numeric", "sequential"}:
+            expected = re.escape(str(number))
+            if re.match(rf"^\s*{expected}\s*[.)—:-]", value):
+                return re.sub(rf"^\s*{expected}\s*[.)—:-]\s*", marker, value, count=1)
+            # Replace a different accidental numeric prefix only when it is clearly
+            # a leading sequence marker, never an ordinary numeric answer.
+            if re.match(r"^\s*\d+\s*[.)—:-]", value):
+                return re.sub(r"^\s*\d+\s*[.)—:-]\s*", marker, value, count=1)
+            return marker + value
+        # Alphabetic mode.
+        letter = _DIALOGUE_ALPHABET_RU[min(number, len(_DIALOGUE_ALPHABET_RU)) - 1]
+        if re.match(rf"^\s*{re.escape(letter)}\s*[.)—:-]", value, flags=re.IGNORECASE):
+            return re.sub(rf"^\s*{re.escape(letter)}\s*[.)—:-]\s*", marker, value, count=1, flags=re.IGNORECASE)
+        if re.match(r"^\s*[А-ЯЁ]\s*[.)—:-]", value, flags=re.IGNORECASE):
+            return re.sub(r"^\s*[А-ЯЁ]\s*[.)—:-]\s*", marker, value, count=1)
+        return marker + value
+
+    if machine_payload.get("answer") or machine_payload.get("content"):
+        canonical = enforce(machine_payload.get("answer") or machine_payload.get("content"))
+        machine_payload["answer"] = canonical
+        machine_payload["content"] = canonical
+        machine_payload["response"] = canonical
+    blocks = machine_payload.get("render_blocks")
+    if isinstance(blocks, list):
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            kind = _text(block.get("type") or block.get("artifact_type") or block.get("representation")).lower()
+            if kind not in {"text", "markdown", ""}:
+                continue
+            content = block.get("content") or block.get("text") or block.get("answer")
+            if content:
+                canonical = enforce(content)
+                block["content"] = canonical
+                block["text"] = canonical
+                if block.get("answer"):
+                    block["answer"] = canonical
+    meta = machine_payload.get("metadata") if isinstance(machine_payload.get("metadata"), dict) else {}
+    meta["dialogue_output_contract"] = {
+        "enforced": True,
+        "task_id": _text(dialogue_contract.get("task_id")),
+        "task_response_number": number,
+        "mode": mode,
+    }
+    machine_payload["metadata"] = meta
+    return machine_payload
 
 
 def _set_live_state(state: dict, request: MachineRequest, response: MachineResponse, contract: Any) -> None:
@@ -1937,13 +2065,21 @@ def _set_live_state(state: dict, request: MachineRequest, response: MachineRespo
     response_task = _provider_task_state(response)
     task = dict(request_task)
     if response_task:
-        task.update(response_task)
+        # Only merge provider lifecycle fields. Interpretation owns task identity,
+        # sequence and counters; Provider cannot overwrite them.
+        for key in ("status", "phase", "awaiting_user", "completed", "last_question", "prompt", "expected_input_type"):
+            if key in response_task:
+                task[key] = response_task[key]
 
     if task:
         task = _advance_task_from_answer(
             task,
             request.conversation.get("current_request", ""),
             response.answer,
+            response_sequence=dialogue.get("response_sequence") if isinstance(dialogue.get("response_sequence"), dict) else {},
+            dialogue_rules=dialogue.get("dialogue_rules") if isinstance(dialogue.get("dialogue_rules"), dict) else {},
+            previous_result=dialogue.get("previous_result") if isinstance(dialogue.get("previous_result"), dict) else {},
+            answer_basis=dialogue.get("answer_basis") if isinstance(dialogue.get("answer_basis"), dict) else {},
         )
         state["interactive_task_state"] = _compact(task, max_depth=5, max_items=16)
         state["open_task"] = _compact(task, max_depth=5, max_items=16)
@@ -2470,6 +2606,10 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
         machine_preview = {}
 
     machine_preview = _bridge_provider_artifacts(machine_preview)
+    machine_preview = _apply_dialogue_output_contract(
+        machine_preview,
+        request.dialogue_contract if isinstance(request.dialogue_contract, dict) else {},
+    )
     preview_response = MachineResponse(
         answer=_text(machine_preview.get("answer")),
         content=_text(machine_preview.get("content")),
