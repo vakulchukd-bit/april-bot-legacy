@@ -102,7 +102,7 @@ VISUAL_SCENE_BLOCK_TYPES = {
 
 # Runtime semantic model is deliberately lazy: importing State Manager must
 # remain cheap. The engine is loaded only when semantic memory is requested.
-SEMANTIC_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # compatibility metadata; runtime is shared
+SEMANTIC_MODEL_NAME = "rapidfuzz-arc-light"  # compatibility metadata; runtime is the shared lightweight interpretation engine
 
 STATE_ENGINE_LOG = []
 # Compatibility name retained for callers that may inspect the old log.
@@ -1666,11 +1666,11 @@ class QuantumMemoryEngine:
                 return self._encoder
 
             # One shared semantic engine for Interpretation, Visual Reference,
-            # and Memory. No second SentenceTransformer instance is created here.
+            # and Memory. No second semantic engine instance is created here.
             from blocks.interpretation_layer import get_shared_semantic_encoder
             self._encoder = get_shared_semantic_encoder()
             self._encoder_ready = True
-            safe_state_log("SEMANTIC MEMORY ENGINE LINKED: SHARED_INTERPRETATION_ENCODER")
+            safe_state_log("SEMANTIC MEMORY ENGINE LINKED: SHARED_ARC_LIGHT_INTERPRETATION")
             return self._encoder
 
     @staticmethod
@@ -1690,7 +1690,7 @@ class QuantumMemoryEngine:
         return float(scores.get(safe_trim_text(candidate, 1600), 0.0))
 
     def semantic_scores(self, query, candidates):
-        """Batch comparison through the one shared interpretation embedding engine."""
+        """Batch comparison through the one shared lightweight interpretation engine."""
         q = safe_trim_text(query, 1600)
         unique = []
         seen = set()
@@ -1705,7 +1705,7 @@ class QuantumMemoryEngine:
             return {}
 
         from blocks.interpretation_layer import QUANTUM_EMBEDDING_ENGINE
-        # The interpretation engine owns the encoder/cache. State Manager only
+        # The interpretation engine owns the similarity/cache. State Manager only
         # consumes its measurement, so no second model/runtime can appear here.
         return QUANTUM_EMBEDDING_ENGINE.similarities(q, unique)
 
