@@ -36,34 +36,23 @@ class GalleryRoom(Room):
 
         print("GALLERY ROOM HANDLE START")
 
+        payload = context.get("gallery_payload") or context.get("payload") or {}
+        images = []
+        captions = []
+        if isinstance(payload, dict):
+            images = payload.get("images") or payload.get("gallery") or payload.get("items") or []
+            captions = payload.get("captions") or []
+        elif isinstance(payload, list):
+            images = payload
+
         artifact = self.process({
-
-            "images":
-                context.get(
-                    "images",
-                    []
-                ),
-
-            "captions":
-                context.get(
-                    "captions",
-                    []
-                ),
-
-            "goal":
-                context.get("goal"),
-
-            "purpose":
-                context.get("purpose")
+            "images": context.get("images") or images,
+            "captions": context.get("captions") or captions,
+            "goal": context.get("goal"),
+            "purpose": context.get("purpose"),
         })
 
-        return {
-
-            "type": "text",
-
-            "data":
-                "GALLERY ROOM ACTIVE"
-        }
+        return artifact
 
     # =================================================
     # WORK ORDER
