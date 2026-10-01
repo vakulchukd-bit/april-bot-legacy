@@ -7,8 +7,8 @@ Canonical State Manager for April.
 
 Design:
 - one unified Quantum Memory Engine owns state evolution;
-- the seven-day memory window is preserved exactly as a rolling window;
-- visual, dialog, focus, goals, loops and scene continuity are one memory field;
+- the authenticated dialogue window is a rolling 12-hour UTC window;
+- visual, dialog, focus, goals, loops and scene continuity are one authenticated live-memory field;
 - semantic retrieval is evidence generation for the Quantum Processor;
 - this module does not choose routes, renderers, providers or orchestration;
 - no parallel memory engines are maintained.
@@ -45,15 +45,21 @@ STATE_MACHINE_CHANNEL = {
 
 ADMIN_ID = 2016592532
 
-# The canonical memory window. day_0 is today; day_6 is the oldest slot.
-# Live window: day_0..day_6. day_7 is a deletion boundary, not a memory day.
-MEMORY_DAYS = 7
-MEMORY_TTL_SECONDS = MEMORY_DAYS * 24 * 60 * 60
-USER_CONTENT_RETENTION_SECONDS = MEMORY_TTL_SECONDS
-TOPIC_CLASSES = ["A", "B", "C", "D", "E"]
+# Canonical authenticated dialogue memory: 12h rolling window in fixed UTC halves.
+# At each UTC boundary only the immediately preceding hour is retained as a seed.
+DIALOGUE_WINDOW_HOURS = 12
+DIALOGUE_SEED_HOURS = 1
+DIALOGUE_WINDOW_SECONDS = DIALOGUE_WINDOW_HOURS * 60 * 60
+DIALOGUE_SEED_SECONDS = DIALOGUE_SEED_HOURS * 60 * 60
+MEMORY_TTL_SECONDS = DIALOGUE_WINDOW_SECONDS
+USER_CONTENT_RETENTION_SECONDS = DIALOGUE_WINDOW_SECONDS
+MEMORY_SLOTS = 1
 
 SESSION_MEMORY_LIMIT = 1600
-HOT_DIALOG_LIMIT = 30  # canonical Free window: 15 USER + 15 APRIL
+HOT_DIALOG_LIMIT = 30
+TOPIC_CLASSES = ["A", "B", "C", "D", "E"]
+
+HOT_DIALOG_LIMIT = 30  # canonical active dialogue hot window
 VISUAL_HISTORY_LIMIT = 8
 IMAGE_MEMORY_LIMIT = 5
 TOPIC_MEMORY_LIMIT = 5
@@ -133,6 +139,20 @@ def utc_day_key():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def utc_window_start(timestamp=None):
+    """Return the fixed UTC 00:00/12:00 boundary containing timestamp."""
+    dt = datetime.fromtimestamp(
+        float(timestamp if timestamp is not None else time.time()),
+        tz=timezone.utc,
+    )
+    hour = 0 if dt.hour < 12 else 12
+    return dt.replace(hour=hour, minute=0, second=0, microsecond=0)
+
+
+def utc_window_key(timestamp=None):
+    return utc_window_start(timestamp).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def build_default_scene():
     return {
         "mode": "idle",
@@ -168,7 +188,36 @@ def build_memory_day():
 
 
 def build_memory_timeline():
-    return {f"day_{i}": build_memory_day() for i in range(MEMORY_DAYS)}
+    return {"day_0": build_memory_day()}
+
+
+def build_default_active_dialogue_sequence():
+    return {
+        "version": "april_dialogue_sequence_v2_12h",
+        "sequence_id": None, "branch_id": None, "topic": None, "status": "inactive",
+        "user_id": None, "conversation_id": None, "turn_count": 0,
+        "started_at": None, "last_turn_at": None,
+        "last_user_request": "", "last_april_answer": "",
+        "last_visual_attachment": {}, "last_visual_scene_id": "",
+        "last_visual_turn_index": 0, "visual_turn_count": 0, "relation": "NEW",
+    }
+
+
+def build_default_active_dialogue_context():
+    return {
+        "version": "active_dialogue_context_v2_12h",
+        "scope": {"user_id": None, "conversation_id": None},
+        "sequence_id": None,
+        "objective": "",
+        "task": {},
+        "intent": "",
+        "goal": "",
+        "topic": "",
+        "active_entity": "",
+        "completed_results": [],
+        "last_completed_result": {},
+        "updated_at": None,
+    }
 
 
 def build_default_state():
@@ -177,7 +226,7 @@ def build_default_state():
         "memory_summary": "",
         "memory_summary_meta": {
             "created_at": None,
-            "expires_after_days": MEMORY_DAYS,
+            "expires_after_hours": DIALOGUE_WINDOW_HOURS,
             "memory_kind": "summary",
         },
         "memory_matrix": {},
@@ -271,26 +320,9 @@ def build_default_state():
             "authoritative": False,
             "updated_at": None,
         },
-        "active_dialogue_sequence": {
-            "version": "april_dialogue_sequence_v1",
-            "sequence_id": None,
-            "branch_id": None,
-            "topic": None,
-            "status": "inactive",
-            "user_id": None,
-            "conversation_id": None,
-            "turn_count": 0,
-            "started_at": None,
-            "last_turn_at": None,
-            "last_user_request": "",
-            "last_april_answer": "",
-            "last_visual_attachment": {},
-            "last_visual_scene_id": "",
-            "last_visual_turn_index": 0,
-            "visual_turn_count": 0,
-            "relation": "NEW",
-        },
-        "dialogue_sequence_version": "APRIL-DIALOGUE-SEQUENCE-7D-V1",
+        "active_dialogue_sequence": build_default_active_dialogue_sequence(),
+        "active_dialogue_context": build_default_active_dialogue_context(),
+        "dialogue_sequence_version": "APRIL-DIALOGUE-SEQUENCE-12H-V2",
         "dialogue_branch_index": {
             "version": "dialogue_branch_index_v1_user_bound",
             "active_sequence_id": "",
@@ -311,10 +343,12 @@ def build_default_state():
         },
         "memory_timeline": build_memory_timeline(),
         "memory_cycle": {
-            "last_day_key": utc_day_key(),
+            "window_key": utc_window_key(),
+            "window_start_utc": utc_window_start().timestamp(),
+            "seed_cutoff_utc": utc_window_start().timestamp() - DIALOGUE_SEED_SECONDS,
             "last_rollover": time.time(),
         },
-        "memory_version": "QUANTUM-7D-V2",
+        "memory_version": "QUANTUM-MEMORY-12H-V2",
         "active_scene_contract": {},
         "current_scene_request": "",
         "visual_summary": {},
@@ -341,8 +375,8 @@ class QuantumMemoryEngine:
     existing Executor/Quantum Processor can consume.
     """
 
-    VERSION = "QUANTUM-MEMORY-7D-V2"
-    MATRIX_VERSION = "QUANTUM-MEMORY-MATRIX-7D-V1"
+    VERSION = "QUANTUM-MEMORY-12H-V2"
+    MATRIX_VERSION = "QUANTUM-MEMORY-MATRIX-12H-V2"
 
     def __init__(self):
         self._encoder = None
@@ -370,7 +404,7 @@ class QuantumMemoryEngine:
         if not isinstance(state_obj.get("memory_summary_meta"), dict):
             state_obj["memory_summary_meta"] = {
                 "created_at": None,
-                "expires_after_days": MEMORY_DAYS,
+                "expires_after_hours": DIALOGUE_WINDOW_HOURS,
                 "memory_kind": "summary",
             }
         if not isinstance(state_obj.get("memory_matrix"), dict):
@@ -398,21 +432,20 @@ class QuantumMemoryEngine:
             timeline = {}
 
         canonical = {}
-        for i in range(MEMORY_DAYS):
-            key = f"day_{i}"
-            day = timeline.get(key)
-            canonical[key] = day if isinstance(day, dict) else build_memory_day()
-            for slot in TOPIC_CLASSES:
-                if not isinstance(canonical[key].get(slot), list):
-                    canonical[key][slot] = []
-            for field in ("visual_scenes", "topics", "objects", "intent_signals", "dialog_pairs"):
-                if not isinstance(canonical[key].get(field), list):
-                    canonical[key][field] = []
+        key = "day_0"
+        day = timeline.get(key)
+        canonical[key] = day if isinstance(day, dict) else build_memory_day()
+        for slot in TOPIC_CLASSES:
+            if not isinstance(canonical[key].get(slot), list):
+                canonical[key][slot] = []
+        for field in ("visual_scenes", "topics", "objects", "intent_signals", "dialog_pairs"):
+            if not isinstance(canonical[key].get(field), list):
+                canonical[key][field] = []
 
         state_obj["memory_timeline"] = canonical
         return canonical
 
-    # ---------- seven-day cycle / TTL lifecycle ----------
+    # ---------- rolling 12-hour UTC lifecycle ----------
 
     @staticmethod
     def _record_timestamp(record):
@@ -420,7 +453,7 @@ class QuantumMemoryEngine:
             return 0.0
         for key in (
             "created_at", "timestamp", "archived_at", "updated_at",
-            "turn_timestamp", "expires_at",
+            "turn_timestamp", "expires_at", "last_turn_at",
         ):
             value = record.get(key)
             try:
@@ -443,7 +476,7 @@ class QuantumMemoryEngine:
         return (current - created) >= MEMORY_TTL_SECONDS
 
     @staticmethod
-    def _memory_age_days(timestamp, now=None):
+    def _memory_age_hours(timestamp, now=None):
         try:
             created = float(timestamp or 0.0)
         except (TypeError, ValueError):
@@ -451,34 +484,183 @@ class QuantumMemoryEngine:
         if created <= 0.0:
             return None
         current = float(now if now is not None else time.time())
-        return max(0.0, (current - created) / 86400.0)
+        return max(0.0, (current - created) / 3600.0)
 
     def _purge_sequence(self, value, *, now=None):
         if not isinstance(value, list):
             return value, 0
-        kept = []
-        removed = 0
+        kept, removed = [], 0
         for item in value:
             ts = self._record_timestamp(item)
-            if ts > 0.0 and self._is_expired(ts, now=now):
+            if ts <= 0.0 or self._is_expired(ts, now=now):
                 removed += 1
                 continue
             kept.append(item)
         return kept, removed
 
+    @staticmethod
+    def _in_interval(record, start_ts, end_ts):
+        ts = QuantumMemoryEngine._record_timestamp(record)
+        return bool(ts and float(start_ts) <= ts < float(end_ts))
+
+    def _seed_container(self, container, seed_start, seed_end):
+        if not isinstance(container, dict):
+            return build_memory_day()
+        result = build_memory_day()
+        for field in tuple(TOPIC_CLASSES) + ("visual_scenes", "topics", "objects", "intent_signals", "dialog_pairs"):
+            values = container.get(field) if isinstance(container.get(field), list) else []
+            result[field] = [deepcopy(x) for x in values if self._in_interval(x, seed_start, seed_end)]
+        return result
+
+    def _clear_dialogue_runtime_except_seed(self, state_obj, seed_start, seed_end):
+        """Keep only the last pre-boundary hour of dialogue state."""
+        timeline = state_obj.get("memory_timeline") if isinstance(state_obj.get("memory_timeline"), dict) else {}
+        state_obj["memory_timeline"] = {
+            "day_0": self._seed_container(timeline.get("day_0"), seed_start, seed_end),
+        }
+
+        def keep_record(record):
+            return isinstance(record, dict) and self._in_interval(record, seed_start, seed_end)
+
+        for key in ("result_chain", "turn_progression", "visual_scene_history", "visual_topic_history", "visual_topic_registry",
+                    "task_context_storage", "continuity_context_storage", "memory_anchor_storage", "internal_dialog_events"):
+            values = state_obj.get(key)
+            if isinstance(values, list):
+                state_obj[key] = [deepcopy(x) for x in values if keep_record(x)][-HOT_DIALOG_LIMIT:]
+
+        # Keep only USER/APRIL pairs in the retained seed hour.
+        dialog = state_obj.get("dialog") if isinstance(state_obj.get("dialog"), list) else []
+        state_obj["dialog"] = [deepcopy(x) for x in dialog if keep_record(x)][-HOT_DIALOG_LIMIT:]
+
+        # The persistent active-task/anchor state survives only when its own last update
+        # occurred inside the retained seed hour. User identity/profile/auth fields are untouched.
+        def state_fresh(key, timestamp_keys=("updated_at", "last_turn_at", "created_at")):
+            value = state_obj.get(key)
+            if not isinstance(value, dict) or not value:
+                return False
+            ts = self._record_timestamp(value)
+            if not ts:
+                for tk in timestamp_keys:
+                    try:
+                        ts = float(state_obj.get(tk) or 0.0)
+                    except Exception:
+                        ts = 0.0
+                    if ts:
+                        break
+            return bool(ts and seed_start <= ts < seed_end)
+
+        if not state_fresh("active_dialogue_context"):
+            state_obj["active_dialogue_context"] = build_default_active_dialogue_context()
+        else:
+            # The active context itself is timestamped, but its nested result/task
+            # history may contain older entries. Bound those nested lists to the
+            # retained seed hour so stale turns cannot re-enter interpretation.
+            active_ctx = state_obj.get("active_dialogue_context") or {}
+            if isinstance(active_ctx, dict):
+                active_ctx["completed_results"] = [
+                    deepcopy(x) for x in (active_ctx.get("completed_results") or [])
+                    if isinstance(x, dict) and self._in_interval(x, seed_start, seed_end)
+                ][-HOT_DIALOG_LIMIT:]
+                last = active_ctx.get("last_completed_result") if isinstance(active_ctx.get("last_completed_result"), dict) else {}
+                if not (last and self._in_interval(last, seed_start, seed_end)):
+                    active_ctx = build_default_active_dialogue_context()
+                else:
+                    task = active_ctx.get("task") if isinstance(active_ctx.get("task"), dict) else {}
+                    for history_key in ("qa_history", "turns", "history", "completed_results"):
+                        values = task.get(history_key)
+                        if isinstance(values, list):
+                            task[history_key] = [
+                                deepcopy(x) for x in values
+                                if isinstance(x, dict) and self._in_interval(x, seed_start, seed_end)
+                            ][-HOT_DIALOG_LIMIT:]
+                    active_ctx["task"] = task
+                state_obj["active_dialogue_context"] = active_ctx
+
+        seq = state_obj.get("active_dialogue_sequence")
+        if isinstance(seq, dict) and seq:
+            last_ts = self._record_timestamp(seq.get("last_turn_at") or {})
+            if not last_ts:
+                try:
+                    last_ts = float(seq.get("last_turn_at") or 0.0)
+                except Exception:
+                    last_ts = 0.0
+            if not (seed_start <= last_ts < seed_end):
+                state_obj["active_dialogue_sequence"] = build_default_active_dialogue_sequence()
+            else:
+                seq = deepcopy(seq)
+                for history_key in ("qa_history", "turns", "history"):
+                    values = seq.get(history_key)
+                    if isinstance(values, list):
+                        seq[history_key] = [
+                            deepcopy(x) for x in values
+                            if isinstance(x, dict) and self._in_interval(x, seed_start, seed_end)
+                        ][-HOT_DIALOG_LIMIT:]
+                state_obj["active_dialogue_sequence"] = seq
+
+        for key in ("interactive_task_state", "open_task", "active_task", "dialog_state", "dialogue_development",
+                    "dialogue_vector", "dialogue_resolution", "continuity_resolution", "dynamic_focus", "goal_hierarchy",
+                    "open_loops", "dialogue_obligations", "focus_snapshot", "focus_state", "task_type", "last_prompt",
+                    "current_object", "current_topic", "active_entity"):
+            value = state_obj.get(key)
+            if isinstance(value, dict) and value:
+                if not state_fresh(key):
+                    state_obj[key] = {}
+            elif isinstance(value, list) and key in {"open_loops", "dialogue_obligations"}:
+                state_obj[key] = []
+
+        # Rebuild branch index strictly from the retained seed rather than leaking prior branches.
+        seq = state_obj.get("active_dialogue_sequence") if isinstance(state_obj.get("active_dialogue_sequence"), dict) else {}
+        seq_id = str(seq.get("sequence_id") or "")
+        state_obj["dialogue_branch_index"] = {
+            "version": "dialogue_branch_index_v2_12h_user_bound",
+            "active_sequence_id": seq_id,
+            "target_sequence_id": seq_id,
+            "target_branch_id": str(seq.get("branch_id") or ""),
+            "resolution_mode": "SEED_SEQUENCE" if seq_id else "NO_BRANCH_RESOLUTION",
+            "branches": [{
+                "sequence_id": seq_id,
+                "branch_id": str(seq.get("branch_id") or ""),
+                "topic": str(seq.get("topic") or ""),
+                "last_user_request": str(seq.get("last_user_request") or ""),
+                "last_april_answer": str(seq.get("last_april_answer") or ""),
+                "last_turn_at": seq.get("last_turn_at"),
+                "active": True,
+            }] if seq_id else [],
+        }
+        state_obj["active_dialogue_branch_id"] = str(seq.get("branch_id") or "") if seq_id else ""
+
+        # Visual hot pointer is also bounded by the seed hour; it does not erase user/profile data.
+        hot = state_obj.get("last_successful_visual_scene")
+        hot_ts = self._record_timestamp(hot)
+        if not (isinstance(hot, dict) and seed_start <= hot_ts < seed_end):
+            state_obj["last_successful_visual_scene"] = None
+            state_obj["last_successful_visual_scene_id"] = None
+            state_obj["last_successful_visual_scene_turn"] = None
+            state_obj["active_visual_scene"] = None
+            state_obj["current_visual_scene"] = None
+            state_obj["active_visual_scene_turn"] = None
+            state_obj["stored_visual_scene_turn"] = None
+            state_obj["active_visual_topic"] = None
+
+        # Generic current-message pointers follow the same seed rule.
+        for value_key, stamp_key in (("last_user_turn", "last_user_turn_at"), ("last_april_turn", "last_april_turn_at"), ("current_scene_request", "current_scene_request_at")):
+            try:
+                ts = float(state_obj.get(stamp_key) or 0.0)
+            except Exception:
+                ts = 0.0
+            if not (ts and seed_start <= ts < seed_end):
+                state_obj[value_key] = ""
+                state_obj[stamp_key] = None
+
     def _cleanup_top_level_memory(self, state_obj, now=None):
-        """Expire timestamped derived ledgers with the same seven-day TTL."""
         now = float(now if now is not None else time.time())
         removed = 0
         by_field = {}
-
+        # Never touch user/profile/auth/subscription records here. This is dialogue/derived memory only.
         for field in (
-            "visual_scene_history",
-            "visual_topic_history",
-            "visual_topic_registry",
-            "task_context_storage",
-            "continuity_context_storage",
-            "memory_anchor_storage",
+            "visual_scene_history", "visual_topic_history", "visual_topic_registry",
+            "task_context_storage", "continuity_context_storage", "memory_anchor_storage",
+            "scene_history", "internal_dialog_events", "result_chain", "turn_progression",
         ):
             cleaned, count = self._purge_sequence(state_obj.get(field), now=now)
             if isinstance(state_obj.get(field), list):
@@ -487,165 +669,98 @@ class QuantumMemoryEngine:
                 by_field[field] = count
                 removed += count
 
-        # Legacy scene history can contain undated records. It remains
-        # compatibility storage only and is not queried by semantic retrieval.
-        cleaned, count = self._purge_sequence(state_obj.get("scene_history"), now=now)
-        if isinstance(state_obj.get("scene_history"), list):
-            state_obj["scene_history"] = cleaned
-        if count:
-            by_field["scene_history"] = count
-            removed += count
+        # Apply the same TTL to the canonical day_0 bucket even when we are
+        # inside the current fixed UTC window. This also removes legacy 7-day
+        # records that may have survived in day_0 after migration.
+        timeline = state_obj.get("memory_timeline") if isinstance(state_obj.get("memory_timeline"), dict) else {}
+        day0 = timeline.get("day_0") if isinstance(timeline.get("day_0"), dict) else {}
+        if day0:
+            for field in tuple(TOPIC_CLASSES) + ("visual_scenes", "topics", "objects", "intent_signals", "dialog_pairs"):
+                values = day0.get(field) if isinstance(day0.get(field), list) else []
+                cleaned, count = self._purge_sequence(values, now=now)
+                day0[field] = cleaned
+                if count:
+                    by_field[f"memory_timeline.day_0.{field}"] = count
+                    removed += count
+            timeline["day_0"] = day0
+            state_obj["memory_timeline"] = timeline
 
-        # Summary has one explicit birth timestamp. A legacy summary without
-        # provenance is quarantined, so stale text cannot leak into new context.
+        active_ctx = state_obj.get("active_dialogue_context") if isinstance(state_obj.get("active_dialogue_context"), dict) else None
+        if isinstance(active_ctx, dict):
+            results = active_ctx.get("completed_results") if isinstance(active_ctx.get("completed_results"), list) else []
+            kept_results = [x for x in results if isinstance(x, dict) and self._record_timestamp(x) > 0.0 and not self._is_expired(self._record_timestamp(x), now=now)]
+            active_ctx["completed_results"] = kept_results[-HOT_DIALOG_LIMIT:]
+            last = active_ctx.get("last_completed_result") if isinstance(active_ctx.get("last_completed_result"), dict) else {}
+            if last:
+                last_ts = self._record_timestamp(last)
+                if not last_ts or self._is_expired(last_ts, now=now):
+                    active_ctx["last_completed_result"] = {}
+                    active_ctx["objective"] = ""
+                    active_ctx["task"] = {}
+                    active_ctx["intent"] = ""
+                    active_ctx["goal"] = ""
+                    active_ctx["topic"] = ""
+                    active_ctx["active_entity"] = ""
+                    active_ctx["sequence_id"] = None
+                    active_ctx["updated_at"] = None
+            state_obj["active_dialogue_context"] = active_ctx
+
         meta = state_obj.get("memory_summary_meta")
         if not isinstance(meta, dict):
             meta = {}
             state_obj["memory_summary_meta"] = meta
         summary_ts = self._record_timestamp(meta)
-
-        if state_obj.get("memory_summary") and summary_ts <= 0.0:
-            state_obj["legacy_memory_summary"] = state_obj.get("memory_summary")
+        if state_obj.get("memory_summary") and (not summary_ts or self._is_expired(summary_ts, now=now)):
             state_obj["memory_summary"] = ""
             state_obj["memory_summary_meta"] = {
                 "created_at": None,
-                "expires_after_days": MEMORY_DAYS,
-                "memory_kind": "summary_legacy_quarantined",
+                "expires_after_hours": DIALOGUE_WINDOW_HOURS,
+                "memory_kind": "rolling_dialogue_summary",
             }
-            safe_state_log(
-                "MEMORY SUMMARY QUARANTINED: no timestamp; excluded from active memory"
-            )
-        elif summary_ts > 0.0 and self._is_expired(summary_ts, now=now):
-            state_obj["memory_summary"] = ""
-            state_obj["memory_summary_meta"] = {
-                "created_at": None,
-                "expires_after_days": MEMORY_DAYS,
-                "memory_kind": "summary_expired",
-            }
+            removed += 1
             by_field["memory_summary"] = 1
-            removed += 1
-            safe_state_log("MEMORY SUMMARY EXPIRED: TTL_EXPIRED -> DELETE")
-
-        # The active visual pointer is subject to the same TTL.
-        hot = state_obj.get("active_visual_scene")
-        hot_ts = self._record_timestamp(hot)
-        if isinstance(hot, dict) and hot and hot_ts > 0.0 and self._is_expired(hot_ts, now=now):
-            state_obj["active_visual_scene"] = None
-            state_obj["current_visual_scene"] = None
-            state_obj["active_visual_scene_turn"] = None
-            state_obj["stored_visual_scene_turn"] = None
-            state_obj["active_visual_topic"] = None
-            by_field["active_visual_scene"] = 1
-            removed += 1
-            safe_state_log("ACTIVE VISUAL MEMORY EXPIRED: TTL_EXPIRED -> DELETE")
 
         state_obj["memory_cleanup"] = {
             "last_cleanup_at": now,
             "last_cleanup_utc": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
             "removed_count": removed,
             "removed_by_field": by_field,
-            "window": "day_0..day_6",
-            "expired_slot": "day_7",
+            "window": "12h_rolling",
+            "seed_hours": DIALOGUE_SEED_HOURS,
             "ttl_seconds": MEMORY_TTL_SECONDS,
         }
-        if removed:
-            safe_state_log(
-                f"MEMORY TTL CLEANUP: removed={removed} "
-                f"window=day_0..day_6 boundary=day_7 fields={by_field}"
-            )
         return removed
-
-    def _purge_expired_records_from_timeline(self, state_obj, now=None):
-        """Remove timestamped records that are seven days old or older."""
-        now = float(now if now is not None else time.time())
-        timeline = state_obj["memory_timeline"]
-        removed = 0
-        by_day = {}
-
-        for i in range(MEMORY_DAYS):
-            key = f"day_{i}"
-            day = timeline.get(key)
-            if not isinstance(day, dict):
-                continue
-            day_removed = 0
-            for field, items in list(day.items()):
-                if not isinstance(items, list):
-                    continue
-                kept = []
-                for item in items:
-                    ts = self._record_timestamp(item)
-                    if ts > 0.0 and self._is_expired(ts, now=now):
-                        day_removed += 1
-                        continue
-                    kept.append(item)
-                day[field] = kept
-            if day_removed:
-                by_day[key] = day_removed
-                removed += day_removed
-
-        if removed:
-            safe_state_log(
-                f"MEMORY TTL CLEANUP: removed={removed} "
-                f"window=day_0..day_6 boundary=day_7 by_day={by_day}"
-            )
-        return removed, by_day
-
-    def _log_rollover_deletion(self, expired_records, today, previous):
-        safe_state_log(
-            f"MEMORY DAY_7 DELETE: utc={today} previous_utc={previous} "
-            f"records_removed={expired_records} window=day_0..day_6"
-        )
 
     def rollover(self, state_obj):
         self.ensure(state_obj)
-        today = utc_day_key()
-        cycle = state_obj["memory_cycle"]
-        previous = cycle.get("last_day_key")
         now = time.time()
+        current_start = utc_window_start(now).timestamp()
+        current_key = utc_window_key(now)
+        cycle = state_obj.get("memory_cycle") if isinstance(state_obj.get("memory_cycle"), dict) else {}
+        previous_key = cycle.get("window_key") or cycle.get("last_window_key")
+        # Legacy 12-hour states are intentionally collapsed: only day_0 may remain, and it is re-seeded below.
+        if not previous_key or previous_key == current_key:
+            changed = False
+        else:
+            changed = True
 
-        # Real-age TTL cleanup runs even without a UTC day change. This protects
-        # against process downtime and legacy records that missed a rollover.
-        self._purge_expired_records_from_timeline(state_obj, now=now)
-        self._cleanup_top_level_memory(state_obj, now=now)
-
-        if previous == today:
-            return False
-
-        shift = 1
-        try:
-            old_date = datetime.strptime(str(previous), "%Y-%m-%d").date()
-            new_date = datetime.strptime(today, "%Y-%m-%d").date()
-            shift = max(1, min(MEMORY_DAYS, (new_date - old_date).days))
-        except Exception:
-            shift = 1
-
-        timeline = state_obj["memory_timeline"]
-        expired_records = 0
-
-        for _ in range(shift):
-            # day_6 is the oldest live slot. It leaves the live window here;
-            # its lifecycle state is day_7 -> DELETE. day_7 is never stored.
-            expired_slot = timeline.pop("day_6", build_memory_day())
-            for items in expired_slot.values():
-                if isinstance(items, list):
-                    expired_records += len(items)
-
-            for i in range(MEMORY_DAYS - 1, 0, -1):
-                timeline[f"day_{i}"] = timeline.get(f"day_{i-1}", build_memory_day())
-            timeline["day_0"] = build_memory_day()
+        if changed:
+            seed_start = current_start - DIALOGUE_SEED_SECONDS
+            seed_end = current_start
+            self._clear_dialogue_runtime_except_seed(state_obj, seed_start, seed_end)
 
         state_obj["memory_cycle"] = {
-            "last_day_key": today,
+            "window_key": current_key,
+            "window_start_utc": current_start,
+            "seed_cutoff_utc": current_start - DIALOGUE_SEED_SECONDS,
             "last_rollover": now,
         }
-
-        self._purge_expired_records_from_timeline(state_obj, now=now)
         self._cleanup_top_level_memory(state_obj, now=now)
-        self._log_rollover_deletion(expired_records, today, previous)
-        safe_state_log(
-            f"MEMORY_WINDOW_ROLLED: day_0..day_6 active; day_7 deleted; utc={today}"
-        )
-        return True
+        if changed:
+            safe_state_log(
+                f"MEMORY_12H_ROLLOVER: utc_window={current_key}; retained_seed=1h;"
+            )
+        return changed
 
     @staticmethod
     def _ensure_user_scope_for_runtime(state_obj):
@@ -672,11 +787,11 @@ class QuantumMemoryEngine:
 
     @staticmethod
     def _migrate_legacy_visual_hot_pointer(state_obj):
-        """Migrate legacy visual hot pointers into live day_0..day_6 memory.
+        """Migrate legacy visual hot pointers into live day_0 (12h) memory.
 
         Old deployments stored rendered tables/images as active_visual_scene without
         the canonical USER↔APRIL scene fields. The migrated record stays live only
-        within the seven-day memory window and can no longer remain the hot pointer.
+        within the 12-hour memory window and can no longer remain the hot pointer.
         """
         scene = state_obj.get("active_visual_scene")
         if not isinstance(scene, dict) or not scene:
@@ -751,7 +866,7 @@ class QuantumMemoryEngine:
 
     @staticmethod
     def _ensure_active_dialogue_sequence(state_obj):
-        """Recover/normalize the authenticated user's active 7-day vector."""
+        """Recover/normalize the authenticated user's active 12-hour vector."""
         if not isinstance(state_obj, dict):
             return {}
 
@@ -792,12 +907,12 @@ class QuantumMemoryEngine:
                 "status": "active",
                 "relation": str(current.get("relation") or "CONTINUE").upper(),
             })
-            # Backfill visual continuity from the durable seven-day turn archive
+            # Backfill visual continuity from the durable 12-hour turn archive
             # when an older persisted sequence predates the visual attachment fields.
             if not isinstance(current.get("last_visual_attachment"), dict) or not current.get("last_visual_attachment"):
                 latest_visual_pair = None
                 timeline = state_obj.get("memory_timeline") if isinstance(state_obj.get("memory_timeline"), dict) else {}
-                for day_index in range(MEMORY_DAYS):
+                for day_index in range(MEMORY_SLOTS):
                     day = timeline.get(f"day_{day_index}")
                     if not isinstance(day, dict):
                         continue
@@ -816,7 +931,7 @@ class QuantumMemoryEngine:
                     current["last_visual_scene_id"] = str(latest_visual_pair.get("visual_scene_id") or latest_visual_pair.get("scene_contract_id") or "")
                     current["last_visual_turn_index"] = int(latest_visual_pair.get("sequence_turn_index") or 0)
                     current["visual_turn_count"] = sum(
-                        1 for day_index in range(MEMORY_DAYS)
+                        1 for day_index in range(MEMORY_SLOTS)
                         for item in ((timeline.get(f"day_{day_index}") or {}).get("dialog_pairs", []) if isinstance(timeline.get(f"day_{day_index}"), dict) else [])
                         if isinstance(item, dict)
                         and str(item.get("sequence_id") or "") == sequence_id
@@ -826,11 +941,11 @@ class QuantumMemoryEngine:
             state_obj["active_dialogue_sequence"] = current
             return current
 
-        # Restore from the newest authenticated dialog pair in the seven-day window.
+        # Restore from the newest authenticated dialog pair in the 12-hour window.
         pairs = []
         timeline = state_obj.get("memory_timeline") if isinstance(state_obj.get("memory_timeline"), dict) else {}
         now = time.time()
-        for day_index in range(MEMORY_DAYS):
+        for day_index in range(MEMORY_SLOTS):
             day = timeline.get(f"day_{day_index}")
             if not isinstance(day, dict):
                 continue
@@ -1086,7 +1201,7 @@ class QuantumMemoryEngine:
     def ensure_runtime(self, state_obj):
         self.ensure(state_obj)
         # Normalize legacy hot visual pointers exactly once. Nothing is deleted;
-        # the old scene is preserved in dynamic/7-day memory.
+        # the old scene is preserved in dynamic/12-hour memory.
         self._ensure_user_scope_for_runtime(state_obj)
         self._migrate_legacy_visual_hot_pointer(state_obj)
         self.rollover(state_obj)
@@ -1194,7 +1309,7 @@ class QuantumMemoryEngine:
         self.ensure(state_obj)
         timeline = state_obj["memory_timeline"]
 
-        for day_index in range(MEMORY_DAYS):
+        for day_index in range(MEMORY_SLOTS):
             day = timeline[f"day_{day_index}"]
             age = day_index
 
@@ -1235,7 +1350,7 @@ class QuantumMemoryEngine:
                     }
 
     def build_memory_matrix(self, state_obj, query="", limit=8):
-        """Build one quantum-matrix evidence field over live day_0..day_6 memory."""
+        """Build one quantum-matrix evidence field over live day_0 (12h) memory."""
         self.ensure_runtime(state_obj)
         query = str(query or "").strip()
         now = time.time()
@@ -1246,14 +1361,14 @@ class QuantumMemoryEngine:
         rows = []
         for record, text in zip(records, texts):
             ts = self._record_timestamp(record)
-            age_days = self._memory_age_days(ts, now=now)
-            base_age = age_days if age_days is not None else float(record.get("day_index", 0))
-            age_ratio = min(1.0, max(0.0, base_age / MEMORY_DAYS))
+            age_hours = self._memory_age_hours(ts, now=now)
+            base_age = age_hours if age_hours is not None else 0.0
+            age_ratio = min(1.0, max(0.0, base_age / DIALOGUE_WINDOW_HOURS))
             semantic = float(semantic_map.get(text, 0.0)) if query and text else 0.0
             rows.append({
                 "day_index": int(record.get("day_index", 0)),
                 "memory_kind": record.get("memory_kind"),
-                "age_days": round(age_days, 6) if age_days is not None else None,
+                "age_hours": round(age_hours, 6) if age_hours is not None else None,
                 "semantic": round(semantic, 6),
                 "visual": 1.0 if record.get("memory_kind") == "visual_scene" else 0.0,
                 "dialogue": 1.0 if record.get("memory_kind") == "dialog_pair" else 0.0,
@@ -1265,8 +1380,8 @@ class QuantumMemoryEngine:
         rows.sort(key=lambda r: (r["semantic"], r["freshness"]), reverse=True)
         return {
             "version": self.MATRIX_VERSION,
-            "window": "day_0..day_6",
-            "expired_boundary": "day_7",
+            "window": "12h_rolling",
+            "expired_boundary": "next_utc_12h_boundary",
             "ttl_seconds": MEMORY_TTL_SECONDS,
             "query": query,
             "rows": rows[: max(1, int(limit))],
@@ -1277,7 +1392,7 @@ class QuantumMemoryEngine:
     def query(self, state_obj, query, *, limit=8, retrieval_mode="semantic"):
 
         """
-        Produce memory evidence. Stored visual scenes remain in the 7-day
+        Produce memory evidence. Stored visual scenes remain in the 12-hour
         memory, but the current active visual context is exposed only when its
         semantic relevance survives the current-turn measurement.
         """
@@ -1293,7 +1408,7 @@ class QuantumMemoryEngine:
         if not query:
             return {
                 "engine": self.VERSION,
-                "window_days": MEMORY_DAYS,
+                "window_hours": DIALOGUE_WINDOW_HOURS,
                 "matches": [],
                 "active_scene": state_obj.get("active_scene", {}),
                 "active_visual_scene": state_obj.get("active_visual_scene"),
@@ -1311,7 +1426,7 @@ class QuantumMemoryEngine:
 
         if retrieval_mode == "continuation_live":
             # Live continuation is sequence-local. It must never search another
-            # seven-day branch merely because the text is semantically similar.
+            # 12-hour branch merely because the text is semantically similar.
             if not active_sequence_id:
                 candidates = []
             else:
@@ -1321,11 +1436,11 @@ class QuantumMemoryEngine:
                 ]
 
         elif retrieval_mode == "continuation_recovery":
-            # Seven-day recovery is an explicit Interpretation decision, not a
+            # 12-hour recovery is an explicit Interpretation decision, not a
             # default memory query. Without the gate, return no historical evidence.
             recovery_allowed = bool(
                 continuity_policy.get("recovery_attempted")
-                and str(continuity_policy.get("historical_memory_policy") or "") == "ALLOW_SEVEN_DAY_RECOVERY"
+                and str(continuity_policy.get("historical_memory_policy") or "") == "BLOCKED_OUTSIDE_LIVE_WINDOW"
             )
             if not recovery_allowed:
                 candidates = []
@@ -1372,7 +1487,7 @@ class QuantumMemoryEngine:
         ranked = []
         for record, candidate_text in zip(candidate_records, candidate_texts):
             semantic = float(semantic_map.get(candidate_text, 0.0))
-            day_recency = max(0.0, 1.0 - (record.get("day_index", 0) / MEMORY_DAYS))
+            day_recency = max(0.0, 1.0 - (record.get("day_index", 0) / MEMORY_SLOTS))
             created_at = float(record.get("created_at") or record.get("timestamp") or 0.0)
             temporal_recency = (
                 max(0.0, min(1.0, created_at / latest_created_at))
@@ -1455,7 +1570,7 @@ class QuantumMemoryEngine:
         return {
             "engine": self.VERSION,
             "matrix_version": self.MATRIX_VERSION,
-            "window_days": MEMORY_DAYS,
+            "window_hours": DIALOGUE_WINDOW_HOURS,
             "matches": matches,
             "memory_matrix": matrix,
             "memory_cleanup": deepcopy(state_obj.get("memory_cleanup", {})),
@@ -1550,12 +1665,12 @@ class QuantumMemoryEngine:
         self._trim_topic_memory(state_obj)
 
     def record_visual_scene(self, state_obj, scene_payload):
-        """Promote one confirmed visual scene to active and archive it in 7-day memory.
+        """Promote one confirmed visual scene to active and archive it in 12-hour memory.
 
-        Active visual state is a one-scene hot pointer. The seven-day timeline is
+        Active visual state is a one-scene hot pointer. The 12-hour timeline is
         the durable dynamic memory. A new scene replaces the hot pointer; older
-        scenes remain retrievable only while they are inside day_0..day_6 and
-        are deleted when they cross the day_7 TTL boundary.
+        scenes remain retrievable only while they are inside day_0 (12h) and
+        are deleted when they cross the next UTC boundary TTL boundary.
         """
         self.ensure_runtime(state_obj)
         if not isinstance(scene_payload, dict):
@@ -1654,9 +1769,7 @@ class QuantumMemoryEngine:
             "visual_topic_history": deepcopy(state_obj.get("visual_topic_history", [])),
             "visual_summary": deepcopy(state_obj.get("visual_summary", {})),
             "memory_cleanup": deepcopy(state_obj.get("memory_cleanup", {})),
-            "today_visual_memory": deepcopy(
-                state_obj["memory_timeline"]["day_0"].get("visual_scenes", [])
-            ),
+            "dialogue_window_memory": deepcopy(state_obj["memory_timeline"]["day_0"]),
         }
         return state_obj["active_scene"]
 
@@ -1664,7 +1777,7 @@ class QuantumMemoryEngine:
         self.ensure_runtime(state_obj)
         memory = self.query(state_obj, query) if query else {
             "engine": self.VERSION,
-            "window_days": MEMORY_DAYS,
+            "window_hours": DIALOGUE_WINDOW_HOURS,
             "matches": [],
             "decision_owner": "QUANTUM_PROCESSOR",
             "evidence_only": True,
@@ -1678,12 +1791,12 @@ class QuantumMemoryEngine:
             "active_object": focus.get("active_object"),
             "priority_score": focus.get("priority_score", 0.0),
             "intent_freshness": focus.get("intent_freshness", 0.0),
-            "today": deepcopy(state_obj["memory_timeline"]["day_0"]),
-            "yesterday": deepcopy(state_obj["memory_timeline"]["day_1"]),
+            "dialogue_window": deepcopy(state_obj["memory_timeline"]["day_0"]),
+            "active_dialogue_context": deepcopy(state_obj.get("active_dialogue_context", {})),
             "open_loops": deepcopy(state_obj.get("open_loops", [])),
             "quantum_memory": memory,
             "memory_version": self.VERSION,
-            "window_days": MEMORY_DAYS,
+            "window_hours": DIALOGUE_WINDOW_HOURS,
             "decision_owner": "QUANTUM_PROCESSOR",
             "evidence_only": True,
         }
@@ -1764,8 +1877,15 @@ def get_state(user_id):
         }
         QUANTUM_MEMORY_ENGINE.ensure(state[key])
         _sanitize_persisted_dialog(state[key])
+        # Legacy memory states have no 12h key. Treat them as expired so only the
+        # one-hour seed immediately before the current UTC boundary can survive.
+        cycle = state[key].get("memory_cycle") if isinstance(state[key].get("memory_cycle"), dict) else {}
+        if not cycle.get("window_key"):
+            cycle["window_key"] = utc_window_key(time.time() - DIALOGUE_WINDOW_SECONDS)
+            state[key]["memory_cycle"] = cycle
+        rolled = QUANTUM_MEMORY_ENGINE.rollover(state[key])
         removed_hot = _cleanup_hot_content(state[key])
-        if removed_hot:
+        if removed_hot or rolled:
             QUANTUM_MEMORY_ENGINE.refresh_scene(state[key])
             try:
                 if callable(save_memory):
@@ -1776,7 +1896,7 @@ def get_state(user_id):
 
 
 def _cleanup_hot_content(state_obj, now=None):
-    """Enforce the same seven-day TTL on all conversational/visual hot content."""
+    """Enforce the same 12-hour rolling TTL on all conversational/visual hot content."""
     now = float(now if now is not None else time.time())
     removed = 0
 
@@ -1897,7 +2017,7 @@ def _cleanup_hot_content(state_obj, now=None):
     state_obj["meta"] = meta
 
     state_obj["user_content_retention"] = {
-        "window_days": MEMORY_DAYS,
+        "window_hours": DIALOGUE_WINDOW_HOURS,
         "ttl_seconds": USER_CONTENT_RETENTION_SECONDS,
         "policy": "all_user_content_rolling_ttl",
         "last_cleanup_at": now,
@@ -2080,7 +2200,7 @@ def update_memory_summary(state_obj, user_text="", assistant_text=""):
         state_obj["memory_summary"] = combined[-SESSION_MEMORY_LIMIT:]
         state_obj["memory_summary_meta"] = {
             "created_at": time.time(),
-            "expires_after_days": MEMORY_DAYS,
+            "expires_after_hours": DIALOGUE_WINDOW_HOURS,
             "memory_kind": "summary",
         }
 
@@ -2152,7 +2272,7 @@ def _archive_dialog_pair(state_obj, user_id, user_msg, april_msg):
         ),
         "continuation_hint": "available_for_reference",
         "created_at": time.time(),
-        "expires_after_days": MEMORY_DAYS,
+        "expires_after_hours": DIALOGUE_WINDOW_HOURS,
     }
     # Deduplicate the same completed pair if a compatibility caller invokes
     # compression more than once.
@@ -2178,7 +2298,7 @@ def compress_dialog_to_summary(state_obj):
 
     The hot dialog is NEVER replaced by a [COMPRESSED_MEMORY] marker anymore.
     Completed pairs are archived by add_dialog() into day_0 and continue through
-    the live day_0..day_6 window; day_7 is the deletion boundary.
+    the live day_0 (12h) window; next UTC boundary is the deletion boundary.
     """
     dialog = safe_list(state_obj.get("dialog"))
     if not dialog:
@@ -2210,7 +2330,7 @@ def compress_dialog_to_summary(state_obj):
     state_obj["memory_summary"] = str(machine_summary)[-SESSION_MEMORY_LIMIT:]
     state_obj["memory_summary_meta"] = {
         "created_at": time.time(),
-        "expires_after_days": MEMORY_DAYS,
+        "expires_after_hours": DIALOGUE_WINDOW_HOURS,
         "memory_kind": "summary",
     }
 
@@ -2304,7 +2424,7 @@ def add_dialog(user_id, role, content, metadata=None):
         state_obj["meta"]["last_bot_message_at"] = now
 
     # Canonical Free hot window: exactly 30 messages. Completed pairs leave the
-    # hot window only as one semantic memory record and continue through day_0..day_6.
+    # hot window only as one semantic memory record and continue inside the current 12-hour window.
     while len(dialog) > HOT_DIALOG_LIMIT:
         if len(dialog) >= 2:
             first, second = dialog[0], dialog[1]
@@ -2329,7 +2449,7 @@ def add_dialog(user_id, role, content, metadata=None):
             "role": oldest.get("role") if isinstance(oldest, dict) else None,
             "content": safe_trim_text(oldest.get("content", "") if isinstance(oldest, dict) else oldest, 800),
             "created_at": time.time(),
-            "expires_after_days": MEMORY_DAYS,
+            "expires_after_hours": DIALOGUE_WINDOW_HOURS,
         })
         day0["topics"] = day0["topics"][-HOT_DIALOG_LIMIT:]
 
@@ -2579,7 +2699,7 @@ def refresh_unified_scene(user_id):
 
 
 # =====================================================
-# SEVEN-DAY MEMORY API
+# ROLLING 12-HOUR MEMORY API
 # =====================================================
 
 def ensure_memory_engine(state_obj):
@@ -2639,7 +2759,7 @@ def build_memory_context(user_id):
         "goal_hierarchy": deepcopy(state_obj.get("goal_hierarchy", {})),
         "memory_signals": deepcopy(state_obj.get("memory_signals", {})),
         "engine": QUANTUM_MEMORY_ENGINE.VERSION,
-        "window_days": MEMORY_DAYS,
+        "window_hours": DIALOGUE_WINDOW_HOURS,
         "memory_cleanup": deepcopy(state_obj.get("memory_cleanup", {})),
         "memory_matrix": deepcopy(state_obj.get("memory_matrix", {})),
         "active_dialogue_sequence": deepcopy(state_obj.get("active_dialogue_sequence", {})),
@@ -2669,7 +2789,7 @@ def build_dialogue_memory_bridge(
         no historical turns are passed downstream.
 
     The branch digest gives Provider a compact picture of the dialogue trajectory
-    without sending the whole seven-day history.
+    without sending the whole 12-hour history.
     """
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
     user_key = str(user_id)
@@ -2694,7 +2814,7 @@ def build_dialogue_memory_bridge(
     ).strip()
 
     # ------------------------------------------------------------------
-    # Collect durable USER↔APRIL dialogue pairs inside the seven-day window.
+    # Collect durable USER↔APRIL dialogue pairs inside the 12-hour window.
     # ------------------------------------------------------------------
     records: list[dict[str, Any]] = []
     now = time.time()
@@ -2704,7 +2824,7 @@ def build_dialogue_memory_bridge(
         else {}
     )
 
-    for day_index in range(MEMORY_DAYS):
+    for day_index in range(MEMORY_SLOTS):
         day = timeline.get(f"day_{day_index}")
         if not isinstance(day, dict):
             continue
@@ -2906,7 +3026,7 @@ def build_dialogue_memory_bridge(
             for item in topic_path[-6:]
         ],
         "coverage": "selected_sequence_only",
-        "seven_day_window_days": MEMORY_DAYS,
+        "dialogue_window_hours": DIALOGUE_WINDOW_HOURS,
         "other_branches_included": False,
         "full_history_included": False,
     }
@@ -2991,7 +3111,7 @@ def build_dialogue_memory_bridge(
 
     return {
         "version": "april_dialogue_memory_bridge_v3_branch_first",
-        "window_days": MEMORY_DAYS,
+        "window_hours": DIALOGUE_WINDOW_HOURS,
         "user_id": user_key,
         "conversation_id": conversation_id,
         "retrieval_mode": mode,
@@ -3011,6 +3131,11 @@ def build_dialogue_memory_bridge(
             else []
         ),
         "active_sequence_turn_count": len(target_records),
+        "active_dialogue_context": (
+            deepcopy(state_obj.get("active_dialogue_context") or {})
+            if mode in {"CONTINUE", "RECALL"}
+            else {}
+        ),
         "active_sequence_digest": (
             deepcopy(active_sequence_digest)
             if mode in {"CONTINUE", "RECALL"}
@@ -3036,12 +3161,12 @@ def build_dialogue_memory_bridge(
                 interactive_task_state.get("awaiting_user")
             ),
         } if interactive_task_state else {},
-        "relevant_7d_turns": (
+        "relevant_window_turns": (
             relevant
             if mode == "RECALL"
             else []
         ),
-        "turn_count_7d": len(records),
+        "turn_count_window": len(records),
         "decision_owner": "INTERPRETATION",
         "interpretation_first": True,
         "active_branch_first": True,
@@ -3065,7 +3190,7 @@ def build_unified_memory_bridge(user_id):
         "memory_timeline": deepcopy(state_obj.get("memory_timeline", {})),
         "memory_cycle": deepcopy(state_obj.get("memory_cycle", {})),
         "engine": QUANTUM_MEMORY_ENGINE.VERSION,
-        "window_days": MEMORY_DAYS,
+        "window_hours": DIALOGUE_WINDOW_HOURS,
     }
 
 
@@ -3228,7 +3353,7 @@ def restore_visual_context_after_turn(user_id, *, new_scene_active=False):
         }
 
     # Do NOT resurrect stored_visual_scene_turn and do NOT clear active_visual_scene.
-    # Archived scenes remain only inside day_0..day_6 until TTL cleanup removes them.
+    # Archived scenes remain only inside day_0 (12h) until TTL cleanup removes them.
     state_obj["stored_visual_scene_turn"] = None
     state_obj["active_visual_scene_turn"] = None
     QUANTUM_MEMORY_ENGINE.refresh_scene(state_obj)
@@ -3301,7 +3426,7 @@ def update_visual_summary(user_id, visual_summary):
         "user_message", "assistant_message", "text", "message",
     }
 
-    # An empty frontend visual summary is not a new scene. Keep the seven-day
+    # An empty frontend visual summary is not a new scene. Keep the 12-hour
     # memory untouched and do not rewrite the active scene with stale text.
     if not isinstance(scene, dict) or not scene:
         if not has_event:
@@ -3335,7 +3460,7 @@ def build_visual_memory_bridge(user_id):
             state_obj["memory_timeline"]["day_0"].get("visual_scenes", [])
         ),
         "memory_engine": QUANTUM_MEMORY_ENGINE.VERSION,
-        "window_days": MEMORY_DAYS,
+        "window_hours": DIALOGUE_WINDOW_HOURS,
     }
 
 
@@ -3371,7 +3496,7 @@ def _next_visual_topic_slot(state_obj):
 
 
 def _archive_current_visual_scene_to_dynamic(state_obj, user_id):
-    """Move the current scene into live day_0..day_6 memory without making it hot."""
+    """Move the current scene into live day_0 (12h) memory without making it hot."""
     current = state_obj.get("current_visual_scene") or state_obj.get("active_visual_scene")
     if not isinstance(current, dict) or not current:
         return
@@ -3410,7 +3535,7 @@ def _archive_current_visual_scene_to_dynamic(state_obj, user_id):
     })
     day0[slot] = day0[slot][-TOPIC_MEMORY_LIMIT:]
 
-    # Keep it in the visual-scene ledger as durable day_0..day_6 memory too.
+    # Keep it in the visual-scene ledger as durable day_0 (12h) memory too.
     day0.setdefault("visual_scenes", []).append(archived)
     day0["visual_scenes"] = day0["visual_scenes"][-TOPIC_MEMORY_LIMIT:]
     state_obj.setdefault("visual_topic_history", []).append(archived)
@@ -3502,7 +3627,7 @@ def _build_dialogue_visual_attachment(render_blocks, scene_id="", turn_id="", *,
 
     The dialogue memory keeps visual identity/metadata, never PNG/base64 payloads.
     This makes a visual artifact part of the same USER↔APRIL turn without
-    inflating the seven-day dialogue memory or changing renderer ownership.
+    inflating the 12-hour dialogue memory or changing renderer ownership.
     """
     blocks = render_blocks if isinstance(render_blocks, list) else []
     for block in blocks:
@@ -3586,7 +3711,7 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
     regardless of whether it contains a graphic/table/formula. The scene stores
     the compact meaning of the user request + April answer + current rendering
     state. When the semantic dialogue contract says the turn is independent/new,
-    the previous scene is archived into the existing A-E / 7-day memory and the
+    the previous scene is archived into the existing A-E / 12-hour memory and the
     new turn becomes the only active scene.
 
     No deletion, no trigger routing, no word rules and no renderer decisions.
@@ -4011,6 +4136,36 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "result_available": bool(answer_text),
         "created_at": time.time(),
     }
+    # Canonical task/result ledger consumed by the next interpretation turn.
+    active_ctx = state_obj.get("active_dialogue_context") if isinstance(state_obj.get("active_dialogue_context"), dict) else build_default_active_dialogue_context()
+    active_task = deepcopy(scene_record.get("active_task") or state_obj.get("active_task") or {})
+    task_semantic = deepcopy(semantic_scene_state if isinstance(semantic_scene_state, dict) else {})
+    previous_results = list(active_ctx.get("completed_results") or [])
+    if resolved_relation == "NEW":
+        previous_results = []
+    previous_results.append(deepcopy(result_record))
+    previous_results = previous_results[-HOT_DIALOG_LIMIT:]
+    state_obj["active_dialogue_context"] = {
+        "version": "active_dialogue_context_v2_12h",
+        "scope": {"user_id": str(user_id), "conversation_id": conversation_id},
+        "sequence_id": str(active_sequence.get("sequence_id") or ""),
+        "objective": safe_trim_text(
+            task_semantic.get("objective")
+            or active_task.get("objective")
+            or (active_task.get("prompt") if active_task else "")
+            or (current_request_text if resolved_relation == "NEW" else state_obj.get("active_dialogue_context", {}).get("objective", "")),
+            1200,
+        ),
+        "task": active_task,
+        "intent": safe_trim_text(task_semantic.get("intent") or task_semantic.get("operation") or "", 220),
+        "goal": safe_trim_text(task_semantic.get("goal") or active_task.get("goal") or "", 320),
+        "topic": safe_trim_text(scene_record.get("topic") or "", 500),
+        "active_entity": safe_trim_text(task_semantic.get("entity") or contract.get("active_entity") or state_obj.get("active_entity") or "", 320),
+        "completed_results": previous_results,
+        "last_completed_result": deepcopy(result_record),
+        "updated_at": now,
+    }
+
     result_chain = list(state_obj.get("result_chain") or [])
     result_chain.append(result_record)
     state_obj["result_chain"] = result_chain[-12:]
@@ -4124,7 +4279,7 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         f"usable={bool(successful_visual)}"
     )
 
-    # Preserve every turn in the existing seven-day dialogue archive as one
+    # Persist every completed USER↔APRIL turn in the current 12-hour dialogue archive as one
     # compact USER↔APRIL unit. This is the durable fallback for semantic recall.
     day0 = state_obj["memory_timeline"]["day_0"]
     pairs = day0.setdefault("dialog_pairs", [])
@@ -4180,7 +4335,7 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
             "visual_attachment": deepcopy(visual_attachment),
         },
         "created_at": time.time(),
-        "expires_after_days": MEMORY_DAYS,
+        "expires_after_hours": DIALOGUE_WINDOW_HOURS,
     }
     if not any(
         isinstance(item, dict)
@@ -4547,7 +4702,7 @@ def build_quantum_memory_signal(user_id, query="", limit=8):
     result = query_dynamic_memory(user_id, query, limit=limit)
     return {
         "engine": QUANTUM_MEMORY_ENGINE.VERSION,
-        "window_days": MEMORY_DAYS,
+        "window_hours": DIALOGUE_WINDOW_HOURS,
         "signal": result,
         "decision_owner": "QUANTUM_PROCESSOR",
         "evidence_only": True,
@@ -4565,7 +4720,7 @@ def initialize_state_engine():
     """
     safe_state_log(
         f"QUANTUM MEMORY ENGINE READY: {QUANTUM_MEMORY_ENGINE.VERSION}, "
-        f"window={MEMORY_DAYS}d"
+        f"window={DIALOGUE_WINDOW_HOURS}h"
     )
     return QUANTUM_MEMORY_ENGINE
 
