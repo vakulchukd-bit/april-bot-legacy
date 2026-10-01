@@ -45,7 +45,7 @@ _RENDERER_REGISTRY = {
     "code": "CodeBlock",
     "graph": "GraphBlock",
     "table": "TableBlock",
-    "diagram": "GalleryBlock",
+    "diagram": "DiagramRenderer",
     "image": "GalleryBlock",
     "gallery": "GalleryBlock",
     "link": "LinkCard",
@@ -1642,6 +1642,10 @@ class ProcessorScene:
         # allowed to strip blocks after canonicalization. A truly text-only
         # request simply arrives with one text block.
 
+        artifact_objects = [
+            item for item in list(machine_payload.get("artifact_objects") or [])
+            if isinstance(item, BaseArtifact)
+        ]
         response = MachineResponse(
             answer=answer,
             content=_text(machine_payload.get("content") or answer),
@@ -1651,7 +1655,7 @@ class ProcessorScene:
             confidence=float(machine_payload.get("confidence") or 1.0),
             render_blocks=blocks,
             artifacts_payload=list(machine_payload.get("artifacts") or []),
-            artifacts=[],
+            artifacts=artifact_objects,
             scene=dict(machine_payload.get("scene") or {}),
             scene_blueprint=dict(machine_payload.get("scene_blueprint") or {}),
             scene_plan=list(machine_payload.get("scene_plan") or request.requested_outputs or ["text"]),
@@ -2227,9 +2231,12 @@ async def _route_image_through_room_registry(
         if _text(x)
     )
 
-    visual_requested = representation in {"image", "gallery"} or bool(
-        {"image", "gallery"} & requested_outputs
-    )
+    # Interpretation owns the primary representation. A structured diagram
+    # may carry "image" as an auxiliary presentation hint, but that must NOT
+    # launch the raster image-generation room and steal the turn from
+    # C_DIAGRAM_ROOM. Only an image/gallery interpretation may enter the
+    # image-generation route.
+    visual_requested = representation in {"image", "gallery"}
     if not visual_requested:
         print(
             "🧭 IMAGE ROUTE DECISION:",
@@ -2510,6 +2517,141 @@ async def _route_image_through_room_registry(
             "INTERPRETATION→C_ARTIFACT→ROOM_REGISTER→image_generate→C_APRIL_IMAGES_GENERATOR"
         )
 
+def _merge_room_route_into_response(target: MachineResponse, routed: MachineResponse) -> None:
+    """Merge canonical C-room artifacts/blocks without replacing Provider text."""
+    if routed is None:
+        return
+
+    # Preserve actual BaseArtifact instances for SceneContract composition.
+    existing_artifact_ids = {
+        str(getattr(getattr(a, "metadata", None), "artifact_id", "") or "")
+        for a in list(getattr(target, "artifacts", []) or [])
+        if isinstance(a, BaseArtifact)
+    }
+    for artifact in list(getattr(routed, "artifacts", []) or []):
+        if isinstance(artifact, BaseArtifact):
+            artifact_id = str(getattr(getattr(artifact, "metadata", None), "artifact_id", "") or "")
+            if artifact_id and artifact_id in existing_artifact_ids:
+                continue
+            target.artifacts.append(artifact)
+            if artifact_id:
+                existing_artifact_ids.add(artifact_id)
+
+    existing_blocks = list(getattr(target, "render_blocks", []) or [])
+    routed_blocks = [
+        dict(raw) for raw in list(getattr(routed, "render_blocks", []) or [])
+        if isinstance(raw, dict)
+    ]
+    # The room result is the authoritative C-ARTIFACT projection. Replace the
+    # provider's provisional block of the same semantic type instead of showing
+    # the same graph/table/formula/code twice.
+    routed_types = {
+        _text(b.get("type") or b.get("artifact_type")).lower()
+        for b in routed_blocks
+        if _text(b.get("type") or b.get("artifact_type"))
+    }
+    if routed_types:
+        existing_blocks = [
+            b for b in existing_blocks
+            if not isinstance(b, dict)
+            or _text(b.get("type") or b.get("artifact_type")).lower() not in routed_types
+        ]
+
+    seen = {
+        (
+            _text(b.get("type") or b.get("artifact_type")),
+            json.dumps(b.get("payload") or {}, ensure_ascii=False, sort_keys=True, default=str),
+        )
+        for b in existing_blocks
+        if isinstance(b, dict)
+    }
+    for raw in routed_blocks:
+        if not isinstance(raw, dict):
+            continue
+        block = dict(raw)
+        kind = _text(block.get("type") or block.get("artifact_type")).lower()
+        payload = canonical_payload_for_block(block)
+        if payload:
+            block["payload"] = payload
+        key = (
+            kind,
+            json.dumps(block.get("payload") or {}, ensure_ascii=False, sort_keys=True, default=str),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        existing_blocks.append(block)
+    target.render_blocks = existing_blocks
+
+    merged_metadata = dict(getattr(target, "metadata", {}) or {})
+    merged_metadata.update(dict(getattr(routed, "metadata", {}) or {}))
+    merged_metadata["canonical_renderer_route"] = (
+        "INTERPRETATION→C_ARTIFACT→ROOM_REGISTER→C_ROOM→"
+        "C_ARTIFACT→SCENE_CONTRACT→WEB"
+    )
+    target.metadata = merged_metadata
+
+
+async def _route_structured_outputs_through_room_registry(
+    response: MachineResponse,
+    request: MachineRequest,
+    state: dict,
+    user_id: str,
+    chat_id=None,
+    run_with_activity: Optional[Callable[..., Awaitable[Any]]] = None,
+) -> None:
+    """Route all non-image structured outputs through one C-ARTIFACT/Register call."""
+    requested = []
+    for value in list(getattr(request, "requested_outputs", []) or []):
+        kind = _text(value).lower()
+        if kind in {"", "text", "markdown"}:
+            continue
+        if kind == "image_generate":
+            kind = "image"
+        if kind not in requested:
+            requested.append(kind)
+
+    representation = _text((getattr(request, "intent", {}) or {}).get("type")).lower()
+    if representation and representation not in {"text", "markdown", "image", "gallery"} and representation not in requested:
+        requested.insert(0, representation)
+
+    non_image = [
+        kind for kind in requested
+        if kind in {"formula", "graph", "table", "diagram", "code", "link"}
+    ]
+    if not non_image:
+        return
+
+    route_contract = build_room_route_contract(
+        request,
+        origin="executor",
+        destination="rooms_registry",
+        pipeline_stage="artifact_route",
+        context={
+            "provider_render_blocks": list(getattr(response, "render_blocks", []) or []),
+            "structured_outputs": list(non_image),
+            "route_mode": "canonical_structured",
+        },
+        metadata={
+            "canonical_route": "INTERPRETATION→C_ARTIFACT→ROOM_REGISTER→C_ROOM",
+            "renderer_route": "C_ARTIFACT→SCENE_CONTRACT→WEB",
+            "representation_authority": "INTERPRETATION",
+        },
+    )
+
+    routed = await registry_route_machine_request(
+        request,
+        route_contract,
+        user_id=user_id,
+        target_representations=non_image,
+        chat_id=chat_id,
+        state=state,
+        provider_response=response,
+        run=run_with_activity,
+    )
+    _merge_room_route_into_response(response, routed)
+
+
 async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Callable[..., Awaitable[Any]]] = None, **kwargs):
     request_text = _text(text)
     if not request_text:
@@ -2602,8 +2744,26 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
         run_with_activity=run_with_activity,
     )
 
+    # Every non-image structured representation follows the same canonical
+    # C-ARTIFACT -> Room Register -> C-room route before SceneContract.
+    await _route_structured_outputs_through_room_registry(
+        preview_response,
+        request,
+        state,
+        _text(user_id),
+        chat_id=chat_id,
+        run_with_activity=run_with_activity,
+    )
+
     machine_preview["render_blocks"] = list(preview_response.render_blocks or [])
     machine_preview["artifacts"] = list(preview_response.artifacts_payload or machine_preview.get("artifacts") or [])
+    # Internal-only object channel: keep the real C-ARTIFACT instances until
+    # build_scene() constructs the final SceneContract. The public transport
+    # still uses artifacts_payload; these objects are never JSON serialized.
+    machine_preview["artifact_objects"] = [
+        item for item in list(getattr(preview_response, "artifacts", []) or [])
+        if isinstance(item, BaseArtifact)
+    ]
     machine_preview["artifacts_payload"] = list(preview_response.artifacts_payload or [])
     machine_preview["metadata"] = dict(preview_response.metadata or {})
     if isinstance(provider_contract, dict):
