@@ -13358,13 +13358,26 @@ def _df_normalize_subject(value: str) -> str:
 
 def _df_extract_previous(history: list[Any], state: dict[str, Any]) -> tuple[str, str]:
     active_context = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
-    last_result = active_context.get("last_completed_result") if isinstance(active_context.get("last_completed_result"), dict) else {}
+    active_sequence = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+    expected_task_id = _df_text(
+        active_sequence.get("task_id")
+        or state.get("active_dialogue_task_id")
+        or "",
+        100,
+    )
+    context_task_id = _df_text(active_context.get("task_id"), 100)
+    context_matches_task = bool(
+        not expected_task_id
+        or not context_task_id
+        or expected_task_id == context_task_id
+    )
+    last_result = active_context.get("last_completed_result") if context_matches_task and isinstance(active_context.get("last_completed_result"), dict) else {}
     if last_result:
         return (
             _df_text(last_result.get("user_request") or last_result.get("current_request"), 1200),
             _df_text(last_result.get("assistant_answer") or last_result.get("april_answer"), 2200),
         )
-    seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+    seq = active_sequence
     prev_user = _df_text(seq.get("last_user_request") or state.get("last_user_turn"))
     prev_april = _df_text(seq.get("last_april_answer") or state.get("last_april_turn"))
     if prev_user and prev_april:
@@ -13388,34 +13401,34 @@ def _df_active_sequence_digest(
     sequence_id: str,
     *,
     limit: int = 6,
+    task_id: str = "",
 ) -> dict[str, Any]:
-    """
-    Build the compact semantic picture of the authenticated active branch.
+    """Build a compact task-scoped view inside one authenticated 12h sequence.
 
-    The digest is intentionally branch-first:
-      active USER↔APRIL sequence -> recent turn trajectory -> branch summary.
-    It never searches another branch and never asks the Provider to choose history.
+    ``sequence_id`` is the parent authenticated conversation identity. ``task_id``
+    is the only identity allowed to select task results. Parent sequence counters
+    and task response counters are exposed separately so neither can reset or
+    overwrite the other.
     """
-    seq = state.get("active_dialogue_sequence") if isinstance(
-        state.get("active_dialogue_sequence"), dict
-    ) else {}
-
+    seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
     sid = _df_text(sequence_id or seq.get("sequence_id"), 120)
-    conversation_id = _df_text(
-        state.get("conversation_id")
-        or (state.get("memory_scope") or {}).get("conversation_id"),
-        160,
-    )
-    user_id = _df_text(
-        state.get("user_id")
-        or (state.get("memory_scope") or {}).get("user_id"),
-        120,
-    )
+    tid = _df_text(task_id or seq.get("task_id") or state.get("active_dialogue_task_id"), 100)
+    conversation_id = _df_text(state.get("conversation_id") or (state.get("memory_scope") or {}).get("conversation_id"), 160)
+    user_id = _df_text(state.get("user_id") or (state.get("memory_scope") or {}).get("user_id"), 120)
+
+    registry = seq.get("task_registry") if isinstance(seq.get("task_registry"), dict) else {}
+    top_registry = state.get("dialogue_task_registry") if isinstance(state.get("dialogue_task_registry"), dict) else {}
+    task_record = {}
+    if tid and isinstance(registry.get(tid), dict):
+        task_record = deepcopy(registry[tid])
+    elif tid and isinstance(top_registry.get(tid), dict):
+        task_record = deepcopy(top_registry[tid])
 
     rows: list[dict[str, Any]] = []
     active_context = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
-    timeline = state.get("memory_timeline")
-    timeline = timeline if isinstance(timeline, dict) else {}
+    active_context_task_id = _df_text(active_context.get("task_id"), 100)
+    use_active_context = bool(not tid or not active_context_task_id or active_context_task_id == tid)
+    timeline = state.get("memory_timeline") if isinstance(state.get("memory_timeline"), dict) else {}
 
     for day_index in range(1):
         day = timeline.get(f"day_{day_index}")
@@ -13427,108 +13440,108 @@ def _df_active_sequence_digest(
             raw_sid = _df_text(raw.get("sequence_id"), 120)
             if not sid or raw_sid != sid:
                 continue
+            raw_tid = _df_text(raw.get("task_id"), 100)
+            # New canonical records always have task_id. Legacy records without it
+            # can only be used when no concrete task was selected.
+            if tid and raw_tid and raw_tid != tid:
+                continue
+            if tid and not raw_tid:
+                continue
             raw_user = _df_text(raw.get("user_id"), 120)
             if user_id and raw_user and raw_user != user_id:
                 continue
             raw_conversation = _df_text(raw.get("conversation_id"), 160)
             if conversation_id and raw_conversation and raw_conversation != conversation_id:
                 continue
-
             try:
                 turn_index = int(raw.get("sequence_turn_index") or 0)
             except (TypeError, ValueError):
                 turn_index = 0
-
             try:
                 created_at = float(raw.get("created_at") or raw.get("timestamp") or 0.0)
             except (TypeError, ValueError):
                 created_at = 0.0
-
             rows.append({
                 "sequence_turn_index": turn_index,
+                "task_response_number": int(raw.get("task_response_number") or raw.get("response_count") or 0),
+                "task_id": raw_tid,
                 "created_at": created_at,
-                "topic": _df_text(
-                    raw.get("sequence_topic")
-                    or raw.get("topic")
-                    or raw.get("canonical_topic"),
-                    220,
-                ),
-                "user": _df_text(
-                    raw.get("user_request")
-                    or raw.get("user_meaning")
-                    or raw.get("user"),
-                    220,
-                ),
-                "april": _df_text(
-                    raw.get("april_answer")
-                    or raw.get("april_meaning")
-                    or raw.get("answer")
-                    or raw.get("answer_summary"),
-                    320,
-                ),
-                "relation": _df_text(raw.get("dialogue_relation") or "", 40).upper(),
+                "topic": _df_text(raw.get("sequence_topic") or raw.get("topic") or raw.get("canonical_topic"), 220),
+                "user": _df_text(raw.get("user_request") or raw.get("user_meaning") or raw.get("user"), 220),
+                "april": _df_text(raw.get("april_answer") or raw.get("april_meaning") or raw.get("answer") or raw.get("answer_summary"), 320),
+                "relation": _df_text(raw.get("dialogue_relation") or raw.get("relation") or "", 40).upper(),
             })
 
-    # The canonical result ledger is the authoritative completed dialogue trail.
-    # It is merged with the current window only when it belongs to this user/conversation.
-    scope = state.get("memory_scope") if isinstance(state.get("memory_scope"), dict) else {}
-    completed = active_context.get("completed_results") if isinstance(active_context.get("completed_results"), list) else []
-    for raw in completed:
-        if not isinstance(raw, dict):
-            continue
-        raw_user = _df_text(raw.get("user_id"), 120)
-        raw_conv = _df_text(raw.get("conversation_id"), 160)
-        if scope.get("user_id") and raw_user and raw_user != _df_text(scope.get("user_id"), 120):
-            continue
-        if scope.get("conversation_id") and raw_conv and raw_conv != _df_text(scope.get("conversation_id"), 160):
-            continue
-        raw_sid = _df_text(raw.get("sequence_id"), 120)
-        if sid and raw_sid and raw_sid != sid:
-            continue
-        try:
-            turn_index = int(raw.get("sequence_turn_index") or raw.get("turn_id") or 0)
-        except Exception:
-            turn_index = 0
-        try:
-            created_at = float(raw.get("created_at") or 0.0)
-        except Exception:
-            created_at = 0.0
-        rows.append({
-            "sequence_turn_index": turn_index,
-            "created_at": created_at,
-            "topic": _df_text(raw.get("topic") or active_context.get("topic"), 220),
-            "user": _df_text(raw.get("user_request") or raw.get("current_request"), 220),
-            "april": _df_text(raw.get("assistant_answer") or raw.get("april_answer"), 320),
-            "relation": _df_text(raw.get("relation") or raw.get("dialogue_relation") or "", 40).upper(),
-        })
+    # Merge only task-matching durable results. For a selected task, an older
+    # active_dialogue_context belonging to another task is ignored completely.
+    if use_active_context:
+        completed = active_context.get("completed_results") if isinstance(active_context.get("completed_results"), list) else []
+        for raw in completed:
+            if not isinstance(raw, dict):
+                continue
+            raw_tid = _df_text(raw.get("task_id"), 100)
+            if tid and raw_tid and raw_tid != tid:
+                continue
+            if tid and not raw_tid:
+                continue
+            raw_user = _df_text(raw.get("user_id"), 120)
+            raw_conv = _df_text(raw.get("conversation_id"), 160)
+            if user_id and raw_user and raw_user != user_id:
+                continue
+            if conversation_id and raw_conv and raw_conv != conversation_id:
+                continue
+            try:
+                turn_index = int(raw.get("sequence_turn_index") or raw.get("turn_id") or 0)
+            except Exception:
+                turn_index = 0
+            try:
+                created_at = float(raw.get("created_at") or 0.0)
+            except Exception:
+                created_at = 0.0
+            rows.append({
+                "sequence_turn_index": turn_index,
+                "task_response_number": int(raw.get("task_response_number") or raw.get("response_count") or 0),
+                "task_id": raw_tid,
+                "created_at": created_at,
+                "topic": _df_text(raw.get("topic") or task_record.get("topic"), 220),
+                "user": _df_text(raw.get("user_request") or raw.get("current_request"), 220),
+                "april": _df_text(raw.get("assistant_answer") or raw.get("april_answer"), 320),
+                "relation": _df_text(raw.get("relation") or raw.get("dialogue_relation") or "", 40).upper(),
+            })
 
-    # Deduplicate the merged ledger by sequence turn + text.
     unique_rows = []
     seen_rows = set()
     for row in sorted(rows, key=lambda item: (item.get("sequence_turn_index", 0), item.get("created_at", 0.0))):
-        sig = (row.get("sequence_turn_index"), row.get("user"), row.get("april"))
+        sig = (row.get("task_id"), row.get("sequence_turn_index"), row.get("user"), row.get("april"))
         if sig in seen_rows:
             continue
         seen_rows.add(sig)
         unique_rows.append(row)
     rows = unique_rows
+
+    # Prefer the task registry as the source of task-local result state. This is
+    # the key separation from the parent sequence's current topic/result.
+    task_topic = _df_text(task_record.get("topic"), 220)
+    task_entity = _df_text(task_record.get("entity") or task_record.get("active_entity"), 180)
+    task_result = deepcopy(task_record.get("last_result") or {})
+    task_basis = deepcopy(task_record.get("last_answer_basis") or task_record.get("answer_basis") or {})
+    task_rules = deepcopy(task_record.get("dialogue_rules") or {})
+    task_response_count = int(task_record.get("response_count") or task_record.get("task_response_count") or 0)
+
+    if not rows and task_record.get("last_result"):
+        last = task_record.get("last_result")
+        rows.append({
+            "sequence_turn_index": int(last.get("sequence_turn_index") or seq.get("turn_count") or 0),
+            "task_response_number": int(last.get("task_response_number") or task_response_count),
+            "task_id": tid,
+            "created_at": float(last.get("created_at") or task_record.get("last_turn_at") or 0.0),
+            "topic": task_topic,
+            "user": _df_text(last.get("user_request") or task_record.get("last_user_request"), 220),
+            "april": _df_text(last.get("april_answer") or task_record.get("last_april_answer"), 320),
+            "relation": _df_text(last.get("relation") or "CONTINUE", 40).upper(),
+        })
+
     rows.sort(key=lambda item: (item["sequence_turn_index"], item["created_at"]))
-
-    # Fallback to the durable sequence head if a legacy deployment has not yet
-    # written dialog_pairs for the current turn.
-    if not rows and sid:
-        last_user = _df_text(seq.get("last_user_request"), 220)
-        last_april = _df_text(seq.get("last_april_answer"), 320)
-        if last_user or last_april:
-            rows.append({
-                "sequence_turn_index": int(seq.get("turn_count") or 0),
-                "created_at": float(seq.get("last_turn_at") or 0.0),
-                "topic": _df_text(seq.get("topic"), 220),
-                "user": last_user,
-                "april": last_april,
-                "relation": _df_text(seq.get("relation") or "CONTINUE", 40).upper(),
-            })
-
     recent = rows[-max(1, int(limit)):] if rows else []
     topics: list[str] = []
     for row in rows:
@@ -13536,26 +13549,20 @@ def _df_active_sequence_digest(
         if topic and topic not in topics:
             topics.append(topic)
 
-    root_topic = (
-        _df_text(active_context.get("topic"), 220)
-        or _df_text(seq.get("topic"), 220)
-        or (topics[0] if topics else "")
-    )
+    root_topic = task_topic or (topics[0] if topics else "")
     last_user = _df_text(
-        (recent[-1] if recent else {}).get("user")
-        or seq.get("last_user_request"),
+        (recent[-1] if recent else {}).get("user") or task_record.get("last_user_request"),
         220,
     )
     last_april = _df_text(
-        (recent[-1] if recent else {}).get("april")
-        or seq.get("last_april_answer"),
+        (recent[-1] if recent else {}).get("april") or task_record.get("last_april_answer"),
         320,
     )
-
-    # Keep a very small "trajectory" rather than dumping history.
     trajectory = [
         {
             "turn": int(row.get("sequence_turn_index") or 0),
+            "task_response_number": int(row.get("task_response_number") or 0),
+            "task_id": row.get("task_id", ""),
             "user": row.get("user", ""),
             "april": row.get("april", ""),
             "topic": row.get("topic", ""),
@@ -13565,31 +13572,28 @@ def _df_active_sequence_digest(
     ]
 
     return {
-        "version": "active_sequence_digest_v1",
-        "source": "authenticated_active_sequence",
+        "version": "active_sequence_digest_v4_task_result_continuity",
+        "source": "authenticated_active_sequence_task",
         "sequence_id": sid,
+        "task_id": tid,
         "conversation_id": conversation_id,
-        "turn_count": max(
-            len(rows),
-            int(seq.get("turn_count") or 0),
-        ),
+        "sequence_turn_count": int(seq.get("turn_count") or 0),
+        "turn_count": int(seq.get("turn_count") or 0),
+        "task_turn_count": len(rows),
+        "task_response_count": task_response_count,
         "root_topic": root_topic,
-        "current_focus": _df_text(
-            seq.get("active_entity")
-            or seq.get("canonical_entity")
-            or seq.get("topic")
-            or last_user,
-            220,
-        ),
+        "current_focus": task_entity or task_topic or last_user,
         "last_user": last_user,
         "last_april": last_april,
+        "last_result": task_result,
+        "answer_basis": task_basis,
+        "dialogue_rules": task_rules,
         "topic_path": topics[-6:],
         "recent_trajectory": trajectory,
-        "coverage": "active_sequence_only",
+        "coverage": "active_task_only" if tid else "active_sequence_only",
         "other_branches_included": False,
         "full_history_included": False,
     }
-
 
 def _df_strong_topic_boundary(text: str) -> bool:
     """Detect discourse-level topic switching, not generic word triggers."""
@@ -13695,8 +13699,24 @@ def _df_is_self_contained_new_topic(
 def _df_active_task(state: dict[str, Any]) -> dict[str, Any]:
     sequence = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
     sequence_id = _df_text(sequence.get("sequence_id"), 80)
-    sequence_topic = _df_text(sequence.get("topic"), 220)
+    active_task_id = _df_text(
+        sequence.get("task_id")
+        or state.get("active_dialogue_task_id")
+        or "",
+        100,
+    )
+
+    registry = sequence.get("task_registry") if isinstance(sequence.get("task_registry"), dict) else {}
+    if not registry and isinstance(state.get("dialogue_task_registry"), dict):
+        registry = state.get("dialogue_task_registry")
+    if active_task_id and isinstance(registry.get(active_task_id), dict):
+        task = deepcopy(registry[active_task_id])
+        task["task_id"] = active_task_id
+        task["sequence_id"] = sequence_id
+        return task
+
     candidates = (
+        sequence.get("active_task"),
         sequence.get("interactive_task_state"),
         sequence.get("open_task"),
         sequence.get("task_state"),
@@ -13707,27 +13727,27 @@ def _df_active_task(state: dict[str, Any]) -> dict[str, Any]:
     for candidate in candidates:
         if not isinstance(candidate, dict) or not candidate:
             continue
-        if not (candidate.get("active") or candidate.get("kind") in {"game", "riddle", "question"} or candidate.get("role")):
+        candidate_id = _df_text(candidate.get("task_id") or active_task_id, 100)
+        candidate_seq = _df_text(candidate.get("sequence_id") or candidate.get("active_sequence_id"), 80)
+        if sequence_id and candidate_seq and candidate_seq != sequence_id:
             continue
-        candidate_id = _df_text(candidate.get("sequence_id") or candidate.get("active_sequence_id"), 80)
-        if sequence_id and candidate_id and candidate_id != sequence_id:
-            continue
-        topic = _df_text(candidate.get("topic") or candidate.get("canonical_topic"), 220)
-        if sequence_topic and topic and _df_overlap(sequence_topic, topic) < 0.25 and sequence_topic.lower() not in topic.lower() and topic.lower() not in sequence_topic.lower():
-            continue
-        ts = candidate.get("task_definition_at") or candidate.get("updated_at") or candidate.get("last_turn_at") or sequence.get("last_turn_at")
-        try:
-            if ts and (time.time() - float(ts)) >= 12 * 60 * 60:
-                continue
-        except (TypeError, ValueError):
-            pass
-        return deepcopy(candidate)
+        if candidate.get("active") or candidate.get("task_id") or candidate.get("status") in {"open", "active", "suspended", "completed", "paused"}:
+            result = deepcopy(candidate)
+            if candidate_id:
+                result["task_id"] = candidate_id
+            if sequence_id:
+                result["sequence_id"] = sequence_id
+            return result
     return {}
 
 
 def _df_topic_from_state(state: dict[str, Any]) -> str:
     seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+    active_ctx = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
+    active_task = _df_active_task(state)
     for value in (
+        active_task.get("topic"),
+        active_ctx.get("topic"),
         seq.get("topic"),
         state.get("april_active_topic"),
         state.get("active_topic"),
@@ -13739,8 +13759,15 @@ def _df_topic_from_state(state: dict[str, Any]) -> str:
 
 
 def _df_entity_from_state(state: dict[str, Any]) -> str:
+    active_task = _df_active_task(state)
+    active_ctx = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
     for value in (
-        state.get("april_active_entity"), state.get("active_entity"), state.get("current_object"),
+        active_task.get("entity"),
+        active_task.get("active_entity"),
+        active_ctx.get("active_entity"),
+        state.get("april_active_entity"),
+        state.get("active_entity"),
+        state.get("current_object"),
         state.get("focus_state", {}).get("active_object") if isinstance(state.get("focus_state"), dict) else "",
     ):
         if _df_text(value) and _df_low(value) not in {"text", "вопрос", "ответ", "контекст я же загадывал", "игра"}:
@@ -13750,26 +13777,82 @@ def _df_entity_from_state(state: dict[str, Any]) -> str:
 
 def _df_branch_index(state: dict[str, Any], active_seq: dict[str, Any], active_topic: str, active_entity: str) -> dict[str, Any]:
     old = state.get("dialogue_branch_index") if isinstance(state.get("dialogue_branch_index"), dict) else {}
+    current_id = _df_text(active_seq.get("sequence_id"), 80)
+    active_task_id = _df_text(
+        active_seq.get("task_id")
+        or state.get("active_dialogue_task_id")
+        or "",
+        100,
+    )
     branches = []
+    seen = set()
     for branch in list(old.get("branches") or []):
         if not isinstance(branch, dict):
             continue
         seq_id = _df_text(branch.get("sequence_id") or branch.get("branch_id"), 80)
-        if seq_id:
-            branches.append(deepcopy(branch))
-    current_id = _df_text(active_seq.get("sequence_id"), 80)
-    if current_id and not any(_df_text(b.get("sequence_id")) == current_id for b in branches):
+        task_id = _df_text(branch.get("task_id"), 100)
+        if not seq_id or (current_id and seq_id != current_id):
+            continue
+        key = task_id or branch.get("branch_id") or seq_id
+        if key in seen:
+            continue
+        seen.add(key)
+        branches.append(deepcopy(branch))
+
+    registry = active_seq.get("task_registry") if isinstance(active_seq.get("task_registry"), dict) else {}
+    top_registry = state.get("dialogue_task_registry") if isinstance(state.get("dialogue_task_registry"), dict) else {}
+    merged_registry = dict(top_registry)
+    merged_registry.update(registry)
+    for task_id, task in merged_registry.items():
+        if not isinstance(task, dict):
+            continue
+        if str(task.get("sequence_id") or current_id) != current_id:
+            continue
+        task_id = str(task.get("task_id") or task_id)
+        if task_id in seen:
+            continue
         branches.append({
-            "branch_id": _df_text(active_seq.get("branch_id") or current_id, 80),
+            "branch_id": f"{current_id}:{task_id}",
             "sequence_id": current_id,
+            "task_id": task_id,
+            "topic": _df_text(task.get("topic") or active_topic, 220),
+            "canonical_entity": _df_text(task.get("entity") or task.get("active_entity") or active_entity, 180),
+            "goal": _df_text(task.get("goal") or "answer", 120),
+            "turn_count": int(task.get("response_count") or task.get("turn_count") or 0),
+            "last_user_request": _df_text(task.get("last_user_request"), 600),
+            "last_april_answer": _df_text(task.get("last_april_answer") or task.get("last_answer"), 900),
+            "last_turn_at": task.get("last_turn_at") or task.get("updated_at"),
+            "last_result": deepcopy(task.get("last_result") or {}),
+            "answer_basis": deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {}),
+            "dialogue_rules": deepcopy(task.get("dialogue_rules") or active_seq.get("dialogue_rules") or {}),
+            "active_task": deepcopy(task),
+            "active": task_id == active_task_id,
+        })
+        seen.add(task_id)
+
+    if current_id and not branches:
+        branches.append({
+            "branch_id": f"{current_id}:{active_task_id}" if active_task_id else current_id,
+            "sequence_id": current_id,
+            "task_id": active_task_id,
             "topic": _df_text(active_seq.get("topic") or active_topic, 220),
             "canonical_entity": _df_text(active_entity, 180),
             "goal": _df_text(active_seq.get("goal") or "answer", 120),
             "last_user_request": _df_text(active_seq.get("last_user_request"), 600),
             "last_april_answer": _df_text(active_seq.get("last_april_answer"), 900),
+            "last_turn_at": active_seq.get("last_turn_at"),
+            "active_task": deepcopy(active_seq.get("active_task") or {}),
             "active": True,
         })
-    return {"version": "dialogue_branch_index_v2", "active_sequence_id": current_id, "branches": branches[-12:]}
+
+    return {
+        "version": "dialogue_branch_index_v3_task_scoped",
+        "active_sequence_id": current_id,
+        "target_sequence_id": current_id,
+        "target_task_id": active_task_id,
+        "target_branch_id": f"{current_id}:{active_task_id}" if current_id and active_task_id else current_id,
+        "branches": branches[-32:],
+    }
 
 
 def _df_render_probe(text: str) -> dict[str, Any]:
@@ -13882,8 +13965,45 @@ def _df_dialogue_bigunok(text: str, previous_user: str, previous_april: str, act
 
 
 def _df_new_sequence_id(user_id: str, conversation_id: str, text: str) -> str:
-    raw = f"{user_id}|{conversation_id}|{time.time_ns()}|{text}"
+    """Create a stable parent conversation sequence for the current 12h window.
+
+    Topic changes inside the same authenticated conversation must not create new
+    sequence identities; tasks are the children of this sequence.
+    """
+    bucket = int(time.time() // (12 * 60 * 60))
+    raw = f"{user_id}|{conversation_id}|dialogue-sequence-v3|{bucket}"
     return "seq-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+
+
+def _df_dialogue_rules(text: str, prior: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Extract compact, persistent user dialogue rules without storing hidden reasoning."""
+    prior = prior if isinstance(prior, dict) else {}
+    previous = prior.get("dialogue_rules") if isinstance(prior.get("dialogue_rules"), dict) else {}
+    low = _df_low(text)
+    rules = dict(previous)
+
+    numbering = any(x in low for x in (
+        "каждый свой ответ", "каждый ответ", "каждого ответа", "последовательн",
+        "нумеровать ответы", "помечала цифрой", "ставить цифру", "ставить букву",
+        "по алфавиту", "начиная с а", "начиная с 1", "до 5",
+    ))
+    alphabetic = any(x in low for x in ("ставить букву", "по алфавиту", "начиная с а", "алфавиту"))
+    numeric = any(x in low for x in ("цифрой", "цифру", "нумеровать", "№", "до 5", "начиная с 1"))
+    if numbering:
+        rules.update({
+            "enabled": True,
+            "scope": "dialogue",
+            "mode": "alphabetic" if alphabetic else "numeric" if numeric else "sequential",
+            "start": 1,
+            "source_instruction": _df_text(text, 1200),
+            "until_explicit_end": any(x in low for x in (
+                "пока я не скажу", "до тех пор", "подведём итоги", "подведем итоги", "пока не скажу"
+            )) or bool(rules.get("until_explicit_end")),
+            "updated_at": time.time(),
+        })
+    if any(x in low for x in ("не нумеруй", "не ставь номер", "без нумерации", "перестань нумеровать")):
+        rules = {}
+    return rules
 
 
 def _df_resolve_relation(
@@ -14031,61 +14151,81 @@ def _df_understand(text: str, relation: str, turn_relation: str, active_topic: s
     }
 
 
-def _df_task_state(text: str, relation: str, task_probe: dict[str, Any], prior: dict[str, Any], topic: str, entity: str, sequence_id: str, active_context: dict[str, Any] | None = None) -> dict[str, Any]:
-    if relation == "NEW" and not task_probe.get("active"):
-        return {}
-    # NEW creates an isolated branch. A previous branch task is never carried
-    # into a new subject unless the current turn itself starts/continues a task.
-    if relation == "NEW" and not any((
-        task_probe.get("current_game_topic"),
-        task_probe.get("handoff"),
-        task_probe.get("answer_analysis"),
-        task_probe.get("task_action"),
-    )):
-        return {}
-
+def _df_task_state(
+    text: str, relation: str, task_probe: dict[str, Any], prior: dict[str, Any],
+    topic: str, entity: str, sequence_id: str, active_context: dict[str, Any] | None = None
+) -> dict[str, Any]:
     active_context = active_context if isinstance(active_context, dict) else {}
+    prior = prior if isinstance(prior, dict) else {}
     context_task = active_context.get("task") if isinstance(active_context.get("task"), dict) else {}
-    task = {}
-    for candidate in (context_task, prior):
-        if not isinstance(candidate, dict) or not candidate:
-            continue
-        task_seq = _df_text(candidate.get("sequence_id") or candidate.get("active_sequence_id"), 80)
-        if sequence_id and task_seq and task_seq != sequence_id:
-            continue
-        task_topic = _df_text(candidate.get("topic") or candidate.get("canonical_topic"), 220)
-        if topic and task_topic and _df_overlap(topic, task_topic) < 0.25 and topic.lower() not in task_topic.lower() and task_topic.lower() not in topic.lower():
-            continue
-        task = deepcopy(candidate)
-        break
 
-    # A CONTINUE must explicitly fit the task. Short discourse turns can keep a
-    # compatible procedural task; unrelated requests cannot inherit it.
-    if relation == "CONTINUE" and task and not (
-        task_probe.get("task_action")
-        or task_probe.get("task_definition")
-        or (len(_df_tokens(text)) <= 4 and task.get("active"))
-    ):
-        task = {}
-    if relation == "CONTINUE" and active_context.get("objective") and task:
-        task.setdefault("objective", _df_text(active_context.get("objective"), 1200))
-    if active_context.get("completed_results"):
-        task["completed_results"] = deepcopy(active_context.get("completed_results"))[-12:]
-    if task_probe.get("active"):
-        task.update({
+    # NEW always creates an explicit task record. This replaces the old behavior
+    # where ordinary new subjects had no task state at all.
+    if relation == "NEW":
+        raw = f"{sequence_id}|{topic}|{time.time_ns()}|task"
+        task_id = "task-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+        task = {
             "active": True,
-            "kind": task_probe.get("kind") or task.get("kind") or "game",
-            "role": task_probe.get("role") or task.get("role") or "",
-            "topic": task_probe.get("topic") or task.get("topic") or topic,
-            "goal": "follow_user_rules" if task_probe.get("task_definition") else task.get("goal") or "answer",
-            "phase": "awaiting_user_riddle" if task_probe.get("handoff") else task.get("phase") or "active",
-            "awaiting_user": True,
+            "status": "open",
+            "kind": "dialogue_task" if task_probe.get("active") else "topic_task",
+            "role": task_probe.get("role") or "",
+            "phase": "active",
+            "topic": _df_text(task_probe.get("topic") or topic, 220),
+            "entity": _df_text(entity, 180),
+            "goal": _df_text(task_probe.get("task_definition") and "follow_user_rules" or task_probe.get("answer_analysis") and "understand" or "answer", 160),
+            "objective": _df_text(task_probe.get("objective") or text, 1200),
+            "instruction": _df_text(text, 1200) if task_probe.get("task_definition") else "",
+            "task_id": task_id,
             "sequence_id": sequence_id,
-        })
+            "response_count": 0,
+            "task_response_count": 0,
+            "turn_count": 0,
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "last_user_request": _df_text(text, 1200),
+            "last_april_answer": "",
+            "last_result": {},
+            "last_answer_basis": {},
+            "result_history": [],
+            "qa_history": [],
+            "turns": [],
+            "completed_results": [],
+            "completed": False,
+            "awaiting_user": True,
+            "task_revision": 1,
+            "dialogue_rules": _df_dialogue_rules(text, prior),
+        }
+        return task
+
+    # CONTINUE/RECALL keep the selected task, even when this turn is an ordinary
+    # knowledge question. The old keyword gate was causing the task to disappear.
+    task = deepcopy(context_task or prior)
+    if not task:
+        return {}
+    if sequence_id:
+        task["sequence_id"] = sequence_id
+    if not task.get("task_id"):
+        raw = f"{sequence_id}|{task.get('topic') or topic}|legacy-task"
+        task["task_id"] = "task-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+    task["topic"] = _df_text(task.get("topic") or topic, 220)
+    task["entity"] = _df_text(entity or task.get("entity"), 180)
+    task["dialogue_rules"] = _df_dialogue_rules(text, task) or deepcopy(
+        active_context.get("dialogue_rules") if isinstance(active_context.get("dialogue_rules"), dict) else {}
+    )
     if task_probe.get("task_definition"):
         task["objective"] = _df_text(task_probe.get("objective") or text, 1200)
         task["instruction"] = _df_text(text, 1200)
-        task["task_definition_at"] = time.time()
+        task["goal"] = "follow_user_rules"
+        task["updated_at"] = time.time()
+    elif task_probe.get("answer_analysis"):
+        task["goal"] = "understand"
+    task["last_user_request"] = _df_text(text, 1200)
+    task["task_revision"] = int(task.get("task_revision") or 0) + 1
+    task["active"] = True
+    task.setdefault("status", "open")
+    task.setdefault("phase", "active")
+    task.setdefault("response_count", int(task.get("task_response_count") or 0))
+    task["task_response_count"] = int(task.get("response_count") or 0)
     return task
 
 
@@ -14110,24 +14250,41 @@ def _df_render_plan(text: str, relation: str, semantic: dict[str, Any], render_p
 
 
 def _df_development(relation: str, sequence_id: str, active_topic: str, active_entity: str, goal: str, current_request: str, previous_april: str, task: dict[str, Any], render_plan: dict[str, Any]) -> dict[str, Any]:
+    task = task if isinstance(task, dict) else {}
+    previous_result = deepcopy(task.get("last_result") or {})
+    previous_basis = deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {})
+    result_history = deepcopy(task.get("result_history") or [])
+    result_history = result_history[-3:] if isinstance(result_history, list) else []
     return {
-        "version": "dialogue_development_v1",
+        "version": "dialogue_development_v2_task_result_continuity",
         "relation": relation,
-        "same_dialogue": relation == "CONTINUE",
+        "same_dialogue": relation in {"CONTINUE", "RECALL"},
         "sequence_id": sequence_id,
+        "task_id": _df_text(task.get("task_id"), 100),
         "active_topic": active_topic,
         "active_goal": goal,
         "active_entity": active_entity,
         "current_request": current_request,
-        "previous_result": previous_april,
+        "previous_result": previous_result or previous_april,
+        "previous_answer_basis": previous_basis,
+        "recent_task_results": result_history,
+        "task_response_count": int(task.get("response_count") or task.get("task_response_count") or 0),
+        "task_status": _df_text(task.get("status") or "open", 40),
+        "task_completed": bool(task.get("completed") or str(task.get("status") or "").lower() == "completed"),
         "latest_result_event": {},
         "open_loops": [],
         "pending_obligations": [],
         "ready_obligations": [],
         "user_needs_guidance": False,
-        "initiative_policy": "answer_current_request",
-        "next_logical_step": "answer_current_request",
-        "continuation_anchor": "live_branch" if relation == "CONTINUE" else "current_turn",
+        "initiative_policy": "resume_or_answer_current_request",
+        "next_logical_step": (
+            "resume_task_from_last_result"
+            if previous_result and not task.get("completed")
+            else "summarize_completed_task_or_answer_current_request"
+            if task.get("completed")
+            else "answer_current_request"
+        ),
+        "continuation_anchor": "task_result" if relation in {"CONTINUE", "RECALL"} else "current_turn",
         "visual_continuity": bool(render_plan.get("artifact_reference")),
         "active_task": deepcopy(task),
     }
@@ -14198,6 +14355,35 @@ def _df_provider_plan(
                     "render_mode": render_plan.get("mode"),
                 },
             },
+            {
+                "key": "DIALOGUE_RULES",
+                "priority": 1.0,
+                "value": deepcopy(task.get("dialogue_rules") or active_dialogue_context.get("dialogue_rules") or {}),
+            },
+            {
+                "key": "RESPONSE_SEQUENCE",
+                "priority": 1.0,
+                "value": {
+                    "sequence_id": sequence_id,
+                    "task_id": task.get("task_id"),
+                    "sequence_turn_index": int(active_sequence_digest.get("turn_count") or active_dialogue_context.get("response_sequence", {}).get("sequence_turn_index") or 0) + 1,
+                    "task_response_number": int(task.get("response_count") or task.get("task_response_count") or 0) + 1,
+                },
+            },
+            {
+                "key": "TASK_RESULT_STATE",
+                "priority": 1.0,
+                "value": {
+                    "task_id": task.get("task_id"),
+                    "sequence_id": sequence_id,
+                    "status": task.get("status") or "open",
+                    "completed": bool(task.get("completed") or str(task.get("status") or "").lower() == "completed"),
+                    "task_response_count": int(task.get("response_count") or task.get("task_response_count") or 0),
+                    "previous_result": deepcopy(task.get("last_result") or active_dialogue_context.get("last_completed_result") or {}),
+                    "answer_basis": deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {}),
+                    "recent_results": deepcopy((task.get("result_history") or [])[-3:]),
+                },
+            },
         ],
         "optional_context": [],
         "excluded_context": [
@@ -14254,7 +14440,7 @@ def _df_provider_plan(
         )
         if task:
             base["required_context"].insert(
-                3,
+                4,
                 {
                     "key": "ACTIVE_TASK",
                     "priority": 0.99,
@@ -14291,16 +14477,57 @@ def _df_provider_plan(
 
 def _df_select_recalled_branch(text: str, state: dict[str, Any], branches: dict[str, Any]) -> dict[str, Any]:
     low = _df_low(text)
-    candidates = list(branches.get("branches") or [])
+    candidates = [b for b in list(branches.get("branches") or []) if isinstance(b, dict)]
+    if not candidates:
+        return {}
+
+    # Explicit ordinal task recall: "первая задача", "ко второй", etc.
+    ordinals = {
+        "первая": 1, "первой": 1, "первую": 1,
+        "вторая": 2, "второй": 2, "вторую": 2,
+        "третья": 3, "третьей": 3, "третью": 3,
+        "четвертая": 4, "четвертой": 4, "четвертую": 4,
+        "пятая": 5, "пятой": 5, "пятую": 5,
+    }
+    ordered = sorted(
+        candidates,
+        key=lambda b: (float(b.get("started_at") or 0.0), str(b.get("task_id") or b.get("branch_id") or "")),
+    )
+    for word, number in ordinals.items():
+        if word in low and ("задач" in low or "тем" in low or "ветк" in low):
+            if 1 <= number <= len(ordered):
+                return deepcopy(ordered[number - 1])
+    m = re.search(r"(?:задач[аеу]?|ветк[аеу]?|тем[аеу]?)\s*(?:номер|№)?\s*(\d+)", low)
+    if m:
+        number = int(m.group(1))
+        if 1 <= number <= len(ordered):
+            return deepcopy(ordered[number - 1])
+
+    def recall_overlap(query_text: str, candidate_text: str) -> float:
+        exact = _df_overlap(query_text, candidate_text)
+        q_tokens = _df_tokens(query_text)
+        c_tokens = _df_tokens(candidate_text)
+        if not q_tokens or not c_tokens:
+            return exact
+        fuzzy_hits = 0
+        for qt in q_tokens:
+            if any(qt == ct or (len(qt) >= 5 and len(ct) >= 5 and qt[:5] == ct[:5]) for ct in c_tokens):
+                fuzzy_hits += 1
+        fuzzy = fuzzy_hits / max(1, len(q_tokens))
+        return max(exact, round(fuzzy, 6))
+
     scored = []
     for branch in candidates:
-        if not isinstance(branch, dict):
-            continue
-        hay = " ".join(_df_text(x) for x in (branch.get("topic"), branch.get("canonical_entity"), branch.get("last_user_request"), branch.get("last_april_answer")))
-        score = max(_df_overlap(low, hay), 0.2 if branch.get("active") else 0.0)
+        hay = " ".join(
+            _df_text(x) for x in (
+                branch.get("topic"), branch.get("canonical_entity"),
+                branch.get("last_user_request"), branch.get("last_april_answer"),
+            )
+        )
+        score = recall_overlap(low, hay)
         scored.append((score, branch))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return deepcopy(scored[0][1]) if scored and scored[0][0] >= 0.20 else {}
+    scored.sort(key=lambda x: (x[0], 1 if x[1].get("active") else 0), reverse=True)
+    return deepcopy(scored[0][1]) if scored and scored[0][0] >= 0.12 else {}
 
 
 def _df_interpret_live_turn(
@@ -14341,9 +14568,19 @@ def _df_interpret_live_turn(
     active_entity = _df_entity_from_state(state)
     active_context = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
     prior_task = _df_active_task(state)
-    if isinstance(active_context.get("task"), dict) and active_context.get("task"):
-        prior_task = deepcopy(active_context.get("task"))
+    context_task = active_context.get("task") if isinstance(active_context.get("task"), dict) else {}
+    context_task_id = _df_text(active_context.get("task_id") or context_task.get("task_id"), 100)
+    prior_task_id = _df_text(prior_task.get("task_id"), 100) if isinstance(prior_task, dict) else ""
+    if context_task and (not prior_task or not prior_task_id or not context_task_id or prior_task_id == context_task_id):
+        prior_task = deepcopy(context_task)
     active_seq_id = _df_text(seq.get("sequence_id"), 80)
+    active_task_id = _df_text(
+        seq.get("task_id")
+        or state.get("active_dialogue_task_id")
+        or prior_task.get("task_id")
+        or "",
+        100,
+    )
     conversation_id = _df_text(
         state.get("conversation_id")
         or (state.get("memory_scope") or {}).get("conversation_id"),
@@ -14363,6 +14600,7 @@ def _df_interpret_live_turn(
         history,
         active_seq_id,
         limit=6,
+        task_id=active_task_id,
     )
 
     # ------------------------------------------------------------------
@@ -14425,10 +14663,27 @@ def _df_interpret_live_turn(
         current, state, previous_april, active_topic, active_entity, task_probe, dialogue_probe,
         semantic=semantic, sequence_digest=active_sequence_digest,
     )
+    topic_affinity = 0.0
+    semantic_topic = _df_low(semantic.get("topic") or "")
+    prior_task_topic = _df_low(
+        (prior_task.get("topic") if isinstance(prior_task, dict) else "")
+        or active_topic
+        or (active_sequence_digest.get("root_topic") if isinstance(active_sequence_digest, dict) else "")
+    )
+    prior_task_entity = _df_low(
+        (prior_task.get("entity") if isinstance(prior_task, dict) else "")
+        or active_entity
+        or (active_sequence_digest.get("current_focus") if isinstance(active_sequence_digest, dict) else "")
+    )
+    if semantic_topic and prior_task_topic:
+        topic_affinity = max(topic_affinity, _df_overlap(semantic_topic, prior_task_topic))
+    if semantic_topic and prior_task_entity:
+        topic_affinity = max(topic_affinity, _df_overlap(semantic_topic, prior_task_entity))
+
     if not explicit_recall and _df_is_self_contained_new_topic(
         current, semantic, active_topic=active_topic, active_entity=active_entity,
         task_probe=task_probe, sequence_digest=active_sequence_digest,
-    ):
+    ) and topic_affinity < 0.28:
         relation, turn_relation = "NEW", "SELF_CONTAINED_NEW_SUBJECT"
 
     selected_branch: dict[str, Any] = {}
@@ -14446,6 +14701,7 @@ def _df_interpret_live_turn(
                 selected_branch.get("sequence_id"),
                 80,
             )
+            active_task_id = _df_text(selected_branch.get("task_id"), 100)
             active_topic = _df_text(
                 selected_branch.get("topic")
                 or active_topic,
@@ -14470,6 +14726,7 @@ def _df_interpret_live_turn(
                 history,
                 active_seq_id,
                 limit=6,
+                task_id=active_task_id,
             )
 
             recalled_task = selected_branch.get("active_task")
@@ -14540,18 +14797,11 @@ def _df_interpret_live_turn(
     if relation == "RECALL" and not selected_branch.get("sequence_id"):
         branch_digest_for_provider = {}
 
-    if relation == "NEW" or not active_seq_id:
-        sequence_id = (
-            _df_new_sequence_id(
-                user_id,
-                conversation_id,
-                current,
-            )
-            if relation == "NEW"
-            else active_seq_id
-        )
-    else:
+    if active_seq_id:
+        # NEW is a new task inside the same authenticated dialogue sequence.
         sequence_id = active_seq_id
+    else:
+        sequence_id = _df_new_sequence_id(user_id, conversation_id, current)
 
     # ------------------------------------------------------------------
     # 6) Response task/development planning.
@@ -14566,6 +14816,11 @@ def _df_interpret_live_turn(
         sequence_id,
         active_context,
     )
+    active_task_id = _df_text(task.get("task_id"), 100) if task else active_task_id
+    if task:
+        task["dialogue_rules"] = _df_dialogue_rules(current, task) or deepcopy(
+            seq.get("dialogue_rules") or active_context.get("dialogue_rules") or {}
+        )
 
     development = _df_development(
         relation,
@@ -14624,10 +14879,12 @@ def _df_interpret_live_turn(
     branch_index = deepcopy(branches)
     if relation == "NEW" and sequence_id:
         branch_index["target_sequence_id"] = sequence_id
-        branch_index["target_branch_id"] = sequence_id
+        branch_index["target_task_id"] = active_task_id
+        branch_index["target_branch_id"] = f"{sequence_id}:{active_task_id}" if active_task_id else sequence_id
         branch_index["target_branch"] = {
-            "branch_id": sequence_id,
+            "branch_id": f"{sequence_id}:{active_task_id}" if active_task_id else sequence_id,
             "sequence_id": sequence_id,
+            "task_id": active_task_id,
             "topic": _df_text(
                 semantic.get("topic"),
                 220,
@@ -14642,24 +14899,25 @@ def _df_interpret_live_turn(
             ),
             "active": True,
         }
-        branch_index["resolution_mode"] = "NEW_BRANCH"
+        branch_index["resolution_mode"] = "NEW_TASK"
     elif relation == "RECALL" and selected_branch:
         branch_index["target_sequence_id"] = _df_text(
             selected_branch.get("sequence_id"),
             80,
         )
+        branch_index["target_task_id"] = _df_text(selected_branch.get("task_id") or "", 100)
+        active_task_id = _df_text(selected_branch.get("task_id") or active_task_id, 100)
         branch_index["target_branch_id"] = _df_text(
             selected_branch.get("branch_id")
-            or selected_branch.get("sequence_id"),
-            80,
+            or (f"{selected_branch.get('sequence_id')}:{active_task_id}" if active_task_id else selected_branch.get("sequence_id")),
+            120,
         )
         branch_index["target_branch"] = deepcopy(selected_branch)
         branch_index["resolution_mode"] = "RESUME_BRANCH"
     else:
         branch_index["resolution_mode"] = "ACTIVE_BRANCH"
-    branch_index["active_sequence_id"] = (
-        sequence_id if relation == "NEW" else active_seq_id
-    )
+    branch_index["active_sequence_id"] = sequence_id
+    branch_index["target_task_id"] = active_task_id
 
     continuity_evidence = {
         "version": "dialogue_continuity_evidence_v1",
@@ -14692,9 +14950,10 @@ def _df_interpret_live_turn(
     }
 
     semantic_anchor = {
-        "version": "semantic_anchor_v3_dialogue_first",
-        "branch_id": sequence_id,
+        "version": "semantic_anchor_v4_task_scoped",
+        "branch_id": f"{sequence_id}:{active_task_id}" if active_task_id else sequence_id,
         "sequence_id": sequence_id,
+        "task_id": active_task_id,
         "relation": relation,
         "turn_relation": turn_relation,
         "topic_root": _df_text(
@@ -14745,6 +15004,8 @@ def _df_interpret_live_turn(
         ),
         "turn_relation": turn_relation,
         "sequence_id": sequence_id,
+        "task_id": active_task_id,
+        "target_task_id": _df_text(branch_index.get("target_task_id") or active_task_id, 100),
         "target_sequence_id": _df_text(
             branch_index.get("target_sequence_id")
             or sequence_id,
@@ -14785,6 +15046,15 @@ def _df_interpret_live_turn(
         "active_task": deepcopy(task),
         "open_task": deepcopy(task),
         "interactive_task_state": deepcopy(task),
+        "dialogue_rules": deepcopy(task.get("dialogue_rules") or seq.get("dialogue_rules") or {}),
+        "response_sequence": {
+            "sequence_id": sequence_id,
+            "task_id": active_task_id,
+            "sequence_turn_index": int(active_sequence_digest.get("turn_count") or seq.get("turn_count") or 0) + 1,
+            "task_response_number": int(task.get("response_count") or task.get("task_response_count") or 0) + 1,
+        },
+        "previous_result": deepcopy(task.get("last_result") or {}),
+        "answer_basis": deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {}),
         "task_memory": {
             "qa_history": list(task.get("qa_history") or [])[-8:]
         } if task else {},
@@ -14823,6 +15093,15 @@ def _df_interpret_live_turn(
                 180,
             ),
             "sequence_id": sequence_id,
+            "task_id": active_task_id,
+            "target_task_id": _df_text(branch_index.get("target_task_id") or active_task_id, 100),
+            "response_sequence": {
+                "sequence_turn_index": int(active_sequence_digest.get("turn_count") or seq.get("turn_count") or 0) + 1,
+                "task_response_number": int(task.get("response_count") or task.get("task_response_count") or 0) + 1,
+            },
+            "dialogue_rules": deepcopy(task.get("dialogue_rules") or seq.get("dialogue_rules") or {}),
+            "previous_result": deepcopy(task.get("last_result") or {}),
+            "answer_basis": deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {}),
             "target_sequence_id": _df_text(
                 branch_index.get("target_sequence_id")
                 or sequence_id,
@@ -14879,8 +15158,11 @@ def _df_interpret_live_turn(
         "current_request": current,
         "resolved_request": current,
         "sequence_id": sequence_id,
-        "task_continuation": bool(task) and relation == "CONTINUE",
-        "active_task_context": deepcopy(task) if relation in {"CONTINUE", "RECALL"} and bool(task) else {},
+        "task_continuation": bool(task) and relation in {"CONTINUE", "RECALL"},
+        "active_task_context": deepcopy(task) if bool(task) else {},
+        "task_id": active_task_id,
+        "dialogue_rules": deepcopy(task.get("dialogue_rules") or {}),
+        "response_sequence": deepcopy(dialogue_contract.get("response_sequence") or {}),
         "semantic_frame": deepcopy(semantic_frame),
         "dialogue_development": deepcopy(development),
         "provider_context_plan": deepcopy(provider_plan),
@@ -14895,6 +15177,9 @@ def _df_interpret_live_turn(
             "active_dialogue_trajectory",
             "active_task",
             "active_entity",
+            "DIALOGUE_RULES",
+            "RESPONSE_SEQUENCE",
+            "TASK_RESULT_STATE",
             "render_plan",
         ],
         "excluded_context": [
@@ -14949,6 +15234,11 @@ def _df_interpret_live_turn(
         ),
         "interactive_task_state": deepcopy(task),
         "open_task": deepcopy(task),
+        "task_id": active_task_id,
+        "dialogue_rules": deepcopy(task.get("dialogue_rules") or {}),
+        "response_sequence": deepcopy(dialogue_contract.get("response_sequence") or {}),
+        "previous_result": deepcopy(task.get("last_result") or {}),
+        "answer_basis": deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {}),
         "task_memory": deepcopy(
             dialogue_contract.get("task_memory") or {}
         ),
@@ -14988,6 +15278,8 @@ def _df_interpret_live_turn(
             "active_sequence_turn_count": int(
                 active_sequence_digest.get("turn_count") or 0
             ),
+            "task_id": active_task_id,
+            "task_response_number": int(task.get("response_count") or task.get("task_response_count") or 0),
             "source": "contextual_dialogue_understanding",
         },
         "dialogue_strategy": {
