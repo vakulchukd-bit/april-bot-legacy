@@ -2650,80 +2650,289 @@ def build_executor_memory_bridge(user_id, query=""):
     return QUANTUM_MEMORY_ENGINE.build_executor_bridge(get_state(user_id), query=query)
 
 
-def build_dialogue_memory_bridge(user_id, query="", limit=8, *, relation="AUTO", target_sequence_id=""):
-    """Build mode-specific authenticated-user dialogue memory after interpretation.
+def build_dialogue_memory_bridge(
+    user_id,
+    query="",
+    limit=8,
+    *,
+    relation="AUTO",
+    target_sequence_id="",
+):
+    """
+    Build the dialogue memory packet after Interpretation has resolved relation.
 
-    NEW -> current-turn metadata only.
-    CONTINUE -> selected live sequence turns only, unless Interpretation has
-    explicitly resolved a seven-day branch recovery target.
-    RECALL -> selected historical 7-day evidence only.
+    CONTINUE:
+        active authenticated sequence first; no other branch is searched.
+    RECALL:
+        explicitly selected branch first, with small semantic recovery evidence.
+    NEW:
+        no historical turns are passed downstream.
+
+    The branch digest gives Provider a compact picture of the dialogue trajectory
+    without sending the whole seven-day history.
     """
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
     user_key = str(user_id)
     conversation_id = str(state_obj.get("conversation_id") or "")
     active = deepcopy(state_obj.get("active_dialogue_sequence") or {})
+
     mode = str(relation or "AUTO").strip().upper()
     if mode == "AUTO":
-        resolution = state_obj.get("dialogue_resolution") if isinstance(state_obj.get("dialogue_resolution"), dict) else {}
+        resolution = (
+            state_obj.get("dialogue_resolution")
+            if isinstance(state_obj.get("dialogue_resolution"), dict)
+            else {}
+        )
         mode = str(resolution.get("relation") or "NEW").strip().upper()
     if mode not in {"NEW", "CONTINUE", "RECALL"}:
         mode = "NEW"
-    selected_sequence_id = str(target_sequence_id or (active.get("sequence_id") or ""))
 
-    records = []
+    active_id = str(active.get("sequence_id") or "")
+    selected_sequence_id = str(
+        target_sequence_id
+        or active_id
+    ).strip()
+
+    # ------------------------------------------------------------------
+    # Collect durable USER↔APRIL dialogue pairs inside the seven-day window.
+    # ------------------------------------------------------------------
+    records: list[dict[str, Any]] = []
     now = time.time()
-    timeline = state_obj.get("memory_timeline") if isinstance(state_obj.get("memory_timeline"), dict) else {}
+    timeline = (
+        state_obj.get("memory_timeline")
+        if isinstance(state_obj.get("memory_timeline"), dict)
+        else {}
+    )
+
     for day_index in range(MEMORY_DAYS):
         day = timeline.get(f"day_{day_index}")
         if not isinstance(day, dict):
             continue
+
         for item in day.get("dialog_pairs", []):
             if not isinstance(item, dict):
                 continue
             if str(item.get("user_id") or "") != user_key:
                 continue
+
             item_conversation = str(item.get("conversation_id") or "")
             if item_conversation and item_conversation != conversation_id:
                 continue
+
             try:
-                created = float(item.get("created_at") or item.get("timestamp") or 0.0)
+                created = float(
+                    item.get("created_at")
+                    or item.get("timestamp")
+                    or 0.0
+                )
             except (TypeError, ValueError):
                 created = 0.0
+
             if not created or (now - created) >= USER_CONTENT_RETENTION_SECONDS:
                 continue
-            record = {
+
+            records.append({
                 "sequence_id": item.get("sequence_id"),
                 "sequence_turn_index": item.get("sequence_turn_index"),
-                "sequence_topic": item.get("sequence_topic") or item.get("topic"),
-                "user_request": item.get("user_request") or item.get("user_meaning"),
-                "april_answer": item.get("april_answer") or item.get("april_meaning"),
-                "answer_summary": item.get("answer_summary") or item.get("april_meaning"),
+                "sequence_topic": (
+                    item.get("sequence_topic")
+                    or item.get("topic")
+                    or item.get("canonical_topic")
+                ),
+                "user_request": (
+                    item.get("user_request")
+                    or item.get("user_meaning")
+                    or item.get("text")
+                ),
+                "april_answer": (
+                    item.get("april_answer")
+                    or item.get("april_meaning")
+                    or item.get("answer")
+                ),
+                "answer_summary": (
+                    item.get("answer_summary")
+                    or item.get("april_meaning")
+                    or item.get("april_answer")
+                ),
                 "dialogue_relation": item.get("dialogue_relation"),
                 "visual_scene_id": item.get("visual_scene_id"),
-                "visual_attachment": deepcopy(item.get("visual_attachment") or {}),
+                "visual_attachment": deepcopy(
+                    item.get("visual_attachment") or {}
+                ),
                 "created_at": created,
-            }
-            records.append(record)
+            })
 
-    records.sort(key=lambda item: float(item.get("created_at") or 0.0))
-    active_id = str(active.get("sequence_id") or "")
-    target_id = selected_sequence_id or active_id
-    active_turns = [item for item in records if str(item.get("sequence_id") or "") == target_id]
-    active_turns = active_turns[-max(1, min(int(limit or 8), 8)):]
+    records.sort(
+        key=lambda item: (
+            int(item.get("sequence_turn_index") or 0),
+            float(item.get("created_at") or 0.0),
+        )
+    )
 
-    # Cross-vector recall evidence is intentionally tiny and never becomes
-    # routing authority. The processor has already decided CONTINUE/RECALL/NEW.
-    relevant = []
+    # ------------------------------------------------------------------
+    # Resolve the metadata of the branch we are actually using.
+    # ------------------------------------------------------------------
+    selected_sequence_meta = (
+        deepcopy(active)
+        if selected_sequence_id and selected_sequence_id == active_id
+        else {}
+    )
+
+    if mode == "RECALL" and selected_sequence_id != active_id:
+        branch_index = (
+            state_obj.get("dialogue_branch_index")
+            if isinstance(state_obj.get("dialogue_branch_index"), dict)
+            else {}
+        )
+        for branch in branch_index.get("branches") or []:
+            if not isinstance(branch, dict):
+                continue
+            if str(
+                branch.get("sequence_id")
+                or branch.get("branch_id")
+                or ""
+            ) == selected_sequence_id:
+                selected_sequence_meta = deepcopy(branch)
+                break
+
+    target_records = [
+        item
+        for item in records
+        if str(item.get("sequence_id") or "") == selected_sequence_id
+    ]
+
+    if not selected_sequence_meta and target_records:
+        first_record = target_records[0]
+        last_record = target_records[-1]
+        selected_sequence_meta = {
+            "sequence_id": selected_sequence_id,
+            "topic": (
+                first_record.get("sequence_topic")
+                or last_record.get("sequence_topic")
+                or ""
+            ),
+            "turn_count": len(target_records),
+            "last_user_request": last_record.get("user_request") or "",
+            "last_april_answer": last_record.get("april_answer") or "",
+            "active": mode == "CONTINUE",
+        }
+
+    if selected_sequence_id and not target_records:
+        # Legacy sequence head remains useful when dialog_pairs have not yet been
+        # written by an older persistence path.
+        if selected_sequence_id == active_id:
+            target_records = [{
+                "sequence_id": selected_sequence_id,
+                "sequence_turn_index": int(active.get("turn_count") or 0),
+                "sequence_topic": active.get("topic") or "",
+                "user_request": active.get("last_user_request") or "",
+                "april_answer": active.get("last_april_answer") or "",
+                "answer_summary": active.get("last_april_answer") or "",
+                "dialogue_relation": active.get("relation") or "",
+                "created_at": float(active.get("last_turn_at") or 0.0),
+            }]
+
+    max_turns = max(1, min(int(limit or 8), 8))
+    recent_records = target_records[-max_turns:]
+
+    def compact_turn(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "turn": int(item.get("sequence_turn_index") or 0),
+            "user": safe_trim_text(
+                item.get("user_request") or "",
+                220,
+            ),
+            "april": safe_trim_text(
+                item.get("april_answer") or item.get("answer_summary") or "",
+                320,
+            ),
+            "topic": safe_trim_text(
+                item.get("sequence_topic") or "",
+                180,
+            ),
+        }
+
+    recent_trajectory = [
+        compact_turn(item)
+        for item in recent_records
+        if item.get("user_request") or item.get("april_answer")
+    ]
+
+    first_turn = (
+        compact_turn(target_records[0])
+        if target_records
+        else {}
+    )
+    last_turn = (
+        compact_turn(target_records[-1])
+        if target_records
+        else {}
+    )
+
+    topic_path: list[str] = []
+    for item in target_records:
+        topic = str(
+            item.get("sequence_topic")
+            or ""
+        ).strip()
+        if topic and topic not in topic_path:
+            topic_path.append(topic)
+
+    active_sequence_digest = {
+        "version": "active_sequence_digest_v2",
+        "source": (
+            "authenticated_active_sequence"
+            if mode == "CONTINUE"
+            else "authenticated_recalled_sequence"
+            if mode == "RECALL"
+            else "current_turn"
+        ),
+        "sequence_id": selected_sequence_id,
+        "conversation_id": conversation_id,
+        "root_topic": safe_trim_text(
+            selected_sequence_meta.get("topic")
+            or (topic_path[0] if topic_path else ""),
+            220,
+        ),
+        "turn_count": max(
+            len(target_records),
+            int(selected_sequence_meta.get("turn_count") or 0),
+        ),
+        "first_turn": first_turn,
+        "recent_trajectory": recent_trajectory,
+        "last_turn": last_turn,
+        "topic_path": [
+            safe_trim_text(item, 180)
+            for item in topic_path[-6:]
+        ],
+        "coverage": "selected_sequence_only",
+        "seven_day_window_days": MEMORY_DAYS,
+        "other_branches_included": False,
+        "full_history_included": False,
+    }
+
+    # ------------------------------------------------------------------
+    # RECALL may use tiny semantic evidence from another branch, but only after
+    # Interpretation explicitly selected RECALL. It never changes the target.
+    # ------------------------------------------------------------------
+    relevant: list[dict[str, Any]] = []
     if mode == "RECALL" and str(query or "").strip():
         candidates = []
         for item in records:
-            if str(item.get("sequence_id") or "") == target_id:
+            if str(item.get("sequence_id") or "") == selected_sequence_id:
                 continue
             source = " ".join(
                 str(item.get(key) or "")
-                for key in ("sequence_topic", "user_request", "april_answer", "answer_summary")
+                for key in (
+                    "sequence_topic",
+                    "user_request",
+                    "april_answer",
+                    "answer_summary",
+                )
             )
-            candidates.append((item, source))
+            if source.strip():
+                candidates.append((item, source))
+
         if candidates:
             scores = QUANTUM_MEMORY_ENGINE.semantic_scores(
                 str(query),
@@ -2731,20 +2940,31 @@ def build_dialogue_memory_bridge(user_id, query="", limit=8, *, relation="AUTO",
             )
             ranked = sorted(
                 (
-                    (float(scores.get(source, 0.0)), item)
+                    (
+                        float(scores.get(source, 0.0)),
+                        item,
+                    )
                     for item, source in candidates
                 ),
                 key=lambda pair: pair[0],
                 reverse=True,
             )
             relevant = [
-                {**item, "relevance": round(score, 6)}
+                {
+                    **item,
+                    "relevance": round(score, 6),
+                }
                 for score, item in ranked[:3]
                 if score >= 0.30
             ]
 
     interactive_task_state = deepcopy(
-        state_obj.get("interactive_task_state")
+        (
+            selected_sequence_meta.get("active_task")
+            if isinstance(selected_sequence_meta, dict)
+            else {}
+        )
+        or state_obj.get("interactive_task_state")
         or active.get("interactive_task_state")
         or active.get("open_task")
         or active.get("task_state")
@@ -2754,37 +2974,77 @@ def build_dialogue_memory_bridge(user_id, query="", limit=8, *, relation="AUTO",
         interactive_task_state = {}
 
     active_meta = {
-        "sequence_id": active.get("sequence_id"),
-        "topic": active.get("topic"),
-        "turn_count": active.get("turn_count", 0),
+        "sequence_id": selected_sequence_meta.get("sequence_id"),
+        "branch_id": selected_sequence_meta.get("branch_id"),
+        "topic": selected_sequence_meta.get("topic"),
+        "turn_count": selected_sequence_meta.get(
+            "turn_count",
+            len(target_records),
+        ),
+        "last_user_request": selected_sequence_meta.get(
+            "last_user_request"
+        ) or (last_turn.get("user") if last_turn else ""),
+        "last_april_answer": selected_sequence_meta.get(
+            "last_april_answer"
+        ) or (last_turn.get("april") if last_turn else ""),
     }
+
     return {
-        "version": "april_dialogue_memory_bridge_v2",
+        "version": "april_dialogue_memory_bridge_v3_branch_first",
         "window_days": MEMORY_DAYS,
         "user_id": user_key,
         "conversation_id": conversation_id,
         "retrieval_mode": mode,
-        "target_sequence_id": target_id,
-        "active_sequence": deepcopy(active) if mode in {"CONTINUE", "RECALL"} else active_meta,
+        "target_sequence_id": selected_sequence_id,
+        "active_sequence": (
+            active_meta
+            if mode in {"CONTINUE", "RECALL"}
+            else {
+                "sequence_id": active_id,
+                "topic": active.get("topic"),
+                "turn_count": active.get("turn_count", 0),
+            }
+        ),
+        "active_sequence_turns": (
+            recent_records
+            if mode in {"CONTINUE", "RECALL"}
+            else []
+        ),
+        "active_sequence_turn_count": len(target_records),
+        "active_sequence_digest": (
+            deepcopy(active_sequence_digest)
+            if mode in {"CONTINUE", "RECALL"}
+            else {}
+        ),
         "interactive_task_state": interactive_task_state,
         "task_memory": {
             "role": interactive_task_state.get("role"),
             "phase": interactive_task_state.get("phase"),
             "last_question": interactive_task_state.get("last_question"),
-            "known_clues": list(interactive_task_state.get("known_clues") or [])[-12:],
+            "known_clues": list(
+                interactive_task_state.get("known_clues") or []
+            )[-12:],
             "qa_history": list(
                 interactive_task_state.get("qa_history")
                 or interactive_task_state.get("turns")
                 or []
             )[-12:],
-            "candidate_answer": interactive_task_state.get("candidate_answer"),
-            "awaiting_user": bool(interactive_task_state.get("awaiting_user")),
+            "candidate_answer": interactive_task_state.get(
+                "candidate_answer"
+            ),
+            "awaiting_user": bool(
+                interactive_task_state.get("awaiting_user")
+            ),
         } if interactive_task_state else {},
-        "active_sequence_turns": active_turns if mode == "CONTINUE" else [],
-        "relevant_7d_turns": relevant if mode == "RECALL" else [],
+        "relevant_7d_turns": (
+            relevant
+            if mode == "RECALL"
+            else []
+        ),
         "turn_count_7d": len(records),
-        "decision_owner": "QUANTUM_PROCESSOR",
+        "decision_owner": "INTERPRETATION",
         "interpretation_first": True,
+        "active_branch_first": True,
         "evidence_only": True,
     }
 
