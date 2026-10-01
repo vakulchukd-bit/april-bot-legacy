@@ -221,6 +221,7 @@ def validate_render_block_payload(block_type: Any, block: Any) -> tuple[bool, st
             payload.get("svg"), payload.get("drawing"), payload.get("geometry"),
             payload.get("shapes"), payload.get("elements"), payload.get("nodes"),
             payload.get("edges"), payload.get("points"),
+            payload.get("ascii"), payload.get("ascii_preview"),
         )
         return any(v not in (None, "", [], {}) for v in concrete), "ok" if any(v not in (None, "", [], {}) for v in concrete) else "missing_diagram_data"
 
