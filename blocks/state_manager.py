@@ -59,6 +59,35 @@ SESSION_MEMORY_LIMIT = 1600
 HOT_DIALOG_LIMIT = 30
 TOPIC_CLASSES = ["A", "B", "C", "D", "E"]
 
+_INTERNAL_BRANCH_ALPHABET_RU = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
+
+
+def _internal_branch_label(tasks: dict, task_id: str = "") -> str:
+    rows = []
+    for tid, task in (tasks or {}).items():
+        if not isinstance(task, dict):
+            continue
+        rows.append((
+            float(task.get("created_at") or task.get("started_at") or 0.0),
+            str(task.get("task_id") or tid),
+            task,
+        ))
+    rows.sort(key=lambda x: (x[0], x[1]))
+    for idx, (_ts, tid, task) in enumerate(rows):
+        if str(tid) == str(task_id) and str(task.get("branch_label") or ""):
+            return str(task.get("branch_label"))[:4]
+    for idx, (_ts, tid, _task) in enumerate(rows):
+        if str(tid) == str(task_id):
+            return _INTERNAL_BRANCH_ALPHABET_RU[min(idx, len(_INTERNAL_BRANCH_ALPHABET_RU) - 1)]
+    return _INTERNAL_BRANCH_ALPHABET_RU[min(len(rows), len(_INTERNAL_BRANCH_ALPHABET_RU) - 1)]
+
+
+def _internal_response_path(branch_label: str, response_number: int) -> str:
+    label = str(branch_label or "А").strip().upper()[:4] or "А"
+    idx = max(0, int(response_number or 0) - 1)
+    mark = _INTERNAL_BRANCH_ALPHABET_RU[min(idx, len(_INTERNAL_BRANCH_ALPHABET_RU) - 1)]
+    return f"{label}.{mark}"
+
 HOT_DIALOG_LIMIT = 30  # canonical active dialogue hot window
 VISUAL_HISTORY_LIMIT = 8
 IMAGE_MEMORY_LIMIT = 5
@@ -193,7 +222,7 @@ def build_memory_timeline():
 
 def build_default_active_dialogue_sequence():
     return {
-        "version": "april_dialogue_sequence_v3_12h_task_scoped",
+        "version": "april_dialogue_sequence_v4_12h_dynamic_branches",
         # sequence_id identifies the authenticated conversation sequence.
         # task_id identifies the currently active task inside that sequence.
         "sequence_id": None, "branch_id": None, "task_id": None,
@@ -633,6 +662,8 @@ class QuantumMemoryEngine:
                     "sequence_turn_index": int((state_obj.get("active_dialogue_sequence") or {}).get("turn_count") or 0),
                     "task_response_number": int(durable_task.get("response_count") or 0),
                     "next_task_response_number": int(durable_task.get("response_count") or 0) + 1,
+                    "branch_label": str(durable_task.get("branch_label") or _internal_branch_label(cleaned_registry, active_task_id))[:4],
+                    "internal_response_path": str(durable_task.get("next_internal_response_path") or ""),
                 }
                 active_ctx["last_completed_result"] = deepcopy(durable_task.get("last_result") or {})
                 active_ctx["completed_results"] = list(durable_task.get("result_history") or [])[-HOT_DIALOG_LIMIT:]
@@ -675,11 +706,16 @@ class QuantumMemoryEngine:
                 "last_result": deepcopy(task.get("last_result") or {}),
                 "answer_basis": deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {}),
                 "dialogue_rules": deepcopy(task.get("dialogue_rules") or active_seq.get("dialogue_rules") or {}),
+                "branch_label": str(task.get("branch_label") or _internal_branch_label(cleaned_registry, task_id))[:4],
+                "branch_type": str(task.get("branch_type") or "topic")[:40],
+                "linked_branch_ids": deepcopy(task.get("linked_branch_ids") or [])[:8],
+                "linked_branches": deepcopy(task.get("linked_branches") or [])[:4],
+                "internal_only": True,
                 "active_task": deepcopy(task),
                 "active": task_id == str(active_seq.get("task_id") or state_obj.get("active_dialogue_task_id") or ""),
             })
         state_obj["dialogue_branch_index"] = {
-            "version": "dialogue_branch_index_v3_task_scoped",
+            "version": "dialogue_branch_index_v4_dynamic_branches",
             "active_sequence_id": seq_id,
             "target_sequence_id": seq_id,
             "target_task_id": str(active_seq.get("task_id") or state_obj.get("active_dialogue_task_id") or ""),
@@ -1073,7 +1109,7 @@ class QuantumMemoryEngine:
             and (not current_conversation or current_conversation == conversation_id)
         ):
             current.update({
-                "version": "april_dialogue_sequence_v3_12h_task_scoped",
+                "version": "april_dialogue_sequence_v4_12h_dynamic_branches",
                 "sequence_id": sequence_id,
                 "user_id": user_id or current_user,
                 "conversation_id": conversation_id or current_conversation,
@@ -1181,7 +1217,7 @@ class QuantumMemoryEngine:
             turn_count = max([int(p.get("sequence_turn_index") or 0) for p in sequence_pairs] or [len(sequence_pairs)])
             restored = {
                 **build_default_active_dialogue_sequence(),
-                "version": "april_dialogue_sequence_v3_12h_task_scoped",
+                "version": "april_dialogue_sequence_v4_12h_dynamic_branches",
                 "sequence_id": sequence_id,
                 "branch_id": sequence_id,
                 "task_id": last_task_id or None,
@@ -1431,6 +1467,25 @@ class QuantumMemoryEngine:
         task_response_number = task_response_count + 1 if target_task else 0
         sequence_turn_index = int(current.get("turn_count") or current.get("response_count") or 0) + 1
 
+        # Branch identity is semantic state. It never controls visible formatting.
+        branch_label = str(target_task.get("branch_label") or dv.get("branch_label") or "").strip() if target_task else ""
+        if target_task and not branch_label:
+            branch_label = _internal_branch_label(sequence_tasks, active_task_id)
+            target_task["branch_label"] = branch_label
+        if target_task:
+            target_task["internal_only"] = True
+            target_task["internal_response_path"] = _internal_response_path(branch_label, task_response_number or 1)
+            target_task["next_internal_response_path"] = _internal_response_path(branch_label, (task_response_number or 0) + 1)
+            branch_type = str(target_task.get("branch_type") or dv.get("branch_type") or "topic")
+            if branch_type:
+                target_task["branch_type"] = branch_type
+            links = target_task.get("linked_branch_ids") or dv.get("linked_branch_ids") or []
+            if isinstance(links, list):
+                target_task["linked_branch_ids"] = [str(x)[:120] for x in links if str(x).strip()][:8]
+            linked = target_task.get("linked_branches") or dv.get("linked_branches") or []
+            if isinstance(linked, list):
+                target_task["linked_branches"] = deepcopy(linked)[:4]
+
         if target_task and not presentation_only:
             # Actual answer/result is the canonical state transition.
             # Presentation-only dialogue-rule turns intentionally do not mutate
@@ -1442,6 +1497,11 @@ class QuantumMemoryEngine:
                 "sequence_id": current_id,
                 "task_response_number": task_response_number,
                 "sequence_turn_index": sequence_turn_index,
+                "branch_label": branch_label,
+                "internal_response_path": target_task.get("internal_response_path") if target_task else "",
+                "branch_type": target_task.get("branch_type") if target_task else "topic",
+                "linked_branch_ids": deepcopy(target_task.get("linked_branch_ids") or []) if target_task else [],
+                "linked_branches": deepcopy(target_task.get("linked_branches") or []) if target_task else [],
                 "user_request": request_text,
                 "april_answer": answer_text,
                 "summary": answer_text[:900],
@@ -1482,6 +1542,8 @@ class QuantumMemoryEngine:
                 "sequence_id": current_id,
                 "task_response_number": task_response_number,
                 "sequence_turn_index": sequence_turn_index,
+                "branch_label": branch_label,
+                "internal_response_path": target_task.get("internal_response_path") if target_task else "",
                 "user": request_text,
                 "april": answer_text,
                 "kind": "turn",
@@ -1495,7 +1557,7 @@ class QuantumMemoryEngine:
             task_registry[active_task_id] = deepcopy(target_task)
 
         current.update({
-            "version": "april_dialogue_sequence_v3_12h_task_scoped",
+            "version": "april_dialogue_sequence_v4_12h_dynamic_branches",
             "sequence_id": current_id,
             "branch_id": current.get("branch_id") or current_id,
             "task_id": active_task_id or None,
@@ -1517,6 +1579,11 @@ class QuantumMemoryEngine:
             "relation": relation,
             "restored": relation == "RECALL",
             "active_entity": str(dv.get("active_entity") or current.get("active_entity") or "")[:180],
+            "branch_label": branch_label,
+            "branch_type": str(dv.get("branch_type") or target_task.get("branch_type") or "topic") if target_task else str(dv.get("branch_type") or "topic"),
+            "linked_branch_ids": deepcopy(target_task.get("linked_branch_ids") or dv.get("linked_branch_ids") or []) if target_task else deepcopy(dv.get("linked_branch_ids") or []),
+            "linked_branches": deepcopy(target_task.get("linked_branches") or dv.get("linked_branches") or []) if target_task else deepcopy(dv.get("linked_branches") or []),
+            "internal_response_path": target_task.get("internal_response_path") if target_task else "",
             "goal": str(dv.get("goal") or (target_task.get("goal") if target_task else current.get("goal") or "answer"))[:120],
             "active_task": deepcopy(target_task),
             "interactive_task_state": deepcopy(target_task),
@@ -1559,14 +1626,20 @@ class QuantumMemoryEngine:
                 "last_result": deepcopy(task.get("last_result") or {}),
                 "answer_basis": deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {}),
                 "dialogue_rules": deepcopy(task.get("dialogue_rules") or rules),
+                "branch_label": str(task.get("branch_label") or _internal_branch_label(sequence_tasks, str(tid)))[:4],
+                "branch_type": str(task.get("branch_type") or "topic")[:40],
+                "linked_branch_ids": deepcopy(task.get("linked_branch_ids") or [])[:8],
+                "linked_branches": deepcopy(task.get("linked_branches") or [])[:4],
+                "internal_only": True,
                 "active_task": deepcopy(task),
                 "active": str(tid) == active_task_id,
             })
         state_obj["dialogue_branch_index"] = {
-            "version": "dialogue_branch_index_v3_task_scoped",
+            "version": "dialogue_branch_index_v4_dynamic_branches",
             "active_sequence_id": current_id,
             "target_sequence_id": current_id,
             "target_task_id": active_task_id,
+            "target_branch_label": branch_label,
             "target_branch_id": f"{current_id}:{active_task_id}" if active_task_id else str(current.get("branch_id") or current_id),
             "resolution_mode": "RECALL_TASK" if relation == "RECALL" else "NEW_TASK" if relation == "NEW" else "ACTIVE_TASK",
             "branches": branches[-32:],
