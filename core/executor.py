@@ -41,7 +41,7 @@ PROCESSOR_MODE = "ACTIVE_BRANCH_MEMORY_CONTEXT_UNDERSTANDING_RELATION_RESPONSE_R
 _RENDERER_REGISTRY = {
     "text": "MessageTextBlock",
     "markdown": "MessageTextBlock",
-    "formula": "MessageTextBlock",
+    "formula": "FormulaRenderer",
     "code": "CodeBlock",
     "graph": "GraphBlock",
     "table": "TableBlock",
@@ -788,6 +788,64 @@ class SequentialInterpretation:
         return bool(set(_tokens(text)) - generic)
 
 
+def _resolve_post_provider_render_blocks(machine_response: dict, request: MachineRequest) -> dict:
+    """Resolve renderer blocks after Provider and before SceneContract.
+
+    The request's frozen requested_outputs is the authority for representation.
+    Provider structured payloads are preserved; no renderer is inferred from prose.
+    """
+    if not isinstance(machine_response, dict):
+        return machine_response
+    blocks = [dict(x) for x in (machine_response.get("render_blocks") or []) if isinstance(x, dict)]
+    existing_types = {str(x.get("type") or x.get("artifact_type") or "").strip().lower() for x in blocks}
+    requested = {str(x).strip().lower() for x in (request.requested_outputs or []) if str(x).strip()}
+    renderer_map = {
+        "formula": "FormulaRenderer",
+        "graph": "GraphBlock",
+        "table": "TableBlock",
+        "diagram": "DiagramBlock",
+        "image": "GalleryBlock",
+        "gallery": "GalleryBlock",
+        "code": "CodeBlock",
+        "link": "LinkCard",
+    }
+    for kind, renderer in renderer_map.items():
+        if kind not in requested or kind in existing_types or kind not in machine_response:
+            continue
+        value = machine_response.get(kind)
+        if value in (None, "", [], {}):
+            continue
+        payload = value if isinstance(value, dict) else {kind: value}
+        block = {
+            "type": kind,
+            "artifact_type": kind,
+            "payload": payload,
+            "renderer": renderer,
+            "viewer": renderer,
+            "scene_contract": True,
+            "human_visible": True,
+            "post_provider_resolved": True,
+            "block_id": _stable_id(f"post-provider-{kind}", payload),
+        }
+        canonical = canonical_payload_for_block(block)
+        if canonical:
+            block["payload"] = canonical
+        blocks.append(block)
+        existing_types.add(kind)
+    machine_response["render_blocks"] = blocks
+    metadata = machine_response.setdefault("metadata", {})
+    metadata["post_provider_render_resolution"] = {
+        "stage": "AFTER_PROVIDER",
+        "authority": "EXECUTOR_SCENE_CONTRACT",
+        "requested_outputs": sorted(requested),
+        "resolved_block_types": [
+            str(x.get("type") or x.get("artifact_type") or "").lower()
+            for x in blocks if isinstance(x, dict)
+        ],
+    }
+    return machine_response
+
+
 class ProcessorScene:
     def __init__(self, state: dict, user_id: str, request: str):
         self.state = state
@@ -1152,6 +1210,11 @@ class ProcessorScene:
                 max_depth=3,
                 max_items=6,
             ),
+            "active_dialogue_context": _compact(
+                dialogue_memory.get("active_dialogue_context") or {},
+                max_depth=6,
+                max_items=12,
+            ),
             "active_sequence_digest": _compact(
                 dialogue_memory.get("active_sequence_digest") or {},
                 max_depth=6,
@@ -1160,10 +1223,10 @@ class ProcessorScene:
             "active_sequence_turn_count": int(
                 dialogue_memory.get("active_sequence_turn_count", 0) or 0
             ),
-            "seven_day_dialogue_memory": _compact(
+            "dialogue_window_memory": _compact(
                 dialogue_memory if relation in {"CONTINUE", "RECALL"} and not artifact_context_only else {
-                    "window_days": 7,
-                    "turn_count_7d": dialogue_memory.get("turn_count_7d", 0),
+                    "window_hours": 12,
+                    "turn_count_window": dialogue_memory.get("turn_count_window", 0),
                     "evidence_only": True,
                     "retrieval_mode": "artifact" if artifact_context_only else "none",
                     "selected_artifact": selected_artifact if artifact_context_only else {},
@@ -1239,14 +1302,14 @@ class ProcessorScene:
                 max_depth=4,
                 max_items=6,
             ),
-            "seven_day_memory_turns": _compact(
+            "dialogue_window_turns": _compact(
                 dialogue_memory.get("active_sequence_turns") or []
                 if relation == "CONTINUE" and not artifact_context_only else [],
                 max_depth=5,
                 max_items=6,
             ),
-            "relevant_7d_turns": _compact(
-                dialogue_memory.get("relevant_7d_turns") or []
+            "relevant_window_turns": _compact(
+                dialogue_memory.get("relevant_window_turns") or []
                 if relation == "RECALL" else [],
                 max_depth=5,
                 max_items=4,
@@ -1262,12 +1325,17 @@ class ProcessorScene:
             "mode": (
                 "artifact_context" if artifact_context_only
                 else "active_sequence" if relation == "CONTINUE"
-                else "selected_7d_thread" if relation == "RECALL"
+                else "selected_window_thread" if relation == "RECALL"
                 else "current_turn_only"
             ),
             "active_topic": _compact(dialogue.get("canonical_topic")) if relation != "NEW" else "",
             "active_goal": _compact(intent.get("goal")) if relation != "NEW" else "",
             "active_task": _compact_task_state(turn_active_task) if semantic_task_active else {},
+            "active_dialogue_context": _compact(
+                dialogue_memory.get("active_dialogue_context") or {},
+                max_depth=6,
+                max_items=12,
+            ),
             "interactive_task_state": _compact_task_state(dialogue.get("interactive_task_state") or active_task) if semantic_task_active else {},
             "task_memory": _compact_task_state(dialogue.get("task_memory") or {}) if semantic_task_active else {},
             "task_relation": _compact(dialogue.get("task_relation") or {}) if semantic_task_active else {},
@@ -1290,14 +1358,14 @@ class ProcessorScene:
                 dialogue_memory.get("active_sequence_turn_count", 0) or 0
             ),
             "dialogue_memory": _compact(dialogue_memory) if relation in {"CONTINUE", "RECALL"} and not artifact_context_only else {
-                "window_days": 7,
-                "turn_count_7d": dialogue_memory.get("turn_count_7d", 0),
+                "window_hours": 12,
+                "turn_count_window": dialogue_memory.get("turn_count_window", 0),
                 "evidence_only": True,
                 "retrieval_mode": "artifact" if artifact_context_only else "none",
                 "selected_artifact": _compact(selected_artifact, max_depth=5, max_items=6) if artifact_context_only else {},
             },
             "interpretation_control": _compact(semantic_result.get("interpretation_control") or {}, max_depth=3, max_items=8),
-            "window_days": 7,
+            "window_hours": 12,
             "authenticated_user_scope": {
                 "user_id": self.user_id,
                 "conversation_id": dialogue_memory.get("conversation_id"),
@@ -1479,8 +1547,9 @@ class ProcessorScene:
         if not isinstance(machine_payload, dict):
             raise RuntimeError("PROVIDER_MACHINE_RESPONSE_MISSING")
 
-        # Keep only actual provider blocks; normalize metadata without changing
-        # the representation chosen by the processor.
+        # Provider has completed. Resolve structured outputs only now, immediately
+        # before canonical SceneContract construction.
+        machine_payload = _resolve_post_provider_render_blocks(machine_payload, request)
         self._render_omissions = []
         provider_blocks = machine_payload.get("render_blocks") or []
         provider_artifacts = machine_payload.get("artifacts") or []
@@ -2476,17 +2545,10 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
             current_request=request_text,
             answer=response.answer,
             internal_context=bool(kwargs.get("internal_context", False)),
-            persist=False,
+            persist=True,
         )
-
-        # Persistence is durability work, not response work. Keep it off the
-        # critical path; the next turn still sees the in-memory canonical state.
-        uid = _text(user_id)
-        previous = _PERSIST_TASKS.get(uid)
-        if previous is None or previous.done():
-            task = asyncio.create_task(asyncio.to_thread(persist_state, uid))
-            task.add_done_callback(_consume_persist_result)
-            _PERSIST_TASKS[uid] = task
+        response.metadata["dialogue_committed"] = True
+        response.metadata["dialogue_commit_stage"] = "POST_PROVIDER_SCENE_BEFORE_DELIVERY"
     except Exception as exc:
         print("⚠️ APRIL SCENE MEMORY WRITE:", exc)
 
