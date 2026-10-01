@@ -728,6 +728,9 @@ class LiveSceneContinuityEngine:
     ) -> dict[str, Any]:
         """Return the newest explicit interactive-task state without guessing ownership."""
         candidates: list[Any] = [
+            sequence.get("interactive_task_state"),
+            sequence.get("open_task"),
+            sequence.get("task_state"),
             state.get("interactive_task_state"),
             state.get("task_context_state"),
             state.get("open_task"),
@@ -735,14 +738,22 @@ class LiveSceneContinuityEngine:
             scene.get("interactive_task_state"),
             scene.get("open_task"),
             scene.get("task_state"),
-            sequence.get("interactive_task_state"),
-            sequence.get("open_task"),
-            sequence.get("task_state"),
         ]
+        sequence_id = cls._text(sequence.get("sequence_id"))
+        sequence_topic = cls._text(sequence.get("topic"))
         for value in candidates:
             mapped = cls._task_mapping(value)
-            if mapped:
-                return mapped
+            if not mapped:
+                continue
+            task_sequence_id = cls._text(mapped.get("sequence_id") or mapped.get("active_sequence_id"))
+            if sequence_id and task_sequence_id and task_sequence_id != sequence_id:
+                continue
+            task_topic = cls._text(mapped.get("topic") or mapped.get("canonical_topic"))
+            if sequence_topic and task_topic:
+                overlap = cls._similarity(sequence_topic, task_topic)
+                if overlap < 0.25 and sequence_topic.lower() not in task_topic.lower() and task_topic.lower() not in sequence_topic.lower():
+                    continue
+            return mapped
         return {}
 
     @classmethod
@@ -1077,7 +1088,10 @@ class LiveSceneContinuityEngine:
 
         # Recover an interactive task from recent history when state was partially
         # persisted by a legacy writer.
+        scope = cls._scope(state)
         for turn in reversed(history[-12:]):
+            if not cls._scope_match(turn, scope):
+                continue
             assistant = cls._text(turn.get("assistant"))
             if not assistant:
                 continue
@@ -2095,7 +2109,11 @@ class DialogueEnvironmentEngine:
             return False
         if scope.get("conversation_id") and conversation_id and conversation_id != scope["conversation_id"]:
             return False
-        if require_sequence and scope.get("dialogue_sequence_id") and sequence_id and sequence_id != scope["dialogue_sequence_id"]:
+        # Once an authenticated active sequence exists, a record carrying another
+        # sequence id is foreign evidence and cannot become the live antecedent.
+        if scope.get("dialogue_sequence_id") and sequence_id and sequence_id != scope["dialogue_sequence_id"]:
+            return False
+        if require_sequence and scope.get("dialogue_sequence_id") and not sequence_id:
             return False
         return True
 
@@ -4326,7 +4344,12 @@ class ActiveTaskEngine(InterpretationEngineBase):
         history: list[Any],
     ) -> dict[str, Any]:
         env_task = relation.get("active_task") if isinstance(relation.get("active_task"), dict) else {}
+        sequence = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+        sequence_id = self._text(sequence.get("sequence_id"))
         task = dict(env_task)
+        task_sequence_id = self._text(task.get("sequence_id") or task.get("active_sequence_id"))
+        if sequence_id and task_sequence_id and task_sequence_id != sequence_id:
+            task = {}
         turn_relation = str(relation.get("turn_relation") or "").upper()
 
         if relation.get("relation") == "NEW" and not task.get("active"):
@@ -8389,17 +8412,25 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             and not task.get("active")
         ):
             persisted_task = None
+            active_sequence = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+            active_topic = self._text(active_sequence.get("topic") or relation.get("environment", {}).get("current_topic") if isinstance(relation.get("environment"), dict) else "")
             for candidate in (
                 state.get("interactive_task_state"),
                 state.get("active_task"),
                 state.get("open_task"),
-                (state.get("active_dialogue_sequence") or {}).get("interactive_task_state")
-                if isinstance(state.get("active_dialogue_sequence"), dict) else None,
+                active_sequence.get("interactive_task_state"),
             ):
-                if isinstance(candidate, dict) and candidate.get("active"):
-                    persisted_task = candidate
-                    break
-            if persisted_task:
+                if not isinstance(candidate, dict) or not candidate.get("active"):
+                    continue
+                task_sequence_id = self._text(candidate.get("sequence_id") or candidate.get("active_sequence_id"))
+                if active_sequence.get("sequence_id") and task_sequence_id and task_sequence_id != active_sequence.get("sequence_id"):
+                    continue
+                task_topic = self._text(candidate.get("topic") or candidate.get("canonical_topic"))
+                if active_topic and task_topic and self._similarity(active_topic, task_topic) < 0.25 and active_topic.lower() not in task_topic.lower() and task_topic.lower() not in active_topic.lower():
+                    continue
+                persisted_task = candidate
+                break
+            if persisted_task and bool(relation.get("task_continuation") or str(relation.get("turn_relation") or "").upper().startswith("TASK_")):
                 task = {
                     "engine": self.task.NAME,
                     "version": self.task.VERSION,
@@ -13296,8 +13327,9 @@ def _df_extract_subject(text: str) -> str:
     # Common concrete objects/entities. Prefer these before generic topic phrases
     # so a sentence such as "сколько я съел пончиков" updates the live entity.
     known = [
-        "илон маск", "илона маска", "пончик", "пончики", "пончиков", "пончика", "яблоко", "яблок", "вода", "ключ", "загадка",
-        "угадайка", "угадайки", "машина", "геели", "формула", "график", "таблица", "схема",
+        "илон маск", "илона маска", "альберт эйнштейн", "альберта эйнштейна",
+        "пончик", "пончики", "пончиков", "пончика", "яблоко", "яблок", "вода", "ключ", "загадка",
+        "угадайка", "угадайки", "машина", "геели",
     ]
     for item in known:
         if item in low:
@@ -13642,7 +13674,9 @@ def _df_is_self_contained_new_topic(
     low = _df_low(text)
     command_shape = bool(re.match(
         r"^(?:а\s+)?(?:расскажи|скажи|объясни|покажи|проверь|найди|"
-        r"сравни|напиши|создай|построй|опиши|рассчитай|посчитай)\b",
+        r"сравни|напиши|создай|построй|опиши|рассчитай|посчитай|"
+        r"кто\s+такой|что\s+такое|кто\s+это|какой(?:\s|$)|какая(?:\s|$)|"
+        r"какое(?:\s|$)|какие(?:\s|$))",
         low,
     ))
     about_shape = bool(re.search(r"\b(?:про|об|о|насчет|насчёт|касаемо)\b", low))
@@ -13659,19 +13693,35 @@ def _df_is_self_contained_new_topic(
 
 
 def _df_active_task(state: dict[str, Any]) -> dict[str, Any]:
+    sequence = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+    sequence_id = _df_text(sequence.get("sequence_id"), 80)
+    sequence_topic = _df_text(sequence.get("topic"), 220)
     candidates = (
+        sequence.get("interactive_task_state"),
+        sequence.get("open_task"),
+        sequence.get("task_state"),
         state.get("interactive_task_state"),
         state.get("active_task"),
         state.get("april_active_task"),
-        (state.get("active_dialogue_sequence") or {}).get("interactive_task_state")
-        if isinstance(state.get("active_dialogue_sequence"), dict) else None,
     )
     for candidate in candidates:
-        if isinstance(candidate, dict) and (
-            candidate.get("active") or candidate.get("kind") in {"game", "riddle", "question"}
-            or candidate.get("role")
-        ):
-            return deepcopy(candidate)
+        if not isinstance(candidate, dict) or not candidate:
+            continue
+        if not (candidate.get("active") or candidate.get("kind") in {"game", "riddle", "question"} or candidate.get("role")):
+            continue
+        candidate_id = _df_text(candidate.get("sequence_id") or candidate.get("active_sequence_id"), 80)
+        if sequence_id and candidate_id and candidate_id != sequence_id:
+            continue
+        topic = _df_text(candidate.get("topic") or candidate.get("canonical_topic"), 220)
+        if sequence_topic and topic and _df_overlap(sequence_topic, topic) < 0.25 and sequence_topic.lower() not in topic.lower() and topic.lower() not in sequence_topic.lower():
+            continue
+        ts = candidate.get("task_definition_at") or candidate.get("updated_at") or candidate.get("last_turn_at") or sequence.get("last_turn_at")
+        try:
+            if ts and (time.time() - float(ts)) >= 12 * 60 * 60:
+                continue
+        except (TypeError, ValueError):
+            pass
+        return deepcopy(candidate)
     return {}
 
 
@@ -13745,7 +13795,13 @@ def _df_task_probe(text: str, active_task: dict[str, Any], active_topic: str) ->
     current_game_topic = any(x in low for x in ("угадай", "отгадай", "разгадай", "игру", "игра"))
     game_topic = current_game_topic or "угадай" in _df_low(active_topic)
     donut_task = "пончик" in low or "пончики" in low
-    answer_analysis = any(x in low for x in ("как ты угадал", "почему ты угадал", "правильный ответ", "твои вычисления", "формулу"))
+    # Do not treat a generic request for a formula as analysis of a previous task.
+    # That lexical hit previously made unrelated science questions inherit the
+    # active riddle/game relation. Task analysis requires explicit discourse cues.
+    answer_analysis = any(x in low for x in (
+        "как ты угадал", "почему ты угадал", "правильный ответ", "твои вычисления",
+        "как получил ответ", "почему ответ такой",
+    ))
 
     # A user may redefine the operating rule of an already active dialogue without
     # changing its subject. Treat explicit procedural language as a task definition
@@ -13757,16 +13813,23 @@ def _df_task_probe(text: str, active_task: dict[str, Any], active_topic: str) ->
         "должна ставить", "должен ставить", "на каждый ответ",
     )) and len(_df_tokens(low)) >= 5
 
-    active = bool(
+    active_task_topic = _df_text(active_task.get("topic") or active_task.get("canonical_topic"))
+    compatible_persisted_task = bool(
         active_task.get("active")
-        or active_task.get("kind") in {"game", "riddle", "question"}
-        or game_topic
-        or task_definition
+        and (not active_topic or not active_task_topic
+             or _df_overlap(active_topic, active_task_topic) >= 0.25
+             or active_topic.lower() in active_task_topic.lower()
+             or active_task_topic.lower() in active_topic.lower())
     )
-    handoff = game_topic and (donut_task or any(x in low for x in ("я загад", "задавай вопросы", "наводящие вопросы")))
-    task_action = active and (
+    active = bool(
+        game_topic
+        or task_definition
+        or compatible_persisted_task
+    )
+    handoff = current_game_topic and (donut_task or any(x in low for x in ("я загад", "задавай вопросы", "наводящие вопросы")))
+    task_action = (
         handoff or answer_analysis or task_definition
-        or any(x in low for x in ("угадать", "угадай", "отгадать", "ответь"))
+        or (compatible_persisted_task and any(x in low for x in ("угадать", "угадай", "отгадать", "ответь")))
     )
     return {
         "active": active,
@@ -13780,8 +13843,13 @@ def _df_task_probe(text: str, active_task: dict[str, Any], active_topic: str) ->
         "handoff": handoff,
         "task_action": task_action,
         "answer_analysis": answer_analysis,
-        "topic": "игра в угадайки" if game_topic else _df_text(active_task.get("topic"), 180),
-        "objective": _df_text(text, 1200) if task_definition else _df_text(active_task.get("objective"), 1200),
+        "topic": (
+            _df_text(active_topic, 180) if task_definition and active_topic
+            else "игра в угадайки" if current_game_topic and any(x in low for x in ("угадай", "отгадай", "разгадай"))
+            else _df_text(active_task.get("topic"), 180) if compatible_persisted_task
+            else ""
+        ),
+        "objective": _df_text(text, 1200) if task_definition else _df_text(active_task.get("objective"), 1200) if compatible_persisted_task else "",
     }
 
 
@@ -13978,8 +14046,28 @@ def _df_task_state(text: str, relation: str, task_probe: dict[str, Any], prior: 
 
     active_context = active_context if isinstance(active_context, dict) else {}
     context_task = active_context.get("task") if isinstance(active_context.get("task"), dict) else {}
-    task = deepcopy(context_task or prior) if isinstance(context_task or prior, dict) else {}
-    if relation == "CONTINUE" and active_context.get("objective"):
+    task = {}
+    for candidate in (context_task, prior):
+        if not isinstance(candidate, dict) or not candidate:
+            continue
+        task_seq = _df_text(candidate.get("sequence_id") or candidate.get("active_sequence_id"), 80)
+        if sequence_id and task_seq and task_seq != sequence_id:
+            continue
+        task_topic = _df_text(candidate.get("topic") or candidate.get("canonical_topic"), 220)
+        if topic and task_topic and _df_overlap(topic, task_topic) < 0.25 and topic.lower() not in task_topic.lower() and task_topic.lower() not in topic.lower():
+            continue
+        task = deepcopy(candidate)
+        break
+
+    # A CONTINUE must explicitly fit the task. Short discourse turns can keep a
+    # compatible procedural task; unrelated requests cannot inherit it.
+    if relation == "CONTINUE" and task and not (
+        task_probe.get("task_action")
+        or task_probe.get("task_definition")
+        or (len(_df_tokens(text)) <= 4 and task.get("active"))
+    ):
+        task = {}
+    if relation == "CONTINUE" and active_context.get("objective") and task:
         task.setdefault("objective", _df_text(active_context.get("objective"), 1200))
     if active_context.get("completed_results"):
         task["completed_results"] = deepcopy(active_context.get("completed_results"))[-12:]
@@ -14791,8 +14879,8 @@ def _df_interpret_live_turn(
         "current_request": current,
         "resolved_request": current,
         "sequence_id": sequence_id,
-        "task_continuation": bool(task),
-        "active_task_context": deepcopy(task),
+        "task_continuation": bool(task) and relation == "CONTINUE",
+        "active_task_context": deepcopy(task) if relation in {"CONTINUE", "RECALL"} and bool(task) else {},
         "semantic_frame": deepcopy(semantic_frame),
         "dialogue_development": deepcopy(development),
         "provider_context_plan": deepcopy(provider_plan),
