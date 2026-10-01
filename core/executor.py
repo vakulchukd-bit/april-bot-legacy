@@ -1976,7 +1976,16 @@ def _apply_dialogue_output_contract(machine_payload: dict[str, Any], dialogue_co
     sequence = dialogue_contract.get("response_sequence")
     sequence = sequence if isinstance(sequence, dict) else {}
     try:
-        number = int(sequence.get("task_response_number") or dialogue_contract.get("task_response_number") or 0)
+        # Conversation-level dialogue_response_number owns the visible marker.
+        # task_response_number remains local to the active task and may restart
+        # when the user changes topic inside the same authenticated sequence.
+        number = int(
+            sequence.get("dialogue_response_number")
+            or dialogue_contract.get("dialogue_response_number")
+            or sequence.get("task_response_number")
+            or dialogue_contract.get("task_response_number")
+            or 0
+        )
     except (TypeError, ValueError):
         number = 0
     if number <= 0:
