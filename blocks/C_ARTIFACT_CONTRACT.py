@@ -548,6 +548,7 @@ ARTIFACT_BLOCK_MAP["function"] = "MessageTextBlock"
 SUPPORTED_RENDERERS = {
     "MessageTextBlock", "GraphBlock", "TableBlock", "GalleryBlock",
     "CodeBlock", "LinkCard", "FunctionBlock", "FormulaBlock", "FormulaRenderer",
+    "DiagramRenderer",
     "SvgBlock", "ArithmeticDiagram",
 }
 
@@ -558,16 +559,20 @@ ARTIFACT_RENDERER_ALIASES = {
     "markdown": "MessageTextBlock",
     "message": "MessageTextBlock",
     "message_text": "MessageTextBlock",
+    # These are implementation-level diagram names. They are normalized to the
+    # actual Web renderer while the payload (including SVG/geometry) is untouched.
     "diagram": "DiagramRenderer",
-    "diagramblock": "GalleryBlock",
-    "schematic": "GalleryBlock",
+    "diagramblock": "DiagramRenderer",
+    "schematic": "DiagramRenderer",
+    "svgblock": "DiagramRenderer",
+    "svg": "DiagramRenderer",
+    "arithmeticdiagram": "DiagramRenderer",
+    "arithmetic_diagram": "DiagramRenderer",
     "gallery": "GalleryBlock",
     "image": "GalleryBlock",
     "figure": "GalleryBlock",
-    "geometry": "GalleryBlock",
-    "geometric_figure": "GalleryBlock",
-    "svg": "SvgBlock",
-    "arithmetic_diagram": "ArithmeticDiagram",
+    "geometry": "DiagramRenderer",
+    "geometric_figure": "DiagramRenderer",
 }
 
 # =====================================================
