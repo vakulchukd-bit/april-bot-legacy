@@ -13254,7 +13254,7 @@ def _provision_stanza_resources() -> None:
 # in the production interpretation layer so the existing project topology is
 # unchanged. Bigunoks are evidence probes only.
 
-_df_version = "april_integrated_dialogue_first_v1"
+_df_version = "april_integrated_dialogue_first_v2_dynamic_branch_graph"
 _df_provider_plan_version = "april_provider_handoff_v1"
 
 _df_structured = {"image", "gallery", "diagram", "graph", "table", "formula", "code", "link"}
@@ -13851,7 +13851,10 @@ def _df_branch_index(state: dict[str, Any], active_seq: dict[str, Any], active_t
         if key in seen:
             continue
         seen.add(key)
-        branches.append(deepcopy(branch))
+        branch_copy = deepcopy(branch)
+        if not _df_text(branch_copy.get("branch_label"), 4):
+            branch_copy["branch_label"] = _df_branch_label_for(list(old.get("branches") or []), _df_text(branch_copy.get("branch_id") or branch_copy.get("task_id"), 120))
+        branches.append(branch_copy)
 
     registry = active_seq.get("task_registry") if isinstance(active_seq.get("task_registry"), dict) else {}
     top_registry = state.get("dialogue_task_registry") if isinstance(state.get("dialogue_task_registry"), dict) else {}
@@ -13899,8 +13902,14 @@ def _df_branch_index(state: dict[str, Any], active_seq: dict[str, Any], active_t
             "active": True,
         })
 
+    # Normalize stable internal A/B/C labels once per branch graph.
+    for idx, branch in enumerate(sorted(branches, key=lambda b: (float(b.get("started_at") or b.get("last_turn_at") or 0.0), str(b.get("task_id") or b.get("branch_id") or "")))):
+        if not _df_text(branch.get("branch_label"), 4):
+            branch["branch_label"] = _INTERNAL_BRANCH_ALPHABET_RU[min(idx, len(_INTERNAL_BRANCH_ALPHABET_RU) - 1)]
+        branch["internal_only"] = True
+
     return {
-        "version": "dialogue_branch_index_v3_task_scoped",
+        "version": "dialogue_branch_index_v4_dynamic_branches",
         "active_sequence_id": current_id,
         "target_sequence_id": current_id,
         "target_task_id": active_task_id,
@@ -14037,7 +14046,11 @@ def _df_dialogue_rules(
     prior: dict[str, Any] | None = None,
     previous_april: str = "",
 ) -> dict[str, Any]:
-    """Interpret presentation rules as dialogue-level semantics, never as a task counter."""
+    """Store user presentation preferences as internal metadata only.
+
+    These rules never own topic, task or branch selection and never cause the
+    executor/provider to prefix a human-visible answer.
+    """
     prior = prior if isinstance(prior, dict) else {}
     previous = prior.get("dialogue_rules") if isinstance(prior.get("dialogue_rules"), dict) else {}
     low = _df_low(text)
@@ -14046,10 +14059,14 @@ def _df_dialogue_rules(
         "не нумеруй", "не ставь номер", "без нумерации", "перестань нумеровать",
     ))
     if disable:
-        return {"enabled": False, "updated": True, "source": "dialogue_rule_update"}
+        return {
+            "enabled": False,
+            "visible": False,
+            "internal_only": True,
+            "updated": True,
+            "source": "dialogue_rule_update",
+        }
 
-    # Structural interpretation: an explicit instruction about EVERY ANSWER +
-    # an ordering/marker operation is a presentation rule. It is not a task.
     answer_target = any(x in low for x in (
         "каждый свой ответ", "каждый ответ", "каждого ответа",
         "каждый свой", "каждого своего ответа",
@@ -14065,24 +14082,12 @@ def _df_dialogue_rules(
         kept = dict(previous)
         kept.pop("updated", None)
         kept.pop("updated_at", None)
-        # Advance only the presentation marker from the last visible April answer.
-        # This is dialogue-rule interpretation, not a task/scene counter.
-        if kept.get("enabled") and previous_april:
-            mode = str(kept.get("mode") or "").lower()
-            if mode == "alphabetic":
-                matches = list(re.finditer(r"(?:^|\s)([А-ЯЁ])\s*[.)—:-]", previous_april.strip(), re.IGNORECASE))
-                if matches:
-                    letter = matches[-1].group(1).upper()
-                    try:
-                        idx = _DIALOGUE_ALPHABET_RU.index(letter)
-                    except ValueError:
-                        idx = -1
-                    if idx >= 0:
-                        kept["next_marker"] = _DIALOGUE_ALPHABET_RU[min(idx + 1, len(_DIALOGUE_ALPHABET_RU) - 1)]
-            elif mode in {"numeric", "sequential"}:
-                m = re.match(r"^\s*(\d+)\s*[.)—:-]", previous_april.strip())
-                if m:
-                    kept["next_marker"] = str(int(m.group(1)) + 1)
+        if kept:
+            kept["visible"] = False
+            kept["internal_only"] = True
+            # next_marker is intentionally removed: visible presentation must not
+            # be driven by the previous answer text.
+            kept.pop("next_marker", None)
         return kept
 
     alphabetic = any(x in low for x in (
@@ -14094,36 +14099,13 @@ def _df_dialogue_rules(
         "цифрой", "цифру", "нумеровать", "номеровать", "начиная с 1",
     ))
     mode = "alphabetic" if alphabetic and not numeric else "numeric" if numeric and not alphabetic else "alphabetic" if alphabetic else "numeric"
-    previous_mode = str(previous.get("mode") or "").lower()
-    mode_changed = bool(previous_mode and previous_mode != mode)
-
-    next_marker = ""
-    if not mode_changed and previous_april:
-        if mode == "alphabetic":
-            # Accept legacy prefixes like "1. а. ..." and normal prefixes like "А) ...".
-            matches = list(re.finditer(r"(?:^|\\s)([А-ЯЁ])\\s*[.)—:-]", previous_april.strip(), re.IGNORECASE))
-            if matches:
-                letter = matches[-1].group(1).upper()
-                try:
-                    idx = _DIALOGUE_ALPHABET_RU.index(letter)
-                except ValueError:
-                    idx = -1
-                if idx >= 0:
-                    next_marker = _DIALOGUE_ALPHABET_RU[min(idx + 1, len(_DIALOGUE_ALPHABET_RU) - 1)]
-        else:
-            m = re.match(r"^\\s*(\\d+)\\s*[.)—:-]", previous_april.strip())
-            if m:
-                next_marker = str(int(m.group(1)) + 1)
-
-    if not next_marker:
-        next_marker = "А" if mode == "alphabetic" else "1"
-
     return {
         "enabled": True,
+        "visible": False,
+        "internal_only": True,
         "scope": "dialogue",
         "mode": mode,
         "start": 1,
-        "next_marker": next_marker,
         "source_instruction": _df_text(text, 1200),
         "until_explicit_end": bool(
             any(x in low for x in ("пока я не скажу", "до тех пор", "подведём итоги", "подведем итоги"))
@@ -14133,6 +14115,141 @@ def _df_dialogue_rules(
         "updated_at": time.time(),
     }
 
+
+# ---------------------------------------------------------------------------
+# Dynamic 12h dialogue branch graph — internal metadata only.
+# ---------------------------------------------------------------------------
+_INTERNAL_BRANCH_ALPHABET_RU = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
+
+
+def _df_dialogue_repair_request(text: str) -> bool:
+    low = _df_low(text)
+    return any(re.search(pattern, low) for pattern in (
+        r"не\s*понял.*(?:о\s+ком|кого|что).*(?:спрашивал|спрашива(?:л|ю))",
+        r"я\s+не\s*(?:это|то)\s+спрашивал",
+        r"ты\s+не\s+то\s+(?:ответил|ответила|сказал|сказала)",
+        r"я\s+спрашивал\s+про",
+        r"я\s+имел\s+в\s+виду",
+    ))
+
+
+def _df_comparison_request(text: str) -> bool:
+    low = _df_low(text)
+    return bool(re.search(
+        r"(?:что\s+общего|сравни(?:ть)?|разниц[аы]|отлич(?:ие|ия|ается|аются)|похож(?:и|есть)|между\s+.+\s+и\b)",
+        low,
+    ))
+
+
+def _df_stem_token(value: Any) -> str:
+    token = _df_low(value).strip(".,!?;:()[]{}«\"'—-_")
+    if not token:
+        return ""
+    for suffix in (
+        "иями", "ами", "ями", "ого", "ему", "ому", "ыми", "ими",
+        "ов", "ев", "ам", "ям", "ах", "ях", "ом", "ем", "ою", "ею",
+        "ий", "ый", "ой", "ая", "яя", "ое", "ее", "ые", "ие",
+        "ую", "юю", "а", "я", "у", "ю", "ы", "и", "е",
+    ):
+        if token.endswith(suffix) and len(token) - len(suffix) >= 5:
+            return token[:-len(suffix)]
+    return token
+
+
+def _df_branch_mention_score(text: str, branch: dict[str, Any]) -> float:
+    q = {_df_stem_token(t) for t in _df_tokens(text)} - {""}
+    entity_text = " ".join(
+        _df_text(x, 220) for x in (
+            branch.get("canonical_entity"), branch.get("entity"), branch.get("topic"),
+        ) if _df_text(x)
+    )
+    c = {_df_stem_token(t) for t in _df_tokens(entity_text)} - {""}
+    if not q or not c:
+        return 0.0
+    exact = len(q & c) / max(1, len(c))
+    fuzzy = sum(
+        1 for qt in q if len(qt) >= 5 and any(qt == ct or qt[:5] == ct[:5] for ct in c if len(ct) >= 5)
+    ) / max(1, len(c))
+    return round(max(exact, fuzzy), 6)
+
+
+def _df_find_branch_mentions(text: str, branches: dict[str, Any]) -> list[dict[str, Any]]:
+    scored = []
+    for branch in list(branches.get("branches") or []):
+        if not isinstance(branch, dict):
+            continue
+        score = _df_branch_mention_score(text, branch)
+        if score >= 0.75:
+            item = deepcopy(branch)
+            item["mention_score"] = score
+            scored.append(item)
+    scored.sort(key=lambda b: (
+        float(b.get("mention_score") or 0.0),
+        1 if b.get("active") else 0,
+        float(b.get("last_turn_at") or b.get("started_at") or 0.0),
+    ), reverse=True)
+    return scored[:6]
+
+
+def _df_branch_label_for(branches: list[dict[str, Any]], branch_id: str) -> str:
+    ordered = sorted(
+        [b for b in branches if isinstance(b, dict)],
+        key=lambda b: (
+            float(b.get("started_at") or b.get("last_turn_at") or 0.0),
+            str(b.get("task_id") or b.get("branch_id") or ""),
+        ),
+    )
+    for idx, branch in enumerate(ordered):
+        if str(branch.get("branch_id") or branch.get("task_id") or "") == str(branch_id or ""):
+            return _INTERNAL_BRANCH_ALPHABET_RU[min(idx, len(_INTERNAL_BRANCH_ALPHABET_RU) - 1)]
+        stored = str(branch.get("branch_label") or "").strip()
+        if stored and str(branch.get("task_id") or "") == str(branch_id or ""):
+            return stored[:4]
+    return _INTERNAL_BRANCH_ALPHABET_RU[min(len(ordered), len(_INTERNAL_BRANCH_ALPHABET_RU) - 1)] if ordered else "А"
+
+
+def _df_internal_response_path(branch_label: str, response_count: int) -> str:
+    branch = _df_text(branch_label, 4).upper() or "А"
+    idx = max(0, int(response_count or 0))
+    answer = _INTERNAL_BRANCH_ALPHABET_RU[min(idx, len(_INTERNAL_BRANCH_ALPHABET_RU) - 1)]
+    return f"{branch}.{answer}"
+
+
+def _df_identity_question(text: str) -> bool:
+    low = _df_low(text)
+    return bool(re.match(
+        r"^(?:ты\s+кто|кто\s+ты|как\s+тебя\s+зовут|что\s+ты\s+умеешь|что\s+ты\s+можешь)\b",
+        low,
+    ))
+
+
+def _df_comparison_branch_context(
+    text: str,
+    active_branch: dict[str, Any],
+    mentioned: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidates = list(mentioned)
+    if isinstance(active_branch, dict) and active_branch:
+        candidates.append(active_branch)
+    linked = []
+    seen = set()
+    for branch in candidates:
+        if not isinstance(branch, dict):
+            continue
+        bid = _df_text(branch.get("branch_id") or branch.get("task_id"), 120)
+        if not bid or bid in seen:
+            continue
+        seen.add(bid)
+        linked.append({
+            "branch_id": bid,
+            "task_id": _df_text(branch.get("task_id"), 100),
+            "branch_label": _df_text(branch.get("branch_label"), 4),
+            "topic": _df_text(branch.get("topic") or branch.get("canonical_entity"), 140),
+            "entity": _df_text(branch.get("canonical_entity") or branch.get("entity"), 120),
+            "last_user_request": _df_text(branch.get("last_user_request"), 180),
+            "last_april_answer": _df_text(branch.get("last_april_answer"), 260),
+        })
+    return linked[:4]
 
 def _df_resolve_relation(
     text: str,
@@ -14145,23 +14262,23 @@ def _df_resolve_relation(
     *,
     semantic: dict[str, Any] | None = None,
     sequence_digest: dict[str, Any] | None = None,
+    branches: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
-    """
-    Resolve dialogue relation only after contextual understanding.
+    """Resolve the current turn against the authenticated 12h branch graph.
 
-    Policy:
-      - RECALL is selected only when the user actually refers back to an older branch.
-      - With a live branch, CONTINUE is the default.
-      - Short/elliptical language is protected from NEW.
-      - NEW requires strong discourse-boundary evidence or a self-contained
-        different subject.
-      - No single word/keyword can force a topic break.
+    The current request is authoritative. The active branch is context, not a
+    veto. A concrete entity can resume an older branch automatically; a request
+    comparing two known branches opens a derived comparison branch; a repair
+    request stays attached to the immediately preceding semantic vector.
     """
     semantic = semantic if isinstance(semantic, dict) else {}
     sequence_digest = sequence_digest if isinstance(sequence_digest, dict) else {}
+    branches = branches if isinstance(branches, dict) else {}
 
     explicit_recall = _df_explicit_recall(text)
     strong_boundary = _df_strong_topic_boundary(text)
+    if explicit_recall:
+        return "RECALL", "REFERENCE_OLD_TOPIC"
 
     seq = state.get("active_dialogue_sequence")
     seq = seq if isinstance(seq, dict) else {}
@@ -14171,9 +14288,6 @@ def _df_resolve_relation(
         or active_topic
         or previous_april
     )
-    if explicit_recall:
-        return "RECALL", "REFERENCE_OLD_TOPIC"
-
     if not has_live:
         return "NEW", "NEW_TOPIC"
 
@@ -14187,6 +14301,31 @@ def _df_resolve_relation(
     task_action = bool(task_probe.get("task_action"))
     task_active = bool(task_probe.get("active"))
 
+    # A repair/correction refers to the last semantic request, not to the words
+    # inside the repair itself. This prevents "о ком я спрашивал" becoming a
+    # synthetic topic named "ком я спрашивал".
+    if _df_dialogue_repair_request(text):
+        return "CONTINUE", "DIALOGUE_REPAIR"
+
+    mentioned = _df_find_branch_mentions(text, branches)
+    active_task_id = _df_text(seq.get("task_id") or state.get("active_dialogue_task_id"), 100)
+    distinct_old = [
+        b for b in mentioned
+        if _df_text(b.get("task_id"), 100) and _df_text(b.get("task_id"), 100) != active_task_id
+    ]
+    comparison = _df_comparison_request(text)
+
+    if not strong_boundary and comparison:
+        # "Что общего между этими двумя ... Пушкин и" explicitly introduces a
+        # second known branch while the active branch supplies the other operand.
+        if len(mentioned) >= 2 or (len(mentioned) == 1 and (distinct_old or deictic)):
+            return "NEW", "BRANCH_COMPARISON"
+
+    if not strong_boundary and distinct_old:
+        # Explicitly naming one already-known branch is an automatic branch
+        # return. No trigger word such as "вернись" is required.
+        return "RECALL", "AUTO_BRANCH_RETURN"
+
     contextual_overlap = max(
         float(dialogue_probe.get("topic_overlap", 0.0) or 0.0),
         float(_df_overlap(low, sequence_digest.get("root_topic")) or 0.0),
@@ -14195,14 +14334,21 @@ def _df_resolve_relation(
         float(_df_overlap(low, sequence_digest.get("last_april")) or 0.0),
     )
 
-    # Question ownership is semantic, not lexical. "Продолжаем что такое формула"
-    # still contains a continuation word, but the current question has its own subject.
+    # Explicitly naming the active branch is not a topic switch and must not
+    # create a duplicate task just because the utterance is phrased as a question.
+    if mentioned and not distinct_old:
+        return "CONTINUE", "ACTIVE_BRANCH_EXPLICIT_SUBJECT"
+
     question_subject = _df_extract_subject(text)
+    identity_question = _df_identity_question(text)
     standalone_question = bool(
-        question_subject
-        and re.match(
-            r"^(?:(?:продолжаем|продолжим|дальше|теперь)\s+)?(?:что\s+такое|кто\s+такой|кто\s+(?:такая|такое|такие)|кто\s+это)\b",
-            low,
+        identity_question
+        or (
+            question_subject
+            and re.match(
+                r"^(?:(?:продолжаем|продолжим|дальше|теперь)\s+)?(?:что\s+такое|кто\s+такой|кто\s+(?:такая|такое|такие)|кто\s+это)\b",
+                low,
+            )
         )
     )
     if standalone_question:
@@ -14217,9 +14363,6 @@ def _df_resolve_relation(
     if rule_update.get("updated"):
         return "CONTINUE", "DIALOGUE_RULE_UPDATE"
 
-    # Understand the current turn before deciding the relation. This keeps
-    # "Продолжаем", "Да", "Возможно", numbers, names, short corrections, etc.
-    # attached to the active branch whenever their discourse role is dependent.
     if short_turn and not strong_boundary:
         short_self_contained_new = _df_is_self_contained_new_topic(
             text,
@@ -14244,13 +14387,9 @@ def _df_resolve_relation(
     if contextual_overlap >= 0.18 and not strong_boundary:
         return "CONTINUE", "ACTIVE_BRANCH_AFFINITY"
 
-    # An explicit discourse-level topic break is the strongest normal NEW signal.
     if strong_boundary:
         return "NEW", "EXPLICIT_TOPIC_BOUNDARY"
 
-    # _df_explicit_new also contains subject patterns. They are allowed only
-    # when the current turn is actually self-contained and not merely a short
-    # continuation. This prevents "давай дальше" / "давай" style leakage.
     self_contained_new = _df_is_self_contained_new_topic(
         text,
         semantic,
@@ -14262,8 +14401,6 @@ def _df_resolve_relation(
     if self_contained_new:
         return "NEW", "SELF_CONTAINED_NEW_SUBJECT"
 
-    # Conservative default: a live human dialogue keeps evolving until there is
-    # evidence that the user intentionally changed subject.
     if low in _df_confirm | _df_reject | _df_short_filler:
         return "CONTINUE", "DISCOURSE_CONTINUATION"
 
@@ -14293,6 +14430,8 @@ def _df_understand(text: str, relation: str, turn_relation: str, active_topic: s
     if relation == "CONTINUE" and not entity and active_entity:
         entity = active_entity
     topic = active_topic if relation == "CONTINUE" and active_topic else (explicit_subject or entity or _df_text(text, 180))
+    if turn_relation in {"BRANCH_COMPARISON", "DIALOGUE_REPAIR"}:
+        topic = explicit_subject or entity or active_topic or _df_text(text, 180)
     semantic_request = _df_text(text, 1200)
     return {
         "topic": _df_text(topic, 220),
@@ -14350,9 +14489,9 @@ def _df_task_state(
         }
         return task
 
-    # CONTINUE/RECALL keep the selected task, even when this turn is an ordinary
-    # knowledge question. The old keyword gate was causing the task to disappear.
-    task = deepcopy(context_task or prior)
+    # RECALL must use the branch selected by Interpretation, never the previous
+    # active task. CONTINUE stays on the active branch.
+    task = deepcopy(prior if relation == "RECALL" else (context_task or prior))
     if not task:
         return {}
     if sequence_id:
@@ -14455,6 +14594,7 @@ def _df_provider_plan(
     active_sequence_digest: dict[str, Any] | None = None,
     active_dialogue_context: dict[str, Any] | None = None,
     dialogue_rules: dict[str, Any] | None = None,
+    related_branches: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Build the final Provider context after semantic understanding is complete.
@@ -14477,6 +14617,7 @@ def _df_provider_plan(
         if isinstance(dialogue_rules, dict)
         else deepcopy(active_dialogue_context.get("dialogue_rules") or {})
     )
+    related_branches = [deepcopy(x) for x in (related_branches or []) if isinstance(x, dict)][:4]
     base = {
         "version": _df_provider_plan_version,
         "relation": relation,
@@ -14499,6 +14640,9 @@ def _df_provider_plan(
                     "goal": semantic.get("goal"),
                     "representation": semantic.get("representation"),
                     "turn_relation": turn_relation,
+                    "branch_label": semantic.get("branch_label") or "",
+                    "branch_type": semantic.get("branch_type") or "topic",
+                    "internal_response_path": semantic.get("internal_response_path") or "",
                 },
             },
             {
@@ -14618,12 +14762,22 @@ def _df_provider_plan(
             }
         )
 
+    if related_branches:
+        base["required_context"].append({
+            "key": "RELATED_TOPIC_BRANCHES",
+            "priority": 0.98,
+            "value": related_branches,
+        })
+
     if relation == "RECALL" and selected_memory:
         base["required_context"].append(
             {
                 "key": "MEMORY_RECALL",
                 "priority": 0.9,
-                "value": [selected_memory],
+                "value": [{
+                    **deepcopy(selected_memory),
+                    "resume_instruction": "Коротко напомни предыдущий предмет только настолько, насколько это помогает текущему вопросу, затем сразу продолжи текущий запрос. Не называй внутреннюю ветку, номер или путь.",
+                }],
             }
         )
         base["new_topic_minimal_context"] = False
@@ -14658,6 +14812,10 @@ def _df_select_recalled_branch(text: str, state: dict[str, Any], branches: dict[
         number = int(m.group(1))
         if 1 <= number <= len(ordered):
             return deepcopy(ordered[number - 1])
+
+    mentioned = _df_find_branch_mentions(text, branches)
+    if mentioned:
+        return deepcopy(mentioned[0])
 
     def recall_overlap(query_text: str, candidate_text: str) -> float:
         exact = _df_overlap(query_text, candidate_text)
@@ -14713,6 +14871,7 @@ def _df_interpret_live_turn(
     state = state if isinstance(state, dict) else {}
     history = history if isinstance(history, list) else []
     current = _df_text(text, 2400)
+    identity_question = _df_identity_question(current)
 
     seq = (
         state.get("active_dialogue_sequence")
@@ -14817,7 +14976,7 @@ def _df_interpret_live_turn(
     # ------------------------------------------------------------------
     relation, turn_relation = _df_resolve_relation(
         current, state, previous_april, active_topic, active_entity, task_probe, dialogue_probe,
-        semantic=semantic, sequence_digest=active_sequence_digest,
+        semantic=semantic, sequence_digest=active_sequence_digest, branches=branches,
     )
     topic_affinity = 0.0
     semantic_topic = _df_low(semantic.get("topic") or "")
@@ -14843,6 +15002,19 @@ def _df_interpret_live_turn(
         relation, turn_relation = "NEW", "SELF_CONTAINED_NEW_SUBJECT"
 
     selected_branch: dict[str, Any] = {}
+    branch_mentions = _df_find_branch_mentions(current, branches)
+    active_branch = next((b for b in (branches.get("branches") or []) if isinstance(b, dict) and _df_text(b.get("task_id"), 100) == active_task_id), {})
+    linked_branches: list[dict[str, Any]] = []
+    if turn_relation == "BRANCH_COMPARISON":
+        linked_branches = _df_comparison_branch_context(current, active_branch, branch_mentions)
+        names = []
+        for item in linked_branches:
+            name = _df_text(item.get("entity") or item.get("topic"), 120)
+            if name and name.lower() not in {x.lower() for x in names}:
+                names.append(name)
+        if names:
+            semantic["topic"] = " и ".join(names[:3])
+            semantic["entity"] = " и ".join(names[:3])
 
     # A recall request is allowed to select one older branch. Nothing else may
     # silently switch branches.
@@ -14900,6 +15072,13 @@ def _df_interpret_live_turn(
                 render_probe,
             )
 
+    if turn_relation == "DIALOGUE_REPAIR":
+        # Keep the semantic vector anchored to the previous live branch. The
+        # repair text itself is not promoted to a new topic/entity.
+        semantic["topic"] = active_topic
+        semantic["entity"] = active_entity
+        semantic["explicit_subject"] = ""
+
     # ------------------------------------------------------------------
     # 5) Apply the final relation to semantic identity.
     # ------------------------------------------------------------------
@@ -14922,18 +15101,31 @@ def _df_interpret_live_turn(
     }
 
     if relation == "NEW":
-        new_topic = (
-            semantic.get("explicit_subject")
-            or semantic.get("entity")
-            or _df_extract_subject(current)
-            or current
-        )
-        semantic["topic"] = _df_normalize_subject(new_topic)
-        active_topic = semantic["topic"]
-        active_entity = _df_normalize_subject(
-            semantic.get("entity")
-            or _df_extract_subject(current)
-        )
+        if turn_relation == "BRANCH_COMPARISON" and linked_branches:
+            comparison_names = []
+            for item in linked_branches:
+                name = _df_normalize_subject(_df_text(item.get("entity") or item.get("topic"), 120))
+                if name and name.lower() not in {x.lower() for x in comparison_names}:
+                    comparison_names.append(name)
+            semantic["topic"] = " и ".join(comparison_names[:3]) or _df_normalize_subject(current)
+            semantic["entity"] = semantic["topic"]
+            active_topic = semantic["topic"]
+            active_entity = semantic["entity"]
+        else:
+            new_topic = (
+                "апрель: идентичность и возможности"
+                if identity_question
+                else semantic.get("explicit_subject")
+                or semantic.get("entity")
+                or _df_extract_subject(current)
+                or current
+            )
+            semantic["topic"] = _df_normalize_subject(new_topic)
+            active_topic = semantic["topic"]
+            active_entity = _df_normalize_subject(
+                semantic.get("entity")
+                or _df_extract_subject(current)
+            )
         branch_digest_for_provider: dict[str, Any] = {}
     else:
         # CONTINUE/RECALL preserve the live/recalled conversational identity.
@@ -14972,6 +15164,14 @@ def _df_interpret_live_turn(
         sequence_id,
         active_context,
     )
+    if task and turn_relation == "BRANCH_COMPARISON":
+        task["branch_type"] = "comparison"
+        task["linked_branch_ids"] = [
+            _df_text(x.get("branch_id") or x.get("task_id"), 120)
+            for x in linked_branches
+            if _df_text(x.get("branch_id") or x.get("task_id"), 120)
+        ]
+        task["linked_branches"] = deepcopy(linked_branches)
     active_task_id = _df_text(task.get("task_id"), 100) if task else active_task_id
     if turn_relation == "DIALOGUE_RULE_UPDATE":
         # Rule changes are presentation-only. They must not become a task turn,
@@ -14996,6 +15196,30 @@ def _df_interpret_live_turn(
     )
     dialogue_rules.pop("updated", None)
     dialogue_rules.pop("updated_at", None)
+    dialogue_rules["visible"] = False
+    dialogue_rules["internal_only"] = True
+    dialogue_rules.pop("next_marker", None)
+
+    # Stable A/B/C branch identity is derived from the branch graph, never from
+    # task response counters. The response path is useful only to memory/debugging.
+    target_branch_id = _df_text(
+        selected_branch.get("branch_id") if selected_branch else "",
+        120,
+    ) or (f"{sequence_id}:{active_task_id}" if active_task_id else sequence_id)
+    branch_label = _df_text(selected_branch.get("branch_label") if selected_branch else "", 4)
+    if not branch_label:
+        branch_label = _df_branch_label_for(branches.get("branches") or [], target_branch_id)
+    if turn_relation == "BRANCH_COMPARISON":
+        branch_label = _df_branch_label_for(branches.get("branches") or [], target_branch_id) if target_branch_id else branch_label
+    if task:
+        task["branch_label"] = branch_label
+        task["internal_only"] = True
+        task["internal_response_path"] = _df_internal_response_path(
+            branch_label, int(task.get("response_count") or task.get("task_response_count") or 0)
+        )
+        task["next_internal_response_path"] = _df_internal_response_path(
+            branch_label, int(task.get("response_count") or task.get("task_response_count") or 0) + 1
+        )
 
     development = _df_development(
         relation,
@@ -15050,6 +15274,7 @@ def _df_interpret_live_turn(
         branch_digest_for_provider,
         active_context,
         dialogue_rules=dialogue_rules,
+        related_branches=linked_branches,
     )
 
     branch_index = deepcopy(branches)
@@ -15073,6 +15298,10 @@ def _df_interpret_live_turn(
                 semantic.get("goal") or "answer",
                 120,
             ),
+            "branch_label": branch_label,
+            "branch_type": "comparison" if turn_relation == "BRANCH_COMPARISON" else "topic",
+            "linked_branch_ids": deepcopy(task.get("linked_branch_ids") or []) if isinstance(task, dict) else [],
+            "internal_only": True,
             "active": True,
         }
         branch_index["resolution_mode"] = "NEW_TASK"
@@ -15182,6 +15411,10 @@ def _df_interpret_live_turn(
         "presentation_only": turn_relation == "DIALOGUE_RULE_UPDATE",
         "sequence_id": sequence_id,
         "task_id": active_task_id,
+        "branch_label": branch_label,
+        "internal_response_path": _df_internal_response_path(
+            branch_label, int(task.get("response_count") or task.get("task_response_count") or 0)
+        ),
         "target_task_id": _df_text(branch_index.get("target_task_id") or active_task_id, 100),
         "target_sequence_id": _df_text(
             branch_index.get("target_sequence_id")
@@ -15229,7 +15462,11 @@ def _df_interpret_live_turn(
             "sequence_id": sequence_id,
             "task_id": active_task_id,
             "sequence_turn_index": int(active_sequence_digest.get("turn_count") or seq.get("turn_count") or 0) + 1,
-            "output_rule": deepcopy(dialogue_rules),
+            "branch_label": branch_label,
+            "internal_response_path": _df_internal_response_path(
+                branch_label, int(task.get("response_count") or task.get("task_response_count") or 0)
+            ),
+            "output_rule": {"visible": False, "internal_only": True},
         },
         "previous_result": deepcopy(task.get("last_result") or {}),
         "answer_basis": deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {}),
@@ -15254,6 +15491,7 @@ def _df_interpret_live_turn(
         "active_sequence_digest": deepcopy(
             branch_digest_for_provider
         ),
+        "linked_branches": deepcopy(linked_branches),
         "continuity_evidence": deepcopy(continuity_evidence),
         "dialogue_vector": {
             "version": "dialogue_vector_v4",
@@ -15270,12 +15508,30 @@ def _df_interpret_live_turn(
                 semantic.get("entity"),
                 180,
             ),
+            "branch_type": "comparison" if turn_relation == "BRANCH_COMPARISON" else "topic",
+            "linked_branch_ids": [
+                _df_text(x.get("branch_id") or x.get("task_id"), 120)
+                for x in linked_branches
+                if _df_text(x.get("branch_id") or x.get("task_id"), 120)
+            ],
+            "linked_branches": deepcopy(linked_branches),
             "sequence_id": sequence_id,
             "task_id": active_task_id,
+            "active_task": deepcopy(task),
+            "open_task": deepcopy(task),
+            "interactive_task_state": deepcopy(task),
+            "branch_label": branch_label,
+            "internal_response_path": _df_internal_response_path(
+                branch_label, int(task.get("response_count") or task.get("task_response_count") or 0)
+            ),
             "target_task_id": _df_text(branch_index.get("target_task_id") or active_task_id, 100),
             "response_sequence": {
                 "sequence_turn_index": int(active_sequence_digest.get("turn_count") or seq.get("turn_count") or 0) + 1,
-                "output_rule": deepcopy(dialogue_rules),
+                "branch_label": branch_label,
+                "internal_response_path": _df_internal_response_path(
+                    branch_label, int(task.get("response_count") or task.get("task_response_count") or 0)
+                ),
+                "output_rule": {"visible": False, "internal_only": True},
             },
             "dialogue_rules": deepcopy(dialogue_rules),
             "dialogue_output_rule": deepcopy(dialogue_rules),
@@ -15445,6 +15701,11 @@ def _df_interpret_live_turn(
             "representation": semantic.get("representation"),
         },
         "dialogue_development": development,
+        "branch_label": branch_label,
+        "internal_response_path": _df_internal_response_path(
+            branch_label, int(task.get("response_count") or task.get("task_response_count") or 0)
+        ),
+        "linked_branches": deepcopy(linked_branches),
         "dialogue_branch_index": branch_index,
         "active_sequence_digest": deepcopy(
             branch_digest_for_provider
