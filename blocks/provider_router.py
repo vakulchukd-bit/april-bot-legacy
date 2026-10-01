@@ -1719,15 +1719,12 @@ def _build_provider_user_text(payload: dict[str, Any], budget_tokens: int) -> st
 
 
 def build_openai_request(machine_request: Any) -> dict:
+    """Compatibility view over the single canonical Interpretation handoff."""
     payload = machine_request_to_dict(machine_request)
-    user_text = _build_provider_user_text(
-        payload,
-        budget_tokens=max(1, INPUT_TOKEN_BUDGET - _estimate_input_tokens(PROVIDER_MACHINE_SYSTEM_PROMPT)),
-    )
-    return {
-        "role": "user",
-        "content": [{"type": "input_text", "text": user_text}],
-    }
+    packets = normalize_provider_input(payload)
+    if len(packets) < 2:
+        raise RuntimeError("PROVIDER_CANONICAL_PACKET_INCOMPLETE")
+    return packets[-1]
 
 
 
@@ -1798,7 +1795,14 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     # New canonical path: Interpretation has already selected context semantically.
     # Provider only serializes and compresses the plan to <= 900 total input tokens.
     provider_plan = _provider_context_plan(payload)
+    dialogue_contract = _dialogue_contract(payload)
+    if dialogue_contract and not provider_plan:
+        raise RuntimeError("DIALOGUE_PROVIDER_PLAN_MISSING")
     if provider_plan:
+        authoritative_request = _safe_text(provider_plan.get("current_user_request"))
+        payload_request = _extract_request_text(payload)
+        if authoritative_request and payload_request and authoritative_request != payload_request:
+            raise RuntimeError("INTERPRETATION_REQUEST_MUTATION")
         user_text, plan_meta = _build_provider_user_text_from_plan(
             payload,
             provider_plan,
