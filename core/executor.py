@@ -1959,69 +1959,50 @@ _DIALOGUE_ALPHABET_RU = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩ�
 
 
 def _apply_dialogue_output_contract(machine_payload: dict[str, Any], dialogue_contract: dict[str, Any]) -> dict[str, Any]:
-    """Apply the exact answer prefix interpreted from the user's dialogue rule.
+    """Remove legacy visible dialogue markers; never generate new ones.
 
-    No task/scene/session counter is used here. Interpretation supplies next_marker.
+    Dialogue branch labels and response paths belong to internal 12h memory only.
+    Text/markdown blocks are sanitized while structured multimedia blocks are left intact.
     """
-    if not isinstance(machine_payload, dict) or not isinstance(dialogue_contract, dict):
+    if not isinstance(machine_payload, dict):
         return machine_payload
-    rules = dialogue_contract.get("dialogue_output_rule") or dialogue_contract.get("dialogue_rules")
-    rules = rules if isinstance(rules, dict) else {}
-    if not rules.get("enabled") or _text(rules.get("scope") or "dialogue").lower() != "dialogue":
-        return machine_payload
-    marker_value = _text(rules.get("next_marker")).strip()
-    mode = _text(rules.get("mode") or "").lower()
-    if not marker_value or mode not in {"numeric", "alphabetic", "sequential"}:
-        return machine_payload
-    marker = f"{marker_value}. "
 
-    def strip_legacy_markers(value: str) -> str:
-        value = value.strip()
-        # Remove repeated legacy/model prefixes: "1. а. ...", "А) ...", "2) ...".
-        for _ in range(4):
-            updated = re.sub(r"^\s*\d+\s*[.)—:-]\s*", "", value)
-            updated = re.sub(r"^\s*[А-ЯЁA-Za-z]\s*[.)—:-]\s*", "", updated, flags=re.IGNORECASE)
-            if updated == value:
+    def strip_legacy_prefixes(value: Any) -> str:
+        text_value = _text(value).strip()
+        for _ in range(6):
+            updated = re.sub(r'^\s*\d+\s*[.)—:-]\s*', '', text_value)
+            updated = re.sub(r'^\s*[А-ЯЁ]\s*[.)—:-]\s*', '', updated, flags=re.IGNORECASE)
+            if updated == text_value:
                 break
-            value = updated
-        return value.strip()
+            text_value = updated
+        return text_value.strip()
 
-    def enforce(value: Any) -> str:
-        text_value = _text(value)
-        return marker + strip_legacy_markers(text_value) if text_value else text_value
+    for field in ('answer', 'content', 'response'):
+        if field in machine_payload and machine_payload.get(field):
+            machine_payload[field] = strip_legacy_prefixes(machine_payload[field])
 
-    if machine_payload.get("answer") or machine_payload.get("content"):
-        canonical = enforce(machine_payload.get("answer") or machine_payload.get("content"))
-        machine_payload["answer"] = canonical
-        machine_payload["content"] = canonical
-        machine_payload["response"] = canonical
-
-    blocks = machine_payload.get("render_blocks")
+    blocks = machine_payload.get('render_blocks')
     if isinstance(blocks, list):
         for block in blocks:
             if not isinstance(block, dict):
                 continue
-            kind = _text(block.get("type") or block.get("artifact_type") or block.get("representation")).lower()
-            if kind not in {"text", "markdown", ""}:
+            kind = _text(block.get('type') or block.get('artifact_type') or block.get('representation')).lower()
+            if kind not in {'', 'text', 'markdown'}:
                 continue
-            content = block.get("content") or block.get("text") or block.get("answer")
-            if content:
-                canonical = enforce(content)
-                block["content"] = canonical
-                block["text"] = canonical
-                if block.get("answer"):
-                    block["answer"] = canonical
+            for field in ('content', 'text', 'answer'):
+                if field in block and block.get(field):
+                    block[field] = strip_legacy_prefixes(block[field])
 
-    meta = machine_payload.get("metadata") if isinstance(machine_payload.get("metadata"), dict) else {}
-    meta["dialogue_output_contract"] = {
-        "enforced": True,
-        "mode": mode,
-        "marker": marker_value,
-        "source": "interpretation_dialogue_rule",
+    meta = machine_payload.get('metadata') if isinstance(machine_payload.get('metadata'), dict) else {}
+    meta['dialogue_output_contract'] = {
+        'enforced': True,
+        'visible': False,
+        'internal_only': True,
+        'marker': '',
+        'source': 'internal_branch_memory_sanitizer',
     }
-    machine_payload["metadata"] = meta
+    machine_payload['metadata'] = meta
     return machine_payload
-
 
 def _set_live_state(state: dict, request: MachineRequest, response: MachineResponse, contract: Any) -> None:
     dialogue = request.dialogue_contract or {}
