@@ -51,11 +51,14 @@
 # =====================================================
 
 from blocks.room_protocol import Room
-from typing import Optional
+from typing import Any, Optional, Sequence
 from blocks.C_ARTIFACT_CONTRACT import (
     MachineRequest,
     MachineResponse,
     UniversalArtifactContract,
+    BaseArtifact,
+    create_artifact,
+    _artifact_canonical_render_blocks,
 )
 
 
@@ -104,6 +107,16 @@ from blocks.C_POLITICS_ROOM import ROOM as POLITICS_ROOM
 from blocks.C_NEWS_ROOM import ROOM as NEWS_ROOM
 from blocks.C_SOCIAL_ROOM import ROOM as SOCIAL_ROOM
 from blocks.C_IT_ROOM import ROOM as IT_ROOM
+
+# Canonical structured render rooms. These replace the legacy inline rooms
+# below for graph/formula/table/diagram/function/link/gallery execution.
+from blocks.C_GRAPH_ROOM import ROOM as C_GRAPH_ROOM
+from blocks.C_FORMULA_ROOM import ROOM as C_FORMULA_ROOM
+from blocks.C_TABLE_ROOM import ROOM as C_TABLE_ROOM
+from blocks.C_DIAGRAM_ROOM import ROOM as C_DIAGRAM_ROOM
+from blocks.C_FUNCTION_ROOM import ROOM as C_FUNCTION_ROOM
+from blocks.C_LINK_ROOM import ROOM as C_LINK_ROOM
+from blocks.C_GALLERY_ROOM import ROOM as C_GALLERY_ROOM
 
 
 # =====================================================
@@ -1411,19 +1424,67 @@ class CodeRoom(Room):
 
     name = "code"
     room_type = "code_renderer"
+    artifact_type = "code"
+    artifact_version = "1.0"
+    web_space_ready = True
+    renderer_safe = True
+    continuity_safe = True
+    orchestration_safe = True
 
     def evaluate(self, text, context):
-        return 8.0 if detect_code_signal(text) else 0.0
+        ctx = context if isinstance(context, dict) else {}
+        payload = ctx.get("code_payload") or ctx.get("payload")
+        if isinstance(payload, dict) and (
+            payload.get("code") or payload.get("source") or payload.get("content")
+        ):
+            return 1.0
+        return 0.0
 
     async def handle(self, user_id, text, context, run):
-        mr = MachineResponse()
-        mr.contributions["code"] = {
-            "language":"auto",
-            "filename":"generated.txt",
-            "source":text,
-            "line_numbers":True
-        }
-        return mr
+        ctx = context if isinstance(context, dict) else {}
+        payload = ctx.get("code_payload") or ctx.get("payload") or {}
+        code = (
+            payload.get("code")
+            or payload.get("source")
+            or payload.get("content")
+            if isinstance(payload, dict) else str(payload or text)
+        )
+        language = (
+            payload.get("language")
+            if isinstance(payload, dict) else ""
+        ) or "text"
+        if not str(code or "").strip():
+            return None
+
+        artifact = create_artifact(
+            artifact_type="code",
+            room_source="C_FUNCTION_ROOM",
+            data={
+                "code": str(code),
+                "language": str(language),
+                "user_id": str(user_id or ""),
+                "scene_id": ctx.get("scene_id"),
+                "turn_id": ctx.get("turn_id"),
+                "flow_id": ctx.get("flow_id"),
+                "topic_group": ctx.get("topic_group"),
+                "continuation": bool(ctx.get("continuation", False)),
+                "block_id": ctx.get("block_id"),
+                "render_id": ctx.get("render_id"),
+                "renderer": "CodeBlock",
+                "viewer": "CodeBlock",
+                "payload": {
+                    "code": str(code),
+                    "language": str(language),
+                },
+                "human_visible": True,
+                "machine_only": False,
+            },
+        )
+        artifact.quality.validation_passed = True
+        artifact.quality.quality_score = 1.0
+        artifact.quality.confidence_score = 1.0
+        artifact.quality.completeness_score = 1.0
+        return artifact
 
 
 
@@ -1517,18 +1578,21 @@ ROOMS = [
 
     GuidanceRoom(),
 
-    GraphRoom(),
+    C_GRAPH_ROOM,
 
-    FormulaRoom(),
+    C_FORMULA_ROOM,
 
+    C_TABLE_ROOM,
 
-    TableRoom(),
-
-    DiagramRoom(),
+    C_DIAGRAM_ROOM,
 
     CodeRoom(),
 
-    LinkRoom(),
+    C_FUNCTION_ROOM,
+
+    C_LINK_ROOM,
+
+    C_GALLERY_ROOM,
 
     SafeScienceRoom(),
 
@@ -1627,6 +1691,18 @@ def _registry_materialize_response(result):
 
     if isinstance(result, MachineResponse):
         return result
+
+    # C-ROOMs return BaseArtifact objects as their canonical output. Preserve
+    # them as artifacts instead of converting the object's __dict__ into a
+    # text/contribution fallback.
+    if isinstance(result, BaseArtifact):
+        response = MachineResponse()
+        response.artifacts.append(result)
+        response.metadata["artifact_route"] = "C_ARTIFACT_CONTRACT"
+        response.metadata["room_artifact_type"] = str(
+            getattr(getattr(result, "metadata", None), "artifact_type", "") or ""
+        )
+        return response
 
     if isinstance(result, dict) and isinstance(result.get("machine_response"), MachineResponse):
         return result["machine_response"]
@@ -1854,45 +1930,168 @@ def _registry_merge_response_payload(target, source):
     return target
 
 
-def _registry_route_target(machine_request: MachineRequest, state: dict) -> str:
-    """Resolve the concrete visual room from already-authorized semantics.
+def _registry_route_targets(
+    machine_request: MachineRequest,
+    state: dict,
+    target_representations: Optional[Sequence[str]] = None,
+) -> list[str]:
+    """Map the already-authorized representation plan to registered rooms.
 
-    This function is intentionally deterministic: it does not reinterpret
-    user text or compete with Interpretation. It only maps the locked
-    representation/operation to a registered room.
+    Register is deliberately not semantic. The request has already been
+    interpreted; this function only translates representation names into room
+    names and keeps the requested order.
     """
     intent = dict(getattr(machine_request, "intent", {}) or {})
     attributes = intent.get("attributes") if isinstance(intent.get("attributes"), dict) else {}
-    representation = str(
-        intent.get("type")
-        or ""
-    ).strip().lower()
-    operation = str(
-        intent.get("operation")
-        or ""
-    ).strip().lower()
-    visual_mode = str(
-        attributes.get("visual_production_mode")
-        or ""
-    ).strip().lower()
+    representation = str(intent.get("type") or "").strip().lower()
+    operation = str(intent.get("operation") or "").strip().lower()
+    visual_mode = str(attributes.get("visual_production_mode") or "").strip().lower()
 
-    if representation in {"image", "gallery"}:
-        active_image = bool(
-            isinstance(state, dict)
-            and (
-                state.get("image_current")
-                or state.get("image_context")
-                or state.get("active_visual_scene")
-            )
-        )
-        if operation in {"modify", "transform", "redraw", "edit"} and active_image:
-            return "image_edit"
-        if visual_mode in {"image_generation", "image"} or operation in {
-            "build", "generate", "create", "visualize", "modify", "transform", "redraw"
-        }:
-            return "image_generate"
+    requested = []
+    source_values = (
+        list(target_representations)
+        if target_representations is not None
+        else list(getattr(machine_request, "requested_outputs", []) or [])
+    )
+    for value in source_values:
+        kind = str(value or "").strip().lower()
+        if kind == "markdown":
+            kind = "text"
+        if kind == "renderer_scene":
+            kind = "diagram"
+        if kind == "visual":
+            kind = "graph"
+        if kind == "image_generate":
+            kind = "image"
+        if kind and kind not in requested:
+            requested.append(kind)
 
-    return ""
+    ordered = []
+    if target_representations is not None:
+        # Caller has already separated the current route from other routes.
+        for kind in requested:
+            if kind not in {"text", "markdown"}:
+                ordered.append(kind)
+    else:
+        if representation and representation not in {"text", "markdown"}:
+            ordered.append(representation)
+        for kind in requested:
+            if kind not in {"text", "markdown"}:
+                ordered.append(kind)
+        if kind not in {"text", "markdown"}:
+            ordered.append(kind)
+
+    targets: list[str] = []
+    seen: set[str] = set()
+    for kind in ordered:
+        room_name = ""
+        if kind in {"image", "gallery"}:
+            # Image-generation/edits have their dedicated image route. A real
+            # provider gallery with concrete sources is handled by gallery room.
+            if visual_mode in {"image_generation", "image"} or operation in {
+                "build", "generate", "create", "visualize", "modify", "transform", "redraw", "edit"
+            }:
+                if kind == "image" or visual_mode in {"image_generation", "image"}:
+                    active_image = bool(
+                        isinstance(state, dict)
+                        and (
+                            state.get("image_current")
+                            or state.get("image_context")
+                            or state.get("active_visual_scene")
+                        )
+                    )
+                    room_name = "image_edit" if operation in {"modify", "transform", "redraw", "edit"} and active_image else "image_generate"
+            if not room_name:
+                room_name = "gallery"
+        else:
+            room_name = {
+                "graph": "graph",
+                "table": "table",
+                "diagram": "diagram",
+                "formula": "formula",
+                "code": "code",
+                "function": "function",
+                "link": "link",
+            }.get(kind, "")
+        if room_name and room_name not in seen:
+            seen.add(room_name)
+            targets.append(room_name)
+
+    return targets
+
+
+def _registry_route_target(machine_request: MachineRequest, state: dict) -> str:
+    targets = _registry_route_targets(machine_request, state)
+    return targets[0] if targets else ""
+
+
+def _provider_structured_block(provider_response: Optional[MachineResponse], kind: str) -> dict[str, Any]:
+    """Return the provider block already carrying the requested structure.
+
+    The Room Register never decides what the user meant.  When Interpretation
+    has already authorized a diagram but the model returned only an ASCII
+    fenced drawing, preserve that exact provider payload as diagram source so
+    C_DIAGRAM_ROOM can render it.  This is transport preservation, not semantic
+    inference and not a parallel/fallback route.
+    """
+    if provider_response is None:
+        return {}
+    wanted = str(kind or "").strip().lower()
+    for raw in list(getattr(provider_response, "render_blocks", []) or []):
+        if not isinstance(raw, dict):
+            continue
+        raw_kind = str(
+            raw.get("type") or raw.get("artifact_type") or raw.get("representation") or ""
+        ).strip().lower()
+        if raw_kind == wanted:
+            return dict(raw)
+
+    if wanted == "diagram":
+        answer = str(
+            getattr(provider_response, "answer", "")
+            or getattr(provider_response, "content", "")
+            or getattr(provider_response, "response", "")
+            or ""
+        ).strip()
+        if answer and "```" in answer and any(ch in answer for ch in ("──", "│", "┌", "┐", "└", "┘", "→", "←")):
+            import re
+            match = re.search(r"```(?:text|ascii|diagram|txt)?\s*\n?(.*?)```", answer, flags=re.IGNORECASE | re.DOTALL)
+            ascii_source = (match.group(1) if match else answer).strip()
+            if ascii_source:
+                return {
+                    "type": "diagram",
+                    "artifact_type": "diagram",
+                    "renderer": "DiagramRenderer",
+                    "viewer": "DiagramRenderer",
+                    "payload": {
+                        "ascii": ascii_source,
+                        "ascii_preview": ascii_source,
+                        "representation": "schematic",
+                        "source": "provider_ascii_payload",
+                    },
+                    "scene_contract": True,
+                    "human_visible": True,
+                }
+    return {}
+
+
+def _registry_artifact_render_blocks(response: MachineResponse) -> list[dict[str, Any]]:
+    """Project every BaseArtifact returned by a room into SceneContract blocks."""
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for artifact in list(getattr(response, "artifacts", []) or []):
+        if not isinstance(artifact, BaseArtifact):
+            continue
+        for raw in _artifact_canonical_render_blocks(artifact)[:1]:
+            block = dict(raw)
+            kind = str(block.get("type") or block.get("artifact_type") or "").lower()
+            payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+            key = f"{kind}:{repr(payload)}"
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(block)
+    return result
 
 
 async def registry_route_machine_request(
@@ -1900,91 +2099,36 @@ async def registry_route_machine_request(
     route_contract: UniversalArtifactContract,
     *,
     user_id: str,
+    target_representations: Optional[Sequence[str]] = None,
     chat_id=None,
     state: Optional[dict] = None,
     provider_response: Optional[MachineResponse] = None,
     run=None,
 ):
-    """Canonical Executor -> C-ARTIFACT -> Room Register entrypoint.
+    """Canonical Executor -> C-ARTIFACT -> Room Register -> C-ROOM route.
 
-    Provider remains responsible for the single semantic/dialogue call.  The
-    resulting image-generation plan is transported in a C-ARTIFACT envelope,
-    resolved here to a registered room, and executed by that room.  Executor
-    never imports or calls C_APRIL_IMAGES_GENERATOR.
+    Interpretation has already selected the representation(s). Register only
+    dispatches the concrete structured payload(s) to their registered C-room.
+    No room is allowed to reclassify the user request.
     """
     request = machine_request
     state = state if isinstance(state, dict) else {}
-
-    target_room = _registry_route_target(request, state)
-    if not target_room:
+    targets = _registry_route_targets(request, state, target_representations)
+    if not targets:
         return MachineResponse()
-
-    room = next(
-        (
-            candidate for candidate in ROOMS
-            if str(getattr(candidate, "name", "")).strip().lower() == target_room
-        ),
-        None,
-    )
-    if room is None:
-        response = MachineResponse()
-        response.metadata.update({
-            "room_route_status": "missing_room",
-            "room_route": f"rooms_registry.{target_room}",
-            "artifact_route": "C_ARTIFACT_CONTRACT",
-        })
-        return response
 
     intent = dict(getattr(request, "intent", {}) or {})
     attributes = intent.get("attributes") if isinstance(intent.get("attributes"), dict) else {}
-    route_context = getattr(route_contract, "payload", None)
-    payload_context = getattr(route_context, "context", {}) if route_context is not None else {}
-    payload_context = payload_context if isinstance(payload_context, dict) else {}
+    payload_contract = getattr(route_contract, "payload", None)
+    payload_context = getattr(payload_contract, "context", {}) if payload_contract is not None else {}
+    payload_context = dict(payload_context) if isinstance(payload_context, dict) else {}
 
-    provider_metadata = {}
-    if provider_response is not None:
-        provider_metadata = dict(getattr(provider_response, "metadata", {}) or {})
-
-    spec = provider_metadata.get("image_generation_spec")
-    if not isinstance(spec, dict):
-        specs = provider_metadata.get("image_generation_specs")
-        if isinstance(specs, list):
-            spec = next((item for item in specs if isinstance(item, dict)), None)
-
-    semantic = {
-        "room": target_room,
-        "intent": "image_generate" if target_room == "image_generate" else "image_edit",
-        "representation": str(intent.get("type") or "image").lower(),
-        "operation": str(intent.get("operation") or "").lower(),
-        "goal": str(intent.get("goal") or "").lower(),
-        "visual_production_mode": str(
-            attributes.get("visual_production_mode")
-            or ""
-        ).lower(),
-        "object": str(intent.get("object") or ""),
-        "dialogue_development": deepcopy(
-            (request.dialogue_contract or {}).get("dialogue_development", {})
-            if hasattr(request, "dialogue_contract") and isinstance(getattr(request, "dialogue_contract", None), dict)
-            else {}
-        ),
-        "topic": str(
-            intent.get("topic")
-            or (
-                (request.dialogue_contract or {}).get("canonical_topic")
-                if hasattr(request, "dialogue_contract")
-                and isinstance(getattr(request, "dialogue_contract", None), dict)
-                else ""
-            )
-            or ""
-        ),
-    }
-
-    current_request = str(
+    provider_metadata = dict(getattr(provider_response, "metadata", {}) or {}) if provider_response else {}
+    base_current_request = str(
         payload_context.get("current_user_request")
         or getattr(request, "conversation", {}).get("current_request", "")
         or ""
     ).strip()
-
     semantic_request = str(
         payload_context.get("semantic_request")
         or intent.get("semantic_request")
@@ -1992,93 +2136,191 @@ async def registry_route_machine_request(
         or ""
     ).strip()
 
-    context = {
-        "machine_request": request,
-        "route_contract": route_contract,
-        "state": state,
-        "chat_id": chat_id,
-        **_dialogue_transport_context({
-            "machine_request": request,
-            "dialogue_contract": getattr(request, "conversation", {}).get("dialogue_contract", {}) if isinstance(getattr(request, "conversation", {}), dict) else {},
-            "user_id": user_id,
-            "flow_id": getattr(request, "flow_id", ""),
-            "conversation_id": getattr(request, "conversation_id", ""),
-            "dialogue_development": getattr(request, "conversation", {}).get("dialogue_development", {}) if isinstance(getattr(request, "conversation", {}), dict) else {},
-        }),
-        "semantic": semantic,
-        "current_user_request": current_request,
-        "semantic_request": semantic_request,
-        "dialogue_contract": deepcopy(
-            getattr(request, "conversation", {}).get("dialogue_contract", {})
-            if isinstance(getattr(request, "conversation", {}), dict)
-            else {}
-        ),
-        "dialogue_vector": deepcopy(
-            getattr(request, "conversation", {}).get("dialogue_vector", {})
-            if isinstance(getattr(request, "conversation", {}), dict)
-            else {}
-        ),
-        "visual_context": deepcopy(getattr(request, "visual_context", {}) or {}),
-        "provider_metadata": deepcopy(provider_metadata),
-        "image_generation_spec": deepcopy(spec) if isinstance(spec, dict) else None,
-        "route_authority": "INTERPRETATION",
-        "route_stage": "C_ARTIFACT→ROOM_REGISTER→ROOM",
-        "memory": deepcopy(getattr(request, "memory", {}) or {}),
-        "conversation": deepcopy(getattr(request, "conversation", {}) or {}),
-    }
+    results = []
+    routed_names = []
+    route_errors = []
 
     async def _run(room_chat_id, coro):
-        """Adapter for Room callbacks: the room supplies its canonical chat_id."""
         effective_chat_id = room_chat_id if room_chat_id is not None else chat_id
         if run is not None:
             return await run(effective_chat_id, coro)
         return await coro
 
-    try:
-        if not room.can_handle(current_request, context):
-            response = MachineResponse()
-            response.metadata.update({
-                "room_route_status": "rejected_by_room",
-                "room_route": f"rooms_registry.{target_room}",
-                "artifact_route": "C_ARTIFACT_CONTRACT",
-            })
-            return response
-
-        result = await room.handle(
-            user_id,
-            current_request,
-            context,
-            _run,
-        )
-        response = registry_parent_dispatch(
-            request,
-            [result],
-        )
-        response.metadata = dict(getattr(response, "metadata", {}) or {})
-        response.metadata.update({
-            "room_route_status": "completed",
-            "room_route": f"rooms_registry.{target_room}",
-            "room_name": getattr(room, "name", target_room),
-            "artifact_route": "C_ARTIFACT_CONTRACT",
-            "route_contract_stage": getattr(
-                getattr(route_contract, "transport", None),
-                "pipeline_stage",
-                "artifact_route",
+    for target_room in targets:
+        room = next(
+            (
+                candidate for candidate in ROOMS
+                if str(getattr(candidate, "name", "")).strip().lower() == target_room
             ),
-            "semantic_authority": "INTERPRETATION",
-            "provider_calls_added": 0,
-        })
-        return response
+            None,
+        )
+        if room is None:
+            route_errors.append(f"missing_room:{target_room}")
+            continue
 
-    except Exception as exc:
-        response = MachineResponse()
-        response.metadata.update({
-            "room_route_status": "failed",
-            "room_route": f"rooms_registry.{target_room}",
-            "artifact_route": "C_ARTIFACT_CONTRACT",
-            "room_error": str(exc),
-        })
-        return response
+        kind = {
+            "image_generate": "image",
+            "image_edit": "image",
+            "gallery": "gallery",
+        }.get(target_room, target_room)
+        provider_block = _provider_structured_block(provider_response, kind)
+
+        block_payload = provider_block.get("payload") if isinstance(provider_block, dict) else None
+        if not isinstance(block_payload, dict):
+            block_payload = {}
+
+        semantic = {
+            "room": target_room,
+            "representation": kind,
+            "operation": str(intent.get("operation") or "").lower(),
+            "goal": str(intent.get("goal") or "").lower(),
+            "object": str(intent.get("object") or ""),
+            "topic": str(
+                intent.get("topic")
+                or (
+                    (getattr(request, "dialogue_contract", {}) or {}).get("canonical_topic")
+                    if isinstance(getattr(request, "dialogue_contract", {}), dict)
+                    else ""
+                )
+                or ""
+            ),
+            "renderers": [kind],
+            "representations": [kind],
+            "route_authorized": True,
+        }
+
+        context = {
+            "machine_request": request,
+            "route_contract": route_contract,
+            "state": state,
+            "chat_id": chat_id,
+            **_dialogue_transport_context({
+                "machine_request": request,
+                "dialogue_contract": (
+                    getattr(request, "conversation", {}).get("dialogue_contract", {})
+                    if isinstance(getattr(request, "conversation", {}), dict) else {}
+                ),
+                "user_id": user_id,
+                "flow_id": getattr(request, "flow_id", ""),
+                "conversation_id": getattr(request, "conversation_id", ""),
+                "dialogue_development": (
+                    getattr(request, "conversation", {}).get("dialogue_development", {})
+                    if isinstance(getattr(request, "conversation", {}), dict) else {}
+                ),
+            }),
+            "semantic": semantic,
+            "current_user_request": base_current_request,
+            "semantic_request": semantic_request,
+            "dialogue_contract": deepcopy(
+                getattr(request, "conversation", {}).get("dialogue_contract", {})
+                if isinstance(getattr(request, "conversation", {}), dict) else {}
+            ),
+            "dialogue_vector": deepcopy(
+                getattr(request, "conversation", {}).get("dialogue_vector", {})
+                if isinstance(getattr(request, "conversation", {}), dict) else {}
+            ),
+            "visual_context": deepcopy(getattr(request, "visual_context", {}) or {}),
+            "provider_metadata": deepcopy(provider_metadata),
+            "route_authority": "INTERPRETATION",
+            "route_stage": "C_ARTIFACT→ROOM_REGISTER→ROOM",
+            "memory": deepcopy(getattr(request, "memory", {}) or {}),
+            "conversation": deepcopy(getattr(request, "conversation", {}) or {}),
+            "scene_id": f"{getattr(request, 'request_id', '')}:scene",
+            "turn_id": str((state.get("april_turn_id") or 0) + 1),
+            "flow_id": str(getattr(request, "request_id", "") or ""),
+            "topic_group": str(intent.get("object") or intent.get("type") or ""),
+            "continuation": bool(
+                (getattr(request, "dialogue_contract", {}) or {}).get("continuation")
+                if isinstance(getattr(request, "dialogue_contract", {}), dict)
+                else False
+            ),
+            "block_id": provider_block.get("block_id") if isinstance(provider_block, dict) else "",
+            "render_id": provider_block.get("render_id") if isinstance(provider_block, dict) else "",
+            "payload": deepcopy(block_payload),
+            "structured_payload": deepcopy(block_payload),
+            "artifact_payload": deepcopy(block_payload),
+            f"{kind}_payload": deepcopy(block_payload),
+            "scene_blueprint": deepcopy(
+                getattr(request, "conversation", {}).get("scene_blueprint", {})
+                if isinstance(getattr(request, "conversation", {}), dict) else {}
+            ),
+            "goal": str(intent.get("goal") or ""),
+            "purpose": str(intent.get("goal") or ""),
+        }
+
+        if kind == "gallery":
+            images = block_payload.get("images") or block_payload.get("gallery") or block_payload.get("items") or []
+            context["images"] = deepcopy(images) if isinstance(images, list) else []
+            context["captions"] = deepcopy(block_payload.get("captions") or [])
+        elif kind == "link":
+            context["url"] = str(block_payload.get("url") or block_payload.get("href") or "")
+            context["title"] = str(block_payload.get("title") or "")
+            context["description"] = str(block_payload.get("description") or "")
+        elif kind == "formula":
+            context["formula"] = str(
+                block_payload.get("formula")
+                or block_payload.get("latex")
+                or block_payload.get("equation")
+                or block_payload.get("expression")
+                or block_payload.get("content")
+                or ""
+            )
+        elif kind == "code":
+            context["code"] = str(
+                block_payload.get("code")
+                or block_payload.get("source")
+                or block_payload.get("content")
+                or ""
+            )
+            context["language"] = str(block_payload.get("language") or "")
+        elif kind == "diagram":
+            context["diagram_payload"] = deepcopy(block_payload)
+
+        try:
+            # This is already an authorized route. Calling lexical can_handle()
+            # here would re-interpret the request and can silently reject a valid
+            # structured block. The register, not the room, owns dispatch truth.
+            result = await room.handle(
+                user_id,
+                base_current_request,
+                context,
+                _run,
+            )
+            if result is None:
+                route_errors.append(f"empty_result:{target_room}")
+                continue
+            results.append(result)
+            routed_names.append(target_room)
+        except Exception as exc:
+            route_errors.append(f"{target_room}:{exc}")
+
+    response = registry_parent_dispatch(request, results)
+
+    # Convert every C-room artifact into a canonical structured scene block.
+    artifact_blocks = _registry_artifact_render_blocks(response)
+    existing_blocks = list(getattr(response, "render_blocks", []) or [])
+    if artifact_blocks:
+        response.render_blocks = existing_blocks + artifact_blocks
+
+    response.metadata = dict(getattr(response, "metadata", {}) or {})
+    response.metadata.update({
+        "room_route_status": "completed" if routed_names and not route_errors else ("partial" if routed_names else "failed"),
+        "room_routes": [f"rooms_registry.{name}" for name in routed_names],
+        "room_names": routed_names,
+        "artifact_route": "C_ARTIFACT_CONTRACT",
+        "route_contract_stage": getattr(
+            getattr(route_contract, "transport", None),
+            "pipeline_stage",
+            "artifact_route",
+        ),
+        "canonical_renderer_route": "INTERPRETATION→C_ARTIFACT→ROOM_REGISTER→C_ROOM→C_ARTIFACT→SCENE_CONTRACT→WEB",
+        "semantic_authority": "INTERPRETATION",
+        "provider_calls_added": 0,
+        "room_route_errors": route_errors,
+        "structured_artifact_count": len(getattr(response, "artifacts", []) or []),
+        "structured_render_block_count": len(getattr(response, "render_blocks", []) or []),
+    })
+    return response
 
 
 def registry_accept_request(request: MachineRequest)->MachineRequest:
@@ -2131,23 +2373,9 @@ def registry_collect_responses(responses):
             except Exception:
                 pass
 
-    # If the registry has a text answer but no blocks, provide a plain text
-    # block so the executor/web chain has a stable signal to render.
-    if _registry_is_text(getattr(mr, "answer", None)) and not list(getattr(mr, "render_blocks", []) or []):
-        try:
-            mr.render_blocks = [{
-                "type": "text",
-                "content": getattr(mr, "answer", ""),
-                "signal": "TEXT",
-                "source_type": "text",
-                "renderer": "TextBlock",
-                "viewer": "TextBlock",
-                "label": "text",
-                "priority": 0,
-            }]
-        except Exception:
-            pass
-
+    # Room Register never synthesizes a fallback render block. Text remains the
+    # Provider/SceneContract responsibility; C-room artifacts become structured
+    # blocks through _registry_artifact_render_blocks().
     return mr
 
 def registry_export_contract(response: MachineResponse):
@@ -2309,22 +2537,8 @@ def registry_validate_response(response: MachineResponse):
             except Exception:
                 pass
 
-    # Ensure a plain text render block exists whenever a canonical answer exists.
-    if _registry_is_text(getattr(response, "answer", None)) and not list(getattr(response, "render_blocks", []) or []):
-        try:
-            response.render_blocks = [{
-                "type": "text",
-                "content": getattr(response, "answer", ""),
-                "signal": "TEXT",
-                "source_type": "text",
-                "renderer": "TextBlock",
-                "viewer": "TextBlock",
-                "label": "text",
-                "priority": 0,
-            }]
-        except Exception:
-            pass
-
+    # Validation does not manufacture render blocks. A missing canonical scene
+    # is an upstream contract error, not a permission to switch to a fallback.
     response.contributions.setdefault(
         "registry_diagnostics",
         diagnostics
