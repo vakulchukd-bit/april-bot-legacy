@@ -213,9 +213,9 @@ PROVIDER_CONTEXT_PLAN_VERSION = "provider_context_plan_v2_dependency_first"
 SEMANTIC_ANCHOR_VERSION = "semantic_anchor_v1_topic_entity_direction_development"
 
 # Continuation resolution is staged. The live dialogue is authoritative; the
-# seven-day window is a recovery surface only after a live CONTINUE has failed.
+# 12-hour window is a recovery surface only after a live CONTINUE has failed.
 LIVE_CONTINUITY_SCORE_THRESHOLD = 0.24
-SEVEN_DAY_RECOVERY_SCORE_THRESHOLD = 0.30
+LIVE_WINDOW_RECOVERY_SCORE_THRESHOLD = 0.30
 SEMANTIC_ENTITY_TYPES = (
     "USER_IDENTITY", "PERSON", "STORY_ELEMENT", "OBJECT", "DOCUMENT",
     "LOCATION", "PRODUCT", "VEHICLE", "CONCEPT", "RESULT", "ARTIFACT",
@@ -1989,12 +1989,12 @@ class DialogueEnvironmentEngine:
       6. build a compact continuation-content plan for Provider.
 
     The authenticated conversation is the long-lived container.  Topic branches
-    inside it are independent semantic work items.  Historical 7-day memory is
+    inside it are independent semantic work items.  Historical 12-hour memory is
     retrieval evidence only and never becomes the active owner by itself.
     """
 
     VERSION = "dialogue_environment_v3_semantic_sync"
-    SEVEN_DAYS_SECONDS = 7 * 24 * 60 * 60
+    DIALOGUE_WINDOW_SECONDS = 12 * 60 * 60
 
     _CONFIRMATION = (
         "правильно", "верно", "точно", "ага", "именно", "да", "да,", "всё верно", "все верно",
@@ -2136,6 +2136,9 @@ class DialogueEnvironmentEngine:
         candidates: list[dict[str, Any]] = []
         seen: set[str] = set()
 
+        active_ctx = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
+        last_result = active_ctx.get("last_completed_result") if isinstance(active_ctx.get("last_completed_result"), dict) else {}
+
         def push(pair: dict[str, Any]) -> None:
             if not pair:
                 return
@@ -2165,6 +2168,18 @@ class DialogueEnvironmentEngine:
             seen.add(sig)
             candidates.append(pair)
 
+        # The canonical completed result is the newest USER↔APRIL antecedent.
+        if last_result:
+            push(cls._pair_from_item({
+                "user_request": last_result.get("user_request"),
+                "april_answer": last_result.get("assistant_answer") or last_result.get("april_answer"),
+                "created_at": last_result.get("created_at"),
+                "sequence_id": last_result.get("sequence_id") or active_ctx.get("sequence_id"),
+                "user_id": (active_ctx.get("scope") or {}).get("user_id") or scope.get("user_id"),
+                "conversation_id": (active_ctx.get("scope") or {}).get("conversation_id") or scope.get("conversation_id"),
+                "topic": last_result.get("topic") or active_ctx.get("topic"),
+            }, scope))
+
         # The active authenticated sequence is the hot semantic carrier. Prefer it
         # before any stale visual scene because visual state can lag one or more
         # dialogue turns during artifact rendering.
@@ -2178,7 +2193,13 @@ class DialogueEnvironmentEngine:
         # real latest semantic turn even when scene_state/current_visual_scene was
         # not refreshed after the last response.
         if isinstance(history, list):
+            now = time.time()
+            cutoff = now - DialogueEnvironmentEngine.DIALOGUE_WINDOW_SECONDS
             for item in reversed(history):
+                if isinstance(item, dict):
+                    stamp = cls._timestamp(item.get("created_at") or item.get("timestamp") or item.get("updated_at"))
+                    if stamp is not None and stamp < cutoff:
+                        continue
                 pair = cls._pair_from_item(item, scope)
                 if pair:
                     push(pair)
@@ -3172,7 +3193,7 @@ class DialogueEnvironmentEngine:
 
         # A visual reference is a dialogue dependency, not a fresh image topic.
         # Keep the authenticated sequence authoritative when the referenced turn
-        # is immediately available; otherwise fall back to 7-day RECALL.
+        # is immediately available; otherwise fall back to 12-hour RECALL.
         visual_reference = cls._visual_reference_query(text)
         current_task = cls._current_task_start(text, scope)
         explicit_new = cls._explicit_new_topic(text)
@@ -3284,7 +3305,7 @@ class DialogueEnvironmentEngine:
                 "IMMEDIATE_USER_APRIL_PAIR",
                 "ACTIVE_TOPIC_BRANCH",
                 "ACTIVE_TASK",
-                "EXPLICIT_7D_MEMORY_RECALL",
+                "EXPLICIT_WINDOW_RECALL",
                 "HISTORICAL_MEMORY_EVIDENCE",
             ],
         }
@@ -3414,7 +3435,7 @@ class CurrentTurnEngine(InterpretationEngineBase):
 class DialogueBranchIndexEngine(InterpretationEngineBase):
     """Build a compact, user-bound index of dialogue branches.
 
-    The index is derived from the durable seven-day dialogue records and the
+    The index is derived from the durable 12-hour dialogue records and the
     current hot sequence.  It is not a second memory store and it never becomes
     provider context by itself.  Its job is to answer one question before the
     rest of interpretation runs:
@@ -4799,7 +4820,7 @@ class ReferenceResolutionEngine(InterpretationEngineBase):
 class MemoryRelevanceEngine(InterpretationEngineBase):
     NAME = "MemoryRelevanceEngine"
     VERSION = "memory_relevance_v3"
-    SEVEN_DAYS_SECONDS = 7 * 24 * 60 * 60
+    DIALOGUE_WINDOW_SECONDS = 12 * 60 * 60
     MAX_ITEMS = 6
 
     def _timestamp(self, value: Any) -> float | None:
@@ -4835,7 +4856,7 @@ class MemoryRelevanceEngine(InterpretationEngineBase):
 
         relation_value = self._text(relation.get("relation")).upper()
         # Generic continuation is served by the immediate authenticated dialogue
-        # pair; only explicit RECALL may pull 7-day historical memory.
+        # pair; only explicit RECALL may pull 12-hour historical memory.
         allowed = relation_value == "RECALL"
 
         selected: list[dict[str, Any]] = []
@@ -4858,7 +4879,7 @@ class MemoryRelevanceEngine(InterpretationEngineBase):
                 continue
 
             stamp = self._timestamp(item.get("created_at") or item.get("timestamp") or item.get("updated_at"))
-            if stamp is not None and now - stamp > self.SEVEN_DAYS_SECONDS:
+            if stamp is not None and now - stamp > self.DIALOGUE_WINDOW_SECONDS:
                 continue
 
             item_sequence_id = self._text(item.get("sequence_id") or item.get("dialogue_sequence_id"))
@@ -4866,7 +4887,7 @@ class MemoryRelevanceEngine(InterpretationEngineBase):
             same_sequence = bool(current_sequence_id and item_sequence_id and item_sequence_id == current_sequence_id)
             same_scene = bool(current_scene_id and item_scene_id and item_scene_id == current_scene_id)
 
-            # Continuation must stay inside the authenticated active branch. A 7-day
+            # Continuation must stay inside the authenticated active branch. A 12-hour
             # record from the same user/conversation but another sequence is historical
             # evidence, not continuation context. Explicit RECALL may cross branches.
             if relation_value == "CONTINUE" and current_sequence_id and not (same_sequence or same_scene):
@@ -4913,7 +4934,7 @@ class MemoryRelevanceEngine(InterpretationEngineBase):
         return {
             "engine": self.NAME,
             "version": self.VERSION,
-            "seven_day_window_seconds": self.SEVEN_DAYS_SECONDS,
+            "dialogue_window_seconds": self.DIALOGUE_WINDOW_SECONDS,
             "allowed": bool(allowed),
             "selection_mode": "explicit_recall" if relation_value == "RECALL" else "same_authenticated_branch" if allowed else "excluded",
             "selected": selected,
@@ -5270,14 +5291,19 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
 
         records: list[dict[str, Any]] = []
         normalized = cls._normalize_history(history)
+        cutoff = time.time() - DialogueEnvironmentEngine.DIALOGUE_WINDOW_SECONDS
         for idx, pair in enumerate(normalized[-cls.MAX_INDEX_TURNS:]):
+            if isinstance(pair, dict):
+                stamp = cls._timestamp(pair.get("created_at") or pair.get("timestamp") or pair.get("updated_at"))
+                if stamp is not None and stamp < cutoff:
+                    continue
             records.append(
                 cls._record_from_pair(
                     pair, index=idx, source="dialogue_history", sequence_id=sequence_id, scene_id=scene_id
                 )
             )
 
-        # Same authenticated sequence records can exist in seven-day memory even
+        # Same authenticated sequence records can exist in 12-hour memory even
         # when the transport history contains only a short recent window. The
         # canonical state schema stores these records inside day_0..day_6 buckets,
         # so flatten the bucket lists explicitly instead of treating each day
@@ -5286,7 +5312,7 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
         memory_records: list[dict[str, Any]] = []
         if isinstance(memory_raw, dict):
             day_items = []
-            for day_index in range(7):
+            for day_index in range(1):
                 day = memory_raw.get(f"day_{day_index}")
                 if not isinstance(day, dict):
                     continue
@@ -5308,6 +5334,11 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
         # Preserve chronological order in the underlying timeline. Slider/recall
         # logic may request RECALL to see cross-branch records; normal CONTINUE
         # history remains branch-fenced by _branch_records below.
+        memory_records = [
+            item for item in memory_records
+            if not (cls._timestamp(item.get("created_at") or item.get("timestamp") or item.get("updated_at")) is not None
+                    and cls._timestamp(item.get("created_at") or item.get("timestamp") or item.get("updated_at")) < cutoff)
+        ]
         memory_records.sort(
             key=lambda item: (
                 float(item.get("created_at") or item.get("timestamp") or 0.0),
@@ -5675,7 +5706,7 @@ class DialogueHistorySearchEngine(InterpretationEngineBase):
             "carry_forward_result": carry_forward,
             "history_context_required": needs_history,
             "same_authenticated_branch_first": relation_value == "CONTINUE",
-            "seven_day_cross_branch_allowed": relation_value == "RECALL",
+            "window_cross_branch_allowed": relation_value == "RECALL",
             # Cross-branch recovery is decided by InterpretationOrchestrator,
             # never by this low-level history search.  This engine must not read
             # an as-yet-uncreated local ``history_search`` variable.
@@ -5707,8 +5738,8 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
 
     The slider is not a second dialogue brain:
       * LIVE CONTINUE scans only the active authenticated sequence.
-      * SEVEN_DAY is a recovery stage entered only after LIVE CONTINUE fails.
-      * Explicit RECALL may use the seven-day stage directly.
+      * LIVE_WINDOW is a recovery stage entered only after LIVE CONTINUE fails.
+      * Explicit RECALL may use the 12-hour stage directly.
       * Every candidate is measured by the same QuantumInterpretationEngine.
       * The first sufficiently related candidate in the active scan direction
         becomes evidence; it never owns routing or reclassifies the turn by itself.
@@ -5857,8 +5888,8 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
 
         LIVE:
             only the authenticated active sequence is inspected.
-        SEVEN_DAY:
-            the seven-day timeline may be inspected only after Interpretation has
+        LIVE_WINDOW:
+            the 12-hour timeline may be inspected only after Interpretation has
             declared a live CONTINUE unresolved and explicitly escalated here.
 
         The slider is evidence for Interpretation. It never decides that a new
@@ -5867,7 +5898,7 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
         relation_value = self._text(relation or "NEW").upper()
         query = self._text(text)
         stage = self._text(search_stage or "LIVE").upper()
-        if stage not in {"LIVE", "SEVEN_DAY"}:
+        if stage not in {"LIVE", "LIVE_WINDOW"}:
             stage = "LIVE"
 
         enabled = bool(query) and (
@@ -5888,7 +5919,7 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
             "reason": "new_vector" if relation_value == "NEW" else "no_match",
             "selection_mode": "disabled",
             "escalation_reason": escalation_reason,
-            "scan_scope": "active_sequence" if stage == "LIVE" else "seven_day",
+            "scan_scope": "active_sequence" if stage == "LIVE" else "live_window",
             "decision_owner": "INTERPRETATION",
             "evidence_only": True,
         }
@@ -6021,8 +6052,8 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
             )
 
             threshold = (
-                SEVEN_DAY_RECOVERY_SCORE_THRESHOLD
-                if stage == "SEVEN_DAY"
+                LIVE_WINDOW_RECOVERY_SCORE_THRESHOLD
+                if stage == "LIVE_WINDOW"
                 else max(LIVE_CONTINUITY_SCORE_THRESHOLD, self.CONTINUE_THRESHOLD)
             )
             if score < threshold:
@@ -6036,7 +6067,7 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
             })
 
         if not candidates:
-            result["reason"] = "live_no_match" if stage == "LIVE" else "seven_day_no_match"
+            result["reason"] = "live_no_match" if stage == "LIVE" else "live_window_no_match"
             result["scanned"] = len(ordered)
             result["selection_mode"] = "live_no_match" if stage == "LIVE" else "enabled_no_match"
             return result
@@ -6073,7 +6104,7 @@ class DialogueMemorySliderEngine(InterpretationEngineBase):
             "selected_memory_index": primary_record.get("index", primary["position"]),
             "selected_memory_record": deepcopy(primary_record),
             "selected_memory_operand": primary_operand,
-            "reason": "live_match" if stage == "LIVE" else "seven_day_match",
+            "reason": "live_match" if stage == "LIVE" else "live_window_match",
             "selection_mode": "live_dialogue_slider" if stage == "LIVE" else "dialogue_memory_slider_recovery",
             "scan_order": "latest_first",
             "stop_position": primary["position"],
@@ -7266,7 +7297,7 @@ class CanonicalizationEngine(InterpretationEngineBase):
                 "allowed": bool(arbitration.get("use_memory")),
                 "selected": list(arbitration.get("memory_items") or []),
                 "historical_memory_is_evidence_only": True,
-                "seven_day_window_seconds": memory.get("seven_day_window_seconds"),
+                "dialogue_window_seconds": memory.get("dialogue_window_seconds"),
             },
             "knowledge_source": knowledge,
             "representation": representation,
@@ -7662,7 +7693,7 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
                 add(optional, "BRANCH_MEMORY_EVIDENCE", branch_memory, 0.62, "same_sequence_support_only", False, max_depth=4, max_items=2, max_keys=7)
 
             excluded.extend([
-                {"key": "UNRELATED_7D_MEMORY", "reason": "continuation_uses_live_branch_first"},
+                {"key": "UNRELATED_WINDOW_MEMORY", "reason": "continuation_uses_live_branch_first"},
                 {"key": "OTHER_TOPIC_BRANCHES", "reason": "current_branch_is_authoritative"},
                 {"key": "STALE_GLOBAL_ENTITY", "reason": "entity must resolve from current branch"},
                 {"key": "FULL_HISTORY", "reason": "history_search_selects_relevant_evidence_only"},
@@ -7686,7 +7717,7 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
                 "query_kind": history_search.get("query_kind"),
                 "authenticated_scope": history_search.get("authenticated_scope") or {},
             }
-            add(required, "MEMORY_RECALL", recall_packet, 0.99, "explicit_history_or_7d_recall", True, max_depth=4, max_items=6, max_keys=10)
+            add(required, "MEMORY_RECALL", recall_packet, 0.99, "explicit_history_within_live_window", True, max_depth=4, max_items=6, max_keys=10)
             add(optional, "RECALL_RESPONSE_GUIDANCE", {
                 "use_memory_as_evidence": True,
                 "state_only_what_is_recalled": True,
@@ -7697,7 +7728,7 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
             # Old branch context can be useful only insofar as the memory engine
             # selected it for this explicit recall.
             excluded.extend([
-                {"key": "UNSELECTED_7D_MEMORY", "reason": "not_relevant_to_explicit_recall"},
+                {"key": "UNSELECTED_12H_MEMORY", "reason": "not_relevant_to_explicit_recall"},
                 {"key": "FULL_HISTORY", "reason": "memory_engine_selected_evidence_only"},
                 {"key": "CURRENT_UNRELATED_TASK", "reason": "recall_requested"},
             ])
@@ -7708,7 +7739,7 @@ class ProviderContextPlanEngine(InterpretationEngineBase):
                 {"key": "PREVIOUS_APRIL_TURN", "reason": "new_topic"},
                 {"key": "ACTIVE_SEQUENCE_DIGEST", "reason": "new_topic"},
                 {"key": "RELEVANT_MEMORY", "reason": "new_topic_memory_fence"},
-                {"key": "SEVEN_DAY_MEMORY", "reason": "new_topic_memory_fence"},
+                {"key": "LIVE_WINDOW_MEMORY", "reason": "new_topic_memory_fence"},
                 {"key": "HISTORICAL_MEMORY", "reason": "new_topic_memory_fence"},
                 {"key": "STALE_VISUAL_STATE", "reason": "no_artifact_dependency"},
                 {"key": "STALE_ENTITY", "reason": "current_turn_entity_only"},
@@ -8164,7 +8195,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
     ) -> dict[str, Any]:
         """Decide whether CONTINUE is explainable by the live dialogue alone.
 
-        The gate is intentionally before seven-day retrieval. A historical search is
+        The gate is intentionally before 12-hour retrieval. A historical search is
         justified only when the live branch cannot explain the current turn.
         """
         rel = cls._text(relation.get("relation") or "NEW").upper()
@@ -8179,7 +8210,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
             return {
                 "relation": rel,
                 "live_supported": False,
-                "escalate_to_7d": False,
+                "escalate_to_historical": False,
                 "reason": "not_continue",
                 "decision_owner": "INTERPRETATION",
             }
@@ -8272,7 +8303,8 @@ class InterpretationOrchestrator(InterpretationEngineBase):
         return {
             "relation": rel,
             "live_supported": live_supported,
-            "escalate_to_7d": suspicious_continue,
+            "escalate_to_historical": False,
+            "escalate_to_historical": False,
             "reason": (
                 "task_handoff"
                 if task_handoff else
@@ -8301,7 +8333,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
                 "active_goal": round(goal_score, 6),
             },
             "decision_owner": "INTERPRETATION",
-            "historical_memory_policy": "BLOCKED_UNTIL_LIVE_MISS",
+            "historical_memory_policy": "BLOCKED_OUTSIDE_LIVE_WINDOW",
         }
 
     def run(
@@ -8391,8 +8423,8 @@ class InterpretationOrchestrator(InterpretationEngineBase):
         # STAGED CONTINUATION RESOLUTION
         # ------------------------------------------------------------------
         # 1) CONTINUE -> inspect only the live authenticated sequence.
-        # 2) If live evidence cannot explain the turn -> escalate to 7-day memory.
-        # 3) If 7-day memory also fails -> Interpretation is allowed to reclassify
+        # 2) If live evidence cannot explain the turn -> escalate to 12-hour memory.
+        # 3) If 12-hour memory also fails -> Interpretation is allowed to reclassify
         #    the turn as independent/current-turn-only.
         live_gate = self._live_continuity_gate(
             text,
@@ -8429,12 +8461,9 @@ class InterpretationOrchestrator(InterpretationEngineBase):
         )
 
         recovery_attempted = False
-        if (
-            self._text(relation.get("relation") or "NEW").upper() == "CONTINUE"
-            and live_gate.get("escalate_to_7d")
-        ):
+        if False:
             recovery_attempted = True
-            live_gate["historical_memory_policy"] = "ALLOW_SEVEN_DAY_RECOVERY"
+            live_gate["historical_memory_policy"] = "BLOCKED_OUTSIDE_LIVE_WINDOW"
             state["continuity_resolution"] = deepcopy(live_gate)
             memory_slider = self.memory_slider.scan(
                 text,
@@ -8446,7 +8475,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
                 active_entity="",
                 active_goal=self._text(task.get("goal")),
                 task=task,
-                search_stage="SEVEN_DAY",
+                search_stage="LIVE_WINDOW",
                 escalation_reason=live_gate.get("reason") or "live_context_mismatch",
             )
 
@@ -8474,7 +8503,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
                         "continuation": True,
                         "reference_to_previous": True,
                         "turn_relation": "RESUME_BRANCH",
-                        "context_dependency": "seven_day_branch_recovery",
+                        "context_dependency": "live_window_branch_recovery",
                         "previous_user_turn": self._text(recovered.get("user_request")),
                         "previous_april_turn": self._text(recovered.get("april_answer")),
                         "target_sequence_id": recovered_sequence,
@@ -8505,7 +8534,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
                     relation_env.update({
                         "relation": "CONTINUE",
                         "turn_relation": "RESUME_BRANCH",
-                        "context_dependency": "seven_day_branch_recovery",
+                        "context_dependency": "live_window_branch_recovery",
                         "current_topic": self._text(recovered.get("topic")),
                         "active_entity": self._text(recovered.get("entity")),
                         "target_sequence_id": recovered_sequence,
@@ -8521,7 +8550,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
                     live_gate["selected_sequence_id"] = recovered_sequence
                     live_gate["escalation_result"] = "RECOVERED_SAME_SEQUENCE"
             else:
-                # Nothing in the seven-day window explains the current request.
+                # Nothing in the 12-hour window explains the current request.
                 # Give Interpretation ownership back to the current turn and fence
                 # all stale task/history state from the provider.
                 relation = deepcopy(relation)
@@ -8628,7 +8657,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
                 active_entity=self._text(entity.get("active_entity")),
                 active_goal=self._text(task.get("goal")),
                 task=task,
-                search_stage="SEVEN_DAY",
+                search_stage="LIVE_WINDOW",
                 escalation_reason="explicit_recall",
             )
             history_search["memory_slider"] = memory_slider
@@ -8646,7 +8675,7 @@ class InterpretationOrchestrator(InterpretationEngineBase):
                 else "HISTORY_LOOKUP"
             )
             history_search["provider_instruction"] = (
-                "Use the selected chronological seven-day dialogue operand to resolve "
+                "Use the selected chronological 12-hour dialogue operand to resolve "
                 "the current continuation before answering. Keep the current user "
                 "request authoritative and do not invent missing historical details."
             )
@@ -10989,7 +11018,7 @@ class QuantumInterpretationEngine:
             workspace["fenced_historical_entities"] = list(dialogue_environment.get("fenced_historical_entities") or [])
             workspace["authority_chain"] = list(dialogue_environment.get("authority_chain") or workspace.get("authority_chain") or [])
 
-            # New/continuing turns must not inherit semantically unrelated 7-day
+            # New/continuing turns must not inherit semantically unrelated 12-hour
             # memory. Recall is the only mode that is allowed to rank historical
             # topics into provider context.
             optional_context = list(workspace.get("optional_context") or [])
@@ -10997,7 +11026,7 @@ class QuantumInterpretationEngine:
             if not workspace["historical_memory_allowed"] and not slider_memory_allowed:
                 optional_context = [
                     entry for entry in optional_context
-                    if not isinstance(entry, dict) or entry.get("key") not in {"RELEVANT_MEMORY", "SEVEN_DAY_DIALOGUE_MEMORY", "HISTORICAL_MEMORY", "CONTINUATION_MEMORY_OPERAND"}
+                    if not isinstance(entry, dict) or entry.get("key") not in {"RELEVANT_MEMORY", "LIVE_WINDOW_DIALOGUE_MEMORY", "HISTORICAL_MEMORY", "CONTINUATION_MEMORY_OPERAND"}
                 ]
                 excluded_context = list(workspace.get("excluded_context") or [])
                 excluded_context.append({
@@ -11010,7 +11039,7 @@ class QuantumInterpretationEngine:
                 # operand is already a protected, semantically resolved dependency.
                 optional_context = [
                     entry for entry in optional_context
-                    if not isinstance(entry, dict) or entry.get("key") not in {"RELEVANT_MEMORY", "SEVEN_DAY_DIALOGUE_MEMORY", "HISTORICAL_MEMORY"}
+                    if not isinstance(entry, dict) or entry.get("key") not in {"RELEVANT_MEMORY", "LIVE_WINDOW_DIALOGUE_MEMORY", "HISTORICAL_MEMORY"}
                 ]
             workspace["optional_context"] = optional_context
             workspace["selected_memory"] = (
@@ -11024,12 +11053,12 @@ class QuantumInterpretationEngine:
             if not workspace["historical_memory_allowed"] and not slider_memory_allowed:
                 provider_sections = [
                     entry for entry in provider_sections
-                    if not isinstance(entry, dict) or entry.get("name") not in {"RELEVANT_MEMORY", "SEVEN_DAY_DIALOGUE_MEMORY", "HISTORICAL_MEMORY", "CONTINUATION_MEMORY_OPERAND"}
+                    if not isinstance(entry, dict) or entry.get("name") not in {"RELEVANT_MEMORY", "LIVE_WINDOW_DIALOGUE_MEMORY", "HISTORICAL_MEMORY", "CONTINUATION_MEMORY_OPERAND"}
                 ]
             elif slider_memory_allowed:
                 provider_sections = [
                     entry for entry in provider_sections
-                    if not isinstance(entry, dict) or entry.get("name") not in {"RELEVANT_MEMORY", "SEVEN_DAY_DIALOGUE_MEMORY", "HISTORICAL_MEMORY"}
+                    if not isinstance(entry, dict) or entry.get("name") not in {"RELEVANT_MEMORY", "LIVE_WINDOW_DIALOGUE_MEMORY", "HISTORICAL_MEMORY"}
                 ]
             workspace["provider_sections"] = provider_sections
 
@@ -11652,21 +11681,21 @@ class DialogCognitiveWorkspace:
         else:
             values = []
 
-        for key in ("active_sequence_turns", "relevant_7d_turns", "seven_day_memory_turns"):
+        for key in ("active_sequence_turns", "relevant_window_turns", "window_memory_turns"):
             value = state.get(key) if isinstance(state, dict) else None
             if isinstance(value, list):
                 values.extend(value)
         values.extend(history[-8:])
 
         now = time.time()
-        cutoff = now - DialogueEnvironmentEngine.SEVEN_DAYS_SECONDS
+        cutoff = now - DialogueEnvironmentEngine.DIALOGUE_WINDOW_SECONDS
         seen: set[str] = set()
         for item in reversed(values[-self.MAX_MEMORY_CANDIDATES * 2:]):
             if isinstance(item, dict):
                 stamp = DialogueEnvironmentEngine._timestamp(
                     item.get("created_at") or item.get("timestamp") or item.get("updated_at")
                 )
-                # The 7-day memory contract is enforced when a source exposes a
+                # The 12-hour memory contract is enforced when a source exposes a
                 # timestamp. Entries without a timestamp are treated as transient
                 # active-history evidence, not as historical memory.
                 is_historical_store = bool(item.get("sequence_id") or item.get("memory_kind") or item.get("created_at"))
@@ -13296,6 +13325,13 @@ def _df_normalize_subject(value: str) -> str:
 
 
 def _df_extract_previous(history: list[Any], state: dict[str, Any]) -> tuple[str, str]:
+    active_context = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
+    last_result = active_context.get("last_completed_result") if isinstance(active_context.get("last_completed_result"), dict) else {}
+    if last_result:
+        return (
+            _df_text(last_result.get("user_request") or last_result.get("current_request"), 1200),
+            _df_text(last_result.get("assistant_answer") or last_result.get("april_answer"), 2200),
+        )
     seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
     prev_user = _df_text(seq.get("last_user_request") or state.get("last_user_turn"))
     prev_april = _df_text(seq.get("last_april_answer") or state.get("last_april_turn"))
@@ -13345,10 +13381,11 @@ def _df_active_sequence_digest(
     )
 
     rows: list[dict[str, Any]] = []
+    active_context = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
     timeline = state.get("memory_timeline")
     timeline = timeline if isinstance(timeline, dict) else {}
 
-    for day_index in range(7):
+    for day_index in range(1):
         day = timeline.get(f"day_{day_index}")
         if not isinstance(day, dict):
             continue
@@ -13400,6 +13437,49 @@ def _df_active_sequence_digest(
                 "relation": _df_text(raw.get("dialogue_relation") or "", 40).upper(),
             })
 
+    # The canonical result ledger is the authoritative completed dialogue trail.
+    # It is merged with the current window only when it belongs to this user/conversation.
+    scope = state.get("memory_scope") if isinstance(state.get("memory_scope"), dict) else {}
+    completed = active_context.get("completed_results") if isinstance(active_context.get("completed_results"), list) else []
+    for raw in completed:
+        if not isinstance(raw, dict):
+            continue
+        raw_user = _df_text(raw.get("user_id"), 120)
+        raw_conv = _df_text(raw.get("conversation_id"), 160)
+        if scope.get("user_id") and raw_user and raw_user != _df_text(scope.get("user_id"), 120):
+            continue
+        if scope.get("conversation_id") and raw_conv and raw_conv != _df_text(scope.get("conversation_id"), 160):
+            continue
+        raw_sid = _df_text(raw.get("sequence_id"), 120)
+        if sid and raw_sid and raw_sid != sid:
+            continue
+        try:
+            turn_index = int(raw.get("sequence_turn_index") or raw.get("turn_id") or 0)
+        except Exception:
+            turn_index = 0
+        try:
+            created_at = float(raw.get("created_at") or 0.0)
+        except Exception:
+            created_at = 0.0
+        rows.append({
+            "sequence_turn_index": turn_index,
+            "created_at": created_at,
+            "topic": _df_text(raw.get("topic") or active_context.get("topic"), 220),
+            "user": _df_text(raw.get("user_request") or raw.get("current_request"), 220),
+            "april": _df_text(raw.get("assistant_answer") or raw.get("april_answer"), 320),
+            "relation": _df_text(raw.get("relation") or raw.get("dialogue_relation") or "", 40).upper(),
+        })
+
+    # Deduplicate the merged ledger by sequence turn + text.
+    unique_rows = []
+    seen_rows = set()
+    for row in sorted(rows, key=lambda item: (item.get("sequence_turn_index", 0), item.get("created_at", 0.0))):
+        sig = (row.get("sequence_turn_index"), row.get("user"), row.get("april"))
+        if sig in seen_rows:
+            continue
+        seen_rows.add(sig)
+        unique_rows.append(row)
+    rows = unique_rows
     rows.sort(key=lambda item: (item["sequence_turn_index"], item["created_at"]))
 
     # Fallback to the durable sequence head if a legacy deployment has not yet
@@ -13425,7 +13505,8 @@ def _df_active_sequence_digest(
             topics.append(topic)
 
     root_topic = (
-        _df_text(seq.get("topic"), 220)
+        _df_text(active_context.get("topic"), 220)
+        or _df_text(seq.get("topic"), 220)
         or (topics[0] if topics else "")
     )
     last_user = _df_text(
@@ -13522,16 +13603,17 @@ def _df_is_self_contained_new_topic(
     if len(words) < 2 and "?" not in text and "？" not in text:
         return False
     # An active task protects terse answers, but it must not prevent an explicit,
-    # self-contained request to discuss a different subject.
-    if bool(_df_deictic.search(_df_low(text))):
-        return False
-
+    # self-contained request to discuss a different subject. Pronouns such as
+    # "его" inside a sentence that explicitly names a new subject are local
+    # references and must not suppress the topic switch.
     subject = _df_normalize_subject(
         _df_text(semantic.get("explicit_subject"), 220)
     )
     if not subject:
         subject = _df_normalize_subject(_df_extract_subject(text))
     if not subject:
+        return False
+    if bool(_df_deictic.search(_df_low(text))) and subject in {"это", "это", "он", "она", "они", "его", "ее", "её", "них", "такое"}:
         return False
 
     branch_text = " ".join([
@@ -13664,20 +13746,42 @@ def _df_task_probe(text: str, active_task: dict[str, Any], active_topic: str) ->
     game_topic = current_game_topic or "угадай" in _df_low(active_topic)
     donut_task = "пончик" in low or "пончики" in low
     answer_analysis = any(x in low for x in ("как ты угадал", "почему ты угадал", "правильный ответ", "твои вычисления", "формулу"))
-    active = bool(active_task.get("active") or active_task.get("kind") in {"game", "riddle", "question"} or game_topic)
+
+    # A user may redefine the operating rule of an already active dialogue without
+    # changing its subject. Treat explicit procedural language as a task definition
+    # so the rule becomes the new canonical objective rather than inheriting a stale
+    # task prompt from the previous turn.
+    task_definition = any(x in low for x in (
+        "при каждом", "каждый свой", "смотри, при", "условия", "правило",
+        "начиная с", "по алфавиту", "последовательно", "будешь ставить",
+        "должна ставить", "должен ставить", "на каждый ответ",
+    )) and len(_df_tokens(low)) >= 5
+
+    active = bool(
+        active_task.get("active")
+        or active_task.get("kind") in {"game", "riddle", "question"}
+        or game_topic
+        or task_definition
+    )
     handoff = game_topic and (donut_task or any(x in low for x in ("я загад", "задавай вопросы", "наводящие вопросы")))
     task_action = active and (
-        handoff or answer_analysis or any(x in low for x in ("угадать", "угадай", "отгадать", "ответь"))
+        handoff or answer_analysis or task_definition
+        or any(x in low for x in ("угадать", "угадай", "отгадать", "ответь"))
     )
     return {
         "active": active,
         "current_game_topic": current_game_topic,
-        "kind": _df_text(active_task.get("kind") or ("game" if game_topic else ""), 80).lower(),
+        "task_definition": task_definition,
+        "kind": _df_text(
+            "dialogue_task" if task_definition and not game_topic else active_task.get("kind") or ("game" if game_topic else ""),
+            80,
+        ).lower(),
         "role": _df_text(active_task.get("role") or ("april_guesses_user_object" if handoff else ""), 100),
         "handoff": handoff,
         "task_action": task_action,
         "answer_analysis": answer_analysis,
         "topic": "игра в угадайки" if game_topic else _df_text(active_task.get("topic"), 180),
+        "objective": _df_text(text, 1200) if task_definition else _df_text(active_task.get("objective"), 1200),
     }
 
 
@@ -13859,7 +13963,7 @@ def _df_understand(text: str, relation: str, turn_relation: str, active_topic: s
     }
 
 
-def _df_task_state(text: str, relation: str, task_probe: dict[str, Any], prior: dict[str, Any], topic: str, entity: str, sequence_id: str) -> dict[str, Any]:
+def _df_task_state(text: str, relation: str, task_probe: dict[str, Any], prior: dict[str, Any], topic: str, entity: str, sequence_id: str, active_context: dict[str, Any] | None = None) -> dict[str, Any]:
     if relation == "NEW" and not task_probe.get("active"):
         return {}
     # NEW creates an isolated branch. A previous branch task is never carried
@@ -13872,18 +13976,28 @@ def _df_task_state(text: str, relation: str, task_probe: dict[str, Any], prior: 
     )):
         return {}
 
-    task = deepcopy(prior) if isinstance(prior, dict) else {}
+    active_context = active_context if isinstance(active_context, dict) else {}
+    context_task = active_context.get("task") if isinstance(active_context.get("task"), dict) else {}
+    task = deepcopy(context_task or prior) if isinstance(context_task or prior, dict) else {}
+    if relation == "CONTINUE" and active_context.get("objective"):
+        task.setdefault("objective", _df_text(active_context.get("objective"), 1200))
+    if active_context.get("completed_results"):
+        task["completed_results"] = deepcopy(active_context.get("completed_results"))[-12:]
     if task_probe.get("active"):
         task.update({
             "active": True,
             "kind": task_probe.get("kind") or task.get("kind") or "game",
             "role": task_probe.get("role") or task.get("role") or "",
             "topic": task_probe.get("topic") or task.get("topic") or topic,
-            "goal": task.get("goal") or "answer",
+            "goal": "follow_user_rules" if task_probe.get("task_definition") else task.get("goal") or "answer",
             "phase": "awaiting_user_riddle" if task_probe.get("handoff") else task.get("phase") or "active",
             "awaiting_user": True,
             "sequence_id": sequence_id,
         })
+    if task_probe.get("task_definition"):
+        task["objective"] = _df_text(task_probe.get("objective") or text, 1200)
+        task["instruction"] = _df_text(text, 1200)
+        task["task_definition_at"] = time.time()
     return task
 
 
@@ -13944,6 +14058,7 @@ def _df_provider_plan(
     development: dict[str, Any],
     selected_memory: dict[str, Any],
     active_sequence_digest: dict[str, Any] | None = None,
+    active_dialogue_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Build the final Provider context after semantic understanding is complete.
@@ -13954,6 +14069,11 @@ def _df_provider_plan(
     active_sequence_digest = (
         active_sequence_digest
         if isinstance(active_sequence_digest, dict)
+        else {}
+    )
+    active_dialogue_context = (
+        active_dialogue_context
+        if isinstance(active_dialogue_context, dict)
         else {}
     )
     base = {
@@ -13995,7 +14115,7 @@ def _df_provider_plan(
         "excluded_context": [
             "FULL_HISTORY",
             "OTHER_TOPIC_BRANCHES",
-            "UNRELATED_7D_MEMORY",
+            "UNRELATED_WINDOW_MEMORY",
             "STALE_GLOBAL_ENTITY",
         ],
     }
@@ -14006,13 +14126,31 @@ def _df_provider_plan(
         base["required_context"].insert(
             0,
             {
-                "key": "ACTIVE_DIALOGUE_TRAJECTORY",
+                "key": "ACTIVE_DIALOGUE_CONTEXT",
                 "priority": 1.0,
-                "value": active_sequence_digest,
+                "value": {
+                    "objective": active_dialogue_context.get("objective"),
+                    "task": active_dialogue_context.get("task") or task,
+                    "intent": active_dialogue_context.get("intent"),
+                    "goal": active_dialogue_context.get("goal") or task.get("goal"),
+                    "topic": active_dialogue_context.get("topic"),
+                    "active_entity": active_dialogue_context.get("active_entity"),
+                    "completed_results": list(active_dialogue_context.get("completed_results") or [])[-12:],
+                    "last_completed_result": active_dialogue_context.get("last_completed_result") or {},
+                    "sequence_id": active_dialogue_context.get("sequence_id") or sequence_id,
+                },
             },
         )
         base["required_context"].insert(
             1,
+            {
+                "key": "ACTIVE_DIALOGUE_TRAJECTORY",
+                "priority": 0.999,
+                "value": active_sequence_digest,
+            },
+        )
+        base["required_context"].insert(
+            2,
             {
                 "key": "DIALOGUE_ANCHOR",
                 "priority": 0.995,
@@ -14028,7 +14166,7 @@ def _df_provider_plan(
         )
         if task:
             base["required_context"].insert(
-                2,
+                3,
                 {
                     "key": "ACTIVE_TASK",
                     "priority": 0.99,
@@ -14113,7 +14251,10 @@ def _df_interpret_live_turn(
     previous_user, previous_april = _df_extract_previous(history, state)
     active_topic = _df_topic_from_state(state)
     active_entity = _df_entity_from_state(state)
+    active_context = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
     prior_task = _df_active_task(state)
+    if isinstance(active_context.get("task"), dict) and active_context.get("task"):
+        prior_task = deepcopy(active_context.get("task"))
     active_seq_id = _df_text(seq.get("sequence_id"), 80)
     conversation_id = _df_text(
         state.get("conversation_id")
@@ -14193,16 +14334,14 @@ def _df_interpret_live_turn(
     # 4) Now resolve the dialogue relation from the contextual understanding.
     # ------------------------------------------------------------------
     relation, turn_relation = _df_resolve_relation(
-        current,
-        state,
-        previous_april,
-        active_topic,
-        active_entity,
-        task_probe,
-        dialogue_probe,
-        semantic=semantic,
-        sequence_digest=active_sequence_digest,
+        current, state, previous_april, active_topic, active_entity, task_probe, dialogue_probe,
+        semantic=semantic, sequence_digest=active_sequence_digest,
     )
+    if not explicit_recall and _df_is_self_contained_new_topic(
+        current, semantic, active_topic=active_topic, active_entity=active_entity,
+        task_probe=task_probe, sequence_digest=active_sequence_digest,
+    ):
+        relation, turn_relation = "NEW", "SELF_CONTAINED_NEW_SUBJECT"
 
     selected_branch: dict[str, Any] = {}
 
@@ -14337,6 +14476,7 @@ def _df_interpret_live_turn(
         semantic.get("topic") or active_topic,
         semantic.get("entity") or active_entity,
         sequence_id,
+        active_context,
     )
 
     development = _df_development(
@@ -14390,6 +14530,7 @@ def _df_interpret_live_turn(
         development,
         selected_memory,
         branch_digest_for_provider,
+        active_context,
     )
 
     branch_index = deepcopy(branches)
@@ -14671,7 +14812,7 @@ def _df_interpret_live_turn(
         "excluded_context": [
             "full_history",
             "other_topic_branches",
-            "unrelated_7d_memory",
+            "unrelated_window_memory",
             "stale_global_entity",
         ],
     }
