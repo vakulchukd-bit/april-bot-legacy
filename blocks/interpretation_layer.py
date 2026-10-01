@@ -2974,6 +2974,41 @@ class DialogueEnvironmentEngine:
             if cls._generic_dialogue_topic(previous_topic) or (previous_topic and topic_similarity < 0.16):
                 return cls._new_topic_context(text, scope)
 
+        # A standalone information question is a new TASK inside the same
+        # authenticated conversation sequence.  It must not be swallowed by an
+        # older task merely because the parent conversation is still alive.
+        # Question forms are self-contained even without a question mark (e.g.
+        # "Что ты умеешь").  Deictic/reference forms such as "что это" remain
+        # continuation candidates and therefore are excluded here.
+        question_heads = {
+            "что", "кто", "где", "какой", "какая", "какое", "какие",
+            "почему", "как", "когда", "зачем", "сколько", "чем", "чья",
+            "чей", "чьё", "чьи",
+        }
+        standalone_question = bool(
+            len(tokens) >= 3
+            and tokens
+            and tokens[0] in question_heads
+            and not deictic
+            and not confirmation
+            and not rejection
+            and semantic_overlap < 0.30
+            and not prior_question
+        )
+        if standalone_question:
+            result = cls._new_topic_context(text, scope)
+            result["turn_relation"] = "NEW_QUESTION"
+            result["context_dependency"] = "current_turn_only"
+            result["historical_memory_allowed"] = False
+            result["previous_user_turn"] = ""
+            result["previous_april_turn"] = ""
+            result["provider_instruction"] = (
+                "Answer the user's self-contained current question. Do not inherit the "
+                "previous task's object, answer, numbering counter or other task-local state. "
+                "Conversation-level rules may still be inherited by the authenticated sequence."
+            )
+            return result
+
         # A direct user-name disclosure belongs to the immediately preceding
         # identity exchange. Capture it before generic NEW-topic logic.
         identity_disclosure = cls._identity_disclosure(text, previous_user, previous_april)
