@@ -927,7 +927,7 @@ def _render_block_renderer(block_type: str) -> str:
     return {
         "text": "MessageTextBlock",
         "markdown": "MessageTextBlock",
-        "formula": "MessageTextBlock",
+        "formula": "FormulaRenderer",
         "table": "TableBlock",
         "graph": "GraphBlock",
         "diagram": "GalleryBlock",
@@ -1320,7 +1320,7 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
             fields.append(("DIALOGUE_STRATEGY", _compact_value(strategy, max_depth=3, max_items=8, max_keys=12)))
         if isinstance(analysis, dict) and analysis.get("active"):
             # Compact delta only: the provider needs enough prior-content knowledge
-            # to avoid repetition, not the entire seven-day ledger in prose.
+            # to avoid repetition, not the entire live dialogue ledger in prose.
             delta = {
                 "mode": analysis.get("mode"),
                 "intent": analysis.get("intent"),
@@ -1338,10 +1338,10 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
         if isinstance(dialogue_memory, dict):
             compact_memory = _compact_value(
                 {
-                    "window_days": dialogue_memory.get("window_days", 7),
+                    "window_hours": dialogue_memory.get("window_hours", 12),
                     "active_sequence": dialogue_memory.get("active_sequence"),
                     "active_sequence_turns": dialogue_memory.get("active_sequence_turns"),
-                    "relevant_7d_turns": dialogue_memory.get("relevant_7d_turns"),
+                    "relevant_window_turns": dialogue_memory.get("relevant_window_turns"),
                 },
                 max_depth=5,
                 max_items=5,
@@ -2191,8 +2191,8 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
                 if compact:
                     recent.append(compact)
             if recent:
-                optional.append(("seven_day_memory", _json_piece(
-                    "MEMORY_EVIDENCE", {"window_days": dialogue_memory.get("window_days", 7), "recent": recent},
+                optional.append(("dialogue_window_memory", _json_piece(
+                    "MEMORY_EVIDENCE", {"window_hours": dialogue_memory.get("window_hours", 12), "recent": recent},
                     depth=3, items=3, keys=4
                 )))
 
@@ -3953,6 +3953,8 @@ def provider_finalize_for_executor(contract: dict) -> dict:
 
     mr["answer"] = answer
     mr["content"] = answer
+    mr.setdefault("metadata", {})["post_provider_render_stage"] = "AFTER_PROVIDER"
+    mr.setdefault("metadata", {})["post_provider_render_authority"] = "EXECUTOR_SCENE_CONTRACT"
     response_text = normalize_response_text(mr.get("response") or answer)
     mr["response"] = _strip_image_technical_fallback(response_text) if image_generation_preview else response_text
     mr["content"] = _strip_image_technical_fallback(mr["content"]) if image_generation_preview else mr["content"]
