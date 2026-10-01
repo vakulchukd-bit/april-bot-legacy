@@ -767,15 +767,35 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
     if not isinstance(compact_dialogue, dict):
         compact_dialogue = {}
         compact["dialogue_contract"] = compact_dialogue
+    dialogue_relation = _safe_text(
+        raw_dialogue.get("relation")
+        or raw_dialogue.get("three_way_relation")
+        or "NEW"
+    ).upper()
+    dialogue_sequence_id = _safe_text(
+        raw_dialogue.get("sequence_id")
+        or raw_dialogue.get("target_sequence_id")
+    )
     task_state = (
         raw_dialogue.get("interactive_task_state")
         if isinstance(raw_dialogue.get("interactive_task_state"), dict)
         else raw_dialogue.get("open_task")
         if isinstance(raw_dialogue.get("open_task"), dict)
-        else raw.get("interactive_task_state")
-        if isinstance(raw.get("interactive_task_state"), dict)
         else {}
     )
+    if isinstance(task_state, dict) and task_state:
+        task_sequence_id = _safe_text(task_state.get("sequence_id") or task_state.get("active_sequence_id"))
+        task_owned = bool(
+            raw_dialogue.get("task_continuation")
+            or raw_dialogue.get("task_action")
+            or raw_dialogue.get("task_definition")
+        )
+        if dialogue_sequence_id and task_sequence_id and task_sequence_id != dialogue_sequence_id:
+            task_state = {}
+        elif dialogue_relation == "NEW" and not task_owned:
+            task_state = {}
+        elif dialogue_relation == "CONTINUE" and not task_owned:
+            task_state = {}
     if isinstance(task_state, dict) and task_state:
         task_state = _compact_value(task_state, max_depth=6, max_items=16, max_keys=20) or {}
         compact_dialogue["interactive_task_state"] = task_state
@@ -1348,7 +1368,7 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
                 max_keys=12,
             )
             if compact_memory:
-                fields.append(("SEVEN_DAY_DIALOGUE_MEMORY", compact_memory))
+                fields.append(("TWELVE_HOUR_DIALOGUE_MEMORY", compact_memory))
 
     if continuation and dialogue.get("previous_april_turn"):
         fields.append(("PREVIOUS_APRIL_TURN", dialogue.get("previous_april_turn")))
@@ -2024,10 +2044,24 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         if isinstance(dialogue.get("interactive_task_state"), dict)
         else dialogue.get("open_task")
         if isinstance(dialogue.get("open_task"), dict)
-        else payload.get("interactive_task_state")
-        if isinstance(payload.get("interactive_task_state"), dict)
         else {}
     )
+    task_sequence_id = _safe_text(task_state.get("sequence_id") or task_state.get("active_sequence_id")) if isinstance(task_state, dict) else ""
+    dialogue_sequence_id = _safe_text(
+        dialogue.get("sequence_id")
+        or dialogue.get("target_sequence_id")
+    )
+    task_owned = bool(
+        dialogue.get("task_continuation")
+        or dialogue.get("task_action")
+        or dialogue.get("task_definition")
+    )
+    if dialogue_sequence_id and task_sequence_id and task_sequence_id != dialogue_sequence_id:
+        task_state = {}
+    elif relation == "NEW" and not task_owned:
+        task_state = {}
+    elif relation == "CONTINUE" and not task_owned:
+        task_state = {}
     task_memory = (
         dialogue.get("task_memory")
         if isinstance(dialogue.get("task_memory"), dict)
