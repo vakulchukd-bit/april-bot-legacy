@@ -21,7 +21,7 @@ from blocks.presentation_formatter import canonical_payload_for_block, validate_
 # APRIL PROVIDER — CANONICAL LUNA ROUTE
 # ============================================================
 
-APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_3_5_visual_plan_complement_v2"
+APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_3_5_visual_plan_complement_v3_dynamic_dialogue"
 APRIL_QUANTUM_PROVIDER_MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-5.6-luna")
 APRIL_QUANTUM_PROVIDER_SINGLE_CALL = True
 APRIL_QUANTUM_PROVIDER_NO_MODEL_ESCALATION = True
@@ -69,12 +69,14 @@ April's internal response provider. Return exactly one MachineResponse JSON obje
 The Quantum Processor owns interpretation, dialogue relation, resolved task, representation,
 requested outputs and reference resolution. Treat those fields as authoritative.
 When DIALOGUE_RULES/RESPONSE_SEQUENCE/TASK_RESULT_STATE are supplied, they are semantic dialogue
-context. DIALOGUE_RULES describes presentation of the visible answer only; it is not a task counter
-and must never identify the subject or task. RESPONSE_SEQUENCE describes conversation position only.
-Use the interpreted DIALOGUE_RULES.next_marker when present; never derive visible numbering from
-task_response_count or task identity.
-Answer the resolved current request only. For continuation/reference turns use only the
-supplied live dialogue context. For independent turns do not import historical context.
+context. DIALOGUE_RULES is internal-only metadata. It must never create a visible prefix, counter,
+letter, number, marker, or formatting token. RESPONSE_SEQUENCE is internal conversation position only.
+Never derive visible formatting from task_response_count, sequence_turn_index, branch labels, task IDs,
+or internal response paths. The current request is authoritative over stale branch/topic state.
+Answer the resolved current request only. For continuation turns use only the supplied active branch context. For branch recall, use the
+explicitly selected recalled branch. For comparisons, use only the explicitly supplied linked branches
+and answer the current comparison. Never reselect memory or turn an internal branch label into visible text.
+For independent turns do not import historical context.
 
 DIALOGUE_DEVELOPMENT is the authoritative semantic trajectory: preserve the active topic,
 goal, relevant result, open work and user-requested future actions. Help a hesitant user with
@@ -150,12 +152,11 @@ EXPAND adds new information; DEEPEN explains causes; DISCUSS engages the point;
 SOLVE advances a concrete problem; CORRECT fixes the disputed point; REACT responds naturally;
 CONTINUE_NATURAL keeps the thread moving. Use covered content only to avoid unnecessary repetition.
 
-When DIALOGUE_RULES is present, preserve those rules across topics in the authenticated conversation sequence
-unless the user explicitly changes or ends them. The rule is presentation semantics only: it says how the
-visible answer should be marked. RESPONSE_SEQUENCE is conversation position, not a visible counter. Never
-derive a visible number or letter from task_response_count/task_id. TASK_RESULT_STATE describes only the
-previous task result used for semantic development. A NEW topic may therefore use the same dialogue-level
-presentation rule without inheriting the previous task's subject or answer.
+When DIALOGUE_RULES is present, it is internal-only dialogue metadata. Preserve it in memory when the user
+has established such a preference, but NEVER emit its marker/letter/number in the visible answer. RESPONSE_SEQUENCE
+and all task counters/branch labels/response paths are internal state only. A NEW topic keeps the same parent
+12h conversation but does not inherit the previous task's subject or answer. The current request always has
+semantic authority over stale active-task state.
 
 When INTERACTIVE_TASK_STATE is present, it is the active conversational work item.
 Its role, phase, latest question, accumulated clues and Q&A history are authoritative.
@@ -2026,8 +2027,9 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         system_prompt = (
             "April internal response provider. Return exactly one MachineResponse JSON object. "
             "Quantum Processor owns current request, relation, task, representation and context plan. "
-            "DIALOGUE_RULES and OUTPUT_RULE are authoritative for visible formatting; RESPONSE_SEQUENCE is conversation position only. "
-            "and never reset it. TASK_RESULT_STATE is the actual previous task result. Use only supplied context; "
+            "DIALOGUE_RULES/OUTPUT_RULE/RESPONSE_SEQUENCE are internal semantic metadata only; never emit counters, letters, "
+            "markers or branch labels. The current request is authoritative; TASK_RESULT_STATE is supplied history only. "
+            "Use only supplied context; never reselect or reinterpret branch state. "
             "do not reselect, search, reinterpret or substitute context. Never expose internal state."
         )
 
