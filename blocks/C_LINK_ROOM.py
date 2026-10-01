@@ -36,30 +36,25 @@ class LinkRoom(Room):
 
         print("LINK ROOM HANDLE START")
 
+        payload = context.get("link_payload") or context.get("payload") or {}
+        url = (
+            payload.get("url")
+            or payload.get("href")
+            or payload.get("uri")
+            if isinstance(payload, dict) else str(payload or text)
+        )
+        title = payload.get("title", "") if isinstance(payload, dict) else ""
+        description = payload.get("description", "") if isinstance(payload, dict) else ""
+
         artifact = self.process({
-
-            "url": text,
-
-            "title":
-                text,
-
-            "description":
-                text,
-
-            "goal":
-                context.get("goal"),
-
-            "purpose":
-                context.get("purpose")
+            "url": str(url or ""),
+            "title": str(title or url or ""),
+            "description": str(description or ""),
+            "goal": context.get("goal"),
+            "purpose": context.get("purpose"),
         })
 
-        return {
-
-            "type": "text",
-
-            "data":
-                "LINK ROOM ACTIVE"
-        }
+        return artifact
 
     # =================================================
     # WORK ORDER
