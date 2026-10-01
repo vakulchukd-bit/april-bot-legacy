@@ -31,8 +31,8 @@ from blocks.state_manager import get_state, update_scene_context, persist_state,
 from blocks.presentation_formatter import canonical_payload_for_block, validate_render_block_payload
 from blocks.rooms_registry import registry_route_machine_request
 
-PROCESSOR_VERSION = "april_sequential_processor_v1_fast_memory_scene"
-PROCESSOR_MODE = "SEQUENTIAL_INTERPRETATION_MEMORY_PROVIDER_SCENE"
+PROCESSOR_VERSION = "april_sequential_processor_v2_context_first_scene"
+PROCESSOR_MODE = "ACTIVE_BRANCH_MEMORY_CONTEXT_UNDERSTANDING_RELATION_RESPONSE_RENDER_PROVIDER_SCENE"
 
 # ============================================================
 # Canonical control tables
@@ -54,37 +54,6 @@ _RENDERER_REGISTRY = {
 
 _STRUCTURED_TYPES = {"code", "graph", "table", "diagram", "image", "gallery", "formula", "link"}
 
-_NEW_TOPIC_MARKERS = (
-    "новая тема",
-    "другая тема",
-    "забудь это",
-)
-
-_FOLLOWUP_PREFIXES = (
-    "теперь",
-    "ещё",
-    "еще",
-    "дальше",
-    "сделай",
-    "покажи",
-    "нарисуй",
-    "измени",
-    "добавь",
-    "убери",
-    "продолжи",
-    "объясни",
-    "расскажи",
-    "уточни",
-    "а теперь",
-    "и ещё",
-    "и еще",
-)
-
-_SHORT_PENDING_WORDS = {
-    "официальный", "официальная", "официальное", "официально",
-    "канал", "чат", "пользователь", "аккаунт", "личный", "да", "нет",
-}
-
 _PERSIST_TASKS: Dict[str, asyncio.Task] = {}
 
 
@@ -95,20 +64,6 @@ def _consume_persist_result(task: asyncio.Task) -> None:
         if not isinstance(exc, asyncio.CancelledError):
             print("⚠️ APRIL BACKGROUND PERSIST:", exc)
 
-
-_ARTIFACT_REFERENCE_FORMS = (
-    "этот график",
-    "на графике",
-    "этот рисунок",
-    "эту картинку",
-    "на картинке",
-    "на схеме",
-    "этот файл",
-    "это",
-    "его",
-    "её",
-    "ее",
-)
 
 
 def _text(value: Any) -> str:
@@ -972,12 +927,17 @@ class ProcessorScene:
             resolved_request = f"Продолжение задания: {base_topic}. Ответ пользователя: {self.request}"
 
         if relation in {"CONTINUE", "RECALL"}:
+            # Interpretation has already selected the branch. Executor only
+            # carries the prepared active-branch memory forward.
             dialogue_memory = build_dialogue_memory_bridge(
                 self.user_id,
                 query=self.request,
-                limit=6,
+                limit=8,
                 relation=relation,
-                target_sequence_id=_text(dialogue.get("target_sequence_id") or dialogue.get("sequence_id")),
+                target_sequence_id=_text(
+                    dialogue.get("target_sequence_id")
+                    or dialogue.get("sequence_id")
+                ),
             )
         else:
             dialogue_memory = {
@@ -1192,6 +1152,14 @@ class ProcessorScene:
                 max_depth=3,
                 max_items=6,
             ),
+            "active_sequence_digest": _compact(
+                dialogue_memory.get("active_sequence_digest") or {},
+                max_depth=6,
+                max_items=10,
+            ),
+            "active_sequence_turn_count": int(
+                dialogue_memory.get("active_sequence_turn_count", 0) or 0
+            ),
             "seven_day_dialogue_memory": _compact(
                 dialogue_memory if relation in {"CONTINUE", "RECALL"} and not artifact_context_only else {
                     "window_days": 7,
@@ -1221,7 +1189,7 @@ class ProcessorScene:
         output_budget = 8000
 
         dialogue_contract = {
-            "version": "april_dialogue_contract_v2_semantic_trajectory",
+            "version": "april_dialogue_contract_v3_context_first_branch_digest",
             "relation": relation,
             "continuation": bool(dialogue["continuation"]),
             "reference_to_previous": bool(dialogue["reference"]),
@@ -1229,6 +1197,14 @@ class ProcessorScene:
             "active_task": _compact_task_state(turn_active_task),
             "open_task": _compact_task_state(dialogue.get("open_task") or active_task),
             "interactive_task_state": _compact_task_state(dialogue.get("interactive_task_state") or active_task),
+            "active_sequence_digest": _compact(
+                dialogue_memory.get("active_sequence_digest") or {},
+                max_depth=6,
+                max_items=10,
+            ),
+            "active_sequence_turn_count": int(
+                dialogue_memory.get("active_sequence_turn_count", 0) or 0
+            ),
             "task_memory": _compact(dialogue.get("task_memory") or {}),
             "task_relation": _compact(dialogue.get("task_relation") or {}),
             "task_transition": _compact(dialogue.get("task_transition") or {}),
@@ -1304,7 +1280,15 @@ class ProcessorScene:
             "pending_task": _compact(pending_task) if pending_task else {},
             "last_artifact_type": _state_artifact_type(self.state) if relation == "CONTINUE" and render_mode == "ARTIFACT_CONTINUATION" else "",
             "selected_artifact": _compact(selected_artifact, max_depth=5, max_items=6) if artifact_context_only else {},
-            "dialogue_sequence": _compact(dialogue_memory.get("active_sequence") or {}) if relation in {"CONTINUE", "RECALL"} and not artifact_context_only else {},
+            "dialogue_sequence": _compact(
+                dialogue_memory.get("active_sequence") or {}
+            ) if relation in {"CONTINUE", "RECALL"} and not artifact_context_only else {},
+            "active_sequence_digest": _compact(
+                dialogue_memory.get("active_sequence_digest") or {}
+            ) if relation in {"CONTINUE", "RECALL"} and not artifact_context_only else {},
+            "active_sequence_turn_count": int(
+                dialogue_memory.get("active_sequence_turn_count", 0) or 0
+            ),
             "dialogue_memory": _compact(dialogue_memory) if relation in {"CONTINUE", "RECALL"} and not artifact_context_only else {
                 "window_days": 7,
                 "turn_count_7d": dialogue_memory.get("turn_count_7d", 0),
@@ -2375,7 +2359,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
         request.visual_context = {}
 
     print("🧬 APRIL EXECUTOR BUILD:", PROCESSOR_VERSION)
-    print("🧭 APRIL FLOW:", "INPUT → INTERPRETATION+LIVE_MEMORY → OPENAI → C_ARTIFACT → ROOM_REGISTER → ROOM → C_ARTIFACT → SCENE → WEB")
+    print("🧭 APRIL FLOW:", "INPUT → ACTIVE_BRANCH_MEMORY → CONTEXTUAL_UNDERSTANDING → DIALOGUE_RELATION → RESPONSE_DEVELOPMENT → RENDER_PLAN → OPENAI → C_ARTIFACT → ROOM → SCENE → WEB")
     print("🧠 APRIL INTERPRETATION:", _compact(request.intent))
     print("🧠 APRIL DIALOGUE:", _compact(request.dialogue_contract))
 
