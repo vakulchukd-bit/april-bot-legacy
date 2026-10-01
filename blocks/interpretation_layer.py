@@ -13314,6 +13314,267 @@ def _df_extract_previous(history: list[Any], state: dict[str, Any]) -> tuple[str
             break
     return prev_user, prev_april
 
+def _df_active_sequence_digest(
+    state: dict[str, Any],
+    history: list[Any],
+    sequence_id: str,
+    *,
+    limit: int = 6,
+) -> dict[str, Any]:
+    """
+    Build the compact semantic picture of the authenticated active branch.
+
+    The digest is intentionally branch-first:
+      active USER↔APRIL sequence -> recent turn trajectory -> branch summary.
+    It never searches another branch and never asks the Provider to choose history.
+    """
+    seq = state.get("active_dialogue_sequence") if isinstance(
+        state.get("active_dialogue_sequence"), dict
+    ) else {}
+
+    sid = _df_text(sequence_id or seq.get("sequence_id"), 120)
+    conversation_id = _df_text(
+        state.get("conversation_id")
+        or (state.get("memory_scope") or {}).get("conversation_id"),
+        160,
+    )
+    user_id = _df_text(
+        state.get("user_id")
+        or (state.get("memory_scope") or {}).get("user_id"),
+        120,
+    )
+
+    rows: list[dict[str, Any]] = []
+    timeline = state.get("memory_timeline")
+    timeline = timeline if isinstance(timeline, dict) else {}
+
+    for day_index in range(7):
+        day = timeline.get(f"day_{day_index}")
+        if not isinstance(day, dict):
+            continue
+        for raw in day.get("dialog_pairs", []):
+            if not isinstance(raw, dict):
+                continue
+            raw_sid = _df_text(raw.get("sequence_id"), 120)
+            if not sid or raw_sid != sid:
+                continue
+            raw_user = _df_text(raw.get("user_id"), 120)
+            if user_id and raw_user and raw_user != user_id:
+                continue
+            raw_conversation = _df_text(raw.get("conversation_id"), 160)
+            if conversation_id and raw_conversation and raw_conversation != conversation_id:
+                continue
+
+            try:
+                turn_index = int(raw.get("sequence_turn_index") or 0)
+            except (TypeError, ValueError):
+                turn_index = 0
+
+            try:
+                created_at = float(raw.get("created_at") or raw.get("timestamp") or 0.0)
+            except (TypeError, ValueError):
+                created_at = 0.0
+
+            rows.append({
+                "sequence_turn_index": turn_index,
+                "created_at": created_at,
+                "topic": _df_text(
+                    raw.get("sequence_topic")
+                    or raw.get("topic")
+                    or raw.get("canonical_topic"),
+                    220,
+                ),
+                "user": _df_text(
+                    raw.get("user_request")
+                    or raw.get("user_meaning")
+                    or raw.get("user"),
+                    220,
+                ),
+                "april": _df_text(
+                    raw.get("april_answer")
+                    or raw.get("april_meaning")
+                    or raw.get("answer")
+                    or raw.get("answer_summary"),
+                    320,
+                ),
+                "relation": _df_text(raw.get("dialogue_relation") or "", 40).upper(),
+            })
+
+    rows.sort(key=lambda item: (item["sequence_turn_index"], item["created_at"]))
+
+    # Fallback to the durable sequence head if a legacy deployment has not yet
+    # written dialog_pairs for the current turn.
+    if not rows and sid:
+        last_user = _df_text(seq.get("last_user_request"), 220)
+        last_april = _df_text(seq.get("last_april_answer"), 320)
+        if last_user or last_april:
+            rows.append({
+                "sequence_turn_index": int(seq.get("turn_count") or 0),
+                "created_at": float(seq.get("last_turn_at") or 0.0),
+                "topic": _df_text(seq.get("topic"), 220),
+                "user": last_user,
+                "april": last_april,
+                "relation": _df_text(seq.get("relation") or "CONTINUE", 40).upper(),
+            })
+
+    recent = rows[-max(1, int(limit)):] if rows else []
+    topics: list[str] = []
+    for row in rows:
+        topic = _df_text(row.get("topic"), 220)
+        if topic and topic not in topics:
+            topics.append(topic)
+
+    root_topic = (
+        _df_text(seq.get("topic"), 220)
+        or (topics[0] if topics else "")
+    )
+    last_user = _df_text(
+        (recent[-1] if recent else {}).get("user")
+        or seq.get("last_user_request"),
+        220,
+    )
+    last_april = _df_text(
+        (recent[-1] if recent else {}).get("april")
+        or seq.get("last_april_answer"),
+        320,
+    )
+
+    # Keep a very small "trajectory" rather than dumping history.
+    trajectory = [
+        {
+            "turn": int(row.get("sequence_turn_index") or 0),
+            "user": row.get("user", ""),
+            "april": row.get("april", ""),
+            "topic": row.get("topic", ""),
+        }
+        for row in recent
+        if row.get("user") or row.get("april")
+    ]
+
+    return {
+        "version": "active_sequence_digest_v1",
+        "source": "authenticated_active_sequence",
+        "sequence_id": sid,
+        "conversation_id": conversation_id,
+        "turn_count": max(
+            len(rows),
+            int(seq.get("turn_count") or 0),
+        ),
+        "root_topic": root_topic,
+        "current_focus": _df_text(
+            seq.get("active_entity")
+            or seq.get("canonical_entity")
+            or seq.get("topic")
+            or last_user,
+            220,
+        ),
+        "last_user": last_user,
+        "last_april": last_april,
+        "topic_path": topics[-6:],
+        "recent_trajectory": trajectory,
+        "coverage": "active_sequence_only",
+        "other_branches_included": False,
+        "full_history_included": False,
+    }
+
+
+def _df_strong_topic_boundary(text: str) -> bool:
+    """Detect discourse-level topic switching, not generic word triggers."""
+    low = _df_low(text)
+    strong = (
+        "новая тема",
+        "другая тема",
+        "отдельная тема",
+        "сменим тему",
+        "перейдем к",
+        "перейдём к",
+        "давай теперь про",
+        "давай теперь о",
+        "а теперь про",
+        "а теперь о",
+        "теперь поговорим о",
+        "хочу обсудить другую тему",
+        "хочу поговорить о другой теме",
+    )
+    return any(marker in low for marker in strong)
+
+
+def _df_is_self_contained_new_topic(
+    text: str,
+    semantic: dict[str, Any] | None,
+    *,
+    active_topic: str,
+    active_entity: str,
+    task_probe: dict[str, Any],
+    sequence_digest: dict[str, Any],
+) -> bool:
+    """
+    Identify a genuinely new subject without turning short replies into NEW.
+
+    A lexical subject is insufficient. A new branch requires a reasonably
+    self-contained utterance naming a different subject and not behaving like
+    a response/reference to the active branch.
+    """
+    semantic = semantic if isinstance(semantic, dict) else {}
+    words = _df_tokens(text)
+    if _df_strong_topic_boundary(text):
+        return True
+    if len(words) < 2 and "?" not in text and "？" not in text:
+        return False
+    # An active task protects terse answers, but it must not prevent an explicit,
+    # self-contained request to discuss a different subject.
+    if bool(_df_deictic.search(_df_low(text))):
+        return False
+
+    subject = _df_normalize_subject(
+        _df_text(semantic.get("explicit_subject"), 220)
+    )
+    if not subject:
+        subject = _df_normalize_subject(_df_extract_subject(text))
+    if not subject:
+        return False
+
+    branch_text = " ".join([
+        _df_text(active_topic, 220),
+        _df_text(active_entity, 220),
+        _df_text(sequence_digest.get("root_topic"), 220),
+        " ".join(_df_text(x, 180) for x in sequence_digest.get("topic_path", [])[-3:]),
+        _df_text(sequence_digest.get("last_user"), 180),
+        _df_text(sequence_digest.get("last_april"), 220),
+    ])
+    if not branch_text.strip():
+        return True
+
+    overlap_subject = _df_overlap(subject, branch_text)
+    overlap_turn = max(
+        _df_overlap(text, active_topic),
+        _df_overlap(text, active_entity),
+        _df_overlap(text, sequence_digest.get("last_user")),
+        _df_overlap(text, sequence_digest.get("last_april")),
+    )
+    if max(overlap_subject, overlap_turn) >= 0.20:
+        return False
+
+    # Self-contained requests/questions with an explicitly named distinct
+    # subject are the main non-explicit path to NEW.
+    low = _df_low(text)
+    command_shape = bool(re.match(
+        r"^(?:а\s+)?(?:расскажи|скажи|объясни|покажи|проверь|найди|"
+        r"сравни|напиши|создай|построй|опиши|рассчитай|посчитай)\b",
+        low,
+    ))
+    about_shape = bool(re.search(r"\b(?:про|об|о|насчет|насчёт|касаемо)\b", low))
+    question_shape = "?" in text or "？" in text
+
+    return bool(
+        subject
+        and (
+            command_shape
+            or about_shape
+            or question_shape
+        )
+    )
+
 
 def _df_active_task(state: dict[str, Any]) -> dict[str, Any]:
     candidates = (
@@ -13453,40 +13714,118 @@ def _df_new_sequence_id(user_id: str, conversation_id: str, text: str) -> str:
     return "seq-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
-def _df_resolve_relation(text: str, state: dict[str, Any], previous_april: str, active_topic: str, active_entity: str, task_probe: dict[str, Any], dialogue_probe: dict[str, Any]) -> tuple[str, str]:
-    explicit_new = _df_explicit_new(text, active_topic=active_topic, active_entity=active_entity)
+def _df_resolve_relation(
+    text: str,
+    state: dict[str, Any],
+    previous_april: str,
+    active_topic: str,
+    active_entity: str,
+    task_probe: dict[str, Any],
+    dialogue_probe: dict[str, Any],
+    *,
+    semantic: dict[str, Any] | None = None,
+    sequence_digest: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    """
+    Resolve dialogue relation only after contextual understanding.
+
+    Policy:
+      - RECALL is selected only when the user actually refers back to an older branch.
+      - With a live branch, CONTINUE is the default.
+      - Short/elliptical language is protected from NEW.
+      - NEW requires strong discourse-boundary evidence or a self-contained
+        different subject.
+      - No single word/keyword can force a topic break.
+    """
+    semantic = semantic if isinstance(semantic, dict) else {}
+    sequence_digest = sequence_digest if isinstance(sequence_digest, dict) else {}
+
     explicit_recall = _df_explicit_recall(text)
-    has_live = bool(state.get("active_dialogue_sequence", {}).get("sequence_id") or active_topic or previous_april)
+    strong_boundary = _df_strong_topic_boundary(text)
+
+    seq = state.get("active_dialogue_sequence")
+    seq = seq if isinstance(seq, dict) else {}
+    has_live = bool(
+        _df_text(seq.get("sequence_id"), 120)
+        or sequence_digest.get("sequence_id")
+        or active_topic
+        or previous_april
+    )
     if explicit_recall:
         return "RECALL", "REFERENCE_OLD_TOPIC"
+
     if not has_live:
         return "NEW", "NEW_TOPIC"
-    if explicit_new:
-        # An explicit new subject starts another branch; it never destroys the old one.
-        return "NEW", "NEW_TOPIC"
-    if dialogue_probe.get("short") and (dialogue_probe.get("confirmation") or dialogue_probe.get("rejection")):
-        return "CONTINUE", "TASK_CONFIRMATION" if task_probe.get("active") else "CONFIRMATION"
-    if task_probe.get("handoff"):
-        return "CONTINUE", "TASK_HANDOFF"
-    if task_probe.get("answer_analysis") or dialogue_probe.get("direct_reference"):
-        return "CONTINUE", "CONTINUE_ANALYSIS"
-    if dialogue_probe.get("deictic") or task_probe.get("task_action"):
-        return "CONTINUE", "CONTINUE_TOPIC"
-    # A clearly different concrete subject can start a new branch even without
-    # the words "new topic". Keep short confirmations/analysis in the old branch.
-    candidate = _df_normalize_subject(_df_extract_subject(text))
-    active_norm = _df_normalize_subject(active_entity or active_topic)
-    if candidate and active_norm and candidate not in {active_norm, "игра", "игру", "вопрос", "ответ"}:
-        cand_tokens = set(_df_tokens(candidate))
-        active_tokens = set(_df_tokens(active_norm))
-        if cand_tokens and not (cand_tokens & active_tokens):
-            return "NEW", "NEW_TOPIC"
-    if _df_low(text) in _df_confirm | _df_reject | _df_short_filler:
-        return "CONTINUE", "CONTINUE_TOPIC"
-    # Core rule: once a live branch exists, continuation is the default.
-    # A new branch is created only by an explicit topic boundary above.
-    return "CONTINUE", "CONTINUE_TOPIC"
 
+    low = _df_low(text)
+    words = _df_tokens(text)
+    short_turn = len(words) <= 8
+    confirmation = bool(dialogue_probe.get("confirmation"))
+    rejection = bool(dialogue_probe.get("rejection"))
+    deictic = bool(dialogue_probe.get("deictic"))
+    direct_reference = bool(dialogue_probe.get("direct_reference"))
+    task_action = bool(task_probe.get("task_action"))
+    task_active = bool(task_probe.get("active"))
+
+    contextual_overlap = max(
+        float(dialogue_probe.get("topic_overlap", 0.0) or 0.0),
+        float(_df_overlap(low, sequence_digest.get("root_topic")) or 0.0),
+        float(_df_overlap(low, sequence_digest.get("current_focus")) or 0.0),
+        float(_df_overlap(low, sequence_digest.get("last_user")) or 0.0),
+        float(_df_overlap(low, sequence_digest.get("last_april")) or 0.0),
+    )
+
+    # Understand the current turn before deciding the relation. This keeps
+    # "Продолжаем", "Да", "Возможно", numbers, names, short corrections, etc.
+    # attached to the active branch whenever their discourse role is dependent.
+    if short_turn and not strong_boundary:
+        short_self_contained_new = _df_is_self_contained_new_topic(
+            text,
+            semantic,
+            active_topic=active_topic,
+            active_entity=active_entity,
+            task_probe=task_probe,
+            sequence_digest=sequence_digest,
+        )
+        if short_self_contained_new:
+            return "NEW", "SELF_CONTAINED_NEW_SUBJECT"
+        if confirmation or rejection or deictic or direct_reference or task_active:
+            return "CONTINUE", "CONTEXTUAL_SHORT_FOLLOWUP"
+        return "CONTINUE", "CONTEXTUAL_SHORT_FOLLOWUP"
+
+    if task_action:
+        return "CONTINUE", "TASK_ACTION"
+
+    if direct_reference or deictic:
+        return "CONTINUE", "CONTEXTUAL_REFERENCE"
+
+    if contextual_overlap >= 0.18 and not strong_boundary:
+        return "CONTINUE", "ACTIVE_BRANCH_AFFINITY"
+
+    # An explicit discourse-level topic break is the strongest normal NEW signal.
+    if strong_boundary:
+        return "NEW", "EXPLICIT_TOPIC_BOUNDARY"
+
+    # _df_explicit_new also contains subject patterns. They are allowed only
+    # when the current turn is actually self-contained and not merely a short
+    # continuation. This prevents "давай дальше" / "давай" style leakage.
+    self_contained_new = _df_is_self_contained_new_topic(
+        text,
+        semantic,
+        active_topic=active_topic,
+        active_entity=active_entity,
+        task_probe=task_probe,
+        sequence_digest=sequence_digest,
+    )
+    if self_contained_new:
+        return "NEW", "SELF_CONTAINED_NEW_SUBJECT"
+
+    # Conservative default: a live human dialogue keeps evolving until there is
+    # evidence that the user intentionally changed subject.
+    if low in _df_confirm | _df_reject | _df_short_filler:
+        return "CONTINUE", "DISCOURSE_CONTINUATION"
+
+    return "CONTINUE", "LIVE_BRANCH_DEFAULT"
 
 def _df_understand(text: str, relation: str, turn_relation: str, active_topic: str, active_entity: str, task_probe: dict[str, Any], render_probe: dict[str, Any]) -> dict[str, Any]:
     low = _df_low(text)
@@ -13592,7 +13931,31 @@ def _df_development(relation: str, sequence_id: str, active_topic: str, active_e
     }
 
 
-def _df_provider_plan(current_request: str, relation: str, turn_relation: str, semantic: dict[str, Any], task: dict[str, Any], previous_user: str, previous_april: str, sequence_id: str, render_plan: dict[str, Any], development: dict[str, Any], selected_memory: dict[str, Any]) -> dict[str, Any]:
+def _df_provider_plan(
+    current_request: str,
+    relation: str,
+    turn_relation: str,
+    semantic: dict[str, Any],
+    task: dict[str, Any],
+    previous_user: str,
+    previous_april: str,
+    sequence_id: str,
+    render_plan: dict[str, Any],
+    development: dict[str, Any],
+    selected_memory: dict[str, Any],
+    active_sequence_digest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Build the final Provider context after semantic understanding is complete.
+
+    The Provider receives a prepared semantic packet. It never chooses the
+    dialogue branch or searches memory on its own.
+    """
+    active_sequence_digest = (
+        active_sequence_digest
+        if isinstance(active_sequence_digest, dict)
+        else {}
+    )
     base = {
         "version": _df_provider_plan_version,
         "relation": relation,
@@ -13605,33 +13968,98 @@ def _df_provider_plan(current_request: str, relation: str, turn_relation: str, s
         "soft_target_tokens": 820,
         "new_topic_minimal_context": relation == "NEW",
         "required_context": [
-            {"key": "SEMANTIC_CORE", "priority": 1.0, "value": {
-                "topic": semantic.get("topic"), "entity": semantic.get("entity"), "operation": semantic.get("operation"),
-                "goal": semantic.get("goal"), "representation": semantic.get("representation"), "turn_relation": turn_relation,
-            }},
-            {"key": "OUTPUT_CONTRACT", "priority": 0.99, "value": {
-                "representation": semantic.get("representation"), "requested_outputs": render_plan.get("requested_outputs"),
-                "render_authorized": render_plan.get("authorized"), "render_mode": render_plan.get("mode"),
-            }},
+            {
+                "key": "SEMANTIC_CORE",
+                "priority": 1.0,
+                "value": {
+                    "topic": semantic.get("topic"),
+                    "entity": semantic.get("entity"),
+                    "operation": semantic.get("operation"),
+                    "goal": semantic.get("goal"),
+                    "representation": semantic.get("representation"),
+                    "turn_relation": turn_relation,
+                },
+            },
+            {
+                "key": "OUTPUT_CONTRACT",
+                "priority": 0.99,
+                "value": {
+                    "representation": semantic.get("representation"),
+                    "requested_outputs": render_plan.get("requested_outputs"),
+                    "render_authorized": render_plan.get("authorized"),
+                    "render_mode": render_plan.get("mode"),
+                },
+            },
         ],
         "optional_context": [],
-        "excluded_context": ["FULL_HISTORY", "OTHER_TOPIC_BRANCHES", "UNRELATED_7D_MEMORY"],
+        "excluded_context": [
+            "FULL_HISTORY",
+            "OTHER_TOPIC_BRANCHES",
+            "UNRELATED_7D_MEMORY",
+            "STALE_GLOBAL_ENTITY",
+        ],
     }
+
     if relation == "CONTINUE":
-        base["required_context"].insert(0, {"key": "DIALOGUE_ANCHOR", "priority": 1.0, "value": {
-            "previous_user_turn": previous_user, "previous_april_turn": previous_april,
-            "topic": semantic.get("topic"), "entity": semantic.get("entity"), "turn_relation": turn_relation,
-            "sequence_id": sequence_id,
-        }})
+        # The active branch digest outranks topic-word similarity. It is the
+        # compact picture that lets the model understand an elliptical turn.
+        base["required_context"].insert(
+            0,
+            {
+                "key": "ACTIVE_DIALOGUE_TRAJECTORY",
+                "priority": 1.0,
+                "value": active_sequence_digest,
+            },
+        )
+        base["required_context"].insert(
+            1,
+            {
+                "key": "DIALOGUE_ANCHOR",
+                "priority": 0.995,
+                "value": {
+                    "previous_user_turn": previous_user,
+                    "previous_april_turn": previous_april,
+                    "topic": semantic.get("topic"),
+                    "entity": semantic.get("entity"),
+                    "turn_relation": turn_relation,
+                    "sequence_id": sequence_id,
+                },
+            },
+        )
         if task:
-            base["required_context"].insert(1, {"key": "ACTIVE_TASK", "priority": 0.995, "value": {
-                "kind": task.get("kind"), "role": task.get("role"), "phase": task.get("phase"),
-                "topic": task.get("topic"), "goal": task.get("goal"), "last_question": task.get("last_question"),
-            }})
-        base["required_context"].append({"key": "DIALOGUE_DEVELOPMENT", "priority": 0.9, "value": development})
+            base["required_context"].insert(
+                2,
+                {
+                    "key": "ACTIVE_TASK",
+                    "priority": 0.99,
+                    "value": {
+                        "kind": task.get("kind"),
+                        "role": task.get("role"),
+                        "phase": task.get("phase"),
+                        "topic": task.get("topic"),
+                        "goal": task.get("goal"),
+                        "last_question": task.get("last_question"),
+                    },
+                },
+            )
+        base["required_context"].append(
+            {
+                "key": "DIALOGUE_DEVELOPMENT",
+                "priority": 0.9,
+                "value": development,
+            }
+        )
+
     if relation == "RECALL" and selected_memory:
-        base["required_context"].append({"key": "MEMORY_RECALL", "priority": 0.9, "value": [selected_memory]})
+        base["required_context"].append(
+            {
+                "key": "MEMORY_RECALL",
+                "priority": 0.9,
+                "value": [selected_memory],
+            }
+        )
         base["new_topic_minimal_context"] = False
+
     return base
 
 
@@ -13649,74 +14077,319 @@ def _df_select_recalled_branch(text: str, state: dict[str, Any], branches: dict[
     return deepcopy(scored[0][1]) if scored and scored[0][0] >= 0.20 else {}
 
 
-def _df_interpret_live_turn(text: str, *, history: list[Any] | None = None, state: dict[str, Any] | None = None) -> dict[str, Any]:
+def _df_interpret_live_turn(
+    text: str,
+    *,
+    history: list[Any] | None = None,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Canonical production interpretation pipeline.
+
+    Order:
+        1. receive current turn
+        2. inspect authenticated active-branch memory
+        3. build compact branch picture
+        4. contextually understand the current turn
+        5. resolve CONTINUE / NEW / RECALL
+        6. build response/development intent
+        7. build render plan
+        8. build the frozen Provider context
+        9. hand off to Executor/SceneContract
+
+    Relation resolution is deliberately late. Rendering is never used to decide
+    whether a user changed topic.
+    """
     started = time.perf_counter()
     state = state if isinstance(state, dict) else {}
     history = history if isinstance(history, list) else []
     current = _df_text(text, 2400)
 
-    seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+    seq = (
+        state.get("active_dialogue_sequence")
+        if isinstance(state.get("active_dialogue_sequence"), dict)
+        else {}
+    )
     previous_user, previous_april = _df_extract_previous(history, state)
     active_topic = _df_topic_from_state(state)
     active_entity = _df_entity_from_state(state)
     prior_task = _df_active_task(state)
     active_seq_id = _df_text(seq.get("sequence_id"), 80)
-    conversation_id = _df_text(state.get("conversation_id") or (state.get("memory_scope") or {}).get("conversation_id"), 120)
-    user_id = _df_text(state.get("user_id") or (state.get("memory_scope") or {}).get("user_id"), 120)
+    conversation_id = _df_text(
+        state.get("conversation_id")
+        or (state.get("memory_scope") or {}).get("conversation_id"),
+        120,
+    )
+    user_id = _df_text(
+        state.get("user_id")
+        or (state.get("memory_scope") or {}).get("user_id"),
+        120,
+    )
 
-    # Eyes/ears. These are evidence only.
+    # ------------------------------------------------------------------
+    # 1) Active-session memory first.
+    # ------------------------------------------------------------------
+    active_sequence_digest = _df_active_sequence_digest(
+        state,
+        history,
+        active_seq_id,
+        limit=6,
+    )
+
+    # ------------------------------------------------------------------
+    # 2) Cheap evidence probes. They cannot own relation or routing.
+    # ------------------------------------------------------------------
     render_probe = _df_render_probe(current)
     task_probe = _df_task_probe(current, prior_task, active_topic)
-    dialogue_probe = _df_dialogue_bigunok(current, previous_user, previous_april, active_topic, active_entity, task_probe)
+    dialogue_probe = _df_dialogue_bigunok(
+        current,
+        previous_user,
+        previous_april,
+        active_topic,
+        active_entity,
+        task_probe,
+    )
     branches = _df_branch_index(state, seq, active_topic, active_entity)
 
-    relation, turn_relation = _df_resolve_relation(current, state, previous_april, active_topic, active_entity, task_probe, dialogue_probe)
-    selected_branch = {}
-    if relation == "RECALL":
-        selected_branch = _df_select_recalled_branch(current, state, branches)
-        if selected_branch.get("sequence_id"):
-            active_seq_id = _df_text(selected_branch.get("sequence_id"), 80)
-            active_topic = _df_text(selected_branch.get("topic") or active_topic, 220)
-            active_entity = _df_text(selected_branch.get("canonical_entity") or active_entity, 180)
-            previous_user = _df_text(selected_branch.get("last_user_request") or previous_user)
-            previous_april = _df_text(selected_branch.get("last_april_answer") or previous_april)
+    # ------------------------------------------------------------------
+    # 3) Contextual understanding BEFORE relation resolution.
+    #
+    # A live branch is the working context. NEW is only provisional when there
+    # is no live branch. This is what lets "да", "возможно", "дальше", numbers,
+    # names and other elliptical human replies acquire meaning from the branch.
+    # ------------------------------------------------------------------
+    has_live_branch = bool(
+        active_sequence_digest.get("sequence_id")
+        or active_seq_id
+        or active_topic
+        or previous_april
+    )
+    explicit_recall = _df_explicit_recall(current)
 
-    semantic = _df_understand(current, relation, turn_relation, active_topic, active_entity, task_probe, render_probe)
-    explicit_entity = _df_normalize_subject(_df_text(semantic.get("explicit_subject")))
+    provisional_relation = (
+        "RECALL"
+        if explicit_recall
+        else "CONTINUE"
+        if has_live_branch
+        else "NEW"
+    )
+    provisional_turn_relation = (
+        "REFERENCE_OLD_TOPIC"
+        if provisional_relation == "RECALL"
+        else "CONTEXTUAL_UNDERSTANDING"
+    )
+
+    semantic = _df_understand(
+        current,
+        provisional_relation,
+        provisional_turn_relation,
+        active_topic,
+        active_entity,
+        task_probe,
+        render_probe,
+    )
+
+    # ------------------------------------------------------------------
+    # 4) Now resolve the dialogue relation from the contextual understanding.
+    # ------------------------------------------------------------------
+    relation, turn_relation = _df_resolve_relation(
+        current,
+        state,
+        previous_april,
+        active_topic,
+        active_entity,
+        task_probe,
+        dialogue_probe,
+        semantic=semantic,
+        sequence_digest=active_sequence_digest,
+    )
+
+    selected_branch: dict[str, Any] = {}
+
+    # A recall request is allowed to select one older branch. Nothing else may
+    # silently switch branches.
+    if relation == "RECALL":
+        selected_branch = _df_select_recalled_branch(
+            current,
+            state,
+            branches,
+        )
+        if selected_branch.get("sequence_id"):
+            active_seq_id = _df_text(
+                selected_branch.get("sequence_id"),
+                80,
+            )
+            active_topic = _df_text(
+                selected_branch.get("topic")
+                or active_topic,
+                220,
+            )
+            active_entity = _df_text(
+                selected_branch.get("canonical_entity")
+                or active_entity,
+                180,
+            )
+            previous_user = _df_text(
+                selected_branch.get("last_user_request")
+                or previous_user,
+            )
+            previous_april = _df_text(
+                selected_branch.get("last_april_answer")
+                or previous_april,
+            )
+            # Rebuild the digest for the branch explicitly selected by RECALL.
+            active_sequence_digest = _df_active_sequence_digest(
+                state,
+                history,
+                active_seq_id,
+                limit=6,
+            )
+
+            recalled_task = selected_branch.get("active_task")
+            if isinstance(recalled_task, dict) and recalled_task:
+                prior_task = deepcopy(recalled_task)
+
+            # Re-understand against the recalled branch, not the old active branch.
+            semantic = _df_understand(
+                current,
+                "CONTINUE",
+                "REFERENCE_OLD_TOPIC",
+                active_topic,
+                active_entity,
+                _df_task_probe(current, prior_task, active_topic),
+                render_probe,
+            )
+
+    # ------------------------------------------------------------------
+    # 5) Apply the final relation to semantic identity.
+    # ------------------------------------------------------------------
+    explicit_entity = _df_normalize_subject(
+        _df_text(semantic.get("explicit_subject"))
+    )
     concrete_entities = {
-        "пончик", "яблоко", "вода", "ключ", "загадка", "илон маск", "машина",
-        "формула", "график", "таблица", "схема", "игра в угадайки",
+        "пончик",
+        "яблоко",
+        "вода",
+        "ключ",
+        "загадка",
+        "илон маск",
+        "машина",
+        "формула",
+        "график",
+        "таблица",
+        "схема",
+        "игра в угадайки",
     }
+
     if relation == "NEW":
-        new_topic = semantic.get("explicit_subject") or semantic.get("entity") or _df_extract_subject(current) or current
+        new_topic = (
+            semantic.get("explicit_subject")
+            or semantic.get("entity")
+            or _df_extract_subject(current)
+            or current
+        )
         semantic["topic"] = _df_normalize_subject(new_topic)
         active_topic = semantic["topic"]
-        active_entity = semantic.get("entity") or _df_normalize_subject(_df_extract_subject(current))
-    elif explicit_entity in concrete_entities:
-        # A concrete operand named by the current turn may refine the live entity
-        # without replacing the dialogue branch itself. Generic sentence tails
-        # such as "загадал предмет задавай вопросы" are not entities.
-        active_entity = explicit_entity
-    elif not active_entity and semantic.get("entity"):
-        active_entity = semantic["entity"]
-    semantic["entity"] = active_entity or semantic.get("entity")
-    semantic["topic"] = active_topic or semantic.get("topic")
+        active_entity = _df_normalize_subject(
+            semantic.get("entity")
+            or _df_extract_subject(current)
+        )
+        branch_digest_for_provider: dict[str, Any] = {}
+    else:
+        # CONTINUE/RECALL preserve the live/recalled conversational identity.
+        # A concrete operand may refine the active entity without replacing the
+        # branch. Generic sentence tails never become the entity.
+        if explicit_entity in concrete_entities:
+            active_entity = explicit_entity
+        elif not active_entity and semantic.get("entity"):
+            active_entity = _df_text(semantic.get("entity"), 180)
+
+        semantic["entity"] = active_entity or semantic.get("entity")
+        semantic["topic"] = active_topic or semantic.get("topic")
+        branch_digest_for_provider = deepcopy(active_sequence_digest)
+
+    # RECALL points at a branch and then continues its conversational trajectory.
+    # The relation remains RECALL for state/branch accounting.
+    if relation == "RECALL" and not selected_branch.get("sequence_id"):
+        branch_digest_for_provider = {}
 
     if relation == "NEW" or not active_seq_id:
-        sequence_id = _df_new_sequence_id(user_id, conversation_id, current) if relation == "NEW" else active_seq_id
+        sequence_id = (
+            _df_new_sequence_id(
+                user_id,
+                conversation_id,
+                current,
+            )
+            if relation == "NEW"
+            else active_seq_id
+        )
     else:
         sequence_id = active_seq_id
 
-    task = _df_task_state(current, relation, task_probe, prior_task, semantic.get("topic") or active_topic, semantic.get("entity") or active_entity, sequence_id)
-    render_plan = _df_render_plan(current, relation, semantic, render_probe)
-    development = _df_development(
-        relation, sequence_id, semantic.get("topic") or active_topic, semantic.get("entity") or active_entity,
-        semantic.get("goal") or "answer", current, previous_april, task, render_plan,
+    # ------------------------------------------------------------------
+    # 6) Response task/development planning.
+    # ------------------------------------------------------------------
+    task = _df_task_state(
+        current,
+        relation,
+        task_probe,
+        prior_task,
+        semantic.get("topic") or active_topic,
+        semantic.get("entity") or active_entity,
+        sequence_id,
     )
+
+    development = _df_development(
+        relation,
+        sequence_id,
+        semantic.get("topic") or active_topic,
+        semantic.get("entity") or active_entity,
+        semantic.get("goal") or "answer",
+        current,
+        previous_april,
+        task,
+        {},  # render plan is attached after semantic response planning
+    )
+
+    # ------------------------------------------------------------------
+    # 7) Render determination happens only after dialogue understanding/relation.
+    # ------------------------------------------------------------------
+    render_plan = _df_render_plan(
+        current,
+        relation,
+        semantic,
+        render_probe,
+    )
+    development["render_plan"] = deepcopy(render_plan)
+    development["next_logical_step"] = (
+        "answer_current_request"
+        if relation != "RECALL"
+        else "answer_recalled_branch_request"
+    )
+    development["active_sequence_digest_version"] = (
+        branch_digest_for_provider.get("version")
+        if branch_digest_for_provider
+        else ""
+    )
+
     selected_memory = selected_branch if relation == "RECALL" else {}
+
+    # ------------------------------------------------------------------
+    # 8) Provider context is frozen here. Provider cannot select memory/branch.
+    # ------------------------------------------------------------------
     provider_plan = _df_provider_plan(
-        current, relation, turn_relation, semantic, task, previous_user, previous_april,
-        sequence_id, render_plan, development, selected_memory,
+        current,
+        relation,
+        turn_relation,
+        semantic,
+        task,
+        previous_user,
+        previous_april,
+        sequence_id,
+        render_plan,
+        development,
+        selected_memory,
+        branch_digest_for_provider,
     )
 
     branch_index = deepcopy(branches)
@@ -13726,51 +14399,154 @@ def _df_interpret_live_turn(text: str, *, history: list[Any] | None = None, stat
         branch_index["target_branch"] = {
             "branch_id": sequence_id,
             "sequence_id": sequence_id,
-            "topic": _df_text(semantic.get("topic"), 220),
-            "canonical_entity": _df_text(semantic.get("entity"), 180),
-            "goal": _df_text(semantic.get("goal") or "answer", 120),
+            "topic": _df_text(
+                semantic.get("topic"),
+                220,
+            ),
+            "canonical_entity": _df_text(
+                semantic.get("entity"),
+                180,
+            ),
+            "goal": _df_text(
+                semantic.get("goal") or "answer",
+                120,
+            ),
             "active": True,
         }
         branch_index["resolution_mode"] = "NEW_BRANCH"
     elif relation == "RECALL" and selected_branch:
-        branch_index["target_sequence_id"] = _df_text(selected_branch.get("sequence_id"), 80)
-        branch_index["target_branch_id"] = _df_text(selected_branch.get("branch_id") or selected_branch.get("sequence_id"), 80)
+        branch_index["target_sequence_id"] = _df_text(
+            selected_branch.get("sequence_id"),
+            80,
+        )
+        branch_index["target_branch_id"] = _df_text(
+            selected_branch.get("branch_id")
+            or selected_branch.get("sequence_id"),
+            80,
+        )
         branch_index["target_branch"] = deepcopy(selected_branch)
         branch_index["resolution_mode"] = "RESUME_BRANCH"
     else:
         branch_index["resolution_mode"] = "ACTIVE_BRANCH"
-    branch_index["active_sequence_id"] = sequence_id if relation == "NEW" else active_seq_id
+    branch_index["active_sequence_id"] = (
+        sequence_id if relation == "NEW" else active_seq_id
+    )
+
+    continuity_evidence = {
+        "version": "dialogue_continuity_evidence_v1",
+        "live_branch_exists": has_live_branch,
+        "active_sequence_id": _df_text(
+            active_sequence_digest.get("sequence_id")
+            or active_seq_id,
+            80,
+        ),
+        "branch_turn_count": int(
+            active_sequence_digest.get("turn_count") or 0
+        ),
+        "short_turn": bool(dialogue_probe.get("short")),
+        "confirmation": bool(dialogue_probe.get("confirmation")),
+        "rejection": bool(dialogue_probe.get("rejection")),
+        "deictic_reference": bool(dialogue_probe.get("deictic")),
+        "direct_reference": bool(dialogue_probe.get("direct_reference")),
+        "task_active": bool(task_probe.get("active")),
+        "contextual_overlap": round(
+            max(
+                float(dialogue_probe.get("topic_overlap", 0.0) or 0.0),
+                float(_df_overlap(current, active_sequence_digest.get("root_topic")) or 0.0),
+                float(_df_overlap(current, active_sequence_digest.get("last_april")) or 0.0),
+            ),
+            6,
+        ),
+        "strong_topic_boundary": _df_strong_topic_boundary(current),
+        "decision": relation,
+        "decision_reason": turn_relation,
+    }
 
     semantic_anchor = {
-        "version": "semantic_anchor_v2_live_dialogue",
+        "version": "semantic_anchor_v3_dialogue_first",
         "branch_id": sequence_id,
         "sequence_id": sequence_id,
         "relation": relation,
         "turn_relation": turn_relation,
-        "topic_root": _df_text(semantic.get("topic"), 220),
-        "active_focus": _df_text(current, 500),
-        "primary_entity": _df_text(semantic.get("entity"), 180),
-        "reference_target": "",
-        "operation": _df_text(semantic.get("operation") or "answer", 80),
-        "goal": _df_text(semantic.get("goal") or "answer", 100),
-        "source": "integrated_dialogue_interpretation",
+        "topic_root": _df_text(
+            semantic.get("topic"),
+            220,
+        ),
+        "active_focus": _df_text(
+            active_sequence_digest.get("current_focus")
+            or current,
+            500,
+        ),
+        "primary_entity": _df_text(
+            semantic.get("entity"),
+            180,
+        ),
+        "reference_target": _df_text(
+            selected_branch.get("canonical_entity")
+            if selected_branch
+            else "",
+            180,
+        ),
+        "operation": _df_text(
+            semantic.get("operation") or "answer",
+            80,
+        ),
+        "goal": _df_text(
+            semantic.get("goal") or "answer",
+            100,
+        ),
+        "source": "contextual_dialogue_interpretation",
     }
 
     dialogue_contract = {
-        "version": "april_dialogue_contract_v3_live_first",
+        "version": "april_dialogue_contract_v4_context_first",
         "relation": relation,
         "continuation": relation == "CONTINUE",
-        "reference_to_previous": relation == "RECALL" or dialogue_probe.get("direct_reference") or dialogue_probe.get("deictic"),
-        "context_dependency": "continuation" if relation == "CONTINUE" else "recall" if relation == "RECALL" else "independent",
+        "reference_to_previous": (
+            relation == "RECALL"
+            or dialogue_probe.get("direct_reference")
+            or dialogue_probe.get("deictic")
+        ),
+        "context_dependency": (
+            "active_dialogue_sequence"
+            if relation == "CONTINUE"
+            else "recalled_dialogue_sequence"
+            if relation == "RECALL"
+            else "current_turn_only"
+        ),
         "turn_relation": turn_relation,
         "sequence_id": sequence_id,
-        "target_sequence_id": _df_text(branch_index.get("target_sequence_id") or sequence_id, 80),
-        "target_branch_id": _df_text(branch_index.get("target_branch_id"), 80),
-        "target_branch": deepcopy(branch_index.get("target_branch") or {}),
-        "canonical_topic": _df_text(semantic.get("topic"), 220),
-        "active_entity": _df_text(semantic.get("entity"), 180),
-        "resolved_entity": _df_text(semantic.get("entity"), 180),
-        "resolved_entity_source": "live_dialogue" if relation == "CONTINUE" else "current_turn",
+        "target_sequence_id": _df_text(
+            branch_index.get("target_sequence_id")
+            or sequence_id,
+            80,
+        ),
+        "target_branch_id": _df_text(
+            branch_index.get("target_branch_id"),
+            80,
+        ),
+        "target_branch": deepcopy(
+            branch_index.get("target_branch") or {}
+        ),
+        "canonical_topic": _df_text(
+            semantic.get("topic"),
+            220,
+        ),
+        "active_entity": _df_text(
+            semantic.get("entity"),
+            180,
+        ),
+        "resolved_entity": _df_text(
+            semantic.get("entity"),
+            180,
+        ),
+        "resolved_entity_source": (
+            "recalled_dialogue"
+            if relation == "RECALL"
+            else "live_dialogue"
+            if relation == "CONTINUE"
+            else "current_turn"
+        ),
         "resolved_request": current,
         "semantic_request": semantic.get("semantic_request") or current,
         "selected_memory_index": -1,
@@ -13780,38 +14556,90 @@ def _df_interpret_live_turn(text: str, *, history: list[Any] | None = None, stat
         "active_task": deepcopy(task),
         "open_task": deepcopy(task),
         "interactive_task_state": deepcopy(task),
-        "task_memory": {"qa_history": list(task.get("qa_history") or [])[-8:]} if task else {},
-        "task_relation": {"handoff": task_probe.get("handoff"), "analysis": task_probe.get("answer_analysis")},
+        "task_memory": {
+            "qa_history": list(task.get("qa_history") or [])[-8:]
+        } if task else {},
+        "task_relation": {
+            "handoff": task_probe.get("handoff"),
+            "analysis": task_probe.get("answer_analysis"),
+        },
         "task_action": bool(task_probe.get("task_action")),
-        "task_transition": {"replace_task": bool(task_probe.get("handoff"))},
+        "task_transition": {
+            "replace_task": bool(task_probe.get("handoff"))
+        },
         "pending_resolved": False,
         "dialogue_development": development,
-        "dialogue_strategy": {"mode": "dialogue_first", "next_action": "answer_current_request"},
+        "dialogue_strategy": {
+            "mode": "context_first",
+            "next_action": development.get("next_logical_step"),
+        },
         "semantic_anchor": deepcopy(semantic_anchor),
+        "active_sequence_digest": deepcopy(
+            branch_digest_for_provider
+        ),
+        "continuity_evidence": deepcopy(continuity_evidence),
         "dialogue_vector": {
-            "version": "dialogue_vector_v3",
+            "version": "dialogue_vector_v4",
             "relation": relation,
             "three_way_relation": relation,
             "turn_relation": turn_relation,
             "continuation": relation == "CONTINUE",
-            "canonical_topic": _df_text(semantic.get("topic"), 220),
-            "active_entity": _df_text(semantic.get("entity"), 180),
+            "conversation_continuation": relation == "CONTINUE",
+            "canonical_topic": _df_text(
+                semantic.get("topic"),
+                220,
+            ),
+            "active_entity": _df_text(
+                semantic.get("entity"),
+                180,
+            ),
             "sequence_id": sequence_id,
-            "target_sequence_id": _df_text(branch_index.get("target_sequence_id") or sequence_id, 80),
-            "target_branch_id": _df_text(branch_index.get("target_branch_id"), 80),
-            "target_branch": deepcopy(branch_index.get("target_branch") or {}),
-            "trajectory": {"topic": _df_text(semantic.get("topic"), 220), "entity": _df_text(semantic.get("entity"), 180)},
+            "target_sequence_id": _df_text(
+                branch_index.get("target_sequence_id")
+                or sequence_id,
+                80,
+            ),
+            "target_branch_id": _df_text(
+                branch_index.get("target_branch_id"),
+                80,
+            ),
+            "target_branch": deepcopy(
+                branch_index.get("target_branch") or {}
+            ),
+            "trajectory": {
+                "root_topic": _df_text(
+                    active_sequence_digest.get("root_topic")
+                    or semantic.get("topic"),
+                    220,
+                ),
+                "current_topic": _df_text(
+                    semantic.get("topic"),
+                    220,
+                ),
+                "turn_count": int(
+                    active_sequence_digest.get("turn_count") or 0
+                ),
+            },
+            "active_sequence_digest": deepcopy(
+                branch_digest_for_provider
+            ),
             "semantic_anchor": deepcopy(semantic_anchor),
             "branch_index": deepcopy(branch_index),
         },
     }
 
     semantic_frame = {
-        "topic": semantic.get("topic"), "operation": semantic.get("operation"), "goal": semantic.get("goal"),
-        "representation": semantic.get("representation"), "entity": semantic.get("entity"), "relation": relation,
+        "topic": semantic.get("topic"),
+        "operation": semantic.get("operation"),
+        "goal": semantic.get("goal"),
+        "representation": semantic.get("representation"),
+        "entity": semantic.get("entity"),
+        "relation": relation,
+        "understanding_stage": "complete_before_relation",
     }
+
     cognitive_workspace = {
-        "version": "dialogue_workspace_v1",
+        "version": "dialogue_workspace_v2_context_first",
         "relation": relation,
         "topic": semantic.get("topic"),
         "active_topic": semantic.get("topic"),
@@ -13827,9 +14655,25 @@ def _df_interpret_live_turn(text: str, *, history: list[Any] | None = None, stat
         "semantic_frame": deepcopy(semantic_frame),
         "dialogue_development": deepcopy(development),
         "provider_context_plan": deepcopy(provider_plan),
+        "active_sequence_digest": deepcopy(
+            branch_digest_for_provider
+        ),
+        "continuity_evidence": deepcopy(continuity_evidence),
         "output_contract": deepcopy(render_plan),
-        "protected_context": ["current_request", "dialogue_relation", "active_task", "active_entity", "render_plan"],
-        "excluded_context": ["full_history", "other_topic_branches", "stale_memory_slider"],
+        "protected_context": [
+            "current_request",
+            "dialogue_relation",
+            "active_dialogue_trajectory",
+            "active_task",
+            "active_entity",
+            "render_plan",
+        ],
+        "excluded_context": [
+            "full_history",
+            "other_topic_branches",
+            "unrelated_7d_memory",
+            "stale_global_entity",
+        ],
     }
 
     result = {
@@ -13844,57 +14688,110 @@ def _df_interpret_live_turn(text: str, *, history: list[Any] | None = None, stat
         "resolved_request": current,
         "semantic_request": semantic.get("semantic_request") or current,
         "semantic_frame": semantic_frame,
-        "semantic_understanding": {"topic": semantic.get("topic"), "entity": semantic.get("entity"), "operation": semantic.get("operation"), "goal": semantic.get("goal"), "representation": semantic.get("representation")},
+        "semantic_understanding": {
+            "topic": semantic.get("topic"),
+            "entity": semantic.get("entity"),
+            "operation": semantic.get("operation"),
+            "goal": semantic.get("goal"),
+            "representation": semantic.get("representation"),
+        },
         "dialogue_contract": dialogue_contract,
-        "dialogue_relation": {**deepcopy(dialogue_contract), "source": "integrated_dialogue_interpretation"},
+        "dialogue_relation": {
+            **deepcopy(dialogue_contract),
+            "source": "context_first_interpretation",
+        },
         "semantic_anchor": deepcopy(semantic_anchor),
         "dialogue_vector": deepcopy(dialogue_contract["dialogue_vector"]),
         "three_way_relation": relation,
         "dialogue_subtype": turn_relation,
         "continuation": relation == "CONTINUE",
-        "reference_to_previous": bool(dialogue_contract.get("reference_to_previous")),
+        "reference_to_previous": bool(
+            dialogue_contract.get("reference_to_previous")
+        ),
         "context_dependency": dialogue_contract["context_dependency"],
         "canonical_topic": semantic.get("topic"),
         "active_topic": semantic.get("topic"),
         "resolved_entity": semantic.get("entity"),
-        "resolved_reference": _df_text(selected_branch.get("canonical_entity") if selected_branch else "", 180),
+        "resolved_reference": _df_text(
+            selected_branch.get("canonical_entity")
+            if selected_branch
+            else "",
+            180,
+        ),
         "interactive_task_state": deepcopy(task),
         "open_task": deepcopy(task),
-        "task_memory": deepcopy(dialogue_contract.get("task_memory") or {}),
-        "task_relation": deepcopy(dialogue_contract.get("task_relation") or {}),
-        "requested_outputs": list(render_plan.get("requested_outputs") or ["text"]),
+        "task_memory": deepcopy(
+            dialogue_contract.get("task_memory") or {}
+        ),
+        "task_relation": deepcopy(
+            dialogue_contract.get("task_relation") or {}
+        ),
+        "requested_outputs": list(
+            render_plan.get("requested_outputs") or ["text"]
+        ),
         "render_plan": deepcopy(render_plan),
         "interpretation_control": {
-            "version": "interpretation_control_v2",
+            "version": "interpretation_control_v3_context_first",
             "relation": relation,
             "render_authorized": bool(render_plan.get("authorized")),
             "render_mode": render_plan.get("mode"),
-            "render_representations": list(render_plan.get("requested_outputs") or []),
-            "artifact_reference": bool(render_plan.get("artifact_reference")),
+            "render_representations": list(
+                render_plan.get("requested_outputs") or []
+            ),
+            "artifact_reference": bool(
+                render_plan.get("artifact_reference")
+            ),
             "operation": semantic.get("operation"),
             "representation": semantic.get("representation"),
         },
         "dialogue_development": development,
         "dialogue_branch_index": branch_index,
+        "active_sequence_digest": deepcopy(
+            branch_digest_for_provider
+        ),
+        "continuity_evidence": continuity_evidence,
         "cognitive_workspace": cognitive_workspace,
         "provider_context_plan": provider_plan,
         "continuation_content_analysis": {
-            "active_entity": semantic.get("entity"), "active_topic": semantic.get("topic"),
-            "same_branch": relation == "CONTINUE", "source": "dialogue_bigunok",
+            "active_entity": semantic.get("entity"),
+            "active_topic": semantic.get("topic"),
+            "same_branch": relation == "CONTINUE",
+            "active_sequence_turn_count": int(
+                active_sequence_digest.get("turn_count") or 0
+            ),
+            "source": "contextual_dialogue_understanding",
         },
-        "dialogue_strategy": {"mode": "dialogue_first", "next_action": "answer_current_request"},
+        "dialogue_strategy": {
+            "mode": "context_first",
+            "next_action": development.get("next_logical_step"),
+        },
         "bigunoks": {
             "dialogue": dialogue_probe,
             "task": task_probe,
             "render": render_probe,
-            "reference": {"deictic": dialogue_probe.get("deictic"), "direct": dialogue_probe.get("direct_reference")},
+            "reference": {
+                "deictic": dialogue_probe.get("deictic"),
+                "direct": dialogue_probe.get("direct_reference"),
+            },
             "role": "evidence_only",
         },
-        "stage_order": ["REQUEST_ANALYSIS", "LIVE_DIALOGUE", "BIGUNOK_EVIDENCE", "UNDERSTANDING", "RENDER_PLAN", "OPENAI", "SCENE_DELIVERY"],
+        "stage_order": [
+            "REQUEST_RECEIPT",
+            "ACTIVE_BRANCH_MEMORY",
+            "CONTEXTUAL_UNDERSTANDING",
+            "DIALOGUE_RELATION_RESOLUTION",
+            "RESPONSE_DEVELOPMENT",
+            "RENDER_PLAN",
+            "PROVIDER_HANDOFF",
+            "SCENE_CONTRACT",
+        ],
         "provider_context_authority": "INTERPRETATION",
         "provider_must_not_reselect_context": True,
         "decision_owner": "INTERPRETATION_RUNTIME",
-        "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+        "elapsed_ms": round(
+            (time.perf_counter() - started) * 1000,
+            3,
+        ),
     }
     return result
 
