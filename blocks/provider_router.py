@@ -1138,7 +1138,7 @@ def _render_block_renderer(block_type: str) -> str:
         "formula": "FormulaRenderer",
         "table": "TableBlock",
         "graph": "GraphBlock",
-        "diagram": "GalleryBlock",
+        "diagram": "DiagramRenderer",
         "gallery": "GalleryBlock",
         "image": "GalleryBlock",
         "code": "CodeBlock",
@@ -3714,9 +3714,23 @@ def _top_level_visual_block(kind: str, value: Any) -> dict[str, Any] | None:
         return None
 
     # Other structured top-level fields already carry a semantic payload.
-    payload = dict(value) if isinstance(value, dict) else (
-        {"content": value} if value not in (None, "") else {}
-    )
+    # Scalar values must stay bound to their semantic field; using a generic
+    # ``content`` carrier makes the structured validator reject formula/link/
+    # graph values during provider finalization.
+    if isinstance(value, dict):
+        payload = dict(value)
+    elif value not in (None, ""):
+        scalar_key = {
+            "formula": "formula",
+            "graph": "data",
+            "table": "data",
+            "diagram": "svg" if isinstance(value, str) else "data",
+            "code": "code",
+            "link": "url",
+        }.get(kind, "content")
+        payload = {scalar_key: value}
+    else:
+        payload = {}
     if not payload:
         return None
     return {
