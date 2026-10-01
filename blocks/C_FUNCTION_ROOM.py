@@ -36,26 +36,27 @@ class FunctionRoom(Room):
 
         print("FUNCTION ROOM HANDLE START")
 
+        payload = context.get("function_payload") or context.get("payload") or {}
+        function = (
+            payload.get("function")
+            or payload.get("expression")
+            or payload.get("equation")
+            or payload.get("content")
+            if isinstance(payload, dict) else str(payload or text)
+        )
+        description = (
+            payload.get("description")
+            if isinstance(payload, dict) else ""
+        ) or context.get("description") or ""
+
         artifact = self.process({
-
-            "function": text,
-
-            "description": text,
-
-            "goal":
-                context.get("goal"),
-
-            "purpose":
-                context.get("purpose")
+            "function": str(function or ""),
+            "description": str(description),
+            "goal": context.get("goal"),
+            "purpose": context.get("purpose"),
         })
 
-        return {
-
-            "type": "text",
-
-            "data":
-                "FUNCTION ROOM ACTIVE"
-        }
+        return artifact
 
     # =================================================
     # WORK ORDER
