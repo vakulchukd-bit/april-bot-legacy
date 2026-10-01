@@ -964,20 +964,30 @@ class ProcessorScene:
             required_artifacts = []
 
         semantic_task_state = dialogue.get("interactive_task_state") if isinstance(dialogue.get("interactive_task_state"), dict) else {}
-        persisted_task_state = self.state.get("interactive_task_state") if isinstance(self.state.get("interactive_task_state"), dict) else {}
-        if cognitive_workspace:
-            active_task = (
-                semantic_task_state
-                if bool(cognitive_workspace.get("task_continuation")) and isinstance(semantic_task_state, dict)
-                else {}
-            )
-        else:
-            active_task = semantic_task_state or persisted_task_state or (
-                self.state.get("april_active_task")
-                if isinstance(self.state.get("april_active_task"), dict)
-                else {}
-            )
+        active_sequence = self.state.get("active_dialogue_sequence") if isinstance(self.state.get("active_dialogue_sequence"), dict) else {}
+        active_sequence_id = _text(active_sequence.get("sequence_id"))
+        semantic_task_sequence_id = _text(semantic_task_state.get("sequence_id") or semantic_task_state.get("active_sequence_id"))
+        task_sequence_ok = (
+            not active_sequence_id
+            or not semantic_task_sequence_id
+            or semantic_task_sequence_id == active_sequence_id
+        )
+        if not task_sequence_ok:
+            semantic_task_state = {}
+
+        task_continuation = bool(cognitive_workspace.get("task_continuation")) if cognitive_workspace else bool(
+            dialogue.get("task_continuation")
+            or dialogue.get("task_action")
+        )
+        # Executor consumes only the task selected by Interpretation for the
+        # authenticated active branch. Never resurrect a global/legacy task.
+        active_task = semantic_task_state if task_continuation else {}
         pending_task = self.state.get("april_pending_task") if isinstance(self.state.get("april_pending_task"), dict) else {}
+        pending_sequence_id = _text(pending_task.get("sequence_id") or pending_task.get("active_sequence_id"))
+        if active_sequence_id and pending_sequence_id and pending_sequence_id != active_sequence_id:
+            pending_task = {}
+        if relation not in {"CONTINUE", "RECALL"} and not bool(dialogue.get("pending_resolved")):
+            pending_task = {}
 
         resolved_request = _text(dialogue.get("resolved_request") or self.request)
         if dialogue["pending_resolved"] and pending_task and not dialogue.get("resolved_request"):
