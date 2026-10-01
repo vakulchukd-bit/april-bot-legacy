@@ -506,6 +506,94 @@ def _adaptive_target_budget(*, mode: str, task_active: bool, continuation: bool)
     return max(760, min(860, target))
 
 
+def _compact_packet_value(value: Any, *, depth: int = 0, max_depth: int = 2,
+                           max_items: int = 3, max_keys: int = 8,
+                           leaf_limit: int = 90) -> Any:
+    """Recursively compact provider packet data without losing the newest facts."""
+    if depth > max_depth:
+        return None
+    if value in (None, "", [], {}):
+        return None
+    if isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return _semantic_excerpt(value, leaf_limit)
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in list(value.items())[:max_keys]:
+            compact = _compact_packet_value(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_keys=max_keys,
+                leaf_limit=leaf_limit,
+            )
+            if compact not in (None, "", [], {}):
+                out[str(key)] = compact
+        return out
+    if isinstance(value, (list, tuple, set)):
+        seq = list(value)
+        if len(seq) > max_items:
+            seq = seq[-max_items:]
+        out = []
+        for item in seq:
+            compact = _compact_packet_value(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_keys=max_keys,
+                leaf_limit=leaf_limit,
+            )
+            if compact not in (None, "", [], {}):
+                out.append(compact)
+        return out
+    return _semantic_excerpt(_safe_text(value), leaf_limit)
+
+
+def _compact_packet_piece(piece: str, limit: int, *, label_floor: int = 24) -> str:
+    """Compact one provider packet section while preserving its semantic label."""
+    raw = _safe_text(piece).strip()
+    if len(raw) <= limit:
+        return raw
+    if ":" not in raw:
+        return _semantic_excerpt(raw, max(label_floor, limit))
+
+    label, payload = raw.split(":", 1)
+    label = label.strip()
+    payload = payload.strip()
+    payload_limit = max(24, limit - len(label) - 2)
+
+    if payload.startswith(("{", "[")):
+        try:
+            parsed = json.loads(payload)
+            for leaf_limit, max_items, max_keys, max_depth in (
+                (72, 3, 8, 4),
+                (54, 2, 6, 3),
+                (40, 2, 5, 2),
+            ):
+                compact = _compact_packet_value(
+                    parsed,
+                    max_depth=max_depth,
+                    max_items=max_items,
+                    max_keys=max_keys,
+                    leaf_limit=leaf_limit,
+                )
+                candidate = label + ": " + json.dumps(
+                    compact,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                )
+                if len(candidate) <= limit:
+                    return candidate
+        except Exception:
+            pass
+
+    return label + ": " + _semantic_excerpt(payload, payload_limit)
+
+
 def _adaptive_pack(
     system_prompt: str,
     mandatory: list[str],
@@ -514,11 +602,10 @@ def _adaptive_pack(
     hard_budget: int = INPUT_TOKEN_BUDGET,
     target_budget: int = ADAPTIVE_PROVIDER_TARGET_TOKENS,
 ) -> tuple[str, dict[str, Any]]:
-    """Pack provider context by semantic priority, progressively compressing each tier.
+    """Pack provider context with a guaranteed live-continuation packet.
 
-    Invariant: local estimated input <= hard_budget. Memory is not mutated. The packer
-    only creates the provider-facing projection and will degrade optional context before
-    ever considering the current request.
+    Required dialogue state is compressed before removal. A short follow-up cannot
+    fail merely because the authenticated task history gained another turn.
     """
     prompt = _safe_text(system_prompt).strip()
     selected = list(mandatory)
@@ -528,7 +615,6 @@ def _adaptive_pack(
     def total(text_parts: list[str], prompt_text: str = prompt) -> int:
         return _estimate_input_tokens(prompt_text) + _estimate_input_tokens("\n".join(text_parts))
 
-    # If the system prompt itself is too expensive, use the compact equivalent.
     if total(selected) > target_budget:
         prompt = (
             "April provider. Return one compact MachineResponse JSON object. "
@@ -537,23 +623,14 @@ def _adaptive_pack(
             "Preserve requested structured output. Never expose internal state."
         )
 
-    # Every optional tier carries a compression ladder. Each item is selected at the
-    # first level that fits; low-priority items may therefore survive in compact form.
     for name, raw_piece in optional_tiers:
         if not raw_piece:
             continue
-
         variants = [raw_piece]
-        compact_piece = _shrink_packet_piece(raw_piece, 360)
-        if compact_piece != raw_piece:
-            variants.append(compact_piece)
-        minimal_piece = _shrink_packet_piece(raw_piece, 210)
-        if minimal_piece not in variants:
-            variants.append(minimal_piece)
-        micro_piece = _shrink_packet_piece(raw_piece, 150)
-        if micro_piece not in variants:
-            variants.append(micro_piece)
-
+        for limit in (360, 210, 150, 100):
+            compact_piece = _compact_packet_piece(raw_piece, limit)
+            if compact_piece not in variants:
+                variants.append(compact_piece)
         chosen = None
         for idx, candidate in enumerate(variants):
             if total(selected + [candidate]) <= target_budget:
@@ -561,7 +638,6 @@ def _adaptive_pack(
                 if idx > 0:
                     compressed.append(name)
                 break
-
         if chosen is not None:
             selected.append(chosen)
         else:
@@ -569,7 +645,6 @@ def _adaptive_pack(
 
     used = total(selected)
 
-    # Hard-budget pass: trim optional sections from lowest priority to highest priority.
     if used > hard_budget:
         for idx in range(len(selected) - 1, len(mandatory) - 1, -1):
             removed = selected.pop(idx)
@@ -578,37 +653,126 @@ def _adaptive_pack(
             if used <= hard_budget:
                 break
 
-    # Emergency degradation preserves the protected semantic contract. Never
-    # replace it with a bare request/mode pair: output contract, requested outputs,
-    # cognitive core and active task must remain represented. Only the textual
-    # payloads of protected sections may be compacted further.
     if used > hard_budget:
-        compacted = []
+        priority_limits = {
+            "REQUEST": 360,
+            "DIALOGUE_ANCHOR": 220,
+            "ACTIVE_TASK": 180,
+            "TASK_RESULT_STATE": 180,
+            "RESPONSE_SEQUENCE": 160,
+            "DIALOGUE_RULES": 140,
+            "SEMANTIC_CORE": 140,
+            "OUTPUT_CONTRACT": 140,
+            "ACTIVE_DIALOGUE_CONTEXT": 150,
+            "ACTIVE_DIALOGUE_TRAJECTORY": 150,
+            "SEMANTIC_FRAME": 120,
+            "DIALOGUE_DEVELOPMENT": 120,
+        }
+        compacted: list[str] = []
         for piece in mandatory:
             label = piece.split(":", 1)[0].strip().upper()
-            if label == "REQUEST":
-                value = _semantic_excerpt(piece.split(":", 1)[1], 360)
-                compacted.append("REQUEST: " + value)
-            elif label in {"COGNITIVE_CORE", "RENDER_CONTRACT", "ACTIVE_TASK", "DIALOGUE_ANCHOR"}:
-                compacted.append(_shrink_packet_piece(piece, 260))
-            else:
-                compacted.append(piece)
+            limit = priority_limits.get(label, 110)
+            compacted_piece = _compact_packet_piece(piece, limit)
+            if compacted_piece != piece:
+                compressed.append("protected:" + label)
+            compacted.append(compacted_piece)
         selected = compacted
-        dropped.append("emergency_protected_compaction")
+        dropped.append("protected_context_recursive_compaction")
         used = total(selected)
 
-    # Deterministic final guarantee. The current request is reduced semantically,
-    # never dropped, until the local estimate fits the hard envelope.
     if used > hard_budget:
-        request_text = next((x.split(":", 1)[1].strip() for x in selected if x.startswith("REQUEST:")), "")
-        for limit in (130, 110, 90, 70, 50):
-            candidate = "REQUEST: " + _semantic_excerpt(request_text, limit)
-            trial = [x for x in selected if not x.startswith("REQUEST:")]
-            trial.insert(1, candidate)
-            if total(trial) <= hard_budget:
-                selected = trial
-                used = total(selected)
+        removable_labels = [
+            "ACTIVE_DIALOGUE_CONTEXT",
+            "ACTIVE_DIALOGUE_TRAJECTORY",
+            "SEMANTIC_FRAME",
+            "DIALOGUE_DEVELOPMENT",
+            "OUTPUT_CONTRACT",
+            "SEMANTIC_CORE",
+        ]
+        for remove_label in removable_labels:
+            if used <= hard_budget:
                 break
+            filtered = []
+            removed_any = False
+            for piece in selected:
+                label = piece.split(":", 1)[0].strip().upper()
+                if label == remove_label:
+                    removed_any = True
+                    continue
+                filtered.append(piece)
+            if removed_any:
+                selected = filtered
+                dropped.append("redundant_protected_trim:" + remove_label)
+                used = total(selected)
+
+    if used > hard_budget:
+        pieces_by_label = {
+            piece.split(":", 1)[0].strip().upper(): piece
+            for piece in selected
+            if ":" in piece
+        }
+        request_piece = next(
+            (piece for piece in selected if piece.startswith("REQUEST:")),
+            "REQUEST: " + _semantic_excerpt(
+                next((x.split(":", 1)[1].strip() for x in selected if x.startswith("REQUEST:")), ""),
+                180,
+            ),
+        )
+        final_pieces = [
+            request_piece,
+            pieces_by_label.get("RELATION", "RELATION: CONTINUE"),
+            pieces_by_label.get("REQUESTED", "REQUESTED: [\"text\"]"),
+            pieces_by_label.get("RESPONSE_SEQUENCE", ""),
+            pieces_by_label.get("DIALOGUE_ANCHOR", ""),
+            pieces_by_label.get("TASK_RESULT_STATE", ""),
+            pieces_by_label.get("ACTIVE_TASK", ""),
+            pieces_by_label.get("DIALOGUE_RULES", ""),
+            pieces_by_label.get("RESPONSE_FORMAT", "RESPONSE_FORMAT: Return one complete logical MachineResponse JSON answer."),
+        ]
+        final_pieces = [x for x in final_pieces if x]
+
+        for limit_map in (
+            {"REQUEST": 220, "DIALOGUE_ANCHOR": 180, "TASK_RESULT_STATE": 150, "ACTIVE_TASK": 120, "DIALOGUE_RULES": 100, "RESPONSE_SEQUENCE": 120},
+            {"REQUEST": 160, "DIALOGUE_ANCHOR": 150, "TASK_RESULT_STATE": 110, "ACTIVE_TASK": 90, "DIALOGUE_RULES": 80, "RESPONSE_SEQUENCE": 100},
+            {"REQUEST": 120, "DIALOGUE_ANCHOR": 120, "TASK_RESULT_STATE": 80, "ACTIVE_TASK": 60, "DIALOGUE_RULES": 60, "RESPONSE_SEQUENCE": 80},
+        ):
+            trial = []
+            for piece in final_pieces:
+                label = piece.split(":", 1)[0].strip().upper()
+                trial.append(_compact_packet_piece(piece, limit_map.get(label, 100)))
+            trial_used = total(trial)
+            if trial_used <= hard_budget:
+                final_pieces = trial
+                used = trial_used
+                selected = final_pieces
+                break
+        else:
+            request = next((x.split(":", 1)[1].strip() for x in final_pieces if x.startswith("REQUEST:")), "")
+            core = [
+                "REQUEST: " + _semantic_excerpt(request, 90),
+                pieces_by_label.get("RELATION", "RELATION: CONTINUE"),
+                pieces_by_label.get("REQUESTED", "REQUESTED: [\"text\"]"),
+                _compact_packet_piece(pieces_by_label.get("RESPONSE_SEQUENCE", "RESPONSE_SEQUENCE: {}"), 72),
+                _compact_packet_piece(pieces_by_label.get("DIALOGUE_ANCHOR", "DIALOGUE_ANCHOR: {}"), 110),
+                pieces_by_label.get("RESPONSE_FORMAT", "RESPONSE_FORMAT: Return one complete logical MachineResponse JSON answer."),
+            ]
+            # Keep REQUEST, RELATION and DIALOGUE_ANCHOR as the final semantic core.
+            # Remove requested-output metadata before the anchor when space is tight.
+            while total(core) > hard_budget and len(core) > 3:
+                removed = False
+                for label in ("REQUESTED", "RESPONSE_SEQUENCE"):
+                    for idx in range(len(core) - 1, -1, -1):
+                        if core[idx].split(":", 1)[0].strip().upper() == label:
+                            core.pop(idx)
+                            removed = True
+                            break
+                    if removed:
+                        break
+                if not removed:
+                    break
+            selected = core
+            used = total(selected)
+        dropped.append("protected_continuation_packet")
 
     return "\n".join(selected), {
         "estimated_input_tokens": used,
@@ -623,6 +787,7 @@ def _adaptive_pack(
         "target_budget": target_budget,
         "hard_budget": hard_budget,
     }
+
 
 def _dialogue_contract(payload: dict[str, Any]) -> dict[str, Any]:
     contract = payload.get("dialogue_contract")
