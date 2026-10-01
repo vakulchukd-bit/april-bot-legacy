@@ -36,27 +36,31 @@ class FormulaRoom(Room):
 
         print("FORMULA ROOM HANDLE START")
 
+        payload = context.get("formula_payload") or context.get("payload") or {}
+        formula = (
+            payload.get("formula")
+            or payload.get("latex")
+            or payload.get("equation")
+            or payload.get("expression")
+            or payload.get("content")
+            if isinstance(payload, dict) else str(payload or text)
+        )
+
         artifact = self.process({
-
-            "formula": text,
-
-            "goal":
-                context.get("goal"),
-
-            "purpose":
-                context.get("purpose"),
-
-            "active_scene":
-                context.get("active_scene")
+            "formula": str(formula or ""),
+            "goal": context.get("goal"),
+            "purpose": context.get("purpose"),
+            "active_scene": context.get("active_scene"),
+            "scene_id": context.get("scene_id"),
+            "turn_id": context.get("turn_id"),
+            "flow_id": context.get("flow_id"),
+            "topic_group": context.get("topic_group"),
+            "continuation": context.get("continuation", False),
+            "block_id": context.get("block_id"),
+            "render_id": context.get("render_id"),
         })
 
-        return {
-
-            "type": "text",
-
-            "data":
-                "FORMULA ROOM ACTIVE"
-        }
+        return artifact
 
     # =================================================
     # WORK ORDER
