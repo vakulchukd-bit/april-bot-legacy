@@ -68,6 +68,9 @@ April's internal response provider. Return exactly one MachineResponse JSON obje
 
 The Quantum Processor owns interpretation, dialogue relation, resolved task, representation,
 requested outputs and reference resolution. Treat those fields as authoritative.
+When DIALOGUE_RULES/RESPONSE_SEQUENCE/TASK_RESULT_STATE are supplied, they are immutable dialogue
+state for the current task: preserve the rule, use the supplied next response number, and use the
+actual previous result for continuation. Never reselect or reset task context.
 Answer the resolved current request only. For continuation/reference turns use only the
 supplied live dialogue context. For independent turns do not import historical context.
 
@@ -144,6 +147,13 @@ Use the supplied dialogue strategy as response guidance:
 EXPAND adds new information; DEEPEN explains causes; DISCUSS engages the point;
 SOLVE advances a concrete problem; CORRECT fixes the disputed point; REACT responds naturally;
 CONTINUE_NATURAL keeps the thread moving. Use covered content only to avoid unnecessary repetition.
+
+When DIALOGUE_RULES is present, preserve those rules across every topic inside the authenticated
+conversation sequence unless the user explicitly changes or ends them. RESPONSE_SEQUENCE is authoritative:
+task_response_number is the next response number for this task. Never reset it to 1 because the topic changed
+or because the current message is short. TASK_RESULT_STATE contains the actual previous task result; use it
+to develop the next answer. When the current relation is NEW, create a separate task conceptually but keep
+the parent authenticated sequence and inherited dialogue rules isolated from other tasks.
 
 When INTERACTIVE_TASK_STATE is present, it is the active conversational work item.
 Its role, phase, latest question, accumulated clues and Q&A history are authoritative.
@@ -393,13 +403,23 @@ def _build_adaptive_task_digest(
 def _build_live_dialogue_digest(dialogue: dict[str, Any]) -> dict[str, Any]:
     """Keep only the live conversational facts required for a continuation."""
     contract = dialogue if isinstance(dialogue, dict) else {}
+    response_sequence = contract.get("response_sequence") if isinstance(contract.get("response_sequence"), dict) else {}
+    dialogue_rules = contract.get("dialogue_rules") if isinstance(contract.get("dialogue_rules"), dict) else {}
     digest: dict[str, Any] = {
         "relation": _safe_text(contract.get("relation")),
         "dependency": _safe_text(contract.get("context_dependency")),
         "topic": _semantic_excerpt(contract.get("canonical_topic"), 120),
+        "task_id": _safe_text(contract.get("task_id")),
         "prev_user": _semantic_excerpt(contract.get("previous_user_turn"), 170),
         "prev_april": _semantic_excerpt(contract.get("previous_april_turn"), 220),
     }
+    if dialogue_rules:
+        digest["dialogue_rules"] = _compact_value(dialogue_rules, max_depth=2, max_items=6, max_keys=8)
+    if response_sequence:
+        digest["response_sequence"] = _compact_value(response_sequence, max_depth=2, max_items=6, max_keys=8)
+    previous_result = contract.get("previous_result") if isinstance(contract.get("previous_result"), dict) else {}
+    if previous_result:
+        digest["previous_result"] = _compact_value(previous_result, max_depth=2, max_items=8, max_keys=8)
     # Only carry the scene identity when it can matter for reference continuity.
     if contract.get("reference_to_previous") or str(contract.get("context_dependency") or "").lower() in {
         "artifact", "reference", "pending", "recall"
@@ -1519,14 +1539,25 @@ def _minimal_plan_context(plan: dict[str, Any]) -> dict[str, Any]:
     task = by_key.get("ACTIVE_TASK")
     if isinstance(task, dict):
         keep = (
-            "kind", "role", "phase", "expected_input_type", "topic", "goal",
+            "task_id", "sequence_id", "kind", "role", "phase", "expected_input_type", "topic", "goal",
             "last_question", "candidate_answer", "last_user_answer",
+            "response_count", "task_response_count", "last_result", "last_answer_basis",
         )
         out["active_task"] = {
             key: _semantic_excerpt(task.get(key), 160)
             for key in keep
             if task.get(key) not in (None, "", [], {})
         }
+
+    rules = by_key.get("DIALOGUE_RULES")
+    if isinstance(rules, dict) and rules:
+        out["dialogue_rules"] = _compact_value(rules, max_depth=2, max_items=6, max_keys=8)
+    sequence = by_key.get("RESPONSE_SEQUENCE")
+    if isinstance(sequence, dict) and sequence:
+        out["response_sequence"] = _compact_value(sequence, max_depth=2, max_items=6, max_keys=8)
+    result_state = by_key.get("TASK_RESULT_STATE")
+    if isinstance(result_state, dict) and result_state:
+        out["task_result_state"] = _compact_value(result_state, max_depth=3, max_items=6, max_keys=8)
 
     anchor = by_key.get("DIALOGUE_ANCHOR")
     if isinstance(anchor, dict):
@@ -1594,16 +1625,36 @@ def _build_provider_user_text_from_plan(
         requested = [requested]
     requested = [x for x in requested if _safe_text(x).strip()]
 
-    # A NEW topic is intentionally isolated.  The current request is the only
-    # conversational operand; semantic metadata is already encoded in the request
-    # and provider system contract. This prevents stale topic/entity leakage.
+    # A NEW topic is isolated from other task operands, but a dialogue-level rule
+    # (for example sequential numbering) still belongs to the authenticated sequence.
+    # Preserve only the explicitly protected task-scoped sections; never import old topic data.
     if relation == "NEW" and bool(plan.get("new_topic_minimal_context")):
-        minimal = "APRIL CANONICAL REQUEST\nREQUEST: " + current_request
+        sections = {
+            _safe_text(x.get("key") or x.get("name")).upper(): x.get("value")
+            for x in list(plan.get("required_context") or [])
+            if isinstance(x, dict)
+        }
+        protected_parts = [
+            "APRIL CANONICAL REQUEST",
+            "REQUEST: " + current_request,
+            "RELATION: NEW",
+        ]
+        rules = sections.get("DIALOGUE_RULES")
+        if rules not in (None, "", [], {}):
+            protected_parts.append(_json_piece("DIALOGUE_RULES", rules, depth=2, items=6, keys=8))
+        sequence = sections.get("RESPONSE_SEQUENCE")
+        if sequence not in (None, "", [], {}):
+            protected_parts.append(_json_piece("RESPONSE_SEQUENCE", sequence, depth=2, items=6, keys=8))
+        result_state = sections.get("TASK_RESULT_STATE")
+        if result_state not in (None, "", [], {}):
+            protected_parts.append(_json_piece("TASK_RESULT_STATE", result_state, depth=3, items=6, keys=8))
+        protected_parts.append("RESPONSE_FORMAT: Return exactly one complete logical answer as MachineResponse JSON.")
+        minimal = "\n".join(protected_parts)
         return minimal, {
             "provider_context_plan_version": _safe_text(plan.get("version")),
             "provider_context_authority": "INTERPRETATION",
             "provider_must_not_reselect_context": True,
-            "plan_required_selected": ["CURRENT_REQUEST"],
+            "plan_required_selected": ["CURRENT_REQUEST", "DIALOGUE_RULES", "RESPONSE_SEQUENCE", "TASK_RESULT_STATE"],
             "plan_optional_candidates": [],
             "plan_excluded": [
                 _safe_text(x.get("key") or x.get("name"))
@@ -1807,9 +1858,10 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     if _estimate_input_tokens(system_prompt) > 420:
         system_prompt = (
             "April internal response provider. Return exactly one MachineResponse JSON object. "
-            "Quantum Processor owns current request, dialogue relation, task, representation and context plan. "
-            "Use only the supplied context plan. Do not add, search, reinterpret or substitute context. "
-            "Preserve requested structured representations and never expose internal state."
+            "Quantum Processor owns current request, relation, task, representation and context plan. "
+            "DIALOGUE_RULES and RESPONSE_SEQUENCE are authoritative; use the supplied next task response number "
+            "and never reset it. TASK_RESULT_STATE is the actual previous task result. Use only supplied context; "
+            "do not reselect, search, reinterpret or substitute context. Never expose internal state."
         )
 
     # New canonical path: Interpretation has already selected context semantically.
