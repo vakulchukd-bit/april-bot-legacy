@@ -1309,7 +1309,6 @@ class ProcessorScene:
             "target_task_id": _text(dialogue.get("target_task_id") or (dialogue.get("active_task") or {}).get("task_id")),
             "target_sequence_id": _text(dialogue.get("sequence_id") or dialogue.get("target_sequence_id")),
             "sequence_turn_index": int((dialogue_memory.get("active_sequence") or {}).get("turn_count", 0) or 0) + (1 if relation in {"NEW", "CONTINUE", "RECALL"} else 0),
-            "task_response_number": int((dialogue.get("response_sequence") or {}).get("task_response_number") or 0),
             "dialogue_rules": _compact(dialogue.get("dialogue_rules") or {}, max_depth=3, max_items=8),
             "response_sequence": _compact(dialogue.get("response_sequence") or {}, max_depth=3, max_items=8),
             "previous_result": _compact(dialogue.get("previous_result") or {}, max_depth=4, max_items=8),
@@ -1679,7 +1678,6 @@ class ProcessorScene:
             "conversation_id": _text(request.memory.get("authenticated_user_scope", {}).get("conversation_id")),
             "dialogue_sequence_id": _text(request.dialogue_contract.get("sequence_id")),
             "task_id": _text(request.dialogue_contract.get("task_id")),
-            "task_response_number": int(request.dialogue_contract.get("task_response_number") or (request.dialogue_contract.get("response_sequence") or {}).get("task_response_number") or 0),
             "sequence_turn_index": int(request.dialogue_contract.get("sequence_turn_index") or 0),
             "dialogue_rules": deepcopy(request.dialogue_contract.get("dialogue_rules") or {}),
             "response_sequence": deepcopy(request.dialogue_contract.get("response_sequence") or {}),
@@ -1961,69 +1959,43 @@ _DIALOGUE_ALPHABET_RU = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩ�
 
 
 def _apply_dialogue_output_contract(machine_payload: dict[str, Any], dialogue_contract: dict[str, Any]) -> dict[str, Any]:
-    """Deterministically enforce a persistent dialogue numbering/alphabet rule.
+    """Apply the exact answer prefix interpreted from the user's dialogue rule.
 
-    The Provider answers semantically. The contract carries the authoritative
-    task response number; this final normalization prevents a model from resetting
-    a counter or dropping a user-requested sequence marker.
+    No task/scene/session counter is used here. Interpretation supplies next_marker.
     """
     if not isinstance(machine_payload, dict) or not isinstance(dialogue_contract, dict):
         return machine_payload
-    rules = dialogue_contract.get("dialogue_rules")
+    rules = dialogue_contract.get("dialogue_output_rule") or dialogue_contract.get("dialogue_rules")
     rules = rules if isinstance(rules, dict) else {}
-    if not rules.get("enabled") or _text(rules.get("scope")).lower() != "dialogue":
+    if not rules.get("enabled") or _text(rules.get("scope") or "dialogue").lower() != "dialogue":
         return machine_payload
-    sequence = dialogue_contract.get("response_sequence")
-    sequence = sequence if isinstance(sequence, dict) else {}
-    try:
-        # Conversation-level dialogue_response_number owns the visible marker.
-        # task_response_number remains local to the active task and may restart
-        # when the user changes topic inside the same authenticated sequence.
-        number = int(
-            sequence.get("dialogue_response_number")
-            or dialogue_contract.get("dialogue_response_number")
-            or sequence.get("task_response_number")
-            or dialogue_contract.get("task_response_number")
-            or 0
-        )
-    except (TypeError, ValueError):
-        number = 0
-    if number <= 0:
+    marker_value = _text(rules.get("next_marker")).strip()
+    mode = _text(rules.get("mode") or "").lower()
+    if not marker_value or mode not in {"numeric", "alphabetic", "sequential"}:
         return machine_payload
-    mode = _text(rules.get("mode") or "numeric").lower()
-    marker = f"{number}. "
-    if mode == "alphabetic":
-        idx = min(number, len(_DIALOGUE_ALPHABET_RU)) - 1
-        marker = f"{_DIALOGUE_ALPHABET_RU[idx]} — "
-    elif mode not in {"numeric", "sequential"}:
-        return machine_payload
+    marker = f"{marker_value}. "
 
-    def enforce(text: Any) -> str:
-        value = _text(text)
-        if not value:
-            return value
-        if mode in {"numeric", "sequential"}:
-            expected = re.escape(str(number))
-            if re.match(rf"^\s*{expected}\s*[.)—:-]", value):
-                return re.sub(rf"^\s*{expected}\s*[.)—:-]\s*", marker, value, count=1)
-            # Replace a different accidental numeric prefix only when it is clearly
-            # a leading sequence marker, never an ordinary numeric answer.
-            if re.match(r"^\s*\d+\s*[.)—:-]", value):
-                return re.sub(r"^\s*\d+\s*[.)—:-]\s*", marker, value, count=1)
-            return marker + value
-        # Alphabetic mode.
-        letter = _DIALOGUE_ALPHABET_RU[min(number, len(_DIALOGUE_ALPHABET_RU)) - 1]
-        if re.match(rf"^\s*{re.escape(letter)}\s*[.)—:-]", value, flags=re.IGNORECASE):
-            return re.sub(rf"^\s*{re.escape(letter)}\s*[.)—:-]\s*", marker, value, count=1, flags=re.IGNORECASE)
-        if re.match(r"^\s*[А-ЯЁ]\s*[.)—:-]", value, flags=re.IGNORECASE):
-            return re.sub(r"^\s*[А-ЯЁ]\s*[.)—:-]\s*", marker, value, count=1)
-        return marker + value
+    def strip_legacy_markers(value: str) -> str:
+        value = value.strip()
+        # Remove repeated legacy/model prefixes: "1. а. ...", "А) ...", "2) ...".
+        for _ in range(4):
+            updated = re.sub(r"^\s*\d+\s*[.)—:-]\s*", "", value)
+            updated = re.sub(r"^\s*[А-ЯЁA-Za-z]\s*[.)—:-]\s*", "", updated, flags=re.IGNORECASE)
+            if updated == value:
+                break
+            value = updated
+        return value.strip()
+
+    def enforce(value: Any) -> str:
+        text_value = _text(value)
+        return marker + strip_legacy_markers(text_value) if text_value else text_value
 
     if machine_payload.get("answer") or machine_payload.get("content"):
         canonical = enforce(machine_payload.get("answer") or machine_payload.get("content"))
         machine_payload["answer"] = canonical
         machine_payload["content"] = canonical
         machine_payload["response"] = canonical
+
     blocks = machine_payload.get("render_blocks")
     if isinstance(blocks, list):
         for block in blocks:
@@ -2039,12 +2011,13 @@ def _apply_dialogue_output_contract(machine_payload: dict[str, Any], dialogue_co
                 block["text"] = canonical
                 if block.get("answer"):
                     block["answer"] = canonical
+
     meta = machine_payload.get("metadata") if isinstance(machine_payload.get("metadata"), dict) else {}
     meta["dialogue_output_contract"] = {
         "enforced": True,
-        "task_id": _text(dialogue_contract.get("task_id")),
-        "task_response_number": number,
         "mode": mode,
+        "marker": marker_value,
+        "source": "interpretation_dialogue_rule",
     }
     machine_payload["metadata"] = meta
     return machine_payload
