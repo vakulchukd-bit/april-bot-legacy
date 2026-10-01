@@ -68,12 +68,11 @@ April's internal response provider. Return exactly one MachineResponse JSON obje
 
 The Quantum Processor owns interpretation, dialogue relation, resolved task, representation,
 requested outputs and reference resolution. Treat those fields as authoritative.
-When DIALOGUE_RULES/RESPONSE_SEQUENCE/TASK_RESULT_STATE are supplied, DIALOGUE_RULES and
-DIALOGUE_RULE_STATE are conversation-level state shared across task branches. Use the supplied
-dialogue_response_number as the next visible response marker; task_response_number is only a
-task-local counter and may reset when a new topic becomes a new task. Never reset the dialogue
-marker because the topic changed. TASK_RESULT_STATE is the actual previous task result only when
-the current turn is a continuation of that task.
+When DIALOGUE_RULES/RESPONSE_SEQUENCE/TASK_RESULT_STATE are supplied, they are semantic dialogue
+context. DIALOGUE_RULES describes presentation of the visible answer only; it is not a task counter
+and must never identify the subject or task. RESPONSE_SEQUENCE describes conversation position only.
+Use the interpreted DIALOGUE_RULES.next_marker when present; never derive visible numbering from
+task_response_count or task identity.
 Answer the resolved current request only. For continuation/reference turns use only the
 supplied live dialogue context. For independent turns do not import historical context.
 
@@ -151,15 +150,12 @@ EXPAND adds new information; DEEPEN explains causes; DISCUSS engages the point;
 SOLVE advances a concrete problem; CORRECT fixes the disputed point; REACT responds naturally;
 CONTINUE_NATURAL keeps the thread moving. Use covered content only to avoid unnecessary repetition.
 
-When DIALOGUE_RULES is present, preserve those rules across every topic inside the authenticated
-conversation sequence unless the user explicitly changes or ends them. DIALOGUE_RULE_STATE and
-RESPONSE_SEQUENCE.dialogue_response_number are authoritative for the next visible dialogue marker.
-RESPONSE_SEQUENCE.task_response_number is task-local and may restart for a newly opened topic task.
-Never let a task-local counter reset the conversation-level marker. TASK_RESULT_STATE contains the
-actual previous task result only when the current turn continues that task. When the current relation
-is NEW, answer the new topic independently while inheriting the conversation-level dialogue rule.
-If turn_relation is DIALOGUE_RULE_UPDATE, acknowledge the rule change only; do not answer the previous
-content task or import its topic into the current answer.
+When DIALOGUE_RULES is present, preserve those rules across topics in the authenticated conversation sequence
+unless the user explicitly changes or ends them. The rule is presentation semantics only: it says how the
+visible answer should be marked. RESPONSE_SEQUENCE is conversation position, not a visible counter. Never
+derive a visible number or letter from task_response_count/task_id. TASK_RESULT_STATE describes only the
+previous task result used for semantic development. A NEW topic may therefore use the same dialogue-level
+presentation rule without inheriting the previous task's subject or answer.
 
 When INTERACTIVE_TASK_STATE is present, it is the active conversational work item.
 Its role, phase, latest question, accumulated clues and Q&A history are authoritative.
@@ -2030,11 +2026,9 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         system_prompt = (
             "April internal response provider. Return exactly one MachineResponse JSON object. "
             "Quantum Processor owns current request, relation, task, representation and context plan. "
-            "DIALOGUE_RULES and DIALOGUE_RULE_STATE are conversation-level and shared across task branches. "
-            "Use RESPONSE_SEQUENCE.dialogue_response_number as the next visible dialogue marker; "
-            "task_response_number is only local to the current task and may restart on a topic change. "
-            "TASK_RESULT_STATE is the actual previous task result only for a true task continuation. "
-            "Use only supplied context; do not reselect, search, reinterpret or substitute context. Never expose internal state."
+            "DIALOGUE_RULES and OUTPUT_RULE are authoritative for visible formatting; RESPONSE_SEQUENCE is conversation position only. "
+            "and never reset it. TASK_RESULT_STATE is the actual previous task result. Use only supplied context; "
+            "do not reselect, search, reinterpret or substitute context. Never expose internal state."
         )
 
     # New canonical path: Interpretation has already selected context semantically.
