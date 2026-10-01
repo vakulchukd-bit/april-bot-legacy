@@ -67,6 +67,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
+_DIALOGUE_ALPHABET_RU = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
 
 SEMANTIC_MODEL_NAME = os.getenv(
     "APRIL_SENTENCE_MODEL",
@@ -3401,11 +3402,6 @@ class InterpretationEngineBase:
         return float(len(left & right) / max(1, min(len(left), len(right))))
 
     @classmethod
-    def _similarity(cls, a: Any, b: Any) -> float:
-        """Compatibility alias used by the earlier semantic orchestrator."""
-        return cls._sim(a, b)
-
-    @classmethod
     def _fingerprint(cls, value: Any) -> str:
         return hashlib.sha1(cls._low(value).encode("utf-8")).hexdigest()[:16]
 
@@ -4211,6 +4207,7 @@ class DialogueRelationEngine(InterpretationEngineBase):
             "version": self.VERSION,
             "relation": relation,
             "turn_relation": turn_relation,
+            "presentation_only": turn_relation == "DIALOGUE_RULE_UPDATE",
             "continuation": relation == "CONTINUE",
             "reference": relation == "RECALL",
             "previous_user_turn": previous_user,
@@ -13261,15 +13258,13 @@ _df_version = "april_integrated_dialogue_first_v1"
 _df_provider_plan_version = "april_provider_handoff_v1"
 
 _df_structured = {"image", "gallery", "diagram", "graph", "table", "formula", "code", "link"}
-_DIALOGUE_ALPHABET_RU = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
 _df_confirm = {"да", "ага", "верно", "правильно", "точно", "именно", "хорошо", "угу"}
 _df_reject = {"нет", "не", "неверно", "неправильно", "неа"}
 _df_short_filler = {"ну", "так", "теперь", "дальше", "и", "а", "это", "понятно"}
 _df_stop = {
-    "и", "а", "но", "да", "нет", "ну", "так", "же", "ли", "я", "ты", "мне", "тебе",
-    "меня", "тебя", "мы", "вы", "они", "он", "она", "оно", "это", "этот", "эта", "эту", "эти", "тот", "та", "те",
-    "его", "ему", "ей", "её", "ее", "им", "их", "нас", "вам", "они",
-    "что", "такое", "такой", "такая", "такие", "как", "почему", "зачем", "какой", "какая", "какое", "какие", "сколько", "можешь",
+    "и", "а", "но", "да", "нет", "ну", "так", "же", "ли", "же", "я", "ты", "мне", "тебе",
+    "меня", "тебя", "мы", "вы", "они", "он", "она", "оно", "это", "этот", "эта", "эту", "тот",
+    "что", "как", "почему", "зачем", "какой", "какая", "какое", "какие", "сколько", "можешь",
     "можешь", "можно", "хочу", "хотел", "хотела", "нужно", "надо", "давай", "расскажи", "скажи",
     "объясни", "покажи", "сделай", "создай", "построй", "проверь", "предложить", "предлагаю", "игру",
     "в", "на", "по", "про", "об", "о", "к", "у", "из", "с", "со", "для", "уже", "ещё", "еще",
@@ -13366,6 +13361,23 @@ def _df_extract_subject(text: str) -> str:
     quoted = re.search(r'[«"]([^»"]{3,120})[»"]', value)
     if quoted:
         return _df_text(quoted.group(1), 180)
+    # Natural question forms are semantically primary. Strip the interrogative
+    # frame so "что такое формула" resolves to "формула", not the old topic.
+    question_patterns = (
+        r"^(?:продолжаем|продолжим|дальше|теперь)\s+что\s+такое\s+(.+)$",
+        r"^что\s+такое\s+(.+)$",
+        r"^(?:продолжаем|продолжим|дальше|теперь)\s+кто\s+такой\s+(.+)$",
+        r"^кто\s+такой\s+(.+)$",
+        r"^кто\s+(?:такая|такое|такие)\s+(.+)$",
+        r"^кто\s+это\s+(.+)$",
+    )
+    for pattern in question_patterns:
+        qm = re.match(pattern, low, re.IGNORECASE)
+        if qm:
+            candidate = qm.group(1).strip(" .,!?:;—-\n")
+            if candidate:
+                return _df_text(candidate, 180)
+
     # Common concrete objects/entities. Prefer these before generic topic phrases
     # so a sentence such as "сколько я съел пончиков" updates the live entity.
     known = [
@@ -13932,11 +13944,14 @@ def _df_task_probe(text: str, active_task: dict[str, Any], active_topic: str) ->
     # changing its subject. Treat explicit procedural language as a task definition
     # so the rule becomes the new canonical objective rather than inheriting a stale
     # task prompt from the previous turn.
-    task_definition = any(x in low for x in (
-        "при каждом", "каждый свой", "смотри, при", "условия", "правило",
-        "начиная с", "по алфавиту", "последовательно", "будешь ставить",
-        "должна ставить", "должен ставить", "на каждый ответ",
-    )) and len(_df_tokens(low)) >= 5
+    # Presentation rules are handled by _df_dialogue_rules and do not create tasks.
+    task_definition = bool(
+        any(x in low for x in (
+            "условия игры", "правила игры", "давай сыграем", "сыграем в игру",
+            "начнем игру", "начнём игру",
+        ))
+        and len(_df_tokens(low)) >= 4
+    )
 
     active_task_topic = _df_text(active_task.get("topic") or active_task.get("canonical_topic"))
     compatible_persisted_task = bool(
@@ -14017,143 +14032,106 @@ def _df_new_sequence_id(user_id: str, conversation_id: str, text: str) -> str:
     return "seq-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
-
-_DF_DIALOGUE_CONTROL_PATTERNS = (
-    r"\b(?:нумеруй|нумируй|помечай|обозначай|обозначь|ставь)\b.*\b(?:ответ(?:ы|а)?|букв(?:ами|ой|ами)|цифр(?:ами|ой|ами))\b",
-    r"\b(?:отвечай|овечай|отвечайте|овечайте)\b.*\bбукв(?:ами|ой)\b",
-    r"\b(?:каждый\s+свой|каждый|каждого)\s+ответ\b.*\b(?:букв|цифр|последователь)\w*\b",
-    r"\b(?:по\s+алфавиту|следующей\s+буквой|следующ(?:ая|ей)\s+букв)\b",
-    r"\b(?:обознача(?:й|ть)|став(?:ь|ить)|помеча(?:й|ть))\b.*\bответ\w*\b.*\bбукв",
-)
-
-_DF_DIALOGUE_RULE_RESET_MARKERS = (
-    "начинаем", "начнём", "начнем", "начинай", "начать с а", "начать с 1",
-    "с буквы а", "с цифры 1", "заново",
-)
-
-
-def _df_dialogue_control_update(text: str) -> bool:
-    """Detect an explicit output-format rule without treating it as topic/task content."""
-    low = _df_low(text)
-    return any(re.search(pattern, low, flags=re.IGNORECASE) for pattern in _DF_DIALOGUE_CONTROL_PATTERNS)
-
-
-def _df_question_subject(text: str) -> str:
-    """Extract the semantic operand from a self-contained knowledge question."""
-    low = _df_low(text)
-    patterns = (
-        r"^(?:а\s+)?что\s+такое\s+(.+)$",
-        r"^(?:а\s+)?кто\s+так(?:ой|ая)\s+(.+)$",
-        r"^(?:а\s+)?кто\s+это\s+(.+)$",
-    )
-    for pattern in patterns:
-        match = re.match(pattern, low, flags=re.IGNORECASE)
-        if match:
-            value = _df_normalize_subject(match.group(1).strip(" .,!?:;—-"))
-            if value and value not in _df_stop:
-                return value
-    return ""
-
-
-def _df_meta_question_type(text: str) -> str:
-    """Recognize self-contained assistant-directed questions that should not inherit a content task."""
-    low = _df_low(text)
-    if re.search(r"\bкак\s+(?:тебя|вас)\s+зовут\b", low):
-        return "assistant_identity"
-    if re.search(r"\bчто\s+ты\s+(?:умеешь|можешь)\b", low):
-        return "assistant_capabilities"
-    if re.search(r"\bкто\s+ты\b", low):
-        return "assistant_identity"
-    return ""
-
-
-def _df_control_only_turn(text: str) -> bool:
-    """True when a dialogue-rule instruction is the whole user turn."""
-    if not _df_dialogue_control_update(text):
-        return False
-    low = _df_low(text)
-    if "?" in text or "？" in text:
-        return False
-    if _df_meta_question_type(text) or _df_question_subject(text):
-        return False
-    substantive = re.search(
-        r"\b(?:расскажи|скажи|объясни|покажи|нарисуй|изобрази|создай|сделай|проверь|найди|сравни|"
-        r"напиши|построй|опиши|рассчитай|посчитай|почему|зачем|сколько|где|когда|как)\b",
-        low,
-        flags=re.IGNORECASE,
-    )
-    # Control verbs themselves are excluded from this test; any other command/question
-    # indicates that the user bundled a rule with a real request.
-    if substantive:
-        return False
-    return True
-
-
-def _df_distinct_question_from_active(text: str, active_topic: str, active_entity: str) -> bool:
-    """Return True only when a concrete question operand differs from the live topic/entity."""
-    subject = _df_question_subject(text)
-    if not subject:
-        return False
-    candidates = [active_topic, active_entity]
-    for candidate in candidates:
-        candidate = _df_normalize_subject(_df_text(candidate, 180))
-        if not candidate:
-            continue
-        if _df_overlap(subject, candidate) >= 0.50:
-            return False
-        if _df_low(subject) == _df_low(candidate):
-            return False
-        if _df_low(subject) in _df_low(candidate) or _df_low(candidate) in _df_low(subject):
-            return False
-    return True
-
-def _df_dialogue_rules(text: str, prior: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Extract persistent conversation-level output rules and cursor state."""
+def _df_dialogue_rules(
+    text: str,
+    prior: dict[str, Any] | None = None,
+    previous_april: str = "",
+) -> dict[str, Any]:
+    """Interpret presentation rules as dialogue-level semantics, never as a task counter."""
     prior = prior if isinstance(prior, dict) else {}
     previous = prior.get("dialogue_rules") if isinstance(prior.get("dialogue_rules"), dict) else {}
-    if not previous and isinstance(prior.get("sequence"), dict):
-        previous = prior["sequence"].get("dialogue_rules") if isinstance(prior["sequence"].get("dialogue_rules"), dict) else {}
-    prior_state = prior.get("dialogue_rule_state") if isinstance(prior.get("dialogue_rule_state"), dict) else {}
     low = _df_low(text)
-    rules = dict(previous)
 
-    numbering = _df_dialogue_control_update(text)
-    alphabetic = bool(re.search(r"\b(?:букв(?:ами|ой)?|по\s+алфавиту|следующ(?:ая|ей)\s+букв)\b", low, flags=re.IGNORECASE))
-    numeric = bool(re.search(r"\b(?:цифр(?:ами|ой)?|нумеруй|нумируй|номер)\b", low, flags=re.IGNORECASE))
-    if numbering:
-        try:
-            next_index = int(
-                previous.get("next_index")
-                or prior_state.get("next_index")
-                or 1
-            )
-        except (TypeError, ValueError):
-            next_index = 1
-        if any(marker in low for marker in _DF_DIALOGUE_RULE_RESET_MARKERS):
-            next_index = 1
-        mode = "alphabetic" if alphabetic else "numeric" if numeric else str(previous.get("mode") or "sequential")
-        rules.update({
-            "enabled": True,
-            "scope": "dialogue",
-            "mode": mode,
-            "start": 1,
-            "next_index": max(1, next_index),
-            "next_marker": (
-                _DIALOGUE_ALPHABET_RU[min(max(1, next_index), len(_DIALOGUE_ALPHABET_RU)) - 1]
-                if mode == "alphabetic"
-                else str(max(1, next_index))
-            ),
-            "source_instruction": _df_text(text, 1200),
-            "until_explicit_end": any(x in low for x in (
-                "пока я не скажу", "до тех пор", "подведём итоги", "подведем итоги", "пока не скажу"
-            )) or bool(rules.get("until_explicit_end")),
-            "updated_at": time.time(),
-        })
-    if any(re.search(rf"\b{re.escape(x)}\b", low) for x in (
-        "не нумеруй", "не ставь номер", "без нумерации", "перестань нумеровать", "без букв"
-    )):
-        rules = {}
-    return rules
+    disable = any(x in low for x in (
+        "не нумеруй", "не ставь номер", "без нумерации", "перестань нумеровать",
+    ))
+    if disable:
+        return {"enabled": False, "updated": True, "source": "dialogue_rule_update"}
+
+    # Structural interpretation: an explicit instruction about EVERY ANSWER +
+    # an ordering/marker operation is a presentation rule. It is not a task.
+    answer_target = any(x in low for x in (
+        "каждый свой ответ", "каждый ответ", "каждого ответа",
+        "каждый свой", "каждого своего ответа",
+    ))
+    ordering = any(x in low for x in (
+        "последовательн", "нумеровать", "номеровать", "нумеруй", "номеруй",
+        "ставить цифру", "ставь цифру", "помечать цифрой", "помечала цифрой",
+        "ставить букву", "ставь букву", "помечать буквой", "по алфавиту",
+        "начиная с а", "начиная с 1", "с буквы а",
+    ))
+    explicit_rule = bool(answer_target and ordering)
+    if not explicit_rule:
+        kept = dict(previous)
+        kept.pop("updated", None)
+        kept.pop("updated_at", None)
+        # Advance only the presentation marker from the last visible April answer.
+        # This is dialogue-rule interpretation, not a task/scene counter.
+        if kept.get("enabled") and previous_april:
+            mode = str(kept.get("mode") or "").lower()
+            if mode == "alphabetic":
+                matches = list(re.finditer(r"(?:^|\s)([А-ЯЁ])\s*[.)—:-]", previous_april.strip(), re.IGNORECASE))
+                if matches:
+                    letter = matches[-1].group(1).upper()
+                    try:
+                        idx = _DIALOGUE_ALPHABET_RU.index(letter)
+                    except ValueError:
+                        idx = -1
+                    if idx >= 0:
+                        kept["next_marker"] = _DIALOGUE_ALPHABET_RU[min(idx + 1, len(_DIALOGUE_ALPHABET_RU) - 1)]
+            elif mode in {"numeric", "sequential"}:
+                m = re.match(r"^\s*(\d+)\s*[.)—:-]", previous_april.strip())
+                if m:
+                    kept["next_marker"] = str(int(m.group(1)) + 1)
+        return kept
+
+    alphabetic = any(x in low for x in (
+        "ставить букву", "ставь букву", "помечать буквой", "по алфавиту",
+        "начиная с а", "с буквы а",
+    ))
+    numeric = any(x in low for x in (
+        "ставить цифру", "ставь цифру", "помечать цифрой", "помечала цифрой",
+        "цифрой", "цифру", "нумеровать", "номеровать", "начиная с 1",
+    ))
+    mode = "alphabetic" if alphabetic and not numeric else "numeric" if numeric and not alphabetic else "alphabetic" if alphabetic else "numeric"
+    previous_mode = str(previous.get("mode") or "").lower()
+    mode_changed = bool(previous_mode and previous_mode != mode)
+
+    next_marker = ""
+    if not mode_changed and previous_april:
+        if mode == "alphabetic":
+            # Accept legacy prefixes like "1. а. ..." and normal prefixes like "А) ...".
+            matches = list(re.finditer(r"(?:^|\\s)([А-ЯЁ])\\s*[.)—:-]", previous_april.strip(), re.IGNORECASE))
+            if matches:
+                letter = matches[-1].group(1).upper()
+                try:
+                    idx = _DIALOGUE_ALPHABET_RU.index(letter)
+                except ValueError:
+                    idx = -1
+                if idx >= 0:
+                    next_marker = _DIALOGUE_ALPHABET_RU[min(idx + 1, len(_DIALOGUE_ALPHABET_RU) - 1)]
+        else:
+            m = re.match(r"^\\s*(\\d+)\\s*[.)—:-]", previous_april.strip())
+            if m:
+                next_marker = str(int(m.group(1)) + 1)
+
+    if not next_marker:
+        next_marker = "А" if mode == "alphabetic" else "1"
+
+    return {
+        "enabled": True,
+        "scope": "dialogue",
+        "mode": mode,
+        "start": 1,
+        "next_marker": next_marker,
+        "source_instruction": _df_text(text, 1200),
+        "until_explicit_end": bool(
+            any(x in low for x in ("пока я не скажу", "до тех пор", "подведём итоги", "подведем итоги"))
+            or previous.get("until_explicit_end")
+        ),
+        "updated": True,
+        "updated_at": time.time(),
+    }
 
 
 def _df_resolve_relation(
@@ -14209,22 +14187,6 @@ def _df_resolve_relation(
     task_action = bool(task_probe.get("task_action"))
     task_active = bool(task_probe.get("active"))
 
-    # Output-format instructions are dialogue-level control, never an answer to
-    # the currently active content task. They must be consumed by the dialogue
-    # rule state and not forwarded into the old task as semantic content.
-    if _df_control_only_turn(text):
-        return "CONTINUE", "DIALOGUE_RULE_UPDATE"
-
-    meta_question_type = _df_meta_question_type(text)
-    if meta_question_type:
-        return "NEW", "NEW_META_QUESTION"
-
-    # Concrete knowledge questions are self-contained operands. Resolve them
-    # before short-turn/task fallbacks so an old task can never swallow
-    # "Что такое океан", "Что такое пустыня", etc.
-    if _df_distinct_question_from_active(text, active_topic, active_entity):
-        return "NEW", "NEW_SELF_CONTAINED_QUESTION"
-
     contextual_overlap = max(
         float(dialogue_probe.get("topic_overlap", 0.0) or 0.0),
         float(_df_overlap(low, sequence_digest.get("root_topic")) or 0.0),
@@ -14232,6 +14194,28 @@ def _df_resolve_relation(
         float(_df_overlap(low, sequence_digest.get("last_user")) or 0.0),
         float(_df_overlap(low, sequence_digest.get("last_april")) or 0.0),
     )
+
+    # Question ownership is semantic, not lexical. "Продолжаем что такое формула"
+    # still contains a continuation word, but the current question has its own subject.
+    question_subject = _df_extract_subject(text)
+    standalone_question = bool(
+        question_subject
+        and re.match(
+            r"^(?:(?:продолжаем|продолжим|дальше|теперь)\s+)?(?:что\s+такое|кто\s+такой|кто\s+(?:такая|такое|такие)|кто\s+это)\b",
+            low,
+        )
+    )
+    if standalone_question:
+        return "NEW", "SELF_CONTAINED_QUESTION"
+
+    sequence_rules = (
+        state.get("active_dialogue_sequence", {}).get("dialogue_rules", {})
+        if isinstance(state.get("active_dialogue_sequence"), dict)
+        else {}
+    )
+    rule_update = _df_dialogue_rules(text, {"dialogue_rules": sequence_rules})
+    if rule_update.get("updated"):
+        return "CONTINUE", "DIALOGUE_RULE_UPDATE"
 
     # Understand the current turn before deciding the relation. This keeps
     # "Продолжаем", "Да", "Возможно", numbers, names, short corrections, etc.
@@ -14287,22 +14271,12 @@ def _df_resolve_relation(
 
 def _df_understand(text: str, relation: str, turn_relation: str, active_topic: str, active_entity: str, task_probe: dict[str, Any], render_probe: dict[str, Any]) -> dict[str, Any]:
     low = _df_low(text)
-    meta_question = _df_meta_question_type(text)
-    explicit_subject = _df_question_subject(text) or _df_normalize_subject(_df_extract_subject(text))
+    explicit_subject = _df_normalize_subject(_df_extract_subject(text))
     entity = explicit_subject
-    if meta_question == "assistant_identity":
-        explicit_subject = "assistant_identity"
-        entity = "April"
-    elif meta_question == "assistant_capabilities":
-        explicit_subject = "assistant_capabilities"
-        entity = "April"
-    if relation == "CONTINUE" and active_entity and not meta_question:
-        # A follow-up question usually refines the same operand ("почему море...",
-        # "как это сделать"). Do not turn a descriptive tail into a new entity.
-        if (not explicit_subject
-                or _df_overlap(explicit_subject, active_entity) >= 0.50
-                or _df_deictic.search(low)):
-            entity = active_entity
+    if not entity:
+        question_subject = _df_extract_subject(text)
+        if question_subject:
+            entity = _df_normalize_subject(question_subject)
     if not entity or entity in {"игра", "игру", "угадайки"}:
         entity = active_entity
     operation = "answer"
@@ -14347,10 +14321,10 @@ def _df_task_state(
         task = {
             "active": True,
             "status": "open",
-            "kind": "dialogue_task" if task_probe.get("active") else "topic_task",
+            "kind": "dialogue_task" if task_probe.get("current_game_topic") or task_probe.get("task_definition") else "topic_task",
             "role": task_probe.get("role") or "",
             "phase": "active",
-            "topic": _df_text(task_probe.get("topic") or topic, 220),
+            "topic": _df_text(topic or task_probe.get("topic"), 220),
             "entity": _df_text(entity, 180),
             "goal": _df_text(task_probe.get("task_definition") and "follow_user_rules" or task_probe.get("answer_analysis") and "understand" or "answer", 160),
             "objective": _df_text(task_probe.get("objective") or text, 1200),
@@ -14373,7 +14347,6 @@ def _df_task_state(
             "completed": False,
             "awaiting_user": True,
             "task_revision": 1,
-            "dialogue_rules": deepcopy(prior.get("dialogue_rules") or {}),
         }
         return task
 
@@ -14389,9 +14362,6 @@ def _df_task_state(
         task["task_id"] = "task-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
     task["topic"] = _df_text(task.get("topic") or topic, 220)
     task["entity"] = _df_text(entity or task.get("entity"), 180)
-    task["dialogue_rules"] = _df_dialogue_rules(text, task) or deepcopy(
-        active_context.get("dialogue_rules") if isinstance(active_context.get("dialogue_rules"), dict) else {}
-    )
     if task_probe.get("task_definition"):
         task["objective"] = _df_text(task_probe.get("objective") or text, 1200)
         task["instruction"] = _df_text(text, 1200)
@@ -14485,7 +14455,6 @@ def _df_provider_plan(
     active_sequence_digest: dict[str, Any] | None = None,
     active_dialogue_context: dict[str, Any] | None = None,
     dialogue_rules: dict[str, Any] | None = None,
-    dialogue_rule_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Build the final Provider context after semantic understanding is complete.
@@ -14503,20 +14472,11 @@ def _df_provider_plan(
         if isinstance(active_dialogue_context, dict)
         else {}
     )
-    effective_dialogue_rules = deepcopy(
+    dialogue_rules = (
         dialogue_rules
         if isinstance(dialogue_rules, dict)
-        else task.get("dialogue_rules")
-        or active_dialogue_context.get("dialogue_rules")
-        or {}
+        else deepcopy(active_dialogue_context.get("dialogue_rules") or {})
     )
-    effective_rule_state = deepcopy(
-        dialogue_rule_state
-        if isinstance(dialogue_rule_state, dict)
-        else active_dialogue_context.get("dialogue_rule_state")
-        or {}
-    )
-    next_dialogue_number = int(effective_rule_state.get("next_index") or effective_dialogue_rules.get("next_index") or 0)
     base = {
         "version": _df_provider_plan_version,
         "relation": relation,
@@ -14554,7 +14514,7 @@ def _df_provider_plan(
             {
                 "key": "DIALOGUE_RULES",
                 "priority": 1.0,
-                "value": deepcopy(effective_dialogue_rules),
+                "value": deepcopy(dialogue_rules),
             },
             {
                 "key": "RESPONSE_SEQUENCE",
@@ -14563,8 +14523,7 @@ def _df_provider_plan(
                     "sequence_id": sequence_id,
                     "task_id": task.get("task_id"),
                     "sequence_turn_index": int(active_sequence_digest.get("turn_count") or active_dialogue_context.get("response_sequence", {}).get("sequence_turn_index") or 0) + 1,
-                    "task_response_number": int(task.get("response_count") or task.get("task_response_count") or 0) + 1 if task else 0,
-                    "dialogue_response_number": next_dialogue_number,
+                    "output_rule": deepcopy(dialogue_rules),
                 },
             },
             {
@@ -14590,45 +14549,6 @@ def _df_provider_plan(
             "STALE_GLOBAL_ENTITY",
         ],
     }
-
-    if turn_relation == "DIALOGUE_RULE_UPDATE":
-        base["required_context"] = [
-            {
-                "key": "SEMANTIC_CORE",
-                "priority": 1.0,
-                "value": {
-                    "topic": "диалог",
-                    "operation": "acknowledge",
-                    "goal": "apply_dialogue_rule",
-                    "representation": "text",
-                    "turn_relation": "DIALOGUE_RULE_UPDATE",
-                },
-            },
-            {
-                "key": "DIALOGUE_RULES",
-                "priority": 1.0,
-                "value": deepcopy(effective_dialogue_rules),
-            },
-            {
-                "key": "RESPONSE_SEQUENCE",
-                "priority": 1.0,
-                "value": {
-                    "sequence_id": sequence_id,
-                    "task_id": task.get("task_id") or "",
-                    "sequence_turn_index": int(active_sequence_digest.get("turn_count") or active_dialogue_context.get("response_sequence", {}).get("sequence_turn_index") or 0) + 1,
-                    "task_response_number": 0,
-                    "dialogue_response_number": next_dialogue_number,
-                },
-            },
-            {
-                "key": "CONTROL_INSTRUCTION",
-                "priority": 1.0,
-                "value": "The user changed a dialogue-level answer-format rule. Acknowledge the rule briefly. Do not answer the previous content task and do not carry its topic into this turn.",
-            },
-        ]
-        base["optional_context"] = []
-        base["new_topic_minimal_context"] = False
-        return base
 
     if relation == "CONTINUE":
         # The active branch digest outranks topic-word similarity. It is the
@@ -14803,22 +14723,6 @@ def _df_interpret_live_turn(
     active_topic = _df_topic_from_state(state)
     active_entity = _df_entity_from_state(state)
     active_context = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
-    sequence_dialogue_rules = deepcopy(
-        seq.get("dialogue_rules")
-        if isinstance(seq.get("dialogue_rules"), dict) and seq.get("dialogue_rules")
-        else active_context.get("dialogue_rules")
-        if isinstance(active_context.get("dialogue_rules"), dict)
-        else {}
-    )
-    sequence_rule_state = deepcopy(
-        seq.get("dialogue_rule_state")
-        if isinstance(seq.get("dialogue_rule_state"), dict)
-        else active_context.get("dialogue_rule_state")
-        if isinstance(active_context.get("dialogue_rule_state"), dict)
-        else {}
-    )
-    dialogue_rule_detected = _df_dialogue_control_update(current)
-    dialogue_control_update = _df_control_only_turn(current)
     prior_task = _df_active_task(state)
     context_task = active_context.get("task") if isinstance(active_context.get("task"), dict) else {}
     context_task_id = _df_text(active_context.get("task_id") or context_task.get("task_id"), 100)
@@ -14843,7 +14747,6 @@ def _df_interpret_live_turn(
         or (state.get("memory_scope") or {}).get("user_id"),
         120,
     )
-    sequence_id = active_seq_id or _df_new_sequence_id(user_id, conversation_id, current)
 
     # ------------------------------------------------------------------
     # 1) Active-session memory first.
@@ -14855,27 +14758,6 @@ def _df_interpret_live_turn(
         limit=6,
         task_id=active_task_id,
     )
-
-    # Dialogue rules are parsed independently from content intent. A single turn
-    # may both change a formatting rule and contain a real request (e.g.
-    # "нумеруй ответы, как тебя зовут"). The rule must be inherited by the
-    # answer without swallowing the substantive request.
-    if dialogue_rule_detected:
-        updated_rules = _df_dialogue_rules(
-            current,
-            {
-                "dialogue_rules": sequence_dialogue_rules,
-                "dialogue_rule_state": sequence_rule_state,
-            },
-        )
-        sequence_dialogue_rules = updated_rules
-        sequence_rule_state = {
-            "version": "dialogue_rule_state_v1_sequence_scoped",
-            "enabled": bool(updated_rules.get("enabled")),
-            "mode": updated_rules.get("mode") or "sequential",
-            "next_index": int(updated_rules.get("next_index") or sequence_rule_state.get("next_index") or 1),
-            "updated_at": updated_rules.get("updated_at") or time.time(),
-        }
 
     # ------------------------------------------------------------------
     # 2) Cheap evidence probes. They cannot own relation or routing.
@@ -14933,25 +14815,10 @@ def _df_interpret_live_turn(
     # ------------------------------------------------------------------
     # 4) Now resolve the dialogue relation from the contextual understanding.
     # ------------------------------------------------------------------
-    if dialogue_control_update:
-        relation, turn_relation = "CONTINUE", "DIALOGUE_RULE_UPDATE"
-        # A control turn never carries the active content task into Provider.
-        task_probe = {"active": False, "task_definition": False, "task_action": False, "answer_analysis": False, "topic": "", "objective": ""}
-        dialogue_probe = {**dialogue_probe, "short": len(_df_tokens(current)) <= 8, "topic_overlap": 0.0, "direct_reference": False, "deictic": False, "confirmation": False, "rejection": False}
-        semantic = {
-            "topic": "диалог",
-            "entity": "",
-            "operation": "acknowledge",
-            "goal": "apply_dialogue_rule",
-            "representation": "text",
-            "semantic_request": current,
-            "explicit_subject": "",
-        }
-    else:
-        relation, turn_relation = _df_resolve_relation(
-            current, state, previous_april, active_topic, active_entity, task_probe, dialogue_probe,
-            semantic=semantic, sequence_digest=active_sequence_digest,
-        )
+    relation, turn_relation = _df_resolve_relation(
+        current, state, previous_april, active_topic, active_entity, task_probe, dialogue_probe,
+        semantic=semantic, sequence_digest=active_sequence_digest,
+    )
     topic_affinity = 0.0
     semantic_topic = _df_low(semantic.get("topic") or "")
     prior_task_topic = _df_low(
@@ -14969,7 +14836,7 @@ def _df_interpret_live_turn(
     if semantic_topic and prior_task_entity:
         topic_affinity = max(topic_affinity, _df_overlap(semantic_topic, prior_task_entity))
 
-    if not dialogue_control_update and not explicit_recall and _df_is_self_contained_new_topic(
+    if not explicit_recall and _df_is_self_contained_new_topic(
         current, semantic, active_topic=active_topic, active_entity=active_entity,
         task_probe=task_probe, sequence_digest=active_sequence_digest,
     ) and topic_affinity < 0.28:
@@ -15068,20 +14935,6 @@ def _df_interpret_live_turn(
             or _df_extract_subject(current)
         )
         branch_digest_for_provider: dict[str, Any] = {}
-    elif dialogue_control_update:
-        # This turn changes the conversation rule only. The old content task
-        # remains resumable in StateManager but is not the semantic operand.
-        semantic["topic"] = "диалог"
-        semantic["entity"] = ""
-        active_topic = "диалог"
-        active_entity = ""
-        branch_digest_for_provider = {
-            "version": "active_sequence_control_v1",
-            "sequence_id": sequence_id,
-            "turn_count": int(seq.get("turn_count") or 0),
-            "coverage": "sequence_control_only",
-            "task_content_included": False,
-        }
     else:
         # CONTINUE/RECALL preserve the live/recalled conversational identity.
         # A concrete operand may refine the active entity without replacing the
@@ -15106,40 +14959,43 @@ def _df_interpret_live_turn(
     else:
         sequence_id = _df_new_sequence_id(user_id, conversation_id, current)
 
-    if dialogue_control_update and not branch_digest_for_provider:
-        branch_digest_for_provider = {
-            "version": "active_sequence_control_v1",
-            "sequence_id": sequence_id,
-            "turn_count": int(seq.get("turn_count") or 0),
-            "coverage": "sequence_control_only",
-            "task_content_included": False,
-        }
-
     # ------------------------------------------------------------------
     # 6) Response task/development planning.
     # ------------------------------------------------------------------
-    if dialogue_control_update:
+    task = _df_task_state(
+        current,
+        relation,
+        task_probe,
+        prior_task,
+        semantic.get("topic") or active_topic,
+        semantic.get("entity") or active_entity,
+        sequence_id,
+        active_context,
+    )
+    active_task_id = _df_text(task.get("task_id"), 100) if task else active_task_id
+    if turn_relation == "DIALOGUE_RULE_UPDATE":
+        # Rule changes are presentation-only. They must not become a task turn,
+        # alter the topic, or consume task-local response state.
         task = {}
-        # Keep the currently selected task as the resume target, but do not make
-        # it the semantic operand of this rule-control turn.
         active_task_id = _df_text(
-            seq.get("task_id") or state.get("active_dialogue_task_id") or active_task_id,
+            seq.get("task_id") or active_task_id,
             100,
         )
-    else:
-        task = _df_task_state(
-            current,
-            relation,
-            task_probe,
-            {**prior_task, "dialogue_rules": deepcopy(sequence_dialogue_rules)},
-            semantic.get("topic") or active_topic,
-            semantic.get("entity") or active_entity,
-            sequence_id,
-            {**active_context, "dialogue_rules": deepcopy(sequence_dialogue_rules)},
+
+    sequence_rule_seed = {
+        "dialogue_rules": deepcopy(
+            seq.get("dialogue_rules")
+            or (active_context.get("dialogue_rules") if isinstance(active_context, dict) else {})
+            or {}
         )
-        active_task_id = _df_text(task.get("task_id"), 100) if task else active_task_id
-        if task:
-            task["dialogue_rules"] = deepcopy(sequence_dialogue_rules)
+    }
+    dialogue_rules = _df_dialogue_rules(
+        current,
+        sequence_rule_seed,
+        previous_april=previous_april,
+    )
+    dialogue_rules.pop("updated", None)
+    dialogue_rules.pop("updated_at", None)
 
     development = _df_development(
         relation,
@@ -15193,8 +15049,7 @@ def _df_interpret_live_turn(
         selected_memory,
         branch_digest_for_provider,
         active_context,
-        sequence_dialogue_rules,
-        sequence_rule_state,
+        dialogue_rules=dialogue_rules,
     )
 
     branch_index = deepcopy(branches)
@@ -15324,6 +15179,7 @@ def _df_interpret_live_turn(
             else "current_turn_only"
         ),
         "turn_relation": turn_relation,
+        "presentation_only": turn_relation == "DIALOGUE_RULE_UPDATE",
         "sequence_id": sequence_id,
         "task_id": active_task_id,
         "target_task_id": _df_text(branch_index.get("target_task_id") or active_task_id, 100),
@@ -15367,14 +15223,13 @@ def _df_interpret_live_turn(
         "active_task": deepcopy(task),
         "open_task": deepcopy(task),
         "interactive_task_state": deepcopy(task),
-        "dialogue_rules": deepcopy(sequence_dialogue_rules),
-        "dialogue_rule_state": deepcopy(sequence_rule_state),
+        "dialogue_rules": deepcopy(dialogue_rules),
+        "dialogue_output_rule": deepcopy(dialogue_rules),
         "response_sequence": {
             "sequence_id": sequence_id,
             "task_id": active_task_id,
             "sequence_turn_index": int(active_sequence_digest.get("turn_count") or seq.get("turn_count") or 0) + 1,
-            "task_response_number": int(task.get("response_count") or task.get("task_response_count") or 0) + 1 if task else 0,
-            "dialogue_response_number": int(sequence_rule_state.get("next_index") or sequence_dialogue_rules.get("next_index") or 0),
+            "output_rule": deepcopy(dialogue_rules),
         },
         "previous_result": deepcopy(task.get("last_result") or {}),
         "answer_basis": deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {}),
@@ -15420,11 +15275,10 @@ def _df_interpret_live_turn(
             "target_task_id": _df_text(branch_index.get("target_task_id") or active_task_id, 100),
             "response_sequence": {
                 "sequence_turn_index": int(active_sequence_digest.get("turn_count") or seq.get("turn_count") or 0) + 1,
-                "task_response_number": int(task.get("response_count") or task.get("task_response_count") or 0) + 1 if task else 0,
-                "dialogue_response_number": int(sequence_rule_state.get("next_index") or sequence_dialogue_rules.get("next_index") or 0),
+                "output_rule": deepcopy(dialogue_rules),
             },
-            "dialogue_rules": deepcopy(sequence_dialogue_rules),
-            "dialogue_rule_state": deepcopy(sequence_rule_state),
+            "dialogue_rules": deepcopy(dialogue_rules),
+            "dialogue_output_rule": deepcopy(dialogue_rules),
             "previous_result": deepcopy(task.get("last_result") or {}),
             "answer_basis": deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {}),
             "target_sequence_id": _df_text(
@@ -15486,8 +15340,8 @@ def _df_interpret_live_turn(
         "task_continuation": bool(task) and relation in {"CONTINUE", "RECALL"},
         "active_task_context": deepcopy(task) if bool(task) else {},
         "task_id": active_task_id,
-        "dialogue_rules": deepcopy(sequence_dialogue_rules),
-        "dialogue_rule_state": deepcopy(sequence_rule_state),
+        "dialogue_rules": deepcopy(dialogue_rules),
+        "dialogue_output_rule": deepcopy(dialogue_rules),
         "response_sequence": deepcopy(dialogue_contract.get("response_sequence") or {}),
         "semantic_frame": deepcopy(semantic_frame),
         "dialogue_development": deepcopy(development),
@@ -15561,8 +15415,8 @@ def _df_interpret_live_turn(
         "interactive_task_state": deepcopy(task),
         "open_task": deepcopy(task),
         "task_id": active_task_id,
-        "dialogue_rules": deepcopy(sequence_dialogue_rules),
-        "dialogue_rule_state": deepcopy(sequence_rule_state),
+        "dialogue_rules": deepcopy(dialogue_rules),
+        "dialogue_output_rule": deepcopy(dialogue_rules),
         "response_sequence": deepcopy(dialogue_contract.get("response_sequence") or {}),
         "previous_result": deepcopy(task.get("last_result") or {}),
         "answer_basis": deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {}),
@@ -15606,8 +15460,6 @@ def _df_interpret_live_turn(
                 active_sequence_digest.get("turn_count") or 0
             ),
             "task_id": active_task_id,
-            "task_response_number": int(task.get("response_count") or task.get("task_response_count") or 0) if task else 0,
-            "dialogue_response_number": int(sequence_rule_state.get("next_index") or sequence_dialogue_rules.get("next_index") or 0),
             "source": "contextual_dialogue_understanding",
         },
         "dialogue_strategy": {
