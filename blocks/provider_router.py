@@ -87,6 +87,8 @@ Keep all structured and visual output inside the same current SceneContract resp
 Return compact JSON with:
 answer, content, summary, scene, artifacts, render_blocks, scene_plan, render_priority,
 confidence, metadata.
+The listed fields must be direct top-level keys of the JSON object. Do not wrap the object
+inside a "MachineResponse", "machine_response", "result" or other outer envelope.
 
 The `answer` field is mandatory and MUST contain the actual human-visible answer.
 Never return an empty object, an empty answer, or `{}`. For a simple text/math request,
@@ -3217,12 +3219,22 @@ def _coerce_human_answer(value: Any) -> str:
     if isinstance(value, (int, float, bool)):
         return str(value)
     if isinstance(value, dict):
-        for key in (
+        # Accept canonical field names plus the transport wrapper
+        # MachineResponse without exposing the envelope.
+        preferred = (
             "answer", "content", "response", "final_text", "text", "value",
             "result", "data", "output", "message", "summary",
-        ):
+        )
+        for key in preferred:
             if key in value:
                 nested = _coerce_human_answer(value.get(key))
+                if nested:
+                    return nested
+
+        for key, nested_value in value.items():
+            normalized_key = re.sub(r"[^a-z0-9]+", "_", str(key).strip().lower()).strip("_")
+            if normalized_key in _CANONICAL_PROVIDER_WRAPPER_KEYS and isinstance(nested_value, dict):
+                nested = _coerce_human_answer(nested_value)
                 if nested:
                     return nested
         return ""
@@ -4273,18 +4285,10 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
 
     parsed = raw_text if isinstance(raw_text, dict) else _parse_provider_json(raw_text)
 
-    # Accept one level of provider-envelope wrapping without changing the
-    # canonical contract. This is a transport repair, not a semantic rewrite.
-    canonical_payload = parsed
-    if isinstance(parsed, dict):
-        for wrapper_key in ("machine_response", "result", "data", "output"):
-            wrapped = parsed.get(wrapper_key)
-            if isinstance(wrapped, dict) and any(
-                key in wrapped
-                for key in ("answer", "content", "response", "text", "render_blocks", "artifacts", "image", "gallery", "diagram", "graph", "table")
-            ):
-                canonical_payload = wrapped
-                break
+    # Transport repair only: accept both flat MachineResponse objects and
+    # wrapped envelopes such as {"MachineResponse": {...}}. Do not reinterpret
+    # or regenerate semantic/visual content here.
+    canonical_payload, provider_wrapper_key = _unwrap_canonical_provider_payload(parsed)
 
     source_payload = machine_request_to_dict(source_request) if source_request is not None else {}
     source_constraints = source_payload.get("constraints") if isinstance(source_payload.get("constraints"), dict) else {}
@@ -4403,6 +4407,8 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         "parsed_answer_chars": len(answer),
         "parsed_content_chars": len(content),
         "canonical_answer_recovery_used": bool(recovery_used),
+        "provider_envelope_unwrapped": bool(provider_wrapper_key),
+        "provider_envelope_key": provider_wrapper_key,
         "parsed_render_blocks": len(canonical_payload.get("render_blocks") or []) if isinstance(canonical_payload.get("render_blocks"), list) else 0,
         "parsed_artifacts": len(canonical_payload.get("artifacts") or []) if isinstance(canonical_payload.get("artifacts"), list) else 0,
     }
