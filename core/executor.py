@@ -2738,6 +2738,10 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
         metadata=dict(machine_preview.get("metadata") or {}),
     )
 
+    # Machine-only evidence produced by C_APRIL_IMAGES_GENERATOR. It is committed
+    # later by the same canonical state writer as the USER↔APRIL turn.
+    dialogue_visual_generation_memory: dict[str, Any] = {}
+
     # The image route is decided from the current MachineRequest, not from the
     # provider's human-facing text block. This is what guarantees that a real
     # image request reaches Room Register even when Provider returns text only.
@@ -2749,6 +2753,16 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
         chat_id=chat_id,
         run_with_activity=run_with_activity,
     )
+
+    if isinstance(preview_response.metadata, dict):
+        candidate_visual_memory = preview_response.metadata.pop(
+            "_dialogue_visual_generation_memory",
+            None,
+        )
+        if isinstance(candidate_visual_memory, dict) and candidate_visual_memory.get("generation_prompt"):
+            # The public Scene/Web metadata must never carry the large prompt.
+            # Keep one internal copy for the canonical 12-hour dialogue writer.
+            dialogue_visual_generation_memory = deepcopy(candidate_visual_memory)
 
     # Every non-image structured representation follows the same canonical
     # C-ARTIFACT -> Room Register -> C-room route before SceneContract.
@@ -2828,6 +2842,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
             contract,
             current_request=request_text,
             answer=response.answer,
+            visual_generation_memory=dialogue_visual_generation_memory,
             internal_context=bool(kwargs.get("internal_context", False)),
             persist=True,
         )
