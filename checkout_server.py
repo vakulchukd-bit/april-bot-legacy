@@ -84,7 +84,11 @@ from blocks.state_manager import (
     restore_visual_context_after_turn,
     persist_state,
 )
-from blocks.image_engine import get_image_generation_status
+from blocks.image_engine import (
+    get_image_generation_status,
+    get_render_generation_status,
+    set_render_generation_status,
+)
 
 from blocks.provider_router import (
     transcribe_voice
@@ -1606,9 +1610,21 @@ def _bind_backend_asset_urls(value):
     return value
 
 
+@app.route("/api/v1/render-generation/status", methods=["GET"])
+def render_generation_status_route():
+    """Expose the canonical live render lifecycle for image/graph/table turns."""
+    flow_id = str(request.args.get("flow_id") or "").strip()
+    user_id = str(request.args.get("user_id") or "").strip()
+    status = get_render_generation_status(flow_id, user_id)
+    response = jsonify({"success": True, **status})
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
 @app.route("/api/v1/image-generation/status", methods=["GET"])
 def image_generation_status_route():
-    """Expose the live state of the current image generator to April Web."""
+    """Compatibility endpoint for the image engine; Web uses the generic render endpoint."""
     flow_id = str(request.args.get("flow_id") or "").strip()
     user_id = str(request.args.get("user_id") or "").strip()
     status = get_image_generation_status(flow_id, user_id)
@@ -1718,6 +1734,12 @@ def web_chat():
         session_started_utc = data.get(
             "session_started_utc"
         )
+
+        # Do not create a provisional `pending/none` record here.
+        # ProcessorScene.prepare() performs the authoritative Interpretation and
+        # Executor immediately publishes either `not_requested` or the real
+        # render kind before the provider call. A provisional record here caused
+        # the Web poller to keep asking for text-only turns.
 
         visual_summary = {
 
@@ -1835,6 +1857,15 @@ def web_chat():
 
         error_text = str(e)
         normalized_error = error_text.lower()
+        if flow_id:
+            current_render_status = get_render_generation_status(flow_id, user_id)
+            set_render_generation_status(
+                flow_id,
+                status="failed",
+                kind=str(current_render_status.get("kind") or "none"),
+                user_id=user_id,
+                error=error_text,
+            )
 
         if (
             "gpt-5.6 luna returned no textual output" in normalized_error
