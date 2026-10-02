@@ -1265,8 +1265,90 @@ def _strip_duplicate_structured_text(answer: str, requested_outputs: list[str]) 
 
 
 def _dialogue_graph_payload(answer: str) -> dict[str, Any]:
-    """Build a minimal graph only from explicit numeric values present in April's answer."""
+    """Build an authorized graph payload without adding another model call.
+
+    Priority:
+      1) preserve a complete Markdown data table already present in the answer;
+      2) for an explicit one-week linear-growth answer, derive all seven points
+         from the stated endpoints (only when the answer explicitly says growth
+         is uniform);
+      3) otherwise keep the historical two-endpoint behavior as the last guard.
+    """
     text = normalize_response_text(answer)
+    if not text:
+        return {}
+
+    # Preserve complete provider tables first.
+    lines = text.splitlines()
+    separator = re.compile(
+        r"^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)+\|?\s*$"
+    )
+
+    def cells(line: str) -> list[str]:
+        line = str(line or "").strip()
+        if "|" not in line:
+            return []
+        if line.startswith("|"):
+            line = line[1:]
+        if line.endswith("|"):
+            line = line[:-1]
+        return [part.strip() for part in line.split("|")]
+
+    def number(value: str) -> float | None:
+        raw = re.sub(r"\s+", "", str(value or "")).replace("−", "-").replace("–", "-")
+        raw = re.sub(r"[^0-9eE+\-.,]", "", raw)
+        if raw.count(",") and raw.count("."):
+            if raw.rfind(",") > raw.rfind("."):
+                raw = raw.replace(".", "").replace(",", ".")
+            else:
+                raw = raw.replace(",", "")
+        else:
+            raw = raw.replace(",", ".")
+        try:
+            value = float(raw)
+        except Exception:
+            return None
+        return value if value == value and value not in {float("inf"), float("-inf")} else None
+
+    for index in range(len(lines) - 2):
+        headers = cells(lines[index])
+        if len(headers) < 2 or not separator.match(lines[index + 1]):
+            continue
+        points = []
+        row_index = index + 2
+        while row_index < len(lines):
+            row = cells(lines[row_index])
+            if len(row) < 2:
+                break
+            y_value = number(row[1])
+            if y_value is None or not row[0]:
+                break
+            x_value = number(row[0])
+            points.append({"x": x_value if x_value is not None else row[0], "y": y_value})
+            row_index += 1
+        if len(points) >= 2:
+            title = ""
+            for candidate in reversed(lines[:index]):
+                candidate = candidate.strip().strip("#* ")
+                if candidate and "|" not in candidate:
+                    title = candidate.rstrip(":").strip()
+                    break
+            return {
+                "representation": "line",
+                "title": title or "Graph",
+                "series": [{
+                    "label": headers[1] or "Value",
+                    "type": "points",
+                    "points": points,
+                    "x": [point["x"] for point in points],
+                    "y": [point["y"] for point in points],
+                }],
+                "x_axis": {"type": "categorical", "label": headers[0] or "Period"},
+                "y_axis": {"type": "numeric", "label": headers[1] or "Value"},
+                "grid": True,
+                "source": "provider_markdown_table_preserved",
+            }
+
     match = re.search(
         r"(?:с|от)\s*([0-9][0-9\s.,]*)\s*([^\n,;]+?)\s+(?:до|к)\s*([0-9][0-9\s.,]*)\s*([^\n.;]+)",
         text,
@@ -1275,24 +1357,52 @@ def _dialogue_graph_payload(answer: str) -> dict[str, Any]:
     if not match:
         return {}
 
-    def number(value: str) -> float | None:
-        raw = re.sub(r"\s+", "", value).replace(",", ".")
-        raw = re.sub(r"[^0-9.+-]", "", raw)
-        try:
-            return float(raw)
-        except Exception:
-            return None
-
     start = number(match.group(1))
     end = number(match.group(3))
     if start is None or end is None:
         return {}
 
-    period = ""
-    period_match = re.search(r"\b(?:за|протягом)\s+(неделю|недели|день|дня|дней|месяц|месяца|год|года)", text, flags=re.IGNORECASE)
+    period_match = re.search(
+        r"\b(?:за|протягом)\s+(неделю|недели|week)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
     if period_match:
-        period = period_match.group(1).strip()
-    suffix = f" {period}" if period else ""
+        period = period_match.group(1).lower()
+        # Seven daily points are justified only when the answer explicitly says
+        # the change is uniform/linear; this avoids inventing hidden data.
+        if re.search(r"\b(равномерн|линейн|одинаков)\w*\b", text, flags=re.IGNORECASE):
+            count = 7
+            step = (end - start) / (count - 1)
+            points = []
+            for index in range(count):
+                value = start + step * index
+                if index in {0, count - 1}:
+                    value = round(value, 2)
+                else:
+                    value = round(value + 1e-12, 2)
+                points.append({"x": f"День {index + 1}", "y": value})
+            return {
+                "representation": "line",
+                "title": "График роста",
+                "series": [{
+                    "label": "Значение",
+                    "type": "points",
+                    "points": points,
+                    "x": [point["x"] for point in points],
+                    "y": [point["y"] for point in points],
+                }],
+                "x_axis": {"type": "categorical", "label": "День"},
+                "y_axis": {"type": "numeric", "label": "Значение"},
+                "grid": True,
+                "metadata": {
+                    "source": "explicit_endpoints_uniform_week",
+                    "derived": True,
+                    "derivation": "linear_interpolation",
+                    "point_count": 7,
+                },
+                "source": "dialogue_answer_explicit_values",
+            }
 
     return {
         "representation": "line",
@@ -1300,12 +1410,12 @@ def _dialogue_graph_payload(answer: str) -> dict[str, Any]:
         "series": [{
             "label": "Значение",
             "points": [
-                {"x": f"Начало{suffix}", "y": start},
-                {"x": f"Конец{suffix}", "y": end},
+                {"x": "Начало", "y": start},
+                {"x": "Конец", "y": end},
             ],
         }],
         "x_axis": {"type": "categorical", "label": "Период"},
-        "y_axis": {"type": "numeric"},
+        "y_axis": {"type": "numeric", "label": "Значение"},
         "source": "dialogue_answer_explicit_values",
     }
 
@@ -1318,14 +1428,26 @@ def _ascii_diagram_to_payload(answer: str) -> dict[str, Any]:
     node_index: dict[str, str] = {}
 
     def node_id(label: str) -> str:
-        key = re.sub(r"\s+", " ", label.strip(" +-→←─—_\t"))
-        key = re.sub(r"[()\[\]{}]", "", key).strip()
+        # Keep electrical polarity markers so (+) and (−) terminals are not
+        # collapsed into one generic "battery" node. This preserves the actual
+        # connection semantics for the professional diagram renderer.
+        key = re.sub(r"\s+", " ", label.strip(" →←─—_\t"))
+        key = re.sub(r"[\[\]{}]", "", key).strip()
+        key = key.replace("(+) ", "+ ").replace("(-) ", "- ").replace("(−) ", "− ")
+        key = re.sub(r"[()]", "", key).strip()
         if not key or len(key) > 80:
             return ""
         if key not in node_index:
             nid = f"n{len(node_index) + 1}"
             node_index[key] = nid
-            nodes.append({"id": nid, "label": key})
+            low_key = key.lower()
+            kind = (
+                "source" if any(token in low_key for token in ("батар", "источник", "+ "))
+                else "switch" if "выключатель" in low_key or "switch" in low_key
+                else "load" if any(token in low_key for token in ("ламп", "свет", "load"))
+                else "node"
+            )
+            nodes.append({"id": nid, "label": key, "kind": kind})
         return node_index[key]
 
     for line in lines:
@@ -1340,9 +1462,31 @@ def _ascii_diagram_to_payload(answer: str) -> dict[str, Any]:
 
     if len(nodes) < 2 or not edges:
         return {}
+    title = ""
+    for raw_line in normalize_response_text(answer).splitlines():
+        line = raw_line.strip()
+        if line and not _looks_like_visual_ascii(line):
+            if any(token in line.lower() for token in ("схем", "диаграм", "подключ")):
+                title = line.rstrip(":").strip()
+                break
+
+    # Give simple connector diagrams an explicit horizontal geometry so the
+    # existing GraphBlock/NetworkSvg renders a professional chain instead of
+    # falling back to a square grid. General/multi-line diagrams can still use
+    # their normal automatic layout.
+    if 2 <= len(nodes) <= 8:
+        for index, node in enumerate(nodes):
+            node["x"] = float(index)
+            node["y"] = 0.0
+
     return {
         "representation": "diagram",
+        "diagram_type": "electrical_schematic" if any(
+            token in normalize_response_text(answer).lower()
+            for token in ("батар", "ламп", "выключатель")
+        ) else "diagram",
         "direction": "horizontal",
+        "title": title or "Схема подключения",
         "nodes": nodes,
         "edges": edges,
         "source": "dialogue_answer_visual_syntax",
