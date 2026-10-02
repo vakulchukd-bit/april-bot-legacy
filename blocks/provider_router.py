@@ -1172,44 +1172,259 @@ def _canonical_requested_outputs(payload: dict[str, Any]) -> list[str]:
     return result or ["text"]
 
 
-def _strip_duplicate_structured_text(answer: str, requested_outputs: list[str]) -> str:
-    """Keep the visible answer aligned with the canonical output plan.
+def _normalize_formula_for_render(value: Any) -> str:
+    """Return only the mathematical source for the dedicated FormulaRenderer."""
+    text = normalize_response_text(value)
+    if not text:
+        return ""
 
-    For text-only turns, structured markdown emitted by the model is not a
-    second presentation channel; it is removed so the Web renderer can own
-    representation. For explicit table output, the dedicated TableBlock owns
-    the table and the prose copy is removed as before.
-    """
+    text = text.replace("\r", "").replace("\n", " ").strip()
+    text = re.sub(r"^```(?:latex|tex|math)?\s*|```$", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"^\s*(?:formula|формула(?:\s+[^:]+)?):\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\s*\\\[", "", text).strip()
+    text = re.sub(r"\\\]\s*$", "", text).strip()
+    text = re.sub(r"^\s*\\\(", "", text).strip()
+    text = re.sub(r"\\\)\s*$", "", text).strip()
+    text = re.sub(r"^\s*\$+|\$+\s*$", "", text).strip()
+
+    # Keep mathematical grouping braces/parentheses. Remove only presentation
+    # arrows and transport wrappers that do not belong to the formula itself.
+    text = text.replace("→", " ").replace("←", " ").replace("↔", " ").replace("⟶", " ")
+    text = re.sub(r"^\s*[\[\]⟦⟧<>]+\s*|\s*[\[\]⟦⟧<>]+\s*$", "", text)
+
+    # A provider may append a prose explanation to an otherwise valid equation.
+    # Keep the equation only; the explanation belongs in the normal text block.
+    text = re.split(r"\s+(?:где|where)\s+", text, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    return re.sub(r"\s{2,}", " ", text)
+
+
+def _extract_formula_from_text(text: str) -> str:
+    raw = normalize_response_text(text)
+    if not raw:
+        return ""
+
+    candidates = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        candidate = line.split(":", 1)[1].strip() if ":" in line else line
+        math_score = sum(ch in candidate for ch in "=^_\\+-*/") + (2 if re.search(r"[{}]", candidate) else 0)
+        if "=" in candidate or math_score >= 2:
+            candidates.append(candidate)
+    return _normalize_formula_for_render(candidates[0] if candidates else "")
+
+
+def _looks_like_visual_ascii(line: str) -> bool:
+    text = str(line or "")
+    box_chars = "┌┐└┘├┤┬┴┼│─━═║╔╗╚╝╠╣╦╩╬"
+    if sum(ch in box_chars for ch in text) >= 4:
+        return True
+    if re.search(r"(?:-{2,}|─{2,}|━{2,}|→|<-|->|⟶)", text) and len(text) >= 18:
+        return True
+    return False
+
+
+def _strip_duplicate_structured_text(answer: str, requested_outputs: list[str]) -> str:
+    """Keep visible text explanatory; dedicated blocks own visual syntax/data."""
     if not answer:
         return answer
-    text_only = list(requested_outputs or []) == ["text"]
-    if not text_only and "table" not in requested_outputs:
+
+    outputs = {str(x).strip().lower() for x in (requested_outputs or [])}
+    if outputs == {"text"}:
         return answer
 
     lines = answer.splitlines()
     out: list[str] = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        is_pipe = line.count("|") >= 2
-        if is_pipe:
-            j = i
-            run = 0
-            separator = False
-            while j < len(lines) and lines[j].count("|") >= 2:
-                current = lines[j].strip()
-                if re.fullmatch(r"\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?", current):
-                    separator = True
-                run += 1
-                j += 1
-            if run >= 3 and separator:
-                i = j
+    for raw_line in lines:
+        line = raw_line.strip()
+
+        if "table" in outputs and line.count("|") >= 2:
+            if re.search(r"\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)+\|?", line):
                 continue
-        out.append(line)
-        i += 1
+            # A pipe-table row is visual data, not visible narrative.
+            if line.startswith("|") and line.endswith("|"):
+                continue
+
+        if outputs.intersection({"graph", "diagram"}) and _looks_like_visual_ascii(raw_line):
+            continue
+
+        if "formula" in outputs and line:
+            candidate = line.split(":", 1)[1].strip() if ":" in line else line
+            normalized = _normalize_formula_for_render(candidate)
+            if normalized and ("=" in candidate or re.search(r"\\[A-Za-z]+|[{}^_]", candidate)):
+                if ":" in line:
+                    # Preserve a human label such as “Формула Эйлера:”.
+                    out.append(line.split(":", 1)[0].rstrip() + ":")
+                continue
+
+        out.append(raw_line)
 
     cleaned = "\n".join(out).strip()
     return re.sub(r"\n{3,}", "\n\n", cleaned)
+
+
+def _dialogue_graph_payload(answer: str) -> dict[str, Any]:
+    """Build a minimal graph only from explicit numeric values present in April's answer."""
+    text = normalize_response_text(answer)
+    match = re.search(
+        r"(?:с|от)\s*([0-9][0-9\s.,]*)\s*([^\n,;]+?)\s+(?:до|к)\s*([0-9][0-9\s.,]*)\s*([^\n.;]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return {}
+
+    def number(value: str) -> float | None:
+        raw = re.sub(r"\s+", "", value).replace(",", ".")
+        raw = re.sub(r"[^0-9.+-]", "", raw)
+        try:
+            return float(raw)
+        except Exception:
+            return None
+
+    start = number(match.group(1))
+    end = number(match.group(3))
+    if start is None or end is None:
+        return {}
+
+    period = ""
+    period_match = re.search(r"\b(?:за|протягом)\s+(неделю|недели|день|дня|дней|месяц|месяца|год|года)", text, flags=re.IGNORECASE)
+    if period_match:
+        period = period_match.group(1).strip()
+    suffix = f" {period}" if period else ""
+
+    return {
+        "representation": "line",
+        "title": "Рост",
+        "series": [{
+            "label": "Значение",
+            "points": [
+                {"x": f"Начало{suffix}", "y": start},
+                {"x": f"Конец{suffix}", "y": end},
+            ],
+        }],
+        "x_axis": {"type": "categorical", "label": "Период"},
+        "y_axis": {"type": "numeric"},
+        "source": "dialogue_answer_explicit_values",
+    }
+
+
+def _ascii_diagram_to_payload(answer: str) -> dict[str, Any]:
+    """Convert an unambiguous connector-line diagram into structured nodes/edges."""
+    lines = [line.strip() for line in normalize_response_text(answer).splitlines() if _looks_like_visual_ascii(line)]
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    node_index: dict[str, str] = {}
+
+    def node_id(label: str) -> str:
+        key = re.sub(r"\s+", " ", label.strip(" +-→←─—_\t"))
+        key = re.sub(r"[()\[\]{}]", "", key).strip()
+        if not key or len(key) > 80:
+            return ""
+        if key not in node_index:
+            nid = f"n{len(node_index) + 1}"
+            node_index[key] = nid
+            nodes.append({"id": nid, "label": key})
+        return node_index[key]
+
+    for line in lines:
+        parts = [part.strip() for part in re.split(r"\s*(?:─{2,}|—{2,}|━{2,}|═{2,}|-{2,}|→|->|⟶)\s*", line) if part.strip()]
+        if len(parts) < 2 or len(parts) > 8:
+            continue
+        ids = [node_id(part) for part in parts]
+        ids = [item for item in ids if item]
+        for left, right in zip(ids, ids[1:]):
+            edge_id = f"e{len(edges) + 1}"
+            edges.append({"id": edge_id, "from": left, "to": right})
+
+    if len(nodes) < 2 or not edges:
+        return {}
+    return {
+        "representation": "diagram",
+        "direction": "horizontal",
+        "nodes": nodes,
+        "edges": edges,
+        "source": "dialogue_answer_visual_syntax",
+    }
+
+
+def _materialize_provider_visual_fields(
+    machine_response: dict[str, Any],
+    existing_blocks: list[dict],
+    requested_outputs: list[str],
+    answer_source: str,
+) -> list[dict]:
+    """Promote structured MachineResponse fields into the single Scene stream."""
+    result = list(existing_blocks or [])
+    outputs = {str(x).strip().lower() for x in (requested_outputs or [])}
+
+    def has_type(kind: str) -> bool:
+        for block in result:
+            if not isinstance(block, dict):
+                continue
+            if _safe_text(block.get("type") or block.get("artifact_type")).lower() != kind:
+                continue
+            valid, _ = validate_render_block_payload(kind, block)
+            if valid:
+                return True
+        return False
+
+    candidates: list[tuple[str, Any]] = []
+    if "formula" in outputs and not has_type("formula"):
+        value = (
+            machine_response.get("formula")
+            or machine_response.get("latex")
+            or machine_response.get("equation")
+            or machine_response.get("expression")
+            or machine_response.get("math")
+            or _extract_formula_from_text(answer_source)
+        )
+        formula = _normalize_formula_for_render(value)
+        if formula:
+            candidates.append(("formula", {"formula": formula, "latex": formula}))
+
+    if "graph" in outputs and not has_type("graph"):
+        graph_payload = machine_response.get("graph") or machine_response.get("graph_data") or machine_response.get("chart")
+        if isinstance(graph_payload, dict):
+            candidates.append(("graph", graph_payload))
+        elif isinstance(graph_payload, list) and graph_payload:
+            candidates.append(("graph", {"series": graph_payload}))
+        else:
+            inferred = _dialogue_graph_payload(answer_source)
+            if inferred:
+                candidates.append(("graph", inferred))
+
+    if "diagram" in outputs and not has_type("diagram"):
+        diagram_payload = machine_response.get("diagram") or machine_response.get("schema") or machine_response.get("schematic")
+        if isinstance(diagram_payload, dict):
+            candidates.append(("diagram", diagram_payload))
+        else:
+            inferred_diagram = _ascii_diagram_to_payload(answer_source)
+            if inferred_diagram:
+                candidates.append(("diagram", inferred_diagram))
+
+    if "table" in outputs and not has_type("table"):
+        table_payload = machine_response.get("table") or machine_response.get("table_data")
+        if isinstance(table_payload, dict):
+            candidates.append(("table", table_payload))
+        elif isinstance(table_payload, list) and table_payload:
+            candidates.append(("table", {"data": table_payload}))
+
+    for kind, payload in candidates:
+        result.append({
+            "type": kind,
+            "artifact_type": kind,
+            "renderer": _render_block_renderer(kind),
+            "viewer": _render_block_renderer(kind),
+            "payload": payload,
+            "content": "",
+            "text": "",
+            "scene_contract": True,
+            "provider_payload": True,
+            "canonical_provider_payload": True,
+        })
+    return result
 
 
 
@@ -1372,11 +1587,55 @@ def _materialize_artifacts_as_render_blocks(
     return result
 
 
+def _provider_visual_key(block: dict[str, Any]) -> str:
+    kind = _safe_text(block.get("type") or block.get("artifact_type")).lower()
+    if kind not in {"formula", "graph", "table", "diagram", "image", "gallery", "link", "file"}:
+        return ""
+    payload = block.get("payload") if isinstance(block.get("payload"), dict) else canonical_payload_for_block(block)
+    if kind in {"image", "gallery"}:
+        images = payload.get("images") or payload.get("gallery") or []
+        sources = []
+        if isinstance(images, list):
+            for item in images:
+                if isinstance(item, str):
+                    src = item
+                elif isinstance(item, dict):
+                    src = item.get("src") or item.get("url") or item.get("image") or item.get("asset_url")
+                else:
+                    src = ""
+                if src:
+                    sources.append(_safe_text(src))
+        if sources:
+            payload = {"sources": sorted(set(sources))}
+        else:
+            source = _safe_text(payload.get("src") or payload.get("url") or block.get("src") or block.get("url"))
+            payload = {"sources": [source]} if source else {"sources": []}
+    elif kind == "formula":
+        payload = {"formula": _normalize_formula_for_render(payload.get("formula") or payload.get("latex") or payload.get("equation") or payload.get("expression") or block.get("content"))}
+    elif kind == "diagram":
+        svg = _safe_text(payload.get("svg") or payload.get("drawing") or payload.get("svg_payload"))
+        payload = {"svg": " ".join(svg.split())} if svg else {
+            "nodes": payload.get("nodes") or [],
+            "edges": payload.get("edges") or [],
+            "elements": payload.get("elements") or payload.get("shapes") or [],
+            "points": payload.get("points") or [],
+        }
+    elif kind in {"link", "file"}:
+        url = _safe_text(block.get("url") or block.get("href") or payload.get("url") or payload.get("href"))
+        payload = {"url": url.split("#", 1)[0].rstrip("/").lower()}
+    try:
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        raw = repr(payload)
+    return f"visual:{kind}:{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:20]}"
+
+
 def _dedupe_render_blocks(blocks: list[dict], answer: str, requested_outputs: list[str]) -> list[dict]:
     """Canonicalize one answer + structured artifacts without losing unique payloads."""
     clean = _clean_render_blocks(blocks)
     result: list[dict] = []
     seen = set()
+    semantic_seen: dict[str, int] = {}
     text_added = False
 
     for block in clean:
@@ -1401,7 +1660,19 @@ def _dedupe_render_blocks(blocks: list[dict], answer: str, requested_outputs: li
         sig = (btype, json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)[:8000])
         if sig in seen:
             continue
+        semantic_key = _provider_visual_key(block)
+        if semantic_key and semantic_key in semantic_seen:
+            previous_index = semantic_seen[semantic_key]
+            previous = result[previous_index]
+            previous_renderer = _safe_text(previous.get("renderer")).lower()
+            candidate_renderer = _safe_text(block.get("renderer")).lower()
+            generic = {"textblock", "messagetextblock", "markdownblock"}
+            if previous_renderer in generic and candidate_renderer not in generic:
+                result[previous_index] = block
+            continue
         seen.add(sig)
+        if semantic_key:
+            semantic_seen[semantic_key] = len(result)
         result.append(block)
 
     # Guarantee one text block, but do not duplicate a provider text block.
@@ -4196,7 +4467,9 @@ def provider_finalize_for_executor(contract: dict) -> dict:
         requested_outputs = ["text"]
     mr.setdefault("metadata", {})["canonical_output_plan_before_finalize"] = list(requested_outputs)
 
-    # Remove duplicated full structured representations from the narrative channel.
+    # Preserve the provider's original answer as the source for visual data.
+    # The visible text is cleaned only after structured render payloads are materialized.
+    raw_answer_for_visuals = answer
     answer = _strip_duplicate_structured_text(answer, requested_outputs)
 
     constraints = payload.get("constraints", {}) if isinstance(payload.get("constraints"), dict) else {}
@@ -4228,8 +4501,9 @@ def provider_finalize_for_executor(contract: dict) -> dict:
     mr["content"] = answer
     mr.setdefault("metadata", {})["post_provider_render_stage"] = "AFTER_PROVIDER"
     mr.setdefault("metadata", {})["post_provider_render_authority"] = "EXECUTOR_SCENE_CONTRACT"
-    response_text = normalize_response_text(mr.get("response") or answer)
-    mr["response"] = _strip_image_technical_fallback(response_text) if image_generation_preview else response_text
+    # The same cleaned narrative is used by all downstream Scene builders.
+    # Structured visual payloads live only in render_blocks.
+    mr["response"] = _strip_image_technical_fallback(answer) if image_generation_preview else answer
     mr["content"] = _strip_image_technical_fallback(mr["content"]) if image_generation_preview else mr["content"]
 
     original_blocks = mr.get("render_blocks") or []
@@ -4246,6 +4520,12 @@ def provider_finalize_for_executor(contract: dict) -> dict:
     original_blocks = _materialize_artifacts_as_render_blocks(
         mr["artifacts"],
         original_blocks,
+    )
+    original_blocks = _materialize_provider_visual_fields(
+        mr,
+        original_blocks,
+        requested_outputs,
+        raw_answer_for_visuals,
     )
     mr["render_blocks"] = _dedupe_render_blocks(
         original_blocks,
