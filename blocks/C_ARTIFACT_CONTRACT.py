@@ -2058,28 +2058,111 @@ def _scene_block_type(block: Dict[str, Any]) -> str:
 
 
 def _scene_block_renderer(block: Dict[str, Any]) -> str:
+    block_type = _scene_block_type(block)
     renderer = str(block.get("renderer") or block.get("viewer") or "").strip()
+    canonical = ARTIFACT_BLOCK_MAP.get(block_type, "MessageTextBlock")
+    generic = {"", "MessageTextBlock", "TextBlock", "MarkdownBlock"}
+    # A visual artifact has exactly one specialized viewer in the SceneContract.
+    if block_type in {"formula", "graph", "table", "diagram", "image", "gallery", "link", "file"} and renderer in generic:
+        return canonical
     if renderer:
         return renderer
-    return ARTIFACT_BLOCK_MAP.get(_scene_block_type(block), "MessageTextBlock")
+    return canonical
+
+
+def _canonical_visual_payload_for_dedupe(block: Dict[str, Any]) -> Any:
+    """Keep only the actual visual payload; ignore transient renderer metadata."""
+    block_type = _scene_block_type(block)
+    payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+    for candidate in (
+        block.get("artifact", {}).get("payload") if isinstance(block.get("artifact"), dict) else None,
+        block.get("signal", {}).get("payload") if isinstance(block.get("signal"), dict) else None,
+        block.get("presentation", {}).get("payload_contract", {}).get("payload")
+        if isinstance(block.get("presentation"), dict)
+        and isinstance(block.get("presentation", {}).get("payload_contract"), dict)
+        else None,
+    ):
+        if isinstance(candidate, dict):
+            merged = dict(candidate)
+            merged.update({k: v for k, v in payload.items() if v not in (None, "", [], {})})
+            payload = merged
+
+    if block_type in {"image", "gallery"}:
+        images = payload.get("images") or payload.get("gallery") or []
+        if isinstance(images, list):
+            sources = []
+            for item in images:
+                if isinstance(item, str):
+                    src = item
+                elif isinstance(item, dict):
+                    src = item.get("src") or item.get("url") or item.get("image") or item.get("asset_url")
+                else:
+                    src = ""
+                if src:
+                    sources.append(str(src).strip())
+            if sources:
+                return {"sources": sorted(set(sources))}
+        src = str(
+            block.get("src") or block.get("url") or block.get("asset_url")
+            or payload.get("src") or payload.get("url") or payload.get("image_url") or ""
+        ).strip()
+        return {"sources": [src]} if src else {"sources": []}
+
+    if block_type == "formula":
+        return {
+            "formula": str(
+                payload.get("formula") or payload.get("latex") or payload.get("equation")
+                or payload.get("expression") or block.get("content") or ""
+            ).strip()
+        }
+
+    if block_type == "diagram":
+        svg = str(payload.get("svg") or payload.get("drawing") or payload.get("svg_payload") or "").strip()
+        if svg:
+            return {"svg": " ".join(svg.split())}
+        return {
+            "nodes": payload.get("nodes") or [],
+            "edges": payload.get("edges") or [],
+            "elements": payload.get("elements") or payload.get("shapes") or [],
+            "points": payload.get("points") or [],
+            "ascii": str(payload.get("ascii") or payload.get("ascii_preview") or "").strip(),
+        }
+
+    if block_type in {"graph", "table"}:
+        return payload
+
+    if block_type in {"link", "file"}:
+        url = str(block.get("url") or block.get("href") or payload.get("url") or payload.get("href") or "").strip()
+        return {"url": url.split("#", 1)[0].rstrip("/").lower()} if url else payload
+
+    return {}
 
 
 def _canonical_visual_dedupe_key(block: Dict[str, Any]) -> str:
     block_type = _scene_block_type(block)
-    if block_type in {"link", "file"}:
-        payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-        url = str(block.get("url") or block.get("href") or payload.get("url") or payload.get("href") or "").strip()
-        if url:
-            return f"link:{url.split('#', 1)[0].rstrip('/').lower()}"
     if block_type == "graph_data":
         return f"internal:graph_data:{str(block.get('name') or '')}"
+    if block_type in {"link", "file", "formula", "graph", "table", "diagram", "image", "gallery"}:
+        return f"visual:{block_type}:{_scene_hash(_canonical_visual_payload_for_dedupe(block))}"
     return ""
 
 
 def _prefer_canonical_visual_block(existing: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
+    rank = {
+        "messagetextblock": 0,
+        "textblock": 0,
+        "markdownblock": 0,
+        "formularenderer": 100,
+        "formulablock": 100,
+        "graphblock": 100,
+        "tableblock": 100,
+        "diagramrenderer": 100,
+        "galleryblock": 100,
+        "linkcard": 100,
+    }
     existing_renderer = str(existing.get("renderer") or "").lower()
     candidate_renderer = str(candidate.get("renderer") or "").lower()
-    if "linkcard" in candidate_renderer and "message" in existing_renderer:
+    if rank.get(candidate_renderer, 20) > rank.get(existing_renderer, 20):
         return candidate
     return existing
 
