@@ -1421,77 +1421,172 @@ def _dialogue_graph_payload(answer: str) -> dict[str, Any]:
 
 
 def _ascii_diagram_to_payload(answer: str) -> dict[str, Any]:
-    """Convert an unambiguous connector-line diagram into structured nodes/edges."""
-    lines = [line.strip() for line in normalize_response_text(answer).splitlines() if _looks_like_visual_ascii(line)]
+    """Convert an explicit connector-line diagram into a richer structured diagram.
+
+    This is only a transport fallback for providers that returned an ASCII/text
+    schematic instead of the requested diagram object. It derives metadata from
+    the text that is already present; it does not invent ratings, values or
+    hidden connections.
+    """
+    text = normalize_response_text(answer)
+    lines = [line.strip() for line in text.splitlines() if _looks_like_visual_ascii(line)]
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     node_index: dict[str, str] = {}
 
-    def node_id(label: str) -> str:
-        # Keep electrical polarity markers so (+) and (−) terminals are not
-        # collapsed into one generic "battery" node. This preserves the actual
-        # connection semantics for the professional diagram renderer.
-        key = re.sub(r"\s+", " ", label.strip(" →←─—_\t"))
+    def infer_kind(label: str) -> tuple[str, str, str]:
+        low = label.lower()
+        if any(token in low for token in ("батар", "источник", "блок питания", "блока питания", "power supply")):
+            return "source", "power_supply", "PS"
+        if any(token in low for token in ("предохран", "fuse")):
+            return "protection", "fuse", "F"
+        if any(token in low for token in ("выключател", "переключател", "switch", "dpdt")):
+            return "switch", "switch", "S"
+        if any(token in low for token in ("ламп", "светиль", "load", "гирлянд")):
+            return "load", "lamp", "H"
+        if any(token in low for token in ("двигател", "motor")):
+            return "load", "motor", "M"
+        if any(token in low for token in ("резист", "resistor")):
+            return "passive", "resistor", "R"
+        if any(token in low for token in ("контроллер", "controller", "контактор", "contactor", "реле", "relay")):
+            return "control", "controller", "K"
+        return "node", "component", "X"
+
+    def explicit_rating(label: str) -> str:
+        # Preserve only ratings explicitly written in the source text.
+        match = re.search(
+            r"(?i)\b\d+(?:[.,]\d+)?\s*(?:к?в|v|вольт(?:а|ов)?|a|амп(?:ер|ера|еров)?)\b",
+            label,
+        )
+        return match.group(0) if match else ""
+
+    def canonical_node_key(label: str) -> tuple[str, str]:
+        key = re.sub(r"\s+", " ", label.strip(" →←─—_━═\t"))
         key = re.sub(r"[\[\]{}]", "", key).strip()
         key = key.replace("(+) ", "+ ").replace("(-) ", "- ").replace("(−) ", "− ")
         key = re.sub(r"[()]", "", key).strip()
+        if not key:
+            return "", ""
+
+        low = key.lower()
+        terminal = ""
+        if re.match(r"^\+\s*", key):
+            terminal = "plus"
+        elif re.match(r"^(?:−|-)\s*", key):
+            terminal = "minus"
+
+        # "+ блока питания" and "− блока питания" are two terminals of one
+        # physical source. Keep one source node and annotate the concrete edge
+        # terminal instead of rendering two fake power-supply components.
+        if "блок питания" in low or "блока питания" in low or "power supply" in low:
+            return "Блок питания", terminal
+
+        return key, terminal
+
+    def node_id(label: str) -> tuple[str, str]:
+        key, terminal = canonical_node_key(label)
         if not key or len(key) > 80:
-            return ""
+            return "", ""
+
         if key not in node_index:
             nid = f"n{len(node_index) + 1}"
             node_index[key] = nid
-            low_key = key.lower()
-            kind = (
-                "source" if any(token in low_key for token in ("батар", "источник", "+ "))
-                else "switch" if "выключатель" in low_key or "switch" in low_key
-                else "load" if any(token in low_key for token in ("ламп", "свет", "load"))
-                else "node"
-            )
-            nodes.append({"id": nid, "label": key, "kind": kind})
-        return node_index[key]
+            role, symbol, ref_prefix = infer_kind(key)
+            item: dict[str, Any] = {
+                "id": nid,
+                "ref": f"{ref_prefix}{sum(1 for n in nodes if str(n.get('ref','')).startswith(ref_prefix)) + 1}",
+                "kind": role,
+                "symbol": symbol,
+                "label": key,
+            }
+            rating = explicit_rating(label)
+            if rating:
+                item["rating"] = rating
+
+            ports: list[dict[str, str]] = []
+            if "+" in label:
+                ports.append({"id": "plus", "label": "+"})
+            if "−" in label or re.search(r"(?<![A-Za-z])-", label):
+                ports.append({"id": "minus", "label": "−"})
+            if ports:
+                item["ports"] = ports
+            nodes.append(item)
+        else:
+            # Merge explicit source polarity discovered on a later occurrence
+            # into the already-created source node.
+            for existing in nodes:
+                if existing.get("id") == node_index[key]:
+                    ports = list(existing.get("ports") or [])
+                    if terminal and not any(str(p.get("id")) == terminal for p in ports if isinstance(p, dict)):
+                        ports.append({"id": terminal, "label": "+" if terminal == "plus" else "−"})
+                    if ports:
+                        existing["ports"] = ports
+                    break
+
+        return node_index[key], terminal
 
     for line in lines:
-        parts = [part.strip() for part in re.split(r"\s*(?:─{2,}|—{2,}|━{2,}|═{2,}|-{2,}|→|->|⟶)\s*", line) if part.strip()]
-        if len(parts) < 2 or len(parts) > 8:
+        parts = [
+            part.strip()
+            for part in re.split(
+                r"\s*(?:─{2,}|—{2,}|━{2,}|═{2,}|-{2,}|→|->|⟶|⇒)\s*",
+                line,
+            )
+            if part.strip()
+        ]
+        if len(parts) < 2 or len(parts) > 10:
             continue
-        ids = [node_id(part) for part in parts]
-        ids = [item for item in ids if item]
-        for left, right in zip(ids, ids[1:]):
+
+        endpoints = [node_id(part) for part in parts]
+        endpoints = [(nid, terminal) for nid, terminal in endpoints if nid]
+        for (left, left_terminal), (right, right_terminal) in zip(endpoints, endpoints[1:]):
             edge_id = f"e{len(edges) + 1}"
-            edges.append({"id": edge_id, "from": left, "to": right})
+            edge: dict[str, Any] = {
+                "id": edge_id,
+                "from": left,
+                "to": right,
+            }
+            if left_terminal:
+                edge["from_terminal"] = left_terminal
+            if right_terminal:
+                edge["to_terminal"] = right_terminal
+            edges.append(edge)
 
     if len(nodes) < 2 or not edges:
         return {}
+
     title = ""
-    for raw_line in normalize_response_text(answer).splitlines():
+    for raw_line in text.splitlines():
         line = raw_line.strip()
         if line and not _looks_like_visual_ascii(line):
-            if any(token in line.lower() for token in ("схем", "диаграм", "подключ")):
+            if any(token in line.lower() for token in ("схем", "диаграм", "подключ", "circuit")):
                 title = line.rstrip(":").strip()
                 break
 
-    # Give simple connector diagrams an explicit horizontal geometry so the
-    # existing GraphBlock/NetworkSvg renders a professional chain instead of
-    # falling back to a square grid. General/multi-line diagrams can still use
-    # their normal automatic layout.
-    if 2 <= len(nodes) <= 8:
+    if 2 <= len(nodes) <= 10:
         for index, node in enumerate(nodes):
             node["x"] = float(index)
             node["y"] = 0.0
 
+    electrical = any(
+        n.get("symbol") in {"power_supply", "fuse", "switch", "lamp", "motor", "resistor", "controller"}
+        for n in nodes
+    )
+
     return {
         "representation": "diagram",
-        "diagram_type": "electrical_schematic" if any(
-            token in normalize_response_text(answer).lower()
-            for token in ("батар", "ламп", "выключатель")
-        ) else "diagram",
+        "diagram_type": "electrical_schematic" if electrical else "diagram",
         "direction": "horizontal",
         "title": title or "Схема подключения",
         "nodes": nodes,
         "edges": edges,
+        "legend": [
+            {"ref": str(n.get("ref")), "label": str(n.get("label"))}
+            for n in nodes
+            if n.get("ref")
+        ],
         "source": "dialogue_answer_visual_syntax",
     }
-
 
 def _materialize_provider_visual_fields(
     machine_response: dict[str, Any],
@@ -1546,6 +1641,14 @@ def _materialize_provider_visual_fields(
         else:
             inferred_diagram = _ascii_diagram_to_payload(answer_source)
             if inferred_diagram:
+                formula_value = (
+                    machine_response.get("formula")
+                    or machine_response.get("latex")
+                    or machine_response.get("equation")
+                    or machine_response.get("expression")
+                )
+                if formula_value:
+                    inferred_diagram["linked_formula"] = _safe_text(formula_value)
                 candidates.append(("diagram", inferred_diagram))
 
     if "table" in outputs and not has_type("table"):
@@ -2270,7 +2373,7 @@ def _build_provider_user_text_from_plan(
     ]
     if diagram_requested:
         mandatory.append(
-            "DIAGRAM_OUTPUT: include one complete diagram object with compact nodes[{id,label,kind}] and edges[{from,to,label}]; preserve every requested connection; keep answer text concise; do not substitute ASCII/text for diagram data."
+            "DIAGRAM_OUTPUT: include one complete structured diagram object; nodes must carry id, ref (when determinable), kind, symbol (when determinable), label, value/rating when explicitly known, and known terminals/ports; edges must carry from, to, from_terminal/to_terminal when known, net/wire/label when known; include diagram_type, direction, title, legend/notes when useful; when formula+diagram are requested together, link the same-turn formula relation/variables into diagram notes or linked_formula without inventing numeric values; preserve every requested connection; keep answer text concise; do not substitute ASCII/text for diagram data and never invent unknown component ratings or terminals."
         )
 
     development = plan.get("dialogue_development")
