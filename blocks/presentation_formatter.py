@@ -254,12 +254,20 @@ def validate_render_block_payload(block_type: Any, block: Any) -> tuple[bool, st
 
 
 def normalize_renderer(value: Any, block_type: str) -> str:
+    kind = normalize_type(block_type)
     requested = _s(value).lower()
+    canonical = RENDERER_ALIASES.get(kind)
+    generic = {"messagetextblock", "textblock", "markdownblock", ""}
+    # Visual objects always reach their dedicated Web block. A generic text
+    # renderer is not a valid second representation of the same object.
+    if canonical and kind in {"formula", "graph", "table", "diagram", "image", "gallery", "link", "file"}:
+        if not requested or requested in generic or requested in {"math", "schematic"}:
+            return canonical
     if requested in RENDERER_ALIASES:
         return RENDERER_ALIASES[requested]
     if requested:
         return requested
-    return RENDERER_ALIASES.get(normalize_type(block_type), "MessageTextBlock")
+    return canonical or "MessageTextBlock"
 
 
 def _json_safe(value: Any) -> Any:
@@ -334,32 +342,104 @@ def _content(block: dict[str, Any]) -> str:
     return ""
 
 
-def _semantic_visual_key(block: dict[str, Any]) -> str:
-    """Return a stable key for transport duplicates of the same visual node."""
-    block_type = normalize_type(block.get("type") or block.get("artifact_type") or block.get("representation"))
-    payload = _d(block.get("payload"))
+def _visual_payload_for_dedupe(block: dict[str, Any]) -> Any:
+    """Reduce a render block to its visual content, ignoring transport identity."""
+    block_type = normalize_type(
+        block.get("type") or block.get("artifact_type") or block.get("representation")
+    )
+    payload = canonical_payload_for_block(block) or _d(block.get("payload"))
+
+    if block_type in {"image", "gallery"}:
+        images = payload.get("images") or payload.get("gallery") or []
+        if isinstance(images, list):
+            sources = []
+            for item in images:
+                if isinstance(item, str):
+                    src = item
+                elif isinstance(item, dict):
+                    src = item.get("src") or item.get("url") or item.get("image") or item.get("asset_url")
+                else:
+                    src = ""
+                if src:
+                    sources.append(_s(src))
+            if sources:
+                return {"sources": sorted(set(sources))}
+        src = _s(
+            payload.get("src")
+            or payload.get("url")
+            or payload.get("image_url")
+            or block.get("src")
+            or block.get("url")
+            or block.get("asset_url")
+        )
+        return {"source": src} if src else payload
+
+    if block_type == "formula":
+        formula = _s(
+            payload.get("formula")
+            or payload.get("latex")
+            or payload.get("equation")
+            or payload.get("expression")
+            or _content(block)
+        )
+        return {"formula": formula}
+
+    if block_type == "diagram":
+        svg = _s(payload.get("svg") or payload.get("drawing") or payload.get("svg_payload"))
+        if svg:
+            return {"svg": re.sub(r"\s+", " ", svg).strip()}
+        return {
+            "nodes": payload.get("nodes") or [],
+            "edges": payload.get("edges") or [],
+            "elements": payload.get("elements") or payload.get("shapes") or [],
+            "points": payload.get("points") or [],
+            "ascii": _s(payload.get("ascii") or payload.get("ascii_preview")),
+        }
+
+    if block_type in {"graph", "table"}:
+        return payload
 
     if block_type in {"link", "file"}:
         url = _s(block.get("url") or block.get("href") or payload.get("url") or payload.get("href"))
-        if url:
-            return f"link:{url.split('#', 1)[0].rstrip('/').lower()}"
+        return {"url": url.split("#", 1)[0].rstrip("/").lower()} if url else payload
 
-    # graph_data is an internal data carrier for graph artifacts, not a second
-    # human-visible scene node.
+    return {}
+
+
+def _semantic_visual_key(block: dict[str, Any]) -> str:
+    """Return a stable semantic key for equivalent visual render blocks."""
+    block_type = normalize_type(
+        block.get("type") or block.get("artifact_type") or block.get("representation")
+    )
     if block_type == "graph_data":
+        payload = _d(block.get("payload"))
         name = _s(block.get("name") or payload.get("name"))
         return f"internal:graph_data:{name or _fingerprint(payload)}"
+
+    if block_type in {"link", "file", "formula", "graph", "table", "diagram", "image", "gallery"}:
+        return f"visual:{block_type}:{_fingerprint(_visual_payload_for_dedupe(block))}"
 
     return ""
 
 
 def _prefer_block(existing: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    """Prefer the canonical specialized viewer over a generic text viewer."""
+    rank = {
+        "messagetextblock": 0,
+        "textblock": 0,
+        "markdownblock": 0,
+        "formularenderer": 100,
+        "formulablock": 100,
+        "graphblock": 100,
+        "tableblock": 100,
+        "diagramrenderer": 100,
+        "galleryblock": 100,
+        "linkcard": 100,
+    }
     existing_renderer = _s(existing.get("renderer")).lower()
     candidate_renderer = _s(candidate.get("renderer")).lower()
-    if "linkcard" in candidate_renderer and "message" in existing_renderer:
+    if rank.get(candidate_renderer, 20) > rank.get(existing_renderer, 20):
         return candidate
-    if "linkcard" in existing_renderer and "message" in candidate_renderer:
-        return existing
     return existing
 
 def canonicalize_scene_blocks(
