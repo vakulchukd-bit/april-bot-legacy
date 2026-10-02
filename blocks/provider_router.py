@@ -2212,6 +2212,12 @@ def _build_provider_user_text_from_plan(
         requested = [requested]
     requested = [x for x in requested if _safe_text(x).strip()]
 
+    # Diagram output is a semantic payload, not prose/ASCII art. Keep this contract
+    # tiny so the 900-token input ceiling is preserved.
+    diagram_requested = any(
+        _safe_text(x).strip().lower() == "diagram" for x in requested
+    )
+
     # A NEW topic is isolated from other task operands, but a dialogue-level rule
     # (for example sequential numbering) still belongs to the authenticated sequence.
     # Preserve only the explicitly protected task-scoped sections; never import old topic data.
@@ -2262,6 +2268,10 @@ def _build_provider_user_text_from_plan(
         "REQUESTED: " + json.dumps(requested[:6], ensure_ascii=False, separators=(",", ":")),
         "RESPONSE_FORMAT: Return exactly one complete logical answer as MachineResponse JSON. Use only the supplied context plan.",
     ]
+    if diagram_requested:
+        mandatory.append(
+            "DIAGRAM_OUTPUT: include one complete diagram object with compact nodes[{id,label,kind}] and edges[{from,to,label}]; preserve every requested connection; keep answer text concise; do not substitute ASCII/text for diagram data."
+        )
 
     development = plan.get("dialogue_development")
     # CONTINUE already carries the compact DIALOGUE_ANCHOR +
@@ -2625,7 +2635,7 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         )
     elif effective_mode == "diagram":
         mandatory.append(
-            "MODE_RULE: return one complete diagram with explicit nodes/edges or vector shapes; no duplicates."
+            "MODE_RULE: return one complete diagram object with compact nodes[{id,label,kind}] and edges[{from,to,label}]; preserve every requested connection; keep answer concise; no ASCII substitute."
         )
     elif effective_mode == "graph":
         mandatory.append(
