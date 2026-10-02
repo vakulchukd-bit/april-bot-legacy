@@ -27,10 +27,9 @@ from blocks.provider_router import generate_text
 from blocks.reasoning_state import build_turn_synchronization_snapshot
 from blocks.goal_engine import build_goal_evidence, evaluate_goal_progress
 from blocks.response_decision import build_completion_decision
-from blocks.state_manager import get_state, update_scene_context, persist_state, build_dialogue_memory_bridge
+from blocks.state_manager import get_state, update_scene_context, build_dialogue_memory_bridge
 from blocks.presentation_formatter import canonical_payload_for_block, validate_render_block_payload
 from blocks.rooms_registry import registry_route_machine_request
-from blocks.image_engine import set_render_generation_status
 
 PROCESSOR_VERSION = "april_sequential_processor_v2_context_first_scene"
 PROCESSOR_MODE = "ACTIVE_BRANCH_MEMORY_CONTEXT_UNDERSTANDING_RELATION_RESPONSE_RENDER_PROVIDER_SCENE"
@@ -2741,34 +2740,11 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
     print("🧠 APRIL INTERPRETATION:", _compact(request.intent))
     print("🧠 APRIL DIALOGUE:", _compact(request.dialogue_contract))
 
-    # The Web typing is driven by the same authoritative representation that
-    # the Executor will route. Text-only turns explicitly close the render
-    # lifecycle here, so the frontend cannot keep polling an image endpoint.
     requested_outputs = {
         _text(value).lower()
         for value in list(request.requested_outputs or [])
         if _text(value)
     }
-    representation_hint = _text((request.intent or {}).get("type") or (request.intent or {}).get("representation")).lower()
-    render_generation_kind = next(
-        (kind for kind in ("image", "graph", "table") if representation_hint == kind or kind in requested_outputs),
-        "none",
-    )
-    if render_generation_kind == "none":
-        set_render_generation_status(
-            str(request.request_id),
-            status="not_requested",
-            kind="none",
-            user_id=_text(user_id),
-        )
-    else:
-        set_render_generation_status(
-            str(request.request_id),
-            status="generating",
-            kind=render_generation_kind,
-            user_id=_text(user_id),
-        )
-
     started = time.perf_counter()
     if run_with_activity:
         try:
@@ -2867,18 +2843,6 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
     response, scene, contract = processor.build_scene(request, provider_contract)
     response.metadata["timing"] = {"provider_ms": provider_ms}
 
-    # Graph/table routes are already fully materialized by the canonical
-    # C-ARTIFACT/Room/Scene path at this point. Image status is also mirrored by
-    # C_APRIL_IMAGES_GENERATOR, so writing the terminal state here keeps all
-    # render types on one lifecycle boundary.
-    if render_generation_kind in {"graph", "table"}:
-        set_render_generation_status(
-            str(request.request_id),
-            status="success",
-            kind=render_generation_kind,
-            user_id=_text(user_id),
-        )
-
     # Post-result goal analysis is read-only. It decides only whether a difficult
     # completed turn deserves a natural synthesis; ordinary turns remain plain.
     semantic_for_goal = {
@@ -2931,10 +2895,13 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
             answer=response.answer,
             visual_generation_memory=dialogue_visual_generation_memory,
             internal_context=bool(kwargs.get("internal_context", False)),
-            persist=True,
+            # The canonical state is updated synchronously in memory, but the
+            # database write is intentionally moved out of the HTTP critical path.
+            persist=False,
         )
         response.metadata["dialogue_committed"] = True
-        response.metadata["dialogue_commit_stage"] = "POST_PROVIDER_SCENE_BEFORE_DELIVERY"
+        response.metadata["dialogue_commit_stage"] = "POST_PROVIDER_SCENE_IN_MEMORY_BEFORE_DELIVERY"
+        response.metadata["dialogue_persistence"] = "background_after_delivery_commit"
     except Exception as exc:
         print("⚠️ APRIL SCENE MEMORY WRITE:", exc)
 
