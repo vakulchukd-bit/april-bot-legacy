@@ -30,6 +30,8 @@ import json
 import math
 import os
 import re
+import time
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -221,8 +223,14 @@ class AprilImagesGenerator:
         return text[:limit]
 
     @classmethod
-    def _semantic_plan_for_generation(cls, spec: dict[str, Any]) -> str:
-        """Keep only same-turn OpenAI visual data; no render-profile injection."""
+    def _dialogue_generation_prompt_for_history(cls, spec: dict[str, Any]) -> str:
+        """Preserve the former full generator prompt as 12-hour dialogue evidence.
+
+        This is intentionally *not* sent to GPT Image 2. It is the exact richer
+        semantic/constraint envelope that the previous generator path assembled,
+        retained so Interpretation can use it when a later turn continues the
+        same authenticated visual task.
+        """
         raw_plan = spec.get("openai_structured_visual_plan_raw")
         plan_semantic = cls._clean_prompt(
             spec.get("openai_structured_visual_plan_semantic")
@@ -244,14 +252,51 @@ class AprilImagesGenerator:
                 parts.append(f"OpenAI visual constraints: {encoded_context}")
 
         if isinstance(raw_plan, dict):
-            # Preserve structured same-turn visual fields when they contain
-            # information beyond the already extracted semantic description.
             nontrivial_keys = {
                 str(key) for key in raw_plan.keys()
                 if str(key) not in {"description", "prompt", "visual_prompt", "image_prompt"}
             }
             if nontrivial_keys:
                 encoded_plan = cls._compact_json(raw_plan, 8_000)
+                if encoded_plan:
+                    parts.append(f"OpenAI structured visual plan: {encoded_plan}")
+
+        parts.append(
+            "Render the supplied visual content faithfully. Do not replace the requested subject, "
+            "do not add unrelated subjects or environments, and do not invent missing scene elements."
+        )
+        return "\n".join(parts)
+
+    @classmethod
+    def _semantic_plan_for_generation(cls, spec: dict[str, Any]) -> str:
+        """Send only same-turn user intent + OpenAI visual understanding to the image model.
+
+        The former broad ``visual_context`` envelope is preserved separately by
+        ``_dialogue_generation_prompt_for_history`` and returned to the canonical
+        dialogue memory writer instead of being appended to the Image API prompt.
+        """
+        raw_plan = spec.get("openai_structured_visual_plan_raw")
+        plan_semantic = cls._clean_prompt(
+            spec.get("openai_structured_visual_plan_semantic")
+            or spec.get("prompt")
+            or ""
+        )
+
+        parts: list[str] = []
+        request_anchor = cls._safe_text(spec.get("request_anchor") or "").strip()
+        if request_anchor:
+            parts.append(f"User request: {request_anchor}")
+
+        if plan_semantic:
+            parts.append(f"OpenAI visual meaning: {plan_semantic}")
+
+        if isinstance(raw_plan, dict):
+            nontrivial_keys = {
+                str(key) for key in raw_plan.keys()
+                if str(key) not in {"description", "prompt", "visual_prompt", "image_prompt"}
+            }
+            if nontrivial_keys:
+                encoded_plan = cls._compact_json(raw_plan, 6_000)
                 if encoded_plan:
                     parts.append(f"OpenAI structured visual plan: {encoded_plan}")
 
@@ -841,8 +886,36 @@ class AprilImagesGenerator:
     ) -> dict[str, Any]:
         clean = cls._validate_render_spec(spec)
         width, height = cls._parse_size(f"{clean['width']}x{clean['height']}")
+
+        # The former broad generator envelope is retained as dialogue evidence,
+        # not as image-model input. The actual GPT Image 2 prompt is now limited
+        # to the current user anchor + OpenAI's same-turn visual understanding.
+        dialogue_generation_prompt = cls._dialogue_generation_prompt_for_history(clean)
         prompt = cls._compose_prompt(clean["prompt"], clean)
         final_prompt_tokens = cls._estimate_prompt_tokens(prompt)
+
+        dialogue_generation_memory = {
+            "version": "visual_generation_dialogue_memory_v1",
+            "memory_kind": "visual_generation_prompt",
+            "source": "C_APRIL_IMAGES_GENERATOR",
+            "route": "C_ARTIFACT_CONTRACT",
+            "request_anchor": clean.get("request_anchor") or "",
+            "generation_prompt": dialogue_generation_prompt,
+            "image_model_prompt": prompt,
+            "image_model_prompt_chars": len(prompt),
+            "legacy_prompt_chars": len(dialogue_generation_prompt),
+            "openai_structured_visual_plan_semantic": clean.get("openai_structured_visual_plan_semantic") or "",
+            "flow_id": clean.get("flow_id") or "",
+            "turn_id": clean.get("turn_id") or "",
+            "scene_id": clean.get("scene_id") or "",
+            "user_id": clean.get("user_id") or "",
+            "conversation_id": clean.get("conversation_id") or "",
+            "dialogue_sequence_id": clean.get("dialogue_sequence_id") or "",
+            "created_at": time.time(),
+            "expires_after_hours": 12,
+            "full_prompt_consumed_by_image_api": False,
+            "history_only": True,
+        }
 
         print(
             "\n===== IMAGE PROMPT TRACE: GENERATOR ENTRY =====\n"
@@ -1048,7 +1121,7 @@ class AprilImagesGenerator:
                 "generation_quality": meta["effective_quality"],
             },
         )
-        return cls._result_dict(
+        result_dict = cls._result_dict(
             ImageGenerationResult(
                 image_bytes=image_bytes,
                 mime_type="image/png",
@@ -1060,6 +1133,12 @@ class AprilImagesGenerator:
                 contract=contract,
             )
         )
+        # Machine-only handoff back to the canonical dialogue-memory writer.
+        # The large envelope is never forwarded to GPT Image 2.
+        result_dict["metadata"] = {
+            "_dialogue_visual_generation_memory": dialogue_generation_memory,
+        }
+        return result_dict
 
     async def generate(
         self,
