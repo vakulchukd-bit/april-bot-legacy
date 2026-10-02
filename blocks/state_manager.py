@@ -4235,7 +4235,16 @@ def _build_dialogue_visual_attachment(render_blocks, scene_id="", turn_id="", *,
     return {}
 
 
-def update_scene_context(user_id, scene_contract, current_request="", answer="", *, internal_context=False, persist=True):
+def update_scene_context(
+    user_id,
+    scene_contract,
+    current_request="",
+    answer="",
+    *,
+    visual_generation_memory=None,
+    internal_context=False,
+    persist=True,
+):
     """
     One canonical dialogue-scene update.
 
@@ -4250,6 +4259,34 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
     """
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
     conversation_id = _ensure_conversation_scope(state_obj, user_id)
+
+    # Optional machine-only visual-generation evidence. The authenticated
+    # conversation/sequence IDs are canonicalized here rather than trusted from
+    # the renderer, so the large prompt can live only inside the existing 12-hour
+    # USER↔APRIL memory pair.
+    visual_generation_memory_record = (
+        deepcopy(visual_generation_memory)
+        if isinstance(visual_generation_memory, dict)
+        and str(visual_generation_memory.get("generation_prompt") or "").strip()
+        else {}
+    )
+    if visual_generation_memory_record:
+        visual_generation_memory_record["version"] = str(
+            visual_generation_memory_record.get("version")
+            or "visual_generation_dialogue_memory_v1"
+        )
+        visual_generation_memory_record["memory_kind"] = "visual_generation_prompt"
+        visual_generation_memory_record["source"] = "C_APRIL_IMAGES_GENERATOR"
+        visual_generation_memory_record["user_id"] = str(user_id)
+        visual_generation_memory_record["conversation_id"] = conversation_id
+        visual_generation_memory_record["dialogue_sequence_id"] = str(
+            visual_generation_memory_record.get("dialogue_sequence_id") or ""
+        )
+        visual_generation_memory_record["created_at"] = float(
+            visual_generation_memory_record.get("created_at") or time.time()
+        )
+        visual_generation_memory_record["expires_after_hours"] = DIALOGUE_WINDOW_HOURS
+        visual_generation_memory_record["history_scope"] = "authenticated_dialogue_12h"
 
     contract = scene_contract if isinstance(scene_contract, dict) else {}
     if internal_context:
@@ -4859,6 +4896,18 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
     day0 = state_obj["memory_timeline"]["day_0"]
     pairs = day0.setdefault("dialog_pairs", [])
     turn_key = f"{conversation_id}:{state_obj['visual_scene_version']}"
+    if visual_generation_memory_record:
+        visual_generation_memory_record["dialogue_sequence_id"] = str(
+            contract.get("dialogue_sequence_id")
+            or active_sequence.get("sequence_id")
+            or visual_generation_memory_record.get("dialogue_sequence_id")
+            or ""
+        )
+        visual_generation_memory_record["scene_id"] = scene_id
+        visual_generation_memory_record["turn_id"] = str(
+            contract.get("turn_id") or scene_id or ""
+        )
+
     pair = {
         "record_type": "dialog_pair",
         "turn_key": turn_key,
@@ -4901,6 +4950,9 @@ def update_scene_context(user_id, scene_contract, current_request="", answer="",
         "visual_scene_id": scene_id,
         "scene_contract_id": scene_id,
         "visual_attachment": deepcopy(visual_attachment),
+        "visual_generation_memory": deepcopy(visual_generation_memory_record)
+        if visual_generation_memory_record
+        else {},
         "dialogue_sequence_id": str(contract.get("dialogue_sequence_id") or active_sequence.get("sequence_id") or ""),
         "continuation": is_continuation,
         "render_block_types": list(block_types),
