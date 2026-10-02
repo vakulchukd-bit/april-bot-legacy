@@ -100,48 +100,12 @@ def _extract_payload(task: Dict[str, Any]) -> Dict[str, Any]:
         "operation", "safety", "switch_states", "states", "notes",
         "caption", "metadata", "ascii", "ascii_preview", "svg", "svg_payload",
         "elements", "vertices", "points", "segments", "labels",
-        "coordinate_system", "construction",
+        "coordinate_system", "construction", "ascii", "ascii_preview",
     )
     for key in keys:
         if key in task:
             payload[key] = deepcopy(task[key])
     return payload
-
-
-def _normalize_terminals(value: Any) -> Dict[str, Dict[str, Any]]:
-    """Normalize terminal/port metadata without inventing electrical semantics."""
-    if isinstance(value, dict):
-        result: Dict[str, Dict[str, Any]] = {}
-        for key, raw in value.items():
-            name = _text(key)
-            if not name:
-                continue
-            if isinstance(raw, dict):
-                entry = deepcopy(raw)
-                entry.setdefault("name", name)
-                if "label" not in entry and raw.get("name"):
-                    entry["label"] = _text(raw.get("name"))
-                result[name] = entry
-            else:
-                result[name] = {"name": name, "label": _text(raw)}
-        return result
-
-    if isinstance(value, (list, tuple)):
-        result = {}
-        for index, raw in enumerate(value, start=1):
-            if isinstance(raw, dict):
-                name = _text(
-                    raw.get("id") or raw.get("name") or raw.get("key") or f"t{index}"
-                )
-                entry = deepcopy(raw)
-                entry.setdefault("name", name)
-                result[name] = entry
-            else:
-                name = _text(raw) or f"t{index}"
-                result[name] = {"name": name, "label": name}
-        return result
-
-    return {}
 
 
 def _normalize_nodes(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -170,33 +134,8 @@ def _normalize_nodes(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 
         node["id"] = node_id
         node["label"] = label
-        node["kind"] = _text(
-            node.get("kind")
-            or node.get("symbol")
-            or node.get("type")
-            or node.get("subtype"),
-            "node",
-        )
-
-        terminal_source = (
-            node.get("terminals")
-            if node.get("terminals") is not None
-            else node.get("ports")
-            if node.get("ports") is not None
-            else node.get("contacts")
-            if node.get("contacts") is not None
-            else node.get("pins")
-        )
-        node["terminals"] = _normalize_terminals(terminal_source)
-
-        # Preserve common engineering annotations when supplied by the Processor.
-        if node.get("reference_designation") and not node.get("ref"):
-            node["ref"] = node["reference_designation"]
-        if node.get("reference") and not node.get("ref"):
-            node["ref"] = node["reference"]
-        if node.get("designator") and not node.get("ref"):
-            node["ref"] = node["designator"]
-
+        if not node.get("kind"):
+            node["kind"] = _text(node.get("symbol") or node.get("type"), "node")
         nodes.append(node)
 
     return nodes
@@ -208,7 +147,6 @@ def _normalize_edges(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         + _list(payload.get("connections"))
         + _list(payload.get("relations"))
         + _list(payload.get("segments"))
-        + _list(payload.get("wires"))
     )
 
     edges: List[Dict[str, Any]] = []
@@ -228,27 +166,11 @@ def _normalize_edges(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         edge = deepcopy(raw)
         edge["from"] = source
         edge["to"] = target
-        edge["from_node"] = source.split(".", 1)[0]
-        edge["to_node"] = target.split(".", 1)[0]
-        edge["from_terminal"] = source.split(".", 1)[1] if "." in source else ""
-        edge["to_terminal"] = target.split(".", 1)[1] if "." in target else ""
-
-        if "wire" not in edge and edge.get("conductor") is not None:
-            edge["wire"] = edge.get("conductor")
-        if "net" not in edge and edge.get("net_name") is not None:
-            edge["net"] = edge.get("net_name")
-        if "label" not in edge and edge.get("description") is not None:
-            edge["label"] = edge.get("description")
-
-        waypoints = edge.get("waypoints") or edge.get("points") or edge.get("path")
-        if waypoints is not None:
-            edge["waypoints"] = deepcopy(waypoints)
 
         key = (
             source,
             target,
             _text(edge.get("label")),
-            _text(edge.get("net")),
             repr(edge.get("wire")),
             repr(edge.get("waypoints")),
         )
@@ -284,391 +206,160 @@ def _select_renderer(payload: Dict[str, Any]) -> str:
             return "SvgBlock" if explicit.lower() == "svgblock" else "ArithmeticDiagram"
         return "SvgBlock"
 
+    # Plain ASCII schematics are still canonical diagrams. The Web renderer
+    # displays them directly from the artifact payload; do not downgrade them
+    # to GalleryBlock, which has no textual schematic renderer.
+    if _text(payload.get("ascii") or payload.get("ascii_preview")):
+        return "DiagramRenderer"
+
     if explicit:
         return explicit
 
-    return "GalleryBlock"
-
-
-def _symbol_color(kind: str) -> str:
-    k = _text(kind).lower()
-    if any(token in k for token in ("source", "supply", "battery", "dc_source", "ac_source")):
-        return "#166534"
-    if any(token in k for token in ("fuse", "breaker", "rcd", "rccb", "uzo", "protection", "protect")):
-        return "#b45309"
-    if any(token in k for token in ("switch", "contactor", "relay", "selector", "dpdt")):
-        return "#1d4ed8"
-    if any(token in k for token in ("motor", "load", "lamp", "actuator")):
-        return "#7c3aed"
-    if any(token in k for token in ("ground", "earth", "pe")):
-        return "#047857"
-    return "#475569"
-
-
-def _split_label(text: str, limit: int = 24, max_lines: int = 3) -> List[str]:
-    words = _text(text).split()
-    if not words:
-        return [""]
-    lines: List[str] = []
-    current = ""
-    for word in words:
-        candidate = f"{current} {word}".strip()
-        if current and len(candidate) > limit:
-            lines.append(current)
-            current = word
-        else:
-            current = candidate
-    if current:
-        lines.append(current)
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-        lines[-1] = lines[-1][: max(0, limit - 1)] + "…"
-    return lines
-
-
-def _node_dimensions(node: Dict[str, Any]) -> tuple[int, int]:
-    kind = _text(node.get("kind") or node.get("symbol") or node.get("type")).lower()
-    if any(token in kind for token in ("contactor", "relay", "breaker", "rcd", "rccb", "thermal")):
-        return (230, 118)
-    if any(token in kind for token in ("motor", "source", "battery", "transformer")):
-        return (220, 118)
-    return (210, 110)
-
-
-def _explicit_position(node: Dict[str, Any]) -> Optional[tuple[float, float]]:
-    position = node.get("position")
-    if isinstance(position, dict):
-        x = position.get("x")
-        y = position.get("y")
-        try:
-            return float(x), float(y)
-        except (TypeError, ValueError):
-            return None
-    if isinstance(position, (list, tuple)) and len(position) >= 2:
-        try:
-            return float(position[0]), float(position[1])
-        except (TypeError, ValueError):
-            return None
-    if node.get("x") is not None and node.get("y") is not None:
-        try:
-            return float(node.get("x")), float(node.get("y"))
-        except (TypeError, ValueError):
-            return None
-    return None
-
-
-def _resolve_positions(nodes: List[Dict[str, Any]], payload: Dict[str, Any], width: int, height: int) -> Dict[str, tuple[float, float]]:
-    positions: Dict[str, tuple[float, float]] = {}
-    explicit = False
-    for node in nodes:
-        pos = _explicit_position(node)
-        if pos is not None:
-            explicit = True
-            positions[_text(node.get("id"))] = pos
-
-    # Explicit coordinates can be either pixel coordinates or normalized [0,1].
-    if explicit:
-        values = list(positions.values())
-        normalized = bool(values) and all(0 <= x <= 1 and 0 <= y <= 1 for x, y in values)
-        if normalized:
-            left, top, right, bottom = 90, 145, width - 90, height - 145
-            positions = {
-                node_id: (left + x * (right - left), top + y * (bottom - top))
-                for node_id, (x, y) in positions.items()
-            }
-        return positions
-
-    sections = _list(payload.get("sections"))
-    section_rows = []
-    for section in sections:
-        if isinstance(section, dict):
-            section_rows.append(_text(section.get("id") or section.get("name") or section.get("title")))
-    if section_rows and len(section_rows) > 1:
-        # Group by supplied node section; unknowns remain on the first row.
-        groups: Dict[str, List[Dict[str, Any]]] = {row: [] for row in section_rows}
-        groups.setdefault("", [])
-        for node in nodes:
-            key = _text(node.get("section") or node.get("group") or node.get("layer"))
-            groups.setdefault(key if key in groups else "", []).append(node)
-        usable_rows = [g for g in groups.values() if g]
-    else:
-        usable_rows = [nodes]
-
-    top = 170
-    row_gap = 220
-    for row_index, row_nodes in enumerate(usable_rows):
-        if not row_nodes:
-            continue
-        gap = 54
-        widths = [_node_dimensions(node)[0] for node in row_nodes]
-        total = sum(widths) + gap * max(0, len(row_nodes) - 1)
-        start_x = max(70, (width - total) / 2)
-        cursor = start_x
-        y = top + row_index * row_gap
-        for node, node_w in zip(row_nodes, widths):
-            positions[_text(node.get("id"))] = (cursor + node_w / 2, y)
-            cursor += node_w + gap
-
-    return positions
-
-
-def _terminal_point(
-    node: Dict[str, Any],
-    center: tuple[float, float],
-    terminal_name: str,
-    node_w: int,
-    node_h: int,
-    *,
-    target_center: Optional[tuple[float, float]] = None,
-) -> tuple[float, float]:
-    cx, cy = center
-    terminals = node.get("terminals") or {}
-    spec = terminals.get(terminal_name) if isinstance(terminals, dict) else None
-    side = _text(spec.get("side") if isinstance(spec, dict) else "").lower()
-    explicit = spec.get("position") if isinstance(spec, dict) else None
-
-    if isinstance(explicit, dict):
-        try:
-            px, py = float(explicit.get("x")), float(explicit.get("y"))
-            if 0 <= px <= 1 and 0 <= py <= 1:
-                return cx - node_w / 2 + px * node_w, cy - node_h / 2 + py * node_h
-            return px, py
-        except (TypeError, ValueError):
-            pass
-
-    if not side and target_center is not None:
-        side = "right" if target_center[0] >= cx else "left"
-
-    names = list(terminals.keys()) if isinstance(terminals, dict) else []
-    index = names.index(terminal_name) if terminal_name in names else 0
-    count = max(1, len(names))
-
-    if side in {"top", "bottom"}:
-        x = cx - node_w / 2 + node_w * ((index + 1) / (count + 1))
-        y = cy - node_h / 2 if side == "top" else cy + node_h / 2
-        return x, y
-
-    y = cy - node_h / 2 + node_h * ((index + 1) / (count + 1))
-    x = cx + node_w / 2 if side == "right" else cx - node_w / 2
-    return x, y
-
-
-def _symbol_svg(kind: str, cx: float, cy: float, accent: str) -> str:
-    k = _text(kind).lower()
-    parts: List[str] = []
-    if "motor" in k:
-        parts.append(f'<circle cx="{cx}" cy="{cy}" r="28" fill="none" stroke="{accent}" stroke-width="4"/>')
-        parts.append(f'<text x="{cx}" y="{cy + 8}" text-anchor="middle" font-size="26" font-weight="700" fill="{accent}">M</text>')
-    elif "lamp" in k or "light" in k:
-        parts.append(f'<circle cx="{cx}" cy="{cy}" r="26" fill="none" stroke="{accent}" stroke-width="4"/>')
-        parts.append(f'<path d="M {cx-14} {cy-14} L {cx+14} {cy+14} M {cx+14} {cy-14} L {cx-14} {cy+14}" stroke="{accent}" stroke-width="3"/>')
-    elif "fuse" in k:
-        parts.append(f'<rect x="{cx-32}" y="{cy-12}" width="64" height="24" rx="5" fill="none" stroke="{accent}" stroke-width="4"/>')
-        parts.append(f'<path d="M {cx-22} {cy} L {cx-8} {cy} L {cx} {cy-7} L {cx+8} {cy+7} L {cx+22} {cy}" fill="none" stroke="{accent}" stroke-width="3"/>')
-    elif any(token in k for token in ("switch", "selector", "dpdt", "contactor")):
-        parts.append(f'<circle cx="{cx-22}" cy="{cy+14}" r="5" fill="{accent}"/>')
-        parts.append(f'<circle cx="{cx+22}" cy="{cy-14}" r="5" fill="{accent}"/>')
-        parts.append(f'<path d="M {cx-17} {cy+11} L {cx+18} {cy-12}" stroke="{accent}" stroke-width="4" stroke-linecap="round"/>')
-        if "contactor" in k:
-            parts.append(f'<rect x="{cx-34}" y="{cy+20}" width="68" height="20" rx="4" fill="none" stroke="{accent}" stroke-width="3"/>')
-    elif any(token in k for token in ("breaker", "rcd", "rccb", "uzo", "protection")):
-        parts.append(f'<rect x="{cx-28}" y="{cy-30}" width="56" height="60" rx="8" fill="none" stroke="{accent}" stroke-width="4"/>')
-        parts.append(f'<path d="M {cx-15} {cy+18} L {cx+12} {cy-15}" stroke="{accent}" stroke-width="4" stroke-linecap="round"/>')
-        if any(token in k for token in ("rcd", "rccb", "uzo")):
-            parts.append(f'<circle cx="{cx+12}" cy="{cy+17}" r="6" fill="none" stroke="{accent}" stroke-width="3"/>')
-    elif "source" in k or "supply" in k or "battery" in k:
-        parts.append(f'<circle cx="{cx}" cy="{cy}" r="28" fill="none" stroke="{accent}" stroke-width="4"/>')
-        parts.append(f'<text x="{cx}" y="{cy+8}" text-anchor="middle" font-size="22" font-weight="700" fill="{accent}">DC</text>')
-    elif "ground" in k or "earth" in k:
-        parts.append(f'<path d="M {cx} {cy-18} L {cx} {cy+2} M {cx-18} {cy+2} L {cx+18} {cy+2} M {cx-12} {cy+10} L {cx+12} {cy+10} M {cx-6} {cy+18} L {cx+6} {cy+18}" stroke="{accent}" stroke-width="3"/>')
-    else:
-        parts.append(f'<rect x="{cx-30}" y="{cy-24}" width="60" height="48" rx="8" fill="none" stroke="{accent}" stroke-width="3"/>')
-    return "".join(parts)
+    return "DiagramRenderer"
 
 
 def _build_schematic_svg(
     nodes: List[Dict[str, Any]],
     edges: List[Dict[str, Any]],
     *,
-    width: int = 1600,
-    height: int = 820,
-    payload: Optional[Dict[str, Any]] = None,
+    width: int = 1400,
+    height: int = 520,
 ) -> str:
-    """Build a deterministic engineering-style SVG from supplied topology.
+    """Build a crisp deterministic schematic from already-supplied structure.
 
-    The renderer never invents a component or a connection. It only visualizes
-    nodes, terminal metadata, positions, wires and annotations already present.
+    This does not infer components from natural language. It only lays out the
+    normalized nodes/edges already supplied by the Processor so the Web
+    renderer receives an actual SVG instead of a GalleryBlock with structural
+    JSON that it cannot draw.
     """
-    if not nodes and not edges:
+    if not nodes:
         return ""
 
-    payload = payload or {}
-    width = max(1000, int(width))
-    height = max(600, int(height))
-    esc = html.escape
-    positions = _resolve_positions(nodes, payload, width, height)
-    node_map = {_text(node.get("id")): node for node in nodes}
+    width = max(720, int(width))
+    height = max(360, int(height))
+    margin_x = 70
+    center_y = height // 2
+    node_w = 210
+    node_h = 92
+    usable = max(200, width - 2 * margin_x)
+    gap = max(48, int((usable - node_w * len(nodes)) / max(1, len(nodes) - 1)))
 
-    # Keep canvas tall enough for long labels/notes.
-    notes = [x for x in _list(payload.get("notes")) if _text(x)]
-    legend = payload.get("legend")
-    title = _text(payload.get("title")) or "Схема"
-    description = _text(payload.get("description"))
-    orientation = _text(payload.get("orientation"))
+    positions: Dict[str, tuple[int, int]] = {}
+    for index, node in enumerate(nodes):
+        node_id = _text(node.get("id")) or f"node_{index + 1}"
+        x = margin_x + index * (node_w + gap)
+        y = center_y - node_h // 2
+        positions[node_id] = (x, y)
+
+    # Prefer any explicit normalized positions when supplied.
+    for node in nodes:
+        node_id = _text(node.get("id"))
+        pos = node.get("position")
+        if isinstance(pos, dict):
+            try:
+                x = int(float(pos.get("x")))
+                y = int(float(pos.get("y")))
+                positions[node_id] = (
+                    max(20, min(width - node_w - 20, x)),
+                    max(20, min(height - node_h - 20, y)),
+                )
+            except (TypeError, ValueError):
+                pass
+
+    esc = html.escape
 
     parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="{esc(title)}">',
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" role="img" aria-label="April schematic">',
         "<defs>",
-        '<marker id="april-wire-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">',
+        '<marker id="april-arrow" viewBox="0 0 10 10" refX="9" refY="5" '
+        'markerWidth="8" markerHeight="8" orient="auto-start-reverse">',
         '<path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>',
         "</marker>",
         "</defs>",
-        '<rect width="100%" height="100%" fill="#ffffff" rx="20"/>',
-        f'<text x="60" y="58" font-family="Inter,Arial,sans-serif" font-size="28" font-weight="700" fill="#0f172a">{esc(title)}</text>',
+        '<rect x="0" y="0" width="100%" height="100%" fill="#ffffff" rx="18"/>',
     ]
-    if description:
-        parts.append(f'<text x="60" y="88" font-family="Inter,Arial,sans-serif" font-size="16" fill="#64748b">{esc(description)}</text>')
-    if orientation:
-        parts.append(f'<text x="{width-60}" y="58" text-anchor="end" font-family="Inter,Arial,sans-serif" font-size="14" fill="#64748b">{esc(orientation)}</text>')
-    parts.append(f'<line x1="50" y1="115" x2="{width-50}" y2="115" stroke="#e2e8f0" stroke-width="2"/>')
 
-    # Optional section bands are visual only and use supplied section names.
-    raw_sections = [section for section in _list(payload.get("sections")) if isinstance(section, dict)]
-    if raw_sections:
-        section_names = [_text(section.get("id") or section.get("name") or section.get("title")) for section in raw_sections]
-        section_names = [name for name in section_names if name]
-        if section_names:
-            y = 145
-            parts.append(f'<text x="60" y="{y}" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="700" fill="#94a3b8">РАЗДЕЛ</text>')
-            for idx, name in enumerate(section_names):
-                x = 120 + idx * 190
-                parts.append(f'<text x="{x}" y="{y}" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="600" fill="#475569">{esc(name)}</text>')
-
-    # Draw wires behind components. Explicit waypoints are honored when provided.
+    # Edges first so node cards remain visually dominant.
     for edge in edges:
-        source_node = node_map.get(_text(edge.get("from_node")) or _text(edge.get("from")).split(".", 1)[0])
-        target_node = node_map.get(_text(edge.get("to_node")) or _text(edge.get("to")).split(".", 1)[0])
-        if not source_node or not target_node:
+        source = _text(edge.get("from") or edge.get("source") or edge.get("start"))
+        target = _text(edge.get("to") or edge.get("target") or edge.get("end"))
+        if source not in positions or target not in positions:
             continue
-        sid, tid = _text(source_node.get("id")), _text(target_node.get("id"))
-        sc = positions.get(sid)
-        tc = positions.get(tid)
-        if not sc or not tc:
-            continue
-        sw, sh = _node_dimensions(source_node)
-        tw, th = _node_dimensions(target_node)
-        sp = _terminal_point(source_node, sc, _text(edge.get("from_terminal")), sw, sh, target_center=tc)
-        tp = _terminal_point(target_node, tc, _text(edge.get("to_terminal")), tw, th, target_center=sc)
-
-        points = [sp]
-        raw_waypoints = edge.get("waypoints")
-        if isinstance(raw_waypoints, (list, tuple)):
-            for raw in raw_waypoints:
-                if isinstance(raw, dict):
-                    try:
-                        wx, wy = float(raw.get("x")), float(raw.get("y"))
-                    except (TypeError, ValueError):
-                        continue
-                    if 0 <= wx <= 1 and 0 <= wy <= 1:
-                        wx = 70 + wx * (width - 140)
-                        wy = 155 + wy * (height - 240)
-                    points.append((wx, wy))
-                elif isinstance(raw, (list, tuple)) and len(raw) >= 2:
-                    try:
-                        points.append((float(raw[0]), float(raw[1])))
-                    except (TypeError, ValueError):
-                        pass
-        if len(points) == 1:
-            # Orthogonal elbow avoids overlapping text and reads like a wiring document.
-            mx = (sp[0] + tp[0]) / 2
-            points.extend([(mx, sp[1]), (mx, tp[1])])
-        points.append(tp)
-        path_d = " M ".join((f"{x:.1f},{y:.1f}" for x, y in points))
-        path_d = "M " + path_d
-
+        x1, y1 = positions[source]
+        x2, y2 = positions[target]
+        sx = x1 + node_w
+        sy = y1 + node_h // 2
+        tx = x2
+        ty = y2 + node_h // 2
+        mid_x = (sx + tx) // 2
+        path = f"M {sx} {sy} C {mid_x} {sy}, {mid_x} {ty}, {tx} {ty}"
+        parts.append(
+            f'<path d="{path}" fill="none" stroke="#334155" stroke-width="5" '
+            f'stroke-linecap="round" marker-end="url(#april-arrow)"/>'
+        )
         label = _text(edge.get("label"))
-        net = _text(edge.get("net"))
-        wire = edge.get("wire")
-        wire_text = _text(wire) if not isinstance(wire, dict) else _text(wire.get("id") or wire.get("name") or wire.get("type"))
-        info = " · ".join([item for item in (net, label, wire_text) if item])
-        stroke = _text(edge.get("color")) or "#334155"
-        dash = _text(edge.get("line_style") or edge.get("style"))
-        dash_attr = ' stroke-dasharray="8 6"' if dash.lower() in {"dashed", "dash", "signal"} else ""
-        parts.append(f'<path d="{path_d}" fill="none" stroke="{esc(stroke)}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"{dash_attr}/>')
-        if edge.get("arrow") or edge.get("directed"):
-            parts.append(f'<path d="M {tp[0]-10:.1f},{tp[1]:.1f} L {tp[0]:.1f},{tp[1]:.1f}" fill="none" stroke="{esc(stroke)}" stroke-width="3" marker-end="url(#april-wire-arrow)"/>')
-        if info:
-            lx = (sp[0] + tp[0]) / 2
-            ly = (sp[1] + tp[1]) / 2 - 10
-            parts.append(f'<rect x="{lx-90:.1f}" y="{ly-12:.1f}" width="180" height="22" rx="7" fill="#ffffff" stroke="#e2e8f0"/>')
-            parts.append(f'<text x="{lx:.1f}" y="{ly+4:.1f}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="12" fill="#475569">{esc(info[:52])}</text>')
+        if label:
+            parts.append(
+                f'<text x="{mid_x}" y="{min(sy, ty) - 14}" text-anchor="middle" '
+                f'font-family="Inter,Arial,sans-serif" font-size="20" fill="#334155">'
+                f'{esc(label)}</text>'
+            )
 
-    # Junctions are explicit only; they are not inferred from crossings.
-    for junction in _list(payload.get("junctions")):
-        if not isinstance(junction, dict):
-            continue
-        try:
-            jx, jy = float(junction.get("x")), float(junction.get("y"))
-        except (TypeError, ValueError):
-            continue
-        if 0 <= jx <= 1 and 0 <= jy <= 1:
-            jx = 70 + jx * (width - 140)
-            jy = 155 + jy * (height - 240)
-        parts.append(f'<circle cx="{jx}" cy="{jy}" r="7" fill="#0f172a"/>')
-
-    for node in nodes:
-        node_id = _text(node.get("id"))
-        if node_id not in positions:
-            continue
-        cx, cy = positions[node_id]
-        node_w, node_h = _node_dimensions(node)
-        x, y = cx - node_w / 2, cy - node_h / 2
-        kind = _text(node.get("kind") or node.get("symbol") or node.get("type"), "node")
-        accent = _symbol_color(kind)
-        ref = _text(node.get("ref") or node.get("reference_designation") or node.get("reference"))
-        value = _text(node.get("value") or node.get("rating") or node.get("specification"))
+    for index, node in enumerate(nodes):
+        node_id = _text(node.get("id")) or f"node_{index + 1}"
         label = _text(node.get("label") or node.get("name") or node_id)
-        fill = "#f8fafc"
-        parts.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{node_w}" height="{node_h}" rx="16" fill="{fill}" stroke="#cbd5e1" stroke-width="2"/>')
-        parts.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="8" height="{node_h}" rx="4" fill="{accent}"/>')
-        parts.append(_symbol_svg(kind, x + 62, cy - 2, accent))
+        kind = _text(node.get("kind") or node.get("type") or "node").lower()
+        x, y = positions[node_id]
 
-        text_x = x + 105
-        if ref:
-            parts.append(f'<text x="{text_x:.1f}" y="{y+24:.1f}" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="700" fill="{accent}">{esc(ref)}</text>')
-        lines = _split_label(label, 22, 3)
-        base_y = y + (46 if ref else 34)
-        for i, line in enumerate(lines):
-            parts.append(f'<text x="{text_x:.1f}" y="{base_y + i*21:.1f}" font-family="Inter,Arial,sans-serif" font-size="15" font-weight="600" fill="#0f172a">{esc(line)}</text>')
-        if value:
-            parts.append(f'<text x="{text_x:.1f}" y="{y+node_h-16:.1f}" font-family="Inter,Arial,sans-serif" font-size="11" fill="#64748b">{esc(value[:44])}</text>')
-
-        # Explicit terminal names are rendered at their connection side.
-        terminals = node.get("terminals") or {}
-        if isinstance(terminals, dict):
-            for terminal_name, spec in terminals.items():
-                tp = _terminal_point(node, (cx, cy), terminal_name, node_w, node_h)
-                parts.append(f'<circle cx="{tp[0]:.1f}" cy="{tp[1]:.1f}" r="5" fill="#ffffff" stroke="{accent}" stroke-width="2"/>')
-                term_label = _text(spec.get("label") if isinstance(spec, dict) else "") or terminal_name
-                side = _text(spec.get("side") if isinstance(spec, dict) else "").lower()
-                anchor = "start" if side == "right" else "end" if side == "left" else "middle"
-                dx = 9 if anchor == "start" else -9 if anchor == "end" else 0
-                parts.append(f'<text x="{tp[0]+dx:.1f}" y="{tp[1]-8:.1f}" text-anchor="{anchor}" font-family="Inter,Arial,sans-serif" font-size="10" fill="#64748b">{esc(term_label[:18])}</text>')
-
-    # Explicit legend / notes remain compact and do not alter topology.
-    bottom = height - 110
-    if legend:
-        legend_items = []
-        if isinstance(legend, dict):
-            legend_items = [f"{_text(k)}: {_text(v)}" for k, v in legend.items() if _text(k) and _text(v)]
+        if "positive" in kind or label.startswith("+"):
+            fill = "#ECFDF5"
+            stroke = "#047857"
+        elif "negative" in kind or "−" in label or "-" == label.strip():
+            fill = "#FEF2F2"
+            stroke = "#B91C1C"
+        elif "fuse" in kind or "предохран" in label.lower():
+            fill = "#FFF7ED"
+            stroke = "#C2410C"
+        elif "switch" in kind or "выключ" in label.lower():
+            fill = "#EFF6FF"
+            stroke = "#1D4ED8"
+        elif "lamp" in kind or "лампоч" in label.lower():
+            fill = "#FFFBEB"
+            stroke = "#A16207"
         else:
-            legend_items = [_text(item) for item in _list(legend) if _text(item)]
-        if legend_items:
-            parts.append(f'<text x="60" y="{bottom}" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="700" fill="#475569">Легенда</text>')
-            parts.append(f'<text x="60" y="{bottom+24}" font-family="Inter,Arial,sans-serif" font-size="12" fill="#64748b">{esc(" · ".join(legend_items)[:180])}</text>')
-    if notes:
-        note_text = " · ".join(_text(note) for note in notes)[:220]
-        parts.append(f'<text x="60" y="{height-42}" font-family="Inter,Arial,sans-serif" font-size="12" fill="#64748b">{esc(note_text)}</text>')
+            fill = "#F8FAFC"
+            stroke = "#475569"
+
+        parts.append(
+            f'<rect x="{x}" y="{y}" width="{node_w}" height="{node_h}" rx="18" '
+            f'fill="{fill}" stroke="{stroke}" stroke-width="4"/>'
+        )
+        parts.append(
+            f'<circle cx="{x + 26}" cy="{y + 30}" r="9" fill="{stroke}"/>'
+        )
+        # Compactly wrap labels at a conservative character width.
+        words = label.split()
+        lines = []
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if len(candidate) > 22 and current:
+                lines.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        lines = lines[:3] or [node_id]
+
+        base_y = y + 42 - max(0, len(lines) - 1) * 10
+        for line_index, line in enumerate(lines):
+            parts.append(
+                f'<text x="{x + node_w / 2 + 10}" y="{base_y + line_index * 28}" '
+                f'text-anchor="middle" font-family="Inter,Arial,sans-serif" '
+                f'font-size="24" font-weight="600" fill="#0f172a">{esc(line)}</text>'
+            )
 
     parts.append("</svg>")
     return "".join(parts)
@@ -688,7 +379,7 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
     # artifact. This is a presentation normalization step, not semantic routing.
     generated_svg = ""
     if not svg and not svg_payload and (nodes or edges):
-        generated_svg = _build_schematic_svg(nodes, edges, payload=source)
+        generated_svg = _build_schematic_svg(nodes, edges)
 
     if generated_svg:
         source["svg"] = generated_svg
@@ -702,6 +393,9 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
         or source.get("format"),
         "structured_diagram",
     ).lower()
+
+    if not svg and not svg_payload and source.get("ascii"):
+        diagram_type = "ascii_schematic"
 
     representation = _text(
         source.get("representation"),
@@ -719,6 +413,8 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
         or source.get("elements")
         or source.get("vertices")
         or source.get("points")
+        or source.get("ascii")
+        or source.get("ascii_preview")
     )
 
     if not render_ready:
@@ -739,15 +435,6 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
         "connections": deepcopy(edges),
         "renderer": renderer,
         "render_ready": True,
-        "diagram_schema": "april.diagram.canonical.v3",
-        "professional_render_model": {
-            "component_metadata": True,
-            "terminal_topology": True,
-            "wire_metadata": True,
-            "explicit_geometry": True,
-            "junctions_explicit_only": True,
-            "symbol_vocabulary": "iec60617_inspired",
-        },
         "scene": {
             **identity,
             "node_type": "diagram",
@@ -773,10 +460,6 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
             "generated_svg_from_supplied_structure": bool(generated_svg),
             "no_generated_missing_components": True,
             "no_parallel_route": True,
-            "no_invented_topology": True,
-            "terminal_topology_explicit": True,
-            "wire_metadata_preserved": True,
-            "reference_designations_preserved": True,
         },
         "metadata": {
             **_obj(source.get("metadata")),
