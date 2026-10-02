@@ -2691,6 +2691,30 @@ def _df_provider_plan(
                 },
             },
         )
+        visual_memory_ref = semantic.get("previous_visual_generation_memory")
+        if isinstance(visual_memory_ref, dict) and visual_memory_ref.get("available"):
+            # Use only a compact excerpt in Provider context. The complete
+            # generator prompt remains in the authenticated 12-hour pair.
+            base["required_context"].insert(
+                3,
+                {
+                    "key": "VISUAL_GENERATION_MEMORY",
+                    "priority": 0.99,
+                    "value": {
+                        "available": True,
+                        "source": "authenticated_dialogue_12h",
+                        "full_prompt_available_in_history": True,
+                        "request": _df_text(visual_memory_ref.get("user_request"), 600),
+                        "prompt_excerpt": _df_text(
+                            visual_memory_ref.get("prompt_excerpt"), 1200
+                        ),
+                        "scene_id": _df_text(visual_memory_ref.get("scene_id"), 120),
+                        "dialogue_sequence_id": _df_text(
+                            visual_memory_ref.get("dialogue_sequence_id"), 100
+                        ),
+                    },
+                },
+            )
         if task:
             base["required_context"].insert(
                 4,
@@ -2811,6 +2835,111 @@ def _df_select_recalled_branch(text: str, state: dict[str, Any], branches: dict[
     return deepcopy(scored[0][1]) if scored and scored[0][0] >= 0.12 else {}
 
 
+
+def _df_latest_visual_generation_memory(
+    state: dict[str, Any],
+    *,
+    user_id: str = "",
+    conversation_id: str = "",
+    sequence_id: str = "",
+) -> dict[str, Any]:
+    """Read the latest full visual-generation envelope from authenticated 12h memory.
+
+    The full generator prompt is deliberately kept in StateManager's existing
+    ``day_0.dialog_pairs`` archive. Interpretation reads it only after the
+    current authenticated scope is known; no second storage path is introduced.
+    """
+    if not isinstance(state, dict):
+        return {}
+
+    timeline = state.get("memory_timeline")
+    day0 = timeline.get("day_0") if isinstance(timeline, dict) else {}
+    pairs = day0.get("dialog_pairs") if isinstance(day0, dict) else []
+    if not isinstance(pairs, list):
+        return {}
+
+    uid = _df_text(user_id or state.get("user_id") or (state.get("memory_scope") or {}).get("user_id"), 120)
+    cid = _df_text(
+        conversation_id
+        or state.get("conversation_id")
+        or (state.get("memory_scope") or {}).get("conversation_id"),
+        120,
+    )
+    sid = _df_text(sequence_id, 100)
+    now = time.time()
+
+    for pair in reversed(pairs):
+        if not isinstance(pair, dict):
+            continue
+        if uid and _df_text(pair.get("user_id"), 120) != uid:
+            continue
+        if cid and _df_text(pair.get("conversation_id"), 120) != cid:
+            continue
+
+        pair_sequence_id = _df_text(
+            pair.get("dialogue_sequence_id") or pair.get("sequence_id"),
+            100,
+        )
+        if sid and pair_sequence_id and pair_sequence_id != sid:
+            continue
+
+        created_at = pair.get("created_at")
+        try:
+            age = max(0.0, now - float(created_at))
+        except (TypeError, ValueError):
+            age = 0.0
+        if age > USER_CONTENT_RETENTION_SECONDS:
+            continue
+
+        memory = pair.get("visual_generation_memory")
+        if not isinstance(memory, dict):
+            continue
+        generation_prompt = _df_text(memory.get("generation_prompt"), 20000)
+        if not generation_prompt:
+            continue
+
+        result = deepcopy(memory)
+        # Authenticated pair scope is authoritative over any generator metadata.
+        result["user_id"] = uid
+        result["conversation_id"] = cid
+        result["dialogue_sequence_id"] = pair_sequence_id or _df_text(
+            memory.get("dialogue_sequence_id"), 100
+        )
+        result["history_created_at"] = float(created_at) if created_at is not None else now
+        result["history_expires_after_hours"] = DIALOGUE_WINDOW_HOURS
+        return result
+
+    return {}
+
+
+def _df_visual_generation_memory_reference(memory: dict[str, Any]) -> dict[str, Any]:
+    """Build a provider-safe reference while keeping the full prompt in 12h memory."""
+    if not isinstance(memory, dict):
+        return {}
+    prompt = _df_text(memory.get("generation_prompt"), 20000)
+    if not prompt:
+        return {}
+
+    # The excerpt is evidence for relation/continuity only. The full prompt stays
+    # in the authenticated memory archive and is never injected into the Image API.
+    excerpt = prompt[:1200]
+    return {
+        "version": "visual_generation_memory_ref_v1",
+        "available": True,
+        "full_prompt_available_in_history": True,
+        "memory_kind": "visual_generation_prompt",
+        "source": "authenticated_dialogue_12h",
+        "user_request": _df_text(memory.get("request_anchor"), 600),
+        "prompt_excerpt": excerpt,
+        "prompt_chars": len(prompt),
+        "image_model_prompt_chars": int(memory.get("image_model_prompt_chars") or 0),
+        "scene_id": _df_text(memory.get("scene_id"), 120),
+        "turn_id": _df_text(memory.get("turn_id"), 120),
+        "dialogue_sequence_id": _df_text(memory.get("dialogue_sequence_id"), 100),
+        "expires_after_hours": DIALOGUE_WINDOW_HOURS,
+    }
+
+
 def _df_interpret_live_turn(
     text: str,
     *,
@@ -2877,6 +3006,19 @@ def _df_interpret_live_turn(
     # ------------------------------------------------------------------
     # 1) Active-session memory first.
     # ------------------------------------------------------------------
+    # A completed image turn leaves its full generator envelope in the same
+    # authenticated 12-hour dialog archive. Start with that evidence so a short
+    # follow-up such as "сделай её крупнее" can remain tied to the image.
+    visual_generation_memory = _df_latest_visual_generation_memory(
+        state,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        sequence_id=active_seq_id,
+    )
+    visual_generation_memory_ref = _df_visual_generation_memory_reference(
+        visual_generation_memory
+    )
+
     active_sequence_digest = _df_active_sequence_digest(
         state,
         history,
@@ -3127,6 +3269,22 @@ def _df_interpret_live_turn(
         sequence_id = active_seq_id
     else:
         sequence_id = _df_new_sequence_id(user_id, conversation_id, current)
+
+    # RECALL may have selected a different sequence. Resolve the visual memory
+    # against the final branch identity before building Provider context.
+    visual_generation_memory = _df_latest_visual_generation_memory(
+        state,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        sequence_id=sequence_id,
+    ) or visual_generation_memory
+    visual_generation_memory_ref = _df_visual_generation_memory_reference(
+        visual_generation_memory
+    )
+    if visual_generation_memory_ref and relation in {"CONTINUE", "RECALL"}:
+        semantic["previous_visual_generation_memory"] = deepcopy(
+            visual_generation_memory_ref
+        )
 
     # ------------------------------------------------------------------
     # 6) Response task/development planning.
@@ -3447,6 +3605,9 @@ def _df_interpret_live_turn(
         ),
         "resolved_request": current,
         "semantic_request": semantic.get("semantic_request") or current,
+        "previous_visual_generation_memory": deepcopy(
+            visual_generation_memory_ref
+        ) if relation in {"CONTINUE", "RECALL"} and visual_generation_memory_ref else {},
         "current_turn_role": _df_text(task_probe.get("live_input_role") or "current_turn", 80),
         "answer_to_active_task": bool(task_probe.get("answer_to_active_task")),
         "candidate_answer": _df_text(current, 1200) if task_probe.get("answer_to_active_task") else "",
@@ -3512,6 +3673,9 @@ def _df_interpret_live_turn(
                 semantic.get("topic"),
                 220,
             ),
+            "previous_visual_generation_memory": deepcopy(
+                visual_generation_memory_ref
+            ) if relation in {"CONTINUE", "RECALL"} and visual_generation_memory_ref else {},
             "active_entity": _df_text(
                 semantic.get("entity"),
                 180,
@@ -3650,6 +3814,9 @@ def _df_interpret_live_turn(
         "resolved_request": current,
         "semantic_request": semantic.get("semantic_request") or current,
         "semantic_frame": semantic_frame,
+        "previous_visual_generation_memory": deepcopy(
+            visual_generation_memory_ref
+        ) if relation in {"CONTINUE", "RECALL"} and visual_generation_memory_ref else {},
         "semantic_understanding": {
             "topic": semantic.get("topic"),
             "entity": semantic.get("entity"),
