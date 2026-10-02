@@ -1104,6 +1104,12 @@ def _df_extract_subject(text: str) -> str:
     about = re.search(r"\b(?:про|об|о|насчет|насчёт|касаемо)\s+(.{2,180})", low)
     if about:
         candidate = about.group(1).strip(" .,!?:;—-\n")
+        candidate = re.sub(
+            r"\s+(?:расскажи|расскажите|объясни|объясните|покажи|покажите|напиши|опиши)$",
+            "",
+            candidate,
+            flags=re.IGNORECASE,
+        ).strip()
         if candidate and candidate not in {"это", "этом", "этого", "него", "неё", "нее"}:
             return _df_text(candidate, 180)
 
@@ -1131,6 +1137,68 @@ def _df_extract_subject(text: str) -> str:
             return _df_text(candidate, 180)
 
     return ""
+
+def _df_visual_reference_entity(
+    text: str,
+    previous_user: str = "",
+    previous_april: str = "",
+    state: dict[str, Any] | None = None,
+) -> str:
+    """Resolve an image-edit pronoun to the nearest semantic person/object.
+
+    This is deliberately local and evidence-based: it never calls a model and it
+    only runs for visual requests containing a deictic/person reference. Prefer
+    the immediately preceding visual scene/answer, then the previous assistant
+    turn, then the previous user turn.
+    """
+    low = _df_low(text)
+    if not re.search(
+        r"\b(?:его|ее|её|этого\s+(?:человека|мужчину|мужчины)|эту\s+женщину|"
+        r"этого|на\s+(?:нём|нем|ней)|его\s+на|её\s+на|ее\s+на)\b",
+        low,
+    ):
+        return ""
+
+    sources: list[str] = []
+    visual_scene = state.get("current_visual_scene") if isinstance(state, dict) else None
+    if isinstance(visual_scene, dict):
+        sources.extend([
+            _df_text(visual_scene.get("april_answer") or visual_scene.get("answer"), 2400),
+            _df_text(visual_scene.get("summary"), 1200),
+            _df_text(visual_scene.get("topic"), 300),
+            _df_text(visual_scene.get("user_request"), 600),
+        ])
+    sources.extend([_df_text(previous_april, 2400), _df_text(previous_user, 1200)])
+
+    ignored = {
+        "апрель", "сейчас", "теперь", "пожалуйста", "конечно", "хорошо", "готово",
+        "вот", "да", "кто", "что", "расскажи", "объясни", "покажи", "нарисуй",
+        "сделай", "сделаем", "изображу", "изобразить", "в", "на", "про", "это",
+        "этого", "его", "ее", "её",
+    }
+    # Prefer the first strong proper-name pair/single name in the preceding
+    # assistant description. For "Сергей Есенин ... Анна Снегина" this keeps
+    # the actual subject rather than a later work title.
+    for source in sources:
+        if not source:
+            continue
+        proper = re.findall(
+            r"\b[А-ЯЁ][а-яё-]{2,}(?:\s+[А-ЯЁ][а-яё-]{2,}){0,2}\b",
+            source,
+        )
+        for candidate in proper:
+            parts = candidate.split()
+            if parts and parts[0].lower() not in ignored:
+                return _df_text(candidate, 180)
+
+        # Compact fallback for a Russian "о <name> ..." phrase.
+        match = re.search(r"\b(?:о|об|про)\s+([а-яё-]{3,})", _df_low(source))
+        if match:
+            candidate = _df_text(match.group(1), 120)
+            if candidate and candidate not in {"этом", "этого", "ней", "нем", "него"}:
+                return candidate
+    return ""
+
 
 def _df_normalize_subject(value: str) -> str:
     low = _df_low(value)
@@ -2223,10 +2291,33 @@ def _df_resolve_relation(
     live_task_question = _df_text(task_probe.get("live_question"), 900)
     live_task_active = bool(task_probe.get("live_task_active") and live_task_question)
     if live_task_active and not _df_strong_topic_boundary(text) and not _df_explicit_recall(text):
-        if task_probe.get("answer_to_active_task"):
-            return "CONTINUE", "ACTIVE_TASK_ANSWER"
-        if live_input_role == "followup_question_to_active_task":
-            return "CONTINUE", "ACTIVE_TASK_FOLLOWUP_QUESTION"
+        # A complete self-contained subject outranks a stale interactive task.
+        # This prevents "О Есенине расскажи" from being treated as an answer
+        # to an unrelated question such as "Как тебя зовут?".
+        fresh_subject = bool(current_subject)
+        fresh_subject_match = bool(
+            fresh_subject
+            and subject_overlap < 0.20
+            and not direct_reference
+            and not deictic
+        )
+        if not fresh_subject_match:
+            if task_probe.get("answer_to_active_task"):
+                return "CONTINUE", "ACTIVE_TASK_ANSWER"
+            if live_input_role == "followup_question_to_active_task":
+                return "CONTINUE", "ACTIVE_TASK_FOLLOWUP_QUESTION"
+
+    # A clear operand with no live-branch reference starts a new task even if an
+    # older interactive question is still open. This is intentionally local and
+    # avoids sending extra context to the Provider.
+    if (
+        current_subject
+        and subject_overlap < 0.20
+        and not direct_reference
+        and not deictic
+        and not _df_memory_scope_request(text)
+    ):
+        return "NEW", "SELF_CONTAINED_SUBJECT"
 
     question_subject = _df_extract_subject(text)
     identity_question = _df_identity_question(text)
@@ -3037,6 +3128,21 @@ def _df_interpret_live_turn(
     # ------------------------------------------------------------------
     render_probe = _df_render_probe(current)
     task_probe = _df_task_probe(current, prior_task, active_topic, previous_april=previous_april)
+
+    # Visual deictic references must bind to the latest concrete subject, not to
+    # an older task/question that happens to remain open in the 12h sequence.
+    visual_ref_entity = ""
+    if render_probe.get("requested") == ["image"]:
+        visual_ref_entity = _df_visual_reference_entity(
+            current,
+            previous_user=previous_user,
+            previous_april=previous_april,
+            state=state,
+        )
+        if visual_ref_entity:
+            active_entity = visual_ref_entity
+            active_topic = visual_ref_entity
+
     dialogue_probe = _df_dialogue_bigunok(
         current,
         previous_user,
@@ -3084,6 +3190,15 @@ def _df_interpret_live_turn(
         task_probe,
         render_probe,
     )
+    if visual_ref_entity:
+        # For a deictic image-edit request ("его/её/этого человека") the
+        # resolved visual entity is authoritative. Do not let the generic
+        # request parser turn phrases such as "на картинке его в профиль" into
+        # the entity or let a stale interactive task win later.
+        semantic["reference_entity"] = visual_ref_entity
+        semantic["entity"] = visual_ref_entity
+        semantic["topic"] = visual_ref_entity
+        semantic["explicit_subject"] = ""
 
     # ------------------------------------------------------------------
     # 4) Now resolve the dialogue relation from the contextual understanding.
@@ -3197,6 +3312,18 @@ def _df_interpret_live_turn(
         semantic["entity"] = active_entity
         semantic["explicit_subject"] = ""
 
+    # A visual-reference follow-up continues the authenticated conversation,
+    # but it is a new task action attached to the referenced visual entity.
+    # Keep the outer dialogue relation as CONTINUE while ensuring the task fed
+    # to Provider is no longer the stale interactive question branch.
+    if visual_ref_entity:
+        semantic["reference_entity"] = visual_ref_entity
+        semantic["entity"] = visual_ref_entity
+        semantic["topic"] = visual_ref_entity
+        semantic["explicit_subject"] = ""
+        active_entity = visual_ref_entity
+        active_topic = visual_ref_entity
+
     # ------------------------------------------------------------------
     # 5) Apply the final relation to semantic identity.
     # ------------------------------------------------------------------
@@ -3290,7 +3417,17 @@ def _df_interpret_live_turn(
     # 6) Response task/development planning.
     # ------------------------------------------------------------------
     live_role = _df_text(task_probe.get("live_input_role") or "current_turn", 80)
-    if relation == "CONTINUE" and live_role in {"answer_to_active_question", "followup_question_to_active_task"}:
+    if visual_ref_entity:
+        # It remains a continuation of the same authenticated conversation, but
+        # it is not an answer to the stale interactive question. The Provider
+        # must see a visual-reference action instead of inheriting that task.
+        live_role = "visual_reference_followup"
+        turn_relation = "VISUAL_REFERENCE_FOLLOWUP"
+        task_probe = dict(task_probe)
+        task_probe["live_input_role"] = live_role
+        task_probe["answer_to_active_task"] = False
+        task_probe["task_action"] = True
+    if relation == "CONTINUE" and not visual_ref_entity and live_role in {"answer_to_active_question", "followup_question_to_active_task"}:
         # The user's answer is payload for the existing task, not a new entity.
         # Preserve the task's semantic identity and carry the answer separately.
         semantic["topic"] = _df_text(prior_task.get("topic") or active_topic or semantic.get("topic"), 220)
@@ -3299,7 +3436,7 @@ def _df_interpret_live_turn(
             semantic["candidate_answer"] = current
     task = _df_task_state(
         current,
-        relation,
+        "NEW" if visual_ref_entity and relation == "CONTINUE" else relation,
         task_probe,
         prior_task,
         semantic.get("topic") or active_topic,
