@@ -550,19 +550,64 @@ def scene_contract_view(contract):
 
 
 def _scene_contract_web_projection(contract):
-    """Build the single lossless Web SceneContract without transport duplicates.
+    """Project the canonical SceneContract once for Web without recursive mirrors.
 
-    The CPU keeps its full canonical contract internally. This projection removes
-    redundant mirrors (blocks/signal block copies/metadata.scene_signal) only at
-    the HTTP boundary. The authoritative image payload remains exactly once in
-    SceneContract.render_blocks. No routing or renderer decision occurs here.
+    The CPU keeps the full contract internally. At the HTTP boundary we remove
+    duplicated signal/block mirrors and redundant image pixel encodings when a
+    canonical backend asset URL is already present. This is transport-only: it
+    does not reroute, reinterpret, or rebuild a scene.
     """
     scene = scene_contract_view(contract)
     if not scene:
         return {}
 
     projected = dict(scene)
-    render_blocks = list(scene.get("render_blocks") or [])
+    render_blocks = []
+    for raw in list(scene.get("render_blocks") or []):
+        if not isinstance(raw, dict):
+            continue
+        block = dict(raw)
+        kind = str(
+            block.get("type") or block.get("artifact_type") or block.get("representation") or ""
+        ).strip().lower()
+        payload = block.get("payload")
+        if kind in {"image", "gallery"} and isinstance(payload, dict):
+            has_backend_asset = any(
+                isinstance(payload.get(key), str)
+                and payload.get(key).strip()
+                and not payload.get(key).strip().startswith("data:")
+                for key in ("src", "url", "asset_url", "image_url")
+            )
+            if has_backend_asset:
+                compact_payload = dict(payload)
+                for key in (
+                    "image_base64", "image_data_uri", "base64", "data_uri",
+                ):
+                    compact_payload.pop(key, None)
+                images = compact_payload.get("images")
+                if isinstance(images, list):
+                    compact_images = []
+                    for item in images:
+                        if isinstance(item, dict):
+                            compact_item = dict(item)
+                            has_item_url = any(
+                                isinstance(compact_item.get(key), str)
+                                and compact_item.get(key).strip()
+                                and not compact_item.get(key).strip().startswith("data:")
+                                for key in ("src", "url", "asset_url", "image_url")
+                            )
+                            if has_item_url:
+                                for key in (
+                                    "image_base64", "image_data_uri", "base64", "data_uri",
+                                ):
+                                    compact_item.pop(key, None)
+                            compact_images.append(compact_item)
+                        else:
+                            compact_images.append(item)
+                    compact_payload["images"] = compact_images
+                block["payload"] = compact_payload
+        render_blocks.append(block)
+
     projected["render_blocks"] = render_blocks
     projected.pop("blocks", None)
 
@@ -659,15 +704,16 @@ def gateway_return_cpu_result(result):
     }
 
 
-def build_gateway_transport_payload(result):
+def build_gateway_transport_payload(result, scene=None):
     """
     Project the already-created CPU SceneContract into the HTTP transport
     envelope. No new scene, response, provider, or renderer is created here.
+    Reuse an existing Web projection when the caller already built one.
     """
     if not isinstance(result, dict):
         result = gateway_return_cpu_result(result)
 
-    scene = _scene_contract_web_projection(result.get("scene_contract"))
+    scene = scene if isinstance(scene, dict) else _scene_contract_web_projection(result.get("scene_contract"))
     machine = result.get("machine_response")
     machine = machine if isinstance(machine, dict) else {}
 
@@ -1155,7 +1201,10 @@ async def process_web_message(
         if not isinstance(result, dict) or not result.get("scene_contract"):
             raise RuntimeError("Canonical CPU SceneContract is required.")
 
-        scene_view = scene_contract_view(result["scene_contract"])
+        # Use the bounded HTTP projection here. The canonical CPU contract is
+        # already complete; serializing its full signal/scene mirrors again was
+        # the expensive post-scene tail observed in runtime.
+        scene_view = _scene_contract_web_projection(result["scene_contract"])
         normalized = {
             "scene_contract": scene_view,
             "content": scene_view.get("content") or "",
@@ -1170,8 +1219,6 @@ async def process_web_message(
             "layout": scene_view.get("layout"),
             "visual": scene_view.get("visual"),
         }
-        normalized["space_continuity"] = build_space_continuity(normalized)
-
         try:
             sc = normalized.get("scene_contract")
             print("="*80)
@@ -1790,7 +1837,11 @@ def web_chat():
             )
         )
 
-        result["gateway_transport"] = build_gateway_transport_payload(result)
+        # process_web_message already created the bounded canonical projection.
+        # Reuse that exact object here instead of projecting the SceneContract a
+        # second time on the same request.
+        scene = _bind_backend_asset_urls(result.get("scene_contract", {}))
+        result["gateway_transport"] = build_gateway_transport_payload(result, scene=scene)
         print(
             "🌐 WEB CHAT FLOW RESULT:",
             {
@@ -1824,10 +1875,7 @@ def web_chat():
         #
         # =========================================================
 
-        gt = _bind_backend_asset_urls(result.get("gateway_transport", {}))
-        scene = _bind_backend_asset_urls(_scene_contract_web_projection(result.get("scene_contract")))
-        if isinstance(result.get("scene_contract"), dict):
-            result["scene_contract"] = _bind_backend_asset_urls(result["scene_contract"])
+        gt = result.get("gateway_transport", {})
         return jsonify({
             "success": True,
             "gateway_transport": safe_json(gt),
