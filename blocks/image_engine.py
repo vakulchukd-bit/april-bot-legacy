@@ -496,6 +496,18 @@ async def generate(
             else {}
         )
 
+        # The generator returns the former large prompt as machine-only dialogue
+        # evidence. Keep it on the internal route; Executor commits it to the
+        # authenticated 12-hour dialog pair. It is never placed in the artifact
+        # or sent back to GPT Image 2.
+        generator_metadata = result.get("metadata") if isinstance(result, dict) else {}
+        dialogue_visual_generation_memory = (
+            deepcopy(generator_metadata.get("_dialogue_visual_generation_memory"))
+            if isinstance(generator_metadata, dict)
+            and isinstance(generator_metadata.get("_dialogue_visual_generation_memory"), dict)
+            else {}
+        )
+
         set_last_entity(
             user_id,
             {
@@ -524,6 +536,9 @@ async def generate(
             "image_generation_status": "success",
             "image_generation_backend": result.get("backend"),
             "prompt": effective_prompt,
+            "metadata": {
+                "_dialogue_visual_generation_memory": dialogue_visual_generation_memory,
+            } if dialogue_visual_generation_memory else {},
             "asset_url": public_asset_url or asset_url,
             "image_asset_url": public_asset_url or asset_url,
             "asset_path": path or "",
