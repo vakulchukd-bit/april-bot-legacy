@@ -1118,7 +1118,12 @@ def _df_extract_subject(text: str) -> str:
         return ""
 
     # Proper-name mentions are semantic entities, not hardcoded entity lists.
-    ignored = {"теперь", "сейчас", "потом", "пожалуйста", "апрель", "я", "ты", "мы", "вы", "назови", "скажи", "расскажи"}
+    ignored = {
+        "теперь", "сейчас", "потом", "пожалуйста", "апрель", "я", "ты", "мы", "вы",
+        "назови", "скажи", "расскажи", "кто", "что", "почему", "зачем", "как", "где",
+        "когда", "сколько", "какой", "какая", "какое", "какие", "можешь", "можно",
+        "нужно", "надо", "давай",
+    }
     proper = re.findall(r"\b[А-ЯЁ][а-яё-]{2,}(?:\s+[А-ЯЁ][а-яё-]{2,}){0,2}\b", value)
     for candidate in reversed(proper):
         parts = candidate.split()
@@ -1731,7 +1736,52 @@ def _df_render_probe(text: str) -> dict[str, Any]:
     }
 
 
-def _df_task_probe(text: str, active_task: dict[str, Any], active_topic: str) -> dict[str, Any]:
+def _df_live_task_answer_probe(text: str, active_task: dict[str, Any], previous_april: str = "") -> dict[str, Any]:
+    """Bind a user turn to an open question before topic/new-branch heuristics."""
+    task = active_task if isinstance(active_task, dict) else {}
+    phase = _df_low(task.get("phase"))
+    expected = _df_low(task.get("expected_input_type") or task.get("input_type"))
+    awaiting = bool(
+        task.get("awaiting_user")
+        or task.get("awaiting_input")
+        or phase in {"awaiting_user_answer", "awaiting_input", "awaiting_answer"}
+        or expected in {"answer", "user_answer", "text_answer", "choice", "selection"}
+    )
+    question = _df_text(task.get("last_question") or task.get("prompt") or task.get("question"), 900)
+    question_source = "active_task" if question else ""
+    # Normal conversational questions are also live context even when no
+    # interactive task object was created for that turn. This keeps an ordinary
+    # chat exchange alive instead of requiring every question to become a task.
+    if not question and _df_text(previous_april).rstrip().endswith(("?", "？")):
+        question = _df_text(previous_april, 900)
+        question_source = "last_april_question"
+        awaiting = True
+    if not question or not awaiting:
+        return {"active": False, "question": question, "question_source": question_source, "score": 0.0, "input_role": "current_turn", "answer_candidate": False}
+
+    low = _df_low(text)
+    words = _df_tokens(text)
+    stripped = low.strip(" .,!?:;-—")
+    question_words = {"кто", "что", "почему", "зачем", "как", "где", "когда", "сколько", "какой", "какая", "какое", "какие", "можешь", "можно"}
+    is_question = bool("?" in text or "？" in text or stripped in question_words)
+    command_shape = bool(re.match(
+        r"^(?:(?:а\s+)?теперь\s+|а\s+)?(?:расскажи|скажи|объясни|покажи|проверь|найди|сравни|напиши|создай|построй|опиши|рассчитай|посчитай|ответь|дай|выдай|укажи)\b",
+        low,
+    ))
+    if _df_strong_topic_boundary(text) or _df_explicit_recall(text):
+        return {"active": True, "question": question, "question_source": question_source, "score": 0.0, "input_role": "current_turn", "answer_candidate": False, "escaped_by": "boundary_or_recall"}
+
+    if command_shape or (is_question and len(words) >= 2):
+        return {"active": True, "question": question, "question_source": question_source, "score": 0.0, "input_role": "current_turn", "answer_candidate": False, "escaped_by": "self_contained_question_or_command"}
+
+    if is_question:
+        return {"active": True, "question": question, "question_source": question_source, "score": 0.88, "input_role": "followup_question_to_active_task", "answer_candidate": False, "escaped_by": "short_live_question"}
+
+    score = 0.99 if len(words) <= 3 else 0.96 if len(words) <= 8 else 0.90 if len(words) <= 16 else 0.78
+    return {"active": True, "question": question, "question_source": question_source, "score": score, "input_role": "answer_to_active_question", "answer_candidate": True, "escaped_by": ""}
+
+
+def _df_task_probe(text: str, active_task: dict[str, Any], active_topic: str, previous_april: str = "") -> dict[str, Any]:
     low = _df_low(text)
     current_game_topic = any(x in low for x in ("угадай", "отгадай", "разгадай", "игру", "игра"))
     game_topic = current_game_topic or "угадай" in _df_low(active_topic)
@@ -1765,14 +1815,19 @@ def _df_task_probe(text: str, active_task: dict[str, Any], active_topic: str) ->
              or active_topic.lower() in active_task_topic.lower()
              or active_task_topic.lower() in active_topic.lower())
     )
+    live_answer = _df_live_task_answer_probe(text, active_task, previous_april=previous_april)
     active = bool(
         game_topic
         or task_definition
         or compatible_persisted_task
+        or live_answer.get("answer_candidate")
+        or live_answer.get("input_role") == "followup_question_to_active_task"
     )
     handoff = current_game_topic and (donut_task or any(x in low for x in ("я загад", "задавай вопросы", "наводящие вопросы")))
     task_action = (
         handoff or answer_analysis or task_definition
+        or bool(live_answer.get("answer_candidate"))
+        or live_answer.get("input_role") == "followup_question_to_active_task"
         or (compatible_persisted_task and any(x in low for x in ("угадать", "угадай", "отгадать", "ответь")))
     )
     return {
@@ -1794,6 +1849,12 @@ def _df_task_probe(text: str, active_task: dict[str, Any], active_topic: str) ->
             else ""
         ),
         "objective": _df_text(text, 1200) if task_definition else _df_text(active_task.get("objective"), 1200) if compatible_persisted_task else "",
+        "live_question": _df_text(live_answer.get("question"), 900),
+        "live_question_source": _df_text(live_answer.get("question_source") or "", 40),
+        "live_question_score": float(live_answer.get("score", 0.0) or 0.0),
+        "live_input_role": _df_text(live_answer.get("input_role") or "current_turn", 80),
+        "answer_to_active_task": bool(live_answer.get("answer_candidate")),
+        "live_task_active": bool(live_answer.get("active")),
     }
 
 
@@ -2158,6 +2219,15 @@ def _df_resolve_relation(
         default=0.0,
     ) if current_subject else 0.0
 
+    live_input_role = _df_text(task_probe.get("live_input_role"), 80)
+    live_task_question = _df_text(task_probe.get("live_question"), 900)
+    live_task_active = bool(task_probe.get("live_task_active") and live_task_question)
+    if live_task_active and not _df_strong_topic_boundary(text) and not _df_explicit_recall(text):
+        if task_probe.get("answer_to_active_task"):
+            return "CONTINUE", "ACTIVE_TASK_ANSWER"
+        if live_input_role == "followup_question_to_active_task":
+            return "CONTINUE", "ACTIVE_TASK_FOLLOWUP_QUESTION"
+
     question_subject = _df_extract_subject(text)
     identity_question = _df_identity_question(text)
     standalone_question = bool(
@@ -2367,7 +2437,12 @@ def _df_task_state(
         raw = f"{sequence_id}|{task.get('topic') or topic}|legacy-task"
         task["task_id"] = "task-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
     task["topic"] = _df_text(task.get("topic") or topic, 220)
-    task["entity"] = _df_text(entity or task.get("entity"), 180)
+    task["entity"] = _df_text(
+        task.get("entity")
+        if task_probe.get("answer_to_active_task") or task_probe.get("live_input_role") == "followup_question_to_active_task"
+        else (entity or task.get("entity")),
+        180,
+    )
     if task_probe.get("task_definition"):
         task["objective"] = _df_text(task_probe.get("objective") or text, 1200)
         task["instruction"] = _df_text(text, 1200)
@@ -2376,6 +2451,14 @@ def _df_task_state(
     elif task_probe.get("answer_analysis"):
         task["goal"] = "understand"
     task["last_user_request"] = _df_text(text, 1200)
+    if task_probe.get("answer_to_active_task"):
+        task["last_user_answer"] = _df_text(text, 1200)
+        task["last_answered_question"] = _df_text(task_probe.get("live_question"), 900)
+        task["last_input_role"] = "answer_to_active_question"
+        task["last_input_confidence"] = float(task_probe.get("live_question_score", 0.0) or 0.0)
+    elif task_probe.get("live_input_role") == "followup_question_to_active_task":
+        task["last_user_action"] = _df_text(text, 1200)
+        task["last_input_role"] = "followup_question_to_active_task"
     task["task_revision"] = int(task.get("task_revision") or 0) + 1
     task["active"] = True
     task.setdefault("status", "open")
@@ -2602,6 +2685,9 @@ def _df_provider_plan(
                     "entity": semantic.get("entity"),
                     "turn_relation": turn_relation,
                     "sequence_id": sequence_id,
+                    "current_turn_role": _df_text(semantic.get("current_turn_role") or "current_turn", 80),
+                    "answer_to_active_task": bool(semantic.get("answer_to_active_task")),
+                    "active_question": _df_text(semantic.get("active_question"), 900),
                 },
             },
         )
@@ -2618,6 +2704,10 @@ def _df_provider_plan(
                         "topic": task.get("topic"),
                         "goal": task.get("goal"),
                         "last_question": task.get("last_question"),
+                        "last_user_answer": task.get("last_user_answer"),
+                        "candidate_answer": _df_text(semantic.get("candidate_answer") or "", 1200),
+                        "current_turn_role": _df_text(semantic.get("current_turn_role") or "current_turn", 80),
+                        "answer_to_active_task": bool(semantic.get("answer_to_active_task")),
                     },
                 },
             )
@@ -2804,7 +2894,7 @@ def _df_interpret_live_turn(
     # 2) Cheap evidence probes. They cannot own relation or routing.
     # ------------------------------------------------------------------
     render_probe = _df_render_probe(current)
-    task_probe = _df_task_probe(current, prior_task, active_topic)
+    task_probe = _df_task_probe(current, prior_task, active_topic, previous_april=previous_april)
     dialogue_probe = _df_dialogue_bigunok(
         current,
         previous_user,
@@ -2877,7 +2967,7 @@ def _df_interpret_live_turn(
     if semantic_topic and prior_task_entity:
         topic_affinity = max(topic_affinity, _df_overlap(semantic_topic, prior_task_entity))
 
-    if not explicit_recall and _df_is_self_contained_new_topic(
+    if not explicit_recall and not bool(task_probe.get("answer_to_active_task")) and _df_is_self_contained_new_topic(
         current, semantic, active_topic=active_topic, active_entity=active_entity,
         task_probe=task_probe, sequence_digest=active_sequence_digest,
     ) and topic_affinity < 0.28:
@@ -2954,7 +3044,7 @@ def _df_interpret_live_turn(
                 "REFERENCE_OLD_TOPIC",
                 active_topic,
                 active_entity,
-                _df_task_probe(current, prior_task, active_topic),
+                _df_task_probe(current, prior_task, active_topic, previous_april=previous_april),
                 render_probe,
             )
 
@@ -3041,6 +3131,14 @@ def _df_interpret_live_turn(
     # ------------------------------------------------------------------
     # 6) Response task/development planning.
     # ------------------------------------------------------------------
+    live_role = _df_text(task_probe.get("live_input_role") or "current_turn", 80)
+    if relation == "CONTINUE" and live_role in {"answer_to_active_question", "followup_question_to_active_task"}:
+        # The user's answer is payload for the existing task, not a new entity.
+        # Preserve the task's semantic identity and carry the answer separately.
+        semantic["topic"] = _df_text(prior_task.get("topic") or active_topic or semantic.get("topic"), 220)
+        semantic["entity"] = _df_text(prior_task.get("entity") or active_entity or "", 180)
+        if live_role == "answer_to_active_question":
+            semantic["candidate_answer"] = current
     task = _df_task_state(
         current,
         relation,
@@ -3142,6 +3240,19 @@ def _df_interpret_live_turn(
     )
 
     selected_memory = selected_branch if relation == "RECALL" else {}
+
+    # Freeze the human-turn relationship into the semantic packet before the
+    # Provider plan is built. These fields describe the live exchange, not an
+    # internal branch/counter, and prevent a short answer from reaching the model
+    # as an apparently standalone request.
+    semantic["current_turn_role"] = _df_text(
+        task_probe.get("live_input_role") or "current_turn", 80
+    )
+    semantic["answer_to_active_task"] = bool(task_probe.get("answer_to_active_task"))
+    semantic["active_question"] = _df_text(task_probe.get("live_question"), 900)
+    semantic["active_question_source"] = _df_text(
+        task_probe.get("live_question_source") or "", 40
+    )
 
     # ------------------------------------------------------------------
     # 8) Provider context is frozen here. Provider cannot select memory/branch.
@@ -3336,6 +3447,11 @@ def _df_interpret_live_turn(
         ),
         "resolved_request": current,
         "semantic_request": semantic.get("semantic_request") or current,
+        "current_turn_role": _df_text(task_probe.get("live_input_role") or "current_turn", 80),
+        "answer_to_active_task": bool(task_probe.get("answer_to_active_task")),
+        "candidate_answer": _df_text(current, 1200) if task_probe.get("answer_to_active_task") else "",
+        "active_question": _df_text(task_probe.get("live_question"), 900),
+        "active_question_source": _df_text(task_probe.get("live_question_source") or "", 40),
         "selected_memory_index": -1,
         "selected_memory_operand": {},
         "selected_memory_record": {},
@@ -3363,6 +3479,11 @@ def _df_interpret_live_turn(
         "task_relation": {
             "handoff": task_probe.get("handoff"),
             "analysis": task_probe.get("answer_analysis"),
+            "input_role": _df_text(task_probe.get("live_input_role") or "current_turn", 80),
+            "answer_to_active_task": bool(task_probe.get("answer_to_active_task")),
+            "active_question": _df_text(task_probe.get("live_question"), 900),
+            "active_question_source": _df_text(task_probe.get("live_question_source") or "", 40),
+            "active_question_score": float(task_probe.get("live_question_score", 0.0) or 0.0),
         },
         "task_action": bool(task_probe.get("task_action")),
         "task_transition": {
@@ -3460,6 +3581,10 @@ def _df_interpret_live_turn(
 
     semantic_frame = {
         "topic": semantic.get("topic"),
+        "current_turn_role": _df_text(task_probe.get("live_input_role") or "current_turn", 80),
+        "answer_to_active_task": bool(task_probe.get("answer_to_active_task")),
+        "candidate_answer": _df_text(current, 1200) if task_probe.get("answer_to_active_task") else "",
+        "active_question": _df_text(task_probe.get("live_question"), 900),
         "operation": semantic.get("operation"),
         "goal": semantic.get("goal"),
         "representation": semantic.get("representation"),
@@ -3569,6 +3694,9 @@ def _df_interpret_live_turn(
         "task_relation": deepcopy(
             dialogue_contract.get("task_relation") or {}
         ),
+        "current_turn_role": _df_text(task_probe.get("live_input_role") or "current_turn", 80),
+        "answer_to_active_task": bool(task_probe.get("answer_to_active_task")),
+        "active_question": _df_text(task_probe.get("live_question"), 900),
         "requested_outputs": list(
             render_plan.get("requested_outputs") or ["text"]
         ),
