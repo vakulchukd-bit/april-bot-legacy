@@ -2025,6 +2025,137 @@ def _registry_route_target(machine_request: MachineRequest, state: dict) -> str:
     return targets[0] if targets else ""
 
 
+
+def _graph_numeric_cell(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = text.replace("−", "-").replace("–", "-").replace("—", "-")
+    # Provider tables may carry units/currency in the numeric cell. Preserve the
+    # number while rejecting prose-only cells.
+    cleaned = re.sub(r"[^0-9eE+\-.,]", "", text.replace("\u00a0", "").replace(" ", ""))
+    if not cleaned:
+        return None
+    if cleaned.count(",") and cleaned.count("."):
+        # The last punctuation mark is the decimal separator when both occur.
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    else:
+        cleaned = cleaned.replace(",", ".")
+    try:
+        result = float(cleaned)
+    except (TypeError, ValueError):
+        return None
+    return result if result == result and result not in {float("inf"), float("-inf")} else None
+
+
+def _graph_table_cells(line: str) -> list[str]:
+    text = str(line or "").strip()
+    if not text or "|" not in text:
+        return []
+    if text.startswith("|"):
+        text = text[1:]
+    if text.endswith("|"):
+        text = text[:-1]
+    return [part.strip() for part in text.split("|")]
+
+
+def _provider_markdown_graph_block(provider_response: Optional[MachineResponse]) -> dict[str, Any]:
+    """Convert an already-authorized provider data table into graph structure.
+
+    This does not infer graph intent. It runs only after Interpretation has routed
+    the request to the graph room and only accepts a concrete Markdown table with
+    a text/numeric pair in every data row.
+    """
+    if provider_response is None:
+        return {}
+
+    metadata = getattr(provider_response, "metadata", {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    answer = str(
+        metadata.get("provider_original_answer")
+        or getattr(provider_response, "answer", "")
+        or getattr(provider_response, "content", "")
+        or getattr(provider_response, "response", "")
+        or ""
+    ).strip()
+    if not answer:
+        return {}
+
+    lines = answer.splitlines()
+    separator = re.compile(
+        r"^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)+\|?\s*$"
+    )
+
+    for index in range(len(lines) - 2):
+        headers = _graph_table_cells(lines[index])
+        if len(headers) < 2 or not separator.match(lines[index + 1]):
+            continue
+
+        points = []
+        row_index = index + 2
+        while row_index < len(lines):
+            row = _graph_table_cells(lines[row_index])
+            if len(row) < 2:
+                break
+            y_value = _graph_numeric_cell(row[1])
+            if y_value is None:
+                break
+            x_raw = row[0]
+            if not x_raw:
+                break
+            x_value = _graph_numeric_cell(x_raw)
+            points.append({"x": x_value if x_value is not None else x_raw, "y": y_value})
+            row_index += 1
+
+        if len(points) < 2:
+            continue
+
+        title = ""
+        for candidate in reversed(lines[:index]):
+            candidate = candidate.strip().strip("#* ")
+            if candidate and "|" not in candidate:
+                title = candidate.rstrip(":").strip()
+                break
+
+        payload = {
+            "scene_type": "graph",
+            "artifact_type": "graph",
+            "representation": "line",
+            "title": title or "Graph",
+            "series": [{
+                "label": headers[1] or "Series 1",
+                "type": "points",
+                "points": points,
+                "x": [point["x"] for point in points],
+                "y": [point["y"] for point in points],
+            }],
+            "x_axis": {"title": headers[0] or "X"},
+            "y_axis": {"title": headers[1] or "Y"},
+            "grid": True,
+            "metadata": {
+                "source": "provider_markdown_table",
+                "authorized_by": "INTERPRETATION",
+                "transport_conversion": "markdown_table_to_graph",
+            },
+        }
+        return {
+            "type": "graph",
+            "artifact_type": "graph",
+            "renderer": "GraphBlock",
+            "viewer": "GraphBlock",
+            "payload": payload,
+            "scene_contract": True,
+            "human_visible": True,
+            "post_provider_resolved": True,
+            "transport_preserved": True,
+        }
+
+    return {}
+
+
 def _provider_structured_block(provider_response: Optional[MachineResponse], kind: str) -> dict[str, Any]:
     """Return the provider block already carrying the requested structure.
 
@@ -2054,7 +2185,6 @@ def _provider_structured_block(provider_response: Optional[MachineResponse], kin
             or ""
         ).strip()
         if answer and "```" in answer and any(ch in answer for ch in ("──", "│", "┌", "┐", "└", "┘", "→", "←")):
-            import re
             match = re.search(r"```(?:text|ascii|diagram|txt)?\s*\n?(.*?)```", answer, flags=re.IGNORECASE | re.DOTALL)
             ascii_source = (match.group(1) if match else answer).strip()
             if ascii_source:
@@ -2072,6 +2202,12 @@ def _provider_structured_block(provider_response: Optional[MachineResponse], kin
                     "scene_contract": True,
                     "human_visible": True,
                 }
+
+    if wanted == "graph":
+        graph_block = _provider_markdown_graph_block(provider_response)
+        if graph_block:
+            return graph_block
+
     return {}
 
 
