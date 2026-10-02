@@ -223,147 +223,305 @@ def _build_schematic_svg(
     edges: List[Dict[str, Any]],
     *,
     width: int = 1400,
-    height: int = 520,
+    height: int = 560,
+    title: str = "Схема подключения",
+    linked_formula: str = "",
 ) -> str:
-    """Build a crisp deterministic schematic from already-supplied structure.
+    """Render supplied schematic data as a clean technical SVG.
 
-    This does not infer components from natural language. It only lays out the
-    normalized nodes/edges already supplied by the Processor so the Web
-    renderer receives an actual SVG instead of a GalleryBlock with structural
-    JSON that it cannot draw.
+    The room only visualizes normalized nodes/edges. Component symbols are
+    selected from explicit node metadata; values/ratings/terminal names are
+    shown only when supplied upstream. No missing electrical parameter is
+    fabricated here.
     """
     if not nodes:
         return ""
 
-    width = max(720, int(width))
-    height = max(360, int(height))
+    width = max(900, int(width))
+    height = max(460, int(height))
     margin_x = 70
-    center_y = height // 2
+    title_y = 38
     node_w = 210
-    node_h = 92
-    usable = max(200, width - 2 * margin_x)
-    gap = max(48, int((usable - node_w * len(nodes)) / max(1, len(nodes) - 1)))
+    node_h = 168
+    canvas_y = 150
+    usable = max(300, width - 2 * margin_x)
+    gap = max(55, int((usable - node_w * len(nodes)) / max(1, len(nodes) - 1)))
 
     positions: Dict[str, tuple[int, int]] = {}
     for index, node in enumerate(nodes):
         node_id = _text(node.get("id")) or f"node_{index + 1}"
         x = margin_x + index * (node_w + gap)
-        y = center_y - node_h // 2
+        y = canvas_y
         positions[node_id] = (x, y)
 
-    # Prefer any explicit normalized positions when supplied.
     for node in nodes:
         node_id = _text(node.get("id"))
         pos = node.get("position")
         if isinstance(pos, dict):
             try:
-                x = int(float(pos.get("x")))
-                y = int(float(pos.get("y")))
-                positions[node_id] = (
-                    max(20, min(width - node_w - 20, x)),
-                    max(20, min(height - node_h - 20, y)),
-                )
+                px = float(pos.get("x"))
+                py = float(pos.get("y"))
+                if 0.0 <= px <= 1.0 and 0.0 <= py <= 1.0:
+                    positions[node_id] = (
+                        int(40 + px * max(100, width - node_w - 80)),
+                        int(canvas_y + py * max(40, height - canvas_y - node_h - 70)),
+                    )
+                else:
+                    positions[node_id] = (
+                        max(30, min(width - node_w - 30, int(px))),
+                        max(canvas_y, min(height - node_h - 60, int(py))),
+                    )
             except (TypeError, ValueError):
                 pass
 
     esc = html.escape
 
-    parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-        f'viewBox="0 0 {width} {height}" role="img" aria-label="April schematic">',
-        "<defs>",
-        '<marker id="april-arrow" viewBox="0 0 10 10" refX="9" refY="5" '
-        'markerWidth="8" markerHeight="8" orient="auto-start-reverse">',
-        '<path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>',
-        "</marker>",
-        "</defs>",
-        '<rect x="0" y="0" width="100%" height="100%" fill="#ffffff" rx="18"/>',
-    ]
+    def node_kind(node: Dict[str, Any]) -> str:
+        raw = " ".join(
+            _text(node.get(key))
+            for key in ("symbol", "kind", "type", "label", "name")
+        ).lower()
+        if any(x in raw for x in ("power_supply", "source", "блок питания", "источник", "battery", "батар")):
+            return "power"
+        if any(x in raw for x in ("fuse", "предохран")):
+            return "fuse"
+        if any(x in raw for x in ("switch", "выключател", "переключател", "dpdt")):
+            return "switch"
+        if any(x in raw for x in ("lamp", "ламп", "гирлянд", "light")):
+            return "lamp"
+        if any(x in raw for x in ("motor", "двигател")):
+            return "motor"
+        if any(x in raw for x in ("resistor", "резист")):
+            return "resistor"
+        if any(x in raw for x in ("controller", "контроллер", "relay", "реле", "contactor", "контактор")):
+            return "controller"
+        return "generic"
 
-    # Edges first so node cards remain visually dominant.
-    for edge in edges:
-        source = _text(edge.get("from") or edge.get("source") or edge.get("start"))
-        target = _text(edge.get("to") or edge.get("target") or edge.get("end"))
-        if source not in positions or target not in positions:
-            continue
-        x1, y1 = positions[source]
-        x2, y2 = positions[target]
-        sx = x1 + node_w
-        sy = y1 + node_h // 2
-        tx = x2
-        ty = y2 + node_h // 2
-        mid_x = (sx + tx) // 2
-        path = f"M {sx} {sy} C {mid_x} {sy}, {mid_x} {ty}, {tx} {ty}"
-        parts.append(
-            f'<path d="{path}" fill="none" stroke="#334155" stroke-width="5" '
-            f'stroke-linecap="round" marker-end="url(#april-arrow)"/>'
-        )
-        label = _text(edge.get("label"))
-        if label:
-            parts.append(
-                f'<text x="{mid_x}" y="{min(sy, ty) - 14}" text-anchor="middle" '
-                f'font-family="Inter,Arial,sans-serif" font-size="20" fill="#334155">'
-                f'{esc(label)}</text>'
-            )
-
-    for index, node in enumerate(nodes):
-        node_id = _text(node.get("id")) or f"node_{index + 1}"
-        label = _text(node.get("label") or node.get("name") or node_id)
-        kind = _text(node.get("kind") or node.get("type") or "node").lower()
-        x, y = positions[node_id]
-
-        if "positive" in kind or label.startswith("+"):
-            fill = "#ECFDF5"
-            stroke = "#047857"
-        elif "negative" in kind or "−" in label or "-" == label.strip():
-            fill = "#FEF2F2"
-            stroke = "#B91C1C"
-        elif "fuse" in kind or "предохран" in label.lower():
-            fill = "#FFF7ED"
-            stroke = "#C2410C"
-        elif "switch" in kind or "выключ" in label.lower():
-            fill = "#EFF6FF"
-            stroke = "#1D4ED8"
-        elif "lamp" in kind or "лампоч" in label.lower():
-            fill = "#FFFBEB"
-            stroke = "#A16207"
-        else:
-            fill = "#F8FAFC"
-            stroke = "#475569"
-
-        parts.append(
-            f'<rect x="{x}" y="{y}" width="{node_w}" height="{node_h}" rx="18" '
-            f'fill="{fill}" stroke="{stroke}" stroke-width="4"/>'
-        )
-        parts.append(
-            f'<circle cx="{x + 26}" cy="{y + 30}" r="9" fill="{stroke}"/>'
-        )
-        # Compactly wrap labels at a conservative character width.
+    def text_lines(value: Any, limit: int = 28, max_lines: int = 2) -> List[str]:
+        label = _text(value)
+        if not label:
+            return []
         words = label.split()
-        lines = []
+        lines: List[str] = []
         current = ""
         for word in words:
             candidate = f"{current} {word}".strip()
-            if len(candidate) > 22 and current:
+            if len(candidate) > limit and current:
                 lines.append(current)
                 current = word
             else:
                 current = candidate
         if current:
             lines.append(current)
-        lines = lines[:3] or [node_id]
+        return lines[:max_lines]
 
-        base_y = y + 42 - max(0, len(lines) - 1) * 10
-        for line_index, line in enumerate(lines):
+    kind_by_id = {
+        _text(node.get("id")) or f"node_{index + 1}": node_kind(node)
+        for index, node in enumerate(nodes)
+    }
+    electrical_schematic = any(
+        kind in {"power", "fuse", "switch", "lamp", "motor", "resistor", "controller"}
+        for kind in kind_by_id.values()
+    )
+
+    def endpoint(node_id: str, terminal: str, side: str) -> tuple[float, float]:
+        x, y = positions[node_id]
+        kind = kind_by_id.get(node_id, "generic")
+        cy = y + node_h / 2
+        terminal = _text(terminal).lower()
+
+        if kind == "power":
+            if terminal in {"minus", "-", "negative"}:
+                return (x + node_w / 2, y + node_h + 14)
+            return (x + node_w, cy - 20)
+
+        if side == "out":
+            return (x + node_w, cy)
+        return (x, cy)
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" role="img" aria-label="{esc(title or "Схема")}">',
+        "<defs>",
+        '<filter id="april-shadow" x="-20%" y="-20%" width="140%" height="140%">'
+        '<feDropShadow dx="0" dy="5" stdDeviation="5" flood-opacity="0.12"/>'
+        "</filter>",
+        '<marker id="april-arrow" viewBox="0 0 10 10" refX="9" refY="5" '
+        'markerWidth="7" markerHeight="7" orient="auto-start-reverse">',
+        '<path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>',
+        "</marker>",
+        "</defs>",
+        '<rect x="0" y="0" width="100%" height="100%" rx="18" fill="#ffffff"/>',
+        f'<text x="50%" y="{title_y}" text-anchor="middle" font-family="Inter,Arial,sans-serif" '
+        f'font-size="28" font-weight="700" fill="#0f172a">{esc(title or "Схема подключения")}</text>',
+    ]
+
+    for edge in edges:
+        source = _text(edge.get("from") or edge.get("source") or edge.get("start"))
+        target = _text(edge.get("to") or edge.get("target") or edge.get("end"))
+        if source not in positions or target not in positions:
+            continue
+
+        from_terminal = _text(edge.get("from_terminal") or edge.get("source_terminal"))
+        to_terminal = _text(edge.get("to_terminal") or edge.get("target_terminal"))
+
+        sx, sy = endpoint(source, from_terminal, "out")
+        tx, ty = endpoint(target, to_terminal, "in")
+
+        # Return conductor to a source minus terminal gets a lower orthogonal
+        # route so it does not run through the component cards.
+        target_kind = kind_by_id.get(target, "generic")
+        target_is_bottom_port = target_kind == "power" and to_terminal.lower() in {"minus", "-", "negative"}
+
+        if target_is_bottom_port:
+            route_y = max(y + node_h for _, y in positions.values()) + 48
+            path = f"M {sx} {sy} L {sx} {route_y} L {tx} {route_y} L {tx} {ty}"
+            label_x = (sx + tx) / 2
+            label_y = route_y - 12
+        elif abs(ty - sy) < 2:
+            path = f"M {sx} {sy} L {tx} {ty}"
+            label_x = (sx + tx) / 2
+            label_y = sy - 14
+        else:
+            mid_x = (sx + tx) / 2
+            path = f"M {sx} {sy} L {mid_x} {sy} L {mid_x} {ty} L {tx} {ty}"
+            label_x = mid_x
+            label_y = min(sy, ty) - 14
+
+        marker = "" if electrical_schematic else ' marker-end="url(#april-arrow)"'
+        parts.append(
+            f'<path d="{path}" fill="none" stroke="#334155" stroke-width="4" '
+            f'stroke-linecap="round" stroke-linejoin="round"{marker}/>'
+        )
+
+        edge_label = _text(edge.get("label") or edge.get("wire") or edge.get("net"))
+        if edge_label:
             parts.append(
-                f'<text x="{x + node_w / 2 + 10}" y="{base_y + line_index * 28}" '
-                f'text-anchor="middle" font-family="Inter,Arial,sans-serif" '
-                f'font-size="24" font-weight="600" fill="#0f172a">{esc(line)}</text>'
+                f'<text x="{label_x}" y="{label_y}" text-anchor="middle" '
+                f'font-family="Inter,Arial,sans-serif" font-size="16" font-weight="600" '
+                f'fill="#475569">{esc(edge_label[:70])}</text>'
             )
 
+    for index, node in enumerate(nodes):
+        node_id = _text(node.get("id")) or f"node_{index + 1}"
+        x, y = positions[node_id]
+        kind = kind_by_id.get(node_id, "generic")
+
+        styles = {
+            "power": ("#eff6ff", "#1d4ed8"),
+            "fuse": ("#fff7ed", "#c2410c"),
+            "switch": ("#f0f9ff", "#0369a1"),
+            "lamp": ("#fffbeb", "#a16207"),
+            "motor": ("#f5f3ff", "#6d28d9"),
+            "resistor": ("#f8fafc", "#475569"),
+            "controller": ("#ecfeff", "#0f766e"),
+            "generic": ("#f8fafc", "#475569"),
+        }
+        fill, stroke = styles.get(kind, styles["generic"])
+
+        parts.append(
+            f'<g filter="url(#april-shadow)">'
+            f'<rect x="{x}" y="{y}" width="{node_w}" height="{node_h}" rx="18" '
+            f'fill="{fill}" stroke="{stroke}" stroke-width="3"/>'
+            f'</g>'
+        )
+
+        ref = _text(node.get("ref") or node.get("reference"))
+        if ref:
+            parts.append(
+                f'<text x="{x + 16}" y="{y + 26}" font-family="Inter,Arial,sans-serif" '
+                f'font-size="17" font-weight="700" fill="{stroke}">{esc(ref[:24])}</text>'
+            )
+
+        cx = x + node_w / 2
+        sy = y + 78
+
+        if kind == "power":
+            parts.extend([
+                f'<rect x="{cx-46}" y="{sy-27}" width="92" height="54" rx="8" '
+                f'fill="#ffffff" stroke="{stroke}" stroke-width="3"/>',
+                f'<text x="{cx}" y="{sy+7}" text-anchor="middle" font-family="Inter,Arial,sans-serif" '
+                f'font-size="15" font-weight="700" fill="{stroke}">DC</text>',
+                f'<line x1="{cx+46}" y1="{sy-20}" x2="{cx+68}" y2="{sy-20}" stroke="{stroke}" stroke-width="3"/>',
+                f'<line x1="{cx+68}" y1="{sy+20}" x2="{cx+68}" y2="{sy+20}" stroke="#b91c1c" stroke-width="3"/>',
+                f'<line x1="{cx+46}" y1="{sy+20}" x2="{cx+68}" y2="{sy+20}" stroke="#b91c1c" stroke-width="3"/>',
+                f'<text x="{cx+76}" y="{sy-14}" font-family="Inter,Arial,sans-serif" font-size="15" font-weight="700" fill="{stroke}">+</text>',
+                f'<text x="{cx+76}" y="{sy+26}" font-family="Inter,Arial,sans-serif" font-size="15" font-weight="700" fill="#b91c1c">−</text>',
+                f'<line x1="{cx}" y1="{sy+27}" x2="{cx}" y2="{y+node_h+14}" stroke="#b91c1c" stroke-width="3"/>',
+            ])
+        elif kind == "fuse":
+            parts.extend([
+                f'<line x1="{cx-58}" y1="{sy}" x2="{cx-28}" y2="{sy}" stroke="{stroke}" stroke-width="3"/>',
+                f'<rect x="{cx-28}" y="{sy-13}" width="56" height="26" rx="5" fill="#ffffff" stroke="{stroke}" stroke-width="3"/>',
+                f'<line x1="{cx+28}" y1="{sy}" x2="{cx+58}" y2="{sy}" stroke="{stroke}" stroke-width="3"/>',
+            ])
+        elif kind == "switch":
+            parts.extend([
+                f'<circle cx="{cx-48}" cy="{sy}" r="5" fill="{stroke}"/>',
+                f'<circle cx="{cx+48}" cy="{sy}" r="5" fill="{stroke}"/>',
+                f'<line x1="{cx-48}" y1="{sy}" x2="{cx+28}" y2="{sy-28}" stroke="{stroke}" stroke-width="4" stroke-linecap="round"/>',
+            ])
+        elif kind == "lamp":
+            parts.extend([
+                f'<circle cx="{cx}" cy="{sy}" r="34" fill="#ffffff" stroke="{stroke}" stroke-width="3"/>',
+                f'<line x1="{cx-20}" y1="{sy-20}" x2="{cx+20}" y2="{sy+20}" stroke="{stroke}" stroke-width="3"/>',
+                f'<line x1="{cx+20}" y1="{sy-20}" x2="{cx-20}" y2="{sy+20}" stroke="{stroke}" stroke-width="3"/>',
+            ])
+        elif kind == "motor":
+            parts.extend([
+                f'<circle cx="{cx}" cy="{sy}" r="34" fill="#ffffff" stroke="{stroke}" stroke-width="3"/>',
+                f'<text x="{cx}" y="{sy+8}" text-anchor="middle" font-family="Inter,Arial,sans-serif" '
+                f'font-size="28" font-weight="700" fill="{stroke}">M</text>',
+            ])
+        elif kind == "resistor":
+            parts.extend([
+                f'<path d="M {cx-55} {sy} l 14 -14 l 14 28 l 14 -28 l 14 28 l 14 -28 l 14 14" '
+                f'fill="none" stroke="{stroke}" stroke-width="3" stroke-linejoin="round"/>',
+            ])
+        elif kind == "controller":
+            parts.extend([
+                f'<rect x="{cx-50}" y="{sy-30}" width="100" height="60" rx="8" '
+                f'fill="#ffffff" stroke="{stroke}" stroke-width="3"/>',
+                f'<text x="{cx}" y="{sy+6}" text-anchor="middle" font-family="Inter,Arial,sans-serif" '
+                f'font-size="15" font-weight="700" fill="{stroke}">CTRL</text>',
+            ])
+        else:
+            parts.append(
+                f'<rect x="{cx-45}" y="{sy-26}" width="90" height="52" rx="8" '
+                f'fill="#ffffff" stroke="{stroke}" stroke-width="3"/>'
+            )
+
+        label_lines = text_lines(node.get("label") or node.get("name") or node_id)
+        for line_index, line in enumerate(label_lines):
+            parts.append(
+                f'<text x="{cx}" y="{y+116+line_index*22}" text-anchor="middle" '
+                f'font-family="Inter,Arial,sans-serif" font-size="18" font-weight="600" '
+                f'fill="#0f172a">{esc(line)}</text>'
+            )
+
+        value = _text(node.get("value") or node.get("rating"))
+        if value:
+            parts.append(
+                f'<text x="{cx}" y="{y+156}" text-anchor="middle" '
+                f'font-family="Inter,Arial,sans-serif" font-size="14" fill="#64748b">'
+                f'{esc(value[:54])}</text>'
+            )
+
+    if linked_formula:
+        formula = _text(linked_formula)
+        parts.append(
+            f'<rect x="{margin_x}" y="{height-78}" width="{width-2*margin_x}" height="36" rx="10" '
+            f'fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>'
+        )
+        parts.append(
+            f'<text x="{width/2}" y="{height-54}" text-anchor="middle" '
+            f'font-family="Inter,Arial,sans-serif" font-size="15" font-weight="600" '
+            f'fill="#475569">{esc(("Связь с формулой: " + formula)[:150])}</text>'
+        )
+
+    # Reference designators are already shown on each component card;\n    # keep the SVG uncluttered by a second legend line.\n
     parts.append("</svg>")
     return "".join(parts)
-
 
 def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
     source = _extract_payload(task)
@@ -378,21 +536,26 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
     # Turn the already-supplied graph structure into a real SVG transport
     # artifact. This is a presentation normalization step, not semantic routing.
     generated_svg = ""
-    if not svg and not svg_payload and (nodes or edges):
-        generated_svg = _build_schematic_svg(nodes, edges)
-
-    if generated_svg:
-        source["svg"] = generated_svg
-        svg = generated_svg
-
-    renderer = _select_renderer(source)
-
     diagram_type = _text(
         source.get("diagram_type")
         or source.get("representation")
         or source.get("format"),
         "structured_diagram",
     ).lower()
+
+    if not svg and not svg_payload and (nodes or edges):
+        generated_svg = _build_schematic_svg(
+            nodes,
+            edges,
+            title=_text(source.get("title") or "Схема подключения"),
+            linked_formula=_text(source.get("linked_formula") or ""),
+        )
+
+    if generated_svg:
+        source["svg"] = generated_svg
+        svg = generated_svg
+
+    renderer = _select_renderer(source)
 
     if not svg and not svg_payload and source.get("ascii"):
         diagram_type = "ascii_schematic"
