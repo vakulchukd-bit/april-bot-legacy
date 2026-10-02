@@ -2551,6 +2551,50 @@ def persist_state(user_id):
         safe_state_log(f"PERSIST ERROR: {exc}")
 
 
+# The Web chat path must not wait on PostgreSQL after the canonical SceneContract
+# is already complete. Keep one latest snapshot per user and serialize background
+# writes so a later turn replaces, rather than races, an older queued snapshot.
+_PERSIST_BACKGROUND_LOCK = threading.RLock()
+_PERSIST_BACKGROUND_QUEUES = {}
+_PERSIST_BACKGROUND_WORKERS = set()
+
+def persist_state_background(user_id):
+    uid = str(user_id)
+    try:
+        snapshot = _persistable_snapshot(get_state(uid))
+    except Exception as exc:
+        safe_state_log(f"BACKGROUND PERSIST SNAPSHOT ERROR: {exc}")
+        return
+
+    with _PERSIST_BACKGROUND_LOCK:
+        _PERSIST_BACKGROUND_QUEUES[uid] = snapshot
+        if uid in _PERSIST_BACKGROUND_WORKERS:
+            return
+        _PERSIST_BACKGROUND_WORKERS.add(uid)
+
+    def _worker():
+        while True:
+            with _PERSIST_BACKGROUND_LOCK:
+                payload = _PERSIST_BACKGROUND_QUEUES.pop(uid, None)
+            if payload is None:
+                with _PERSIST_BACKGROUND_LOCK:
+                    _PERSIST_BACKGROUND_WORKERS.discard(uid)
+                return
+            try:
+                if callable(save_memory):
+                    save_memory(uid, payload)
+            except Exception as exc:
+                safe_state_log(f"BACKGROUND PERSIST ERROR: {exc}")
+                # Keep the request path non-blocking. A future turn can publish a
+                # fresh snapshot without making persistence failures user-visible.
+
+    threading.Thread(
+        target=_worker,
+        name="april-state-persist",
+        daemon=True,
+    ).start()
+
+
 # =====================================================
 # SCENE API
 # =====================================================
@@ -2865,7 +2909,7 @@ def _is_human_dialog_item(item: Any) -> bool:
         return False
     return str(item.get("role") or "").lower() in {"user", "human", "assistant", "april", "bot"}
 
-def add_dialog(user_id, role, content, metadata=None):
+def add_dialog(user_id, role, content, metadata=None, *, persist=True):
     state_obj = get_state(user_id)
     # Internal visual/tool turns are not human dialogue and must never become
     # previous_user/previous_april evidence for the dialogue vector.
@@ -2878,7 +2922,8 @@ def add_dialog(user_id, role, content, metadata=None):
             "created_at": time.time(),
         })
         state_obj["internal_dialog_events"] = state_obj["internal_dialog_events"][-VISUAL_HISTORY_LIMIT:]
-        persist_state(user_id)
+        if persist:
+            persist_state(user_id)
         return
     dialog = safe_list(state_obj.get("dialog"))
     message = compact_dialog_message(role, content)
@@ -2948,7 +2993,8 @@ def add_dialog(user_id, role, content, metadata=None):
     trim_visual_history(state_obj)
     trim_topic_memory(state_obj)
     state_obj["active_scene"] = QUANTUM_MEMORY_ENGINE.refresh_scene(state_obj)
-    persist_state(user_id)
+    if persist:
+        persist_state(user_id)
 
 
 
@@ -3740,7 +3786,7 @@ def sync_focus_layers(user_id):
         state_obj["dynamic_focus"] = deepcopy(state_obj["focus_snapshot"])
 
 
-def prepare_visual_context_for_turn(user_id, current_request):
+def prepare_visual_context_for_turn(user_id, current_request, *, persist=True):
     """Expose the current user-scoped scene as memory evidence without deciding relevance.
 
     The current scene is already the compact USER↔APRIL dialogue state. The
@@ -3853,10 +3899,11 @@ def prepare_visual_context_for_turn(user_id, current_request):
         "active_visual_scene": deepcopy(evidence_scene),
     }
 
-    persist_state(user_id)
+    if persist:
+        persist_state(user_id)
     return deepcopy(state_obj["visual_context_bridge"])
 
-def restore_visual_context_after_turn(user_id, *, new_scene_active=False):
+def restore_visual_context_after_turn(user_id, *, new_scene_active=False, persist=True):
     """Finalize turn-local markers without resurrecting or erasing scene memory.
 
     The canonical USER↔APRIL scene is already committed by update_scene_context()
@@ -3889,7 +3936,8 @@ def restore_visual_context_after_turn(user_id, *, new_scene_active=False):
     state_obj["stored_visual_scene_turn"] = None
     state_obj["active_visual_scene_turn"] = None
     QUANTUM_MEMORY_ENGINE.refresh_scene(state_obj)
-    persist_state(user_id)
+    if persist:
+        persist_state(user_id)
 
 def bind_current_visual_scene(user_id):
     state_obj = QUANTUM_MEMORY_ENGINE.ensure_runtime(get_state(user_id))
