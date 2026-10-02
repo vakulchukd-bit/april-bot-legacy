@@ -94,6 +94,20 @@ put the direct answer in `answer` and mirror it in `content` and a text render b
 If structured output is requested, keep its render block structured and complete:
 type, renderer, viewer, payload, scene_contract=true.
 Preserve every requested representation and never invent an unrequested one.
+
+For `diagram` / `electrical_schematic` output, do not return a vague list of boxes. Build a
+complete structured schematic from the current request and only the facts explicitly established
+in the current answer/context. The diagram payload should contain: `title`, `diagram_type`,
+`direction`, `nodes`, `edges`, and when applicable `legend`, `notes`, `safety`, `operation`.
+Each node should identify `id`, `ref`, `kind`, `symbol`, `label`, and any explicitly known
+`value`/`rating` plus `ports`/`terminals`. Each connection should identify `from`, `to`,
+`from_terminal`, `to_terminal`, and an explicit `label`/`wire`/`net` when the conductor has a
+known role such as `+12 V`, `GND`, `L`, `N`, `PE`, or `OUT`. Keep separate physical terminals
+separate: never merge `+` and `−`/`GND` into one connection. For electrical schematics,
+connections describe actual circuit topology, not merely visual proximity. If the requested
+schematic is simple, still provide the complete circuit path and return path. Do not invent
+component ratings, wire gauges, standards, or safety devices that the user did not specify;
+put unknowns into `notes` only when useful.
 For `image_generation`, return one semantic generation handoff only:
 `metadata.image_generation_spec` and `metadata.image_generation_signal`.
 The current user request is the immutable generation trigger/anchor. It selects the image route
@@ -1588,6 +1602,84 @@ def _ascii_diagram_to_payload(answer: str) -> dict[str, Any]:
         "source": "dialogue_answer_visual_syntax",
     }
 
+
+def _normalize_electrical_diagram_payload(payload: dict[str, Any], answer_source: str = "") -> dict[str, Any]:
+    """Normalize an already supplied electrical diagram without changing its topology."""
+    if not isinstance(payload, dict):
+        return payload
+    result = dict(payload)
+    nodes = payload.get("nodes") or payload.get("components") or []
+    edges = payload.get("edges") or payload.get("connections") or []
+    if not isinstance(nodes, list):
+        nodes = []
+    if not isinstance(edges, list):
+        edges = []
+
+    def txt(v):
+        return str(v).strip() if v is not None else ""
+
+    def infer_symbol(node):
+        raw = " ".join(txt(node.get(k)) for k in ("kind","symbol","type","label","name")).lower()
+        if any(x in raw for x in ("блок питания","источник","battery","батар")):
+            return "power_supply", "power"
+        if any(x in raw for x in ("предохран","fuse")):
+            return "fuse", "protection"
+        if any(x in raw for x in ("выключател","переключател","switch")):
+            return "switch", "switch"
+        if any(x in raw for x in ("ламп","светиль","lamp","light")):
+            return "lamp", "load"
+        if any(x in raw for x in ("двигател","motor")):
+            return "motor", "load"
+        if any(x in raw for x in ("резист","resistor")):
+            return "resistor", "passive"
+        return txt(node.get("symbol")) or "component", txt(node.get("kind")) or "component"
+
+    normalized_nodes=[]
+    for i, raw in enumerate(nodes):
+        n=dict(raw) if isinstance(raw, dict) else {"label":txt(raw)}
+        n.setdefault("id", txt(n.get("node_id")) or f"n{i+1}")
+        n.setdefault("label", txt(n.get("name")) or txt(n.get("title")) or txt(n.get("id")))
+        sym, kind = infer_symbol(n)
+        n.setdefault("symbol", sym)
+        n.setdefault("kind", kind)
+        if not n.get("ref"):
+            prefix={"power_supply":"PS","fuse":"F","switch":"S","lamp":"L","motor":"M","resistor":"R"}.get(sym,"X")
+            n["ref"]=f"{prefix}{sum(1 for x in normalized_nodes if txt(x.get('ref')).startswith(prefix))+1}"
+        normalized_nodes.append(n)
+
+    node_ids={txt(n.get("id")) for n in normalized_nodes}
+    normalized_edges=[]
+    for raw in edges:
+        if not isinstance(raw, dict):
+            continue
+        e=dict(raw)
+        e["from"]=txt(e.get("from") or e.get("source") or e.get("start"))
+        e["to"]=txt(e.get("to") or e.get("target") or e.get("end"))
+        if e["from"] not in node_ids or e["to"] not in node_ids:
+            continue
+        # Preserve explicit terminal semantics; never guess them here.
+        if e.get("from_terminal") is not None: e["from_terminal"]=txt(e["from_terminal"])
+        if e.get("to_terminal") is not None: e["to_terminal"]=txt(e["to_terminal"])
+        normalized_edges.append(e)
+
+    result["nodes"]=normalized_nodes
+    result["components"]=normalized_nodes
+    result["edges"]=normalized_edges
+    result["connections"]=normalized_edges
+    result.setdefault("diagram_type", "electrical_schematic")
+    result.setdefault("direction", "horizontal")
+    result["render_profile"]={
+        "style":"technical_schematic",
+        "topology_authoritative":True,
+        "show_reference_designators":True,
+        "show_terminals":True,
+        "show_wire_labels":True,
+        "orthogonal_wires":True,
+        "avoid_component_overlap":True,
+        "preserve_explicit_positions":True,
+    }
+    return result
+
 def _materialize_provider_visual_fields(
     machine_response: dict[str, Any],
     existing_blocks: list[dict],
@@ -1637,7 +1729,7 @@ def _materialize_provider_visual_fields(
     if "diagram" in outputs and not has_type("diagram"):
         diagram_payload = machine_response.get("diagram") or machine_response.get("schema") or machine_response.get("schematic")
         if isinstance(diagram_payload, dict):
-            candidates.append(("diagram", diagram_payload))
+            candidates.append(("diagram", _normalize_electrical_diagram_payload(diagram_payload, answer_source)))
         else:
             inferred_diagram = _ascii_diagram_to_payload(answer_source)
             if inferred_diagram:
@@ -2558,7 +2650,7 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     if _estimate_input_tokens(system_prompt) > 420:
         system_prompt = (
             "April internal response provider. Return exactly one MachineResponse JSON object. "
-            "Quantum Processor owns current request, relation, task, representation and context plan. "
+            "Quantum Processor owns current request, relation, task, representation and context plan. For diagram/electrical_schematic output, return real circuit topology: nodes with ref/kind/symbol/ports and edges with from/to/from_terminal/to_terminal plus known wire/net labels; keep source positive and negative terminals distinct; include only explicitly known values/ratings. "
             "DIALOGUE_RULES/OUTPUT_RULE/RESPONSE_SEQUENCE are internal semantic metadata only; never emit counters, letters, "
             "markers or branch labels. The current request is authoritative; TASK_RESULT_STATE is supplied history only. "
             "Use only supplied context; never reselect or reinterpret branch state. "
