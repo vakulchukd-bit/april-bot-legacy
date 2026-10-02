@@ -1708,7 +1708,8 @@ def _minimal_plan_context(plan: dict[str, Any]) -> dict[str, Any]:
     if isinstance(task, dict):
         keep = (
             "task_id", "sequence_id", "kind", "role", "phase", "expected_input_type", "topic", "goal",
-            "last_question", "candidate_answer", "last_user_answer",
+            "last_question", "candidate_answer", "last_user_answer", "last_answered_question",
+            "last_input_role", "last_input_confidence",
             "response_count", "task_response_count", "last_result", "last_answer_basis",
         )
         out["active_task"] = {
@@ -1729,7 +1730,10 @@ def _minimal_plan_context(plan: dict[str, Any]) -> dict[str, Any]:
 
     anchor = by_key.get("DIALOGUE_ANCHOR")
     if isinstance(anchor, dict):
-        keep = ("previous_user_turn", "previous_april_turn", "topic", "entity", "turn_relation")
+        keep = (
+            "previous_user_turn", "previous_april_turn", "topic", "entity", "turn_relation",
+            "current_turn_role", "answer_to_active_task", "active_question",
+        )
         out["dialogue_anchor"] = {
             key: _semantic_excerpt(anchor.get(key), 180)
             for key in keep
