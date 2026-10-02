@@ -82,7 +82,7 @@ from blocks.state_manager import (
     update_visual_summary,
     prepare_visual_context_for_turn,
     restore_visual_context_after_turn,
-    persist_state,
+    persist_state_background,
 )
 from blocks.image_engine import (
     get_image_generation_status,
@@ -1179,7 +1179,7 @@ async def process_web_message(
         print("🔥 RESULT TYPE:", type(result))
         return result
 
-    visual_turn = prepare_visual_context_for_turn(user_id, text)
+    visual_turn = prepare_visual_context_for_turn(user_id, text, persist=False)
     print("🧠 VISUAL TURN GATE SUMMARY:", _compact_debug_payload(visual_turn))
     # The current human turn MUST NOT enter state.dialog before interpretation.
     # Interpretation needs the previous completed USER↔APRIL pair as its anchor.
@@ -1243,6 +1243,7 @@ async def process_web_message(
                     "user",
                     text,
                     metadata={"source": "april_web", "modality": "text", "human_turn": True},
+                    persist=False,
                 )
             if visible_answer:
                 add_dialog(
@@ -1250,6 +1251,7 @@ async def process_web_message(
                     "assistant",
                     visible_answer,
                     metadata={"source": "april_web", "modality": "text", "human_turn": True},
+                    persist=False,
                 )
         normalized["user_id"] = str(user_id)
         normalized["canonical_route"] = "/api/v1/chat"
@@ -1275,7 +1277,11 @@ async def process_web_message(
             isinstance(block, dict) and str(block.get("type") or block.get("artifact_type") or block.get("representation") or "").strip().lower() in visual_types
             for block in blocks
         )
-        restore_visual_context_after_turn(user_id, new_scene_active=new_scene_active)
+        restore_visual_context_after_turn(user_id, new_scene_active=new_scene_active, persist=False)
+        if isinstance(normalized_local, dict) and normalized_local.get("scene_contract"):
+            # All Web-turn mutations are now complete. Persist one final snapshot
+            # outside the HTTP critical path instead of waiting on PostgreSQL.
+            persist_state_background(user_id)
 
 
 
