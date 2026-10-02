@@ -22,6 +22,82 @@ from blocks.image_system import (
 )
 
 # =====================================================
+# LIVE GENERIC RENDER GENERATION STATUS
+# =====================================================
+# Shared lifecycle registry for image/graph/table rendering. It lives in this
+# existing module so the project does not need a separate
+# render_generation_status.py file.
+_RENDER_STATUS_LOCK = threading.RLock()
+_RENDER_STATUS: dict[str, dict] = {}
+_RENDER_STATUS_TTL = 120.0
+_RENDER_KINDS = {"none", "image", "graph", "table"}
+
+
+def set_render_generation_status(
+    flow_id: str,
+    *,
+    status: str,
+    kind: str = "none",
+    user_id: str = "",
+    asset_url: str = "",
+    error: str = "",
+) -> None:
+    key = str(flow_id or user_id or "").strip()
+    if not key:
+        return
+    normalized_kind = str(kind or "none").strip().lower()
+    if normalized_kind not in _RENDER_KINDS:
+        normalized_kind = "none"
+    normalized_status = str(status or "pending").strip().lower()
+    now = time.time()
+    with _RENDER_STATUS_LOCK:
+        _RENDER_STATUS[key] = {
+            "flow_id": str(flow_id or key),
+            "user_id": str(user_id or ""),
+            "kind": normalized_kind,
+            "status": normalized_status,
+            "generation_expected": normalized_kind != "none" and normalized_status not in {"not_requested", "cancelled"},
+            "generating": normalized_status in {"pending", "generating", "rendering"} and normalized_kind != "none",
+            "asset_url": str(asset_url or ""),
+            "error": str(error or ""),
+            "updated_at": now,
+            "expires_at": 0.0 if normalized_status in {"pending", "generating", "rendering"} else now + _RENDER_STATUS_TTL,
+        }
+
+
+def get_render_generation_status(flow_id: str = "", user_id: str = "") -> dict:
+    key = str(flow_id or user_id or "").strip()
+    if not key:
+        return {
+            "flow_id": "",
+            "user_id": str(user_id or ""),
+            "kind": "none",
+            "status": "not_requested",
+            "generation_expected": False,
+            "generating": False,
+        }
+
+    now = time.time()
+    with _RENDER_STATUS_LOCK:
+        for stale_key, record in list(_RENDER_STATUS.items()):
+            if float(record.get("expires_at") or 0.0) <= now:
+                _RENDER_STATUS.pop(stale_key, None)
+        record = dict(_RENDER_STATUS.get(key) or {})
+
+    if not record:
+        return {
+            "flow_id": str(flow_id or key),
+            "user_id": str(user_id or ""),
+            "kind": "none",
+            "status": "not_requested",
+            "generation_expected": False,
+            "generating": False,
+        }
+
+    return record
+
+
+# =====================================================
 # LIVE IMAGE GENERATION STATUS
 # =====================================================
 # Kept in the existing image engine so Web can observe the
@@ -206,6 +282,12 @@ async def generate(
             status="generating",
             user_id=str(user_id or ""),
         )
+        set_render_generation_status(
+            flow_id,
+            status="generating",
+            kind="image",
+            user_id=str(user_id or ""),
+        )
         print(
             "🧠 ENGINE: C_APRIL_IMAGES_GENERATOR ACTIVE",
             {
@@ -287,6 +369,13 @@ async def generate(
                 user_id=str(user_id or ""),
                 error=str(error_value),
             )
+            set_render_generation_status(
+                flow_id,
+                status="failed",
+                kind="image",
+                user_id=str(user_id or ""),
+                error=str(error_value),
+            )
             return {
                 "type": "error",
                 "data": "⚠️ Внутренний April Images Generation не смог создать изображение",
@@ -333,6 +422,13 @@ async def generate(
                 user_id=str(user_id or ""),
                 error=error_value,
             )
+            set_render_generation_status(
+                flow_id,
+                status="failed",
+                kind="image",
+                user_id=str(user_id or ""),
+                error=error_value,
+            )
             return {
                 "type": "error",
                 "data": "⚠️ Изображение создано, но не удалось подготовить его для Web.",
@@ -347,6 +443,13 @@ async def generate(
         set_image_generation_status(
             flow_id,
             status="success",
+            user_id=str(user_id or ""),
+            asset_url=public_asset_url or asset_url,
+        )
+        set_render_generation_status(
+            flow_id,
+            status="success",
+            kind="image",
             user_id=str(user_id or ""),
             asset_url=public_asset_url or asset_url,
         )
@@ -551,6 +654,13 @@ async def generate(
         set_image_generation_status(
             flow_id,
             status="failed",
+            user_id=str(user_id or ""),
+            error=str(e),
+        )
+        set_render_generation_status(
+            flow_id,
+            status="failed",
+            kind="image",
             user_id=str(user_id or ""),
             error=str(e),
         )
