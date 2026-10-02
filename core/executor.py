@@ -252,6 +252,52 @@ def _bridge_provider_artifacts(machine_response: dict) -> dict:
         if isinstance(values, list):
             candidates.extend(x for x in values if isinstance(x, dict))
 
+    # Provider may return a graph/chart as a top-level structured field while
+    # emitting only its text companion in render_blocks. Promote that exact
+    # payload into the canonical graph block BEFORE Room Register dispatch.
+    # This is transport normalization only: no new provider call, no semantic
+    # reinterpretation and no scene rebuild.
+    top_level_structured = (
+        ("graph", "graph"),
+        ("chart", "graph"),
+        ("plot", "graph"),
+        ("table", "table"),
+        ("formula", "formula"),
+        ("diagram", "diagram"),
+        ("image", "image"),
+        ("gallery", "gallery"),
+    )
+    existing_candidate_types = {
+        _text(item.get("type") or item.get("artifact_type") or item.get("representation")).lower()
+        for item in existing
+        if isinstance(item, dict)
+    }
+    existing_candidate_types.update(
+        _text(item.get("type") or item.get("artifact_type") or item.get("representation")).lower()
+        for item in candidates
+        if isinstance(item, dict)
+    )
+    for source_key, canonical_kind in top_level_structured:
+        value = machine_response.get(source_key)
+        if value in (None, "", [], {}):
+            continue
+        if canonical_kind in existing_candidate_types:
+            continue
+        payload = value if isinstance(value, dict) else {source_key: value}
+        candidates.append({
+            "type": canonical_kind,
+            "artifact_type": canonical_kind,
+            "payload": payload,
+            "renderer": _RENDERER_REGISTRY.get(canonical_kind, "MessageTextBlock"),
+            "viewer": _RENDERER_REGISTRY.get(canonical_kind, "MessageTextBlock"),
+            "scene_contract": True,
+            "human_visible": True,
+            "post_provider_resolved": True,
+            "provider_source_field": source_key,
+            "block_id": _stable_id(f"provider-{canonical_kind}", payload),
+        })
+        existing_candidate_types.add(canonical_kind)
+
     metadata = dict(machine_response.get("metadata") or {})
     for artifact in candidates:
         spec = artifact.get("image_generation_spec") if isinstance(artifact, dict) else None
