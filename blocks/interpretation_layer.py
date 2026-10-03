@@ -1,2769 +1,374 @@
 """
-APRIL — TEST ONLY: Unified Interpretation Layer v1
-===================================================
+APRIL — LIGHT UNIFIED INTERPRETATION LAYER
 
-This file is intentionally independent from the currently installed
-interpretation_layer.py. Keep the production file untouched.
+Single lightweight semantic dependency: rapidfuzz.
+The layer owns interpretation/evidence only. Routing, providers, execution and
+rendering stay outside this module.
 
-Purpose
--------
-Replace trigger/keyword-driven dialogue handling with one semantic cycle:
-
-    CURRENT USER REQUEST
-            |
-            v
-    SEMANTIC MEANING ENGINE
-            |
-            v
-    DIALOGUE RELATION ENGINE
-       NEW / CONTINUE / RECALL
-            |
-            v
-    STRUCTURED CONTEXT ENGINE
-       subject + goal + data + artifact + history
-            |
-            v
-    CANONICAL PROVIDER HANDOFF
-            |
-            v
-    OpenAI / provider_router
-            |
-            v
-    STRUCTURED RESPONSE
-            |
-            v
-    CANONICAL DIALOGUE MEMORY
-            |
-            v
-       next user turn
-
-Design rules
-------------
-1. No trigger dictionaries for dialogue understanding.
-2. No "его/её/он/оно/это" routing rules.
-3. No arbitrary entity-bag memory.
-4. Structured OpenAI responses are stored as first-class dialogue records.
-5. Data is preserved independently of representation.
-6. Representation changes do not change the semantic subject.
-7. A week/month/year/custom range can contain any number of points.
-8. Parent 12h dialogue sequence and topic/task branches remain separate.
-9. Provider receives the canonical interpretation; provider does not re-select context.
-10. Renderer remains outside this file and can be upgraded independently.
-
-Canonical integration points
------------------------------
-Current project route uses these modules around this layer:
-
-    blocks.executor
-    blocks.provider_router
-    blocks.state_manager
-    blocks.C_ARTIFACT_CONTRACT
-    blocks.presentation_formatter
-    blocks.context_system
-
-The production Executor currently imports:
-    interpret_request
-    build_processor_execution_context
-    QUANTUM_EVIDENCE_FUSION
-    QUANTUM_DIALOGUE_ENGINE
-
-Those compatibility symbols are provided at the bottom of this file.
-
-IMPORTANT
----------
-This is a test replacement. It is deliberately not a drop-in replacement for
-every historical helper in the 4k-line production file. The old file remains
-your rollback point.
+ARC = Adaptive Relation Compression: current request -> active sequence ->
+semantic relation -> compact provider-safe context.
 """
-
 from __future__ import annotations
 
-import copy
 import hashlib
-import json
-import os
+import re
+import threading
 import time
-import uuid
-from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import Any, Dict, List, Sequence, Iterable
 
-try:
-    from rapidfuzz import fuzz
-except Exception:  # pragma: no cover
-    fuzz = None
-
-
-ENGINE_VERSION = "APRIL-UNIFIED-INTERPRETATION-V1"
-TRANSPORT_NAME = "transport_state"
-DECISION_OWNER = "INTERPRETATION_LAYER"
-DIALOGUE_WINDOW_HOURS = 12
-DIALOGUE_TTL_SECONDS = DIALOGUE_WINDOW_HOURS * 3600
-
-PROVIDER_INPUT_HARD_BUDGET = 900
-PROVIDER_OUTPUT_HARD_BUDGET = 8000
-
-SINGLE_ROUTE = True
-PROVIDER_CALLS_PER_TURN = 1
-LEGACY_TRIGGER_EXECUTION = False
-KEYWORD_ROUTING = False
-
-
-# ---------------------------------------------------------------------------
-# Renderer-independent representation schema.
-# These are data types, not trigger words.
-# ---------------------------------------------------------------------------
-
-REPRESENTATIONS = (
-    "text",
-    "table",
-    "graph",
-    "diagram",
-    "formula",
-    "image",
-    "gallery",
-    "code",
-    "link",
-)
-
-STRUCTURED_KINDS = {
-    "table",
-    "graph",
-    "diagram",
-    "formula",
-    "image",
-    "gallery",
-    "code",
-    "link",
-}
-
-
-# ---------------------------------------------------------------------------
-# Compatibility result constants.
-# ---------------------------------------------------------------------------
+from rapidfuzz import fuzz
 
 RESPONSE_COMPLEXITY_LOW = "LOW"
 RESPONSE_COMPLEXITY_MEDIUM = "MEDIUM"
 RESPONSE_COMPLEXITY_HIGH = "HIGH"
-
-
-def _copy(value: Any) -> Any:
-    return copy.deepcopy(value)
-
-
-def _text(value: Any, limit: Optional[int] = None) -> str:
-    value = "" if value is None else str(value)
-    value = " ".join(value.strip().split())
-    if limit is not None:
-        return value[:limit]
-    return value
-
-
-def _now() -> float:
-    return time.time()
-
-
-def _iso(ts: float) -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
-
-
-def _sha(value: Any) -> str:
-    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
-
-
-def _safe_json(value: Any) -> Any:
-    """
-    Make runtime objects persistable without flattening structured data.
-    """
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-
-    if isinstance(value, Mapping):
-        return {
-            str(k): _safe_json(v)
-            for k, v in value.items()
-        }
-
-    if isinstance(value, (list, tuple)):
-        return [_safe_json(v) for v in value]
-
-    if hasattr(value, "__dict__"):
-        return _safe_json(vars(value))
-
-    return str(value)
-
-
-def _semantic_similarity(a: str, b: str) -> float:
-    """
-    Similarity is evidence, not a route trigger.
-
-    Primary path:
-        existing April semantic memory engine, if available.
-
-    Secondary path:
-        fuzzy similarity only as a degraded mathematical similarity measure,
-        never as a hard-coded language trigger.
-
-    There are NO word dictionaries here.
-    """
-    a = _text(a)
-    b = _text(b)
-    if not a or not b:
-        return 0.0
-
-    # Reuse the project's existing semantic-memory encoder when present.
-    try:
-        from blocks.state_manager import QUANTUM_MEMORY_ENGINE
-
-        scorer = getattr(QUANTUM_MEMORY_ENGINE, "semantic_score", None)
-        if callable(scorer):
-            value = float(scorer(a, b))
-            return max(0.0, min(1.0, value))
-    except Exception:
-        pass
-
-    if fuzz is not None:
-        try:
-            token_set = fuzz.token_set_ratio(a, b) / 100.0
-            ratio = fuzz.ratio(a, b) / 100.0
-            return max(0.0, min(1.0, token_set * 0.70 + ratio * 0.30))
-        except Exception:
-            pass
-
-    return 0.0
-
-
-def _semantic_canvas(
-    *,
-    user_text: str,
-    interpretation: Optional[Mapping[str, Any]] = None,
-    assistant_text: str = "",
-    structured: Any = None,
-    artifact: Optional[Mapping[str, Any]] = None,
-) -> str:
-    """
-    Build semantic evidence from the meaning-bearing fields of a turn.
-
-    Structured data are represented by a compact schema summary here; the full
-    data remain in the turn/artifact and are never replaced by this text.
-    """
-    interpretation = interpretation or {}
-    artifact = artifact or {}
-
-    values: List[str] = [
-        _text(user_text, 1600),
-        _text(interpretation.get("topic"), 400),
-        _text(interpretation.get("goal"), 400),
-        _text(interpretation.get("operation"), 400),
-        _text(interpretation.get("representation"), 120),
-        _text(interpretation.get("active_subject_description"), 500),
-        _text(assistant_text, 1800),
-        _text(artifact.get("title"), 300),
-        _text(artifact.get("kind"), 100),
-        _text(artifact.get("representation"), 100),
-    ]
-
-    temporal = interpretation.get("temporal_scope")
-    if isinstance(temporal, Mapping):
-        values.extend(
-            _text(temporal.get(k), 100)
-            for k in ("kind", "from", "to", "granularity")
-        )
-
-    if isinstance(structured, Mapping):
-        values.extend(
-            _text(structured.get(k), 300)
-            for k in ("kind", "title", "representation")
-        )
-
-    return " | ".join(x for x in values if x)
-
-
-@dataclass
-class StructuredArtifact:
-    artifact_id: str
-    kind: str
-    representation: str
-    title: str = ""
-    data: Any = None
-    columns: List[Any] = field(default_factory=list)
-    rows: List[Any] = field(default_factory=list)
-    series: List[Any] = field(default_factory=list)
-    x_axis: Dict[str, Any] = field(default_factory=dict)
-    y_axis: Dict[str, Any] = field(default_factory=dict)
-    temporal_scope: Dict[str, Any] = field(default_factory=dict)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return _safe_json({
-            "artifact_id": self.artifact_id,
-            "kind": self.kind,
-            "representation": self.representation,
-            "title": self.title,
-            "data": self.data,
-            "columns": self.columns,
-            "rows": self.rows,
-            "series": self.series,
-            "x_axis": self.x_axis,
-            "y_axis": self.y_axis,
-            "temporal_scope": self.temporal_scope,
-            "metadata": self.metadata,
-        })
-
-
-@dataclass
-class DialogueTurn:
-    turn_id: str
-    sequence_id: str
-    created_at: float
-    user_text: str
-
-    # Canonical interpretation for the turn.
-    interpretation: Dict[str, Any]
-
-    # Exact structured result from Provider/OpenAI.
-    assistant_structured: Any = None
-
-    # Human-readable answer.
-    assistant_text: str = ""
-
-    # Extracted structured artifacts. Full values/data stay here.
-    artifacts: List[Dict[str, Any]] = field(default_factory=list)
-
-    # Provider usage/cost/transport metadata.
-    provider_meta: Dict[str, Any] = field(default_factory=dict)
-
-    def semantic_canvas(self) -> str:
-        artifact = self.artifacts[0] if self.artifacts else {}
-        return _semantic_canvas(
-            user_text=self.user_text,
-            interpretation=self.interpretation,
-            assistant_text=self.assistant_text,
-            structured=self.assistant_structured,
-            artifact=artifact,
-        )
-
-    def to_dict(self) -> Dict[str, Any]:
-        return _safe_json({
-            "turn_id": self.turn_id,
-            "sequence_id": self.sequence_id,
-            "created_at": self.created_at,
-            "user_text": self.user_text,
-            "interpretation": self.interpretation,
-            "assistant_structured": self.assistant_structured,
-            "assistant_text": self.assistant_text,
-            "artifacts": self.artifacts,
-            "provider_meta": self.provider_meta,
-        })
-
-
-@dataclass
-class DialogueMemory:
-    user_id: str
-    conversation_id: str
-    sequence_id: str
-    ttl_seconds: int = DIALOGUE_TTL_SECONDS
-    turns: List[DialogueTurn] = field(default_factory=list)
-
-    def prune(self, now: Optional[float] = None) -> None:
-        now = _now() if now is None else float(now)
-        cutoff = now - float(self.ttl_seconds)
-
-        self.turns = [
-            t for t in self.turns
-            if float(t.created_at or 0.0) >= cutoff
-        ]
-
-    def append(self, turn: DialogueTurn, now: Optional[float] = None) -> None:
-        self.prune(now)
-        self.turns.append(turn)
-        self.prune(now)
-
-    def latest(self) -> Optional[DialogueTurn]:
-        self.prune()
-        return self.turns[-1] if self.turns else None
-
-    def recent(self, limit: int = 12) -> List[DialogueTurn]:
-        self.prune()
-        return self.turns[-max(1, int(limit)):]
-
-    def to_dict(self) -> Dict[str, Any]:
-        self.prune()
-        return _safe_json({
-            "engine": ENGINE_VERSION,
-            "window": "12h",
-            "user_id": self.user_id,
-            "conversation_id": self.conversation_id,
-            "sequence_id": self.sequence_id,
-            "ttl_seconds": self.ttl_seconds,
-            "turns": [t.to_dict() for t in self.turns],
-        })
-
-
-@dataclass
-class InterpretationDecision:
-    relation: str = "NEW"
-    topic: str = ""
-    goal: str = ""
-    operation: str = "answer"
-
-    active_subject: Dict[str, Any] = field(default_factory=dict)
-    source_turn_ids: List[str] = field(default_factory=list)
-
-    # Requested representation is separate from semantic topic.
-    representation: str = "text"
-
-    # Reused structured data, when current request depends on it.
-    data: Any = None
-
-    # Natural language time scope remains first-class semantic data.
-    temporal_scope: Dict[str, Any] = field(default_factory=dict)
-
-    # Provider needs more data only when the data are not already available.
-    data_required: bool = False
-
-    # Semantic summary sent into the response-generation stage.
-    openai_objective: str = ""
-
-    confidence: float = 0.0
-    rationale: str = ""
-
-    # Evidence used by the semantic engine, useful for diagnostics.
-    semantic_evidence: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return _safe_json({
-            "relation": self.relation,
-            "topic": self.topic,
-            "goal": self.goal,
-            "operation": self.operation,
-            "active_subject": self.active_subject,
-            "active_subject_description": _text(
-                self.active_subject.get("description")
-            ),
-            "source_turn_ids": self.source_turn_ids,
-            "representation": self.representation,
-            "data": self.data,
-            "temporal_scope": self.temporal_scope,
-            "data_required": self.data_required,
-            "openai_objective": self.openai_objective,
-            "confidence": self.confidence,
-            "rationale": self.rationale,
-            "semantic_evidence": self.semantic_evidence,
-        })
-
-
-# ---------------------------------------------------------------------------
-# Semantic dialogue engine
-# ---------------------------------------------------------------------------
-
-class UnifiedDialogueSemanticEngine:
-    """
-    One semantic engine.
-
-    It does not contain vocabulary-trigger routing.
-
-    Its job is to compare:
-        current request
-        against
-        complete meaning-bearing previous turns / artifacts.
-
-    Relation is decided from evidence fusion:
-        recency
-        semantic similarity
-        active branch similarity
-        artifact similarity
-        structural continuity
-        explicit branch identity from stored state
-
-    It does not manufacture entities.
-    """
-
-    VERSION = ENGINE_VERSION
-
-    CONTINUE_THRESHOLD = 0.60
-    STRONG_CONTINUE_THRESHOLD = 0.74
-    RECALL_THRESHOLD = 0.66
-    NEW_DISTANCE_THRESHOLD = 0.42
-
-    def _stored_turns_from_state(
-        self,
-        history: Sequence[Any],
-        state: Mapping[str, Any],
-    ) -> List[DialogueTurn]:
-        """
-        Prefer canonical structured memory.
-
-        Legacy dialog rows are accepted as read-only evidence but are never
-        rewritten into the new entity-based representation.
-        """
-        turns: List[DialogueTurn] = []
-
-        raw_memory = state.get("dialogue_memory")
-        if isinstance(raw_memory, Mapping):
-            raw_turns = raw_memory.get("turns")
-            if isinstance(raw_turns, list):
-                for item in raw_turns:
-                    if not isinstance(item, Mapping):
-                        continue
-
-                    turns.append(
-                        DialogueTurn(
-                            turn_id=_text(item.get("turn_id")) or uuid.uuid4().hex,
-                            sequence_id=_text(
-                                item.get("sequence_id")
-                                or raw_memory.get("sequence_id")
-                            ),
-                            created_at=float(
-                                item.get("created_at") or _now()
-                            ),
-                            user_text=_text(
-                                item.get("user_text")
-                            ),
-                            interpretation=_copy(
-                                item.get("interpretation") or {}
-                            ),
-                            assistant_structured=_copy(
-                                item.get("assistant_structured")
-                            ),
-                            assistant_text=_text(
-                                item.get("assistant_text")
-                            ),
-                            artifacts=_copy(
-                                item.get("artifacts") or []
-                            ),
-                            provider_meta=_copy(
-                                item.get("provider_meta") or {}
-                            ),
-                        )
-                    )
-
-        # Canonical current turn is useful even if persistence has not yet been
-        # written. It must not be treated as an entity bag.
-        canonical = state.get("canonical_dialogue_turn")
-        if isinstance(canonical, Mapping):
-            user_text = _text(
-                canonical.get("user_request")
-                or canonical.get("user_text")
-            )
-            if user_text:
-                turn_id = _text(
-                    canonical.get("turn_id")
-                ) or uuid.uuid4().hex
-
-                if not any(t.turn_id == turn_id for t in turns):
-                    turns.append(
-                        DialogueTurn(
-                            turn_id=turn_id,
-                            sequence_id=_text(
-                                canonical.get("sequence_id")
-                                or state.get(
-                                    "active_dialogue_sequence",
-                                    {},
-                                ).get("sequence_id")
-                            ),
-                            created_at=float(
-                                canonical.get("created_at") or _now()
-                            ),
-                            user_text=user_text,
-                            interpretation=_copy(
-                                canonical.get("interpretation")
-                                or canonical
-                            ),
-                            assistant_structured=_copy(
-                                canonical.get("assistant_structured")
-                                or canonical.get("last_result")
-                            ),
-                            assistant_text=_text(
-                                canonical.get("april_answer")
-                                or canonical.get("assistant_text")
-                            ),
-                            artifacts=_copy(
-                                canonical.get("artifacts") or []
-                            ),
-                            provider_meta=_copy(
-                                canonical.get("provider_meta") or {}
-                            ),
-                        )
-                    )
-
-        if turns:
-            turns.sort(key=lambda x: (x.created_at, x.turn_id))
-            return turns
-
-        # Legacy history is evidence only.
-        for item in history if isinstance(history, list) else []:
-            if not isinstance(item, Mapping):
+DECISION_OWNER = "QUANTUM_PROCESSOR"
+TRANSPORT_NAME = "transport_state"
+_DIALOGUE_ALPHABET_RU = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
+DIALOGUE_WINDOW_HOURS = 12
+USER_CONTENT_RETENTION_SECONDS = DIALOGUE_WINDOW_HOURS * 3600
+PROVIDER_INPUT_HARD_BUDGET = 900
+PROVIDER_INPUT_SOFT_TARGET_NEW = 850
+PROVIDER_INPUT_SOFT_TARGET_CONTINUE = 820
+PROVIDER_INPUT_SOFT_TARGET_RECALL = 800
+PROVIDER_CONTEXT_PLAN_VERSION = "provider_context_plan_v2_dependency_first"
+SEMANTIC_ANCHOR_VERSION = "semantic_anchor_v2_arc"
+LIVE_CONTINUITY_SCORE_THRESHOLD = 0.24
+LIVE_WINDOW_RECOVERY_SCORE_THRESHOLD = 0.30
+
+DIALOGUE_LABELS = (
+    "identity", "greeting", "question", "request", "continuation",
+    "reformulation", "correction", "reference", "affirmation", "rejection",
+    "new_topic", "statement", "independent", "memory_query",
+)
+
+REPRESENTATION_HYPOTHESES = {
+    "text": "обычный текстовый ответ объяснение рассказ описание",
+    "table": "таблица строки колонки сравнение параметры",
+    "graph": "график диаграмма визуализация числовых данных",
+    "diagram": "схема диаграмма связей блоков структура процесса",
+    "formula": "формула уравнение математическое выражение",
+    "image": "изображение картинка рисунок иллюстрация фотография",
+    "gallery": "несколько изображений подборка галерея",
+    "code": "код программирование функция программа python",
+    "link": "ссылка адрес сайта веб ресурс",
+}
+DIALOGUE_PROTOTYPES = {
+    "identity": "кто ты как тебя зовут представься",
+    "greeting": "привет здравствуй доброе утро как дела",
+    "question": "вопрос ответ что такое почему сколько как",
+    "request": "сделай дай скажи расскажи покажи выполни задача",
+    "continuation": "продолжай продолжим дальше следующее теперь ещё",
+    "reformulation": "перепиши переделай переформулируй измени ответ",
+    "correction": "исправь я не это имел в виду не спрашивал уточняю",
+    "reference": "это тот предыдущий ответ как раньше вернись к",
+    "affirmation": "да верно правильно точно хорошо согласен",
+    "rejection": "нет неверно неправильно не то",
+    "new_topic": "новая тема другой предмет сменим тему теперь поговорим",
+    "statement": "я сообщаю рассказываю утверждение факт",
+    "independent": "самостоятельный отдельный запрос",
+    "memory_query": "вспомни что я спрашивал о чем говорили предыдущий диалог память",
+}
+DOMAIN_HYPOTHESES = {
+    "biology": "биология клетки животные растения генетика организм",
+    "chemistry": "химия вещества реакции молекулы атомы",
+    "physics": "физика сила энергия движение скорость масса поле",
+    "engineering": "инженерия конструкция проектирование устройство система",
+    "it": "программирование компьютер код алгоритм приложение",
+    "literature": "литература писатель роман поэзия стихотворение",
+    "politics": "политика государство правительство выборы закон",
+    "news": "новости текущие события",
+    "social": "общество люди отношения социальные темы",
+    "web": "интернет сайт поиск веб ресурс",
+}
+CAPABILITY_HYPOTHESES = {
+    "exploration": "анализ сравнение исследование изучение разбор",
+    "web": "поиск интернет сайт веб информация",
+    "code": "код программирование программная реализация",
+    "information": "объяснение информация ответ разъяснение",
+    "discussion": "обсуждение мнение рассуждение аргументы",
+    "space": "пространство сцена композиция расположение визуальная структура",
+}
+SCENE_MATRIX_LABELS = ("text", "table", "graph", "diagram", "formula", "image", "gallery", "code", "link")
+SCENE_MATRIX_FEATURES = ("dialogue", "representation", "domain", "capability", "continuity", "context", "modality")
+SCENE_MATRIX_CAPABILITY = {
+    "text": "information", "table": "information", "graph": "exploration",
+    "diagram": "space", "formula": "information", "image": "space",
+    "gallery": "space", "code": "code", "link": "web",
+}
+SCENE_MATRIX_DOMAIN_BIAS = {
+    "biology": {"graph": .08, "table": .06, "diagram": .08},
+    "chemistry": {"formula": .10, "table": .05, "diagram": .05},
+    "physics": {"graph": .09, "formula": .09, "diagram": .05},
+    "engineering": {"diagram": .10, "graph": .06, "table": .04},
+    "it": {"code": .10, "diagram": .06, "table": .04},
+    "literature": {"text": .08},
+    "politics": {"table": .06, "graph": .06},
+    "news": {"link": .05, "table": .05, "graph": .05},
+    "social": {"table": .04, "graph": .04},
+    "web": {"link": .10},
+}
+_SCENE_WEIGHTS = (
+    (.12,.55,.03,.20,.04,.03,.03), (.08,.62,.03,.20,.02,.03,.02),
+    (.04,.68,.05,.16,.02,.03,.02), (.04,.62,.06,.20,.02,.04,.02),
+    (.03,.70,.07,.16,.01,.02,.01), (.03,.72,.03,.17,.01,.02,.02),
+    (.03,.74,.03,.16,.01,.02,.01), (.02,.70,.03,.22,.01,.01,.01),
+    (.02,.66,.05,.22,.01,.03,.01),
+)
+OBLIGATION_SCHEMA_VERSION = "april_dialogue_obligation_v1"
+INTERPRETATION_ROUTE = (
+    "dialogue_profile", "semantic_evidence_engine", "dialogue_cognition_matrix",
+    "semantic_dialogue_graph", "scene_profile", "artifact_contract",
+    "executor_preparation_contract",
+)
+SEMANTIC_EVIDENCE_PRIORITY = (
+    "current_request", "active_goal", "dialogue_history", "voice_context",
+    "vision_context", "gallery_context", "file_context", "semantic_profile",
+)
+LEGACY_TRIGGER_FLAGS = ()
+CANONICAL_SEMANTIC_RUNTIME = {
+    "transport": TRANSPORT_NAME, "reasoning": "arc_light",
+    "legacy_trigger_execution": False, "single_scene": True,
+    "single_processor": True, "single_executor": True,
+}
+SEMANTIC_INTERPRETATION_CORE = {
+    "decision_source": DECISION_OWNER, "routing": "processor_owned",
+    "scene_contract": "artifact_first", "executor_contract": "advisory_only",
+    "history_model": "active_12h_sequence", "compression": "ARC",
+}
+
+
+def _obligation_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+def extract_dialogue_obligations(text: str) -> list[dict[str, Any]]:
+    value = _obligation_text(text)
+    if not value:
+        return []
+    hits = []
+    if re.search(r"\b(?:буду|будем|дальше буду|обязательно|нужно будет|следом)\b", value.lower()):
+        hits.append({"schema": OBLIGATION_SCHEMA_VERSION, "kind": "future_commitment", "text": value[:500], "status": "open"})
+    return hits
+
+def merge_dialogue_obligations(*sources: Any) -> list[dict[str, Any]]:
+    out = []
+    seen = set()
+    for source in sources:
+        items = source if isinstance(source, list) else [source]
+        for item in items:
+            if not isinstance(item, dict):
                 continue
-
-            user = item.get("user")
-            april = item.get("april")
-
-            if isinstance(user, Mapping):
-                user_text = _text(
-                    user.get("text")
-                    or user.get("content")
-                )
-            else:
-                user_text = _text(
-                    item.get("user_request")
-                    or item.get("content")
-                )
-
-            if isinstance(april, Mapping):
-                assistant_text = _text(
-                    april.get("answer")
-                    or april.get("content")
-                )
-            else:
-                assistant_text = _text(
-                    item.get("answer")
-                    or item.get("april_answer")
-                )
-
-            if not user_text and not assistant_text:
+            key = (_obligation_text(item.get("kind")), _obligation_text(item.get("text")))
+            if key in seen or not key[1]:
                 continue
-
-            turns.append(
-                DialogueTurn(
-                    turn_id=_text(
-                        item.get("turn_id")
-                    ) or uuid.uuid4().hex,
-                    sequence_id=_text(
-                        item.get("sequence_id")
-                        or item.get("dialogue_sequence_id")
-                    ),
-                    created_at=float(
-                        item.get("created_at") or _now()
-                    ),
-                    user_text=user_text,
-                    interpretation=_copy(
-                        item.get("interpretation")
-                        or item.get("semantic_state")
-                        or {}
-                    ),
-                    assistant_structured=_copy(
-                        item.get("assistant_structured")
-                        or item.get("last_result")
-                    ),
-                    assistant_text=assistant_text,
-                    artifacts=_copy(
-                        item.get("artifacts") or []
-                    ),
-                    provider_meta={},
-                )
-            )
-
-        turns.sort(key=lambda x: (x.created_at, x.turn_id))
-        return turns
-
-    def _branch_state(
-        self,
-        state: Mapping[str, Any],
-        turns: Sequence[DialogueTurn],
-    ) -> Dict[str, Any]:
-        active = state.get("active_dialogue_sequence")
-
-        if isinstance(active, Mapping):
-            return {
-                "sequence_id": _text(active.get("sequence_id")),
-                "task_id": _text(active.get("task_id")),
-                "topic": _text(
-                    active.get("topic")
-                    or active.get("current_topic")
-                ),
-                "goal": _text(active.get("goal")),
-                "active_subject": _text(
-                    active.get("active_entity")
-                    or active.get("current_object")
-                ),
-            }
-
-        latest = turns[-1] if turns else None
-        return {
-            "sequence_id": latest.sequence_id if latest else "",
-            "task_id": "",
-            "topic": _text(
-                latest.interpretation.get("topic")
-                if latest else ""
-            ),
-            "goal": _text(
-                latest.interpretation.get("goal")
-                if latest else ""
-            ),
-            "active_subject": _text(
-                latest.interpretation.get(
-                    "active_subject_description"
-                )
-                if latest else ""
-            ),
-        }
-
-    def _turn_score(
-        self,
-        current: str,
-        candidate: DialogueTurn,
-        *,
-        branch: Mapping[str, Any],
-        rank_from_latest: int,
-    ) -> float:
-        semantic = _semantic_similarity(
-            current,
-            candidate.semantic_canvas(),
-        )
-
-        branch_text = " | ".join(
-            _text(branch.get(k))
-            for k in (
-                "topic",
-                "goal",
-                "active_subject",
-            )
-        )
-
-        branch_similarity = _semantic_similarity(
-            current,
-            branch_text,
-        )
-
-        # Structured artifact relevance is independent from topic text.
-        artifact_similarity = 0.0
-        for artifact in candidate.artifacts:
-            artifact_canvas = _semantic_canvas(
-                user_text=candidate.user_text,
-                interpretation=candidate.interpretation,
-                assistant_text=candidate.assistant_text,
-                structured=candidate.assistant_structured,
-                artifact=artifact,
-            )
-            artifact_similarity = max(
-                artifact_similarity,
-                _semantic_similarity(current, artifact_canvas),
-            )
-
-        # Mild recency evidence. It never creates continuity on its own.
-        recency = 1.0 / max(1, rank_from_latest)
-
-        score = (
-            semantic * 0.50
-            + branch_similarity * 0.20
-            + artifact_similarity * 0.25
-            + recency * 0.05
-        )
-
-        return max(0.0, min(1.0, score))
-
-    def resolve(
-        self,
-        *,
-        current_request: str,
-        history: Sequence[Any],
-        state: Mapping[str, Any],
-    ) -> Dict[str, Any]:
-        current = _text(current_request)
-
-        turns = self._stored_turns_from_state(
-            history,
-            state,
-        )
-        turns = [
-            t for t in turns
-            if t.user_text or t.assistant_text or t.artifacts
-        ]
-
-        branch = self._branch_state(
-            state,
-            turns,
-        )
-
-        if not turns:
-            return {
-                "relation": "NEW",
-                "reason": "no_live_dialogue_evidence",
-                "confidence": 1.0,
-                "selected_turn_id": "",
-                "selected_artifact": {},
-                "scores": [],
-            }
-
-        scores: List[Dict[str, Any]] = []
-        for reverse_index, turn in enumerate(
-            reversed(turns),
-            start=1,
-        ):
-            score = self._turn_score(
-                current,
-                turn,
-                branch=branch,
-                rank_from_latest=reverse_index,
-            )
-
-            scores.append({
-                "turn_id": turn.turn_id,
-                "score": round(score, 6),
-                "age_rank": reverse_index,
-                "sequence_id": turn.sequence_id,
-                "topic": _text(
-                    turn.interpretation.get("topic")
-                ),
-                "representation": _text(
-                    turn.interpretation.get("representation")
-                ),
-            })
-
-        scores.sort(
-            key=lambda x: (
-                float(x["score"]),
-                -int(x["age_rank"]),
-            ),
-            reverse=True,
-        )
-
-        best = scores[0]
-        best_score = float(best["score"])
-
-        selected_turn = next(
-            (
-                t for t in turns
-                if t.turn_id == best["turn_id"]
-            ),
-            None,
-        )
-
-        # A stored branch can be explicitly recalled through a semantic match.
-        # The current request remains authoritative.
-        if (
-            selected_turn is not None
-            and selected_turn.sequence_id
-            and (
-                selected_turn.sequence_id
-                != _text(branch.get("sequence_id"))
-            )
-            and best_score >= self.RECALL_THRESHOLD
-        ):
-            relation = "RECALL"
-            reason = "semantic_match_to_live_memory_branch"
-        elif best_score >= self.STRONG_CONTINUE_THRESHOLD:
-            relation = "CONTINUE"
-            reason = "strong_semantic_continuity"
-        elif best_score >= self.CONTINUE_THRESHOLD:
-            relation = "CONTINUE"
-            reason = "semantic_branch_affinity"
-        elif best_score <= self.NEW_DISTANCE_THRESHOLD:
-            relation = "NEW"
-            reason = "semantic_distance_from_live_context"
-        else:
-            # Ambiguous middle ground stays in dialogue context rather than
-            # inventing a new subject.
-            relation = "CONTINUE"
-            reason = "ambiguous_but_live_context_retained"
-
-        selected_artifact: Dict[str, Any] = {}
-        if selected_turn is not None:
-            for artifact in selected_turn.artifacts:
-                canvas = _semantic_canvas(
-                    user_text=selected_turn.user_text,
-                    interpretation=selected_turn.interpretation,
-                    assistant_text=selected_turn.assistant_text,
-                    structured=selected_turn.assistant_structured,
-                    artifact=artifact,
-                )
-
-                artifact_score = _semantic_similarity(
-                    current,
-                    canvas,
-                )
-
-                if (
-                    not selected_artifact
-                    or artifact_score
-                    > float(
-                        selected_artifact.get(
-                            "_score",
-                            0.0,
-                        )
-                    )
-                ):
-                    selected_artifact = _copy(artifact)
-                    selected_artifact["_score"] = round(
-                        artifact_score,
-                        6,
-                    )
-
-        return {
-            "relation": relation,
-            "reason": reason,
-            "confidence": round(best_score, 6),
-            "selected_turn_id": selected_turn.turn_id
-            if selected_turn
-            else "",
-            "selected_artifact": selected_artifact,
-            "scores": scores[:12],
-            "branch": branch,
-        }
-
-    def dialogue(
-        self,
-        text: str,
-        *,
-        previous_assistant: str = "",
-        previous_user: str = "",
-        active_goal: str = "",
-        active_topic: str = "",
-        open_task: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Compatibility method used by older Executor paths.
-
-        It still performs semantic comparison and does not use word triggers.
-        """
-        candidate = {
-            "user_request": previous_user,
-            "april_answer": previous_assistant,
-            "topic": active_topic,
-            "goal": active_goal,
-            "task": open_task or {},
-        }
-
-        score = _semantic_similarity(
-            text,
-            _semantic_canvas(
-                user_text=previous_user,
-                interpretation={
-                    "topic": active_topic,
-                    "goal": active_goal,
-                },
-                assistant_text=previous_assistant,
-            ),
-        )
-
-        continuation = bool(
-            previous_assistant
-            or previous_user
-            or active_topic
-            or active_goal
-        ) and score >= self.CONTINUE_THRESHOLD
-
-        return {
-            "dialogue": {
-                "label": "continuation"
-                if continuation
-                else "independent",
-                "confidence": score,
-                "continuation_score": score,
-                "reference_score": score,
-                "topic_score": _semantic_similarity(
-                    text,
-                    active_topic,
-                ),
-                "goal_score": _semantic_similarity(
-                    text,
-                    active_goal,
-                ),
-            },
-            "continuation": continuation,
-            "reference_to_previous": continuation and score >= 0.66,
-            "decision_owner": DECISION_OWNER,
-            "evidence_only": True,
-            "engine": ENGINE_VERSION,
-            "candidate": candidate,
-        }
-
-    def similarities(
-        self,
-        text: str,
-        candidates: Sequence[str],
-    ) -> Dict[str, float]:
-        return {
-            _text(candidate): _semantic_similarity(
-                text,
-                _text(candidate),
-            )
-            for candidate in candidates
-            if _text(candidate)
-        }
-
-    def semantic_profile(
-        self,
-        text: str,
-        *,
-        previous_assistant: str = "",
-        previous_user: str = "",
-        active_topic: str = "",
-        active_goal: str = "",
-    ) -> Dict[str, Any]:
-        canvas = _semantic_canvas(
-            user_text=text,
-            interpretation={
-                "topic": active_topic,
-                "goal": active_goal,
-            },
-            assistant_text=previous_assistant,
-        )
-
-        return {
-            "engine": ENGINE_VERSION,
-            "source": "semantic_context_fusion",
-            "context_similarity": {
-                "previous_turn": _semantic_similarity(
-                    text,
-                    canvas,
-                ),
-                "active_topic": _semantic_similarity(
-                    text,
-                    active_topic,
-                ),
-                "active_goal": _semantic_similarity(
-                    text,
-                    active_goal,
-                ),
-            },
-            "evidence_only": True,
-        }
-
-    def measure(self, text: str, **context: Any) -> Dict[str, Any]:
-        return self.semantic_profile(
-            text,
-            previous_assistant=_text(
-                context.get("previous_assistant")
-            ),
-            previous_user=_text(
-                context.get("previous_user")
-            ),
-            active_topic=_text(
-                context.get("active_topic")
-            ),
-            active_goal=_text(
-                context.get("active_goal")
-            ),
-        )
-
-
-QUANTUM_DIALOGUE_ENGINE = UnifiedDialogueSemanticEngine()
-QUANTUM_EVIDENCE_FUSION = QUANTUM_DIALOGUE_ENGINE
-QUANTUM_INTERPRETATION_ENGINE = QUANTUM_DIALOGUE_ENGINE
-QUANTUM_FAST_SEMANTIC = QUANTUM_DIALOGUE_ENGINE
-QuantumInterpretationEngine = UnifiedDialogueSemanticEngine
-
-
-# ---------------------------------------------------------------------------
-# Representation understanding.
-# ---------------------------------------------------------------------------
-
-def _extract_representation_from_state(
-    current_request: str,
-    *,
-    state: Mapping[str, Any],
-    selected_turn: Optional[DialogueTurn] = None,
-) -> str:
-    """
-    Do not parse the user's vocabulary into route decisions.
-
-    Preference order:
-        1. canonical structured request already stored in state;
-        2. selected prior artifact when current operation transforms it;
-        3. processor/semantic evidence supplied by previous stages;
-        4. 'text' only as a neutral absence-of-structure value.
-
-    The actual natural-language representation interpretation is expected to be
-    provided by the existing semantic processor before/after this layer.
-    """
-    canonical = state.get("canonical_dialogue_turn")
-    if isinstance(canonical, Mapping):
-        representation = _text(
-            canonical.get("representation")
-            or canonical.get("production_representation")
-        )
-        if representation in REPRESENTATIONS:
-            return representation
-
-    active_context = state.get(
-        "active_dialogue_context"
-    )
-    if isinstance(active_context, Mapping):
-        representation = _text(
-            active_context.get("representation")
-        )
-        if representation in REPRESENTATIONS:
-            return representation
-
-    if selected_turn is not None:
-        representation = _text(
-            selected_turn.interpretation.get(
-                "representation"
-            )
-        )
-        if representation in REPRESENTATIONS:
-            return representation
-
-        if selected_turn.artifacts:
-            candidate = _text(
-                selected_turn.artifacts[-1].get(
-                    "representation"
-                )
-            )
-            if candidate in REPRESENTATIONS:
-                return candidate
-
-    # No semantic representation has been established yet.
-    return "text"
-
-
-def _extract_data_from_artifact(
-    artifact: Mapping[str, Any]
-) -> Any:
-    """
-    Preserve data exactly. No 5/7/12/30-point reduction.
-    """
-    if not isinstance(artifact, Mapping):
-        return None
-
-    if artifact.get("data") is not None:
-        return _copy(artifact["data"])
-
-    if artifact.get("rows"):
-        return _copy(artifact["rows"])
-
-    if artifact.get("series"):
-        return _copy(artifact["series"])
-
-    return None
-
-
-def _build_active_subject(
-    *,
-    decision_relation: str,
-    current_request: str,
-    selected_turn: Optional[DialogueTurn],
-    selected_artifact: Optional[Mapping[str, Any]],
-    state: Mapping[str, Any],
-) -> Dict[str, Any]:
-    subject: Dict[str, Any] = {}
-
-    if decision_relation in {"CONTINUE", "RECALL"} and selected_turn:
-        subject = {
-            "kind": "dialogue_object",
-            "turn_id": selected_turn.turn_id,
-            "artifact_id": _text(
-                (selected_artifact or {}).get(
-                    "artifact_id"
-                )
-            ),
-            "description": _text(
-                selected_turn.interpretation.get(
-                    "active_subject_description"
-                )
-                or selected_turn.interpretation.get(
-                    "topic"
-                )
-                or selected_turn.user_text
-            ),
-        }
-
-    if not subject:
-        canonical = state.get("canonical_dialogue_turn")
-        if isinstance(canonical, Mapping):
-            description = _text(
-                canonical.get("active_entity")
-                or canonical.get("topic")
-            )
-            if description:
-                subject = {
-                    "kind": "canonical_dialogue_object",
-                    "turn_id": _text(
-                        canonical.get("turn_id")
-                    ),
-                    "artifact_id": "",
-                    "description": description,
-                }
-
-    if not subject and current_request:
-        # Current request is the authoritative subject source for a NEW turn.
-        subject = {
-            "kind": "current_request",
-            "turn_id": "",
-            "artifact_id": "",
-            "description": _text(
-                current_request,
-                1000,
-            ),
-        }
-
-    return subject
-
-
-# ---------------------------------------------------------------------------
-# Canonical interpretation.
-# ---------------------------------------------------------------------------
-
-def interpret_request(
-    text: str,
-    cognition: Optional[Dict[str, Any]] = None,
-    semantic: Optional[Dict[str, Any]] = None,
-    history: Optional[List[Any]] = None,
-    state: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
-    """
-    THE ONLY public interpretation entrypoint.
-
-    It creates one canonical interpretation object.
-
-    Important:
-        this function never runs a keyword-trigger routing table.
-
-    The current semantic processors can add evidence under:
-        cognition
-        semantic
-
-    but they cannot replace the canonical structured dialogue record.
-    """
-    current = _text(text)
-    if not current:
-        return None
-
-    cognition = cognition if isinstance(cognition, dict) else {}
-    semantic = semantic if isinstance(semantic, dict) else {}
-    history = history if isinstance(history, list) else []
-    state = state if isinstance(state, dict) else {}
-
-    relation_measurement = QUANTUM_DIALOGUE_ENGINE.resolve(
-        current_request=current,
-        history=history,
-        state=state,
-    )
-
-    relation = _text(
-        relation_measurement.get("relation")
-    ).upper()
-
-    if relation not in {"NEW", "CONTINUE", "RECALL"}:
-        relation = "NEW"
-
-    selected_turn_id = _text(
-        relation_measurement.get(
-            "selected_turn_id"
-        )
-    )
-
-    semantic_turns = QUANTUM_DIALOGUE_ENGINE._stored_turns_from_state(
-        history,
-        state,
-    )
-
-    selected_turn = next(
-        (
-            t for t in semantic_turns
-            if t.turn_id == selected_turn_id
-        ),
-        None,
-    )
-
-    selected_artifact = relation_measurement.get(
-        "selected_artifact"
-    )
-    if not isinstance(selected_artifact, dict):
-        selected_artifact = {}
-
-    # Remove diagnostic score from persisted artifact identity.
-    selected_artifact = {
-        k: _copy(v)
-        for k, v in selected_artifact.items()
-        if k != "_score"
-    }
-
-    active_subject = _build_active_subject(
-        decision_relation=relation,
-        current_request=current,
-        selected_turn=selected_turn,
-        selected_artifact=selected_artifact,
-        state=state,
-    )
-
-    # Prefer semantic evidence supplied by the existing processor if present.
-    inferred_topic = _text(
-        semantic.get("topic")
-        or cognition.get("topic")
-        or (
-            selected_turn.interpretation.get("topic")
-            if selected_turn
-            else ""
-        )
-    )
-
-    inferred_goal = _text(
-        semantic.get("goal")
-        or cognition.get("goal")
-        or (
-            selected_turn.interpretation.get("goal")
-            if selected_turn
-            else ""
-        )
-    )
-
-    inferred_operation = _text(
-        semantic.get("operation")
-        or cognition.get("operation")
-        or (
-            selected_turn.interpretation.get(
-                "operation"
-            )
-            if selected_turn
-            else ""
-        )
-        or "answer"
-    )
-
-    representation = (
-        _text(
-            semantic.get("representation")
-            or semantic.get(
-                "production_representation"
-            )
-            or cognition.get("representation")
-        )
-        or _extract_representation_from_state(
-            current,
-            state=state,
-            selected_turn=selected_turn,
-        )
-    )
-
-    if representation not in REPRESENTATIONS:
-        representation = "text"
-
-    data = _copy(
-        semantic.get("data")
-    )
-
-    if data is None and selected_artifact:
-        data = _extract_data_from_artifact(
-            selected_artifact
-        )
-
-    # For continuation of a structured object, preserve its representation/data
-    # unless the upstream semantic processor has already supplied a new one.
-    if (
-        relation in {"CONTINUE", "RECALL"}
-        and selected_artifact
-    ):
-        if data is None:
-            data = _extract_data_from_artifact(
-                selected_artifact
-            )
-
-        if (
-            representation == "text"
-            and _text(
-                selected_artifact.get(
-                    "representation"
-                )
-            ) in REPRESENTATIONS
-        ):
-            representation = _text(
-                selected_artifact.get(
-                    "representation"
-                )
-            )
-
-    # Temporal scope is deliberately structured rather than hard-coded.
-    temporal_scope = _copy(
-        semantic.get("temporal_scope")
-        or cognition.get("temporal_scope")
-        or (
-            selected_turn.interpretation.get(
-                "temporal_scope"
-            )
-            if selected_turn
-            else {}
-        )
-        or {}
-    )
-
-    source_turn_ids = []
-    if selected_turn is not None:
-        source_turn_ids.append(
-            selected_turn.turn_id
-        )
-
-    # When an existing structured object is referenced, its full data remain
-    # attached to the canonical interpretation.
-    data_required = bool(
-        semantic.get("data_required")
-        or (
-            relation in {"CONTINUE", "RECALL"}
-            and selected_artifact == {}
-            and selected_turn is not None
-            and representation in STRUCTURED_KINDS
-        )
-    )
-
-    objective = _text(
-        semantic.get("openai_objective")
-        or cognition.get("openai_objective")
-    )
-
-    if not objective:
-        objective = _text(
-            current,
-            1800,
-        )
-
-    confidence = float(
-        relation_measurement.get(
-            "confidence"
-        )
-        or semantic.get("confidence")
-        or cognition.get("confidence")
-        or 0.0
-    )
-    confidence = max(
-        0.0,
-        min(1.0, confidence),
-    )
-
-    decision = InterpretationDecision(
-        relation=relation,
-        topic=inferred_topic,
-        goal=inferred_goal,
-        operation=inferred_operation,
-        active_subject=active_subject,
-        source_turn_ids=source_turn_ids,
-        representation=representation,
-        data=data,
-        temporal_scope=temporal_scope
-        if isinstance(temporal_scope, dict)
-        else {},
-        data_required=data_required,
-        openai_objective=objective,
-        confidence=confidence,
-        rationale=_text(
-            relation_measurement.get(
-                "reason"
-            ),
-            300,
-        ),
-        semantic_evidence=_copy(
-            relation_measurement
-        ),
-    )
-
-    result = decision.to_dict()
-
-    # ------------------------------------------------------------------
-    # Canonical transport fields expected downstream.
-    # ------------------------------------------------------------------
-    result["transport"] = TRANSPORT_NAME
-    result["decision_owner"] = DECISION_OWNER
-    result["engine_version"] = ENGINE_VERSION
-
-    result["canonical"] = True
-    result["single_route"] = True
-    result["provider_must_not_reselect_context"] = True
-    result["legacy_trigger_execution"] = False
-    result["keyword_routing"] = False
-
-    result["current_request"] = current
-
-    result["dialogue_vector"] = {
-        "relation": relation,
-        "continuation": relation == "CONTINUE",
-        "reference_to_previous": relation == "RECALL",
-        "context_dependency": (
-            "current_dialogue"
-            if relation == "CONTINUE"
-            else "memory_reference"
-            if relation == "RECALL"
-            else "independent"
-        ),
-        "selected_turn_id": selected_turn_id,
-        "source_turn_ids": source_turn_ids,
-        "confidence": confidence,
-    }
-
-    # Keep the full structured data in a dedicated field. This is not an
-    # entity-derived reconstruction.
-    result["structured_data"] = _copy(data)
-
-    result["active_subject"] = _copy(
-        active_subject
-    )
-
-    result["data_contract"] = {
-        "preserve_all_points": True,
-        "dynamic_point_count": True,
-        "no_fixed_series_length": True,
-        "reuse_previous_data_on_representation_change": (
-            relation in {"CONTINUE", "RECALL"}
-            and data is not None
-        ),
-        "temporal_scope": _copy(
-            decision.temporal_scope
-        ),
-    }
-
-    result["render_contract"] = {
-        "representation": representation,
-        "structured": representation in STRUCTURED_KINDS,
-        "renderer_selection_owner": "PROCESSOR",
-        "renderer_layer": "SCENE_CONTRACT",
-        "allowed_representations": list(
-            REPRESENTATIONS
-        ),
-        "renderer_neutral": True,
-    }
-
-    # Full 12h context is available to the provider builder.
-    result["memory_contract"] = {
-        "window_hours": DIALOGUE_WINDOW_HOURS,
-        "authenticated_scope": True,
-        "structured_turn_memory": True,
-        "entity_bag_is_not_authoritative": True,
-        "history_is_semantic_evidence": True,
-    }
-
-    # REQUIRED by the current canonical Provider packet.
-    scene_composition = [representation]
-    if "text" not in scene_composition:
-        scene_composition.insert(0, "text")
-    result["scene_composition"] = list(dict.fromkeys(scene_composition))
-
-    provider_plan = {
-        "version": "april_provider_handoff_v1",
-        "authority": "INTERPRETATION",
-        "relation": relation,
-        "current_user_request": current,
-        "current_request_authoritative": True,
-        "provider_must_not_reselect_context": True,
-        "hard_budget_tokens": PROVIDER_INPUT_HARD_BUDGET,
-        "soft_target_tokens": (
-            820 if relation == "CONTINUE"
-            else 800 if relation == "RECALL"
-            else 850
-        ),
-        "scene_composition": _copy(result["scene_composition"]),
-        "required_context": [
-            {
-                "key": "SEMANTIC_CORE",
-                "priority": 1.0,
-                "value": {
-                    "topic": inferred_topic,
-                    "goal": inferred_goal,
-                    "operation": inferred_operation,
-                    "representation": representation,
-                    "relation": relation,
-                    "active_subject": _copy(active_subject),
-                },
-            },
-            {
-                "key": "OUTPUT_CONTRACT",
-                "priority": 0.99,
-                "value": {
-                    "representation": representation,
-                    "requested_outputs": _copy(result["scene_composition"]),
-                    "render_authorized": True,
-                    "render_mode": (
-                        "STRUCTURED_OUTPUT"
-                        if representation in STRUCTURED_KINDS
-                        else "TEXT_ONLY"
-                    ),
-                    "preserve_all_data_points": True,
-                },
-            },
-            {
-                "key": "DIALOGUE_MEMORY",
-                "priority": 1.0,
-                "value": {
-                    "window_hours": DIALOGUE_WINDOW_HOURS,
-                    "source_turn_ids": list(source_turn_ids),
-                    "structured_data": _copy(data),
-                    "selected_artifact": _copy(selected_artifact),
-                },
-            },
-        ],
-        "optional_context": [],
-        "excluded_context": [
-            "UNRELATED_WINDOW_MEMORY",
-            "STALE_GLOBAL_ENTITY",
-            "SECONDARY_ROUTE",
-        ],
-    }
-    result["provider_context_plan"] = provider_plan
-
-    # The existing Provider normalizer accepts the plan from top-level,
-    # conversation, or constraints. Keep one canonical object referenced in
-    # all envelopes; this is compatibility, not a second route.
-    result["conversation"] = {
-        "current_request": current,
-        "provider_context_plan": _copy(provider_plan),
-        "scene_composition": _copy(result["scene_composition"]),
-    }
-    result["constraints"] = {
-        "provider_context_plan": _copy(provider_plan),
-        "scene_composition": _copy(result["scene_composition"]),
-        "structured_output_required": True,
-    }
-
-    result["dialogue_contract"] = {
-        "relation": relation,
-        "continuation": relation == "CONTINUE",
-        "reference_to_previous": relation == "RECALL",
-        "current_request": current,
-        "canonical": True,
-        "decision_owner": DECISION_OWNER,
-    }
-    result["semantic_frame"] = {
-        "topic": inferred_topic,
-        "goal": inferred_goal,
-        "operation": inferred_operation,
-        "representation": representation,
-        "relation": relation,
-        "data": _copy(data),
-        "temporal_scope": _copy(temporal_scope if isinstance(temporal_scope, dict) else {}),
-    }
-    result["turn_meaning"] = {
-        "current_request": current,
-        "relation": relation,
-        "topic": inferred_topic,
-        "operation": inferred_operation,
-        "representation": representation,
-        "data_available": data is not None,
-    }
-    result["turn_sync"] = {
-        "authority": DECISION_OWNER,
-        "current_request": current,
-        "relation": relation,
-        "topic": inferred_topic,
-        "representation": representation,
-    }
-    result["interpretation_control"] = {
-        "render_authorized": True,
-        "render_mode": (
-            "STRUCTURED_OUTPUT"
-            if representation in STRUCTURED_KINDS
-            else "TEXT_ONLY"
-        ),
-        "representation": representation,
-        "relation": relation,
-        "single_route": True,
-        "scene_contract": True,
-    }
-    result["requested_outputs"] = _copy(result["scene_composition"])
-    result["required_artifacts"] = (
-        [representation]
-        if representation in STRUCTURED_KINDS
-        else []
-    )
-    result["render_authorized"] = True
-    result["render_mode"] = (
-        "STRUCTURED_OUTPUT"
-        if representation in STRUCTURED_KINDS
-        else "TEXT_ONLY"
-    )
-    result["dialogue_strategy"] = {
-        "mode": (
-            "continue_existing_branch"
-            if relation == "CONTINUE"
-            else "recall_existing_branch"
-            if relation == "RECALL"
-            else "start_new_branch"
-        ),
-        "context_source": (
-            "structured_dialogue_memory"
-            if relation in {"CONTINUE", "RECALL"}
-            else "current_request"
-        ),
-        "preserve_previous_structured_data": bool(
-            relation in {"CONTINUE", "RECALL"} and data is not None
-        ),
-    }
-    result["continuation_content_analysis"] = {
-        "relation": relation,
-        "active_subject": _copy(active_subject),
-        "source_turn_ids": list(source_turn_ids),
-        "data_reuse": bool(
-            relation in {"CONTINUE", "RECALL"} and data is not None
-        ),
-    }
-    result["dialogue_development"] = {
-        "relation": relation,
-        "current_request": current,
-        "previous_result": _copy(
-            selected_turn.assistant_structured
-            if selected_turn is not None
-            else {}
-        ),
-        "continuation_anchor": (
-            "structured_artifact"
-            if data is not None
-            else "dialogue_turn"
-            if relation in {"CONTINUE", "RECALL"}
-            else "current_turn"
-        ),
-        "next_operation": inferred_operation,
-        "representation": representation,
-    }
-    result["cognitive_workspace"] = {
-        "current_user_request": current,
-        "active_topic": inferred_topic,
-        "active_goal": inferred_goal,
-        "active_entity": _text(
-            active_subject.get("description")
-            if isinstance(active_subject, dict)
-            else ""
-        ),
-        "operation": inferred_operation,
-        "representation": representation,
-        "task_continuation": relation == "CONTINUE",
-        "provider_context_plan": _copy(provider_plan),
-        "dialogue_development": _copy(result["dialogue_development"]),
-    }
-    result["quantum_state"] = {
-        "single_route": True,
-        "decision_owner": DECISION_OWNER,
-        "interpretation_complete": True,
-        "relation_resolved": True,
-        "provider_context_ready": True,
-        "structured_output_ready": True,
-    }
-
+            seen.add(key); out.append(deepcopy(item))
+    return out[-32:]
+
+def mark_obligation_status(obligations: Any, *, trigger: str, text: str = "") -> list[dict[str, Any]]:
+    result = merge_dialogue_obligations([], obligations)
+    needle = _obligation_text(trigger).lower()
+    for item in result:
+        if needle and needle in _obligation_text(item.get("text")).lower():
+            item["status"] = "fulfilled"
     return result
 
-
-# ---------------------------------------------------------------------------
-# Structured provider context.
-# ---------------------------------------------------------------------------
-
-def _compact_artifact_for_provider(
-    artifact: Mapping[str, Any]
-) -> Dict[str, Any]:
-    """
-    Compact envelope, complete data preserved.
-
-    We do not slice series to a fixed number of points.
-    """
-    artifact = artifact if isinstance(
-        artifact,
-        Mapping,
-    ) else {}
-
-    payload = {
-        "artifact_id": _text(
-            artifact.get("artifact_id")
-        ),
-        "kind": _text(
-            artifact.get("kind")
-        ),
-        "representation": _text(
-            artifact.get("representation")
-        ),
-        "title": _text(
-            artifact.get("title"),
-            240,
-        ),
-        "data": _copy(
-            artifact.get("data")
-        ),
-        "columns": _copy(
-            artifact.get("columns") or []
-        ),
-        "rows": _copy(
-            artifact.get("rows") or []
-        ),
-        "series": _copy(
-            artifact.get("series") or []
-        ),
-        "x_axis": _copy(
-            artifact.get("x_axis") or {}
-        ),
-        "y_axis": _copy(
-            artifact.get("y_axis") or {}
-        ),
-        "temporal_scope": _copy(
-            artifact.get("temporal_scope") or {}
-        ),
-        "metadata": _copy(
-            artifact.get("metadata") or {}
-        ),
-    }
-
-    return _safe_json(payload)
-
-
-def _compact_turn_for_provider(
-    turn: DialogueTurn,
-) -> Dict[str, Any]:
-    return {
-        "turn_id": turn.turn_id,
-        "user": turn.user_text,
-        "interpretation": {
-            "relation": _text(
-                turn.interpretation.get(
-                    "relation"
-                )
-            ),
-            "topic": _text(
-                turn.interpretation.get(
-                    "topic"
-                ),
-                300,
-            ),
-            "goal": _text(
-                turn.interpretation.get(
-                    "goal"
-                ),
-                300,
-            ),
-            "operation": _text(
-                turn.interpretation.get(
-                    "operation"
-                ),
-                200,
-            ),
-            "representation": _text(
-                turn.interpretation.get(
-                    "representation"
-                ),
-                100,
-            ),
-            "temporal_scope": _copy(
-                turn.interpretation.get(
-                    "temporal_scope"
-                )
-                or {}
-            ),
-        },
-        "assistant_text": turn.assistant_text,
-        "assistant_structured": _copy(
-            turn.assistant_structured
-        ),
-        "artifacts": [
-            _compact_artifact_for_provider(
-                a
-            )
-            for a in turn.artifacts
-        ],
-    }
-
-
-def build_dialogue_context(
-    *,
-    current_request: str,
-    decision: Mapping[str, Any],
-    memory: DialogueMemory,
-    context_limit: int = 12,
-) -> Dict[str, Any]:
-    memory.prune()
-
-    recent_turns = memory.recent(
-        context_limit
-    )
-
-    selected_turn_ids = {
-        str(x)
-        for x in (
-            decision.get(
-                "source_turn_ids"
-            )
-            or []
-        )
-    }
-
-    # Always include source turns for a CONTINUE/RECALL decision.
-    selected = [
-        t for t in recent_turns
-        if t.turn_id in selected_turn_ids
-    ]
-
-    # Add recent context around the selected source, not an arbitrary entity list.
-    for turn in reversed(recent_turns):
-        if turn not in selected:
-            selected.append(turn)
-        if len(selected) >= context_limit:
-            break
-
-    selected.reverse()
-
-    structured_sources: List[Dict[str, Any]] = []
-    for turn in selected:
-        for artifact in turn.artifacts:
-            structured_sources.append(
-                _compact_artifact_for_provider(
-                    artifact
-                )
-            )
-
-    return _safe_json({
-        "engine": ENGINE_VERSION,
-        "window": "12h",
-        "conversation_id": memory.conversation_id,
-        "sequence_id": memory.sequence_id,
-        "current_request": current_request,
-        "canonical_interpretation": _copy(
-            decision
-        ),
-        "source_turns": [
-            _compact_turn_for_provider(
-                t
-            )
-            for t in selected
-        ],
-        "structured_sources": structured_sources,
-        "rules": {
-            "current_request_is_authoritative": True,
-            "reuse_structured_data": True,
-            "preserve_all_data_points": True,
-            "representation_is_independent_of_topic": True,
-            "do_not_invent_missing_data": True,
-            "provider_does_not_reselect_context": True,
-        },
-    })
-
-
-def build_provider_request(
-    *,
-    current_request: str,
-    interpretation: Mapping[str, Any],
-    memory: DialogueMemory,
-    context_limit: int = 12,
-) -> Dict[str, Any]:
-    """
-    Single canonical provider handoff.
-
-    The existing provider_router remains the API owner.
-    """
-    context = build_dialogue_context(
-        current_request=current_request,
-        decision=interpretation,
-        memory=memory,
-        context_limit=context_limit,
-    )
-
-    provider_plan = _copy(
-        interpretation.get("provider_context_plan") or {}
-    )
-    scene_composition = _copy(
-        interpretation.get("scene_composition")
-        or provider_plan.get("scene_composition")
-        or []
-    )
-
-    return {
-        "version": "april_unified_provider_handoff_v2",
-        "transport": TRANSPORT_NAME,
-        "single_route": True,
-        "provider_must_not_reselect_context": True,
-        "input_budget_tokens": PROVIDER_INPUT_HARD_BUDGET,
-        "current_request": current_request,
-        "interpretation": _copy(interpretation),
-        "dialogue_context": context,
-        "provider_context_plan": provider_plan,
-        "scene_composition": scene_composition,
-        "conversation": {
-            "current_request": current_request,
-            "provider_context_plan": _copy(provider_plan),
-            "scene_composition": _copy(scene_composition),
-        },
-        "constraints": {
-            "provider_context_plan": _copy(provider_plan),
-            "scene_composition": _copy(scene_composition),
-            "structured_output_required": True,
-        },
-        "structured_output_required": True,
-        "preserve_all_data_points": True,
-    }
-
-
-def build_openai_messages(
-    *,
-    current_request: str,
-    interpretation: Mapping[str, Any],
-    memory: DialogueMemory,
-) -> List[Dict[str, str]]:
-    """
-    Provider-ready messages.
-
-    The production provider prompt can wrap this packet inside its existing
-    MachineResponse contract.
-    """
-    system_prompt = (
-        "April canonical response stage. "
-        "Use the supplied canonical interpretation and structured dialogue context. "
-        "Do not re-select the topic or dialogue branch. "
-        "Preserve complete structured datasets. "
-        "When changing representation, reuse the same underlying data. "
-        "Return one structured MachineResponse JSON object with answer/content, "
-        "structured response data, artifacts/render_blocks and metadata. "
-        "Never invent missing values."
-    )
-
-    packet = build_provider_request(
-        current_request=current_request,
-        interpretation=interpretation,
-        memory=memory,
-    )
-
-    return [
-        {
-            "role": "system",
-            "content": system_prompt,
-        },
-        {
-            "role": "user",
-            "content": json.dumps(
-                packet,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
-        },
-    ]
-
-
-# ---------------------------------------------------------------------------
-# OpenAI response -> canonical dialogue memory.
-# ---------------------------------------------------------------------------
-
-def extract_structured_artifacts(
-    structured: Any,
-) -> List[Dict[str, Any]]:
-    """
-    Extract renderer-neutral artifacts without discarding their payloads.
-    """
-    if not isinstance(structured, Mapping):
-        return []
-
-    artifacts: List[Dict[str, Any]] = []
-
-    def append_artifact(
-        value: Mapping[str, Any]
-    ) -> None:
-        kind = _text(
-            value.get("kind")
-            or value.get("type")
-            or value.get("artifact_type")
-        )
-
-        representation = _text(
-            value.get("representation")
-            or value.get("renderer")
-            or kind
-        )
-
-        if not kind and not representation:
-            return
-
-        artifact_id = (
-            _text(
-                value.get("artifact_id")
-            )
-            or f"artifact-{_sha(value)}"
-        )
-
-        artifacts.append({
-            "artifact_id": artifact_id,
-            "kind": kind or representation,
-            "representation": representation,
-            "title": _text(
-                value.get("title")
-            ),
-            "data": _copy(
-                value.get("data")
-            ),
-            "columns": _copy(
-                value.get("columns") or []
-            ),
-            "rows": _copy(
-                value.get("rows") or []
-            ),
-            "series": _copy(
-                value.get("series") or []
-            ),
-            "x_axis": _copy(
-                value.get("x_axis") or {}
-            ),
-            "y_axis": _copy(
-                value.get("y_axis") or {}
-            ),
-            "temporal_scope": _copy(
-                value.get("temporal_scope") or {}
-            ),
-            "metadata": _copy(
-                value.get("metadata") or {}
-            ),
-        })
-
-    append_artifact(
-        structured
-    )
-
-    raw_artifacts = structured.get(
-        "artifacts"
-    )
-
-    if isinstance(
-        raw_artifacts,
-        list,
-    ):
-        for item in raw_artifacts:
-            if isinstance(item, Mapping):
-                append_artifact(
-                    item
-                )
-
-    render_blocks = structured.get(
-        "render_blocks"
-    )
-
-    if isinstance(
-        render_blocks,
-        list,
-    ):
-        for block in render_blocks:
-            if isinstance(
-                block,
-                Mapping,
-            ):
-                payload = block.get(
-                    "payload"
-                )
-
-                if isinstance(
-                    payload,
-                    Mapping,
-                ):
-                    append_artifact(
-                        {
-                            **block,
-                            **payload,
-                        }
-                    )
-                else:
-                    append_artifact(
-                        block
-                    )
-
-    # Deduplicate by stable artifact_id.
-    unique: Dict[str, Dict[str, Any]] = {}
-    for artifact in artifacts:
-        unique[
-            _text(
-                artifact.get(
-                    "artifact_id"
-                )
-            )
-        ] = artifact
-
-    return list(unique.values())
-
-
-def record_openai_response(
-    *,
-    memory: DialogueMemory,
-    user_text: str,
-    interpretation: Mapping[str, Any],
-    provider_result: Mapping[str, Any],
-    now: Optional[float] = None,
-) -> DialogueTurn:
-    """
-    Preserve the OpenAI/provider result as the next semantic turn.
-
-    This is the crucial memory rule:
-        DO NOT reconstruct this from entities.
-    """
-    now = _now() if now is None else float(now)
-
-    provider_result = (
-        provider_result
-        if isinstance(provider_result, Mapping)
-        else {
-            "text": _text(provider_result)
-        }
-    )
-
-    structured = _copy(
-        provider_result.get(
-            "structured"
-        )
-    )
-
-    # Existing provider contract may carry the structured response under
-    # MachineResponse-level fields.
-    if structured is None:
-        structured = _copy(
-            provider_result.get(
-                "scene"
-            )
-        )
-
-    artifacts = extract_structured_artifacts(
-        structured
-    )
-
-    assistant_text = _text(
-        provider_result.get(
-            "answer"
-        )
-        or provider_result.get(
-            "content"
-        )
-        or provider_result.get(
-            "text"
-        )
-    )
-
-    turn = DialogueTurn(
-        turn_id=(
-            _text(
-                provider_result.get(
-                    "turn_id"
-                )
-            )
-            or uuid.uuid4().hex
-        ),
-        sequence_id=memory.sequence_id,
-        created_at=now,
-        user_text=_text(user_text),
-        interpretation=_copy(
-            interpretation
-        ),
-        assistant_structured=structured,
-        assistant_text=assistant_text,
-        artifacts=artifacts,
-        provider_meta={
-            "model": _copy(
-                provider_result.get(
-                    "model"
-                )
-            ),
-            "usage": _copy(
-                provider_result.get(
-                    "usage"
-                )
-            ),
-            "cost": _copy(
-                provider_result.get(
-                    "cost"
-                )
-                or provider_result.get(
-                    "metadata",
-                    {},
-                ).get(
-                    "cost"
-                )
-                if isinstance(
-                    provider_result.get(
-                        "metadata"
-                    ),
-                    Mapping,
-                )
-                else provider_result.get(
-                    "cost"
-                )
-            ),
-            "provider_version": _copy(
-                provider_result.get(
-                    "provider_version"
-                )
-            ),
-        },
-    )
-
-    memory.append(
-        turn,
-        now,
-    )
-
-    return turn
-
-
-# ---------------------------------------------------------------------------
-# StateManager integration.
-# ---------------------------------------------------------------------------
-
-def memory_from_state(
-    *,
-    user_id: str,
-    conversation_id: str,
-    state: Optional[Mapping[str, Any]],
-) -> DialogueMemory:
-    state = state if isinstance(
-        state,
-        Mapping,
-    ) else {}
-
-    active = state.get(
-        "active_dialogue_sequence"
-    )
-    active = (
-        active
-        if isinstance(active, Mapping)
-        else {}
-    )
-
-    raw = state.get(
-        "dialogue_memory"
-    )
-
-    if not isinstance(
-        raw,
-        Mapping,
-    ):
-        raw = active.get(
-            "dialogue_memory"
-        )
-
-    sequence_id = (
-        _text(
-            raw.get("sequence_id")
-        )
-        if isinstance(
-            raw,
-            Mapping,
-        )
-        else ""
-    )
-
-    if not sequence_id:
-        sequence_id = _text(
-            active.get(
-                "sequence_id"
-            )
-        )
-
-    if not sequence_id:
-        bucket = int(
-            _now() // DIALOGUE_TTL_SECONDS
-        )
-        sequence_id = (
-            "seq-"
-            + hashlib.sha256(
-                (
-                    f"{user_id}|"
-                    f"{conversation_id}|"
-                    f"{bucket}"
-                ).encode("utf-8")
-            ).hexdigest()[:20]
-        )
-
-    memory = DialogueMemory(
-        user_id=_text(user_id),
-        conversation_id=_text(
-            conversation_id
-        ),
-        sequence_id=sequence_id,
-    )
-
-    if isinstance(
-        raw,
-        Mapping,
-    ):
-        for item in (
-            raw.get(
-                "turns"
-            )
-            or []
-        ):
-            if not isinstance(
-                item,
-                Mapping,
-            ):
-                continue
-
-            memory.turns.append(
-                DialogueTurn(
-                    turn_id=_text(
-                        item.get(
-                            "turn_id"
-                        )
-                    ) or uuid.uuid4().hex,
-                    sequence_id=_text(
-                        item.get(
-                            "sequence_id"
-                        )
-                    ) or sequence_id,
-                    created_at=float(
-                        item.get(
-                            "created_at"
-                        )
-                        or _now()
-                    ),
-                    user_text=_text(
-                        item.get(
-                            "user_text"
-                        )
-                    ),
-                    interpretation=_copy(
-                        item.get(
-                            "interpretation"
-                        )
-                        or {}
-                    ),
-                    assistant_structured=_copy(
-                        item.get(
-                            "assistant_structured"
-                        )
-                    ),
-                    assistant_text=_text(
-                        item.get(
-                            "assistant_text"
-                        )
-                    ),
-                    artifacts=_copy(
-                        item.get(
-                            "artifacts"
-                        )
-                        or []
-                    ),
-                    provider_meta=_copy(
-                        item.get(
-                            "provider_meta"
-                        )
-                        or {}
-                    ),
-                )
-            )
-
-    memory.prune()
-    return memory
-
-
-def write_memory_to_state(
-    *,
-    state: Dict[str, Any],
-    memory: DialogueMemory,
-    latest_turn: Optional[DialogueTurn] = None,
-) -> Dict[str, Any]:
-    """
-    Canonical in-memory write.
-
-    StateManager remains responsible for durable persistence.
-    This layer prepares the canonical record and never writes entity bags.
-    """
-    state["dialogue_memory"] = memory.to_dict()
-    state["dialogue_memory_engine"] = ENGINE_VERSION
-    state["dialogue_memory_window_hours"] = DIALOGUE_WINDOW_HOURS
-
-    if latest_turn is not None:
-        state["canonical_dialogue_turn"] = {
-            "engine": ENGINE_VERSION,
-            "turn_id": latest_turn.turn_id,
-            "sequence_id": latest_turn.sequence_id,
-            "created_at": latest_turn.created_at,
-            "user_request": latest_turn.user_text,
-            "april_answer": latest_turn.assistant_text,
-            "interpretation": _copy(
-                latest_turn.interpretation
-            ),
-            "assistant_structured": _copy(
-                latest_turn.assistant_structured
-            ),
-            "artifacts": _copy(
-                latest_turn.artifacts
-            ),
-            "provider_meta": _copy(
-                latest_turn.provider_meta
-            ),
-            "structured_data": _copy(
-                latest_turn.interpretation.get(
-                    "structured_data"
-                )
-            ),
-            "representation": _text(
-                latest_turn.interpretation.get(
-                    "representation"
-                )
-            ),
-            "topic": _text(
-                latest_turn.interpretation.get(
-                    "topic"
-                )
-            ),
-            "goal": _text(
-                latest_turn.interpretation.get(
-                    "goal"
-                )
-            ),
+@dataclass
+class SemanticEvidence:
+    label: str
+    score: float
+    source: str
+    positive: bool = True
+    details: Dict[str, Any] | None = None
+    def as_dict(self) -> Dict[str, Any]:
+        return {"label": self.label, "score": max(0.0, min(1.0, float(self.score))), "source": self.source, "positive": bool(self.positive), "details": self.details or {}}
+
+
+
+class QuantumInterpretationEngine:
+    """Single lightweight interpretation engine backed by rapidfuzz."""
+    VERSION = "APRIL-ARC-LIGHT-1"
+    def __init__(self) -> None:
+        self._lock = threading.RLock(); self._cache = {}; self._cache_limit = 512
+
+    @staticmethod
+    def normalize(text: Any) -> str:
+        return re.sub(r"\s+", " ", str(text or "").strip())
+
+    @staticmethod
+    def _tokens(text: Any) -> list[str]:
+        return re.findall(r"[a-zа-яёіїєґ0-9_]+", QuantumInterpretationEngine.normalize(text).lower())
+
+    @classmethod
+    def _similarity_value(cls, a: Any, b: Any) -> float:
+        aa, bb = cls.normalize(a), cls.normalize(b)
+        if not aa or not bb: return 0.0
+        ts = fuzz.token_set_ratio(aa, bb) / 100.0
+        pr = fuzz.partial_ratio(aa, bb) / 100.0
+        return round(max(ts * .72 + pr * .28, ts), 6)
+
+    def similarity(self, text_a: str, text_b: str) -> dict[str, Any]:
+        score = self._similarity_value(text_a, text_b)
+        return {"score": score, "source": "rapidfuzz_arc", "measured": bool(score), "cached": False}
+
+    def similarities(self, text: str, candidates: Sequence[str]) -> dict[str, float]:
+        return {self.normalize(c): self._similarity_value(text, c) for c in candidates if self.normalize(c)}
+
+    def prewarm_static(self, candidates: Sequence[str]) -> int:
+        return len({self.normalize(x) for x in candidates if self.normalize(x)})
+
+    def _history(self, history: Any) -> tuple[str, str, Any]:
+        last_a = last_u = ""; reply = None
+        turns = history if isinstance(history, list) else []
+        for item in reversed(turns):
+            if not isinstance(item, dict): continue
+            role = self.normalize(item.get("role")).lower()
+            if not last_a and role in {"assistant","april","bot"}:
+                last_a = self.normalize(item.get("answer") or item.get("content") or item.get("summary") or item.get("text")); reply = item.get("turn_id")
+            if not last_u and role in {"user","human"}:
+                last_u = self.normalize(item.get("content") or item.get("text") or item.get("answer"))
+            if last_a and last_u: break
+        return last_a, last_u, reply
+
+    def _family_scores(self, text: str, prototypes: dict[str, str]) -> dict[str, float]:
+        if not text: return {k: 0.0 for k in prototypes}
+        return {k: self._similarity_value(text, v) for k, v in prototypes.items()}
+
+    def _context_scores(self, text: str, previous_assistant: str = "", previous_user: str = "", active_topic: str = "", active_goal: str = "") -> dict[str, float]:
+        return {
+            "previous_assistant": self._similarity_value(text, previous_assistant),
+            "previous_user": self._similarity_value(text, previous_user),
+            "active_topic": self._similarity_value(text, active_topic),
+            "active_goal": self._similarity_value(text, active_goal),
         }
 
-    active = state.get(
-        "active_dialogue_sequence"
-    )
-    if isinstance(active, dict):
-        active["sequence_id"] = memory.sequence_id
-        active["dialogue_memory"] = _copy(
-            state["dialogue_memory"]
-        )
+    def _linguistic(self, text: str) -> dict[str, Any]:
+        tokens = self._tokens(text)
+        return {"language": None, "tokens": tokens, "lemmas": tokens, "pos": [], "dependencies": [], "entities": [], "sentences": [text] if text else [], "source": "arc_light", "engine": self.VERSION}
 
-        if latest_turn is not None:
-            active["last_user_request"] = latest_turn.user_text
-            active["last_april_answer"] = latest_turn.assistant_text
-            active["topic"] = _text(
-                latest_turn.interpretation.get(
-                    "topic"
-                )
-            )
-            active["goal"] = _text(
-                latest_turn.interpretation.get(
-                    "goal"
-                )
-            )
-            active["representation"] = _text(
-                latest_turn.interpretation.get(
-                    "representation"
-                )
-            )
-            active["last_result"] = _copy(
-                latest_turn.assistant_structured
-            )
+    def scene_matrix(self, *, dialogue: dict[str,float], representation: dict[str,float], domain: dict[str,float], capability: dict[str,float], context: dict[str,float], modalities: dict[str,Any] | None = None, explicit_representations: Sequence[str] = ()) -> dict[str,Any]:
+        vector = [
+            max((dialogue.get(x,0.0) for x in ("continuation","reference","question","request")), default=0.0),
+            max(representation.values(), default=0.0), max(domain.values(), default=0.0),
+            max(capability.values(), default=0.0), max(context.values(), default=0.0),
+            max(context.get("active_topic",0.0), context.get("active_goal",0.0), 0.0),
+            min(1.0, sum(v not in (None,"",{},[]) for v in (modalities or {}).values())/3.0),
+        ]
+        raw = []
+        for row in _SCENE_WEIGHTS:
+            raw.append(sum(a*b for a,b in zip(row, vector)))
+        for scene in SCENE_MATRIX_LABELS:
+            raw[SCENE_MATRIX_LABELS.index(scene)] += .34 * float(representation.get(scene,0.0))
+            raw[SCENE_MATRIX_LABELS.index(scene)] += .10 * float(capability.get(SCENE_MATRIX_CAPABILITY[scene],0.0))
+        for domain_name, bias_map in SCENE_MATRIX_DOMAIN_BIAS.items():
+            ds = float(domain.get(domain_name,0.0))
+            for scene,bias in bias_map.items(): raw[SCENE_MATRIX_LABELS.index(scene)] += ds*bias
+        for scene in explicit_representations:
+            if scene in SCENE_MATRIX_LABELS: raw[SCENE_MATRIX_LABELS.index(scene)] += .45
+        mx = max(raw, default=0.0); scores = [x/mx if mx else 0.0 for x in raw]
+        ranked = sorted(zip(SCENE_MATRIX_LABELS,scores), key=lambda x:x[1], reverse=True)
+        return {"labels":[x[0] for x in ranked],"scores":[round(float(x[1]),6) for x in ranked],"best_scene":ranked[0][0],"best_score":round(float(ranked[0][1]),6),"margin":round(float(ranked[0][1]-(ranked[1][1] if len(ranked)>1 else 0.0)),6),"feature_order":list(SCENE_MATRIX_FEATURES),"feature_vector":[round(x,6) for x in vector],"matrix_shape":[len(_SCENE_WEIGHTS),len(SCENE_MATRIX_FEATURES)],"explicit_representations":list(explicit_representations),"engine":"arc_light","mode":"fuzzy_evidence_fusion","decision_owner":DECISION_OWNER,"evidence_only":True}
 
-        state["active_dialogue_sequence"] = active
+    def measure(self, text: str, *, previous_assistant: str = "", previous_user: str = "", active_topic: str = "", active_goal: str = "", modalities: dict[str,Any] | None = None) -> dict[str,Any]:
+        text = self.normalize(text); key = (text, previous_assistant, previous_user, active_topic, active_goal)
+        with self._lock:
+            if key in self._cache: return deepcopy(self._cache[key])
+        dialogue = self._family_scores(text, DIALOGUE_PROTOTYPES)
+        representation = self._family_scores(text, REPRESENTATION_HYPOTHESES)
+        domain = self._family_scores(text, DOMAIN_HYPOTHESES)
+        capability = self._family_scores(text, CAPABILITY_HYPOTHESES)
+        context = self._context_scores(text, previous_assistant, previous_user, active_topic, active_goal)
+        dialogue_ranked = sorted(dialogue.items(), key=lambda x:x[1], reverse=True)
+        rep_ranked = sorted(representation.items(), key=lambda x:x[1], reverse=True)
+        best_dialogue, best_d = dialogue_ranked[0] if dialogue_ranked else ("question",0.0)
+        best_rep, rep_d = rep_ranked[0] if rep_ranked else ("text",0.0)
+        explicit_reps = [k for k,v in sorted(representation.items(), key=lambda x:x[1], reverse=True) if k != "text" and v >= .58 and v >= representation.get("text",0.0)+.06]
+        scene = self.scene_matrix(dialogue=dialogue, representation=representation, domain=domain, capability=capability, context=context, modalities=modalities, explicit_representations=explicit_reps)
+        profile = {"dialogue_scores": dialogue,"representation_scores": representation,"domain_scores": domain,"capability_scores": capability,"context_scores": context,"dialogue_best":best_dialogue,"dialogue_confidence":float(best_d),"best_representation":best_rep,"best_representation_score":float(rep_d),"representation_margin":float(rep_d-(rep_ranked[1][1] if len(rep_ranked)>1 else 0.0)),"explicit_representations":explicit_reps,"identity_request":dialogue.get("identity",0.0)>=max(.55, dialogue.get("continuation",0.0)),"fast_social":best_dialogue in {"identity","greeting"} and len(text.split())<=24,"scene_matrix":scene,"source":"arc_light_fuzzy"}
+        with self._lock:
+            self._cache[key]=deepcopy(profile)
+            if len(self._cache)>self._cache_limit: self._cache.pop(next(iter(self._cache)))
+        return profile
 
-    return state
+    def fast_semantic_profile(self, text: str, previous_assistant: str = "", previous_user: str = "", active_topic: str = "", active_goal: str = "") -> dict[str,Any]:
+        return self.measure(text, previous_assistant=previous_assistant, previous_user=previous_user, active_topic=active_topic, active_goal=active_goal)
 
+    def turn_measurement(self, text: str, previous_assistant: str = "", previous_user: str = "", active_goal: str = "", active_topic: str = "") -> dict[str,Any]:
+        p=self.measure(text, previous_assistant=previous_assistant, previous_user=previous_user, active_topic=active_topic, active_goal=active_goal)
+        return {"linguistic":self._linguistic(text),"dialogue_nli":{"labels":list(p["dialogue_scores"]),"scores":list(p["dialogue_scores"].values()),"source":"arc_light"},"representation_nli":{"labels":list(p["representation_scores"]),"scores":list(p["representation_scores"].values()),"source":"arc_light"},"domain_nli":{"labels":list(p["domain_scores"]),"scores":list(p["domain_scores"].values()),"source":"arc_light"},"capability_nli":{"labels":list(p["capability_scores"]),"scores":list(p["capability_scores"].values()),"source":"arc_light"},"embeddings":dict(p["context_scores"]),"decision_owner":DECISION_OWNER,"evidence_only":True,"engine":"arc_light_turn_engine"}
 
-def persist_with_state_manager(
-    *,
-    user_id: str,
-    state: Dict[str, Any],
-    latest_turn: Optional[DialogueTurn] = None,
-) -> Dict[str, Any]:
-    """
-    Adapter for the project's existing StateManager.
+    def dialogue(self, text: str, previous_assistant: str = "", previous_user: str = "", active_goal: str = "", active_topic: str = "", open_task: dict[str,Any] | None = None) -> dict[str,Any]:
+        p=self.measure(text, previous_assistant=previous_assistant, previous_user=previous_user, active_topic=active_topic, active_goal=active_goal); d=p["dialogue_scores"]; c=p["context_scores"]; best=p["dialogue_best"]
+        continuation_score=max(d.get("continuation",0.0), .76*c.get("previous_assistant",0.0), .62*c.get("previous_user",0.0), .70*c.get("active_topic",0.0))
+        reference_score=max(d.get("reference",0.0), .84*c.get("previous_assistant",0.0), .66*c.get("previous_user",0.0), .72*c.get("active_topic",0.0), d.get("memory_query",0.0))
+        task = open_task if isinstance(open_task,dict) else {}
+        task_signal = bool(task and (task.get("active") or task.get("status") == "open"))
+        if task_signal and any(x in best for x in ("continuation","reference","correction","reformulation")): continuation_score=max(continuation_score,.90)
+        continuation=bool(previous_assistant and (best in {"continuation","reformulation","correction","reference","affirmation","rejection"} or continuation_score>=.66 or task_signal and len(text.split())<=12))
+        return {"dialogue":{"label":best,"confidence":float(max(d.values(),default=0.0)),"continuation_score":float(continuation_score),"reference_score":float(reference_score),"topic_score":float(c.get("active_topic",0.0)),"goal_score":float(c.get("active_goal",0.0))},"linguistic":self._linguistic(text),"continuation":continuation,"reference_to_previous":bool(previous_assistant and reference_score>=.60),"identity_request":bool(p["identity_request"]),"nli":{"labels":list(d),"scores":list(d.values()),"source":"arc_light"},"decision_owner":DECISION_OWNER,"evidence_only":True,"engine":"arc_light_dialogue_engine"}
 
-    The production module owns actual persistence.
-    """
-    try:
-        from blocks.state_manager import persist_state
+    def representations(self, text: str, context: str = "") -> dict[str,Any]:
+        p=self.measure(text, active_topic=context); return {"nli":{"labels":list(p["representation_scores"]),"scores":list(p["representation_scores"].values()),"source":"arc_light"},"measurements":[{"type":k,"score":float(v),"source":"arc_light"} for k,v in sorted(p["representation_scores"].items(), key=lambda x:x[1], reverse=True)],"context_similarity":{"score":float(p["context_scores"].get("active_topic",0.0)),"source":"arc_light"},"decision_owner":DECISION_OWNER,"evidence_only":True,"engine":"arc_light_representation_engine"}
 
-        persist_state(
-            user_id
-        )
-    except Exception as exc:
-        state.setdefault(
-            "diagnostics",
-            {},
-        )[
-            "state_manager_persist_error"
-        ] = _text(exc, 800)
+    def domains(self, text: str) -> dict[str,Any]:
+        p=self.measure(text); return {"measurements":[{"domain":k,"score":float(v)} for k,v in sorted(p["domain_scores"].items(), key=lambda x:x[1], reverse=True)],"decision_owner":DECISION_OWNER,"evidence_only":True,"engine":"arc_light_domain_engine"}
 
-    return state
+    def classify(self, text: str, hypotheses: Sequence[str]) -> dict[str,Any]:
+        p=self.measure(text); all_scores={**p["dialogue_scores"],**p["representation_scores"],**p["domain_scores"],**p["capability_scores"]}; ranked=sorted(((str(x),float(all_scores.get(x,0.0))) for x in hypotheses), key=lambda x:x[1], reverse=True); return {"labels":[x[0] for x in ranked],"scores":[x[1] for x in ranked],"source":"arc_light"}
 
+    def _resolve_scene_context(self, text: str, state: dict[str,Any], *, continuation: bool, reference: bool, active_topic: str = "") -> dict[str,Any]:
+        if not isinstance(state,dict) or not (continuation or reference): return {}
+        scene = state.get("current_visual_scene") or state.get("active_visual_scene")
+        if not isinstance(scene,dict): return {}
+        hay=" ".join(str(scene.get(k) or "") for k in ("topic","user_request","summary","april_answer"))
+        score=1.0 if continuation else self._similarity_value(text, hay)
+        return {"relation":"current_scene","confidence":round(score,6),"scene_id":str(scene.get("scene_id") or ""),"turn_id":scene.get("turn_id"),"topic":self.normalize(scene.get("topic")),"user_request":self.normalize(scene.get("user_request") or scene.get("current_request")),"answer":self.normalize(scene.get("april_answer") or scene.get("answer") or scene.get("content")),"summary":self.normalize(scene.get("summary")),"render_block_types":list(scene.get("render_block_types") or []),"presentation_types":list(scene.get("presentation_types") or []),"renderer_state":scene.get("renderer_state") if isinstance(scene.get("renderer_state"),dict) else {},"semantic_source":"arc_light_scene_resolution","evidence_only":True}
 
-# ---------------------------------------------------------------------------
-# Canonical single-turn orchestration helper for tests.
-# ---------------------------------------------------------------------------
-
-async def process_turn(
-    *,
-    user_id: str,
-    conversation_id: str,
-    current_request: str,
-    state: Optional[Dict[str, Any]],
-    provider_call,
-) -> Dict[str, Any]:
-    """
-    Test harness for the complete semantic cycle.
-
-    provider_call(messages) must be an async callable compatible with the
-    project's provider_router.generate_text contract.
-
-    The test harness does not call a renderer.
-    """
-    state = state if isinstance(
-        state,
-        dict,
-    ) else {}
-
-    memory = memory_from_state(
-        user_id=user_id,
-        conversation_id=conversation_id,
-        state=state,
-    )
-
-    history = state.get(
-        "dialog",
-        [],
-    )
-    history = history if isinstance(
-        history,
-        list,
-    ) else []
-
-    interpretation = interpret_request(
-        current_request,
-        cognition=state.get(
-            "cognition",
-            {},
-        ),
-        semantic=state.get(
-            "semantic",
-            {},
-        ),
-        history=history,
-        state=state,
-    )
-
-    if interpretation is None:
-        raise ValueError(
-            "empty current request"
-        )
-
-    messages = build_openai_messages(
-        current_request=current_request,
-        interpretation=interpretation,
-        memory=memory,
-    )
-
-    provider_result = await provider_call(
-        messages
-    )
-
-    if not isinstance(
-        provider_result,
-        Mapping,
-    ):
-        provider_result = {
-            "text": _text(
-                provider_result
-            )
-        }
-
-    latest_turn = record_openai_response(
-        memory=memory,
-        user_text=current_request,
-        interpretation=interpretation,
-        provider_result=provider_result,
-    )
-
-    write_memory_to_state(
-        state=state,
-        memory=memory,
-        latest_turn=latest_turn,
-    )
-
-    persist_with_state_manager(
-        user_id=user_id,
-        state=state,
-        latest_turn=latest_turn,
-    )
-
-    return {
-        "engine": ENGINE_VERSION,
-        "interpretation": interpretation,
-        "provider_result": _copy(
-            provider_result
-        ),
-        "canonical_turn": latest_turn.to_dict(),
-        "dialogue_memory": memory.to_dict(),
-        "provider_messages": messages,
-        "single_route": True,
-        "provider_calls": 1,
-    }
+    def interpret(self, text: str, cognition: dict|None=None, semantic: dict|None=None, history: list|None=None, state: dict|None=None) -> dict[str,Any] | None:
+        fn=globals().get("_df_interpret_live_turn")
+        if callable(fn): return fn(text, history=history or [], state=state or {})
+        return self.measure(text)
 
 
-# ---------------------------------------------------------------------------
-# Executor compatibility bridge.
-# ---------------------------------------------------------------------------
+QUANTUM_INTERPRETATION_ENGINE = QuantumInterpretationEngine()
+QUANTUM_FAST_SEMANTIC = QUANTUM_INTERPRETATION_ENGINE
+QUANTUM_LINGUISTIC_ENGINE = QUANTUM_INTERPRETATION_ENGINE
+QUANTUM_EMBEDDING_ENGINE = QUANTUM_INTERPRETATION_ENGINE
+QUANTUM_INTENT_ENGINE = QUANTUM_INTERPRETATION_ENGINE
+QUANTUM_EVIDENCE_FUSION = QUANTUM_INTERPRETATION_ENGINE
+QUANTUM_DIALOGUE_ENGINE = QUANTUM_INTERPRETATION_ENGINE
 
-def build_processor_execution_context(
-    runtime_state: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """
-    Existing Executor compatibility entrypoint.
+# Compatibility API: the shared runtime is now the lightweight ARC engine itself.
+SEMANTIC_MODEL_NAME = "rapidfuzz-arc-light"
 
-    It exposes the canonical interpretation context without creating another
-    route.
-    """
-    runtime_state = (
-        runtime_state
-        if isinstance(
-            runtime_state,
-            dict,
-        )
-        else {}
-    )
+def get_shared_semantic_encoder():
+    return QUANTUM_INTERPRETATION_ENGINE
 
-    return {
-        "transport": TRANSPORT_NAME,
-        "engine": ENGINE_VERSION,
-        "single_route": True,
-        "legacy_trigger_execution": False,
-        "keyword_routing": False,
-        "interpretation": _copy(
-            runtime_state.get(
-                "_canonical_interpretation_dialogue"
-            )
-            or runtime_state.get(
-                "canonical_interpretation"
-            )
-            or {}
-        ),
-        "dialogue_memory": _copy(
-            runtime_state.get(
-                "dialogue_memory"
-            )
-            or {}
-        ),
-        "active_dialogue_sequence": _copy(
-            runtime_state.get(
-                "active_dialogue_sequence"
-            )
-            or {}
-        ),
-        "provider_authority": "INTERPRETATION",
-        "provider_must_not_reselect_context": True,
-        "scene_contract": "canonical",
-    }
+def _runtime_ready_guard() -> None:
+    return None
 
+def _ensure_semantic_runtime() -> None:
+    return None
 
-def build_semantic_profile(
-    text: str,
-    *,
-    history: Optional[List[Any]] = None,
-    state: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    state = state if isinstance(
-        state,
-        dict,
-    ) else {}
+def preload_semantic_runtime() -> None:
+    return None
 
-    history = history if isinstance(
-        history,
-        list,
-    ) else []
+def start_semantic_accelerator() -> None:
+    return None
 
-    latest = QUANTUM_DIALOGUE_ENGINE._stored_turns_from_state(
-        history,
-        state,
-    )
-    previous = latest[-1] if latest else None
+def _ensure_nli_runtime() -> None:
+    return None
 
-    return {
-        "engine": ENGINE_VERSION,
-        "input_text": _text(text),
-        "previous_turn_id": (
-            previous.turn_id
-            if previous
-            else ""
-        ),
-        "context_similarity": (
-            _semantic_similarity(
-                text,
-                previous.semantic_canvas(),
-            )
-            if previous
-            else 0.0
-        ),
-        "history_available": bool(
-            latest
-        ),
-        "structured_memory_available": any(
-            bool(t.artifacts)
-            or t.assistant_structured is not None
-            for t in latest
-        ),
-        "legacy_trigger_execution": False,
-    }
+def _lightweight_linguistic(text: str) -> Dict[str, Any]:
+    return QUANTUM_INTERPRETATION_ENGINE._linguistic(normalize_text(text))
 
+QuantumFastSemanticEngine = QuantumInterpretationEngine
+QuantumLinguisticEngine = QuantumInterpretationEngine
+QuantumEmbeddingEngine = QuantumInterpretationEngine
+QuantumIntentEngine = QuantumInterpretationEngine
+QuantumEvidenceFusionEngine = QuantumInterpretationEngine
+QuantumDialogueEngine = QuantumInterpretationEngine
+QuantumSceneInterpretationMatrix = QuantumInterpretationEngine
 
 def build_scene_blueprint(
     *,
@@ -2775,394 +380,3823 @@ def build_scene_blueprint(
     active_goal: str = "",
     subject: str = "",
     semantic_summary: str = "",
-    dialogue: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    dialogue: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a renderer-neutral scene blueprint for Semantic Core.
+
+    This helper contains no routing and no renderer selection. It preserves the
+    Interpretation decision as a compact semantic scene description.
     """
-    Renderer-neutral blueprint.
-
-    The processor may choose the actual renderer later.
-    """
-    reps: List[str] = []
-
-    for value in list(
-        requested_outputs or []
-    ) + list(
-        scene_composition or []
-    ):
-        if isinstance(
-            value,
-            Mapping,
-        ):
-            value = (
-                value.get(
-                    "representation"
-                )
-                or value.get(
-                    "kind"
-                )
-                or value.get(
-                    "type"
-                )
-            )
-
-        candidate = _text(
-            value
-        )
-
-        if (
-            candidate
-            and candidate in REPRESENTATIONS
-            and candidate not in reps
-        ):
-            reps.append(candidate)
-
-    preferred = _text(
-        production_representation
-    )
-
-    if (
-        preferred in REPRESENTATIONS
-        and preferred not in reps
-    ):
-        reps.insert(
-            0,
-            preferred,
-        )
-
+    reps: list[str] = []
+    for value in list(requested_outputs or ()) + list(scene_composition or ()) + [production_representation]:
+        if isinstance(value, dict):
+            value = value.get("type") or value.get("representation") or value.get("kind")
+        value = str(value or "").strip().lower()
+        if value and value not in reps:
+            reps.append(value)
     if not reps:
-        reps = [
-            "text"
-        ]
+        reps = ["text"]
 
-    dialogue = (
-        dialogue
-        if isinstance(
-            dialogue,
-            dict,
-        )
-        else {}
-    )
+    preferred = str(production_representation or "text").strip().lower() or reps[0]
+    if preferred not in reps:
+        reps.insert(0, preferred)
+
+    dialogue = dialogue if isinstance(dialogue, dict) else {}
+    live_scene = dialogue.get("live_scene") if isinstance(dialogue.get("live_scene"), dict) else {}
 
     return {
-        "version": "unified_scene_blueprint_v1",
-        "scene_kind": (
-            "composite"
-            if len(reps) > 1
-            else reps[0]
-        ),
+        "version": "live_scene_blueprint_v1",
+        "scene_kind": "composite" if len(reps) > 1 else reps[0],
         "representations": reps,
-        "preferred_representation": (
-            preferred
-            if preferred in REPRESENTATIONS
-            else reps[0]
-        ),
-        "active_topic": _text(
-            active_topic,
-            400,
-        ),
-        "active_goal": _text(
-            active_goal,
-            400,
-        ),
-        "subject": _text(
-            subject,
-            800,
-        ),
-        "semantic_summary": _text(
-            semantic_summary
-            or text,
-            1800,
-        ),
+        "preferred_representation": preferred,
+        "active_topic": str(active_topic or live_scene.get("topic") or "").strip(),
+        "active_goal": str(active_goal or live_scene.get("goal") or "").strip(),
+        "subject": str(subject or "").strip(),
+        "semantic_summary": str(semantic_summary or text or "").strip()[:1800],
         "dialogue": {
-            "relation": _text(
-                dialogue.get(
-                    "relation"
-                )
+            "relation": str(
+                dialogue.get("three_way_relation")
+                or dialogue.get("relation")
                 or "NEW"
-            ).upper(),
-            "continuation": bool(
-                dialogue.get(
-                    "continuation"
-                )
-            ),
-            "reference_to_previous": bool(
-                dialogue.get(
-                    "reference_to_previous"
-                )
-            ),
-            "scene_id": _text(
-                dialogue.get(
-                    "scene_id"
-                )
-            ),
+            ).strip().upper(),
+            "continuation": bool(dialogue.get("continuation")),
+            "reference_to_previous": bool(dialogue.get("reference_to_previous")),
+            "scene_id": str(
+                dialogue.get("scene_id")
+                or live_scene.get("scene_id")
+                or ""
+            ).strip(),
+            "canonical_topic": str(
+                dialogue.get("canonical_topic")
+                or active_topic
+                or live_scene.get("topic")
+                or ""
+            ).strip(),
         },
+        "composition": [dict(x) if isinstance(x, dict) else str(x) for x in list(scene_composition or ())[:16]],
         "ownership": {
             "interpretation_owner": "INTERPRETATION_LAYER",
-            "semantic_owner": "INTERPRETATION_LAYER",
-            "renderer_owner": "PROCESSOR",
+            "semantic_owner": "SEMANTIC_CORE",
+            "renderer_owner": "PROCESSOR_SELECTED",
         },
         "renderer_neutral": True,
     }
 
 
-# ---------------------------------------------------------------------------
-# Integration metadata.
-# ---------------------------------------------------------------------------
-
-def integration_contract() -> Dict[str, Any]:
-    """
-    Explicitly documents the intended single route.
-
-    No secondary route is created by this test file.
-    """
-    return {
-        "interpretation_layer": "blocks.interpretation_layer",
-        "executor": "blocks.executor",
-        "provider": "blocks.provider_router.generate_text",
-        "state_manager": {
-            "get_state": "blocks.state_manager.get_state",
-            "build_dialogue_memory_bridge":
-                "blocks.state_manager.build_dialogue_memory_bridge",
-            "update_dialog_context":
-                "blocks.state_manager.update_dialog_context",
-            "update_scene_context":
-                "blocks.state_manager.update_scene_context",
-            "persist_state":
-                "blocks.state_manager.persist_state",
-        },
-        "artifact_contract":
-            "blocks.C_ARTIFACT_CONTRACT",
-        "presentation_formatter":
-            "blocks.presentation_formatter",
-        "context_system":
-            "blocks.context_system",
-        "route": [
-            "INGEST",
-            "INTERPRETATION",
-            "DIALOGUE_RELATION",
-            "STRUCTURED_CONTEXT",
-            "PROVIDER",
-            "STRUCTURED_RESPONSE",
-            "CANONICAL_DIALOGUE_MEMORY",
-            "SCENE_CONTRACT",
-            "WEB",
-        ],
-        "single_route": True,
-        "one_provider_call_per_turn": True,
-        "renderer_independent": True,
-        "legacy_triggers_enabled": False,
-    }
+def normalize_text(text: Any) -> str:
+    return QUANTUM_INTERPRETATION_ENGINE.normalize(text)
 
 
-# ---------------------------------------------------------------------------
-# Test helpers.
-# ---------------------------------------------------------------------------
-
-def build_test_state(
-    *,
-    user_id: str = "test-user",
-    conversation_id: str = "test-conversation",
-) -> Dict[str, Any]:
-    """
-    Small in-memory fixture for local tests.
-    """
-    bucket = int(
-        _now() // DIALOGUE_TTL_SECONDS
-    )
-
-    sequence_id = (
-        "seq-"
-        + hashlib.sha256(
-            (
-                f"{user_id}|"
-                f"{conversation_id}|"
-                f"{bucket}"
-            ).encode("utf-8")
-        ).hexdigest()[:20]
-    )
-
-    return {
-        "user_id": user_id,
-        "conversation_id": conversation_id,
-        "active_dialogue_sequence": {
-            "sequence_id": sequence_id,
-            "task_id": "",
-        },
-        "dialog": [],
-        "dialogue_memory": {
-            "engine": ENGINE_VERSION,
-            "window": "12h",
-            "user_id": user_id,
-            "conversation_id": conversation_id,
-            "sequence_id": sequence_id,
-            "ttl_seconds": DIALOGUE_TTL_SECONDS,
-            "turns": [],
-        },
-        "cognition": {},
-        "semantic": {},
-    }
+def normalize_lower(text: Any) -> str:
+    return normalize_text(text).lower()
 
 
-async def fake_provider(
-    messages: List[Dict[str, str]]
-) -> Dict[str, Any]:
-    """
-    Provider fixture for a pure local contract test.
+def contains_any(text: str, words: Sequence[str]) -> bool:
+    tokens = set(QUANTUM_INTERPRETATION_ENGINE._tokens(normalize_text(text)))
+    return bool(tokens & {normalize_lower(x) for x in words})
 
-    It demonstrates that the provider may return a full structured dataset
-    without the interpretation layer truncating it.
-    """
-    packet = json.loads(
-        messages[-1]["content"]
-    )
 
-    interpretation = packet[
-        "interpretation"
+def _semantic_evidence_stub(kind: str, text: str) -> bool:
+    return contains_any(text, (kind,))
+
+
+def detect_domain_candidates(text: str):
+    return [
+        x["domain"] for x in QUANTUM_INTERPRETATION_ENGINE.domains(text)["measurements"]
+        if float(x["score"]) >= 0.45
     ]
 
-    existing_data = (
-        interpretation.get(
-            "structured_data"
-        )
-    )
 
-    if existing_data is None:
-        existing_data = {
-            "x": list(range(1, 31)),
-            "y": list(range(10, 40)),
-        }
-
-    representation = (
-        interpretation.get(
-            "representation"
-        )
-        or "line"
-    )
-
+def build_domain_confidence(text: str):
     return {
-        "model": "test-provider",
-        "usage": {
-            "input_tokens": 1,
-            "output_tokens": 1,
-        },
-        "answer": "Структурированный тестовый ответ.",
-        "structured": {
-            "kind": "graph",
-            "title": "Тестовые данные",
-            "representation": representation,
-            "data": existing_data,
-            "series": [
-                {
-                    "name": "series-1",
-                    "data": existing_data,
-                }
-            ],
-            "temporal_scope": {
-                "kind": "month",
-                "granularity": "day",
-            },
-            "metadata": {
-                "point_count": len(
-                    existing_data.get(
-                        "x",
-                        []
-                    )
-                )
-            },
-        },
+        x["domain"]: round(float(x["score"]), 4)
+        for x in QUANTUM_INTERPRETATION_ENGINE.domains(text)["measurements"]
+        if float(x["score"]) >= 0.20
     }
 
 
+def _capability_scores(text: str) -> dict[str, float]:
+    return QUANTUM_INTERPRETATION_ENGINE.measure(text)["capability_scores"]
 
-async def regression_test():
+
+def measure_representation_evidence(text: str) -> list[dict[str, Any]]:
+    return [
+        SemanticEvidence(x["type"], float(x["score"]), "quantum_matrix").as_dict()
+        for x in QUANTUM_INTERPRETATION_ENGINE.representations(text)["measurements"]
+    ]
+
+
+def detect_representation_candidates(text: str):
+    return [
+        x["label"] for x in measure_representation_evidence(text)
+        if float(x["score"]) >= 0.45
+    ]
+
+
+def semantic_evidence_math(text: str) -> float:
+    return QUANTUM_INTERPRETATION_ENGINE.measure(text)["representation_scores"].get("formula", 0.0)
+
+
+def semantic_evidence_renderer(text: str) -> float:
+    return max(
+        QUANTUM_INTERPRETATION_ENGINE.measure(text)["representation_scores"].values(),
+        default=0.0,
+    )
+
+
+def semantic_evidence_image(text: str) -> float:
+    return QUANTUM_INTERPRETATION_ENGINE.measure(text)["representation_scores"].get("image", 0.0)
+
+
+def semantic_evidence_exploration(text: str) -> float:
+    return _capability_scores(text).get("exploration", 0.0)
+
+
+def semantic_evidence_continuation(text: str, previous_assistant: str = "") -> float:
+    return QUANTUM_INTERPRETATION_ENGINE.dialogue(
+        text, previous_assistant=previous_assistant
+    )["dialogue"]["continuation_score"]
+
+
+def semantic_evidence_web(text: str) -> float:
+    return _capability_scores(text).get("web", 0.0)
+
+
+def semantic_evidence_code(text: str) -> float:
+    return _capability_scores(text).get("code", 0.0)
+
+
+def semantic_evidence_information(text: str) -> float:
+    return _capability_scores(text).get("information", 0.0)
+
+
+def detect_discussion_mode(text: str) -> float:
+    return _capability_scores(text).get("discussion", 0.0)
+
+
+def detect_space_discussion(text: str) -> float:
+    return _capability_scores(text).get("space", 0.0)
+
+
+def detect_lightweight_visual(text: str) -> float:
+    scores = QUANTUM_INTERPRETATION_ENGINE.measure(text)["representation_scores"]
+    return max(scores.get("image", 0.0), scores.get("diagram", 0.0), scores.get("graph", 0.0))
+
+
+def detect_scene_type(text: str, cognition=None):
+    cognition = cognition if isinstance(cognition, dict) else {}
+    required = [str(x).lower() for x in cognition.get("required_representations", ()) or ()]
+    return required[0] if required else QUANTUM_INTERPRETATION_ENGINE.measure(text)["scene_matrix"]["best_scene"]
+
+
+def _is_micro_social_turn(text: Any) -> bool:
+    p = QUANTUM_INTERPRETATION_ENGINE.measure(normalize_text(text))
+    return bool(p["fast_social"] and len(normalize_text(text).split()) <= 24)
+
+
+def _semantic_identity_request(text: Any) -> bool:
+    return bool(QUANTUM_INTERPRETATION_ENGINE.measure(normalize_text(text))["identity_request"])
+
+
+def _dialogue_signal_contract(
+    text: str, history: list, state: dict, semantic: dict, cognition: dict | None = None,
+    precomputed_profile: dict[str, Any] | None = None,
+):
+    cognition = cognition if isinstance(cognition, dict) else {}
+    state = state if isinstance(state, dict) else {}
+    semantic = semantic if isinstance(semantic, dict) else {}
+    previous_assistant, previous_user, reply_to = QUANTUM_INTERPRETATION_ENGINE._history(history)
+    active_goal = normalize_text(
+        state.get("active_goal") or state.get("current_goal")
+        or semantic.get("active_goal") or cognition.get("active_goal")
+    )
+    active_topic = normalize_text(
+        state.get("active_topic") or state.get("current_topic")
+        or semantic.get("current_topic") or cognition.get("active_topic")
+    )
+    measured = QUANTUM_INTERPRETATION_ENGINE.dialogue(
+        text, previous_assistant=previous_assistant, previous_user=previous_user,
+        active_goal=active_goal, active_topic=active_topic,
+    )
+    d = measured["dialogue"]
+    continuation = bool(
+        previous_assistant and (
+            d["label"] in {"continuation", "reformulation", "correction", "reference", "affirmation", "rejection"}
+            or d["continuation_score"] >= 0.72
+        )
+    )
+    return {
+        "dialog_act": d["label"],
+        "current_request": text,
+        "continuation": continuation,
+        "reference_to_previous": bool(previous_assistant and d["reference_score"] >= 0.60),
+        "previous_april_turn": previous_assistant,
+        "previous_user_turn": previous_user,
+        "reply_to": reply_to,
+        "active_goal": active_goal,
+        "active_topic": active_topic,
+        "topic_score": d["topic_score"],
+        "goal_score": d["goal_score"],
+        "continuation_score": d["continuation_score"],
+        "reference_score": d["reference_score"],
+        "topic_shift": bool(active_topic and not continuation and d["topic_score"] < 0.35),
+        "history_available": bool(history),
+        "turn_count": len(history),
+        "semantic_measurement": measured,
+        "confidence": d["confidence"],
+        "decision_owner": DECISION_OWNER,
+        "evidence_only": True,
+        "canonical": True,
+    }
+
+
+def _semantic_context_packet(
+    text: str, history: list, state: dict, semantic: dict, cognition: dict
+) -> dict[str, Any]:
+    result = QUANTUM_INTERPRETATION_ENGINE.interpret(
+        text, cognition=cognition, semantic=semantic, history=history, state=state
+    )
+    return result.get("quantum_interpretation_field", {})
+
+
+def _base_interpret_request(
+    text, cognition=None, semantic=None, history=None, state=None
+):
+    return interpret_request(text, cognition, semantic, history, state)
+
+
+# ---------------------------------------------------------------------------
+# Canonical interpretation entrypoint
+# ---------------------------------------------------------------------------
+
+def interpret_request(
+    text, cognition=None, semantic=None, history=None, state=None
+):
+    return QUANTUM_INTERPRETATION_ENGINE.interpret(
+        text,
+        cognition=cognition,
+        semantic=semantic,
+        history=history,
+        state=state,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Compatibility builders retained as thin views, not separate engines.
+# ---------------------------------------------------------------------------
+
+def build_semantic_dialog_profile(
+    text, cognition=None, semantic=None, assistant_response=None,
+    dialogue_history=None, vision_context=None
+):
+    cognition = cognition or {}
+    semantic = semantic or {}
+    return {
+        "input_text": text,
+        "assistant_response": assistant_response,
+        "dialogue_history": dialogue_history or [],
+        "vision_context": vision_context or {},
+        "active_goal": cognition.get("active_goal") or semantic.get("active_goal"),
+        "active_topic": cognition.get("active_topic_slot") or semantic.get("current_topic"),
+        "semantic_state": semantic,
+        "requires_scene_builder": False,
+        "profile_version": "quantum_matrix_v1",
+    }
+
+
+def build_scene_construction_profile(semantic_profile):
+    return {
+        "requires_scene_builder": False,
+        "scene_type": "dialogue",
+        "dialogue_mode": "semantic_unified",
+        "context_source": "quantum_matrix",
+        "decision_owner": DECISION_OWNER,
+        "profile_version": "quantum_matrix_v1",
+    }
+
+
+def build_scene_artifact_contract(semantic_profile, scene_profile):
+    return {
+        "contract": "scene_artifact",
+        "transport": TRANSPORT_NAME,
+        "semantic_profile": semantic_profile or {},
+        "scene_profile": scene_profile or {},
+        "representation": "processor_decides",
+        "profile_version": "quantum_matrix_v1",
+    }
+
+
+def build_unified_scene_context(
+    semantic_profile, scene_profile, artifact_contract,
+    voice_context=None, vision_context=None, gallery_context=None, file_context=None,
+    assistant_response=None, dialogue_history=None, memory_state=None
+):
+    return {
+        "semantic_profile": semantic_profile or {},
+        "scene_profile": scene_profile or {},
+        "artifact_contract": artifact_contract or {},
+        "voice_context": voice_context or {},
+        "vision_context": vision_context or {},
+        "gallery_context": gallery_context or {},
+        "file_context": file_context or {},
+        "assistant_response": assistant_response,
+        "dialogue_history": dialogue_history or [],
+        "active_goal": (semantic_profile or {}).get("active_goal"),
+        "active_scene": (scene_profile or {}).get("scene_type", "dialogue"),
+        "memory_state": memory_state or {},
+        "continuity_state": {
+            "single_route": True,
+            "transport": TRANSPORT_NAME,
+            "scene_contract": "canonical",
+        },
+        "profile_version": "quantum_matrix_v1",
+    }
+
+
+def build_scene_execution_plan(
+    semantic_profile, scene_profile, artifact_contract, unified_scene_context=None
+):
+    context = unified_scene_context or build_unified_scene_context(
+        semantic_profile, scene_profile, artifact_contract
+    )
+    return {
+        "transport": TRANSPORT_NAME,
+        "scene_contract": "canonical",
+        "scene_context": context,
+        "scene_type": (scene_profile or {}).get("scene_type", "dialogue"),
+        "representation": "processor_decides",
+        "execution_mode": "single_quantum_matrix_pipeline",
+        "decision_owner": DECISION_OWNER,
+        "profile_version": "quantum_matrix_v1",
+    }
+
+
+def build_unified_interpretation_state(scene_context, processor_state=None):
+    return {
+        "transport": TRANSPORT_NAME,
+        "scene_context": scene_context or {},
+        "processor_state": processor_state or {},
+        "dialogue_vector": (scene_context or {}).get("dialogue_history", []),
+        "assistant_response": (scene_context or {}).get("assistant_response"),
+        "voice_context": (scene_context or {}).get("voice_context", {}),
+        "vision_context": (scene_context or {}).get("vision_context", {}),
+        "gallery_context": (scene_context or {}).get("gallery_context", {}),
+        "file_context": (scene_context or {}).get("file_context", {}),
+        "active_goal": (scene_context or {}).get("active_goal"),
+        "active_scene": (scene_context or {}).get("active_scene"),
+        "executor_mode": "single_scene_contract",
+        "profile_version": "quantum_matrix_v1",
+    }
+
+
+def build_semantic_processor_state(interpretation_state, execution_plan=None):
+    state = interpretation_state or {}
+    return {
+        "transport": TRANSPORT_NAME,
+        "processor_contract": "canonical",
+        "interpretation_state": state,
+        "execution_plan": execution_plan or {},
+        "semantic_inputs": {
+            "text": state.get("scene_context", {}).get("semantic_profile", {}).get("input_text"),
+            "voice": state.get("voice_context", {}),
+            "images": state.get("vision_context", {}),
+            "gallery": state.get("gallery_context", {}),
+            "files": state.get("file_context", {}),
+            "assistant": state.get("assistant_response"),
+            "history": state.get("dialogue_vector", []),
+        },
+        "scene_understanding": {
+            "active_scene": state.get("active_scene"),
+            "active_goal": state.get("active_goal"),
+            "continuity": True,
+            "single_route": True,
+        },
+        "profile_version": "quantum_matrix_v1",
+    }
+
+
+def build_dialogue_understanding_core(processor_state, executor_state=None):
+    inputs = (processor_state or {}).get("semantic_inputs", {})
+    return {
+        "transport": TRANSPORT_NAME,
+        "dialogue_understanding": {
+            "user_text": inputs.get("text"),
+            "voice": inputs.get("voice"),
+            "images": inputs.get("images"),
+            "gallery": inputs.get("gallery"),
+            "files": inputs.get("files"),
+            "assistant_response": inputs.get("assistant"),
+            "dialogue_history": inputs.get("history", []),
+            "scene_understanding": (processor_state or {}).get("scene_understanding", {}),
+        },
+        "processor_reasoning": {
+            "single_scene": True,
+            "history_aware": True,
+            "response_context": True,
+            "executor_shared_context": executor_state or {},
+        },
+        "profile_version": "quantum_matrix_v1",
+    }
+
+
+def optimize_dialogue_understanding(dialogue_core):
+    return {
+        "transport": TRANSPORT_NAME,
+        "dialogue_understanding": (dialogue_core or {}).get("dialogue_understanding", {}),
+        "optimization": {
+            "semantic_priority": ["current_request", "active_goal", "dialogue_history", "multimodal_context"],
+            "multi_evidence": True,
+            "response_continuity": True,
+            "scene_consistency": True,
+            "executor_alignment": True,
+        },
+        "canonical_reasoning": {
+            "single_scene": True, "single_contract": True, "single_transport": True,
+            "preserve_dialogue_vector": True,
+        },
+        "profile_version": "quantum_matrix_v1",
+    }
+
+
+def build_semantic_interpretation_contract(dialogue_optimization):
+    return {
+        "transport": TRANSPORT_NAME,
+        "semantic_contract": {
+            "mode": "canonical_semantic",
+            "single_scene": True,
+            "single_dialogue": True,
+            "single_processor": True,
+            "single_executor": True,
+        },
+        "dialogue_optimization": dialogue_optimization or {},
+        "reasoning_policy": {
+            "current_request_authoritative": True,
+            "multimodal_fusion": True,
+            "multi_evidence": True,
+            "trigger_independent": True,
+            "scene_continuity": True,
+        },
+        "profile_version": "quantum_matrix_v1",
+    }
+
+
+def build_canonical_semantic_runtime(semantic_contract, processor_state, dialogue_core):
+    dialogue = (dialogue_core or {}).get("dialogue_understanding", {})
+    return {
+        "transport": TRANSPORT_NAME,
+        "scene": dialogue.get("scene_understanding", {}),
+        "dialogue": dialogue,
+        "processor": processor_state or {},
+        "reasoning_policy": (semantic_contract or {}).get("reasoning_policy", {}),
+        "continuity_vector": {
+            "history": dialogue.get("dialogue_history", []),
+            "assistant": dialogue.get("assistant_response"),
+            "goal": dialogue.get("scene_understanding", {}).get("active_goal"),
+        },
+        "compatibility": {
+            "enabled": False,
+            "trigger_execution": False,
+            "keyword_matching": False,
+        },
+        "profile_version": "quantum_matrix_v1",
+    }
+
+
+def fuse_semantic_inputs(runtime_state):
+    runtime_state = runtime_state or {}
+    inputs = dict(runtime_state.get("input_sources", {}))
+    continuity = runtime_state.get("continuity_vector", {})
+    return {
+        "transport": TRANSPORT_NAME,
+        "scene": runtime_state.get("scene", {}),
+        "goal": continuity.get("goal"),
+        "history": continuity.get("history", []),
+        "assistant_response": continuity.get("assistant"),
+        "modalities": {k: inputs.get(k) for k in ("text", "voice", "images", "gallery", "files")},
+        "semantic_state": {
+            "single_route": True,
+            "multimodal_fusion": True,
+            "legacy_trigger_enabled": False,
+            "context_complete": True,
+        },
+        "available_modalities": [k for k, v in inputs.items() if v not in (None, {}, [], "")],
+        "profile_version": "quantum_matrix_v1",
+    }
+
+
+def build_processor_execution_context(runtime_state):
+    fused = fuse_semantic_inputs(runtime_state or {})
+    return {
+        "transport": TRANSPORT_NAME,
+        "semantic_context": fused,
+        "executor_context": fused,
+        "processor_context": fused,
+        "decision_owner": DECISION_OWNER,
+        "profile_version": "quantum_matrix_v1",
+    }
+
+
+SEMANTIC_EVIDENCE_PRIORITY = (
+    "current_request", "active_goal", "dialogue_history",
+    "voice_context", "vision_context", "gallery_context",
+    "file_context", "semantic_profile",
+)
+LEGACY_TRIGGER_FLAGS = ()
+CANONICAL_SEMANTIC_RUNTIME = {
+    "transport": TRANSPORT_NAME,
+    "reasoning": "quantum_matrix",
+    "legacy_trigger_execution": False,
+    "single_scene": True,
+    "single_processor": True,
+    "single_executor": True,
+}
+SEMANTIC_INTERPRETATION_CORE = {
+    "decision_source": DECISION_OWNER,
+    "routing": "processor_owned",
+    "legacy_mode": "isolated",
+    "scene_contract": "artifact_first",
+    "executor_contract": "advisory_only",
+    "history_model": "evidence_based",
+    "confidence_policy": "multi_evidence",
+}
+SEMANTIC_PIPELINE = INTERPRETATION_ROUTE
+
+
+# ============================================================================
+# DIALOGUE-FIRST RUNTIME — INTEGRATED INTO THIS EXISTING FILE
+# ============================================================================
+# There is intentionally NO blocks.dialogue_runtime module.  This code lives
+# in the production interpretation layer so the existing project topology is
+# unchanged. Bigunoks are evidence probes only.
+
+_df_version = "april_integrated_dialogue_first_v2_dynamic_branch_graph"
+_df_provider_plan_version = "april_provider_handoff_v1"
+
+_df_structured = {"image", "gallery", "diagram", "graph", "table", "formula", "code", "link"}
+_df_confirm = {"да", "ага", "верно", "правильно", "точно", "именно", "хорошо", "угу"}
+_df_reject = {"нет", "не", "неверно", "неправильно", "неа"}
+_df_short_filler = {"ну", "так", "теперь", "дальше", "и", "а", "это", "понятно"}
+_df_stop = {
+    "и", "а", "но", "да", "нет", "ну", "так", "же", "ли", "же", "я", "ты", "мне", "тебе",
+    "меня", "тебя", "мы", "вы", "они", "он", "она", "оно", "это", "этот", "эта", "эту", "тот",
+    "что", "как", "почему", "зачем", "какой", "какая", "какое", "какие", "сколько", "можешь",
+    "можешь", "можно", "хочу", "хотел", "хотела", "нужно", "надо", "давай", "расскажи", "скажи",
+    "объясни", "покажи", "сделай", "создай", "построй", "проверь", "предложить", "предлагаю", "игру",
+    "в", "на", "по", "про", "об", "о", "к", "у", "из", "с", "со", "для", "уже", "ещё", "еще",
+}
+
+_df_new_topic_markers = (
+    "новая тема", "другая тема", "отдельная тема", "сменим тему", "перейдем к", "перейдём к",
+    "давай теперь про", "давай теперь о", "а теперь про", "а теперь о", "теперь поговорим о",
+    "кстати про", "кстати о", "хочу обсудить другую тему",
+    "хочу предложить тебе игру", "хочу предложить игру", "давай сыграем",
+    "начнем игру", "начнём игру", "давай поиграем",
+)
+_df_recall_markers = (
+    "вернемся к", "вернёмся к", "вернись к", "вернись к теме", "вернись к разговору",
+    "вспомни", "помнишь", "что мы обсуждали", "о чем мы говорили", "о чём мы говорили",
+    "что я спрашивал", "что я спрашивала", "что я просил", "что я просила",
+)
+_df_feedback_markers = (
+    "мне нравится", "мне очень нравится", "мне понравилось", "мне очень понравилось",
+    "понравилось", "нравится", "классно", "классная", "классный", "прикольно",
+    "красиво", "отлично", "супер", "прекрасно", "здорово", "забавно",
+    "круто", "огонь", "молодец", "спасибо", "благодарю",
+)
+_df_feedback_negative_markers = (
+    "не нравится", "не понравилось", "плохо", "ужасно", "некрасиво",
+    "не то", "не очень", "неудачно",
+)
+_df_memory_scope_terms = {
+    "памят", "контекст", "диалог", "диалоги", "разговор", "разговоры",
+    "истори", "обсужд", "сесс", "ветк", "последовательн",
+}
+_df_memory_scope_actions = {
+    "проверь", "проверить", "посмотри", "посмотреть", "покажи", "показать",
+    "расскажи", "рассказать", "выдай", "выдать", "перечисли", "перечислить",
+    "вспомни", "вспомнить", "сориентируйся", "сориентироваться",
+}
+_df_deictic = re.compile(r"\b(?:это|этот|эта|эту|этого|этой|этим|он|она|оно|они|их|них|им|ими|обоих|обеих|его|ее|её|тот|та|те|там|здесь|выше|ниже|дальше|следующ(?:ий|ая|ее|ие|его|ую|им|ими)?|свой|свою|своего)\b", re.I)
+_df_explicit_result = (
+    "как ты угадал", "как ты угадала", "почему ты угадал", "почему ты угадала",
+    "правильный ответ", "объясни свой ответ", "объясни твой ответ", "объясни свой правильный ответ",
+    "объясни твой правильный ответ", "объясни мой ответ", "твои вычисления", "по какой формуле",
+    "какую формулу ты применил", "какую формулу ты применил", "о чем я просил", "о чём я просил",
+    "что ты должна была", "что ты должен был",
+)
+
+_df_render_patterns = (
+    ("image", r"(?:картинк|изображени|нарисуй|изобрази|сгенерируй|портрет|фото|рисунок)"),
+    ("diagram", r"(?:схем|блок[- ]?схем)"),
+    ("graph", r"(?:график|графика|кривую|кривая|диаграмм)"),
+    ("table", r"(?:таблиц|табличк)"),
+    ("formula", r"(?:формул|уравнен|математическ)"),
+    ("code", r"(?:код|python|пайтон|скрипт)"),
+    ("link", r"(?:ссылк|url|link)"),
+)
+
+_df_commands = (
+    "расскажи", "скажи", "объясни", "покажи", "нарисуй", "изобрази", "создай", "сгенерируй",
+    "сделай", "построй", "проверь", "опиши", "сравни", "найди", "выведи", "подскажи", "дай",
+    "предложи", "разработай", "исправь", "сформулируй", "составь", "перепиши", "переделай", "угадай",
+    "отгадай", "разгадай",
+)
+
+
+def _df_text(value: Any, limit: int = 2400) -> str:
+    s = str(value or "").strip()
+    return s[:limit]
+
+
+def _df_low(value: Any) -> str:
+    return re.sub(r"\s+", " ", _df_text(value).lower()).strip()
+
+
+def _df_tokens(value: Any) -> list[str]:
+    words = re.findall(r"[a-zа-яё0-9][a-zа-яё0-9_-]{2,}", _df_low(value))
+    return [w for w in words if w not in _df_stop]
+
+
+def _df_overlap(a: Any, b: Any) -> float:
+    aa, bb = set(_df_tokens(a)), set(_df_tokens(b))
+    if not aa or not bb:
+        return 0.0
+    return round(len(aa & bb) / max(1, min(len(aa), len(bb))), 6)
+
+
+def _df_explicit_new(text: str, active_topic: str = "", active_entity: str = "") -> bool:
+    low = _df_low(text)
+    if any(m in low for m in _df_new_topic_markers):
+        return True
+    # Game/task handoff is a real topic boundary, but the previous branch is kept
+    # in the branch index and remains recallable.
+    if re.search(r"\b(?:хочу\s+предложить(?:\s+тебе)?\s+игр(?:у|а)|давай\s+(?:сыграем|поиграем)|начн(?:ем|ём)\s+игр(?:у|а))\b", low):
+        return True
+    # A command naming a different concrete subject opens a branch.  A pronoun
+    # such as "это/этом" is deliberately excluded: it is a live-dialogue reference.
+    m = re.match(r"^(?:а\s+)?(?:расскажи|скажи|объясни|покажи|проверь|найди|сравни)\b.*?\b(?:про|об|о)\s+(.+)$", low)
+    if m:
+        subject = _df_normalize_subject(m.group(1).strip(" .,!?:;—-"))
+        if subject and not _df_deictic.search(subject):
+            current = {_df_low(active_topic), _df_low(active_entity)} - {""}
+            if _df_low(subject) not in current and not any(_df_low(c) and _df_low(c) in _df_low(subject) for c in current):
+                return True
+    return False
+
+
+def _df_memory_scope_request(text: str) -> bool:
+    """Detect a request to inspect the active conversation memory itself.
+
+    This is semantic evidence, not a route selector: relation handling remains
+    responsible for deciding RECALL, and StateManager remains responsible for
+    materializing the authenticated 12-hour window.
     """
-    Regression for the live failure:
-        DIALOGUE_PROVIDER_PLAN_MISSING -> HTTP 500 -> empty April bubble.
+    low = _df_low(text)
+    if any(marker in low for marker in _df_recall_markers):
+        return True
+    term_hits = sum(1 for term in _df_memory_scope_terms if term in low)
+    action_hits = sum(1 for verb in _df_memory_scope_actions if re.search(rf"\b{re.escape(verb)}\b", low))
+    explicit_window = bool(re.search(r"\b(?:двенадцат|12)[- ]?(?:час|ч)\w*\b", low))
+    return bool((term_hits >= 2 and action_hits >= 1) or (explicit_window and term_hits >= 1 and action_hits >= 1))
 
-    This test verifies that Interpretation emits the Provider plan before the
-    existing provider_router sees the request.
+
+def _df_explicit_recall(text: str) -> bool:
+    return _df_memory_scope_request(text)
+
+
+def _df_feedback_probe(
+    text: str,
+    *,
+    canonical_turn: dict[str, Any] | None = None,
+    previous_april: str = "",
+) -> dict[str, Any]:
+    """Detect a reaction to the immediately preceding canonical assistant action."""
+    low = _df_low(text)
+    canonical = canonical_turn if isinstance(canonical_turn, dict) else {}
+    positive = any(x in low for x in _df_feedback_markers)
+    negative = any(x in low for x in _df_feedback_negative_markers)
+    if _df_explicit_recall(text) or not ((positive or negative) and (canonical or previous_april or len(_df_tokens(low)) <= 8)):
+        return {"feedback": False, "sentiment": "", "target": {}, "reason": ""}
+    scene = canonical.get("visual_scene") if isinstance(canonical.get("visual_scene"), dict) else {}
+    topic = _df_text(canonical.get("topic") or canonical.get("canonical_topic") or scene.get("topic"), 220)
+    entities = [_df_text(x, 180) for x in (canonical.get("entities") or []) if _df_text(x, 180)]
+    target = {
+        "type": "LAST_ASSISTANT_ACTION",
+        "turn_id": _df_text(canonical.get("turn_id"), 120),
+        "scene_id": _df_text(canonical.get("visual_scene_id") or scene.get("scene_id") or canonical.get("scene_id"), 160),
+        "operation": _df_text(canonical.get("operation") or scene.get("operation"), 80),
+        "topic": topic,
+        "entities": entities[:4],
+    }
+    return {
+        "feedback": True,
+        "sentiment": "negative" if negative and not positive else "positive",
+        "target": target,
+        "reason": "user_reaction_to_previous_assistant_action",
+    }
+
+
+def _df_extract_subject(text: str) -> str:
+    """Extract the semantic operand without inventing a topic from sentence tails."""
+    value = _df_text(text, 1000)
+    if not value:
+        return ""
+    low = _df_low(value)
+
+    # Visual plural deictics are references, not semantic operands.
+    if re.match(r"^(?:а\s+)?(?:нарисуй|изобрази|сгенерируй|создай)\s+(?:их|них|обоих|обеих)\b", low):
+        return ""
+
+    quoted = re.search(r'[«"]([^»"]{2,180})[»"]', value)
+    if quoted:
+        return _df_text(quoted.group(1), 180)
+
+    question_patterns = (
+        r"^(?:продолжаем|продолжим|дальше|теперь)\s+что\s+такое\s+(.+)$",
+        r"^что\s+такое\s+(.+)$",
+        r"^(?:продолжаем|продолжим|дальше|теперь)\s+кто\s+такой\s+(.+)$",
+        r"^кто\s+такой\s+(.+)$",
+        r"^кто\s+(?:такая|такое|такие)\s+(.+)$",
+        r"^кто\s+это\s+(.+)$",
+    )
+    for pattern in question_patterns:
+        match = re.match(pattern, low, re.IGNORECASE)
+        if match:
+            candidate = match.group(1).strip(" .,!?:;—-\n")
+            if candidate:
+                return _df_text(candidate, 180)
+
+    # Generic request frames are used only to locate the current operand. They
+    # never decide relation/routing on their own.
+    command_heads = (
+        r"назови", r"скажи", r"дай", r"выдай", r"укажи", r"выбери",
+        r"напиши", r"приведи", r"расскажи", r"объясни", r"покажи",
+        r"проверь", r"найди", r"опиши", r"создай", r"нарисуй", r"изобрази", r"сгенерируй",
+        r"построй", r"рассчитай", r"посчитай", r"ответь", r"определи",
+    )
+    head = "(?:" + "|".join(command_heads) + ")"
+    match = re.match(rf"^(?:а\s+)?{head}\s+(.+)$", low, re.IGNORECASE)
+    if match:
+        candidate = match.group(1).strip(" .,!?:;—-\n")
+        candidate = re.sub(r"^(?:мне|меня|для\s+меня)\s+", "", candidate, flags=re.IGNORECASE)
+        candidate = re.sub(
+            r"\s+(?:прописью|словами|подробно|кратко|пожалуйста|сейчас)$",
+            "",
+            candidate,
+            flags=re.IGNORECASE,
+        ).strip(" .,!?:;—-\n")
+        if candidate:
+            return _df_text(candidate, 180)
+
+    about = re.search(r"\b(?:про|об|о|насчет|насчёт|касаемо)\s+(.{2,180})", low)
+    if about:
+        candidate = about.group(1).strip(" .,!?:;—-\n")
+        candidate = re.sub(
+            r"\s+(?:расскажи|расскажите|объясни|объясните|покажи|покажите|напиши|опиши)$",
+            "",
+            candidate,
+            flags=re.IGNORECASE,
+        ).strip()
+        if candidate and candidate not in {"это", "этом", "этого", "него", "неё", "нее"}:
+            return _df_text(candidate, 180)
+
+    # Pure discourse/deictic heads are not semantic entities. They acquire
+    # meaning from the live sequence only after relation resolution.
+    reference_only = {
+        "следующее", "следующий", "следующая", "следующее", "следующие",
+        "дальше", "продолжай", "продолжить", "продолжение", "ещё", "еще",
+        "теперь", "потом", "далее", "сейчас", "овечай", "отвечай",
+    }
+    if low.strip(" .,!?:;—-\n") in reference_only:
+        return ""
+
+    # Proper-name mentions are semantic entities, not hardcoded entity lists.
+    ignored = {
+        "теперь", "сейчас", "потом", "пожалуйста", "апрель", "я", "ты", "мы", "вы",
+        "назови", "скажи", "расскажи", "кто", "что", "почему", "зачем", "как", "где",
+        "когда", "сколько", "какой", "какая", "какое", "какие", "можешь", "можно",
+        "нужно", "надо", "давай",
+    }
+    proper = re.findall(r"\b[А-ЯЁ][а-яё-]{2,}(?:\s+[А-ЯЁ][а-яё-]{2,}){0,2}\b", value)
+    for candidate in reversed(proper):
+        parts = candidate.split()
+        if parts and parts[0].lower() not in ignored:
+            return _df_text(candidate, 180)
+
+    return ""
+
+def _df_visual_reference_entity(
+    text: str,
+    previous_user: str = "",
+    previous_april: str = "",
+    state: dict[str, Any] | None = None,
+) -> str:
+    """Resolve a deictic reference against ONE authoritative live turn.
+
+    The post-Provider canonical dialogue turn is the only semantic owner for
+    unqualified references such as ``его/её/их/них/этого``. Legacy tasks, old
+    visual scenes and branch registries are deliberately excluded: they remain
+    historical evidence and may only be selected by an explicit RECALL request.
     """
-    state = build_test_state()
-    result = interpret_request(
-        "Покажи данные о прибыли",
-        history=[],
-        state=state,
+    low = _df_low(text)
+    if not re.search(
+        r"\b(?:их|них|им|ими|обоих|обеих|его|ее|её|этого\s+(?:человека|мужчину|мужчины)|"
+        r"эту\s+женщину|этого|на\s+(?:нём|нем|ней)|его\s+на|её\s+на|ее\s+на)\b",
+        low,
+    ):
+        return ""
+    if not isinstance(state, dict):
+        return ""
+
+    canonical = state.get("canonical_dialogue_turn")
+    if not isinstance(canonical, dict):
+        return ""
+
+    entities = [
+        _df_text(x, 180)
+        for x in (canonical.get("entities") or [])
+        if _df_text(x, 180)
+    ]
+    plural = bool(re.search(r"\b(?:их|них|им|ими|обоих|обеих)\b", low))
+    if plural and len(entities) >= 2:
+        return " и ".join(entities[:4])
+
+    active = _df_text(canonical.get("active_entity"), 220)
+    if active:
+        return active
+    if entities:
+        return entities[0]
+
+    # No canonical subject means the system has insufficient evidence. Do not
+    # fall back to previous visual artifacts or an old task just to manufacture
+    # an answer. The Provider can then request/resolve the missing context safely.
+    return ""
+
+
+def _df_normalize_subject(value: str) -> str:
+    low = _df_low(value)
+    aliases = {
+        "пончики": "пончик",
+        "пончиков": "пончик",
+        "пончика": "пончик",
+        "илона маска": "илон маск",
+        "яблоки": "яблоко",
+        "яблок": "яблоко",
+        "угадайки": "игра в угадайки",
+        "угадайка": "игра в угадайки",
+    }
+    return aliases.get(low, _df_text(value, 180))
+
+
+def _df_extract_previous(history: list[Any], state: dict[str, Any]) -> tuple[str, str]:
+    """Read the latest canonical pair; never scan the 12-hour archive on hot path."""
+    state = state if isinstance(state, dict) else {}
+    canonical = state.get("canonical_dialogue_turn")
+    if isinstance(canonical, dict):
+        user = _df_text(canonical.get("user_request"), 1200)
+        april = _df_text(canonical.get("april_answer"), 2200)
+        if user or april:
+            return user, april
+    anchor = state.get("dialogue_memory_anchor")
+    if isinstance(anchor, dict):
+        user = _df_text(anchor.get("user_request"), 1200)
+        april = _df_text(anchor.get("april_answer"), 2200)
+        if user or april:
+            return user, april
+    if isinstance(history, list):
+        last_user = last_april = ""
+        for item in reversed(history[-6:]):
+            if not isinstance(item, dict):
+                continue
+            role = _df_low(item.get("role"))
+            if not last_april and role in {"assistant", "april", "bot"}:
+                last_april = _df_text(item.get("answer") or item.get("content") or item.get("summary") or item.get("text"), 2200)
+            if not last_user and role in {"user", "human"}:
+                last_user = _df_text(item.get("content") or item.get("text") or item.get("answer"), 1200)
+            if last_user and last_april:
+                return last_user, last_april
+    seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+    return (
+        _df_text(seq.get("last_user_request") or state.get("last_user_turn"), 1200),
+        _df_text(seq.get("last_april_answer") or state.get("last_april_turn"), 2200),
     )
 
-    assert isinstance(result, dict)
-    assert result["provider_context_plan"]["authority"] == "INTERPRETATION"
-    assert result["provider_context_plan"]["scene_composition"]
-    assert result["scene_composition"]
-    assert result["requested_outputs"]
-    assert result["render_authorized"] is True
+def _df_compact_active_sequence_digest(
+    state: dict[str, Any],
+    canonical_turn: dict[str, Any],
+    sequence_id: str = "",
+) -> dict[str, Any]:
+    """Build the active dialogue digest from canonical state only."""
+    state = state if isinstance(state, dict) else {}
+    canonical_turn = canonical_turn if isinstance(canonical_turn, dict) else {}
+    seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+    sid = _df_text(sequence_id or canonical_turn.get("sequence_id") or seq.get("sequence_id"), 80)
+    tid = _df_text(canonical_turn.get("task_id") or seq.get("task_id"), 100)
+    topic = _df_text(canonical_turn.get("topic") or canonical_turn.get("canonical_topic") or seq.get("topic"), 220)
+    entities = [_df_text(x, 120) for x in (canonical_turn.get("entities") or []) if _df_text(x, 120)]
+    entity = _df_text(canonical_turn.get("active_entity") or " и ".join(entities[:4]), 220)
+    user = _df_text(canonical_turn.get("user_request") or seq.get("last_user_request"), 260)
+    april = _df_text(canonical_turn.get("april_answer") or seq.get("last_april_answer"), 420)
+    count = int(canonical_turn.get("sequence_turn_index") or seq.get("turn_count") or 0)
+    row = {"turn": count, "task_id": tid, "user": user, "april": april, "topic": topic, "relation": _df_text(canonical_turn.get("relation") or canonical_turn.get("dialogue_relation"), 40).upper()}
+    return {
+        "version": "compact_canonical_digest_v2", "source": "canonical_dialogue_turn",
+        "sequence_id": sid, "task_id": tid, "dialogue_window_hours": DIALOGUE_WINDOW_HOURS,
+        "history_scope": "active_canonical_turn", "sequence_turn_count": count, "turn_count": count,
+        "window_record_count": 1 if (user or april) else 0, "task_turn_count": 1 if tid and (user or april) else 0,
+        "root_topic": topic, "current_topic": topic, "current_task_topic": topic, "current_focus": entity or topic,
+        "last_user": user, "last_april": april, "previous_user": "", "previous_april": "",
+        "last_result": deepcopy(canonical_turn.get("last_result") or {}), "answer_basis": deepcopy(canonical_turn.get("answer_basis") or {}),
+        "dialogue_rules": deepcopy(seq.get("dialogue_rules") or {}), "topic_path": [topic] if topic else [],
+        "recent_trajectory": [row] if (user or april) else [], "task_trajectory": [], "task_summaries": [],
+        "coverage": "canonical_only", "window_complete": bool(sid), "other_branches_included": False, "full_history_included": False,
+    }
 
-    # Verify the 12h memory + structured artifact path with 30 data points.
-    await process_turn(
-        user_id="test-user",
-        conversation_id="test-conversation",
-        current_request="Покажи данные о прибыли",
-        state=state,
-        provider_call=fake_provider,
+
+def _df_active_sequence_digest(
+    state: dict[str, Any],
+    history: list[Any],
+    sequence_id: str,
+    *,
+    limit: int = 8,
+    task_id: str = "",
+) -> dict[str, Any]:
+    """Build the semantic digest of the authenticated 12-hour parent sequence.
+
+    The parent sequence contains multiple topic/task branches. Task-local state
+    remains available separately, but it is never allowed to hide the sequence
+    trajectory from Interpretation.
+    """
+    seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+    sid = _df_text(sequence_id or seq.get("sequence_id"), 120)
+    tid = _df_text(task_id or seq.get("task_id") or state.get("active_dialogue_task_id"), 100)
+    conversation_id = _df_text(state.get("conversation_id") or (state.get("memory_scope") or {}).get("conversation_id"), 160)
+    user_id = _df_text(state.get("user_id") or (state.get("memory_scope") or {}).get("user_id"), 120)
+
+    registry = seq.get("task_registry") if isinstance(seq.get("task_registry"), dict) else {}
+    top_registry = state.get("dialogue_task_registry") if isinstance(state.get("dialogue_task_registry"), dict) else {}
+    task_record = deepcopy(registry.get(tid) or top_registry.get(tid) or {}) if tid else {}
+
+    rows: list[dict[str, Any]] = []
+    timeline = state.get("memory_timeline") if isinstance(state.get("memory_timeline"), dict) else {}
+    now = time.time()
+    for day in timeline.values():
+        if not isinstance(day, dict):
+            continue
+        for raw in day.get("dialog_pairs", []):
+            if not isinstance(raw, dict):
+                continue
+            raw_sid = _df_text(raw.get("sequence_id"), 120)
+            if not sid or raw_sid != sid:
+                continue
+            raw_user_id = _df_text(raw.get("user_id"), 120)
+            if user_id and raw_user_id and raw_user_id != user_id:
+                continue
+            raw_conversation = _df_text(raw.get("conversation_id"), 160)
+            if conversation_id and raw_conversation and raw_conversation != conversation_id:
+                continue
+            try:
+                created_at = float(raw.get("created_at") or raw.get("timestamp") or 0.0)
+            except (TypeError, ValueError):
+                created_at = 0.0
+            if created_at and now - created_at >= USER_CONTENT_RETENTION_SECONDS:
+                continue
+            try:
+                turn_index = int(raw.get("sequence_turn_index") or 0)
+            except (TypeError, ValueError):
+                turn_index = 0
+            rows.append({
+                "sequence_turn_index": turn_index,
+                "task_response_number": int(raw.get("task_response_number") or raw.get("response_count") or 0),
+                "task_id": _df_text(raw.get("task_id"), 100),
+                "created_at": created_at,
+                "topic": _df_text(raw.get("sequence_topic") or raw.get("topic") or raw.get("canonical_topic"), 220),
+                "user": _df_text(raw.get("user_request") or raw.get("user_meaning") or raw.get("user"), 260),
+                "april": _df_text(raw.get("april_answer") or raw.get("april_meaning") or raw.get("answer") or raw.get("answer_summary"), 420),
+                "relation": _df_text(raw.get("dialogue_relation") or raw.get("relation"), 40).upper(),
+            })
+
+    # Legacy recovery: history can still contain the current sequence even when
+    # the durable pair archive was not populated by an older writer.
+    if not rows and isinstance(history, list) and sid:
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            item_sid = _df_text(item.get("sequence_id") or item.get("dialogue_sequence_id"), 120)
+            if item_sid and item_sid != sid:
+                continue
+            user = item.get("user") if isinstance(item.get("user"), dict) else {}
+            april = item.get("april") if isinstance(item.get("april"), dict) else {}
+            user_text = _df_text(user.get("text") or user.get("content") or item.get("user_request") or item.get("content"), 260)
+            april_text = _df_text(april.get("answer") or april.get("content") or item.get("april_answer") or item.get("answer"), 420)
+            if user_text or april_text:
+                rows.append({
+                    "sequence_turn_index": int(item.get("sequence_turn_index") or item.get("turn_id") or len(rows) + 1),
+                    "task_response_number": int(item.get("task_response_number") or 0),
+                    "task_id": _df_text(item.get("task_id"), 100),
+                    "created_at": float(item.get("created_at") or 0.0),
+                    "topic": _df_text(item.get("sequence_topic") or item.get("topic"), 220),
+                    "user": user_text,
+                    "april": april_text,
+                    "relation": _df_text(item.get("dialogue_relation") or item.get("relation"), 40).upper(),
+                })
+
+    rows.sort(key=lambda item: (item.get("sequence_turn_index", 0), item.get("created_at", 0.0)))
+    unique_rows = []
+    seen = set()
+    for row in rows:
+        sig = (row.get("task_id"), row.get("sequence_turn_index"), row.get("user"), row.get("april"))
+        if sig in seen:
+            continue
+        seen.add(sig)
+        unique_rows.append(row)
+    rows = unique_rows
+
+    task_rows = [row for row in rows if tid and str(row.get("task_id") or "") == tid]
+    if not task_rows and isinstance(task_record.get("last_result"), dict):
+        last = task_record["last_result"]
+        task_rows = [{
+            "sequence_turn_index": int(last.get("sequence_turn_index") or seq.get("turn_count") or 0),
+            "task_response_number": int(last.get("task_response_number") or task_record.get("response_count") or 0),
+            "task_id": tid,
+            "created_at": float(last.get("created_at") or task_record.get("last_turn_at") or 0.0),
+            "topic": _df_text(task_record.get("topic"), 220),
+            "user": _df_text(last.get("user_request") or task_record.get("last_user_request"), 260),
+            "april": _df_text(last.get("april_answer") or task_record.get("last_april_answer"), 420),
+            "relation": _df_text(last.get("relation") or "CONTINUE", 40).upper(),
+        }]
+
+    def compact(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "turn": int(row.get("sequence_turn_index") or 0),
+            "task_response_number": int(row.get("task_response_number") or 0),
+            "task_id": _df_text(row.get("task_id"), 100),
+            "user": _df_text(row.get("user"), 220),
+            "april": _df_text(row.get("april"), 360),
+            "topic": _df_text(row.get("topic"), 180),
+            "relation": _df_text(row.get("relation"), 40),
+        }
+
+    recent = rows[-max(1, min(int(limit or 8), 12)):]
+    recent_task = task_rows[-max(1, min(int(limit or 8), 12)):]
+    topics: list[str] = []
+    for row in rows:
+        topic = _df_text(row.get("topic"), 220)
+        if topic and topic not in topics:
+            topics.append(topic)
+
+    last_row = rows[-1] if rows else {}
+    previous_row = rows[-2] if len(rows) >= 2 else {}
+    root_topic = topics[0] if topics else _df_text(seq.get("topic"), 220)
+    latest_topic = _df_text(last_row.get("topic"), 220)
+    task_topic = _df_text(
+        task_record.get("topic")
+        or (task_rows[-1].get("topic") if task_rows else ""),
+        220,
+    )
+    task_entity_raw = _df_text(task_record.get("entity") or task_record.get("active_entity"), 180)
+    task_entity = "" if _df_low(task_entity_raw) in {
+        "если", "это", "такое", "такой", "такие", "кто", "что", "где",
+        "когда", "почему", "как", "пронумеруй", "выдай", "проверь", "так",
+        "следующее", "дальше", "отвечай", "овечай",
+    } else task_entity_raw
+    task_result = deepcopy(task_record.get("last_result") or {})
+
+    task_summaries: list[dict[str, Any]] = []
+    merged_tasks: dict[str, Any] = {}
+    if isinstance(top_registry, dict):
+        merged_tasks.update(top_registry)
+    if isinstance(registry, dict):
+        merged_tasks.update(registry)
+    for raw_tid, raw_task in merged_tasks.items():
+        if not isinstance(raw_task, dict):
+            continue
+        if str(raw_task.get("sequence_id") or sid) != sid:
+            continue
+        tid_value = _df_text(raw_task.get("task_id") or raw_tid, 100)
+        task_topic_value = _df_text(raw_task.get("topic"), 180)
+        if not task_topic_value:
+            matching = [row for row in rows if str(row.get("task_id") or "") == tid_value]
+            task_topic_value = _df_text(matching[-1].get("topic") if matching else "", 180)
+        if task_topic_value:
+            task_summaries.append({
+                "task_id": tid_value,
+                "topic": task_topic_value,
+                "turn_count": int(raw_task.get("response_count") or raw_task.get("turn_count") or 0),
+                "status": _df_text(raw_task.get("status") or "open", 40),
+            })
+    task_summaries.sort(key=lambda item: (str(item.get("topic") or ""), str(item.get("task_id") or "")))
+    task_basis = deepcopy(task_record.get("last_answer_basis") or task_record.get("answer_basis") or {})
+    task_rules = deepcopy(task_record.get("dialogue_rules") or {})
+    task_response_count = int(task_record.get("response_count") or task_record.get("task_response_count") or 0)
+
+    # Canonical post-Provider turn is the active semantic snapshot. Historical
+    # task rows remain available in task_summaries, but their topics cannot leak
+    # into current_topic/current_focus/current_task_topic.
+    canonical = state.get("canonical_dialogue_turn") if isinstance(state.get("canonical_dialogue_turn"), dict) else {}
+    canonical_topic = _df_text(canonical.get("topic"), 220)
+    canonical_entity = _df_text(canonical.get("active_entity"), 220)
+    canonical_user = _df_text(canonical.get("user_request"), 260)
+    canonical_april = _df_text(canonical.get("april_answer"), 420)
+    canonical_task_id = _df_text(canonical.get("task_id"), 100)
+    if canonical_topic:
+        root_topic = canonical_topic
+        latest_topic = canonical_topic
+        task_topic = canonical_topic
+    if canonical_entity:
+        task_entity = canonical_entity
+    if canonical_task_id:
+        tid = canonical_task_id
+    if canonical_user:
+        last_user = canonical_user
+    if canonical_april:
+        last_april = canonical_april
+
+    return {
+        "version": "active_sequence_digest_v5_12h_sequence_window",
+        "source": "authenticated_active_sequence",
+        "sequence_id": sid,
+        "task_id": tid,
+        "conversation_id": conversation_id,
+        "user_id": user_id,
+        "dialogue_window_hours": 12,
+        "history_scope": "authenticated_12h_dialogue_sequence",
+        "sequence_turn_count": max(int(seq.get("turn_count") or 0), int((last_row or {}).get("sequence_turn_index") or 0)),
+        "turn_count": max(int(seq.get("turn_count") or 0), int((last_row or {}).get("sequence_turn_index") or 0)),
+        "window_record_count": len(rows),
+        "task_turn_count": len(task_rows),
+        "task_response_count": task_response_count,
+        "root_topic": root_topic,
+        "current_topic": _df_text(latest_topic or (topics[-1] if topics else "") or seq.get("topic") or root_topic, 220),
+        "current_task_topic": task_topic,
+        "current_focus": task_entity or _df_text((last_row or {}).get("user"), 220) or _df_text(seq.get("active_entity"), 180),
+        "last_user": _df_text((last_row or {}).get("user") or seq.get("last_user_request"), 260),
+        "last_april": _df_text((last_row or {}).get("april") or seq.get("last_april_answer"), 420),
+        "previous_user": _df_text((previous_row or {}).get("user"), 260),
+        "previous_april": _df_text((previous_row or {}).get("april"), 420),
+        "last_result": task_result,
+        "answer_basis": task_basis,
+        "dialogue_rules": task_rules,
+        "topic_path": topics[-12:],
+        "recent_trajectory": [compact(x) for x in recent if x.get("user") or x.get("april")],
+        "task_trajectory": [compact(x) for x in recent_task if x.get("user") or x.get("april")],
+        "task_summaries": task_summaries[-12:],
+        "coverage": "authenticated_sequence_window",
+        "window_complete": bool(sid),
+        "other_branches_included": len({str(row.get("task_id") or "") for row in rows if row.get("task_id")}) > 1,
+        "full_history_included": False,
+    }
+
+def _df_strong_topic_boundary(text: str) -> bool:
+    """Detect discourse-level topic switching, not generic word triggers."""
+    low = _df_low(text)
+    strong = (
+        "новая тема",
+        "другая тема",
+        "отдельная тема",
+        "сменим тему",
+        "перейдем к",
+        "перейдём к",
+        "давай теперь про",
+        "давай теперь о",
+        "а теперь про",
+        "а теперь о",
+        "теперь поговорим о",
+        "хочу обсудить другую тему",
+        "хочу поговорить о другой теме",
+    )
+    return any(marker in low for marker in strong)
+
+
+def _df_is_self_contained_new_topic(
+    text: str,
+    semantic: dict[str, Any] | None,
+    *,
+    active_topic: str,
+    active_entity: str,
+    task_probe: dict[str, Any],
+    sequence_digest: dict[str, Any],
+) -> bool:
+    """
+    Identify a genuinely new subject without turning short replies into NEW.
+
+    A lexical subject is insufficient. A new branch requires a reasonably
+    self-contained utterance naming a different subject and not behaving like
+    a response/reference to the active branch.
+    """
+    semantic = semantic if isinstance(semantic, dict) else {}
+    words = _df_tokens(text)
+    if _df_strong_topic_boundary(text):
+        return True
+    if len(words) < 2 and "?" not in text and "？" not in text:
+        return False
+    # An active task protects terse answers, but it must not prevent an explicit,
+    # self-contained request to discuss a different subject. Pronouns such as
+    # "его" inside a sentence that explicitly names a new subject are local
+    # references and must not suppress the topic switch.
+    subject = _df_normalize_subject(
+        _df_text(semantic.get("explicit_subject"), 220)
+    )
+    if not subject:
+        subject = _df_normalize_subject(_df_extract_subject(text))
+    if not subject:
+        return False
+    if bool(_df_deictic.search(_df_low(text))) and subject in {"это", "это", "он", "она", "они", "его", "ее", "её", "них", "такое"}:
+        return False
+
+    branch_text = " ".join([
+        _df_text(active_topic, 220),
+        _df_text(active_entity, 220),
+        _df_text(sequence_digest.get("root_topic"), 220),
+        " ".join(_df_text(x, 180) for x in sequence_digest.get("topic_path", [])[-3:]),
+        _df_text(sequence_digest.get("last_user"), 180),
+        _df_text(sequence_digest.get("last_april"), 220),
+    ])
+    if not branch_text.strip():
+        return True
+
+    overlap_subject = _df_overlap(subject, branch_text)
+    overlap_turn = max(
+        _df_overlap(text, active_topic),
+        _df_overlap(text, active_entity),
+        _df_overlap(text, sequence_digest.get("last_user")),
+        _df_overlap(text, sequence_digest.get("last_april")),
+    )
+    if max(overlap_subject, overlap_turn) >= 0.20:
+        return False
+
+    # Self-contained requests/questions with an explicitly named distinct
+    # subject are the main non-explicit path to NEW.
+    low = _df_low(text)
+    command_shape = bool(re.match(
+        r"^(?:а\s+)?(?:назови|дай|выдай|укажи|выбери|расскажи|скажи|объясни|покажи|проверь|найди|"
+        r"сравни|напиши|создай|построй|опиши|рассчитай|посчитай|ответь|"
+        r"кто\s+такой|что\s+такое|кто\s+это|какой(?:\s|$)|какая(?:\s|$)|"
+        r"какое(?:\s|$)|какие(?:\s|$))",
+        low,
+    ))
+    about_shape = bool(re.search(r"\b(?:про|об|о|насчет|насчёт|касаемо)\b", low))
+    question_shape = "?" in text or "？" in text
+
+    return bool(
+        subject
+        and (
+            command_shape
+            or about_shape
+            or question_shape
+        )
     )
 
-    result2 = await process_turn(
-        user_id="test-user",
-        conversation_id="test-conversation",
-        current_request="Теперь эти же данные покажи линейным графиком",
-        state=state,
-        provider_call=fake_provider,
+
+def _df_active_task(state: dict[str, Any]) -> dict[str, Any]:
+    sequence = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+    sequence_id = _df_text(sequence.get("sequence_id"), 80)
+    active_task_id = _df_text(
+        sequence.get("task_id")
+        or state.get("active_dialogue_task_id")
+        or "",
+        100,
     )
 
-    assert result2["interpretation"]["relation"] == "CONTINUE"
-    assert result2["interpretation"]["provider_context_plan"]
-    assert result2["interpretation"]["provider_context_plan"]["authority"] == "INTERPRETATION"
+    registry = sequence.get("task_registry") if isinstance(sequence.get("task_registry"), dict) else {}
+    if not registry and isinstance(state.get("dialogue_task_registry"), dict):
+        registry = state.get("dialogue_task_registry")
+    if active_task_id and isinstance(registry.get(active_task_id), dict):
+        task = deepcopy(registry[active_task_id])
+        task["task_id"] = active_task_id
+        task["sequence_id"] = sequence_id
+        return task
 
-    structured = result2["canonical_turn"]["assistant_structured"]
-    assert isinstance(structured, dict)
-    data = structured.get("data") or {}
-    assert len(data.get("x") or []) == 30
-    assert len(data.get("y") or []) == 30
+    candidates = (
+        sequence.get("active_task"),
+        sequence.get("interactive_task_state"),
+        sequence.get("open_task"),
+        sequence.get("task_state"),
+        state.get("interactive_task_state"),
+        state.get("active_task"),
+        state.get("april_active_task"),
+    )
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or not candidate:
+            continue
+        candidate_id = _df_text(candidate.get("task_id") or active_task_id, 100)
+        candidate_seq = _df_text(candidate.get("sequence_id") or candidate.get("active_sequence_id"), 80)
+        if sequence_id and candidate_seq and candidate_seq != sequence_id:
+            continue
+        if candidate.get("active") or candidate.get("task_id") or candidate.get("status") in {"open", "active", "suspended", "completed", "paused"}:
+            result = deepcopy(candidate)
+            if candidate_id:
+                result["task_id"] = candidate_id
+            if sequence_id:
+                result["sequence_id"] = sequence_id
+            return result
+    return {}
 
-    print("REGRESSION OK")
-    print("provider_context_plan = READY")
-    print("scene_composition =", result2["interpretation"]["scene_composition"])
-    print("relation =", result2["interpretation"]["relation"])
-    print("points_preserved =", len(data.get("x") or []))
+
+def _df_topic_from_state(state: dict[str, Any]) -> str:
+    """Return the current topic from the canonical completed turn first.
+
+    Task/branch mirrors are historical operational state and cannot outrank the
+    post-Provider dialogue memory.
+    """
+    seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+    active_ctx = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
+    anchor = state.get("dialogue_memory_anchor") if isinstance(state.get("dialogue_memory_anchor"), dict) else {}
+    canonical = state.get("canonical_dialogue_turn") if isinstance(state.get("canonical_dialogue_turn"), dict) else {}
+    for value in (
+        canonical.get("topic"),
+        anchor.get("topic"),
+        active_ctx.get("topic"),
+        seq.get("topic"),
+        state.get("april_active_topic"),
+        state.get("active_topic"),
+        state.get("current_topic"),
+    ):
+        if _df_text(value):
+            return _df_text(value, 220)
+    return ""
 
 
-__all__ = [
-    "ENGINE_VERSION",
-    "TRANSPORT_NAME",
-    "DECISION_OWNER",
-    "DIALOGUE_WINDOW_HOURS",
-    "PROVIDER_INPUT_HARD_BUDGET",
-    "PROVIDER_OUTPUT_HARD_BUDGET",
-    "REPRESENTATIONS",
-    "STRUCTURED_KINDS",
-    "DialogueTurn",
-    "DialogueMemory",
-    "InterpretationDecision",
-    "StructuredArtifact",
-    "UnifiedDialogueSemanticEngine",
-    "QUANTUM_DIALOGUE_ENGINE",
-    "QUANTUM_EVIDENCE_FUSION",
-    "QUANTUM_INTERPRETATION_ENGINE",
-    "QUANTUM_FAST_SEMANTIC",
-    "QuantumInterpretationEngine",
-    "interpret_request",
-    "build_dialogue_context",
-    "build_provider_request",
-    "build_openai_messages",
-    "extract_structured_artifacts",
-    "record_openai_response",
-    "memory_from_state",
-    "write_memory_to_state",
-    "persist_with_state_manager",
-    "process_turn",
-    "build_processor_execution_context",
-    "build_semantic_profile",
-    "build_scene_blueprint",
-    "integration_contract",
-    "build_test_state",
-    "fake_provider",
-]
+def _df_entity_from_state(state: dict[str, Any]) -> str:
+    """Return the current semantic subject from the post-Provider turn only."""
+    canonical = state.get("canonical_dialogue_turn") if isinstance(state.get("canonical_dialogue_turn"), dict) else {}
+    if not canonical:
+        return ""
+    active = _df_text(canonical.get("active_entity"), 220)
+    if active and _df_low(active) not in {"чем", "что", "кто", "как", "где", "почему", "зачем", "нарисуй", "покажи", "опиши"}:
+        return active
+    for value in canonical.get("entities") or []:
+        value = _df_text(value, 180)
+        if value and _df_low(value) not in {"чем", "что", "кто", "как", "где", "почему", "зачем", "нарисуй", "покажи", "опиши"}:
+            return value
+    return ""
+
+
+def _df_branch_index(state: dict[str, Any], active_seq: dict[str, Any], active_topic: str, active_entity: str) -> dict[str, Any]:
+    old = state.get("dialogue_branch_index") if isinstance(state.get("dialogue_branch_index"), dict) else {}
+    current_id = _df_text(active_seq.get("sequence_id"), 80)
+    active_task_id = _df_text(
+        active_seq.get("task_id")
+        or state.get("active_dialogue_task_id")
+        or "",
+        100,
+    )
+    branches = []
+    seen = set()
+    for branch in list(old.get("branches") or []):
+        if not isinstance(branch, dict):
+            continue
+        seq_id = _df_text(branch.get("sequence_id") or branch.get("branch_id"), 80)
+        task_id = _df_text(branch.get("task_id"), 100)
+        if not seq_id or (current_id and seq_id != current_id):
+            continue
+        key = task_id or branch.get("branch_id") or seq_id
+        if key in seen:
+            continue
+        seen.add(key)
+        branch_copy = deepcopy(branch)
+        if not _df_text(branch_copy.get("branch_label"), 4):
+            branch_copy["branch_label"] = _df_branch_label_for(list(old.get("branches") or []), _df_text(branch_copy.get("branch_id") or branch_copy.get("task_id"), 120))
+        branches.append(branch_copy)
+
+    registry = active_seq.get("task_registry") if isinstance(active_seq.get("task_registry"), dict) else {}
+    top_registry = state.get("dialogue_task_registry") if isinstance(state.get("dialogue_task_registry"), dict) else {}
+    merged_registry = dict(top_registry)
+    merged_registry.update(registry)
+    for task_id, task in merged_registry.items():
+        if not isinstance(task, dict):
+            continue
+        if str(task.get("sequence_id") or current_id) != current_id:
+            continue
+        task_id = str(task.get("task_id") or task_id)
+        if task_id in seen:
+            continue
+        branches.append({
+            "branch_id": f"{current_id}:{task_id}",
+            "sequence_id": current_id,
+            "task_id": task_id,
+            "topic": _df_text(task.get("topic") or active_topic, 220),
+            "canonical_entity": _df_text(task.get("entity") or task.get("active_entity") or active_entity, 180),
+            "goal": _df_text(task.get("goal") or "answer", 120),
+            "turn_count": int(task.get("response_count") or task.get("turn_count") or 0),
+            "last_user_request": _df_text(task.get("last_user_request"), 600),
+            "last_april_answer": _df_text(task.get("last_april_answer") or task.get("last_answer"), 900),
+            "last_turn_at": task.get("last_turn_at") or task.get("updated_at"),
+            "last_result": deepcopy(task.get("last_result") or {}),
+            "answer_basis": deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {}),
+            "dialogue_rules": deepcopy(task.get("dialogue_rules") or active_seq.get("dialogue_rules") or {}),
+            "active_task": deepcopy(task),
+            "active": task_id == active_task_id,
+        })
+        seen.add(task_id)
+
+    if current_id and not branches:
+        branches.append({
+            "branch_id": f"{current_id}:{active_task_id}" if active_task_id else current_id,
+            "sequence_id": current_id,
+            "task_id": active_task_id,
+            "topic": _df_text(active_seq.get("topic") or active_topic, 220),
+            "canonical_entity": _df_text(active_entity, 180),
+            "goal": _df_text(active_seq.get("goal") or "answer", 120),
+            "last_user_request": _df_text(active_seq.get("last_user_request"), 600),
+            "last_april_answer": _df_text(active_seq.get("last_april_answer"), 900),
+            "last_turn_at": active_seq.get("last_turn_at"),
+            "active_task": deepcopy(active_seq.get("active_task") or {}),
+            "active": True,
+        })
+
+    # Normalize stable internal A/B/C labels once per branch graph.
+    for idx, branch in enumerate(sorted(branches, key=lambda b: (float(b.get("started_at") or b.get("last_turn_at") or 0.0), str(b.get("task_id") or b.get("branch_id") or "")))):
+        if not _df_text(branch.get("branch_label"), 4):
+            branch["branch_label"] = _INTERNAL_BRANCH_ALPHABET_RU[min(idx, len(_INTERNAL_BRANCH_ALPHABET_RU) - 1)]
+        branch["internal_only"] = True
+
+    return {
+        "version": "dialogue_branch_index_v4_dynamic_branches",
+        "active_sequence_id": current_id,
+        "target_sequence_id": current_id,
+        "target_task_id": active_task_id,
+        "target_branch_id": f"{current_id}:{active_task_id}" if current_id and active_task_id else current_id,
+        "branches": branches[-32:],
+    }
+
+
+def _df_render_probe(text: str) -> dict[str, Any]:
+    low = _df_low(text)
+    reps: list[str] = []
+    for rep, pattern in _df_render_patterns:
+        if re.search(pattern, low):
+            reps.append(rep)
+    # Specific representations outrank generic image language.
+    order = ["code", "formula", "table", "graph", "diagram", "image", "link"]
+    reps = sorted(set(reps), key=lambda x: order.index(x))
+    explicit = bool(reps)
+    return {
+        "requested": reps,
+        "explicit": explicit,
+        "evidence": "render_words" if explicit else "text_default",
+        "visual_reference": bool(_df_deictic.search(low) and any(r in low for r in ("картинк", "изображени", "схем", "график", "таблиц", "формул"))),
+    }
+
+
+def _df_live_task_answer_probe(text: str, active_task: dict[str, Any], previous_april: str = "") -> dict[str, Any]:
+    """Bind a user turn to an open question before topic/new-branch heuristics."""
+    task = active_task if isinstance(active_task, dict) else {}
+    phase = _df_low(task.get("phase"))
+    expected = _df_low(task.get("expected_input_type") or task.get("input_type"))
+    awaiting = bool(
+        task.get("awaiting_user")
+        or task.get("awaiting_input")
+        or phase in {"awaiting_user_answer", "awaiting_input", "awaiting_answer"}
+        or expected in {"answer", "user_answer", "text_answer", "choice", "selection"}
+    )
+    question = _df_text(task.get("last_question") or task.get("prompt") or task.get("question"), 900)
+    question_source = "active_task" if question else ""
+    # Normal conversational questions are also live context even when no
+    # interactive task object was created for that turn. This keeps an ordinary
+    # chat exchange alive instead of requiring every question to become a task.
+    if not question and _df_text(previous_april).rstrip().endswith(("?", "？")):
+        question = _df_text(previous_april, 900)
+        question_source = "last_april_question"
+        awaiting = True
+    if not question or not awaiting:
+        return {"active": False, "question": question, "question_source": question_source, "score": 0.0, "input_role": "current_turn", "answer_candidate": False}
+
+    low = _df_low(text)
+    words = _df_tokens(text)
+    stripped = low.strip(" .,!?:;-—")
+    question_words = {"кто", "что", "почему", "зачем", "как", "где", "когда", "сколько", "какой", "какая", "какое", "какие", "можешь", "можно"}
+    is_question = bool("?" in text or "？" in text or stripped in question_words)
+    command_shape = bool(re.match(
+        r"^(?:(?:а\s+)?теперь\s+|а\s+)?(?:расскажи|скажи|объясни|покажи|проверь|найди|сравни|напиши|создай|построй|опиши|рассчитай|посчитай|ответь|дай|выдай|укажи)\b",
+        low,
+    ))
+    if _df_strong_topic_boundary(text) or _df_explicit_recall(text):
+        return {"active": True, "question": question, "question_source": question_source, "score": 0.0, "input_role": "current_turn", "answer_candidate": False, "escaped_by": "boundary_or_recall"}
+
+    if command_shape or (is_question and len(words) >= 2):
+        return {"active": True, "question": question, "question_source": question_source, "score": 0.0, "input_role": "current_turn", "answer_candidate": False, "escaped_by": "self_contained_question_or_command"}
+
+    if is_question:
+        return {"active": True, "question": question, "question_source": question_source, "score": 0.88, "input_role": "followup_question_to_active_task", "answer_candidate": False, "escaped_by": "short_live_question"}
+
+    score = 0.99 if len(words) <= 3 else 0.96 if len(words) <= 8 else 0.90 if len(words) <= 16 else 0.78
+    return {"active": True, "question": question, "question_source": question_source, "score": score, "input_role": "answer_to_active_question", "answer_candidate": True, "escaped_by": ""}
+
+
+def _df_task_probe(text: str, active_task: dict[str, Any], active_topic: str, previous_april: str = "") -> dict[str, Any]:
+    low = _df_low(text)
+    current_game_topic = any(x in low for x in ("угадай", "отгадай", "разгадай", "игру", "игра"))
+    game_topic = current_game_topic or "угадай" in _df_low(active_topic)
+    donut_task = "пончик" in low or "пончики" in low
+    # Do not treat a generic request for a formula as analysis of a previous task.
+    # That lexical hit previously made unrelated science questions inherit the
+    # active riddle/game relation. Task analysis requires explicit discourse cues.
+    answer_analysis = any(x in low for x in (
+        "как ты угадал", "почему ты угадал", "правильный ответ", "твои вычисления",
+        "как получил ответ", "почему ответ такой",
+    ))
+
+    # A user may redefine the operating rule of an already active dialogue without
+    # changing its subject. Treat explicit procedural language as a task definition
+    # so the rule becomes the new canonical objective rather than inheriting a stale
+    # task prompt from the previous turn.
+    # Presentation rules are handled by _df_dialogue_rules and do not create tasks.
+    task_definition = bool(
+        any(x in low for x in (
+            "условия игры", "правила игры", "давай сыграем", "сыграем в игру",
+            "начнем игру", "начнём игру",
+        ))
+        and len(_df_tokens(low)) >= 4
+    )
+
+    active_task_topic = _df_text(active_task.get("topic") or active_task.get("canonical_topic"))
+    compatible_persisted_task = bool(
+        active_task.get("active")
+        and (not active_topic or not active_task_topic
+             or _df_overlap(active_topic, active_task_topic) >= 0.25
+             or active_topic.lower() in active_task_topic.lower()
+             or active_task_topic.lower() in active_topic.lower())
+    )
+    live_answer = _df_live_task_answer_probe(text, active_task, previous_april=previous_april)
+    active = bool(
+        game_topic
+        or task_definition
+        or compatible_persisted_task
+        or live_answer.get("answer_candidate")
+        or live_answer.get("input_role") == "followup_question_to_active_task"
+    )
+    handoff = current_game_topic and (donut_task or any(x in low for x in ("я загад", "задавай вопросы", "наводящие вопросы")))
+    task_action = (
+        handoff or answer_analysis or task_definition
+        or bool(live_answer.get("answer_candidate"))
+        or live_answer.get("input_role") == "followup_question_to_active_task"
+        or (compatible_persisted_task and any(x in low for x in ("угадать", "угадай", "отгадать", "ответь")))
+    )
+    return {
+        "active": active,
+        "current_game_topic": current_game_topic,
+        "task_definition": task_definition,
+        "kind": _df_text(
+            "dialogue_task" if task_definition and not game_topic else active_task.get("kind") or ("game" if game_topic else ""),
+            80,
+        ).lower(),
+        "role": _df_text(active_task.get("role") or ("april_guesses_user_object" if handoff else ""), 100),
+        "handoff": handoff,
+        "task_action": task_action,
+        "answer_analysis": answer_analysis,
+        "topic": (
+            _df_text(active_topic, 180) if task_definition and active_topic
+            else "игра в угадайки" if current_game_topic and any(x in low for x in ("угадай", "отгадай", "разгадай"))
+            else _df_text(active_task.get("topic"), 180) if compatible_persisted_task
+            else ""
+        ),
+        "objective": _df_text(text, 1200) if task_definition else _df_text(active_task.get("objective"), 1200) if compatible_persisted_task else "",
+        "live_question": _df_text(live_answer.get("question"), 900),
+        "live_question_source": _df_text(live_answer.get("question_source") or "", 40),
+        "live_question_score": float(live_answer.get("score", 0.0) or 0.0),
+        "live_input_role": _df_text(live_answer.get("input_role") or "current_turn", 80),
+        "answer_to_active_task": bool(live_answer.get("answer_candidate")),
+        "live_task_active": bool(live_answer.get("active")),
+    }
+
+
+def _df_dialogue_bigunok(text: str, previous_user: str, previous_april: str, active_topic: str, active_entity: str, task: dict[str, Any]) -> dict[str, Any]:
+    low = _df_low(text)
+    short = len(_df_tokens(low)) <= 3
+    confirmation = low.strip(" .,!?:;-—") in _df_confirm
+    rejection = low.strip(" .,!?:;-—") in _df_reject
+    deictic = bool(_df_deictic.search(low))
+    direct_reference = any(x in low for x in _df_explicit_result)
+    topic_overlap = max(_df_overlap(low, active_topic), _df_overlap(low, active_entity), _df_overlap(low, previous_user), _df_overlap(low, previous_april))
+    dialogue_rule_signal = bool(
+        re.search(r"\b(?:отвечай|овечай|нумеруй|номеруй|помечай|ставь)\b", low)
+        and re.search(r"\b(?:букв|алфавит|цифр|номер)\w*\b", low)
+    )
+    continuation_verb = bool(re.search(
+        r"^(?:дальше|продолжай(?:те)?|продолжим|продолжить|следующ(?:ий|ая|ее|ие)|ещ(?:е|ё)|далее)$",
+        low.strip(" .,!?:;-—"),
+    ))
+    semantic_signal = (
+        0.97 if direct_reference else
+        0.95 if dialogue_rule_signal else
+        0.94 if task.get("task_action") else
+        0.93 if (confirmation or rejection) and previous_april else
+        0.88 if (deictic or continuation_verb) and previous_april else
+        0.76 if topic_overlap >= 0.34 else
+        0.0
+    )
+    return {
+        "short": short,
+        "confirmation": confirmation,
+        "rejection": rejection,
+        "deictic": deictic,
+        "direct_reference": direct_reference,
+        "continuation_verb": continuation_verb,
+        "dialogue_rule_signal": dialogue_rule_signal,
+        "topic_overlap": topic_overlap,
+        "semantic_signal": semantic_signal,
+        "has_live_pair": bool(previous_user or previous_april),
+    }
+
+
+def _df_new_sequence_id(user_id: str, conversation_id: str, text: str) -> str:
+    """Create a stable parent conversation sequence for the current 12h window.
+
+    Topic changes inside the same authenticated conversation must not create new
+    sequence identities; tasks are the children of this sequence.
+    """
+    bucket = int(time.time() // (12 * 60 * 60))
+    raw = f"{user_id}|{conversation_id}|dialogue-sequence-v3|{bucket}"
+    return "seq-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+
+
+def _df_dialogue_rules(
+    text: str,
+    prior: dict[str, Any] | None = None,
+    previous_april: str = "",
+) -> dict[str, Any]:
+    """Store user presentation preferences as internal metadata only.
+
+    These rules never own topic, task or branch selection and never cause the
+    executor/provider to prefix a human-visible answer.
+    """
+    prior = prior if isinstance(prior, dict) else {}
+    previous = prior.get("dialogue_rules") if isinstance(prior.get("dialogue_rules"), dict) else {}
+    low = _df_low(text)
+
+    disable = any(x in low for x in (
+        "не нумеруй", "не ставь номер", "без нумерации", "перестань нумеровать",
+    ))
+    if disable:
+        return {
+            "enabled": False,
+            "visible": False,
+            "internal_only": True,
+            "updated": True,
+            "source": "dialogue_rule_update",
+        }
+
+    answer_target = any(x in low for x in (
+        "каждый свой ответ", "каждый ответ", "каждого ответа",
+        "каждый свой", "каждого своего ответа",
+    ))
+    ordering = any(x in low for x in (
+        "последовательн", "нумеровать", "номеровать", "нумеруй", "номеруй",
+        "ставить цифру", "ставь цифру", "помечать цифрой", "помечала цифрой",
+        "ставить букву", "ставь букву", "помечать буквой", "по алфавиту",
+        "начиная с а", "начиная с 1", "с буквы а",
+    ))
+    explicit_rule = bool(answer_target and ordering)
+    if not explicit_rule:
+        kept = dict(previous)
+        kept.pop("updated", None)
+        kept.pop("updated_at", None)
+        if kept:
+            kept["visible"] = False
+            kept["internal_only"] = True
+            # next_marker is intentionally removed: visible presentation must not
+            # be driven by the previous answer text.
+            kept.pop("next_marker", None)
+        return kept
+
+    alphabetic = any(x in low for x in (
+        "ставить букву", "ставь букву", "помечать буквой", "по алфавиту",
+        "начиная с а", "с буквы а",
+    ))
+    numeric = any(x in low for x in (
+        "ставить цифру", "ставь цифру", "помечать цифрой", "помечала цифрой",
+        "цифрой", "цифру", "нумеровать", "номеровать", "начиная с 1",
+    ))
+    mode = "alphabetic" if alphabetic and not numeric else "numeric" if numeric and not alphabetic else "alphabetic" if alphabetic else "numeric"
+    return {
+        "enabled": True,
+        "visible": False,
+        "internal_only": True,
+        "scope": "dialogue",
+        "mode": mode,
+        "start": 1,
+        "source_instruction": _df_text(text, 1200),
+        "until_explicit_end": bool(
+            any(x in low for x in ("пока я не скажу", "до тех пор", "подведём итоги", "подведем итоги"))
+            or previous.get("until_explicit_end")
+        ),
+        "updated": True,
+        "updated_at": time.time(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Dynamic 12h dialogue branch graph — internal metadata only.
+# ---------------------------------------------------------------------------
+_INTERNAL_BRANCH_ALPHABET_RU = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
+
+
+def _df_dialogue_repair_request(text: str) -> bool:
+    low = _df_low(text)
+    return any(re.search(pattern, low) for pattern in (
+        r"не\s*понял.*(?:о\s+ком|кого|что).*(?:спрашивал|спрашива(?:л|ю))",
+        r"я\s+не\s*(?:это|то)\s+спрашивал",
+        r"(?:нет|не),?\s*я\s+не\s*(?:про\s+это|об\s+этом|о\s+том|это)\b.*(?:спрашива(?:л|ю)|имел\s+в\s+виду)",
+        r"я\s+не\s+(?:спрашивал|спрашиваю|спрашивала)\b",
+        r"ты\s+не\s+то\s+(?:ответил|ответила|сказал|сказала)",
+        r"я\s+спрашивал\s+про",
+        r"я\s+имел\s+в\s+виду",
+    ))
+
+
+def _df_comparison_request(text: str) -> bool:
+    low = _df_low(text)
+    return bool(re.search(
+        r"(?:что\s+общего|сравни(?:ть)?|разниц[аы]|отлич(?:ие|ия|ается|аются)|похож(?:и|есть)|между\s+.+\s+и\b)",
+        low,
+    ))
+
+
+def _df_stem_token(value: Any) -> str:
+    token = _df_low(value).strip(".,!?;:()[]{}«\"'—-_")
+    if not token:
+        return ""
+    for suffix in (
+        "иями", "ами", "ями", "ого", "ему", "ому", "ыми", "ими",
+        "ов", "ев", "ам", "ям", "ах", "ях", "ом", "ем", "ою", "ею",
+        "ий", "ый", "ой", "ая", "яя", "ое", "ее", "ые", "ие",
+        "ую", "юю", "а", "я", "у", "ю", "ы", "и", "е",
+    ):
+        if token.endswith(suffix) and len(token) - len(suffix) >= 5:
+            return token[:-len(suffix)]
+    return token
+
+
+def _df_branch_mention_score(text: str, branch: dict[str, Any]) -> float:
+    q = {_df_stem_token(t) for t in _df_tokens(text)} - {""}
+    entity_text = " ".join(
+        _df_text(x, 220) for x in (
+            branch.get("canonical_entity"), branch.get("entity"), branch.get("topic"),
+        ) if _df_text(x)
+    )
+    c = {_df_stem_token(t) for t in _df_tokens(entity_text)} - {""}
+    if not q or not c:
+        return 0.0
+    exact = len(q & c) / max(1, len(c))
+    fuzzy = sum(
+        1 for qt in q if len(qt) >= 5 and any(qt == ct or qt[:5] == ct[:5] for ct in c if len(ct) >= 5)
+    ) / max(1, len(c))
+    return round(max(exact, fuzzy), 6)
+
+
+def _df_find_branch_mentions(text: str, branches: dict[str, Any]) -> list[dict[str, Any]]:
+    scored = []
+    for branch in list(branches.get("branches") or []):
+        if not isinstance(branch, dict):
+            continue
+        score = _df_branch_mention_score(text, branch)
+        if score >= 0.75:
+            item = deepcopy(branch)
+            item["mention_score"] = score
+            scored.append(item)
+    scored.sort(key=lambda b: (
+        float(b.get("mention_score") or 0.0),
+        1 if b.get("active") else 0,
+        float(b.get("last_turn_at") or b.get("started_at") or 0.0),
+    ), reverse=True)
+    return scored[:6]
+
+
+def _df_branch_label_for(branches: list[dict[str, Any]], branch_id: str) -> str:
+    ordered = sorted(
+        [b for b in branches if isinstance(b, dict)],
+        key=lambda b: (
+            float(b.get("started_at") or b.get("last_turn_at") or 0.0),
+            str(b.get("task_id") or b.get("branch_id") or ""),
+        ),
+    )
+    for idx, branch in enumerate(ordered):
+        if str(branch.get("branch_id") or branch.get("task_id") or "") == str(branch_id or ""):
+            return _INTERNAL_BRANCH_ALPHABET_RU[min(idx, len(_INTERNAL_BRANCH_ALPHABET_RU) - 1)]
+        stored = str(branch.get("branch_label") or "").strip()
+        if stored and str(branch.get("task_id") or "") == str(branch_id or ""):
+            return stored[:4]
+    return _INTERNAL_BRANCH_ALPHABET_RU[min(len(ordered), len(_INTERNAL_BRANCH_ALPHABET_RU) - 1)] if ordered else "А"
+
+
+def _df_internal_response_path(branch_label: str, response_count: int) -> str:
+    branch = _df_text(branch_label, 4).upper() or "А"
+    idx = max(0, int(response_count or 0))
+    answer = _INTERNAL_BRANCH_ALPHABET_RU[min(idx, len(_INTERNAL_BRANCH_ALPHABET_RU) - 1)]
+    return f"{branch}.{answer}"
+
+
+def _df_identity_question(text: str) -> bool:
+    low = _df_low(text)
+    return bool(re.match(
+        r"^(?:ты\s+кто|кто\s+ты|как\s+тебя\s+зовут|что\s+ты\s+умеешь|что\s+ты\s+можешь)\b",
+        low,
+    ))
+
+
+def _df_comparison_branch_context(
+    text: str,
+    active_branch: dict[str, Any],
+    mentioned: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidates = list(mentioned)
+    if isinstance(active_branch, dict) and active_branch:
+        candidates.append(active_branch)
+    linked = []
+    seen = set()
+    for branch in candidates:
+        if not isinstance(branch, dict):
+            continue
+        bid = _df_text(branch.get("branch_id") or branch.get("task_id"), 120)
+        if not bid or bid in seen:
+            continue
+        seen.add(bid)
+        linked.append({
+            "branch_id": bid,
+            "task_id": _df_text(branch.get("task_id"), 100),
+            "branch_label": _df_text(branch.get("branch_label"), 4),
+            "topic": _df_text(branch.get("topic") or branch.get("canonical_entity"), 140),
+            "entity": _df_text(branch.get("canonical_entity") or branch.get("entity"), 120),
+            "last_user_request": _df_text(branch.get("last_user_request"), 180),
+            "last_april_answer": _df_text(branch.get("last_april_answer"), 260),
+        })
+    return linked[:4]
+
+def _df_resolve_relation(
+    text: str,
+    state: dict[str, Any],
+    previous_april: str,
+    active_topic: str,
+    active_entity: str,
+    task_probe: dict[str, Any],
+    dialogue_probe: dict[str, Any],
+    *,
+    feedback_probe: dict[str, Any] | None = None,
+    semantic: dict[str, Any] | None = None,
+    sequence_digest: dict[str, Any] | None = None,
+    branches: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Resolve the current turn against the live 12-hour dialogue sequence.
+
+    The parent sequence supplies evidence; it never vetoes a self-contained new
+    request. A task is a branch, not the conversation itself.
+    """
+    semantic = semantic if isinstance(semantic, dict) else {}
+    sequence_digest = sequence_digest if isinstance(sequence_digest, dict) else {}
+    branches = branches if isinstance(branches, dict) else {}
+
+    explicit_recall = _df_explicit_recall(text)
+    if explicit_recall:
+        return "RECALL", "REFERENCE_OLD_TOPIC"
+
+    feedback_probe = feedback_probe if isinstance(feedback_probe, dict) else {}
+    if feedback_probe.get("feedback"):
+        return "CONTINUE", "USER_FEEDBACK"
+
+    seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+    has_live = bool(
+        _df_text(seq.get("sequence_id"), 120)
+        or sequence_digest.get("sequence_id")
+        or active_topic
+        or previous_april
+    )
+    if not has_live:
+        return "NEW", "NEW_TOPIC"
+
+    low = _df_low(text)
+    words = _df_tokens(text)
+    short_turn = len(words) <= 8
+    confirmation = bool(dialogue_probe.get("confirmation"))
+    rejection = bool(dialogue_probe.get("rejection"))
+    deictic = bool(dialogue_probe.get("deictic"))
+    direct_reference = bool(dialogue_probe.get("direct_reference"))
+    task_action = bool(task_probe.get("task_action"))
+
+    if _df_dialogue_repair_request(text):
+        return "CONTINUE", "DIALOGUE_REPAIR"
+
+    mentioned = _df_find_branch_mentions(text, branches)
+    active_task_id = _df_text(seq.get("task_id") or state.get("active_dialogue_task_id"), 100)
+    distinct_old = [
+        b for b in mentioned
+        if _df_text(b.get("task_id"), 100) and _df_text(b.get("task_id"), 100) != active_task_id
+    ]
+    comparison = _df_comparison_request(text)
+    if not _df_strong_topic_boundary(text) and comparison:
+        if len(mentioned) >= 2 or (len(mentioned) == 1 and (distinct_old or deictic)):
+            return "NEW", "BRANCH_COMPARISON"
+    if not _df_strong_topic_boundary(text) and distinct_old:
+        return "RECALL", "AUTO_BRANCH_RETURN"
+
+    sequence_topics = [
+        _df_text(sequence_digest.get("root_topic"), 220),
+        _df_text(sequence_digest.get("current_topic"), 220),
+        _df_text(sequence_digest.get("current_task_topic"), 220),
+        *[_df_text(x, 220) for x in sequence_digest.get("topic_path", [])[-6:]],
+    ]
+    trajectory_items = list(sequence_digest.get("recent_trajectory") or []) + list(sequence_digest.get("task_trajectory") or [])
+    trajectory_overlap = 0.0
+    for item in trajectory_items[-12:]:
+        if not isinstance(item, dict):
+            continue
+        for field in ("user", "april", "topic"):
+            value = item.get(field)
+            if value:
+                trajectory_overlap = max(trajectory_overlap, _df_overlap(low, value))
+
+    contextual_overlap = max(
+        float(dialogue_probe.get("topic_overlap", 0.0) or 0.0),
+        *[_df_overlap(low, topic) for topic in sequence_topics if topic],
+        float(_df_overlap(low, sequence_digest.get("last_user")) or 0.0),
+        float(_df_overlap(low, sequence_digest.get("last_april")) or 0.0),
+        float(_df_overlap(low, active_entity) or 0.0),
+        trajectory_overlap,
+    ) if sequence_topics or active_entity or trajectory_items else float(dialogue_probe.get("topic_overlap", 0.0) or 0.0)
+
+    current_subject = _df_normalize_subject(
+        _df_text(semantic.get("explicit_subject") or _df_extract_subject(text), 220)
+    )
+    active_subjects = [
+        _df_text(active_entity, 220),
+        _df_text(active_topic, 220),
+        _df_text(sequence_digest.get("current_task_topic"), 220),
+    ]
+    subject_overlap = max(
+        (_df_overlap(current_subject, candidate) for candidate in active_subjects if candidate),
+        default=0.0,
+    ) if current_subject else 0.0
+
+    live_input_role = _df_text(task_probe.get("live_input_role"), 80)
+    live_task_question = _df_text(task_probe.get("live_question"), 900)
+    live_task_active = bool(task_probe.get("live_task_active") and live_task_question)
+    if live_task_active and not _df_strong_topic_boundary(text) and not _df_explicit_recall(text):
+        # A complete self-contained subject outranks a stale interactive task.
+        # This prevents "О Есенине расскажи" from being treated as an answer
+        # to an unrelated question such as "Как тебя зовут?".
+        fresh_subject = bool(current_subject)
+        fresh_subject_match = bool(
+            fresh_subject
+            and subject_overlap < 0.20
+            and not direct_reference
+            and not deictic
+        )
+        if not fresh_subject_match:
+            if task_probe.get("answer_to_active_task"):
+                return "CONTINUE", "ACTIVE_TASK_ANSWER"
+            if live_input_role == "followup_question_to_active_task":
+                return "CONTINUE", "ACTIVE_TASK_FOLLOWUP_QUESTION"
+
+    # A clear operand with no live-branch reference starts a new task even if an
+    # older interactive question is still open. This is intentionally local and
+    # avoids sending extra context to the Provider.
+    if (
+        current_subject
+        and subject_overlap < 0.20
+        and not direct_reference
+        and not deictic
+        and not _df_memory_scope_request(text)
+    ):
+        return "NEW", "SELF_CONTAINED_SUBJECT"
+
+    question_subject = _df_extract_subject(text)
+    identity_question = _df_identity_question(text)
+    standalone_question = bool(
+        identity_question
+        or (
+            question_subject
+            and re.match(
+                r"^(?:(?:продолжаем|продолжим|дальше|теперь)\s+)?(?:что\s+такое|кто\s+такой|кто\s+(?:такая|такое|такие)|кто\s+это)\b",
+                low,
+            )
+        )
+    )
+
+    # A complete question with its own subject is independent unless that subject
+    # actually matches the current live branch. This is the key distinction that
+    # prevents "океан/пустыня/Пушкин" from inheriting an old subject.
+    if standalone_question:
+        if subject_overlap >= 0.20 or direct_reference or deictic:
+            return "CONTINUE", "ACTIVE_SUBJECT_FOLLOWUP"
+        return "NEW", "SELF_CONTAINED_QUESTION"
+
+    # The same rule applies to complete imperative requests with an extracted
+    # operand. They can start a new task while remaining in the parent 12h session.
+    command_with_subject = bool(
+        current_subject
+        and re.match(
+            r"^(?:а\s+)?(?:назови|скажи|дай|выдай|укажи|выбери|расскажи|объясни|покажи|проверь|найди|напиши|создай|построй|опиши|рассчитай|посчитай|ответь|определи)\b",
+            low,
+        )
+    )
+    if command_with_subject:
+        if subject_overlap >= 0.20 or direct_reference or deictic:
+            return "CONTINUE", "ACTIVE_SUBJECT_FOLLOWUP"
+        return "NEW", "SELF_CONTAINED_COMMAND"
+
+    sequence_rules = (
+        state.get("active_dialogue_sequence", {}).get("dialogue_rules", {})
+        if isinstance(state.get("active_dialogue_sequence"), dict)
+        else {}
+    )
+    rule_update = _df_dialogue_rules(text, {"dialogue_rules": sequence_rules})
+    if rule_update.get("updated"):
+        return "CONTINUE", "DIALOGUE_RULE_UPDATE"
+
+    # Elliptical turns stay on the live branch when the utterance is clearly a
+    # discourse continuation or a dialogue-rule update. Mere task existence is
+    # not enough.
+    if dialogue_probe.get("semantic_signal", 0.0) >= 0.95 and (dialogue_probe.get("confirmation") or dialogue_probe.get("rejection") or dialogue_probe.get("direct_reference")):
+        return "CONTINUE", "DIALOGUE_DISCOURSE_FOLLOWUP"
+    if dialogue_probe.get("semantic_signal", 0.0) >= 0.95 and re.search(r"\b(?:букв|алфавит|цифр|номер)\w*\b", low) and re.search(r"\b(?:отвечай|овечай|нумеруй|номеруй|помечай|ставь)\b", low):
+        return "CONTINUE", "DIALOGUE_RULE_UPDATE"
+
+    if short_turn:
+        if confirmation or rejection or deictic or direct_reference or task_action or dialogue_probe.get("continuation_verb"):
+            return "CONTINUE", "CONTEXTUAL_SHORT_FOLLOWUP"
+        if contextual_overlap >= 0.12:
+            return "CONTINUE", "ACTIVE_BRANCH_AFFINITY"
+        if low in _df_confirm | _df_reject | _df_short_filler:
+            return "CONTINUE", "DISCOURSE_CONTINUATION"
+        return "NEW", "UNRELATED_SHORT_TURN"
+
+    if task_action:
+        return "CONTINUE", "TASK_ACTION"
+    if direct_reference or deictic:
+        return "CONTINUE", "CONTEXTUAL_REFERENCE"
+    if contextual_overlap >= 0.18 and not _df_strong_topic_boundary(text):
+        return "CONTINUE", "ACTIVE_BRANCH_AFFINITY"
+    if _df_strong_topic_boundary(text):
+        return "NEW", "EXPLICIT_TOPIC_BOUNDARY"
+
+    if _df_is_self_contained_new_topic(
+        text,
+        semantic,
+        active_topic=active_topic,
+        active_entity=active_entity,
+        task_probe=task_probe,
+        sequence_digest=sequence_digest,
+    ):
+        return "NEW", "SELF_CONTAINED_NEW_SUBJECT"
+
+    return "CONTINUE", "LIVE_BRANCH_CONTEXTUAL_DEFAULT"
+
+def _df_understand(
+    text: str,
+    relation: str,
+    turn_relation: str,
+    active_topic: str,
+    active_entity: str,
+    task_probe: dict[str, Any],
+    render_probe: dict[str, Any],
+    feedback_probe: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    low = _df_low(text)
+    feedback_probe = feedback_probe if isinstance(feedback_probe, dict) else {}
+    explicit_subject = _df_normalize_subject(_df_extract_subject(text))
+    entity = explicit_subject or active_entity
+
+    if feedback_probe.get("feedback"):
+        target = feedback_probe.get("target") if isinstance(feedback_probe.get("target"), dict) else {}
+        target_entities = [x for x in (target.get("entities") or []) if x]
+        return {
+            "topic": _df_text(target.get("topic") or active_topic, 220),
+            "entity": _df_text(" и ".join(target_entities) or active_entity, 180),
+            "operation": "feedback", "goal": "acknowledge_user_reaction", "representation": "text",
+            "semantic_request": _df_text(text, 1200), "explicit_subject": "",
+            "reference_entity": _df_text(" и ".join(target_entities) or active_entity, 180),
+            "feedback": deepcopy(feedback_probe),
+        }
+
+    operation = "answer"
+    goal = "answer"
+    if _df_memory_scope_request(text):
+        operation, goal = "recall", "memory_recall"
+    elif any(x in low for x in ("объясни", "объяснить", "почему", "разъясни", "как ты")):
+        operation, goal = "explain", "understand"
+    elif render_probe["requested"]:
+        operation, goal = (
+            ("modify", "present")
+            if any(x in low for x in ("измени", "переделай", "добавь", "убери"))
+            else ("build", "present")
+        )
+    elif any(x in low for x in ("проверь", "проанализируй", "разбери", "анализируй")):
+        operation, goal = "analyze", "diagnose_or_analyze"
+    elif any(x in low for x in ("угадай", "отгадай", "разгадай")) or task_probe.get("handoff"):
+        operation, goal = "answer", "guess"
+
+    representation = render_probe["requested"][0] if render_probe["requested"] else "text"
+
+    if _df_memory_scope_request(text):
+        return {
+            "topic": "диалоговая память",
+            "entity": "",
+            "operation": operation,
+            "goal": goal,
+            "representation": representation,
+            "semantic_request": _df_text(text, 1200),
+            "explicit_subject": "",
+        }
+
+    # A concrete subject in the current request is authoritative during
+    # interpretation. Only an elliptical turn inherits the active topic/entity.
+    if explicit_subject:
+        topic = explicit_subject
+        entity = explicit_subject
+    elif relation in {"CONTINUE", "RECALL"} and active_topic:
+        topic = active_topic
+    else:
+        topic = active_topic or entity or _df_text(text, 180)
+
+    if turn_relation in {"DIALOGUE_REPAIR", "DIALOGUE_RULE_UPDATE"}:
+        topic = active_topic or topic
+        entity = active_entity or ""
+    elif turn_relation == "BRANCH_COMPARISON" and explicit_subject:
+        topic = explicit_subject
+        entity = explicit_subject
+
+    semantic_request = _df_text(text, 1200)
+    return {
+        "topic": _df_text(topic, 220),
+        "entity": _df_text(entity, 180),
+        "operation": operation,
+        "goal": goal,
+        "representation": representation,
+        "semantic_request": semantic_request,
+        "explicit_subject": explicit_subject,
+    }
+
+def _df_task_state(
+    text: str, relation: str, task_probe: dict[str, Any], prior: dict[str, Any],
+    topic: str, entity: str, sequence_id: str, active_context: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    active_context = active_context if isinstance(active_context, dict) else {}
+    prior = prior if isinstance(prior, dict) else {}
+    context_task = active_context.get("task") if isinstance(active_context.get("task"), dict) else {}
+
+    # NEW always creates an explicit task record. This replaces the old behavior
+    # where ordinary new subjects had no task state at all.
+    if relation == "NEW":
+        raw = f"{sequence_id}|{topic}|{time.time_ns()}|task"
+        task_id = "task-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+        task = {
+            "active": True,
+            "status": "open",
+            "kind": "dialogue_task" if task_probe.get("current_game_topic") or task_probe.get("task_definition") else "topic_task",
+            "role": task_probe.get("role") or "",
+            "phase": "active",
+            "topic": _df_text(topic or task_probe.get("topic"), 220),
+            "entity": _df_text(entity, 180),
+            "goal": _df_text(task_probe.get("task_definition") and "follow_user_rules" or task_probe.get("answer_analysis") and "understand" or "answer", 160),
+            "objective": _df_text(task_probe.get("objective") or text, 1200),
+            "instruction": _df_text(text, 1200) if task_probe.get("task_definition") else "",
+            "task_id": task_id,
+            "sequence_id": sequence_id,
+            "response_count": 0,
+            "task_response_count": 0,
+            "turn_count": 0,
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "last_user_request": _df_text(text, 1200),
+            "last_april_answer": "",
+            "last_result": {},
+            "last_answer_basis": {},
+            "result_history": [],
+            "qa_history": [],
+            "turns": [],
+            "completed_results": [],
+            "completed": False,
+            "awaiting_user": True,
+            "task_revision": 1,
+        }
+        return task
+
+    # RECALL must use the branch selected by Interpretation, never the previous
+    # active task. CONTINUE stays on the active branch.
+    task = deepcopy(prior if relation == "RECALL" else (context_task or prior))
+    if not task:
+        return {}
+    if sequence_id:
+        task["sequence_id"] = sequence_id
+    if not task.get("task_id"):
+        raw = f"{sequence_id}|{task.get('topic') or topic}|legacy-task"
+        task["task_id"] = "task-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+    task["topic"] = _df_text(task.get("topic") or topic, 220)
+    task["entity"] = _df_text(
+        task.get("entity")
+        if task_probe.get("answer_to_active_task") or task_probe.get("live_input_role") == "followup_question_to_active_task"
+        else (entity or task.get("entity")),
+        180,
+    )
+    if task_probe.get("task_definition"):
+        task["objective"] = _df_text(task_probe.get("objective") or text, 1200)
+        task["instruction"] = _df_text(text, 1200)
+        task["goal"] = "follow_user_rules"
+        task["updated_at"] = time.time()
+    elif task_probe.get("answer_analysis"):
+        task["goal"] = "understand"
+    task["last_user_request"] = _df_text(text, 1200)
+    if task_probe.get("answer_to_active_task"):
+        task["last_user_answer"] = _df_text(text, 1200)
+        task["last_answered_question"] = _df_text(task_probe.get("live_question"), 900)
+        task["last_input_role"] = "answer_to_active_question"
+        task["last_input_confidence"] = float(task_probe.get("live_question_score", 0.0) or 0.0)
+    elif task_probe.get("live_input_role") == "followup_question_to_active_task":
+        task["last_user_action"] = _df_text(text, 1200)
+        task["last_input_role"] = "followup_question_to_active_task"
+    task["task_revision"] = int(task.get("task_revision") or 0) + 1
+    task["active"] = True
+    task.setdefault("status", "open")
+    task.setdefault("phase", "active")
+    task.setdefault("response_count", int(task.get("task_response_count") or 0))
+    task["task_response_count"] = int(task.get("response_count") or 0)
+    return task
+
+
+def _df_render_plan(text: str, relation: str, semantic: dict[str, Any], render_probe: dict[str, Any]) -> dict[str, Any]:
+    requested = list(render_probe.get("requested") or [])
+    # A representation belongs to this turn only. Never inherit a stale renderer.
+    authorized = bool(requested)
+    mode = requested[0] if requested else "TEXT_ONLY"
+    return {
+        "version": "render_plan_v1",
+        "authorized": authorized,
+        "requested_outputs": ["text"] + [x for x in requested if x != "text"],
+        "representation": semantic.get("representation") or "text",
+        "mode": mode,
+        "artifact_reference": bool(authorized and render_probe.get("visual_reference") and relation == "CONTINUE"),
+        "single_route": True,
+        "renderer": {
+            "image": "APRIL_IMAGES_GENERATION", "gallery": "APRIL_IMAGES_GENERATION", "diagram": "DiagramBlock",
+            "graph": "GraphBlock", "table": "TableBlock", "formula": "FormulaBlock", "code": "CodeBlock", "link": "LinkBlock", "text": "MessageTextBlock",
+        }.get(semantic.get("representation") or "text", "MessageTextBlock"),
+    }
+
+
+def _df_development(relation: str, sequence_id: str, active_topic: str, active_entity: str, goal: str, current_request: str, previous_april: str, task: dict[str, Any], render_plan: dict[str, Any]) -> dict[str, Any]:
+    task = task if isinstance(task, dict) else {}
+    previous_result = deepcopy(task.get("last_result") or {})
+    previous_basis = deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {})
+    result_history = deepcopy(task.get("result_history") or [])
+    result_history = result_history[-3:] if isinstance(result_history, list) else []
+    return {
+        "version": "dialogue_development_v2_task_result_continuity",
+        "relation": relation,
+        "same_dialogue": relation in {"CONTINUE", "RECALL"},
+        "sequence_id": sequence_id,
+        "task_id": _df_text(task.get("task_id"), 100),
+        "active_topic": active_topic,
+        "active_goal": goal,
+        "active_entity": active_entity,
+        "current_request": current_request,
+        "previous_result": previous_result or previous_april,
+        "previous_answer_basis": previous_basis,
+        "recent_task_results": result_history,
+        "task_response_count": int(task.get("response_count") or task.get("task_response_count") or 0),
+        "task_status": _df_text(task.get("status") or "open", 40),
+        "task_completed": bool(task.get("completed") or str(task.get("status") or "").lower() == "completed"),
+        "latest_result_event": {},
+        "open_loops": [],
+        "pending_obligations": [],
+        "ready_obligations": [],
+        "user_needs_guidance": False,
+        "initiative_policy": "resume_or_answer_current_request",
+        "next_logical_step": (
+            "resume_task_from_last_result"
+            if previous_result and not task.get("completed")
+            else "summarize_completed_task_or_answer_current_request"
+            if task.get("completed")
+            else "answer_current_request"
+        ),
+        "continuation_anchor": "task_result" if relation in {"CONTINUE", "RECALL"} else "current_turn",
+        "visual_continuity": bool(render_plan.get("artifact_reference")),
+        "active_task": deepcopy(task),
+    }
+
+
+def _df_provider_plan(
+    current_request: str,
+    relation: str,
+    turn_relation: str,
+    semantic: dict[str, Any],
+    task: dict[str, Any],
+    previous_user: str,
+    previous_april: str,
+    sequence_id: str,
+    render_plan: dict[str, Any],
+    development: dict[str, Any],
+    selected_memory: dict[str, Any],
+    active_sequence_digest: dict[str, Any] | None = None,
+    active_dialogue_context: dict[str, Any] | None = None,
+    dialogue_rules: dict[str, Any] | None = None,
+    related_branches: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    Build the final Provider context after semantic understanding is complete.
+
+    The Provider receives a prepared semantic packet. It never chooses the
+    dialogue branch or searches memory on its own.
+    """
+    active_sequence_digest = (
+        active_sequence_digest
+        if isinstance(active_sequence_digest, dict)
+        else {}
+    )
+    active_dialogue_context = (
+        active_dialogue_context
+        if isinstance(active_dialogue_context, dict)
+        else {}
+    )
+    dialogue_rules = (
+        dialogue_rules
+        if isinstance(dialogue_rules, dict)
+        else deepcopy(active_dialogue_context.get("dialogue_rules") or {})
+    )
+    related_branches = [deepcopy(x) for x in (related_branches or []) if isinstance(x, dict)][:4]
+    base = {
+        "version": _df_provider_plan_version,
+        "relation": relation,
+        "turn_relation": turn_relation,
+        "current_user_request": current_request,
+        "current_request_authoritative": True,
+        "context_selection_done_before_provider": True,
+        "provider_must_not_reselect_context": True,
+        "hard_budget_tokens": 900,
+        "soft_target_tokens": 820,
+        "new_topic_minimal_context": relation == "NEW",
+        "required_context": [
+            {
+                "key": "SEMANTIC_CORE",
+                "priority": 1.0,
+                "value": {
+                    "topic": semantic.get("topic"),
+                    "entity": semantic.get("entity"),
+                    "operation": semantic.get("operation"),
+                    "goal": semantic.get("goal"),
+                    "representation": semantic.get("representation"),
+                    "turn_relation": turn_relation,
+                    "branch_label": semantic.get("branch_label") or "",
+                    "branch_type": semantic.get("branch_type") or "topic",
+                    "internal_response_path": semantic.get("internal_response_path") or "",
+                },
+            },
+            {
+                "key": "OUTPUT_CONTRACT",
+                "priority": 0.99,
+                "value": {
+                    "representation": semantic.get("representation"),
+                    "requested_outputs": render_plan.get("requested_outputs"),
+                    "render_authorized": render_plan.get("authorized"),
+                    "render_mode": render_plan.get("mode"),
+                },
+            },
+            {
+                "key": "DIALOGUE_RULES",
+                "priority": 1.0,
+                "value": deepcopy(dialogue_rules),
+            },
+            {
+                "key": "RESPONSE_SEQUENCE",
+                "priority": 1.0,
+                "value": {
+                    "sequence_id": sequence_id,
+                    "task_id": task.get("task_id"),
+                    "sequence_turn_index": int(active_sequence_digest.get("turn_count") or active_dialogue_context.get("response_sequence", {}).get("sequence_turn_index") or 0) + 1,
+                    "output_rule": deepcopy(dialogue_rules),
+                },
+            },
+            {
+                "key": "TASK_RESULT_STATE",
+                "priority": 1.0,
+                "value": {
+                    "task_id": task.get("task_id"),
+                    "sequence_id": sequence_id,
+                    "status": task.get("status") or "open",
+                    "completed": bool(task.get("completed") or str(task.get("status") or "").lower() == "completed"),
+                    "task_response_count": int(task.get("response_count") or task.get("task_response_count") or 0),
+                    "previous_result": deepcopy(task.get("last_result") or active_dialogue_context.get("last_completed_result") or {}),
+                    "answer_basis": deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {}),
+                    "recent_results": deepcopy((task.get("result_history") or [])[-3:]),
+                },
+            },
+        ],
+        "optional_context": [],
+        "excluded_context": [
+            "FULL_HISTORY",
+            "OTHER_TOPIC_BRANCHES",
+            "UNRELATED_WINDOW_MEMORY",
+            "STALE_GLOBAL_ENTITY",
+        ],
+    }
+
+    if relation == "CONTINUE":
+        # The active branch digest outranks topic-word similarity. It is the
+        # compact picture that lets the model understand an elliptical turn.
+        base["required_context"].insert(
+            0,
+            {
+                "key": "ACTIVE_DIALOGUE_CONTEXT",
+                "priority": 1.0,
+                "value": {
+                    "objective": active_dialogue_context.get("objective"),
+                    "task": active_dialogue_context.get("task") or task,
+                    "intent": active_dialogue_context.get("intent"),
+                    "goal": active_dialogue_context.get("goal") or task.get("goal"),
+                    "topic": active_dialogue_context.get("topic"),
+                    "active_entity": active_dialogue_context.get("active_entity"),
+                    "completed_results": list(active_dialogue_context.get("completed_results") or [])[-12:],
+                    "last_completed_result": active_dialogue_context.get("last_completed_result") or {},
+                    "sequence_id": active_dialogue_context.get("sequence_id") or sequence_id,
+                },
+            },
+        )
+        base["required_context"].insert(
+            1,
+            {
+                "key": "ACTIVE_DIALOGUE_TRAJECTORY",
+                "priority": 0.999,
+                "value": active_sequence_digest,
+            },
+        )
+        base["required_context"].insert(
+            2,
+            {
+                "key": "DIALOGUE_ANCHOR",
+                "priority": 0.995,
+                "value": {
+                    "previous_user_turn": previous_user,
+                    "previous_april_turn": previous_april,
+                    "topic": semantic.get("topic"),
+                    "entity": semantic.get("entity"),
+                    "turn_relation": turn_relation,
+                    "sequence_id": sequence_id,
+                    "current_turn_role": _df_text(semantic.get("current_turn_role") or "current_turn", 80),
+                    "answer_to_active_task": bool(semantic.get("answer_to_active_task")),
+                    "active_question": _df_text(semantic.get("active_question"), 900),
+                },
+            },
+        )
+        visual_memory_ref = semantic.get("previous_visual_generation_memory")
+        if isinstance(visual_memory_ref, dict) and visual_memory_ref.get("available"):
+            # Use only a compact excerpt in Provider context. The complete
+            # generator prompt remains in the authenticated 12-hour pair.
+            base["required_context"].insert(
+                3,
+                {
+                    "key": "VISUAL_GENERATION_MEMORY",
+                    "priority": 0.99,
+                    "value": {
+                        "available": True,
+                        "source": "authenticated_dialogue_12h",
+                        "full_prompt_available_in_history": True,
+                        "request": _df_text(visual_memory_ref.get("user_request"), 600),
+                        "prompt_excerpt": _df_text(
+                            visual_memory_ref.get("prompt_excerpt"), 1200
+                        ),
+                        "scene_id": _df_text(visual_memory_ref.get("scene_id"), 120),
+                        "dialogue_sequence_id": _df_text(
+                            visual_memory_ref.get("dialogue_sequence_id"), 100
+                        ),
+                    },
+                },
+            )
+        if task:
+            base["required_context"].insert(
+                4,
+                {
+                    "key": "ACTIVE_TASK",
+                    "priority": 0.99,
+                    "value": {
+                        "kind": task.get("kind"),
+                        "role": task.get("role"),
+                        "phase": task.get("phase"),
+                        "topic": task.get("topic"),
+                        "goal": task.get("goal"),
+                        "last_question": task.get("last_question"),
+                        "last_user_answer": task.get("last_user_answer"),
+                        "candidate_answer": _df_text(semantic.get("candidate_answer") or "", 1200),
+                        "current_turn_role": _df_text(semantic.get("current_turn_role") or "current_turn", 80),
+                        "answer_to_active_task": bool(semantic.get("answer_to_active_task")),
+                    },
+                },
+            )
+        base["required_context"].append(
+            {
+                "key": "DIALOGUE_DEVELOPMENT",
+                "priority": 0.9,
+                "value": development,
+            }
+        )
+
+    if related_branches:
+        base["required_context"].append({
+            "key": "RELATED_TOPIC_BRANCHES",
+            "priority": 0.98,
+            "value": related_branches,
+        })
+
+    if relation == "RECALL":
+        if active_sequence_digest:
+            base["required_context"].append(
+                {
+                    "key": "ACTIVE_DIALOGUE_TRAJECTORY",
+                    "priority": 0.995,
+                    "value": deepcopy(active_sequence_digest),
+                }
+            )
+            base["new_topic_minimal_context"] = False
+        if selected_memory:
+            base["required_context"].append(
+                {
+                    "key": "MEMORY_RECALL",
+                    "priority": 0.9,
+                    "value": [{
+                        **deepcopy(selected_memory),
+                        "resume_instruction": "Коротко напомни предыдущий предмет только настолько, насколько это помогает текущему вопросу, затем сразу продолжи текущий запрос. Не называй внутреннюю ветку, номер или путь.",
+                    }],
+                }
+            )
+            base["new_topic_minimal_context"] = False
+
+    return base
+
+
+def _df_select_recalled_branch(text: str, state: dict[str, Any], branches: dict[str, Any]) -> dict[str, Any]:
+    low = _df_low(text)
+    candidates = [b for b in list(branches.get("branches") or []) if isinstance(b, dict)]
+    if not candidates:
+        return {}
+
+    # Explicit ordinal task recall: "первая задача", "ко второй", etc.
+    ordinals = {
+        "первая": 1, "первой": 1, "первую": 1,
+        "вторая": 2, "второй": 2, "вторую": 2,
+        "третья": 3, "третьей": 3, "третью": 3,
+        "четвертая": 4, "четвертой": 4, "четвертую": 4,
+        "пятая": 5, "пятой": 5, "пятую": 5,
+    }
+    ordered = sorted(
+        candidates,
+        key=lambda b: (float(b.get("started_at") or 0.0), str(b.get("task_id") or b.get("branch_id") or "")),
+    )
+    for word, number in ordinals.items():
+        if word in low and ("задач" in low or "тем" in low or "ветк" in low):
+            if 1 <= number <= len(ordered):
+                return deepcopy(ordered[number - 1])
+    m = re.search(r"(?:задач[аеу]?|ветк[аеу]?|тем[аеу]?)\s*(?:номер|№)?\s*(\d+)", low)
+    if m:
+        number = int(m.group(1))
+        if 1 <= number <= len(ordered):
+            return deepcopy(ordered[number - 1])
+
+    mentioned = _df_find_branch_mentions(text, branches)
+    if mentioned:
+        return deepcopy(mentioned[0])
+
+    def recall_overlap(query_text: str, candidate_text: str) -> float:
+        exact = _df_overlap(query_text, candidate_text)
+        q_tokens = _df_tokens(query_text)
+        c_tokens = _df_tokens(candidate_text)
+        if not q_tokens or not c_tokens:
+            return exact
+        fuzzy_hits = 0
+        for qt in q_tokens:
+            if any(qt == ct or (len(qt) >= 5 and len(ct) >= 5 and qt[:5] == ct[:5]) for ct in c_tokens):
+                fuzzy_hits += 1
+        fuzzy = fuzzy_hits / max(1, len(q_tokens))
+        return max(exact, round(fuzzy, 6))
+
+    scored = []
+    for branch in candidates:
+        hay = " ".join(
+            _df_text(x) for x in (
+                branch.get("topic"), branch.get("canonical_entity"),
+                branch.get("last_user_request"), branch.get("last_april_answer"),
+            )
+        )
+        score = recall_overlap(low, hay)
+        scored.append((score, branch))
+    scored.sort(key=lambda x: (x[0], 1 if x[1].get("active") else 0), reverse=True)
+    return deepcopy(scored[0][1]) if scored and scored[0][0] >= 0.12 else {}
+
+
+
+def _df_latest_visual_generation_memory_fast(
+    state: dict[str, Any],
+    canonical_turn: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Read visual-generation memory from canonical state without scanning history."""
+    canonical = canonical_turn if isinstance(canonical_turn, dict) else {}
+    owners = [canonical]
+    if isinstance(state, dict) and isinstance(state.get("dialogue_memory_anchor"), dict):
+        owners.append(state.get("dialogue_memory_anchor"))
+    for owner in owners:
+        memory = owner.get("visual_generation_memory") if isinstance(owner, dict) else {}
+        if isinstance(memory, dict) and _df_text(memory.get("generation_prompt"), 8):
+            return deepcopy(memory)
+    scene = canonical.get("visual_scene") if isinstance(canonical.get("visual_scene"), dict) else {}
+    if not scene and isinstance(state, dict) and isinstance(state.get("last_successful_visual_scene"), dict):
+        scene = state.get("last_successful_visual_scene")
+    memory = scene.get("visual_generation_memory") if isinstance(scene, dict) else {}
+    return deepcopy(memory) if isinstance(memory, dict) and _df_text(memory.get("generation_prompt"), 8) else {}
+
+
+def _df_latest_visual_generation_memory(
+    state: dict[str, Any],
+    *,
+    user_id: str = "",
+    conversation_id: str = "",
+    sequence_id: str = "",
+) -> dict[str, Any]:
+    """Read the latest full visual-generation envelope from authenticated 12h memory.
+
+    The full generator prompt is deliberately kept in StateManager's existing
+    ``day_0.dialog_pairs`` archive. Interpretation reads it only after the
+    current authenticated scope is known; no second storage path is introduced.
+    """
+    if not isinstance(state, dict):
+        return {}
+
+    timeline = state.get("memory_timeline")
+    day0 = timeline.get("day_0") if isinstance(timeline, dict) else {}
+    pairs = day0.get("dialog_pairs") if isinstance(day0, dict) else []
+    if not isinstance(pairs, list):
+        return {}
+
+    uid = _df_text(user_id or state.get("user_id") or (state.get("memory_scope") or {}).get("user_id"), 120)
+    cid = _df_text(
+        conversation_id
+        or state.get("conversation_id")
+        or (state.get("memory_scope") or {}).get("conversation_id"),
+        120,
+    )
+    sid = _df_text(sequence_id, 100)
+    now = time.time()
+
+    for pair in reversed(pairs):
+        if not isinstance(pair, dict):
+            continue
+        if uid and _df_text(pair.get("user_id"), 120) != uid:
+            continue
+        if cid and _df_text(pair.get("conversation_id"), 120) != cid:
+            continue
+
+        pair_sequence_id = _df_text(
+            pair.get("dialogue_sequence_id") or pair.get("sequence_id"),
+            100,
+        )
+        if sid and pair_sequence_id and pair_sequence_id != sid:
+            continue
+
+        created_at = pair.get("created_at")
+        try:
+            age = max(0.0, now - float(created_at))
+        except (TypeError, ValueError):
+            age = 0.0
+        if age > USER_CONTENT_RETENTION_SECONDS:
+            continue
+
+        memory = pair.get("visual_generation_memory")
+        if not isinstance(memory, dict):
+            continue
+        generation_prompt = _df_text(memory.get("generation_prompt"), 20000)
+        if not generation_prompt:
+            continue
+
+        result = deepcopy(memory)
+        # Authenticated pair scope is authoritative over any generator metadata.
+        result["user_id"] = uid
+        result["conversation_id"] = cid
+        result["dialogue_sequence_id"] = pair_sequence_id or _df_text(
+            memory.get("dialogue_sequence_id"), 100
+        )
+        result["history_created_at"] = float(created_at) if created_at is not None else now
+        result["history_expires_after_hours"] = DIALOGUE_WINDOW_HOURS
+        return result
+
+    return {}
+
+
+def _df_visual_generation_memory_reference(memory: dict[str, Any]) -> dict[str, Any]:
+    """Build a provider-safe reference while keeping the full prompt in 12h memory."""
+    if not isinstance(memory, dict):
+        return {}
+    prompt = _df_text(memory.get("generation_prompt"), 20000)
+    if not prompt:
+        return {}
+
+    # The excerpt is evidence for relation/continuity only. The full prompt stays
+    # in the authenticated memory archive and is never injected into the Image API.
+    excerpt = prompt[:1200]
+    return {
+        "version": "visual_generation_memory_ref_v1",
+        "available": True,
+        "full_prompt_available_in_history": True,
+        "memory_kind": "visual_generation_prompt",
+        "source": "authenticated_dialogue_12h",
+        "user_request": _df_text(memory.get("request_anchor"), 600),
+        "prompt_excerpt": excerpt,
+        "prompt_chars": len(prompt),
+        "image_model_prompt_chars": int(memory.get("image_model_prompt_chars") or 0),
+        "scene_id": _df_text(memory.get("scene_id"), 120),
+        "turn_id": _df_text(memory.get("turn_id"), 120),
+        "dialogue_sequence_id": _df_text(memory.get("dialogue_sequence_id"), 100),
+        "expires_after_hours": DIALOGUE_WINDOW_HOURS,
+    }
+
+
+def _df_interpret_live_turn(
+    text: str,
+    *,
+    history: list[Any] | None = None,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Canonical production interpretation pipeline.
+
+    Order:
+        1. receive current turn
+        2. inspect authenticated active-branch memory
+        3. build compact branch picture
+        4. contextually understand the current turn
+        5. resolve CONTINUE / NEW / RECALL
+        6. build response/development intent
+        7. build render plan
+        8. build the frozen Provider context
+        9. hand off to Executor/SceneContract
+
+    Relation resolution is deliberately late. Rendering is never used to decide
+    whether a user changed topic.
+    """
+    started = time.perf_counter()
+    state = state if isinstance(state, dict) else {}
+    history = history if isinstance(history, list) else []
+    current = _df_text(text, 2400)
+    identity_question = _df_identity_question(current)
+
+    seq = (
+        state.get("active_dialogue_sequence")
+        if isinstance(state.get("active_dialogue_sequence"), dict)
+        else {}
+    )
+    previous_user, previous_april = _df_extract_previous(history, state)
+    canonical_turn = state.get("canonical_dialogue_turn") if isinstance(state.get("canonical_dialogue_turn"), dict) else {}
+    active_topic = _df_text(canonical_turn.get("topic"), 220) or _df_topic_from_state(state)
+    canonical_entities = canonical_turn.get("entities") if isinstance(canonical_turn.get("entities"), list) else []
+    active_entity = (
+        _df_text(canonical_turn.get("active_entity"), 220)
+        or _df_text(" и ".join(str(x) for x in canonical_entities[:4]), 220)
+        or _df_entity_from_state(state)
+    )
+    active_context = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
+    prior_task = _df_active_task(state)
+    context_task = active_context.get("task") if isinstance(active_context.get("task"), dict) else {}
+    context_task_id = _df_text(active_context.get("task_id") or context_task.get("task_id"), 100)
+    prior_task_id = _df_text(prior_task.get("task_id"), 100) if isinstance(prior_task, dict) else ""
+    if context_task and (not prior_task or not prior_task_id or not context_task_id or prior_task_id == context_task_id):
+        prior_task = deepcopy(context_task)
+
+    # A completed canonical turn owns the current branch. A task from an older
+    # turn in the same 12h sequence is historical and cannot become the subject
+    # of a new pronoun/reference just because it remains in task_registry.
+    canonical_task_id = _df_text(canonical_turn.get("task_id"), 100)
+    if canonical_task_id:
+        candidate_task_id = _df_text(prior_task.get("task_id"), 100) if isinstance(prior_task, dict) else ""
+        if candidate_task_id and candidate_task_id != canonical_task_id:
+            prior_task = {}
+        context_task_id = canonical_task_id
+
+    active_seq_id = _df_text(seq.get("sequence_id"), 80)
+    active_task_id = _df_text(
+        canonical_turn.get("task_id")
+        or seq.get("task_id")
+        or state.get("active_dialogue_task_id")
+        or prior_task.get("task_id")
+        or "",
+        100,
+    )
+    conversation_id = _df_text(
+        state.get("conversation_id")
+        or (state.get("memory_scope") or {}).get("conversation_id"),
+        120,
+    )
+    user_id = _df_text(
+        state.get("user_id")
+        or (state.get("memory_scope") or {}).get("user_id"),
+        120,
+    )
+
+    # ------------------------------------------------------------------
+    # 1) Canonical hot-path memory. Full 12h traversal is RECALL-only.
+    # ------------------------------------------------------------------
+    explicit_recall = _df_explicit_recall(current)
+    visual_requested = bool(_df_render_probe(current).get("requested"))
+    visual_generation_memory = _df_latest_visual_generation_memory_fast(state, canonical_turn)
+    if not visual_generation_memory and not canonical_turn and visual_requested:
+        visual_generation_memory = _df_latest_visual_generation_memory(
+            state, user_id=user_id, conversation_id=conversation_id, sequence_id=active_seq_id,
+        )
+    visual_generation_memory_ref = _df_visual_generation_memory_reference(visual_generation_memory)
+    active_sequence_digest = (
+        _df_active_sequence_digest(state, history, active_seq_id, limit=6, task_id=active_task_id)
+        if explicit_recall else _df_compact_active_sequence_digest(state, canonical_turn, active_seq_id)
+    )
+    digest_topic = _df_text(active_sequence_digest.get("current_topic"), 220)
+    # The digest contains historical branch/task mirrors. Once a completed
+    # post-Provider canonical turn exists, it is authoritative and the digest
+    # must not overwrite it with an older task topic.
+    if not canonical_turn and digest_topic and _df_low(digest_topic) not in {
+        "если", "это", "такое", "такой", "так", "пронумеруй", "выдай", "проверь",
+    }:
+        active_topic = digest_topic
+
+    # ------------------------------------------------------------------
+    # 2) Cheap evidence probes. They cannot own relation or routing.
+    # ------------------------------------------------------------------
+    render_probe = _df_render_probe(current)
+    task_probe = _df_task_probe(current, prior_task, active_topic, previous_april=previous_april)
+
+    # Visual deictic references must bind to the latest concrete subject, not to
+    # an older task/question that happens to remain open in the 12h sequence.
+    visual_ref_entity = ""
+    if render_probe.get("requested") == ["image"]:
+        visual_ref_entity = _df_visual_reference_entity(
+            current,
+            previous_user=previous_user,
+            previous_april=previous_april,
+            state=state,
+        )
+        if visual_ref_entity:
+            active_entity = visual_ref_entity
+            active_topic = visual_ref_entity
+
+    dialogue_probe = _df_dialogue_bigunok(
+        current,
+        previous_user,
+        previous_april,
+        active_topic,
+        active_entity,
+        task_probe,
+    )
+    feedback_probe = _df_feedback_probe(current, canonical_turn=canonical_turn, previous_april=previous_april)
+    branches = (
+        _df_branch_index(state, seq, active_topic, active_entity)
+        if explicit_recall or _df_comparison_request(current)
+        else {}
+    )
+
+    # ------------------------------------------------------------------
+    # 3) Contextual understanding BEFORE relation resolution.
+    #
+    # A live branch is the working context. NEW is only provisional when there
+    # is no live branch. This is what lets "да", "возможно", "дальше", numbers,
+    # names and other elliptical human replies acquire meaning from the branch.
+    # ------------------------------------------------------------------
+    has_live_branch = bool(
+        active_sequence_digest.get("sequence_id")
+        or active_seq_id
+        or active_topic
+        or previous_april
+    )
+    explicit_recall = _df_explicit_recall(current)
+
+    provisional_relation = (
+        "RECALL"
+        if explicit_recall
+        else "CONTINUE"
+        if has_live_branch
+        else "NEW"
+    )
+    provisional_turn_relation = (
+        "REFERENCE_OLD_TOPIC"
+        if provisional_relation == "RECALL"
+        else "CONTEXTUAL_UNDERSTANDING"
+    )
+
+    semantic = _df_understand(
+        current, provisional_relation, provisional_turn_relation, active_topic, active_entity,
+        task_probe, render_probe, feedback_probe=feedback_probe,
+    )
+    if visual_ref_entity:
+        # For a deictic image-edit request ("его/её/этого человека") the
+        # resolved visual entity is authoritative. Do not let the generic
+        # request parser turn phrases such as "на картинке его в профиль" into
+        # the entity or let a stale interactive task win later.
+        semantic["reference_entity"] = visual_ref_entity
+        semantic["entity"] = visual_ref_entity
+        semantic["topic"] = visual_ref_entity
+        semantic["explicit_subject"] = ""
+
+    # ------------------------------------------------------------------
+    # 4) Now resolve the dialogue relation from the contextual understanding.
+    # ------------------------------------------------------------------
+    relation, turn_relation = _df_resolve_relation(
+        current, state, previous_april, active_topic, active_entity, task_probe, dialogue_probe,
+        feedback_probe=feedback_probe, semantic=semantic, sequence_digest=active_sequence_digest, branches=branches,
+    )
+    if visual_ref_entity and relation != "RECALL":
+        # A deictic visual follow-up continues the authenticated branch. The
+        # surface command itself must not become a new topic/entity.
+        relation = "CONTINUE"
+        turn_relation = "VISUAL_REFERENCE_FOLLOWUP"
+        semantic["topic"] = visual_ref_entity
+        semantic["entity"] = visual_ref_entity
+        semantic["reference_entity"] = visual_ref_entity
+    topic_affinity = 0.0
+    semantic_topic = _df_low(semantic.get("topic") or "")
+    prior_task_topic = _df_low(
+        (prior_task.get("topic") if isinstance(prior_task, dict) else "")
+        or active_topic
+        or (active_sequence_digest.get("root_topic") if isinstance(active_sequence_digest, dict) else "")
+    )
+    prior_task_entity = _df_low(
+        (prior_task.get("entity") if isinstance(prior_task, dict) else "")
+        or active_entity
+        or (active_sequence_digest.get("current_focus") if isinstance(active_sequence_digest, dict) else "")
+    )
+    if semantic_topic and prior_task_topic:
+        topic_affinity = max(topic_affinity, _df_overlap(semantic_topic, prior_task_topic))
+    if semantic_topic and prior_task_entity:
+        topic_affinity = max(topic_affinity, _df_overlap(semantic_topic, prior_task_entity))
+
+    if not explicit_recall and not bool(task_probe.get("answer_to_active_task")) and _df_is_self_contained_new_topic(
+        current, semantic, active_topic=active_topic, active_entity=active_entity,
+        task_probe=task_probe, sequence_digest=active_sequence_digest,
+    ) and topic_affinity < 0.28:
+        relation, turn_relation = "NEW", "SELF_CONTAINED_NEW_SUBJECT"
+
+    selected_branch: dict[str, Any] = {}
+    branch_mentions = _df_find_branch_mentions(current, branches)
+    active_branch = next((b for b in (branches.get("branches") or []) if isinstance(b, dict) and _df_text(b.get("task_id"), 100) == active_task_id), {})
+    linked_branches: list[dict[str, Any]] = []
+    if turn_relation == "BRANCH_COMPARISON":
+        linked_branches = _df_comparison_branch_context(current, active_branch, branch_mentions)
+        names = []
+        for item in linked_branches:
+            name = _df_text(item.get("entity") or item.get("topic"), 120)
+            if name and name.lower() not in {x.lower() for x in names}:
+                names.append(name)
+        if names:
+            semantic["topic"] = " и ".join(names[:3])
+            semantic["entity"] = " и ".join(names[:3])
+
+    # A recall request is allowed to select one older branch. Nothing else may
+    # silently switch branches.
+    if relation == "RECALL":
+        # Broad memory introspection ("проверь 12-часовую память", "что ты
+        # помнишь из предыдущих диалогов") asks for the window as a whole.
+        # Only an explicitly identifiable subject/ordinal returns to one branch.
+        if not _df_memory_scope_request(current):
+            selected_branch = _df_select_recalled_branch(
+                current,
+                state,
+                branches,
+            )
+        if selected_branch.get("sequence_id"):
+            active_seq_id = _df_text(
+                selected_branch.get("sequence_id"),
+                80,
+            )
+            active_task_id = _df_text(selected_branch.get("task_id"), 100)
+            active_topic = _df_text(
+                selected_branch.get("topic")
+                or active_topic,
+                220,
+            )
+            active_entity = _df_text(
+                selected_branch.get("canonical_entity")
+                or active_entity,
+                180,
+            )
+            previous_user = _df_text(
+                selected_branch.get("last_user_request")
+                or previous_user,
+            )
+            previous_april = _df_text(
+                selected_branch.get("last_april_answer")
+                or previous_april,
+            )
+            # Rebuild the digest for the branch explicitly selected by RECALL.
+            active_sequence_digest = _df_active_sequence_digest(
+                state,
+                history,
+                active_seq_id,
+                limit=6,
+                task_id=active_task_id,
+            )
+
+            recalled_task = selected_branch.get("active_task")
+            if isinstance(recalled_task, dict) and recalled_task:
+                prior_task = deepcopy(recalled_task)
+
+            # Re-understand against the recalled branch, not the old active branch.
+            semantic = _df_understand(
+                current,
+                "CONTINUE",
+                "REFERENCE_OLD_TOPIC",
+                active_topic,
+                active_entity,
+                _df_task_probe(current, prior_task, active_topic, previous_april=previous_april),
+                render_probe,
+            )
+
+    if turn_relation == "USER_FEEDBACK":
+        # Feedback belongs to the last canonical assistant action. Never create a
+        # new task/topic or consult an older branch for a short reaction.
+        semantic["topic"] = _df_text(semantic.get("topic") or active_topic, 220)
+        semantic["entity"] = _df_text(semantic.get("entity") or active_entity, 180)
+        semantic["explicit_subject"] = ""
+        semantic["feedback"] = deepcopy(feedback_probe)
+        task = {}
+        active_task_id = _df_text(canonical_turn.get("task_id") or seq.get("task_id") or "", 100)
+
+    if turn_relation in {"DIALOGUE_REPAIR", "DIALOGUE_RULE_UPDATE"}:
+        # Repair and presentation-rule changes belong to the existing dialogue
+        # branch. Neither utterance is allowed to become a new topic/entity.
+        semantic["topic"] = active_topic
+        semantic["entity"] = active_entity
+        semantic["explicit_subject"] = ""
+
+    # A visual-reference follow-up continues the authenticated conversation,
+    # but it is a new task action attached to the referenced visual entity.
+    # Keep the outer dialogue relation as CONTINUE while ensuring the task fed
+    # to Provider is no longer the stale interactive question branch.
+    if visual_ref_entity:
+        relation = "CONTINUE" if relation != "RECALL" else relation
+        turn_relation = "VISUAL_REFERENCE_FOLLOWUP"
+        semantic["reference_entity"] = visual_ref_entity
+        semantic["entity"] = visual_ref_entity
+        semantic["topic"] = visual_ref_entity
+        semantic["explicit_subject"] = ""
+        active_entity = visual_ref_entity
+        active_topic = visual_ref_entity
+
+    # ------------------------------------------------------------------
+    # 5) Apply the final relation to semantic identity.
+    # ------------------------------------------------------------------
+    explicit_entity = _df_normalize_subject(
+        _df_text(semantic.get("explicit_subject"))
+    )
+
+    if relation == "NEW":
+        if turn_relation == "BRANCH_COMPARISON" and linked_branches:
+            comparison_names = []
+            for item in linked_branches:
+                name = _df_normalize_subject(_df_text(item.get("entity") or item.get("topic"), 120))
+                if name and name.lower() not in {x.lower() for x in comparison_names}:
+                    comparison_names.append(name)
+            semantic["topic"] = " и ".join(comparison_names[:3]) or _df_normalize_subject(current)
+            semantic["entity"] = semantic["topic"]
+            active_topic = semantic["topic"]
+            active_entity = semantic["entity"]
+        else:
+            new_topic = (
+                "апрель: идентичность и возможности"
+                if identity_question
+                else semantic.get("explicit_subject")
+                or semantic.get("entity")
+                or _df_extract_subject(current)
+                or current
+            )
+            semantic["topic"] = _df_normalize_subject(new_topic)
+            active_topic = semantic["topic"]
+            active_entity = _df_normalize_subject(
+                semantic.get("entity")
+                or _df_extract_subject(current)
+            )
+        branch_digest_for_provider: dict[str, Any] = {}
+    else:
+        # CONTINUE/RECALL preserve the live/recalled conversational identity.
+        # A concrete operand may refine the active entity without replacing the
+        # branch. Generic sentence tails never become the entity.
+        live_reference_text = " ".join(
+            [
+                _df_text(active_topic, 220),
+                _df_text(active_entity, 220),
+                _df_text(active_sequence_digest.get("current_task_topic"), 220),
+                _df_text(active_sequence_digest.get("last_user"), 220),
+                _df_text(active_sequence_digest.get("last_april"), 260),
+            ]
+            + [
+                _df_text(x.get("user"), 220)
+                for x in list(active_sequence_digest.get("recent_trajectory") or [])[-6:]
+                if isinstance(x, dict)
+            ]
+        )
+        if explicit_entity and _df_overlap(explicit_entity, live_reference_text) >= 0.20:
+            active_entity = explicit_entity
+        elif not active_entity and semantic.get("entity") and not _df_low(semantic.get("entity")) in {"если", "это", "такое", "такой", "следующее", "дальше", "отвечай", "овечай"}:
+            active_entity = _df_text(semantic.get("entity"), 180)
+
+        semantic["entity"] = active_entity or ("" if relation == "RECALL" else ("" if _df_low(semantic.get("entity")) in {"если", "это", "такое", "такой", "следующее", "дальше", "отвечай", "овечай", "пронумеруй", "выдай", "проверь", "так"} else semantic.get("entity")))
+        semantic["topic"] = semantic.get("topic") or active_topic
+        branch_digest_for_provider = deepcopy(active_sequence_digest)
+
+    # Broad RECALL is the 12-hour conversation itself. A specific branch is only
+    # selected when the user identified one; otherwise keep the live sequence
+    # digest so the Provider can summarize the requested memory window.
+    if relation == "RECALL" and selected_branch.get("sequence_id"):
+        branch_digest_for_provider = deepcopy(active_sequence_digest)
+
+    if active_seq_id:
+        # NEW is a new task inside the same authenticated dialogue sequence.
+        sequence_id = active_seq_id
+    else:
+        sequence_id = _df_new_sequence_id(user_id, conversation_id, current)
+
+    # RECALL may have selected a different sequence. Resolve the visual memory
+    # against the final branch identity before building Provider context.
+    visual_generation_memory = _df_latest_visual_generation_memory(
+        state,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        sequence_id=sequence_id,
+    ) or visual_generation_memory
+    visual_generation_memory_ref = _df_visual_generation_memory_reference(
+        visual_generation_memory
+    )
+    if visual_generation_memory_ref and relation in {"CONTINUE", "RECALL"}:
+        semantic["previous_visual_generation_memory"] = deepcopy(
+            visual_generation_memory_ref
+        )
+
+    # ------------------------------------------------------------------
+    # 6) Response task/development planning.
+    # ------------------------------------------------------------------
+    live_role = _df_text(task_probe.get("live_input_role") or "current_turn", 80)
+    if visual_ref_entity:
+        # It remains a continuation of the same authenticated conversation, but
+        # it is not an answer to the stale interactive question. The Provider
+        # must see a visual-reference action instead of inheriting that task.
+        live_role = "visual_reference_followup"
+        turn_relation = "VISUAL_REFERENCE_FOLLOWUP"
+        task_probe = dict(task_probe)
+        task_probe["live_input_role"] = live_role
+        task_probe["answer_to_active_task"] = False
+        task_probe["task_action"] = True
+    if relation == "CONTINUE" and not visual_ref_entity and live_role in {"answer_to_active_question", "followup_question_to_active_task"}:
+        # The user's answer is payload for the existing task, not a new entity.
+        # Preserve the task's semantic identity and carry the answer separately.
+        semantic["topic"] = _df_text(prior_task.get("topic") or active_topic or semantic.get("topic"), 220)
+        semantic["entity"] = _df_text(prior_task.get("entity") or active_entity or "", 180)
+        if live_role == "answer_to_active_question":
+            semantic["candidate_answer"] = current
+    task = _df_task_state(
+        current,
+        "NEW" if visual_ref_entity and relation == "CONTINUE" else relation,
+        task_probe,
+        prior_task,
+        semantic.get("topic") or active_topic,
+        semantic.get("entity") or active_entity,
+        sequence_id,
+        active_context,
+    )
+    if task and turn_relation == "BRANCH_COMPARISON":
+        task["branch_type"] = "comparison"
+        task["linked_branch_ids"] = [
+            _df_text(x.get("branch_id") or x.get("task_id"), 120)
+            for x in linked_branches
+            if _df_text(x.get("branch_id") or x.get("task_id"), 120)
+        ]
+        task["linked_branches"] = deepcopy(linked_branches)
+    active_task_id = _df_text(task.get("task_id"), 100) if task else active_task_id
+    if turn_relation == "DIALOGUE_RULE_UPDATE":
+        # Rule changes are presentation-only. They must not become a task turn,
+        # alter the topic, or consume task-local response state.
+        task = {}
+        active_task_id = _df_text(
+            seq.get("task_id") or active_task_id,
+            100,
+        )
+
+    sequence_rule_seed = {
+        "dialogue_rules": deepcopy(
+            seq.get("dialogue_rules")
+            or (active_context.get("dialogue_rules") if isinstance(active_context, dict) else {})
+            or {}
+        )
+    }
+    dialogue_rules = _df_dialogue_rules(
+        current,
+        sequence_rule_seed,
+        previous_april=previous_april,
+    )
+    dialogue_rules.pop("updated", None)
+    dialogue_rules.pop("updated_at", None)
+    dialogue_rules["visible"] = False
+    dialogue_rules["internal_only"] = True
+    dialogue_rules.pop("next_marker", None)
+
+    # Stable A/B/C branch identity is derived from the branch graph, never from
+    # task response counters. The response path is useful only to memory/debugging.
+    target_branch_id = _df_text(
+        selected_branch.get("branch_id") if selected_branch else "",
+        120,
+    ) or (f"{sequence_id}:{active_task_id}" if active_task_id else sequence_id)
+    branch_label = _df_text(selected_branch.get("branch_label") if selected_branch else "", 4)
+    if not branch_label:
+        branch_label = _df_branch_label_for(branches.get("branches") or [], target_branch_id)
+    if turn_relation == "BRANCH_COMPARISON":
+        branch_label = _df_branch_label_for(branches.get("branches") or [], target_branch_id) if target_branch_id else branch_label
+    if task:
+        task["branch_label"] = branch_label
+        task["internal_only"] = True
+        task["internal_response_path"] = _df_internal_response_path(
+            branch_label, int(task.get("response_count") or task.get("task_response_count") or 0)
+        )
+        task["next_internal_response_path"] = _df_internal_response_path(
+            branch_label, int(task.get("response_count") or task.get("task_response_count") or 0) + 1
+        )
+
+    development = _df_development(
+        relation,
+        sequence_id,
+        semantic.get("topic") or active_topic,
+        semantic.get("entity") or active_entity,
+        semantic.get("goal") or "answer",
+        current,
+        previous_april,
+        task,
+        {},  # render plan is attached after semantic response planning
+    )
+
+    # ------------------------------------------------------------------
+    # 7) Render determination happens only after dialogue understanding/relation.
+    # ------------------------------------------------------------------
+    render_plan = _df_render_plan(
+        current,
+        relation,
+        semantic,
+        render_probe,
+    )
+    development["render_plan"] = deepcopy(render_plan)
+    development["next_logical_step"] = (
+        "answer_current_request"
+        if relation != "RECALL"
+        else "answer_recalled_branch_request"
+    )
+    development["active_sequence_digest_version"] = (
+        branch_digest_for_provider.get("version")
+        if branch_digest_for_provider
+        else ""
+    )
+
+    selected_memory = selected_branch if relation == "RECALL" else {}
+
+    # Freeze the human-turn relationship into the semantic packet before the
+    # Provider plan is built. These fields describe the live exchange, not an
+    # internal branch/counter, and prevent a short answer from reaching the model
+    # as an apparently standalone request.
+    semantic["current_turn_role"] = _df_text(
+        task_probe.get("live_input_role") or "current_turn", 80
+    )
+    semantic["answer_to_active_task"] = bool(task_probe.get("answer_to_active_task"))
+    semantic["active_question"] = _df_text(task_probe.get("live_question"), 900)
+    semantic["active_question_source"] = _df_text(
+        task_probe.get("live_question_source") or "", 40
+    )
+
+    # ------------------------------------------------------------------
+    # 8) Provider context is frozen here. Provider cannot select memory/branch.
+    # ------------------------------------------------------------------
+    provider_plan = _df_provider_plan(
+        current,
+        relation,
+        turn_relation,
+        semantic,
+        task,
+        previous_user,
+        previous_april,
+        sequence_id,
+        render_plan,
+        development,
+        selected_memory,
+        branch_digest_for_provider,
+        active_context,
+        dialogue_rules=dialogue_rules,
+        related_branches=linked_branches,
+    )
+
+    branch_index = deepcopy(branches)
+    if relation == "NEW" and sequence_id:
+        branch_index["target_sequence_id"] = sequence_id
+        branch_index["target_task_id"] = active_task_id
+        branch_index["target_branch_id"] = f"{sequence_id}:{active_task_id}" if active_task_id else sequence_id
+        branch_index["target_branch"] = {
+            "branch_id": f"{sequence_id}:{active_task_id}" if active_task_id else sequence_id,
+            "sequence_id": sequence_id,
+            "task_id": active_task_id,
+            "topic": _df_text(
+                semantic.get("topic"),
+                220,
+            ),
+            "canonical_entity": _df_text(
+                semantic.get("entity"),
+                180,
+            ),
+            "goal": _df_text(
+                semantic.get("goal") or "answer",
+                120,
+            ),
+            "branch_label": branch_label,
+            "branch_type": "comparison" if turn_relation == "BRANCH_COMPARISON" else "topic",
+            "linked_branch_ids": deepcopy(task.get("linked_branch_ids") or []) if isinstance(task, dict) else [],
+            "internal_only": True,
+            "active": True,
+        }
+        branch_index["resolution_mode"] = "NEW_TASK"
+    elif relation == "RECALL" and selected_branch:
+        branch_index["target_sequence_id"] = _df_text(
+            selected_branch.get("sequence_id"),
+            80,
+        )
+        branch_index["target_task_id"] = _df_text(selected_branch.get("task_id") or "", 100)
+        active_task_id = _df_text(selected_branch.get("task_id") or active_task_id, 100)
+        branch_index["target_branch_id"] = _df_text(
+            selected_branch.get("branch_id")
+            or (f"{selected_branch.get('sequence_id')}:{active_task_id}" if active_task_id else selected_branch.get("sequence_id")),
+            120,
+        )
+        branch_index["target_branch"] = deepcopy(selected_branch)
+        branch_index["resolution_mode"] = "RESUME_BRANCH"
+    else:
+        branch_index["resolution_mode"] = "ACTIVE_BRANCH"
+    branch_index["active_sequence_id"] = sequence_id
+    branch_index["target_task_id"] = active_task_id
+
+    continuity_evidence = {
+        "version": "dialogue_continuity_evidence_v1",
+        "live_branch_exists": has_live_branch,
+        "active_sequence_id": _df_text(
+            active_sequence_digest.get("sequence_id")
+            or active_seq_id,
+            80,
+        ),
+        "branch_turn_count": int(
+            active_sequence_digest.get("turn_count") or 0
+        ),
+        "short_turn": bool(dialogue_probe.get("short")),
+        "confirmation": bool(dialogue_probe.get("confirmation")),
+        "rejection": bool(dialogue_probe.get("rejection")),
+        "deictic_reference": bool(dialogue_probe.get("deictic")),
+        "direct_reference": bool(dialogue_probe.get("direct_reference")),
+        "task_active": bool(task_probe.get("active")),
+        "contextual_overlap": round(
+            max(
+                float(dialogue_probe.get("topic_overlap", 0.0) or 0.0),
+                float(_df_overlap(current, active_sequence_digest.get("root_topic")) or 0.0),
+                float(_df_overlap(current, active_sequence_digest.get("last_april")) or 0.0),
+            ),
+            6,
+        ),
+        "strong_topic_boundary": _df_strong_topic_boundary(current),
+        "decision": relation,
+        "decision_reason": turn_relation,
+    }
+
+    semantic_anchor = {
+        "version": "semantic_anchor_v4_task_scoped",
+        "branch_id": f"{sequence_id}:{active_task_id}" if active_task_id else sequence_id,
+        "sequence_id": sequence_id,
+        "task_id": active_task_id,
+        "relation": relation,
+        "turn_relation": turn_relation,
+        "topic_root": _df_text(
+            semantic.get("topic"),
+            220,
+        ),
+        "active_focus": _df_text(
+            active_sequence_digest.get("current_focus")
+            or current,
+            500,
+        ),
+        "primary_entity": _df_text(
+            semantic.get("entity"),
+            180,
+        ),
+        "reference_target": _df_text(
+            selected_branch.get("canonical_entity")
+            if selected_branch
+            else "",
+            180,
+        ),
+        "operation": _df_text(
+            semantic.get("operation") or "answer",
+            80,
+        ),
+        "goal": _df_text(
+            semantic.get("goal") or "answer",
+            100,
+        ),
+        "source": "contextual_dialogue_interpretation",
+    }
+
+    dialogue_contract = {
+        "version": "april_dialogue_contract_v4_context_first",
+        "relation": relation,
+        "continuation": relation == "CONTINUE",
+        "reference_to_previous": (
+            relation == "RECALL"
+            or dialogue_probe.get("direct_reference")
+            or dialogue_probe.get("deictic")
+        ),
+        "context_dependency": (
+            "active_dialogue_sequence"
+            if relation == "CONTINUE"
+            else "recalled_dialogue_sequence"
+            if relation == "RECALL"
+            else "current_turn_only"
+        ),
+        "turn_relation": turn_relation,
+        "presentation_only": turn_relation == "DIALOGUE_RULE_UPDATE",
+        "sequence_id": sequence_id,
+        "task_id": active_task_id,
+        "branch_label": branch_label,
+        "internal_response_path": _df_internal_response_path(
+            branch_label, int(task.get("response_count") or task.get("task_response_count") or 0)
+        ),
+        "target_task_id": _df_text(branch_index.get("target_task_id") or active_task_id, 100),
+        "target_sequence_id": _df_text(
+            branch_index.get("target_sequence_id")
+            or sequence_id,
+            80,
+        ),
+        "target_branch_id": _df_text(
+            branch_index.get("target_branch_id"),
+            80,
+        ),
+        "target_branch": deepcopy(
+            branch_index.get("target_branch") or {}
+        ),
+        "canonical_topic": _df_text(
+            semantic.get("topic"),
+            220,
+        ),
+        "active_entity": _df_text(
+            semantic.get("entity"),
+            180,
+        ),
+        "resolved_entity": _df_text(
+            semantic.get("entity"),
+            180,
+        ),
+        "resolved_entity_source": (
+            "recalled_dialogue"
+            if relation == "RECALL"
+            else "live_dialogue"
+            if relation == "CONTINUE"
+            else "current_turn"
+        ),
+        "resolved_request": current,
+        "semantic_request": semantic.get("semantic_request") or current,
+        "previous_visual_generation_memory": deepcopy(
+            visual_generation_memory_ref
+        ) if relation in {"CONTINUE", "RECALL"} and visual_generation_memory_ref else {},
+        "current_turn_role": _df_text(task_probe.get("live_input_role") or "current_turn", 80),
+        "answer_to_active_task": bool(task_probe.get("answer_to_active_task")),
+        "candidate_answer": _df_text(current, 1200) if task_probe.get("answer_to_active_task") else "",
+        "active_question": _df_text(task_probe.get("live_question"), 900),
+        "active_question_source": _df_text(task_probe.get("live_question_source") or "", 40),
+        "selected_memory_index": -1,
+        "selected_memory_operand": {},
+        "selected_memory_record": {},
+        "reference": relation == "RECALL",
+        "active_task": deepcopy(task),
+        "open_task": deepcopy(task),
+        "interactive_task_state": deepcopy(task),
+        "dialogue_rules": deepcopy(dialogue_rules),
+        "dialogue_output_rule": deepcopy(dialogue_rules),
+        "response_sequence": {
+            "sequence_id": sequence_id,
+            "task_id": active_task_id,
+            "sequence_turn_index": int(active_sequence_digest.get("turn_count") or seq.get("turn_count") or 0) + 1,
+            "branch_label": branch_label,
+            "internal_response_path": _df_internal_response_path(
+                branch_label, int(task.get("response_count") or task.get("task_response_count") or 0)
+            ),
+            "output_rule": {"visible": False, "internal_only": True},
+        },
+        "previous_result": deepcopy(task.get("last_result") or {}),
+        "answer_basis": deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {}),
+        "task_memory": {
+            "qa_history": list(task.get("qa_history") or [])[-8:]
+        } if task else {},
+        "task_relation": {
+            "handoff": task_probe.get("handoff"),
+            "analysis": task_probe.get("answer_analysis"),
+            "input_role": _df_text(task_probe.get("live_input_role") or "current_turn", 80),
+            "answer_to_active_task": bool(task_probe.get("answer_to_active_task")),
+            "active_question": _df_text(task_probe.get("live_question"), 900),
+            "active_question_source": _df_text(task_probe.get("live_question_source") or "", 40),
+            "active_question_score": float(task_probe.get("live_question_score", 0.0) or 0.0),
+        },
+        "task_action": bool(task_probe.get("task_action")),
+        "task_transition": {
+            "replace_task": bool(task_probe.get("handoff"))
+        },
+        "pending_resolved": False,
+        "dialogue_development": development,
+        "dialogue_strategy": {
+            "mode": "context_first",
+            "next_action": development.get("next_logical_step"),
+        },
+        "semantic_anchor": deepcopy(semantic_anchor),
+        "active_sequence_digest": deepcopy(
+            branch_digest_for_provider
+        ),
+        "linked_branches": deepcopy(linked_branches),
+        "continuity_evidence": deepcopy(continuity_evidence),
+        "dialogue_vector": {
+            "version": "dialogue_vector_v4",
+            "relation": relation,
+            "three_way_relation": relation,
+            "turn_relation": turn_relation,
+            "continuation": relation == "CONTINUE",
+            "conversation_continuation": relation == "CONTINUE",
+            "canonical_topic": _df_text(
+                semantic.get("topic"),
+                220,
+            ),
+            "previous_visual_generation_memory": deepcopy(
+                visual_generation_memory_ref
+            ) if relation in {"CONTINUE", "RECALL"} and visual_generation_memory_ref else {},
+            "active_entity": _df_text(
+                semantic.get("entity"),
+                180,
+            ),
+            "branch_type": "comparison" if turn_relation == "BRANCH_COMPARISON" else "topic",
+            "linked_branch_ids": [
+                _df_text(x.get("branch_id") or x.get("task_id"), 120)
+                for x in linked_branches
+                if _df_text(x.get("branch_id") or x.get("task_id"), 120)
+            ],
+            "linked_branches": deepcopy(linked_branches),
+            "sequence_id": sequence_id,
+            "task_id": active_task_id,
+            "active_task": deepcopy(task),
+            "open_task": deepcopy(task),
+            "interactive_task_state": deepcopy(task),
+            "branch_label": branch_label,
+            "internal_response_path": _df_internal_response_path(
+                branch_label, int(task.get("response_count") or task.get("task_response_count") or 0)
+            ),
+            "target_task_id": _df_text(branch_index.get("target_task_id") or active_task_id, 100),
+            "response_sequence": {
+                "sequence_turn_index": int(active_sequence_digest.get("turn_count") or seq.get("turn_count") or 0) + 1,
+                "branch_label": branch_label,
+                "internal_response_path": _df_internal_response_path(
+                    branch_label, int(task.get("response_count") or task.get("task_response_count") or 0)
+                ),
+                "output_rule": {"visible": False, "internal_only": True},
+            },
+            "dialogue_rules": deepcopy(dialogue_rules),
+            "dialogue_output_rule": deepcopy(dialogue_rules),
+            "previous_result": deepcopy(task.get("last_result") or {}),
+            "answer_basis": deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {}),
+            "target_sequence_id": _df_text(
+                branch_index.get("target_sequence_id")
+                or sequence_id,
+                80,
+            ),
+            "target_branch_id": _df_text(
+                branch_index.get("target_branch_id"),
+                80,
+            ),
+            "target_branch": deepcopy(
+                branch_index.get("target_branch") or {}
+            ),
+            "trajectory": {
+                "root_topic": _df_text(
+                    active_sequence_digest.get("root_topic")
+                    or semantic.get("topic"),
+                    220,
+                ),
+                "current_topic": _df_text(
+                    semantic.get("topic"),
+                    220,
+                ),
+                "turn_count": int(
+                    active_sequence_digest.get("turn_count") or 0
+                ),
+            },
+            "active_sequence_digest": deepcopy(
+                branch_digest_for_provider
+            ),
+            "semantic_anchor": deepcopy(semantic_anchor),
+            "branch_index": deepcopy(branch_index),
+        },
+    }
+
+    semantic_frame = {
+        "topic": semantic.get("topic"),
+        "current_turn_role": _df_text(task_probe.get("live_input_role") or "current_turn", 80),
+        "answer_to_active_task": bool(task_probe.get("answer_to_active_task")),
+        "candidate_answer": _df_text(current, 1200) if task_probe.get("answer_to_active_task") else "",
+        "active_question": _df_text(task_probe.get("live_question"), 900),
+        "operation": semantic.get("operation"),
+        "goal": semantic.get("goal"),
+        "representation": semantic.get("representation"),
+        "entity": semantic.get("entity"),
+        "relation": relation,
+        "feedback": deepcopy(feedback_probe) if feedback_probe.get("feedback") else {},
+        "understanding_stage": "complete_before_relation",
+    }
+
+    cognitive_workspace = {
+        "version": "dialogue_workspace_v2_context_first",
+        "relation": relation,
+        "topic": semantic.get("topic"),
+        "active_topic": semantic.get("topic"),
+        "active_entity": semantic.get("entity"),
+        "operation": semantic.get("operation"),
+        "goal": semantic.get("goal"),
+        "representation": semantic.get("representation"),
+        "current_request": current,
+        "resolved_request": current,
+        "sequence_id": sequence_id,
+        "task_continuation": bool(task) and relation in {"CONTINUE", "RECALL"},
+        "active_task_context": deepcopy(task) if bool(task) else {},
+        "task_id": active_task_id,
+        "dialogue_rules": deepcopy(dialogue_rules),
+        "dialogue_output_rule": deepcopy(dialogue_rules),
+        "response_sequence": deepcopy(dialogue_contract.get("response_sequence") or {}),
+        "semantic_frame": deepcopy(semantic_frame),
+        "dialogue_development": deepcopy(development),
+        "provider_context_plan": deepcopy(provider_plan),
+        "active_sequence_digest": deepcopy(
+            branch_digest_for_provider
+        ),
+        "continuity_evidence": deepcopy(continuity_evidence),
+        "output_contract": deepcopy(render_plan),
+        "protected_context": [
+            "current_request",
+            "dialogue_relation",
+            "active_dialogue_trajectory",
+            "active_task",
+            "active_entity",
+            "DIALOGUE_RULES",
+            "RESPONSE_SEQUENCE",
+            "TASK_RESULT_STATE",
+            "render_plan",
+        ],
+        "excluded_context": [
+            "full_history",
+            "other_topic_branches",
+            "unrelated_window_memory",
+            "stale_global_entity",
+        ],
+    }
+
+    result = {
+        "runtime_version": _df_version,
+        "type": semantic.get("representation") or "text",
+        "operation": semantic.get("operation") or "answer",
+        "object": semantic.get("entity") or semantic.get("representation") or "text",
+        "goal": semantic.get("goal") or "answer",
+        "representation": semantic.get("representation") or "text",
+        "normalized_text": current,
+        "canonical_user_request": current,
+        "resolved_request": (
+            current
+            + (f"\nVISUAL_REFERENCE_ENTITIES: {visual_ref_entity}" if visual_ref_entity else "")
+        ),
+        "visual_generation_request": (
+            f"{current}. Изобрази именно: {visual_ref_entity}."
+            if visual_ref_entity else current
+        ),
+        "semantic_request": semantic.get("semantic_request") or current,
+        "semantic_frame": semantic_frame,
+        "previous_visual_generation_memory": deepcopy(
+            visual_generation_memory_ref
+        ) if relation in {"CONTINUE", "RECALL"} and visual_generation_memory_ref else {},
+        "semantic_understanding": {
+            "topic": semantic.get("topic"),
+            "entity": semantic.get("entity"),
+            "operation": semantic.get("operation"),
+            "goal": semantic.get("goal"),
+            "representation": semantic.get("representation"),
+        },
+        "dialogue_contract": dialogue_contract,
+        "dialogue_relation": {
+            **deepcopy(dialogue_contract),
+            "source": "context_first_interpretation",
+        },
+        "semantic_anchor": deepcopy(semantic_anchor),
+        "dialogue_vector": deepcopy(dialogue_contract["dialogue_vector"]),
+        "three_way_relation": relation,
+        "dialogue_subtype": turn_relation,
+        "continuation": relation == "CONTINUE",
+        "reference_to_previous": bool(
+            dialogue_contract.get("reference_to_previous")
+        ),
+        "context_dependency": dialogue_contract["context_dependency"],
+        "canonical_topic": semantic.get("topic"),
+        "active_topic": semantic.get("topic"),
+        "resolved_entity": semantic.get("entity"),
+        "resolved_reference": _df_text(
+            selected_branch.get("canonical_entity")
+            if selected_branch
+            else "",
+            180,
+        ),
+        "interactive_task_state": deepcopy(task),
+        "open_task": deepcopy(task),
+        "task_id": active_task_id,
+        "dialogue_rules": deepcopy(dialogue_rules),
+        "dialogue_output_rule": deepcopy(dialogue_rules),
+        "response_sequence": deepcopy(dialogue_contract.get("response_sequence") or {}),
+        "previous_result": deepcopy(task.get("last_result") or {}),
+        "answer_basis": deepcopy(task.get("last_answer_basis") or task.get("answer_basis") or {}),
+        "task_memory": deepcopy(
+            dialogue_contract.get("task_memory") or {}
+        ),
+        "task_relation": deepcopy(
+            dialogue_contract.get("task_relation") or {}
+        ),
+        "current_turn_role": _df_text(task_probe.get("live_input_role") or "current_turn", 80),
+        "answer_to_active_task": bool(task_probe.get("answer_to_active_task")),
+        "active_question": _df_text(task_probe.get("live_question"), 900),
+        "requested_outputs": list(
+            render_plan.get("requested_outputs") or ["text"]
+        ),
+        "render_plan": deepcopy(render_plan),
+        "interpretation_control": {
+            "version": "interpretation_control_v3_context_first",
+            "relation": relation,
+            "render_authorized": bool(render_plan.get("authorized")),
+            "render_mode": render_plan.get("mode"),
+            "render_representations": list(
+                render_plan.get("requested_outputs") or []
+            ),
+            "artifact_reference": bool(
+                render_plan.get("artifact_reference")
+            ),
+            "operation": semantic.get("operation"),
+            "representation": semantic.get("representation"),
+        },
+        "dialogue_development": development,
+        "branch_label": branch_label,
+        "internal_response_path": _df_internal_response_path(
+            branch_label, int(task.get("response_count") or task.get("task_response_count") or 0)
+        ),
+        "linked_branches": deepcopy(linked_branches),
+        "dialogue_branch_index": branch_index,
+        "active_sequence_digest": deepcopy(
+            branch_digest_for_provider
+        ),
+        "continuity_evidence": continuity_evidence,
+        "cognitive_workspace": cognitive_workspace,
+        "provider_context_plan": provider_plan,
+        "continuation_content_analysis": {
+            "active_entity": semantic.get("entity"),
+            "active_topic": semantic.get("topic"),
+            "same_branch": relation == "CONTINUE",
+            "active_sequence_turn_count": int(
+                active_sequence_digest.get("turn_count") or 0
+            ),
+            "task_id": active_task_id,
+            "source": "contextual_dialogue_understanding",
+        },
+        "dialogue_strategy": {
+            "mode": "context_first",
+            "next_action": development.get("next_logical_step"),
+        },
+        "bigunoks": {
+            "dialogue": dialogue_probe,
+            "task": task_probe,
+            "render": render_probe,
+            "reference": {
+                "deictic": dialogue_probe.get("deictic"),
+                "direct": dialogue_probe.get("direct_reference"),
+            },
+            "role": "evidence_only",
+        },
+        "stage_order": [
+            "REQUEST_RECEIPT",
+            "ACTIVE_BRANCH_MEMORY",
+            "CONTEXTUAL_UNDERSTANDING",
+            "DIALOGUE_RELATION_RESOLUTION",
+            "RESPONSE_DEVELOPMENT",
+            "RENDER_PLAN",
+            "PROVIDER_HANDOFF",
+            "SCENE_CONTRACT",
+        ],
+        "provider_context_authority": "INTERPRETATION",
+        "provider_must_not_reselect_context": True,
+        "decision_owner": "INTERPRETATION_RUNTIME",
+        "elapsed_ms": round(
+            (time.perf_counter() - started) * 1000,
+            3,
+        ),
+    }
+    return result
+
+# Canonical public entrypoint: one interpretation owner for production turns.
+def interpret_request(
+    text, cognition=None, semantic=None, history=None, state=None
+):
+    return _df_interpret_live_turn(text, history=history or [], state=state or {})
+
+# Compatibility names for callers that used the previous public helpers.
+DIALOGUE_FIRST_RUNTIME_VERSION = _df_version
+DIALOGUE_FIRST_DECISION_OWNER = "INTERPRETATION_RUNTIME"
