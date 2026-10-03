@@ -56,10 +56,6 @@ MEMORY_TTL_SECONDS = DIALOGUE_WINDOW_SECONDS
 USER_CONTENT_RETENTION_SECONDS = DIALOGUE_WINDOW_SECONDS
 MEMORY_SLOTS = 1
 
-STATE_RUNTIME_MAINTENANCE_INTERVAL_SECONDS = 300.0
-STATE_RUNTIME_MAINTENANCE_VERSION = "state_runtime_maintenance_v2_nonblocking"
-CANONICAL_MEMORY_REPAIR_VERSION = "post_provider_semantic_repair_v3"
-
 SESSION_MEMORY_LIMIT = 1600
 HOT_DIALOG_LIMIT = 30
 TOPIC_CLASSES = ["A", "B", "C", "D", "E"]
@@ -240,7 +236,9 @@ _POST_PROVIDER_STOPWORDS = {
     "можешь", "можеш", "можно", "нужно", "надо", "хочу", "хотел", "хотела", "давай", "расскажи", "скажи",
     "объясни", "покажи", "нарисуй", "изобрази", "создай", "сделай", "сравни", "выдай", "выведи", "напиши",
     "ответь", "рассчитай", "посчитай", "проверь", "найди", "готово", "готов", "конечно", "правильно", "верно",
-    "круг",  # removed below only where used as a generic command-like token; kept as a valid concept by extractor rules
+    "он", "она", "оно", "они", "него", "ней", "нему", "ним", "этим", "этот", "эта", "эти",
+    "изображение", "картинка", "картинке", "рисунок", "наполовину", "обычно", "примерно",
+    "круг",  # kept as a valid concept by extractor rules
 }
 
 _POST_PROVIDER_INFLECTIONS = {
@@ -250,6 +248,10 @@ _POST_PROVIDER_INFLECTIONS = {
     "треугольнике": "треугольник", "треугольники": "треугольник", "треугольниками": "треугольник",
     "треугольников": "треугольник", "треугольниках": "треугольник",
     "овалами": "овал", "кругами": "круг",
+    "баскетбольного": "баскетбольный", "баскетбольному": "баскетбольный", "баскетбольным": "баскетбольный", "баскетбольном": "баскетбольный",
+    "футбольного": "футбольный", "футбольному": "футбольный", "футбольным": "футбольный", "футбольном": "футбольный",
+    "стакана": "стакан", "стакану": "стакан", "стаканом": "стакан", "стакане": "стакан",
+    "водой": "вода", "воды": "вода", "воде": "вода",
 }
 
 
@@ -298,6 +300,78 @@ def _post_provider_split_concepts(value: str) -> list[str]:
         if _post_provider_is_concept(norm):
             if norm.casefold() not in {x.casefold() for x in out}:
                 out.append(norm)
+    return out[:6]
+
+
+def _post_provider_semantic_subjects(request_text: str, answer_text: str) -> list[str]:
+    """Extract compact canonical subjects without falling back to trigger words.
+
+    This is deliberately a small grammatical layer, not a second interpreter.
+    It prefers explicit comparison operands and the subject phrase established by
+    Provider's completed answer. Pronouns/commands are never subjects.
+    """
+    request = re.sub(r"\s+", " ", str(request_text or "").strip())
+    answer = re.sub(r"\s+", " ", str(answer_text or "").strip())
+    out: list[str] = []
+
+    def add(value: str, *, append_noun: str = "") -> None:
+        value = _post_provider_normalize_concept(value)
+        if append_noun:
+            noun = _post_provider_normalize_concept(append_noun)
+            if noun and value and noun.casefold() not in value.casefold().split():
+                value = f"{value} {noun}"
+        if _post_provider_is_concept(value):
+            if value.casefold() not in {x.casefold() for x in out}:
+                out.append(value)
+
+    # 1. Explicit comparison: preserve the full first operand and resolve an
+    # adjective-only second operand ("баскетбольного") to the same head noun.
+    m = re.search(
+        r"\b(?:чем\s+отличается|чем\s+отличаются|разница\s+между)\s+(.+?)\s+от\s+(.+?)(?:[?.!]|$)",
+        request, flags=re.IGNORECASE,
+    )
+    if m:
+        left = _post_provider_normalize_concept(m.group(1))
+        right_raw = _post_provider_normalize_concept(m.group(2))
+        head = left.split()[-1] if left.split() else ""
+        adjective_like = bool(re.fullmatch(r"[а-яё-]+(?:ый|ий|ой|ая|яя|ое|ее|ые|ие)", right_raw, flags=re.IGNORECASE))
+        add(left)
+        add(right_raw, append_noun=head if adjective_like else "")
+        return out[:6]
+
+    # 2. Provider's answer is authoritative for a completed turn. Capture a
+    # concrete subject phrase at the beginning of the answer, before predicate
+    # verbs/adverbs. This handles "Прозрачный стакан наполовину наполнен..."
+    # and "Футбольный мяч обычно меньше..." without treating "Он" as a subject.
+    subject_patterns = (
+        r"^([А-ЯЁа-яё-]+\s+[А-ЯЁа-яё-]+)\s+(?:обычно|часто|примерно|наполовину|имеет|является|это|предназначен|покрыт|состоит|наполнен|наполнена|наполнено|находится|виден|видна)\b",
+        r"^([А-ЯЁа-яё-]+\s+[А-ЯЁа-яё-]+)\s+(?:[—-]|обычно)\b",
+    )
+    for pattern in subject_patterns:
+        m = re.search(pattern, answer, flags=re.IGNORECASE)
+        if m:
+            phrase = m.group(1)
+            words = phrase.split()
+            if words and words[0].casefold() not in _POST_PROVIDER_STOPWORDS:
+                add(phrase)
+                break
+
+    # 3. Explicit user subject for commands/description requests. Prefer the
+    # first concrete phrase after the command; this is only a fallback when the
+    # Provider answer did not establish one.
+    if not out:
+        cleaned = re.sub(
+            r"^(?:а\s+)?(?:опиши|расскажи|скажи|объясни|покажи|нарисуй|изобрази|создай|сделай|построй|напиши|проверь|найди)\s+(?:мне\s+)?",
+            "", request, flags=re.IGNORECASE,
+        ).strip()
+        cleaned = re.sub(r"^(?:на\s+картинке|в\s+картинке|на\s+изображении)\s+", "", cleaned, flags=re.IGNORECASE)
+        first = re.split(r"\s+(?:чтобы|который|которая|которое|наполовину|примерно|для|на|в|с|со|и|или)\b|[,.!?]", cleaned, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        words = first.split()
+        if len(words) >= 2 and re.fullmatch(r"[а-яё-]+(?:ый|ий|ой|ая|яя|ое|ее|ые|ие)", words[0], flags=re.IGNORECASE):
+            add(" ".join(words[:2]))
+        elif words:
+            add(words[0])
+
     return out[:6]
 
 
@@ -386,42 +460,6 @@ def _post_provider_full_names(*texts):
     return names
 
 
-_POST_PROVIDER_GENERIC_ENTITIES = {
-    "чем", "что", "кто", "где", "как", "почему", "зачем", "какой", "какая", "какие",
-    "можешь", "можеш", "нарисуй", "покажи", "изобрази", "сделай", "создай", "построй",
-    "расскажи", "объясни", "сравни", "дай", "выдай", "дальше", "теперь", "это", "вот",
-}
-
-def _post_provider_is_generic_entity(value: Any) -> bool:
-    normalized = str(value or "").strip().casefold()
-    return not normalized or normalized in _POST_PROVIDER_GENERIC_ENTITIES
-
-
-def _post_provider_visual_reference_concepts(request_text: str, answer_text: str) -> list[str]:
-    text = f"{request_text} {answer_text}"
-    candidates = _post_provider_extract_request_concepts(request_text) + _post_provider_extract_answer_concepts(answer_text)
-    out = []
-    for item in candidates:
-        normalized = _post_provider_normalize_concept(item)
-        if not normalized or _post_provider_is_generic_entity(normalized):
-            continue
-        if normalized.casefold() not in {x.casefold() for x in out}:
-            out.append(normalized)
-    # Comparison answers can expose subjects even when the request is a deictic command.
-    if len(out) < 2:
-        for pattern in (
-            r"\b(?:чем\s+отличается|разница\s+между)\s+(.+?)\s+от\s+(.+?)(?:[?.!]|$)",
-            r"\b(?:между)\s+(.+?)\s+и\s+(.+?)(?:[?.!]|$)",
-        ):
-            m = re.search(pattern, text, flags=re.IGNORECASE)
-            if m:
-                for group in m.groups():
-                    normalized = _post_provider_normalize_concept(group)
-                    if normalized and not _post_provider_is_generic_entity(normalized) and normalized.casefold() not in {x.casefold() for x in out}:
-                        out.append(normalized)
-    return out[:6]
-
-
 def _derive_post_provider_memory_semantics(
     current_request,
     answer,
@@ -456,40 +494,37 @@ def _derive_post_provider_memory_semantics(
     if prior_active and not prior_entities:
         prior_entities = _post_provider_split_concepts(prior_active) or [prior_active]
 
+    answer_subjects = _post_provider_semantic_subjects(request_text, answer_text)
+    request_subjects = _post_provider_semantic_subjects(request_text, "")
+    semantic_subjects = answer_subjects or request_subjects
     answer_concepts = _post_provider_extract_answer_concepts(answer_text)
     request_concepts = _post_provider_extract_request_concepts(request_text)
     names = _post_provider_full_names(request_text, answer_text)
 
     if relation == "NEW":
-        # Completed Provider answer wins. Request concepts are only the fallback for
-        # answers that don't restate their subject explicitly.
-        entities = answer_concepts[:6] or request_concepts[:6] or names[:6]
+        # Completed Provider answer + explicit current request establish the new
+        # canonical subject. Legacy trigger/word extraction is only a fallback.
+        entities = answer_subjects[:6] or request_subjects[:6] or answer_concepts[:6] or request_concepts[:6] or names[:6]
         topic = " и ".join(entities[:4]) if len(entities) >= 2 else (entities[0] if entities else "")
         if not topic:
             topic = _post_provider_clean_request(request_text) or str(
                 provisional.get("topic") or provisional.get("canonical_topic") or ""
             ).strip()[:220]
     elif relation == "RECALL":
-        entities = answer_concepts[:6] or prior_entities[:6] or request_concepts[:6] or names[:6]
+        entities = request_subjects[:6] or answer_subjects[:6] or prior_entities[:6] or answer_concepts[:6] or request_concepts[:6] or names[:6]
         topic = " и ".join(entities[:4]) if len(entities) >= 2 else (entities[0] if entities else "")
         topic = topic or str(previous_anchor.get("topic") or provisional.get("topic") or "").strip()[:220]
     else:
-        # CONTINUE is branch-preserving. Surface commands such as "нарисуй их"
-        # are not entities; recover the concrete subject from the live branch/answer.
-        entities = [x for x in (prior_entities[:6] or answer_concepts[:6] or request_concepts[:6] or names[:6]) if not _post_provider_is_generic_entity(x)]
-        reference_concepts = _post_provider_visual_reference_concepts(request_text, answer_text)
-        if len(reference_concepts) >= 2 and re.search(r"\b(?:их|них|им|ими|обоих|обеих)\b", request_text.casefold()):
-            entities = reference_concepts[:6] + [x for x in entities if x.casefold() not in {y.casefold() for y in reference_concepts}]
+        # CONTINUE is branch-preserving. The previous completed canonical turn
+        # owns the subject; the current short request contributes an action only.
+        entities = request_subjects[:6] or prior_entities[:6] or answer_subjects[:6] or answer_concepts[:6] or request_concepts[:6] or names[:6]
         topic = str(previous_anchor.get("topic") or "").strip()[:220]
-        if _post_provider_is_generic_entity(topic):
-            topic = ""
-        if not topic and reference_concepts:
-            topic = " и ".join(reference_concepts[:4]) if len(reference_concepts) >= 2 else reference_concepts[0]
+        if request_subjects:
+            topic = " и ".join(request_subjects[:4]) if len(request_subjects) >= 2 else request_subjects[0]
         if not topic:
             topic = " и ".join(entities[:4]) if len(entities) >= 2 else (entities[0] if entities else "")
         if not topic:
-            fallback = str(provisional.get("topic") or provisional.get("canonical_topic") or "").strip()
-            topic = "" if _post_provider_is_generic_entity(fallback) else fallback[:220]
+            topic = str(provisional.get("topic") or provisional.get("canonical_topic") or "").strip()[:220]
 
     subtopic = ""
     haystack = f"{request_text} {answer_text}".lower()
@@ -510,6 +545,9 @@ def _derive_post_provider_memory_semantics(
         "subtopic": subtopic,
         "entities": entities[:6],
         "active_entity": active_entity[:220],
+        "subject_source": "POST_PROVIDER_CANONICAL_TURN" if (entities or topic) else "NONE",
+        "subject_confidence": 1.0 if semantic_subjects else (0.8 if answer_concepts or request_concepts else 0.0),
+        "reference_policy": "CURRENT_CANONICAL_TURN_ONLY",
         "relation": relation,
         "user_request": request_text,
         "april_answer": answer_text,
@@ -2907,40 +2945,7 @@ def _repair_canonical_dialogue_memory(state_obj):
                 })
                 state_obj["focus_state"] = focus
 
-    state_obj["_canonical_memory_repair_version"] = CANONICAL_MEMORY_REPAIR_VERSION
     return changed
-
-def _repair_latest_canonical_dialogue_memory(state_obj, max_pairs=3):
-    """Repair only the newest canonical pairs on the request path. Full archive repair is background work."""
-    if not isinstance(state_obj, dict):
-        return False
-    timeline = state_obj.get("memory_timeline") if isinstance(state_obj.get("memory_timeline"), dict) else {}
-    day0 = timeline.get("day_0") if isinstance(timeline.get("day_0"), dict) else {}
-    pairs = [p for p in (day0.get("dialog_pairs") or []) if isinstance(p, dict)]
-    if not pairs:
-        return False
-    ordered = sorted(pairs, key=lambda p: float(p.get("created_at") or p.get("timestamp") or 0.0))[-max(1, int(max_pairs)):]
-    previous_anchor = state_obj.get("dialogue_memory_anchor") if isinstance(state_obj.get("dialogue_memory_anchor"), dict) else {}
-    changed = False
-    for pair in ordered:
-        request = str(pair.get("user_request") or pair.get("request") or pair.get("user") or "").strip()
-        answer = str(pair.get("april_answer") or pair.get("answer") or pair.get("assistant") or "").strip()
-        if not request or not answer:
-            continue
-        relation = str(pair.get("relation") or "CONTINUE").strip().upper()
-        repaired = _derive_post_provider_memory_semantics(request, answer, provisional=pair.get("semantic") if isinstance(pair.get("semantic"), dict) else {}, previous_anchor=previous_anchor, relation=relation, render_types=pair.get("render_block_types") if isinstance(pair.get("render_block_types"), list) else [])
-        for key in ("topic", "subtopic", "entities", "active_entity", "relation"):
-            value = repaired.get(key)
-            if value and pair.get(key) != value:
-                pair[key] = deepcopy(value)
-                changed = True
-        previous_anchor = repaired
-    if changed:
-        latest = ordered[-1]
-        state_obj["canonical_dialogue_turn"] = deepcopy(latest)
-        state_obj["dialogue_memory_anchor"] = deepcopy(latest)
-    return changed
-
 
 def get_state(user_id):
     key = str(user_id)
@@ -3008,21 +3013,10 @@ def get_state(user_id):
                 "seed_cutoff_utc": anchor - DIALOGUE_SEED_SECONDS,
                 "last_rollover": cycle.get("last_rollover") or now_ts,
             }
-        # Historical semantic repair is maintenance, not request-time work.
-        # Run a tiny repair only after a cold load/periodic interval.
-        maintenance_at = float(state[key].get("_state_maintenance_at") or 0.0)
-        maintenance_due = (now_ts - maintenance_at) >= STATE_RUNTIME_MAINTENANCE_INTERVAL_SECONDS
-        rolled = QUANTUM_MEMORY_ENGINE.rollover(state[key]) if maintenance_due else False
-        repaired = _repair_latest_canonical_dialogue_memory(state[key], max_pairs=3) if maintenance_due else False
-        if maintenance_due:
-            state[key]["_state_maintenance_at"] = now_ts
-            state[key]["_state_maintenance_version"] = STATE_RUNTIME_MAINTENANCE_VERSION
-            if rolled:
-                QUANTUM_MEMORY_ENGINE._ensure_active_dialogue_sequence(state[key])
-        state[key]["_canonical_memory_repair_pending"] = (
-            state[key].get("_canonical_memory_repair_version") != CANONICAL_MEMORY_REPAIR_VERSION
-            and bool(((state[key].get("memory_timeline") or {}).get("day_0") or {}).get("dialog_pairs"))
-        )
+        rolled = QUANTUM_MEMORY_ENGINE.rollover(state[key])
+        repaired = _repair_canonical_dialogue_memory(state[key])
+        # Re-normalize the active sequence strictly from repaired canonical pairs.
+        QUANTUM_MEMORY_ENGINE._ensure_active_dialogue_sequence(state[key])
 
         # Authenticated per-user memory owns the live task. Reject stale/foreign task objects
         # even when a legacy persistence record accidentally carries today's
@@ -3042,6 +3036,11 @@ def get_state(user_id):
         removed_hot = _cleanup_hot_content(state[key])
         if removed_hot or rolled or repaired:
             QUANTUM_MEMORY_ENGINE.refresh_scene(state[key])
+            try:
+                if callable(save_memory):
+                    save_memory(key, _persistable_snapshot(state[key]))
+            except Exception as exc:
+                safe_state_log(f"MEMORY TTL PERSIST FAILED: {exc}")
         return state[key]
 
 
@@ -3245,10 +3244,15 @@ _PERSIST_BACKGROUND_QUEUES = {}
 _PERSIST_BACKGROUND_WORKERS = set()
 
 def persist_state_background(user_id):
-    """Persist from a worker so state serialization and DB I/O never block chat delivery."""
     uid = str(user_id)
+    try:
+        snapshot = _persistable_snapshot(get_state(uid))
+    except Exception as exc:
+        safe_state_log(f"BACKGROUND PERSIST SNAPSHOT ERROR: {exc}")
+        return
+
     with _PERSIST_BACKGROUND_LOCK:
-        _PERSIST_BACKGROUND_QUEUES[uid] = True
+        _PERSIST_BACKGROUND_QUEUES[uid] = snapshot
         if uid in _PERSIST_BACKGROUND_WORKERS:
             return
         _PERSIST_BACKGROUND_WORKERS.add(uid)
@@ -3256,31 +3260,24 @@ def persist_state_background(user_id):
     def _worker():
         while True:
             with _PERSIST_BACKGROUND_LOCK:
-                pending = _PERSIST_BACKGROUND_QUEUES.pop(uid, None)
-            if pending is None:
+                payload = _PERSIST_BACKGROUND_QUEUES.pop(uid, None)
+            if payload is None:
                 with _PERSIST_BACKGROUND_LOCK:
                     _PERSIST_BACKGROUND_WORKERS.discard(uid)
                 return
             try:
-                with _state_lock:
-                    state_obj = state.get(uid)
-                    if not isinstance(state_obj, dict):
-                        continue
-                    pending_repair = bool(state_obj.get("_canonical_memory_repair_pending"))
-                    # Only capture the live reference under the lock. Serialization and
-                    # full historical repair happen on the worker without holding the
-                    # request-path state lock.
-                snapshot = _persistable_snapshot(state_obj)
-                if pending_repair and isinstance(snapshot, dict):
-                    _repair_canonical_dialogue_memory(snapshot)
-                if isinstance(snapshot, dict):
-                    snapshot.pop("_canonical_memory_repair_pending", None)
                 if callable(save_memory):
-                    save_memory(uid, snapshot)
+                    save_memory(uid, payload)
             except Exception as exc:
                 safe_state_log(f"BACKGROUND PERSIST ERROR: {exc}")
+                # Keep the request path non-blocking. A future turn can publish a
+                # fresh snapshot without making persistence failures user-visible.
 
-    threading.Thread(target=_worker, name="april-state-persist", daemon=True).start()
+    threading.Thread(
+        target=_worker,
+        name="april-state-persist",
+        daemon=True,
+    ).start()
 
 
 # =====================================================
@@ -4474,58 +4471,6 @@ def sync_focus_layers(user_id):
         state_obj["dynamic_focus"] = deepcopy(state_obj["focus_snapshot"])
 
 
-def _compact_visual_block_for_memory(block: Any) -> dict:
-    if not isinstance(block, dict):
-        return {}
-    out = {}
-    for key in ("type", "artifact_type", "representation", "renderer", "viewer", "block_id", "render_id", "title", "description", "human_visible", "scene_contract", "sequence_index"):
-        if block.get(key) not in (None, "", [], {}):
-            out[key] = deepcopy(block.get(key))
-    payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-    if payload:
-        keep = ("src", "url", "mime_type", "width", "height", "title", "caption", "prompt", "description", "formula", "data", "nodes", "edges", "elements", "points", "shapes")
-        compact = {k: deepcopy(payload[k]) for k in keep if payload.get(k) not in (None, "", [], {})}
-        if isinstance(payload.get("images"), list):
-            compact["images"] = []
-            for item in payload.get("images", [])[:4]:
-                if isinstance(item, dict):
-                    compact["images"].append({k: deepcopy(item[k]) for k in ("src", "url", "mime_type", "width", "height", "title", "caption") if item.get(k) not in (None, "", [], {})})
-                elif isinstance(item, str) and item.strip():
-                    compact["images"].append(item.strip())
-        svg = payload.get("svg")
-        if isinstance(svg, str) and svg.strip():
-            compact["svg"] = svg[:6000]
-        if compact:
-            out["payload"] = compact
-    presentation = block.get("presentation")
-    if isinstance(presentation, dict):
-        out["presentation"] = {k: deepcopy(v) for k, v in presentation.items() if k in {"kind", "mode", "renderer", "web_renderer", "fallback_renderer", "layout_mode", "signal_channel"} and v not in (None, "", [], {})}
-    return out
-
-
-def _compact_visual_scene_evidence(scene: dict) -> dict:
-    if not isinstance(scene, dict):
-        return {}
-    out = {}
-    for key in ("scene_id", "scene_version", "turn_id", "flow_id", "user_id", "conversation_id", "dialogue_sequence_id", "task_id", "sequence_turn_index", "task_response_number", "topic", "user_request", "april_answer", "summary", "continuation", "context_dependency", "dialogue_relation", "previous_scene_id", "scene_type", "active_entity", "entities", "subtopic", "sequence_id"):
-        if scene.get(key) not in (None, "", [], {}):
-            out[key] = deepcopy(scene.get(key))
-    for key in ("visual_attachment", "memory_semantics", "semantic_state", "semantic_anchor", "render_continuity"):
-        value = scene.get(key)
-        if value not in (None, "", [], {}):
-            if key == "visual_attachment" and isinstance(value, dict):
-                value = {k: deepcopy(v) for k, v in value.items() if k not in {"image_base64", "image_data_uri", "base64"}}
-            out[key] = deepcopy(value)
-    blocks = scene.get("render_blocks")
-    if isinstance(blocks, list):
-        out["render_blocks"] = [x for x in (_compact_visual_block_for_memory(b) for b in blocks) if x]
-    out["render_block_types"] = list(scene.get("render_block_types") or [])
-    out["presentation_types"] = list(scene.get("presentation_types") or [])
-    if isinstance(scene.get("presentation_signals"), list):
-        out["presentation_signals"] = deepcopy(scene.get("presentation_signals")[:8])
-    return out
-
-
 def prepare_visual_context_for_turn(user_id, current_request, *, persist=True):
     """Expose the current user-scoped scene as memory evidence without deciding relevance.
 
@@ -4538,16 +4483,10 @@ def prepare_visual_context_for_turn(user_id, current_request, *, persist=True):
     current = str(current_request or "").strip()
 
     scene = state_obj.get("active_visual_scene")
-    # A text turn must not sever the visual branch. Keep the last successful
-    # visual artifact as evidence until a newer visual turn supersedes it.
-    if not _scene_has_successful_visual(scene if isinstance(scene, dict) else {}):
-        preserved_visual = state_obj.get("last_successful_visual_scene")
-        if isinstance(preserved_visual, dict) and preserved_visual:
-            scene = preserved_visual
-        elif not isinstance(scene, dict) or not scene:
-            state_obj["active_visual_scene_turn"] = None
-            state_obj["stored_visual_scene_turn"] = None
-            return {
+    if not isinstance(scene, dict) or not scene:
+        state_obj["active_visual_scene_turn"] = None
+        state_obj["stored_visual_scene_turn"] = None
+        return {
             "active": False,
             "released": False,
             "overlap": 0.0,
@@ -4564,7 +4503,7 @@ def prepare_visual_context_for_turn(user_id, current_request, *, persist=True):
     # stage.  Releasing evidence here does not grant continuation authority;
     # Interpretation/Quantum Processor still decides whether this turn actually
     # depends on the previous scene.
-    evidence_scene = _compact_visual_scene_evidence(scene)
+    evidence_scene = deepcopy(scene)
     render_blocks = evidence_scene.get("render_blocks")
     if not isinstance(render_blocks, list):
         render_blocks = []
@@ -4597,8 +4536,8 @@ def prepare_visual_context_for_turn(user_id, current_request, *, persist=True):
     # Turn-local signal: this is an evidence packet only.  It deliberately does
     # not change relation/continuation and therefore cannot override a fresh
     # representation request.
-    state_obj["active_visual_scene_turn"] = _compact_visual_scene_evidence(evidence_scene)
-    state_obj["stored_visual_scene_turn"] = _compact_visual_scene_evidence(evidence_scene)
+    state_obj["active_visual_scene_turn"] = deepcopy(evidence_scene)
+    state_obj["stored_visual_scene_turn"] = deepcopy(evidence_scene)
 
     visual_context = {
         "scene_id": str(evidence_scene.get("scene_id") or ""),
@@ -4645,27 +4584,8 @@ def prepare_visual_context_for_turn(user_id, current_request, *, persist=True):
         "active_visual_scene": deepcopy(evidence_scene),
     }
 
-    attachment = evidence_scene.get("visual_attachment") if isinstance(evidence_scene.get("visual_attachment"), dict) else {}
-    if attachment:
-        provider_spec = _dict(evidence_scene.get("memory_semantics")).get("provider_contract", {}).get("image_generation_spec", {})
-        state_obj["visual_continuity_anchor"] = {
-            "version": "visual_continuity_anchor_v2",
-            "scene_id": str(evidence_scene.get("scene_id") or ""),
-            "flow_id": str(evidence_scene.get("flow_id") or ""),
-            "turn_id": evidence_scene.get("turn_id"),
-            "conversation_id": str(evidence_scene.get("conversation_id") or ""),
-            "dialogue_sequence_id": str(evidence_scene.get("dialogue_sequence_id") or ""),
-            "topic": safe_trim_text(evidence_scene.get("topic"), 500),
-            "entities": list(evidence_scene.get("entities") or [])[:6],
-            "active_entity": safe_trim_text(evidence_scene.get("active_entity"), 220),
-            "user_request": safe_trim_text(evidence_scene.get("user_request"), 1200),
-            "april_answer": safe_trim_text(evidence_scene.get("april_answer"), 2200),
-            "render_block_types": list(evidence_scene.get("render_block_types") or []),
-            "visual_attachment": {k: deepcopy(v) for k, v in attachment.items() if k not in {"image_base64", "image_data_uri", "base64"}},
-            "generation_prompt": safe_trim_text(provider_spec.get("prompt") if isinstance(provider_spec, dict) else "", 1800),
-        }
     if persist:
-        persist_state_background(user_id)
+        persist_state(user_id)
     return deepcopy(state_obj["visual_context_bridge"])
 
 def restore_visual_context_after_turn(user_id, *, new_scene_active=False, persist=True):
@@ -5048,29 +4968,6 @@ def _build_dialogue_visual_attachment(render_blocks, scene_id="", turn_id="", *,
     return {}
 
 
-def _compact_memory_value(value: Any, *, depth: int = 0, max_depth: int = 4, max_items: int = 12, max_text: int = 1400) -> Any:
-    """Bound state-machine metadata without removing semantic anchors."""
-    if depth > max_depth or value in (None, "", [], {}):
-        return None
-    if isinstance(value, (str, int, float, bool)):
-        return value if not isinstance(value, str) else value[:max_text]
-    if isinstance(value, dict):
-        out = {}
-        for k, v in list(value.items())[:max_items]:
-            cleaned = _compact_memory_value(v, depth=depth + 1, max_depth=max_depth, max_items=max_items, max_text=max_text)
-            if cleaned not in (None, "", [], {}):
-                out[str(k)] = cleaned
-        return out
-    if isinstance(value, (list, tuple, set)):
-        out = []
-        for item in list(value)[:max_items]:
-            cleaned = _compact_memory_value(item, depth=depth + 1, max_depth=max_depth, max_items=max_items, max_text=max_text)
-            if cleaned not in (None, "", [], {}):
-                out.append(cleaned)
-        return out
-    return str(value)[:max_text]
-
-
 def update_scene_context(
     user_id,
     scene_contract,
@@ -5213,7 +5110,7 @@ def update_scene_context(
     semantic_scene_state = {}
     metadata = contract.get("metadata") if isinstance(contract.get("metadata"), dict) else {}
     if isinstance(metadata.get("semantic_scene_state"), dict):
-        semantic_scene_state = _compact_memory_value(metadata["semantic_scene_state"], max_depth=4, max_items=10, max_text=1200) or {}
+        semantic_scene_state = deepcopy(metadata["semantic_scene_state"])
 
     identity_scope = _dict(contract.get("authenticated_scope") or _dict(contract.get("metadata")).get("identity_scope"))
     active_sequence = state_obj.get("active_dialogue_sequence") if isinstance(state_obj.get("active_dialogue_sequence"), dict) else {}
@@ -5278,25 +5175,25 @@ def update_scene_context(
             or _dict(state_obj.get("dialogue_resolution")).get("selected_memory_record")
             or {}
         ),
-        "dialogue_state": _compact_memory_value(contract.get("dialogue_state") or {}, max_depth=4, max_items=12, max_text=1200) or {},
+        "dialogue_state": deepcopy(contract.get("dialogue_state") or {}),
         "authenticated_scope": deepcopy(identity_scope or {"user_id": str(user_id), "conversation_id": conversation_id}),
         "active_scene": str(contract.get("active_scene") or ""),
-        "space_continuity": _compact_memory_value(contract.get("space_continuity") or {}, max_depth=4, max_items=10, max_text=1200) or {},
-        "scene_blueprint": _compact_memory_value(contract.get("scene_blueprint") or {}, max_depth=5, max_items=14, max_text=1200) or {},
-        "relations": _compact_memory_value(contract.get("relations") or [], max_depth=3, max_items=12, max_text=800) or [],
-        "order": _compact_memory_value(contract.get("order") or [], max_depth=3, max_items=12, max_text=800) or [],
-        "signal": _compact_memory_value(contract.get("signal") or {}, max_depth=4, max_items=10, max_text=1000) or {},
-        "metadata": _compact_memory_value(contract.get("metadata") or {}, max_depth=5, max_items=14, max_text=1200) or {},
-        "supported_payloads": _compact_memory_value(contract.get("supported_payloads") or [], max_depth=3, max_items=12, max_text=800) or [],
+        "space_continuity": deepcopy(contract.get("space_continuity") or {}),
+        "scene_blueprint": deepcopy(contract.get("scene_blueprint") or {}),
+        "relations": deepcopy(contract.get("relations") or []),
+        "order": deepcopy(contract.get("order") or []),
+        "signal": deepcopy(contract.get("signal") or {}),
+        "metadata": deepcopy(contract.get("metadata") or {}),
+        "supported_payloads": deepcopy(contract.get("supported_payloads") or []),
         "render_block_types": block_types,
         "presentation_types": presentation_types,
-        "render_blocks": [x for x in (_compact_visual_block_for_memory(b) for b in render_blocks) if x] if isinstance(render_blocks, list) else [],
+        "render_blocks": deepcopy(render_blocks) if isinstance(render_blocks, list) else [],
         "presentation_signals": [
-            _compact_memory_value(block.get("presentation"), max_depth=3, max_items=8, max_text=500)
-            for block in render_blocks[:8]
+            deepcopy(block.get("presentation"))
+            for block in render_blocks
             if isinstance(block, dict) and isinstance(block.get("presentation"), dict)
         ],
-        "render_signal_inventory": _compact_memory_value(render_signal_inventory, max_depth=3, max_items=12, max_text=600) or [],
+        "render_signal_inventory": deepcopy(render_signal_inventory),
         "current_request": current_request_text,
         "answer": answer_text,
         "scene_id": str(contract.get("scene_id") or ""),
@@ -5559,9 +5456,9 @@ def update_scene_context(
             if isinstance(block, dict) and isinstance(block.get("presentation"), dict)
         ],
         "render_signal_inventory": deepcopy(render_signal_inventory),
-        "semantic_state": _compact_memory_value(semantic_scene_state, max_depth=4, max_items=12, max_text=1200) or {},
-        "memory_semantics": _compact_memory_value(post_provider_semantics, max_depth=5, max_items=12, max_text=1200) or {},
-        "pre_provider_interpretation": _compact_memory_value(metadata.get("semantic_scene_state") or {}, max_depth=4, max_items=10, max_text=1000) or {},
+        "semantic_state": deepcopy(semantic_scene_state),
+        "memory_semantics": deepcopy(post_provider_semantics),
+        "pre_provider_interpretation": deepcopy(metadata.get("semantic_scene_state") or {}),
         "provider_structured_result": {
             "answer": answer_text,
             "render_block_types": list(block_types),
@@ -5617,32 +5514,6 @@ def update_scene_context(
     )
     if visual_attachment:
         scene_record["visual_attachment"] = deepcopy(visual_attachment)
-        # Stable semantic bridge: the next turn resolves "it/them/that picture"
-        # from this exact completed visual turn, independent of the current task mirror.
-        state_obj["visual_continuity_anchor"] = {
-            "version": "visual_continuity_anchor_v2",
-            "scene_id": scene_id,
-            "flow_id": str(contract.get("flow_id") or ""),
-            "turn_id": str(contract.get("turn_id") or state_obj.get("visual_scene_version")),
-            "user_id": str(user_id),
-            "conversation_id": conversation_id,
-            "dialogue_sequence_id": str(active_sequence.get("sequence_id") or ""),
-            "task_id": str(active_sequence.get("task_id") or ""),
-            "topic": safe_trim_text(post_provider_semantics.get("topic") or scene_record.get("topic"), 500),
-            "entities": list(post_provider_semantics.get("entities") or [])[:6],
-            "active_entity": safe_trim_text(post_provider_semantics.get("active_entity") or "", 220),
-            "user_request": safe_trim_text(current_request_text, 1200),
-            "april_answer": safe_trim_text(answer_text, 2200),
-            "render_block_types": list(block_types),
-            "visual_attachment": {k: deepcopy(v) for k, v in visual_attachment.items() if k not in {"image_base64", "image_data_uri", "base64"}},
-            "generation_prompt": safe_trim_text(
-                _dict(provider_metadata.get("image_generation_spec")).get("prompt") if isinstance(provider_metadata.get("image_generation_spec"), dict) else "", 1800
-            ),
-            "created_at": now,
-        }
-        state_obj["last_successful_visual_scene"] = _compact_visual_scene_evidence(scene_record)
-        state_obj["last_successful_visual_scene_id"] = scene_id
-        state_obj["last_successful_visual_scene_turn"] = state_obj.get("visual_scene_version")
 
         # The active dialogue sequence remains the single continuity owner while
         # remembering the last successful visual attached to that sequence.
