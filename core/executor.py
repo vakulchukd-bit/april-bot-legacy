@@ -1317,6 +1317,146 @@ def _df_canonical_subject_from_turn(canonical: dict[str, Any]) -> str:
                 return _df_normalize_subject(candidate)
     return ""
 
+
+def _df_compact_semantic_answer(value: Any, limit: int = 1600) -> str:
+    """Keep the previous OpenAI answer as semantic evidence for continuation."""
+    text = _df_text(value, limit)
+    if not text:
+        return ""
+    # Normalize whitespace without changing the answer's meaning.
+    return re.sub(r"\s+", " ", text).strip()[:limit]
+
+
+def _df_build_semantic_chain_context(
+    *,
+    previous_user: str,
+    previous_april: str,
+    current_user: str,
+    active_topic: str,
+    active_entity: str,
+    relation: str,
+    turn_relation: str,
+    canonical_turn: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the canonical semantic chain used for the next OpenAI interpretation.
+
+    The previous user question and the actual previous assistant/OpenAI answer are
+    the semantic definition of the current entity/branch. The entity label remains
+    only a compact anchor and can never replace the answer content.
+    """
+    canonical_turn = canonical_turn if isinstance(canonical_turn, dict) else {}
+    if relation not in {"CONTINUE", "RECALL"}:
+        entity = _df_text(active_entity or active_topic, 220)
+        if _df_is_generic_entity(entity):
+            entity = ""
+        return {
+            "version": "semantic_chain_v1",
+            "available": False,
+            "entity_definition": {
+                "entity": entity,
+                "topic": _df_text(active_topic, 220),
+                "definition_source": "current_turn_only",
+                "previous_user_question": "",
+                "previous_openai_answer": "",
+                "current_user_question": _df_text(current_user, 1200),
+                "relation": relation,
+                "turn_relation": turn_relation,
+            },
+            "previous_user_question": "",
+            "previous_openai_answer": "",
+            "current_user_question": _df_text(current_user, 1200),
+            "chain": [{"role": "user", "content": _df_text(current_user, 1200)}],
+            "continuation_instruction": "Не наследовать смысл предыдущего диалога: это новый смысловой предмет.",
+            "provider_context_priority": "current_turn_only",
+        }
+
+    prev_q = _df_text(
+        previous_user
+        or canonical_turn.get("user_request")
+        or canonical_turn.get("question")
+        or canonical_turn.get("request"),
+        1200,
+    )
+    prev_a = _df_compact_semantic_answer(
+        previous_april
+        or canonical_turn.get("april_answer")
+        or canonical_turn.get("semantic_answer")
+        or canonical_turn.get("answer")
+        or canonical_turn.get("summary"),
+        1600,
+    )
+    current_q = _df_text(current_user, 1200)
+    entity = _df_text(active_entity or active_topic, 220)
+    if _df_is_generic_entity(entity):
+        entity = ""
+
+    # This text is intentionally bounded: it is semantic evidence, not a second
+    # full history. The model gets the exact order: user question -> answer -> next question.
+    semantic_definition = {
+        "entity": entity,
+        "topic": _df_text(active_topic, 220),
+        "definition_source": "previous_user_question_plus_openai_answer",
+        "previous_user_question": prev_q,
+        "previous_openai_answer": prev_a,
+        "current_user_question": current_q,
+        "relation": relation,
+        "turn_relation": turn_relation,
+    }
+
+    chain = []
+    if prev_q:
+        chain.append({"role": "user", "content": prev_q})
+    if prev_a:
+        chain.append({"role": "assistant", "content": prev_a})
+    chain.append({"role": "user", "content": current_q})
+
+    return {
+        "version": "semantic_chain_v1",
+        "available": bool(prev_q or prev_a),
+        "entity_definition": semantic_definition,
+        "previous_user_question": prev_q,
+        "previous_openai_answer": prev_a,
+        "current_user_question": current_q,
+        "chain": chain,
+        "continuation_instruction": (
+            "Интерпретируй текущий вопрос как продолжение только если его смысл связан "
+            "с предыдущим вопросом и предыдущим ответом. Не создавай сущность из слов "
+            "команды/дискурса. Смысл предыдущего ответа важнее названия entity."
+        ),
+        "provider_context_priority": "previous_answer_then_previous_question_then_entity",
+    }
+
+
+def _df_build_openai_continuation_request(
+    semantic_chain: dict[str, Any],
+    *,
+    relation: str,
+) -> dict[str, Any]:
+    """Return a provider-ready structured request for semantic continuation."""
+    if not isinstance(semantic_chain, dict) or relation not in {"CONTINUE", "RECALL"}:
+        return {}
+    chain = list(semantic_chain.get("chain") or [])
+    return {
+        "version": "openai_semantic_continuation_request_v1",
+        "mode": "CONTINUE_SEMANTIC_CHAIN" if relation == "CONTINUE" else "RECALL_SEMANTIC_CHAIN",
+        "relation": relation,
+        "messages": chain,
+        "semantic_entity_definition": deepcopy(semantic_chain.get("entity_definition") or {}),
+        "instruction": _df_text(semantic_chain.get("continuation_instruction"), 600),
+        "do_not": [
+            "do_not_reselect_memory_branch",
+            "do_not_treat_command_words_as_entities",
+            "do_not_replace_previous_answer_with_entity_label",
+            "do_not_answer_an_old_question_instead_of_current_question",
+        ],
+        "answer_source_priority": [
+            "previous_openai_answer",
+            "previous_user_question",
+            "semantic_entity_definition.entity",
+            "active_sequence_digest",
+        ],
+    }
+
 def _df_resolve_semantic_reference(
     text: str,
     *,
@@ -2979,6 +3119,7 @@ def _df_provider_plan(
     active_dialogue_context: dict[str, Any] | None = None,
     dialogue_rules: dict[str, Any] | None = None,
     related_branches: list[dict[str, Any]] | None = None,
+    semantic_chain: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Build the final Provider context after semantic understanding is complete.
@@ -3002,6 +3143,7 @@ def _df_provider_plan(
         else deepcopy(active_dialogue_context.get("dialogue_rules") or {})
     )
     related_branches = [deepcopy(x) for x in (related_branches or []) if isinstance(x, dict)][:4]
+    semantic_chain = semantic_chain if isinstance(semantic_chain, dict) else {}
     base = {
         "version": _df_provider_plan_version,
         "relation": relation,
@@ -3010,6 +3152,7 @@ def _df_provider_plan(
         "current_request_authoritative": True,
         "context_selection_done_before_provider": True,
         "provider_must_not_reselect_context": True,
+        "provider_continuation_contract": "Use SEMANTIC_CONTINUATION_CHAIN as the ordered semantic input when relation=CONTINUE/RECALL.",
         "hard_budget_tokens": 900,
         "soft_target_tokens": 820,
         "new_topic_minimal_context": relation == "NEW",
@@ -3026,6 +3169,8 @@ def _df_provider_plan(
                     "turn_relation": turn_relation,
                     "relation_definition": semantic.get("relation_definition") or _DF_RELATION_DEFINITIONS.get(relation, ""),
                     "semantic_link": deepcopy(semantic.get("semantic_link") or {}),
+                    "semantic_chain": deepcopy(semantic_chain),
+                    "entity_definition": deepcopy(semantic_chain.get("entity_definition") or {}),
                     "branch_label": semantic.get("branch_label") or "",
                     "branch_type": semantic.get("branch_type") or "topic",
                     "internal_response_path": semantic.get("internal_response_path") or "",
@@ -3127,6 +3272,12 @@ def _df_provider_plan(
                 },
             },
         )
+        if semantic_chain.get("available"):
+            base["required_context"].insert(3, {
+                "key": "SEMANTIC_CONTINUATION_CHAIN",
+                "priority": 0.998,
+                "value": deepcopy(semantic_chain),
+            })
         visual_memory_ref = semantic.get("previous_visual_generation_memory")
         if isinstance(visual_memory_ref, dict) and visual_memory_ref.get("available"):
             # Use only a compact excerpt in Provider context. The complete
@@ -3156,7 +3307,7 @@ def _df_provider_plan(
             )
         if task:
             base["required_context"].insert(
-                4,
+                5 if semantic_chain.get("available") and visual_memory_ref and visual_memory_ref.get("available") else 4,
                 {
                     "key": "ACTIVE_TASK",
                     "priority": 0.99,
@@ -4010,6 +4161,22 @@ def _df_interpret_live_turn(
         else "NONE"
     )
 
+    # The previous OpenAI answer + previous user question define the meaning of
+    # the live entity. This is the canonical hand-off packet for the next model
+    # call; entity is only an anchor, never the primary semantic payload.
+    semantic_chain = _df_build_semantic_chain_context(
+        previous_user=previous_user,
+        previous_april=previous_april,
+        current_user=current,
+        active_topic=active_topic,
+        active_entity=active_entity,
+        relation=relation,
+        turn_relation=turn_relation,
+        canonical_turn=canonical_turn,
+    )
+    semantic["semantic_chain"] = deepcopy(semantic_chain)
+    semantic["entity_definition"] = deepcopy(semantic_chain.get("entity_definition") or {})
+
     # ------------------------------------------------------------------
     # 8) Provider context is frozen here. Provider cannot select memory/branch.
     # ------------------------------------------------------------------
@@ -4029,7 +4196,13 @@ def _df_interpret_live_turn(
         active_context,
         dialogue_rules=dialogue_rules,
         related_branches=linked_branches,
+        semantic_chain=semantic_chain,
     )
+    openai_continuation_request = _df_build_openai_continuation_request(
+        semantic_chain, relation=relation
+    )
+    if openai_continuation_request:
+        provider_plan["openai_continuation_request"] = deepcopy(openai_continuation_request)
 
     branch_index = deepcopy(branches)
     if relation == "NEW" and sequence_id:
@@ -4143,6 +4316,8 @@ def _df_interpret_live_turn(
             100,
         ),
         "source": "contextual_dialogue_interpretation",
+        "entity_definition": deepcopy(semantic.get("entity_definition") or {}),
+        "semantic_chain": deepcopy(semantic.get("semantic_chain") or {}),
     }
 
     dialogue_contract = {
@@ -4205,6 +4380,9 @@ def _df_interpret_live_turn(
         "semantic_request": semantic.get("semantic_request") or current,
         "relation_definition": _DF_RELATION_DEFINITIONS.get(relation, ""),
         "semantic_link": deepcopy(semantic.get("semantic_link") or {}),
+        "entity_definition": deepcopy(semantic.get("entity_definition") or {}),
+        "semantic_chain": deepcopy(semantic.get("semantic_chain") or {}),
+        "openai_continuation_request": deepcopy(openai_continuation_request),
         "previous_visual_generation_memory": deepcopy(
             visual_generation_memory_ref
         ) if relation in {"CONTINUE", "RECALL"} and visual_generation_memory_ref else {},
@@ -4390,6 +4568,9 @@ def _df_interpret_live_turn(
             "active_dialogue_trajectory",
             "active_task",
             "active_entity",
+            "entity_definition",
+            "semantic_chain",
+            "openai_continuation_request",
             "DIALOGUE_RULES",
             "RESPONSE_SEQUENCE",
             "TASK_RESULT_STATE",
@@ -4446,7 +4627,12 @@ def _df_interpret_live_turn(
             "relation": relation,
             "relation_definition": semantic.get("relation_definition") or _DF_RELATION_DEFINITIONS.get(relation, ""),
             "semantic_link": deepcopy(semantic.get("semantic_link") or {}),
+            "entity_definition": deepcopy(semantic.get("entity_definition") or {}),
+            "semantic_chain": deepcopy(semantic.get("semantic_chain") or {}),
         },
+        "entity_definition": deepcopy(semantic.get("entity_definition") or {}),
+        "semantic_chain": deepcopy(semantic.get("semantic_chain") or {}),
+        "openai_continuation_request": deepcopy(openai_continuation_request),
         "dialogue_contract": dialogue_contract,
         "dialogue_relation": {
             **deepcopy(dialogue_contract),
