@@ -957,6 +957,16 @@ _df_recall_markers = (
     "вспомни", "помнишь", "что мы обсуждали", "о чем мы говорили", "о чём мы говорили",
     "что я спрашивал", "что я спрашивала", "что я просил", "что я просила",
 )
+_df_feedback_markers = (
+    "мне нравится", "мне очень нравится", "мне понравилось", "мне очень понравилось",
+    "понравилось", "нравится", "классно", "классная", "классный", "прикольно",
+    "красиво", "отлично", "супер", "прекрасно", "здорово", "забавно",
+    "круто", "огонь", "молодец", "спасибо", "благодарю",
+)
+_df_feedback_negative_markers = (
+    "не нравится", "не понравилось", "плохо", "ужасно", "некрасиво",
+    "не то", "не очень", "неудачно",
+)
 _df_memory_scope_terms = {
     "памят", "контекст", "диалог", "диалоги", "разговор", "разговоры",
     "истори", "обсужд", "сесс", "ветк", "последовательн",
@@ -1052,6 +1062,38 @@ def _df_memory_scope_request(text: str) -> bool:
 
 def _df_explicit_recall(text: str) -> bool:
     return _df_memory_scope_request(text)
+
+
+def _df_feedback_probe(
+    text: str,
+    *,
+    canonical_turn: dict[str, Any] | None = None,
+    previous_april: str = "",
+) -> dict[str, Any]:
+    """Detect a reaction to the immediately preceding canonical assistant action."""
+    low = _df_low(text)
+    canonical = canonical_turn if isinstance(canonical_turn, dict) else {}
+    positive = any(x in low for x in _df_feedback_markers)
+    negative = any(x in low for x in _df_feedback_negative_markers)
+    if _df_explicit_recall(text) or not ((positive or negative) and (canonical or previous_april or len(_df_tokens(low)) <= 8)):
+        return {"feedback": False, "sentiment": "", "target": {}, "reason": ""}
+    scene = canonical.get("visual_scene") if isinstance(canonical.get("visual_scene"), dict) else {}
+    topic = _df_text(canonical.get("topic") or canonical.get("canonical_topic") or scene.get("topic"), 220)
+    entities = [_df_text(x, 180) for x in (canonical.get("entities") or []) if _df_text(x, 180)]
+    target = {
+        "type": "LAST_ASSISTANT_ACTION",
+        "turn_id": _df_text(canonical.get("turn_id"), 120),
+        "scene_id": _df_text(canonical.get("visual_scene_id") or scene.get("scene_id") or canonical.get("scene_id"), 160),
+        "operation": _df_text(canonical.get("operation") or scene.get("operation"), 80),
+        "topic": topic,
+        "entities": entities[:4],
+    }
+    return {
+        "feedback": True,
+        "sentiment": "negative" if negative and not positive else "positive",
+        "target": target,
+        "reason": "user_reaction_to_previous_assistant_action",
+    }
 
 
 def _df_extract_subject(text: str) -> str:
@@ -1207,62 +1249,68 @@ def _df_normalize_subject(value: str) -> str:
 
 
 def _df_extract_previous(history: list[Any], state: dict[str, Any]) -> tuple[str, str]:
-    """Return the latest completed USER↔APRIL pair from canonical 12h memory."""
-    canonical = state.get("canonical_dialogue_turn") if isinstance(state.get("canonical_dialogue_turn"), dict) else {}
-    if canonical:
+    """Read the latest canonical pair; never scan the 12-hour archive on hot path."""
+    state = state if isinstance(state, dict) else {}
+    canonical = state.get("canonical_dialogue_turn")
+    if isinstance(canonical, dict):
         user = _df_text(canonical.get("user_request"), 1200)
         april = _df_text(canonical.get("april_answer"), 2200)
         if user or april:
             return user, april
-
-    anchor = state.get("dialogue_memory_anchor") if isinstance(state.get("dialogue_memory_anchor"), dict) else {}
-    if anchor:
+    anchor = state.get("dialogue_memory_anchor")
+    if isinstance(anchor, dict):
         user = _df_text(anchor.get("user_request"), 1200)
         april = _df_text(anchor.get("april_answer"), 2200)
         if user or april:
             return user, april
-
-    # Pair archive is the durable authenticated source. Ignore task mirrors here.
-    timeline = state.get("memory_timeline") if isinstance(state.get("memory_timeline"), dict) else {}
+    if isinstance(history, list):
+        last_user = last_april = ""
+        for item in reversed(history[-6:]):
+            if not isinstance(item, dict):
+                continue
+            role = _df_low(item.get("role"))
+            if not last_april and role in {"assistant", "april", "bot"}:
+                last_april = _df_text(item.get("answer") or item.get("content") or item.get("summary") or item.get("text"), 2200)
+            if not last_user and role in {"user", "human"}:
+                last_user = _df_text(item.get("content") or item.get("text") or item.get("answer"), 1200)
+            if last_user and last_april:
+                return last_user, last_april
     seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
-    sequence_id = _df_text(seq.get("sequence_id"), 120)
-    user_id = _df_text(state.get("user_id") or (state.get("memory_scope") or {}).get("user_id"), 120)
-    conversation_id = _df_text(state.get("conversation_id") or (state.get("memory_scope") or {}).get("conversation_id"), 160)
-    candidates = []
-    now = time.time()
-    for day in timeline.values():
-        if not isinstance(day, dict):
-            continue
-        for raw in day.get("dialog_pairs", []):
-            if not isinstance(raw, dict):
-                continue
-            if sequence_id and _df_text(raw.get("sequence_id"), 120) != sequence_id:
-                continue
-            if user_id and _df_text(raw.get("user_id"), 120) not in {"", user_id}:
-                continue
-            if conversation_id and _df_text(raw.get("conversation_id"), 160) not in {"", conversation_id}:
-                continue
-            try:
-                created_at = float(raw.get("created_at") or raw.get("timestamp") or 0.0)
-            except (TypeError, ValueError):
-                created_at = 0.0
-            if created_at and now - created_at >= USER_CONTENT_RETENTION_SECONDS:
-                continue
-            candidates.append(raw)
-    if candidates:
-        candidates.sort(key=lambda item: (int(item.get("sequence_turn_index") or 0), float(item.get("created_at") or 0.0)))
-        last = candidates[-1]
-        return (
-            _df_text(last.get("user_request") or last.get("user_meaning"), 1200),
-            _df_text(last.get("april_answer") or last.get("april_meaning") or last.get("answer"), 2200),
-        )
+    return (
+        _df_text(seq.get("last_user_request") or state.get("last_user_turn"), 1200),
+        _df_text(seq.get("last_april_answer") or state.get("last_april_turn"), 2200),
+    )
 
-    # Compatibility fallback only when canonical memory is genuinely unavailable.
-    seq_user = _df_text(seq.get("last_user_request") or state.get("last_user_turn"), 1200)
-    seq_april = _df_text(seq.get("last_april_answer") or state.get("last_april_turn"), 2200)
-    if seq_user or seq_april:
-        return seq_user, seq_april
-    return "", ""
+def _df_compact_active_sequence_digest(
+    state: dict[str, Any],
+    canonical_turn: dict[str, Any],
+    sequence_id: str = "",
+) -> dict[str, Any]:
+    """Build the active dialogue digest from canonical state only."""
+    state = state if isinstance(state, dict) else {}
+    canonical_turn = canonical_turn if isinstance(canonical_turn, dict) else {}
+    seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+    sid = _df_text(sequence_id or canonical_turn.get("sequence_id") or seq.get("sequence_id"), 80)
+    tid = _df_text(canonical_turn.get("task_id") or seq.get("task_id"), 100)
+    topic = _df_text(canonical_turn.get("topic") or canonical_turn.get("canonical_topic") or seq.get("topic"), 220)
+    entities = [_df_text(x, 120) for x in (canonical_turn.get("entities") or []) if _df_text(x, 120)]
+    entity = _df_text(canonical_turn.get("active_entity") or " и ".join(entities[:4]), 220)
+    user = _df_text(canonical_turn.get("user_request") or seq.get("last_user_request"), 260)
+    april = _df_text(canonical_turn.get("april_answer") or seq.get("last_april_answer"), 420)
+    count = int(canonical_turn.get("sequence_turn_index") or seq.get("turn_count") or 0)
+    row = {"turn": count, "task_id": tid, "user": user, "april": april, "topic": topic, "relation": _df_text(canonical_turn.get("relation") or canonical_turn.get("dialogue_relation"), 40).upper()}
+    return {
+        "version": "compact_canonical_digest_v2", "source": "canonical_dialogue_turn",
+        "sequence_id": sid, "task_id": tid, "dialogue_window_hours": DIALOGUE_WINDOW_HOURS,
+        "history_scope": "active_canonical_turn", "sequence_turn_count": count, "turn_count": count,
+        "window_record_count": 1 if (user or april) else 0, "task_turn_count": 1 if tid and (user or april) else 0,
+        "root_topic": topic, "current_topic": topic, "current_task_topic": topic, "current_focus": entity or topic,
+        "last_user": user, "last_april": april, "previous_user": "", "previous_april": "",
+        "last_result": deepcopy(canonical_turn.get("last_result") or {}), "answer_basis": deepcopy(canonical_turn.get("answer_basis") or {}),
+        "dialogue_rules": deepcopy(seq.get("dialogue_rules") or {}), "topic_path": [topic] if topic else [],
+        "recent_trajectory": [row] if (user or april) else [], "task_trajectory": [], "task_summaries": [],
+        "coverage": "canonical_only", "window_complete": bool(sid), "other_branches_included": False, "full_history_included": False,
+    }
 
 
 def _df_active_sequence_digest(
@@ -2184,6 +2232,7 @@ def _df_resolve_relation(
     task_probe: dict[str, Any],
     dialogue_probe: dict[str, Any],
     *,
+    feedback_probe: dict[str, Any] | None = None,
     semantic: dict[str, Any] | None = None,
     sequence_digest: dict[str, Any] | None = None,
     branches: dict[str, Any] | None = None,
@@ -2200,6 +2249,10 @@ def _df_resolve_relation(
     explicit_recall = _df_explicit_recall(text)
     if explicit_recall:
         return "RECALL", "REFERENCE_OLD_TOPIC"
+
+    feedback_probe = feedback_probe if isinstance(feedback_probe, dict) else {}
+    if feedback_probe.get("feedback"):
+        return "CONTINUE", "USER_FEEDBACK"
 
     seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
     has_live = bool(
@@ -2396,10 +2449,24 @@ def _df_understand(
     active_entity: str,
     task_probe: dict[str, Any],
     render_probe: dict[str, Any],
+    feedback_probe: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     low = _df_low(text)
+    feedback_probe = feedback_probe if isinstance(feedback_probe, dict) else {}
     explicit_subject = _df_normalize_subject(_df_extract_subject(text))
     entity = explicit_subject or active_entity
+
+    if feedback_probe.get("feedback"):
+        target = feedback_probe.get("target") if isinstance(feedback_probe.get("target"), dict) else {}
+        target_entities = [x for x in (target.get("entities") or []) if x]
+        return {
+            "topic": _df_text(target.get("topic") or active_topic, 220),
+            "entity": _df_text(" и ".join(target_entities) or active_entity, 180),
+            "operation": "feedback", "goal": "acknowledge_user_reaction", "representation": "text",
+            "semantic_request": _df_text(text, 1200), "explicit_subject": "",
+            "reference_entity": _df_text(" и ".join(target_entities) or active_entity, 180),
+            "feedback": deepcopy(feedback_probe),
+        }
 
     operation = "answer"
     goal = "answer"
@@ -2914,6 +2981,26 @@ def _df_select_recalled_branch(text: str, state: dict[str, Any], branches: dict[
 
 
 
+def _df_latest_visual_generation_memory_fast(
+    state: dict[str, Any],
+    canonical_turn: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Read visual-generation memory from canonical state without scanning history."""
+    canonical = canonical_turn if isinstance(canonical_turn, dict) else {}
+    owners = [canonical]
+    if isinstance(state, dict) and isinstance(state.get("dialogue_memory_anchor"), dict):
+        owners.append(state.get("dialogue_memory_anchor"))
+    for owner in owners:
+        memory = owner.get("visual_generation_memory") if isinstance(owner, dict) else {}
+        if isinstance(memory, dict) and _df_text(memory.get("generation_prompt"), 8):
+            return deepcopy(memory)
+    scene = canonical.get("visual_scene") if isinstance(canonical.get("visual_scene"), dict) else {}
+    if not scene and isinstance(state, dict) and isinstance(state.get("last_successful_visual_scene"), dict):
+        scene = state.get("last_successful_visual_scene")
+    memory = scene.get("visual_generation_memory") if isinstance(scene, dict) else {}
+    return deepcopy(memory) if isinstance(memory, dict) and _df_text(memory.get("generation_prompt"), 8) else {}
+
+
 def _df_latest_visual_generation_memory(
     state: dict[str, Any],
     *,
@@ -3100,27 +3187,19 @@ def _df_interpret_live_turn(
     )
 
     # ------------------------------------------------------------------
-    # 1) Active-session memory first.
+    # 1) Canonical hot-path memory. Full 12h traversal is RECALL-only.
     # ------------------------------------------------------------------
-    # A completed image turn leaves its full generator envelope in the same
-    # authenticated 12-hour dialog archive. Start with that evidence so a short
-    # follow-up such as "сделай её крупнее" can remain tied to the image.
-    visual_generation_memory = _df_latest_visual_generation_memory(
-        state,
-        user_id=user_id,
-        conversation_id=conversation_id,
-        sequence_id=active_seq_id,
-    )
-    visual_generation_memory_ref = _df_visual_generation_memory_reference(
-        visual_generation_memory
-    )
-
-    active_sequence_digest = _df_active_sequence_digest(
-        state,
-        history,
-        active_seq_id,
-        limit=6,
-        task_id=active_task_id,
+    explicit_recall = _df_explicit_recall(current)
+    visual_requested = bool(_df_render_probe(current).get("requested"))
+    visual_generation_memory = _df_latest_visual_generation_memory_fast(state, canonical_turn)
+    if not visual_generation_memory and not canonical_turn and visual_requested:
+        visual_generation_memory = _df_latest_visual_generation_memory(
+            state, user_id=user_id, conversation_id=conversation_id, sequence_id=active_seq_id,
+        )
+    visual_generation_memory_ref = _df_visual_generation_memory_reference(visual_generation_memory)
+    active_sequence_digest = (
+        _df_active_sequence_digest(state, history, active_seq_id, limit=6, task_id=active_task_id)
+        if explicit_recall else _df_compact_active_sequence_digest(state, canonical_turn, active_seq_id)
     )
     digest_topic = _df_text(active_sequence_digest.get("current_topic"), 220)
     # The digest contains historical branch/task mirrors. Once a completed
@@ -3159,7 +3238,12 @@ def _df_interpret_live_turn(
         active_entity,
         task_probe,
     )
-    branches = _df_branch_index(state, seq, active_topic, active_entity)
+    feedback_probe = _df_feedback_probe(current, canonical_turn=canonical_turn, previous_april=previous_april)
+    branches = (
+        _df_branch_index(state, seq, active_topic, active_entity)
+        if explicit_recall or _df_comparison_request(current)
+        else {}
+    )
 
     # ------------------------------------------------------------------
     # 3) Contextual understanding BEFORE relation resolution.
@@ -3190,13 +3274,8 @@ def _df_interpret_live_turn(
     )
 
     semantic = _df_understand(
-        current,
-        provisional_relation,
-        provisional_turn_relation,
-        active_topic,
-        active_entity,
-        task_probe,
-        render_probe,
+        current, provisional_relation, provisional_turn_relation, active_topic, active_entity,
+        task_probe, render_probe, feedback_probe=feedback_probe,
     )
     if visual_ref_entity:
         # For a deictic image-edit request ("его/её/этого человека") the
@@ -3213,7 +3292,7 @@ def _df_interpret_live_turn(
     # ------------------------------------------------------------------
     relation, turn_relation = _df_resolve_relation(
         current, state, previous_april, active_topic, active_entity, task_probe, dialogue_probe,
-        semantic=semantic, sequence_digest=active_sequence_digest, branches=branches,
+        feedback_probe=feedback_probe, semantic=semantic, sequence_digest=active_sequence_digest, branches=branches,
     )
     if visual_ref_entity and relation != "RECALL":
         # A deictic visual follow-up continues the authenticated branch. The
@@ -3320,6 +3399,16 @@ def _df_interpret_live_turn(
                 _df_task_probe(current, prior_task, active_topic, previous_april=previous_april),
                 render_probe,
             )
+
+    if turn_relation == "USER_FEEDBACK":
+        # Feedback belongs to the last canonical assistant action. Never create a
+        # new task/topic or consult an older branch for a short reaction.
+        semantic["topic"] = _df_text(semantic.get("topic") or active_topic, 220)
+        semantic["entity"] = _df_text(semantic.get("entity") or active_entity, 180)
+        semantic["explicit_subject"] = ""
+        semantic["feedback"] = deepcopy(feedback_probe)
+        task = {}
+        active_task_id = _df_text(canonical_turn.get("task_id") or seq.get("task_id") or "", 100)
 
     if turn_relation in {"DIALOGUE_REPAIR", "DIALOGUE_RULE_UPDATE"}:
         # Repair and presentation-rule changes belong to the existing dialogue
@@ -3909,6 +3998,7 @@ def _df_interpret_live_turn(
         "representation": semantic.get("representation"),
         "entity": semantic.get("entity"),
         "relation": relation,
+        "feedback": deepcopy(feedback_probe) if feedback_probe.get("feedback") else {},
         "understanding_stage": "complete_before_relation",
     }
 
