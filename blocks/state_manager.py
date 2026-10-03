@@ -45,8 +45,9 @@ STATE_MACHINE_CHANNEL = {
 
 ADMIN_ID = 2016592532
 
-# Canonical authenticated dialogue memory: 12h rolling window in fixed UTC halves.
-# At each UTC boundary only the immediately preceding hour is retained as a seed.
+# Canonical authenticated dialogue memory: a per-user rolling 12h UTC window.
+# Each user has an independent cycle anchored to the start of that dialogue; at each
+# 12h rollover only the immediately preceding hour is retained as the continuity seed.
 DIALOGUE_WINDOW_HOURS = 12
 DIALOGUE_SEED_HOURS = 1
 DIALOGUE_WINDOW_SECONDS = DIALOGUE_WINDOW_HOURS * 60 * 60
@@ -149,6 +150,150 @@ def safe_list(value):
     return value if isinstance(value, list) else []
 
 
+# ---------------------------------------------------------------------------
+# POST-PROVIDER DIALOGUE MEMORY
+# ---------------------------------------------------------------------------
+# Interpretation before OpenAI is provisional context. The completed
+# USER->APRIL pair returned by Provider is the canonical semantic memory source.
+_POST_PROVIDER_IGNORED_NAMES = {
+    "вот", "это", "оба", "обе", "обоих", "однако", "например",
+    "таким", "также", "здесь", "сегодня", "тогда", "для", "при",
+    "русский", "русская", "русские", "советский", "советская",
+    "система", "программа", "пример", "ответ", "сравнение",
+}
+_POST_PROVIDER_NAME_RE = re.compile(
+    r"\b[А-ЯЁ][а-яё-]{2,}(?:\s+[А-ЯЁ][а-яё-]{2,}){1,2}\b"
+)
+_POST_PROVIDER_LATIN_NAME_RE = re.compile(
+    r"\b[A-Z][a-z-]{2,}(?:\s+[A-Z][a-z-]{2,}){1,2}\b"
+)
+_POST_PROVIDER_SUBTOPICS = (
+    ("comparison", ("сравн", "сопостав")),
+    ("image", ("нарисуй", "изобрази", "картинк", "изображени", "рисунк", "портрет")),
+    ("code", ("код", "python", "скрипт", "программ")),
+    ("diagram", ("схем", "блок-схем")),
+    ("graph", ("график", "диаграмм", "кривую", "кривая")),
+    ("table", ("таблиц", "табличк")),
+    ("formula", ("формул", "уравнен")),
+    ("translation", ("переведи", "перевод", "английск", "перевести")),
+    ("analysis", ("анализ", "разбор", "проанализ")),
+)
+
+
+def _post_provider_full_names(*texts):
+    names = []
+    seen = set()
+    for text in texts:
+        value = str(text or "")
+        candidates = list(_POST_PROVIDER_NAME_RE.findall(value)) + list(_POST_PROVIDER_LATIN_NAME_RE.findall(value))
+        for candidate in candidates:
+            normalized = re.sub(r"\s+", " ", candidate).strip(" .,!?:;—-")
+            if not normalized:
+                continue
+            if normalized.split()[0].lower() in _POST_PROVIDER_IGNORED_NAMES:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(normalized)
+    return names
+
+
+def _post_provider_clean_request(text):
+    value = re.sub(r"\s+", " ", str(text or "").strip())
+    if not value:
+        return ""
+    value = re.sub(
+        r"^(?:а\s+)?(?:сравни|мравни|расскажи|скажи|объясни|покажи|нарисуй|изобрази|"
+        r"сгенерируй|создай|сделай|построй|проверь|найди|напиши|выдай|выведи|"
+        r"рассчитай|посчитай|ответь|переведи)\s+",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    return value.strip(" .,!?:;—-")[:220]
+
+
+def _derive_post_provider_memory_semantics(
+    current_request,
+    answer,
+    provisional=None,
+    previous_anchor=None,
+    relation="NEW",
+    render_types=None,
+):
+    """Build canonical dialogue semantics from the completed Provider result."""
+    provisional = provisional if isinstance(provisional, dict) else {}
+    previous_anchor = previous_anchor if isinstance(previous_anchor, dict) else {}
+    relation = str(relation or "NEW").strip().upper()
+    render_types = [str(x or "").strip().lower() for x in (render_types or []) if str(x or "").strip()]
+    request_text = str(current_request or "").strip()[:1200]
+    answer_text = str(answer or "").strip()[:4000]
+    low = f"{request_text} {answer_text}".lower()
+
+    names = _post_provider_full_names(request_text, answer_text)
+    prior_entities = []
+    raw_prior = previous_anchor.get("entities") or previous_anchor.get("active_entities") or []
+    if isinstance(raw_prior, str):
+        prior_entities = [x.strip() for x in re.split(r"\s+и\s+|,", raw_prior) if x.strip()]
+    elif isinstance(raw_prior, (list, tuple)):
+        prior_entities = [str(x).strip() for x in raw_prior if str(x).strip()]
+    prior_active = str(previous_anchor.get("active_entity") or "").strip()
+    if prior_active and not prior_entities:
+        prior_entities = [x.strip() for x in re.split(r"\s+и\s+|,", prior_active) if x.strip()]
+
+    if relation == "NEW":
+        entities = names[:6]
+        if len(entities) >= 2:
+            topic = " и ".join(entities[:4])
+        elif len(entities) == 1:
+            topic = entities[0]
+        else:
+            topic = _post_provider_clean_request(request_text) or str(
+                provisional.get("topic") or provisional.get("canonical_topic") or ""
+            ).strip()[:220]
+    elif relation == "RECALL":
+        entities = names[:6] or prior_entities[:6]
+        topic = " и ".join(entities[:4]) if len(entities) >= 2 else (entities[0] if entities else "")
+        topic = topic or str(previous_anchor.get("topic") or provisional.get("topic") or "").strip()[:220]
+    else:
+        entities = prior_entities[:6] or names[:6]
+        topic = str(previous_anchor.get("topic") or "").strip()[:220]
+        if not topic:
+            topic = " и ".join(entities[:4]) if len(entities) >= 2 else (entities[0] if entities else "")
+        if not topic:
+            topic = str(provisional.get("topic") or provisional.get("canonical_topic") or "").strip()[:220]
+
+    subtopic = ""
+    haystack = low + " " + " ".join(render_types)
+    for label, markers in _POST_PROVIDER_SUBTOPICS:
+        if label in render_types or any(marker in haystack for marker in markers):
+            subtopic = label
+            break
+
+    active_entity = (
+        " и ".join(entities[:4]) if len(entities) >= 2
+        else (entities[0] if entities else prior_active or str(
+            provisional.get("active_entity") or provisional.get("entity") or ""
+        ).strip()[:180])
+    )
+    return {
+        "version": "post_provider_dialogue_memory_v1",
+        "source_of_truth": "USER_REQUEST_PLUS_APRIL_ANSWER",
+        "memory_source": "POST_PROVIDER_OPENAI_RESPONSE",
+        "topic": topic or _post_provider_clean_request(request_text),
+        "subtopic": subtopic,
+        "entities": entities[:6],
+        "active_entity": active_entity[:220],
+        "relation": relation,
+        "user_request": request_text,
+        "april_answer": answer_text,
+        "created_at": time.time(),
+        "expires_after_hours": DIALOGUE_WINDOW_HOURS,
+    }
+
+
 def compact_dialog_message(role, content):
     now = time.time()
     return {
@@ -169,7 +314,7 @@ def utc_day_key():
 
 
 def utc_window_start(timestamp=None):
-    """Return the fixed UTC 00:00/12:00 boundary containing timestamp."""
+    """Compatibility helper for legacy visual records only. New dialogue memory uses a per-user anchor."""
     dt = datetime.fromtimestamp(
         float(timestamp if timestamp is not None else time.time()),
         tz=timezone.utc,
@@ -260,6 +405,7 @@ def build_default_active_dialogue_context():
 
 
 def build_default_state():
+    now = time.time()
     return {
         "dialog": [],
         "memory_summary": "",
@@ -384,14 +530,18 @@ def build_default_state():
         },
         "memory_timeline": build_memory_timeline(),
         "memory_cycle": {
-            "window_key": utc_window_key(),
-            "window_start_utc": utc_window_start().timestamp(),
-            "seed_cutoff_utc": utc_window_start().timestamp() - DIALOGUE_SEED_SECONDS,
-            "last_rollover": time.time(),
+            "anchor_mode": "USER_DIALOGUE_START_12H_V1",
+            "session_start_utc": now,
+            "window_key": datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "window_start_utc": now,
+            "seed_cutoff_utc": now - DIALOGUE_SEED_SECONDS,
+            "last_rollover": now,
         },
         "memory_version": "QUANTUM-MEMORY-12H-V2",
         "active_scene_contract": {},
         "current_scene_request": "",
+        "dialogue_memory_anchor": {},
+        "canonical_dialogue_turn": {},
         "visual_summary": {},
         "semantic_scene_state": {},
         "last_successful_visual_scene": None,
@@ -562,13 +712,12 @@ class QuantumMemoryEngine:
         timeline = state_obj.get("memory_timeline") if isinstance(state_obj.get("memory_timeline"), dict) else {}
         source_day = timeline.get("day_0") if isinstance(timeline.get("day_0"), dict) else {}
         hot_day = self._seed_container(source_day, seed_start, seed_end)
-        # Keep the full unexpired USER↔APRIL archive for task recall; only the
-        # hot dialogue fields are reduced to the preceding one-hour interaction.
-        durable_pairs = [
+        # At the 12-hour boundary retain only the immediately preceding hour as
+        # continuity seed. The fresh window then grows again with new turns.
+        hot_day["dialog_pairs"] = [
             deepcopy(x) for x in (source_day.get("dialog_pairs") or [])
-            if isinstance(x, dict) and self._record_timestamp(x) and not self._is_expired(self._record_timestamp(x))
+            if self._in_interval(x, seed_start, seed_end)
         ][-SESSION_MEMORY_LIMIT:]
-        hot_day["dialog_pairs"] = durable_pairs
         state_obj["memory_timeline"] = {"day_0": hot_day}
 
         def keep_record(record):
@@ -608,21 +757,37 @@ class QuantumMemoryEngine:
         for task_id, task in registry.items():
             if not isinstance(task, dict):
                 continue
-            ts = self._record_timestamp(task)
-            if ts and not self._is_expired(ts, now=now):
-                task_copy = deepcopy(task)
-                for history_key in ("qa_history", "turns", "result_history", "completed_results"):
-                    values = task_copy.get(history_key)
-                    if isinstance(values, list):
-                        # Result history remains task-local but compact.
-                        task_copy[history_key] = [deepcopy(x) for x in values][-HOT_DIALOG_LIMIT:]
+            task_copy = deepcopy(task)
+            has_seed_history = False
+            for history_key in ("qa_history", "turns", "result_history", "completed_results"):
+                values = task_copy.get(history_key)
+                if not isinstance(values, list):
+                    continue
+                kept_values = [deepcopy(x) for x in values if self._in_interval(x, seed_start, seed_end)]
+                has_seed_history = has_seed_history or bool(kept_values)
+                task_copy[history_key] = kept_values[-HOT_DIALOG_LIMIT:]
+            if has_seed_history or self._in_interval(task_copy, seed_start, seed_end):
                 cleaned_registry[str(task_id)] = task_copy
         state_obj["dialogue_task_registry"] = cleaned_registry
 
         seq = state_obj.get("active_dialogue_sequence")
         if isinstance(seq, dict) and seq:
             seq = deepcopy(seq)
-            seq_ts = self._record_timestamp(seq)
+            # A sequence may be older than one 12h cycle while still having a
+            # valid one-hour continuity seed. Use the latest activity timestamp
+            # for the rollover decision; the sequence start remains only the
+            # authenticated cycle anchor.
+            try:
+                seq_ts = float(
+                    seq.get("last_turn_at")
+                    or seq.get("updated_at")
+                    or seq.get("last_user_turn_at")
+                    or seq.get("last_april_turn_at")
+                    or seq.get("created_at")
+                    or 0.0
+                )
+            except (TypeError, ValueError):
+                seq_ts = 0.0
             if seq_ts and not self._is_expired(seq_ts, now=now):
                 seq_registry = {
                     str(k): deepcopy(v) for k, v in (seq.get("task_registry") or {}).items()
@@ -672,7 +837,13 @@ class QuantumMemoryEngine:
             elif not ctx_ts or self._is_expired(ctx_ts, now=now):
                 state_obj["active_dialogue_context"] = build_default_active_dialogue_context()
 
-        # Top-level task mirrors remain valid for 12h, not only the hot seed hour.
+        # Canonical dialogue anchors follow the same seed lifecycle.
+        for key in ("dialogue_memory_anchor", "canonical_dialogue_turn"):
+            value = state_obj.get(key)
+            if not (isinstance(value, dict) and self._in_interval(value, seed_start, seed_end)):
+                state_obj[key] = {}
+
+        # Top-level task mirrors survive only when their task survived the seed.
         for key in ("interactive_task_state", "open_task", "active_task", "april_active_task"):
             value = state_obj.get(key)
             if not isinstance(value, dict) or not value:
@@ -768,7 +939,7 @@ class QuantumMemoryEngine:
                 removed += count
 
         # Apply the same TTL to the canonical day_0 bucket even when we are
-        # inside the current fixed UTC window. This also removes legacy 7-day
+        # inside the current per-user 12-hour window. This also removes legacy
         # records that may have survived in day_0 after migration.
         timeline = state_obj.get("memory_timeline") if isinstance(state_obj.get("memory_timeline"), dict) else {}
         day0 = timeline.get("day_0") if isinstance(timeline.get("day_0"), dict) else {}
@@ -837,22 +1008,29 @@ class QuantumMemoryEngine:
         if not isinstance(state_obj, dict):
             return False
         now = time.time()
-        current_start = utc_window_start(now).timestamp()
-        current_key = utc_window_key(now)
         cycle = state_obj.get("memory_cycle") if isinstance(state_obj.get("memory_cycle"), dict) else {}
+        anchor = float(cycle.get("session_start_utc") or cycle.get("window_start_utc") or now)
+        if anchor > now:
+            anchor = now
+        elapsed = max(0.0, now - anchor)
+        cycle_index = int(elapsed // DIALOGUE_WINDOW_SECONDS)
+        current_start = anchor + cycle_index * DIALOGUE_WINDOW_SECONDS
+        current_key = datetime.fromtimestamp(current_start, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         previous_key = cycle.get("window_key") or cycle.get("last_window_key")
-        # Legacy 12-hour states are intentionally collapsed: only day_0 may remain, and it is re-seeded below.
-        if not previous_key or previous_key == current_key:
-            changed = False
-        else:
-            changed = True
+        changed = bool(previous_key and previous_key != current_key)
 
         if changed:
             seed_start = current_start - DIALOGUE_SEED_SECONDS
             seed_end = current_start
             self._clear_dialogue_runtime_except_seed(state_obj, seed_start, seed_end)
+            # Rebuild the live sequence/task mirrors from the retained one-hour
+            # authenticated seed. This keeps dialogue continuation alive without
+            # resurrecting any of the preceding 11 hours.
+            self._ensure_active_dialogue_sequence(state_obj)
 
         state_obj["memory_cycle"] = {
+            "anchor_mode": "USER_DIALOGUE_START_12H_V1",
+            "session_start_utc": anchor,
             "window_key": current_key,
             "window_start_utc": current_start,
             "seed_cutoff_utc": current_start - DIALOGUE_SEED_SECONDS,
@@ -860,6 +1038,12 @@ class QuantumMemoryEngine:
         }
         self._cleanup_top_level_memory(state_obj, now=now)
         if changed:
+            state_obj["memory_summary"] = ""
+            state_obj["memory_summary_meta"] = {
+                "created_at": None,
+                "expires_after_hours": DIALOGUE_WINDOW_HOURS,
+                "memory_kind": "summary",
+            }
             safe_state_log(
                 f"MEMORY_12H_ROLLOVER: utc_window={current_key}; retained_seed=1h;"
             )
@@ -919,13 +1103,19 @@ class QuantumMemoryEngine:
             return
 
         # Never re-stamp legacy content with `time.time()`. That turns an old
-        # visual scene into a fresh 12-hour record and defeats the UTC boundary.
-        # Only a record whose original timestamp is already inside the current
-        # 12-hour window may be migrated, and its original timestamp is preserved.
+        # visual scene into a fresh 12-hour record. Only a record whose original
+        # timestamp is already inside the authenticated current user window may
+        # be migrated, and its original timestamp is preserved.
         now = time.time()
         scene_ts = self._record_timestamp(scene)
-        window_start = utc_window_start(now).timestamp()
-        if not scene_ts or scene_ts < (window_start - DIALOGUE_WINDOW_SECONDS) or scene_ts > now:
+        cycle = state_obj.get("memory_cycle") if isinstance(state_obj.get("memory_cycle"), dict) else {}
+        anchor = float(cycle.get("session_start_utc") or cycle.get("window_start_utc") or now)
+        if anchor > now:
+            anchor = now
+        elapsed = max(0.0, now - anchor)
+        cycle_index = int(elapsed // DIALOGUE_WINDOW_SECONDS)
+        window_start = anchor + cycle_index * DIALOGUE_WINDOW_SECONDS
+        if not scene_ts or scene_ts < window_start or scene_ts >= window_start + DIALOGUE_WINDOW_SECONDS or scene_ts > now:
             state_obj["active_visual_scene"] = None
             state_obj["current_visual_scene"] = None
             state_obj["active_visual_scene_turn"] = None
@@ -1829,7 +2019,7 @@ class QuantumMemoryEngine:
         return {
             "version": self.MATRIX_VERSION,
             "window": "12h_rolling",
-            "expired_boundary": "next_utc_12h_boundary",
+            "expired_boundary": "next_authenticated_12h_boundary",
             "ttl_seconds": MEMORY_TTL_SECONDS,
             "query": query,
             "rows": rows[: max(1, int(limit))],
@@ -2118,7 +2308,7 @@ class QuantumMemoryEngine:
         Active visual state is a one-scene hot pointer. The 12-hour timeline is
         the durable dynamic memory. A new scene replaces the hot pointer; older
         scenes remain retrievable only while they are inside day_0 (12h) and
-        are deleted when they cross the next UTC boundary TTL boundary.
+        are deleted when they cross the next authenticated 12h cycle boundary.
         """
         self.ensure_runtime(state_obj)
         if not isinstance(scene_payload, dict):
@@ -2325,15 +2515,37 @@ def get_state(user_id):
         }
         QUANTUM_MEMORY_ENGINE.ensure(state[key])
         _sanitize_persisted_dialog(state[key])
-        # Legacy memory states have no 12h key. Treat them as expired so only the
-        # one-hour seed immediately before the current UTC boundary can survive.
+        # The 12-hour memory window is authenticated per user and anchored to the
+        # beginning of that user's dialogue. All time fields are UTC/epoch based.
         cycle = state[key].get("memory_cycle") if isinstance(state[key].get("memory_cycle"), dict) else {}
-        if not cycle.get("window_key"):
-            cycle["window_key"] = utc_window_key(time.time() - DIALOGUE_WINDOW_SECONDS)
-            state[key]["memory_cycle"] = cycle
+        now_ts = time.time()
+        if cycle.get("anchor_mode") != "USER_DIALOGUE_START_12H_V1":
+            seq = state[key].get("active_dialogue_sequence") if isinstance(state[key].get("active_dialogue_sequence"), dict) else {}
+            anchor = float(seq.get("started_at") or cycle.get("session_start_utc") or 0.0)
+            if anchor <= 0.0:
+                pairs = ((state[key].get("memory_timeline") or {}).get("day_0") or {}).get("dialog_pairs", [])
+                timestamps = []
+                for item in pairs:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        ts = float(item.get("created_at") or item.get("timestamp") or 0.0)
+                    except (TypeError, ValueError):
+                        ts = 0.0
+                    if ts > 0.0:
+                        timestamps.append(ts)
+                anchor = min(timestamps or [now_ts])
+            state[key]["memory_cycle"] = {
+                "anchor_mode": "USER_DIALOGUE_START_12H_V1",
+                "session_start_utc": anchor,
+                "window_start_utc": anchor,
+                "window_key": datetime.fromtimestamp(anchor, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "seed_cutoff_utc": anchor - DIALOGUE_SEED_SECONDS,
+                "last_rollover": cycle.get("last_rollover") or now_ts,
+            }
         rolled = QUANTUM_MEMORY_ENGINE.rollover(state[key])
 
-        # Fixed-UTC memory owns the live task. Reject stale/foreign task objects
+        # Authenticated per-user memory owns the live task. Reject stale/foreign task objects
         # even when a legacy persistence record accidentally carries today's
         # window key or omits task timestamps.
         active_sequence = state[key].get("active_dialogue_sequence") if isinstance(state[key].get("active_dialogue_sequence"), dict) else {}
@@ -2818,7 +3030,7 @@ def compress_dialog_to_summary(state_obj):
 
     The hot dialog is NEVER replaced by a [COMPRESSED_MEMORY] marker anymore.
     Completed pairs are archived by add_dialog() into day_0 and continue through
-    the live day_0 (12h) window; next UTC boundary is the deletion boundary.
+    the live day_0 (12h) window; the next authenticated 12h cycle boundary is the deletion boundary.
     """
     dialog = safe_list(state_obj.get("dialog"))
     if not dialog:
@@ -4549,11 +4761,58 @@ def update_scene_context(
         except (TypeError, ValueError):
             selected_index = -1
 
-    dialogue_vector = (
+    provisional_dialogue_vector = (
         state_obj.get("dialogue_vector")
         if isinstance(state_obj.get("dialogue_vector"), dict)
         else {}
     )
+    previous_anchor = state_obj.get("dialogue_memory_anchor") if isinstance(state_obj.get("dialogue_memory_anchor"), dict) else {}
+    if not previous_anchor:
+        previous_seq = state_obj.get("active_dialogue_sequence") if isinstance(state_obj.get("active_dialogue_sequence"), dict) else {}
+        previous_anchor = {
+            "topic": previous_seq.get("topic") or state_obj.get("current_topic") or state_obj.get("april_active_topic") or "",
+            "entities": previous_seq.get("entities") or [],
+            "active_entity": previous_seq.get("active_entity") or state_obj.get("active_entity") or "",
+            "user_request": previous_seq.get("last_user_request") or "",
+            "april_answer": previous_seq.get("last_april_answer") or "",
+        }
+
+    # Canonical semantic memory is built only after Provider/OpenAI has returned
+    # the real USER request + APRIL answer. The earlier interpretation remains
+    # available as audit evidence, but cannot become memory truth on its own.
+    post_provider_semantics = _derive_post_provider_memory_semantics(
+        current_request_text,
+        answer_text,
+        provisional=semantic_scene_state,
+        previous_anchor=previous_anchor,
+        relation=resolved_relation,
+        render_types=block_types or presentation_types,
+    )
+
+    dialogue_vector = deepcopy(provisional_dialogue_vector)
+    dialogue_vector["canonical_topic"] = post_provider_semantics.get("topic") or dialogue_vector.get("canonical_topic") or current_request_text[:220]
+    dialogue_vector["active_topic"] = post_provider_semantics.get("topic") or dialogue_vector.get("active_topic") or current_request_text[:220]
+    dialogue_vector["topic"] = dialogue_vector["canonical_topic"]
+    dialogue_vector["active_entity"] = post_provider_semantics.get("active_entity") or dialogue_vector.get("active_entity") or ""
+    dialogue_vector["entities"] = deepcopy(post_provider_semantics.get("entities") or [])
+    dialogue_vector["subtopic"] = post_provider_semantics.get("subtopic") or dialogue_vector.get("subtopic") or ""
+    dialogue_vector["memory_semantics"] = deepcopy(post_provider_semantics)
+
+    supplied_task = (
+        dialogue_vector.get("interactive_task_state")
+        or dialogue_vector.get("open_task")
+        or dialogue_vector.get("task_state")
+    )
+    if isinstance(supplied_task, dict) and supplied_task:
+        supplied_task = deepcopy(supplied_task)
+        supplied_task["topic"] = post_provider_semantics.get("topic") or supplied_task.get("topic")
+        supplied_task["canonical_topic"] = post_provider_semantics.get("topic") or supplied_task.get("canonical_topic")
+        supplied_task["entity"] = post_provider_semantics.get("active_entity") or supplied_task.get("entity")
+        supplied_task["active_entity"] = post_provider_semantics.get("active_entity") or supplied_task.get("active_entity")
+        supplied_task["subtopic"] = post_provider_semantics.get("subtopic") or supplied_task.get("subtopic")
+        dialogue_vector["interactive_task_state"] = supplied_task
+        dialogue_vector["open_task"] = deepcopy(supplied_task)
+        dialogue_vector["task_state"] = deepcopy(supplied_task)
 
     # The dialogue vector, not the visual-artifact pointer, owns sequence
     # continuity. A new vector is the only transition that creates a sequence.
@@ -4637,7 +4896,8 @@ def update_scene_context(
         ),
         "scene_type": str(contract.get("active_scene") or "dialogue"),
         "topic": safe_trim_text(
-            (
+            post_provider_semantics.get("topic")
+            or (
                 active_sequence.get("topic")
                 if is_continuation
                 else (
@@ -4704,6 +4964,13 @@ def update_scene_context(
         ],
         "render_signal_inventory": deepcopy(render_signal_inventory),
         "semantic_state": deepcopy(semantic_scene_state),
+        "memory_semantics": deepcopy(post_provider_semantics),
+        "pre_provider_interpretation": deepcopy(metadata.get("semantic_scene_state") or {}),
+        "memory_source": "POST_PROVIDER_OPENAI_RESPONSE",
+        "source_of_truth": "USER_REQUEST_PLUS_APRIL_ANSWER",
+        "subtopic": post_provider_semantics.get("subtopic") or "",
+        "entities": deepcopy(post_provider_semantics.get("entities") or []),
+        "active_entity": post_provider_semantics.get("active_entity") or "",
         "dialogue_vector": deepcopy(state_obj.get("dialogue_vector", {})),
         "turn_progression": deepcopy(state_obj.get("turn_progression", {})),
         "interactive_task_state": deepcopy(
@@ -4717,7 +4984,7 @@ def update_scene_context(
         "sequence_turn_index": active_sequence.get("turn_count", 0),
         "task_response_number": active_sequence.get("task_response_count", 0),
         "dialogue_rules": deepcopy(active_sequence.get("dialogue_rules") or {}),
-        "sequence_topic": active_sequence.get("topic"),
+        "sequence_topic": post_provider_semantics.get("topic") or active_sequence.get("topic"),
         "render_continuity": {
             "relation": resolved_relation,
             "reuse_existing_scene": bool(resolved_relation == "CONTINUE" and previous_scene_id),
@@ -4755,8 +5022,96 @@ def update_scene_context(
         active_sequence["visual_turn_count"] = int(active_sequence.get("visual_turn_count") or 0) + 1
         state_obj["active_dialogue_sequence"] = deepcopy(active_sequence)
 
+    # Provider result is the canonical semantic source for the completed turn.
+    # Preserve the earlier interpretation only as an audit trail.
+    semantic_scene_state = {
+        **deepcopy(semantic_scene_state),
+        "topic": post_provider_semantics.get("topic") or scene_record.get("topic") or active_sequence.get("topic"),
+        "subtopic": post_provider_semantics.get("subtopic") or semantic_scene_state.get("subtopic") or "",
+        "entity": post_provider_semantics.get("active_entity") or semantic_scene_state.get("entity") or "",
+        "active_entity": post_provider_semantics.get("active_entity") or semantic_scene_state.get("active_entity") or "",
+        "entities": deepcopy(post_provider_semantics.get("entities") or []),
+        "relation": resolved_relation,
+        "memory_truth": deepcopy(post_provider_semantics),
+        "source_of_truth": "USER_REQUEST_PLUS_APRIL_ANSWER",
+        "memory_source": "POST_PROVIDER_OPENAI_RESPONSE",
+        "pre_provider_interpretation": deepcopy(metadata.get("semantic_scene_state") or {}),
+    }
     state_obj["semantic_scene_state"] = deepcopy(semantic_scene_state)
+    scene_record["semantic_state"] = deepcopy(semantic_scene_state)
+    # Keep the same post-Provider semantic truth on the scene contract returned
+    # to WEB; render blocks/signals are untouched.
+    active_contract = state_obj.get("active_scene_contract") if isinstance(state_obj.get("active_scene_contract"), dict) else {}
+    active_metadata = active_contract.get("metadata") if isinstance(active_contract.get("metadata"), dict) else {}
+    active_metadata = deepcopy(active_metadata)
+    active_metadata["semantic_scene_state"] = deepcopy(semantic_scene_state)
+    active_metadata["memory_semantics"] = deepcopy(post_provider_semantics)
+    active_metadata["memory_source"] = "POST_PROVIDER_OPENAI_RESPONSE"
+    active_metadata["source_of_truth"] = "USER_REQUEST_PLUS_APRIL_ANSWER"
+    active_contract["metadata"] = active_metadata
+    active_contract["topic_group"] = scene_record.get("topic") or active_contract.get("topic_group") or ""
+    active_contract["continuation"] = bool(is_continuation)
+    active_contract["dialogue_sequence_id"] = str(active_sequence.get("sequence_id") or active_contract.get("dialogue_sequence_id") or "")
+    active_contract["task_id"] = str(active_sequence.get("task_id") or active_contract.get("task_id") or "")
+    active_contract["sequence_turn_index"] = int(active_sequence.get("turn_count") or active_contract.get("sequence_turn_index") or 0)
+    active_contract["task_response_number"] = int(active_sequence.get("task_response_count") or active_contract.get("task_response_number") or 0)
+    active_contract["active_task"] = deepcopy(active_sequence.get("active_task") or active_contract.get("active_task") or {})
+    state_obj["active_scene_contract"] = active_contract
     state_obj["current_topic"] = scene_record.get("topic") or active_sequence.get("topic") or state_obj.get("current_topic")
+    state_obj["april_active_topic"] = state_obj["current_topic"]
+    state_obj["active_entity"] = post_provider_semantics.get("active_entity") or state_obj.get("active_entity")
+    state_obj["april_active_entity"] = post_provider_semantics.get("active_entity") or state_obj.get("april_active_entity")
+
+    # One canonical post-Provider memory anchor feeds the next interpretation
+    # turn. It contains the authenticated USER↔APRIL pair plus semantic
+    # continuation data; preliminary Interpretation is retained only as audit.
+    memory_cycle = state_obj.get("memory_cycle") if isinstance(state_obj.get("memory_cycle"), dict) else {}
+    canonical_anchor = {
+        "version": "dialogue_memory_anchor_v2_post_provider",
+        "source_of_truth": "USER_REQUEST_PLUS_APRIL_ANSWER",
+        "memory_source": "POST_PROVIDER_OPENAI_RESPONSE",
+        "user_id": str(user_id),
+        "conversation_id": conversation_id,
+        "dialogue_sequence_id": str(active_sequence.get("sequence_id") or ""),
+        "task_id": str(active_sequence.get("task_id") or ""),
+        "sequence_turn_index": int(active_sequence.get("turn_count") or 0),
+        "task_response_number": int(active_sequence.get("task_response_count") or 0),
+        "topic": post_provider_semantics.get("topic") or "",
+        "subtopic": post_provider_semantics.get("subtopic") or "",
+        "entities": deepcopy(post_provider_semantics.get("entities") or []),
+        "active_entity": post_provider_semantics.get("active_entity") or "",
+        "relation": resolved_relation,
+        "user_request": safe_trim_text(current_request_text, 1200),
+        "april_answer": safe_trim_text(answer_text, 2200),
+        "created_at": now,
+        "expires_after_hours": DIALOGUE_WINDOW_HOURS,
+        "memory_window_key": memory_cycle.get("window_key") or "",
+        "memory_window_start_utc": memory_cycle.get("window_start_utc") or 0.0,
+        "seed_cutoff_utc": memory_cycle.get("seed_cutoff_utc") or 0.0,
+        "authenticated_scope": deepcopy(
+            identity_scope
+            or {"user_id": str(user_id), "conversation_id": conversation_id,
+                "dialogue_sequence_id": str(active_sequence.get("sequence_id") or "")}
+        ),
+        "pre_provider_interpretation": deepcopy(metadata.get("semantic_scene_state") or {}),
+    }
+    state_obj["dialogue_memory_anchor"] = canonical_anchor
+    state_obj["canonical_dialogue_turn"] = {
+        "version": "canonical_dialogue_turn_v2_post_provider",
+        "source": "POST_PROVIDER_OPENAI_RESPONSE",
+        "user_id": str(user_id),
+        "conversation_id": conversation_id,
+        "dialogue_sequence_id": str(active_sequence.get("sequence_id") or ""),
+        "task_id": str(active_sequence.get("task_id") or ""),
+        "sequence_turn_index": int(active_sequence.get("turn_count") or 0),
+        "task_response_number": int(active_sequence.get("task_response_count") or 0),
+        "user_request": safe_trim_text(current_request_text, 1200),
+        "april_answer": safe_trim_text(answer_text, 2200),
+        "semantic": deepcopy(post_provider_semantics),
+        "created_at": now,
+        "expires_after_hours": DIALOGUE_WINDOW_HOURS,
+        "memory_window_key": memory_cycle.get("window_key") or "",
+    }
     state_obj["current_visual_scene"] = deepcopy(scene_record)
     state_obj["dialogue_development"] = deepcopy(dialogue_development)
     state_obj["dialogue_obligations"] = deepcopy(scene_record.get("dialogue_obligations") or state_obj.get("dialogue_obligations") or [])
@@ -4967,6 +5322,22 @@ def update_scene_context(
         "april_meaning": safe_trim_text(answer_text, 1400),
         "answer_summary": safe_trim_text(contract.get("summary") or answer_text, 1000),
         "semantic_state": deepcopy(semantic_scene_state),
+        "memory_semantics": deepcopy(post_provider_semantics),
+        "pre_provider_interpretation": deepcopy(metadata.get("semantic_scene_state") or {}),
+        "memory_source": "POST_PROVIDER_OPENAI_RESPONSE",
+        "source_of_truth": "USER_REQUEST_PLUS_APRIL_ANSWER",
+        "topic": post_provider_semantics.get("topic") or scene_record.get("topic") or "",
+        "subtopic": post_provider_semantics.get("subtopic") or "",
+        "entities": deepcopy(post_provider_semantics.get("entities") or []),
+        "active_entity": post_provider_semantics.get("active_entity") or "",
+        "memory_window_key": memory_cycle.get("window_key") or "",
+        "memory_window_start_utc": memory_cycle.get("window_start_utc") or 0.0,
+        "seed_cutoff_utc": memory_cycle.get("seed_cutoff_utc") or 0.0,
+        "authenticated_scope": deepcopy(
+            identity_scope
+            or {"user_id": str(user_id), "conversation_id": conversation_id,
+                "dialogue_sequence_id": str(active_sequence.get("sequence_id") or "")}
+        ),
         "interpretation_summary": {
             "relation": resolved_relation,
             "topic": active_sequence.get("topic"),
@@ -5014,7 +5385,7 @@ def update_scene_context(
             "renderer_signals": deepcopy(render_signal_inventory),
             "visual_attachment": deepcopy(visual_attachment),
         },
-        "created_at": time.time(),
+        "created_at": now,
         "expires_after_hours": DIALOGUE_WINDOW_HOURS,
     }
     if not any(
