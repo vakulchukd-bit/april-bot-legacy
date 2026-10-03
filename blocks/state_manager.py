@@ -51,6 +51,7 @@ ADMIN_ID = 2016592532
 DIALOGUE_WINDOW_HOURS = 12
 DIALOGUE_SEED_HOURS = 1
 DIALOGUE_WINDOW_SECONDS = DIALOGUE_WINDOW_HOURS * 60 * 60
+ACTIVE_DIALOGUE_WINDOW_PAIRS = 15
 DIALOGUE_SEED_SECONDS = DIALOGUE_SEED_HOURS * 60 * 60
 MEMORY_TTL_SECONDS = DIALOGUE_WINDOW_SECONDS
 USER_CONTENT_RETENTION_SECONDS = DIALOGUE_WINDOW_SECONDS
@@ -3056,10 +3057,10 @@ def _append_recall_index(state_obj, pair):
     idx.sort(key=lambda x: float(x.get("created_at") or 0.0))
     state_obj["dialogue_recall_index"] = idx[-RECALL_INDEX_LIMIT:]
     state_obj["dialogue_recall_policy"] = {
-        "full_turns_kept": CANONICAL_DIALOG_HOT_LIMIT,
+        "active_window_pairs": ACTIVE_DIALOGUE_WINDOW_PAIRS,
         "recall_index_hours": DIALOGUE_WINDOW_HOURS,
         "recall_index_max": RECALL_INDEX_LIMIT,
-        "full_archive_is_recall_only": True,
+        "full_archive_is_recall_only": False,
     }
 
 
@@ -3262,8 +3263,9 @@ def _cleanup_hot_content(state_obj, now=None):
         removed += 1
     state_obj["meta"] = meta
 
-    # Full dialogue archive is intentionally hot-only: keep exactly the last 3 completed
-    # USER↔APRIL turns. Older turns survive only as compact 12h recall index entries.
+    # The pair archive is the authenticated 12h semantic source. Do NOT prune it
+    # to 3 or 15 here. The active window of 15 pairs is a sliding read view used by
+    # Interpretation; retention/deletion remains exclusively time-based (12h).
     timeline = state_obj.get("memory_timeline") if isinstance(state_obj.get("memory_timeline"), dict) else {}
     day0 = timeline.get("day_0") if isinstance(timeline.get("day_0"), dict) else {}
     if day0:
@@ -3277,9 +3279,10 @@ def _cleanup_hot_content(state_obj, now=None):
                 pts = 0.0
             if pts and now - pts < DIALOGUE_WINDOW_SECONDS:
                 _append_recall_index(state_obj, pair)
-        if len(pairs) > CANONICAL_DIALOG_HOT_LIMIT:
-            removed += len(pairs) - CANONICAL_DIALOG_HOT_LIMIT
-        day0["dialog_pairs"] = pairs[-CANONICAL_DIALOG_HOT_LIMIT:]
+        # Keep all unexpired USER↔APRIL pairs in the 12h archive. Interpretation
+        # selects the latest 15 as its dynamic working window; nothing older is
+        # deleted merely because it left that window.
+        day0["dialog_pairs"] = pairs
         # Visual history is also capped; the active/current scene pointers are untouched.
         for field, limit in (("visual_scenes", 3), ("topics", 3), ("objects", 3), ("intent_signals", 3)):
             values = day0.get(field) if isinstance(day0.get(field), list) else []
@@ -3301,14 +3304,14 @@ def _cleanup_hot_content(state_obj, now=None):
         "ttl_seconds": USER_CONTENT_RETENTION_SECONDS,
         "hourly_cleanup_seconds": MEMORY_HOURLY_CLEANUP_SECONDS,
         "full_dialog_turns": CANONICAL_DIALOG_HOT_LIMIT,
-        "policy": "hourly_hot_cleanup_plus_12h_compact_recall",
+        "policy": "hourly_hot_ui_plus_12h_full_dialogue_archive",
         "last_cleanup_at": now,
     }
     state_obj["memory_cleanup"] = {
         "last_cleanup_at": now,
         "last_cleanup_utc": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
         "removed_count": removed,
-        "window": "hourly_hot_3_plus_12h_recall_index",
+        "window": "15_pair_sliding_active_view_plus_12h_archive",
         "full_dialog_turns": CANONICAL_DIALOG_HOT_LIMIT,
         "recall_index_hours": DIALOGUE_WINDOW_HOURS,
     }
@@ -4118,7 +4121,7 @@ def build_executor_memory_bridge(user_id, query=""):
 def build_dialogue_memory_bridge(
     user_id,
     query="",
-    limit=12,
+    limit=ACTIVE_DIALOGUE_WINDOW_PAIRS,
     *,
     relation="AUTO",
     target_sequence_id="",
@@ -4306,7 +4309,7 @@ def build_dialogue_memory_bridge(
             if selected_task_id and str(item.get("task_id") or "") == selected_task_id
         ]
 
-    max_turns = max(1, min(int(limit or 12), 12))
+    max_turns = max(1, min(int(limit or ACTIVE_DIALOGUE_WINDOW_PAIRS), ACTIVE_DIALOGUE_WINDOW_PAIRS))
 
     def compact_turn(item: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -6066,7 +6069,14 @@ def update_scene_context(
         for item in pairs[-HOT_DIALOG_LIMIT:]
     ):
         pairs.append(pair)
-    day0["dialog_pairs"] = pairs[-CANONICAL_DIALOG_HOT_LIMIT:]
+    day0["dialog_pairs"] = [
+        item for item in pairs
+        if isinstance(item, dict)
+        and (
+            not item.get("created_at")
+            or (time.time() - float(item.get("created_at"))) < USER_CONTENT_RETENTION_SECONDS
+        )
+    ]
     _append_recall_index(state_obj, pair)
 
     # Keep the scene in durable visual history, without allowing old entries to
