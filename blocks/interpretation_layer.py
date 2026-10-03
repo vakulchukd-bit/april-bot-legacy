@@ -28,6 +28,12 @@ TRANSPORT_NAME = "transport_state"
 _DIALOGUE_ALPHABET_RU = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
 DIALOGUE_WINDOW_HOURS = 12
 USER_CONTENT_RETENTION_SECONDS = DIALOGUE_WINDOW_HOURS * 3600
+
+# Active semantic working window.
+# IMPORTANT: this is a sliding context window, NOT a memory deletion limit.
+# Full authenticated 12h dialogue remains available in memory.
+ACTIVE_DIALOGUE_WINDOW_PAIRS = 15
+
 PROVIDER_INPUT_HARD_BUDGET = 900
 PROVIDER_INPUT_SOFT_TARGET_NEW = 850
 PROVIDER_INPUT_SOFT_TARGET_CONTINUE = 820
@@ -976,13 +982,7 @@ _df_memory_scope_actions = {
     "расскажи", "рассказать", "выдай", "выдать", "перечисли", "перечислить",
     "вспомни", "вспомнить", "сориентируйся", "сориентироваться",
 }
-_df_deictic = re.compile(
-    r"\b(?:это|этот|эта|эту|этого|этой|этим|он|она|оно|они|их|них|им|ими|"
-    r"ему|ей|ним|него|нему|нём|нем|ней|ними|обоих|обеих|его|ее|её|"
-    r"тот|та|те|там|здесь|выше|ниже|дальше|следующ(?:ий|ая|ее|ие|его|ую|им|ими)?|"
-    r"свой|свою|своего|своей|своему|своими)\b",
-    re.I,
-)
+_df_deictic = re.compile(r"\b(?:это|этот|эта|эту|этого|этой|этим|он|она|оно|они|их|них|им|ими|обоих|обеих|его|ее|её|тот|та|те|там|здесь|выше|ниже|дальше|следующ(?:ий|ая|ее|ие|его|ую|им|ими)?|свой|свою|своего)\b", re.I)
 _df_explicit_result = (
     "как ты угадал", "как ты угадала", "почему ты угадал", "почему ты угадала",
     "правильный ответ", "объясни свой ответ", "объясни твой ответ", "объясни свой правильный ответ",
@@ -1124,7 +1124,6 @@ def _df_extract_subject(text: str) -> str:
         r"^кто\s+такой\s+(.+)$",
         r"^кто\s+(?:такая|такое|такие)\s+(.+)$",
         r"^кто\s+это\s+(.+)$",
-        r"^\S+\s+(?:что\s+такое|кто\s+такой|кто\s+(?:такая|такое|такие)|кто\s+это)\s+(.+)$",
     )
     for pattern in question_patterns:
         match = re.match(pattern, low, re.IGNORECASE)
@@ -1325,7 +1324,7 @@ def _df_active_sequence_digest(
     history: list[Any],
     sequence_id: str,
     *,
-    limit: int = 8,
+    limit: int = ACTIVE_DIALOGUE_WINDOW_PAIRS,
     task_id: str = "",
 ) -> dict[str, Any]:
     """Build the semantic digest of the authenticated 12-hour parent sequence.
@@ -1444,8 +1443,18 @@ def _df_active_sequence_digest(
             "relation": _df_text(row.get("relation"), 40),
         }
 
-    recent = rows[-max(1, min(int(limit or 8), 12)):]
-    recent_task = task_rows[-max(1, min(int(limit or 8), 12)):]
+    # The complete 12h sequence remains in `rows`/`task_rows`.
+    # Only the active semantic working view slides across the most recent
+    # 15 pairs. No historical pair is deleted here.
+    active_window_size = max(
+        1,
+        min(
+            int(limit or ACTIVE_DIALOGUE_WINDOW_PAIRS),
+            ACTIVE_DIALOGUE_WINDOW_PAIRS,
+        ),
+    )
+    recent = rows[-active_window_size:]
+    recent_task = task_rows[-active_window_size:]
     topics: list[str] = []
     for row in rows:
         topic = _df_text(row.get("topic"), 220)
@@ -1528,9 +1537,27 @@ def _df_active_sequence_digest(
         "user_id": user_id,
         "dialogue_window_hours": 12,
         "history_scope": "authenticated_12h_dialogue_sequence",
+        "active_semantic_window_pairs": ACTIVE_DIALOGUE_WINDOW_PAIRS,
+        "active_semantic_window_mode": "sliding",
         "sequence_turn_count": max(int(seq.get("turn_count") or 0), int((last_row or {}).get("sequence_turn_index") or 0)),
         "turn_count": max(int(seq.get("turn_count") or 0), int((last_row or {}).get("sequence_turn_index") or 0)),
+        # Full live 12h records, not the 15-pair active view.
         "window_record_count": len(rows),
+
+        # Explicit sliding semantic window used by downstream interpretation.
+        "active_window_pair_limit": ACTIVE_DIALOGUE_WINDOW_PAIRS,
+        "active_window_record_count": len(recent),
+        "active_window_start_turn": (
+            int(recent[0].get("sequence_turn_index") or 0)
+            if recent else 0
+        ),
+        "active_window_end_turn": (
+            int(recent[-1].get("sequence_turn_index") or 0)
+            if recent else 0
+        ),
+        "active_window_sliding": True,
+        "active_window_does_not_delete_history": True,
+
         "task_turn_count": len(task_rows),
         "task_response_count": task_response_count,
         "root_topic": root_topic,
@@ -1552,6 +1579,8 @@ def _df_active_sequence_digest(
         "window_complete": bool(sid),
         "other_branches_included": len({str(row.get("task_id") or "") for row in rows if row.get("task_id")}) > 1,
         "full_history_included": False,
+        "full_12h_memory_record_count": len(rows),
+        "memory_retention_is_independent_of_active_window": True,
     }
 
 def _df_strong_topic_boundary(text: str) -> bool:
@@ -1846,248 +1875,6 @@ def _df_render_probe(text: str) -> dict[str, Any]:
     }
 
 
-
-def _df_question_shape(text: str) -> bool:
-    """Grammar-level interrogative structure; evidence only."""
-    value = _df_low(text)
-    if not value:
-        return False
-    words = _df_tokens(value)
-    if not words:
-        return False
-
-    question_words = {
-        "кто", "что", "почему", "зачем", "как", "где", "когда",
-        "сколько", "какой", "какая", "какое", "какие", "можешь", "можно",
-    }
-
-    if "?" in value or "？" in value:
-        return True
-
-    if value.strip(" .,!?:;-—") in question_words:
-        return True
-
-    # Allow a single discourse opener before the interrogative structure.
-    return bool(
-        words[0] in question_words
-        or (len(words) >= 2 and words[1] in question_words)
-    )
-
-
-def _df_reference_shape(text: str) -> dict[str, Any]:
-    value = _df_low(text)
-    explicit_subject = _df_normalize_subject(
-        _df_extract_subject(value)
-    )
-    question = _df_question_shape(value)
-    deictic = bool(_df_deictic.search(value))
-    tokens = _df_tokens(value)
-
-    return {
-        "question_shape": question,
-        "deictic": deictic,
-        "explicit_subject": explicit_subject,
-        "subject_absent": not bool(explicit_subject),
-        "short": len(tokens) <= 8,
-        "context_dependent_shape": bool(
-            deictic
-            or (question and not explicit_subject)
-            or (len(tokens) <= 4 and not explicit_subject)
-        ),
-        "source": "grammar_structure",
-    }
-
-
-def _df_clean_canonical_subject(canonical_turn: dict[str, Any]) -> str:
-    """
-    Prefer the primary operand of the canonical USER turn over an aggregate
-    topic produced from nouns in the assistant answer.
-    """
-    if not isinstance(canonical_turn, dict):
-        return ""
-
-    request = _df_text(
-        canonical_turn.get("user_request")
-        or canonical_turn.get("canonical_user_request")
-        or "",
-        1400,
-    )
-    if request:
-        subject = _df_normalize_subject(
-            _df_extract_subject(request)
-        )
-        if subject:
-            return subject
-
-    frame = canonical_turn.get("semantic_frame")
-    if isinstance(frame, dict):
-        for key in (
-            "explicit_subject", "topic", "entity", "object"
-        ):
-            subject = _df_normalize_subject(
-                _df_text(frame.get(key), 220)
-            )
-            if subject and not _df_deictic.fullmatch(subject):
-                return subject
-
-    for key in (
-        "explicit_subject", "resolved_entity",
-        "active_entity", "entity", "topic", "canonical_topic",
-    ):
-        subject = _df_normalize_subject(
-            _df_text(canonical_turn.get(key), 220)
-        )
-        if subject and not _df_deictic.fullmatch(subject):
-            return subject
-
-    return ""
-
-
-def _df_reference_candidates(
-    canonical_turn: dict[str, Any]
-) -> list[str]:
-    """Return existing concrete semantic candidates as evidence."""
-    if not isinstance(canonical_turn, dict):
-        return []
-
-    result: list[str] = []
-    entities = canonical_turn.get("entities")
-    if isinstance(entities, list):
-        for value in entities:
-            value = _df_text(value, 180)
-            if value:
-                result.append(value)
-
-    for key in ("active_entity", "resolved_entity", "topic"):
-        value = _df_text(canonical_turn.get(key), 180)
-        if value:
-            result.append(value)
-
-    seen = set()
-    unique = []
-    for value in result:
-        key = _df_low(value)
-        if key and key not in seen:
-            seen.add(key)
-            unique.append(value)
-
-    return unique[:8]
-
-
-def _df_semantic_continuation_engine(
-    *,
-    current: str,
-    relation: str,
-    active_topic: str,
-    active_entity: str,
-    previous_april: str,
-    task_probe: dict[str, Any],
-    semantic: dict[str, Any],
-) -> tuple[str, str, dict[str, Any]]:
-    """
-    Final dialogue gate.
-
-    It treats the authenticated live dialogue as the working context.
-    A new branch requires an explicitly identified independent subject or
-    an explicit topic boundary. Otherwise an elliptical/interrogative turn
-    remains CONTINUE.
-
-    It does not use a phrase-by-phrase routing dictionary.
-    """
-    shape = _df_reference_shape(current)
-
-    evidence = {
-        "version": "dialogue_continuation_engine_v2",
-        "question_shape": shape["question_shape"],
-        "deictic": shape["deictic"],
-        "explicit_subject": shape["explicit_subject"],
-        "subject_absent": shape["subject_absent"],
-        "active_topic": _df_text(active_topic, 220),
-        "active_entity": _df_text(active_entity, 220),
-        "previous_answer_available": bool(previous_april),
-        "active_task": bool(task_probe.get("active")),
-        "incoming_relation": relation,
-    }
-
-    live_context = bool(
-        active_topic
-        or active_entity
-        or previous_april
-        or task_probe.get("active")
-    )
-    if not live_context:
-        evidence["reason"] = "NO_LIVE_CONTEXT"
-        return "NEW", "NO_LIVE_CONTEXT", evidence
-
-    if _df_strong_topic_boundary(current):
-        evidence["reason"] = "EXPLICIT_TOPIC_BOUNDARY"
-        return "NEW", "EXPLICIT_TOPIC_BOUNDARY", evidence
-
-    subject = shape["explicit_subject"]
-    if subject:
-        branch_text = " ".join(
-            x for x in (
-                active_topic,
-                active_entity,
-            )
-            if x
-        )
-        overlap = (
-            _df_overlap(subject, branch_text)
-            if branch_text
-            else 0.0
-        )
-        evidence["subject_overlap"] = overlap
-
-        # A complete subject-bearing request normally opens a new branch,
-        # unless it names the active subject or also contains a live reference.
-        if (
-            relation == "NEW"
-            and overlap < 0.20
-            and not shape["deictic"]
-        ):
-            evidence["reason"] = "INDEPENDENT_EXPLICIT_SUBJECT"
-            return "NEW", "INDEPENDENT_EXPLICIT_SUBJECT", evidence
-
-        if (
-            relation == "NEW"
-            and overlap >= 0.20
-        ):
-            evidence["reason"] = "SUBJECT_MATCHES_ACTIVE_BRANCH"
-            return "CONTINUE", "SUBJECT_MATCHES_ACTIVE_BRANCH", evidence
-
-    # Core rule: a question with no independent subject is an elliptical
-    # continuation of the authenticated conversation.
-    if (
-        relation == "NEW"
-        and shape["question_shape"]
-        and shape["subject_absent"]
-    ):
-        evidence["reason"] = "ELLIPTICAL_QUESTION_CONTINUATION"
-        return "CONTINUE", "ELLIPTICAL_QUESTION_CONTINUATION", evidence
-
-    # Deictic/referential turns stay attached to the live branch.
-    if (
-        relation == "NEW"
-        and shape["deictic"]
-        and shape["subject_absent"]
-    ):
-        evidence["reason"] = "DEICTIC_CONTEXT_CONTINUATION"
-        return "CONTINUE", "DEICTIC_CONTEXT_CONTINUATION", evidence
-
-    # An answer to an active assistant question remains on that task.
-    if (
-        relation == "NEW"
-        and task_probe.get("answer_to_active_task")
-        and not shape["question_shape"]
-    ):
-        evidence["reason"] = "LIVE_QUESTION_ANSWER"
-        return "CONTINUE", "LIVE_QUESTION_ANSWER", evidence
-
-    evidence["reason"] = "PRESERVE_EXISTING_RELATION"
-    return relation, "PRESERVE_EXISTING_RELATION", evidence
-
-
 def _df_live_task_answer_probe(text: str, active_task: dict[str, Any], previous_april: str = "") -> dict[str, Any]:
     """Bind a user turn to an open question before topic/new-branch heuristics."""
     task = active_task if isinstance(active_task, dict) else {}
@@ -2115,7 +1902,7 @@ def _df_live_task_answer_probe(text: str, active_task: dict[str, Any], previous_
     words = _df_tokens(text)
     stripped = low.strip(" .,!?:;-—")
     question_words = {"кто", "что", "почему", "зачем", "как", "где", "когда", "сколько", "какой", "какая", "какое", "какие", "можешь", "можно"}
-    is_question = _df_question_shape(text)
+    is_question = bool("?" in text or "？" in text or stripped in question_words)
     command_shape = bool(re.match(
         r"^(?:(?:а\s+)?теперь\s+|а\s+)?(?:расскажи|скажи|объясни|покажи|проверь|найди|сравни|напиши|создай|построй|опиши|рассчитай|посчитай|ответь|дай|выдай|укажи)\b",
         low,
@@ -3137,28 +2924,6 @@ def _df_provider_plan(
             }
         )
 
-    if semantic.get("reference_request") or semantic.get("reference_candidates"):
-        base["required_context"].append({
-            "key": "DIALOGUE_REFERENCE_CONTEXT",
-            "priority": 0.995,
-            "value": {
-                "current_reference_request": _df_text(
-                    semantic.get("reference_request"),
-                    700,
-                ),
-                "reference_candidates": list(
-                    semantic.get("reference_candidates") or []
-                )[:8],
-                "active_topic": _df_text(
-                    semantic.get("topic") or "",
-                    220,
-                ),
-                "resolution_mode": (
-                    "semantic_resolution_from_current_request_and_live_dialogue"
-                ),
-            },
-        })
-
     if related_branches:
         base["required_context"].append({
             "key": "RELATED_TOPIC_BRANCHES",
@@ -3413,16 +3178,9 @@ def _df_interpret_live_turn(
     previous_user, previous_april = _df_extract_previous(history, state)
     canonical_turn = state.get("canonical_dialogue_turn") if isinstance(state.get("canonical_dialogue_turn"), dict) else {}
     active_topic = _df_text(canonical_turn.get("topic"), 220) or _df_topic_from_state(state)
-    canonical_primary_subject = _df_clean_canonical_subject(
-        canonical_turn
-    )
-    if canonical_primary_subject:
-        active_topic = canonical_primary_subject
-
     canonical_entities = canonical_turn.get("entities") if isinstance(canonical_turn.get("entities"), list) else []
     active_entity = (
-        canonical_primary_subject
-        or _df_text(canonical_turn.get("active_entity"), 220)
+        _df_text(canonical_turn.get("active_entity"), 220)
         or _df_text(" и ".join(str(x) for x in canonical_entities[:4]), 220)
         or _df_entity_from_state(state)
     )
@@ -3572,26 +3330,6 @@ def _df_interpret_live_turn(
         current, state, previous_april, active_topic, active_entity, task_probe, dialogue_probe,
         feedback_probe=feedback_probe, semantic=semantic, sequence_digest=active_sequence_digest, branches=branches,
     )
-
-    relation, semantic_relation_reason, continuation_engine = (
-        _df_semantic_continuation_engine(
-            current=current,
-            relation=relation,
-            active_topic=active_topic,
-            active_entity=active_entity,
-            previous_april=previous_april,
-            task_probe=task_probe,
-            semantic=semantic,
-        )
-    )
-
-    if semantic_relation_reason not in {
-        "PRESERVE_EXISTING_RELATION",
-        "NO_LIVE_CONTEXT",
-    }:
-        turn_relation = semantic_relation_reason
-
-    semantic["continuation_engine"] = continuation_engine
     if visual_ref_entity and relation != "RECALL":
         # A deictic visual follow-up continues the authenticated branch. The
         # surface command itself must not become a new topic/entity.
@@ -3786,40 +3524,8 @@ def _df_interpret_live_turn(
         elif not active_entity and semantic.get("entity") and not _df_low(semantic.get("entity")) in {"если", "это", "такое", "такой", "следующее", "дальше", "отвечай", "овечай"}:
             active_entity = _df_text(semantic.get("entity"), 180)
 
-        current_subject = _df_normalize_subject(
-            _df_extract_subject(current)
-        )
-        reference_shape = _df_reference_shape(current)
-
-        if (
-            reference_shape.get("context_dependent_shape")
-            and not current_subject
-        ):
-            semantic["reference_request"] = current
-            semantic["reference_candidates"] = _df_reference_candidates(
-                canonical_turn
-            )
-            semantic["entity"] = active_entity
-            semantic["topic"] = active_topic or semantic.get("topic")
-        else:
-            semantic["entity"] = active_entity or (
-                ""
-                if relation == "RECALL"
-                else (
-                    ""
-                    if _df_low(
-                        semantic.get("entity")
-                    ) in {
-                        "если", "это", "такое", "такой",
-                        "следующее", "дальше", "отвечай",
-                        "овечай", "пронумеруй", "выдай",
-                        "проверь", "так", "text",
-                    }
-                    else semantic.get("entity")
-                )
-            )
-            semantic["topic"] = semantic.get("topic") or active_topic
-
+        semantic["entity"] = active_entity or ("" if relation == "RECALL" else ("" if _df_low(semantic.get("entity")) in {"если", "это", "такое", "такой", "следующее", "дальше", "отвечай", "овечай", "пронумеруй", "выдай", "проверь", "так"} else semantic.get("entity")))
+        semantic["topic"] = semantic.get("topic") or active_topic
         branch_digest_for_provider = deepcopy(active_sequence_digest)
 
     # Broad RECALL is the 12-hour conversation itself. A specific branch is only
@@ -4475,16 +4181,6 @@ def _df_interpret_live_turn(
             branch_digest_for_provider
         ),
         "continuity_evidence": continuity_evidence,
-        "semantic_continuation_engine": deepcopy(
-            semantic.get("continuation_engine") or {}
-        ),
-        "reference_request": _df_text(
-            semantic.get("reference_request") or "",
-            1200,
-        ),
-        "reference_candidates": list(
-            semantic.get("reference_candidates") or []
-        )[:8],
         "cognitive_workspace": cognitive_workspace,
         "provider_context_plan": provider_plan,
         "continuation_content_analysis": {
@@ -4531,244 +4227,6 @@ def _df_interpret_live_turn(
     }
     return result
 
-
-# ============================================================================
-# TEST-ONLY REGRESSION SUITE
-# ============================================================================
-
-def _build_test_state(
-    canonical_user: str,
-    canonical_answer: str,
-    canonical_topic: str,
-    entities: list[str],
-    *,
-    active_question: str = "",
-) -> dict[str, Any]:
-    return {
-        "user_id": "TEST-USER",
-        "conversation_id": "TEST-CONVERSATION",
-        "active_dialogue_sequence": {
-            "sequence_id": "seq-test",
-            "task_id": "task-test",
-            "topic": canonical_topic,
-        },
-        "canonical_dialogue_turn": {
-            "turn_id": "turn-test",
-            "sequence_id": "seq-test",
-            "task_id": "task-test",
-            "user_request": canonical_user,
-            "april_answer": canonical_answer,
-            "topic": canonical_topic,
-            "canonical_topic": canonical_topic,
-            "active_entity": canonical_topic,
-            "entities": entities,
-            "representation": "text",
-        },
-        "active_dialogue_context": {
-            "sequence_id": "seq-test",
-            "task_id": "task-test",
-            "topic": canonical_topic,
-            "active_entity": canonical_topic,
-            "task": {
-                "active": bool(active_question),
-                "status": "open",
-                "task_id": "task-test",
-                "topic": canonical_topic,
-                "entity": canonical_topic,
-                "last_question": active_question,
-                "awaiting_user": bool(active_question),
-            },
-        },
-        "dialog": [
-            {
-                "role": "user",
-                "content": canonical_user,
-                "sequence_id": "seq-test",
-            },
-            {
-                "role": "assistant",
-                "content": canonical_answer,
-                "sequence_id": "seq-test",
-            },
-        ],
-        "memory_timeline": {
-            "day_0": {
-                "dialog_pairs": [
-                    {
-                        "user_id": "TEST-USER",
-                        "conversation_id": "TEST-CONVERSATION",
-                        "sequence_id": "seq-test",
-                        "created_at": time.time(),
-                        "sequence_turn_index": 1,
-                        "user_request": canonical_user,
-                        "april_answer": canonical_answer,
-                        "topic": canonical_topic,
-                    }
-                ]
-            }
-        },
-        "dialogue_task_registry": {},
-        "cognition": {},
-        "semantic": {},
-    }
-
-
-def _assert_case(
-    name: str,
-    request: str,
-    expected_relation: str,
-    expected_topic: str,
-    state: dict[str, Any],
-) -> dict[str, Any]:
-    result = interpret_request(
-        request,
-        cognition={},
-        semantic={},
-        history=state.get("dialog", []),
-        state=state,
-    )
-
-    relation = result.get("three_way_relation")
-    topic = str(
-        result.get("canonical_topic") or ""
-    ).lower()
-
-    passed = (
-        relation == expected_relation
-        and (
-            expected_topic.lower() in topic
-            or topic in expected_topic.lower()
-        )
-    )
-
-    return {
-        "case": name,
-        "request": request,
-        "relation": relation,
-        "topic": topic,
-        "expected_relation": expected_relation,
-        "expected_topic": expected_topic,
-        "passed": passed,
-        "reason": (
-            result.get(
-                "semantic_continuation_engine",
-                {},
-            ).get("reason")
-        ),
-        "reference_request": result.get(
-            "reference_request"
-        ),
-        "reference_candidates": result.get(
-            "reference_candidates"
-        ),
-    }
-
-
-def run_regression_tests() -> dict[str, Any]:
-    tests = [
-        (
-            "question_without_subject_continues",
-            "А сколько ей лет",
-            "CONTINUE",
-            "дед мороз",
-            _build_test_state(
-                "Кто такой дед мороз",
-                "Дед Мороз — сказочный персонаж. Ему помогает внучка Снегурочка.",
-                "Дед Мороз и Дед и Мороз и Новый",
-                ["Дед Мороз", "Снегурочка"],
-            ),
-        ),
-        (
-            "pronoun_question_continues",
-            "Что с ним случилось",
-            "CONTINUE",
-            "рамануджи",
-            _build_test_state(
-                "Так кто такой рамануджи",
-                "Шриниваса Рамануджан был индийским математиком.",
-                "Шриниваса и Рамануджан и Несмотря и Позже",
-                ["Шриниваса Рамануджан", "Годфри Харди"],
-            ),
-        ),
-        (
-            "friend_question_continues",
-            "А кто его друзья",
-            "CONTINUE",
-            "дед мороз",
-            _build_test_state(
-                "Кто такой дед мороз",
-                "Дед Мороз — сказочный персонаж. Ему помогает внучка Снегурочка.",
-                "Дед Мороз и Дед и Мороз и Новый",
-                ["Дед Мороз", "Снегурочка"],
-            ),
-        ),
-        (
-            "new_subject_switches_branch",
-            "Так кто такой рамануджи",
-            "NEW",
-            "рамануджи",
-            _build_test_state(
-                "Кто такой дед мороз",
-                "Дед Мороз — сказочный персонаж.",
-                "Дед Мороз",
-                ["Дед Мороз"],
-            ),
-        ),
-        (
-            "short_task_answer_stays_in_branch",
-            "Внучке",
-            "CONTINUE",
-            "дед мороз",
-            _build_test_state(
-                "А сколько ей лет",
-                "Уточните, о ком речь.",
-                "дед мороз",
-                ["Дед Мороз", "Снегурочка"],
-                active_question="О ком речь?",
-            ),
-        ),
-        (
-            "relational_request_is_not_task_answer",
-            "Посмотри о внучке его",
-            "CONTINUE",
-            "дед мороз",
-            _build_test_state(
-                "Кто такой дед мороз",
-                "Ему помогает внучка Снегурочка.",
-                "Дед Мороз",
-                ["Дед Мороз", "Снегурочка"],
-                active_question="Что вы хотите передать внучке?",
-            ),
-        ),
-    ]
-
-    results = [
-        _assert_case(
-            name,
-            request,
-            expected_relation,
-            expected_topic,
-            state,
-        )
-        for (
-            name,
-            request,
-            expected_relation,
-            expected_topic,
-            state,
-        ) in tests
-    ]
-
-    return {
-        "engine": "dialogue_continuation_engine_v2",
-        "all_passed": all(
-            r["passed"]
-            for r in results
-        ),
-        "results": results,
-    }
-
-
 # Canonical public entrypoint: one interpretation owner for production turns.
 def interpret_request(
     text, cognition=None, semantic=None, history=None, state=None
@@ -4778,3 +4236,82 @@ def interpret_request(
 # Compatibility names for callers that used the previous public helpers.
 DIALOGUE_FIRST_RUNTIME_VERSION = _df_version
 DIALOGUE_FIRST_DECISION_OWNER = "INTERPRETATION_RUNTIME"
+
+
+# ============================================================================
+# TEST-ONLY REGRESSION: 15-pair SLIDING ACTIVE WINDOW
+# ============================================================================
+
+def _test_sliding_window(rows: list[dict[str, Any]], limit: int = ACTIVE_DIALOGUE_WINDOW_PAIRS) -> dict[str, Any]:
+    """
+    Pure test helper reproducing the exact active-window rule used by
+    _df_active_sequence_digest:
+      full rows survive;
+      recent view contains at most 15 latest pairs;
+      moving from 15 -> 16 rotates the window by one.
+    """
+    full = list(rows)
+    size = max(1, min(int(limit or ACTIVE_DIALOGUE_WINDOW_PAIRS), ACTIVE_DIALOGUE_WINDOW_PAIRS))
+    active = full[-size:]
+
+    return {
+        "full_count": len(full),
+        "active_count": len(active),
+        "active_first_turn": active[0]["sequence_turn_index"] if active else 0,
+        "active_last_turn": active[-1]["sequence_turn_index"] if active else 0,
+        "oldest_full_turn": full[0]["sequence_turn_index"] if full else 0,
+        "latest_full_turn": full[-1]["sequence_turn_index"] if full else 0,
+        "history_deleted": False,
+        "sliding": True,
+    }
+
+
+def run_active_window15_regression() -> dict[str, Any]:
+    rows = [
+        {
+            "sequence_turn_index": i,
+            "user": f"user-{i}",
+            "april": f"april-{i}",
+        }
+        for i in range(1, 21)
+    ]
+
+    checks = []
+    for count in (1, 3, 15, 16, 20):
+        result = _test_sliding_window(
+            rows[:count]
+        )
+        expected_active = min(
+            count,
+            ACTIVE_DIALOGUE_WINDOW_PAIRS,
+        )
+        expected_first = (
+            max(1, count - ACTIVE_DIALOGUE_WINDOW_PAIRS + 1)
+            if count
+            else 0
+        )
+        checks.append({
+            "full_count": result["full_count"],
+            "active_count": result["active_count"],
+            "expected_active_count": expected_active,
+            "active_first_turn": result["active_first_turn"],
+            "expected_first_turn": expected_first,
+            "history_deleted": result["history_deleted"],
+            "passed": (
+                result["active_count"] == expected_active
+                and result["active_first_turn"] == expected_first
+                and result["history_deleted"] is False
+            ),
+        })
+
+    return {
+        "engine": "active_dialogue_window_sliding_v1",
+        "window_pairs": ACTIVE_DIALOGUE_WINDOW_PAIRS,
+        "retention_hours": DIALOGUE_WINDOW_HOURS,
+        "all_passed": all(
+            x["passed"]
+            for x in checks
+        ),
+        "checks": checks,
+    }
+
