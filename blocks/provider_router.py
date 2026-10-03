@@ -3582,6 +3582,42 @@ def _image_prompt_from_provider_payload(value: Any) -> str:
         candidate = _image_prompt_from_provider_payload(nested)
         if candidate:
             return candidate
+
+    # OpenAI can return the actual same-turn visual plan as an SVG object:
+    # {format: "svg", content: "<svg>...<text>Квадрат</text>..."}.  It is a
+    # structured plan, not a prose prompt, so recover only its semantic labels
+    # here.  This prevents a deictic trigger such as "нарисуй их" from replacing
+    # the resolved subject while preserving the original SVG in raw-plan storage.
+    nested_image = value.get("image") if isinstance(value.get("image"), dict) else None
+    if nested_image and isinstance(value.get("text"), str):
+        text_hint = re.sub(r"\s+", " ", value.get("text", "")).strip()
+        if text_hint and len(text_hint) <= 1600:
+            # Keep it as semantic evidence only when the nested image has no richer
+            # prompt/description. The original request remains request_anchor.
+            if _safe_text(nested_image.get("format")).strip().lower() not in {"svg", "xml"}:
+                return text_hint
+
+    fmt = _safe_text(value.get("format")).strip().lower()
+    svg_content = value.get("content") or value.get("data")
+    if fmt in {"svg", "xml"} and isinstance(svg_content, str):
+        labels = []
+        seen = set()
+        for match in re.finditer(r"<text\b[^>]*>(.*?)</text>", svg_content, flags=re.IGNORECASE | re.DOTALL):
+            label = re.sub(r"<[^>]+>", " ", match.group(1))
+            label = (label.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+                     .replace("&quot;", '"').replace("&#39;", "'") )
+            label = re.sub(r"\s+", " ", label).strip()
+            if not label:
+                continue
+            key_label = label.casefold()
+            if key_label in seen:
+                continue
+            seen.add(key_label)
+            labels.append(label)
+            if len(labels) >= 8:
+                break
+        if labels:
+            return "Визуальный план: " + "; ".join(labels)
     return ""
 
 
