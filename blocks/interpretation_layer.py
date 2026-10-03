@@ -966,7 +966,7 @@ _df_memory_scope_actions = {
     "расскажи", "рассказать", "выдай", "выдать", "перечисли", "перечислить",
     "вспомни", "вспомнить", "сориентируйся", "сориентироваться",
 }
-_df_deictic = re.compile(r"\b(?:это|этот|эта|эту|этого|этой|этим|он|она|оно|они|его|ее|её|тот|та|те|там|здесь|выше|ниже|дальше|следующ(?:ий|ая|ее|ие|его|ую|им|ими)?|свой|свою|своего)\b", re.I)
+_df_deictic = re.compile(r"\b(?:это|этот|эта|эту|этого|этой|этим|он|она|оно|они|их|них|им|ими|обоих|обеих|его|ее|её|тот|та|те|там|здесь|выше|ниже|дальше|следующ(?:ий|ая|ее|ие|его|ую|им|ими)?|свой|свою|своего)\b", re.I)
 _df_explicit_result = (
     "как ты угадал", "как ты угадала", "почему ты угадал", "почему ты угадала",
     "правильный ответ", "объясни свой ответ", "объясни твой ответ", "объясни свой правильный ответ",
@@ -1061,6 +1061,10 @@ def _df_extract_subject(text: str) -> str:
         return ""
     low = _df_low(value)
 
+    # Visual plural deictics are references, not semantic operands.
+    if re.match(r"^(?:а\s+)?(?:нарисуй|изобрази|сгенерируй|создай)\s+(?:их|них|обоих|обеих)\b", low):
+        return ""
+
     quoted = re.search(r'[«"]([^»"]{2,180})[»"]', value)
     if quoted:
         return _df_text(quoted.group(1), 180)
@@ -1085,8 +1089,8 @@ def _df_extract_subject(text: str) -> str:
     command_heads = (
         r"назови", r"скажи", r"дай", r"выдай", r"укажи", r"выбери",
         r"напиши", r"приведи", r"расскажи", r"объясни", r"покажи",
-        r"проверь", r"найди", r"опиши", r"создай", r"построй", r"рассчитай",
-        r"посчитай", r"ответь", r"определи",
+        r"проверь", r"найди", r"опиши", r"создай", r"нарисуй", r"изобрази", r"сгенерируй",
+        r"построй", r"рассчитай", r"посчитай", r"ответь", r"определи",
     )
     head = "(?:" + "|".join(command_heads) + ")"
     match = re.match(rf"^(?:а\s+)?{head}\s+(.+)$", low, re.IGNORECASE)
@@ -1153,13 +1157,30 @@ def _df_visual_reference_entity(
     """
     low = _df_low(text)
     if not re.search(
-        r"\b(?:его|ее|её|этого\s+(?:человека|мужчину|мужчины)|эту\s+женщину|"
+        r"\b(?:их|них|им|ими|обоих|обеих|его|ее|её|этого\s+(?:человека|мужчину|мужчины)|эту\s+женщину|"
         r"этого|на\s+(?:нём|нем|ней)|его\s+на|её\s+на|ее\s+на)\b",
         low,
     ):
         return ""
 
     sources: list[str] = []
+    anchor = state.get("dialogue_memory_anchor") if isinstance(state, dict) and isinstance(state.get("dialogue_memory_anchor"), dict) else {}
+    if anchor:
+        entities = anchor.get("entities") or []
+        if isinstance(entities, list):
+            compact_entities = [
+                _df_text(x, 180)
+                for x in entities
+                if _df_text(x, 180)
+            ]
+            if compact_entities:
+                sources.append(" и ".join(compact_entities))
+        sources.extend([
+            _df_text(anchor.get("active_entity"), 300),
+            _df_text(anchor.get("topic"), 300),
+            _df_text(anchor.get("user_request"), 1200),
+            _df_text(anchor.get("april_answer"), 2400),
+        ])
     visual_scene = state.get("current_visual_scene") if isinstance(state, dict) else None
     if isinstance(visual_scene, dict):
         sources.extend([
@@ -1179,6 +1200,7 @@ def _df_visual_reference_entity(
     # Prefer the first strong proper-name pair/single name in the preceding
     # assistant description. For "Сергей Есенин ... Анна Снегина" this keeps
     # the actual subject rather than a later work title.
+    plural_reference = bool(re.search(r"\b(?:их|них|им|ими|обоих|обеих)\b", low))
     for source in sources:
         if not source:
             continue
@@ -1186,10 +1208,20 @@ def _df_visual_reference_entity(
             r"\b[А-ЯЁ][а-яё-]{2,}(?:\s+[А-ЯЁ][а-яё-]{2,}){0,2}\b",
             source,
         )
+        strong = []
         for candidate in proper:
             parts = candidate.split()
             if parts and parts[0].lower() not in ignored:
-                return _df_text(candidate, 180)
+                strong.append(_df_text(candidate, 180))
+        if plural_reference and strong:
+            unique = []
+            for candidate in strong:
+                if candidate.lower() not in {x.lower() for x in unique}:
+                    unique.append(candidate)
+            if len(unique) >= 2:
+                return " и ".join(unique[:4])
+        if strong:
+            return strong[0]
 
         # Compact fallback for a Russian "о <name> ..." phrase.
         match = re.search(r"\b(?:о|об|про)\s+([а-яё-]{3,})", _df_low(source))
@@ -1262,6 +1294,14 @@ def _df_extract_previous(history: list[Any], state: dict[str, Any]) -> tuple[str
         _turn, _created, user, april = candidates[-1]
         if user or april:
             return user, april
+
+    # The post-Provider canonical anchor is the direct latest-turn source.
+    anchor = state.get("dialogue_memory_anchor") if isinstance(state.get("dialogue_memory_anchor"), dict) else {}
+    if anchor:
+        anchor_user = _df_text(anchor.get("user_request"), 1200)
+        anchor_april = _df_text(anchor.get("april_answer"), 2200)
+        if anchor_user or anchor_april:
+            return anchor_user, anchor_april
 
     # Sequence head is the next-best source when pair archival was delayed.
     seq_user = _df_text(seq.get("last_user_request") or state.get("last_user_turn"), 1200)
@@ -1663,7 +1703,9 @@ def _df_topic_from_state(state: dict[str, Any]) -> str:
     seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
     active_ctx = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
     active_task = _df_active_task(state)
+    anchor = state.get("dialogue_memory_anchor") if isinstance(state.get("dialogue_memory_anchor"), dict) else {}
     for value in (
+        anchor.get("topic"),
         active_task.get("topic"),
         active_ctx.get("topic"),
         seq.get("topic"),
@@ -1679,7 +1721,11 @@ def _df_topic_from_state(state: dict[str, Any]) -> str:
 def _df_entity_from_state(state: dict[str, Any]) -> str:
     active_task = _df_active_task(state)
     active_ctx = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
+    anchor = state.get("dialogue_memory_anchor") if isinstance(state.get("dialogue_memory_anchor"), dict) else {}
+    anchor_entities = anchor.get("entities") if isinstance(anchor.get("entities"), list) else []
     for value in (
+        anchor.get("active_entity"),
+        *anchor_entities,
         active_task.get("entity"),
         active_task.get("active_entity"),
         active_ctx.get("active_entity"),
@@ -3207,6 +3253,14 @@ def _df_interpret_live_turn(
         current, state, previous_april, active_topic, active_entity, task_probe, dialogue_probe,
         semantic=semantic, sequence_digest=active_sequence_digest, branches=branches,
     )
+    if visual_ref_entity and relation != "RECALL":
+        # A deictic visual follow-up continues the authenticated branch. The
+        # surface command itself must not become a new topic/entity.
+        relation = "CONTINUE"
+        turn_relation = "VISUAL_REFERENCE_FOLLOWUP"
+        semantic["topic"] = visual_ref_entity
+        semantic["entity"] = visual_ref_entity
+        semantic["reference_entity"] = visual_ref_entity
     topic_affinity = 0.0
     semantic_topic = _df_low(semantic.get("topic") or "")
     prior_task_topic = _df_low(
@@ -3317,6 +3371,8 @@ def _df_interpret_live_turn(
     # Keep the outer dialogue relation as CONTINUE while ensuring the task fed
     # to Provider is no longer the stale interactive question branch.
     if visual_ref_entity:
+        relation = "CONTINUE" if relation != "RECALL" else relation
+        turn_relation = "VISUAL_REFERENCE_FOLLOWUP"
         semantic["reference_entity"] = visual_ref_entity
         semantic["entity"] = visual_ref_entity
         semantic["topic"] = visual_ref_entity
