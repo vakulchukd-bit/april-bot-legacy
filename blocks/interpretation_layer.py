@@ -1174,6 +1174,8 @@ def _df_visual_reference_entity(
                 if _df_text(x, 180)
             ]
             if compact_entities:
+                if len(compact_entities) >= 2 and re.search(r"\b(?:их|них|им|ими|обоих|обеих)\b", low):
+                    return " и ".join(compact_entities[:4])
                 sources.append(" и ".join(compact_entities))
         sources.extend([
             _df_text(anchor.get("active_entity"), 300),
@@ -4004,7 +4006,14 @@ def _df_interpret_live_turn(
         "representation": semantic.get("representation") or "text",
         "normalized_text": current,
         "canonical_user_request": current,
-        "resolved_request": current,
+        "resolved_request": (
+            current
+            + (f"\nVISUAL_REFERENCE_ENTITIES: {visual_ref_entity}" if visual_ref_entity else "")
+        ),
+        "visual_generation_request": (
+            f"{current}. Изобрази именно: {visual_ref_entity}."
+            if visual_ref_entity else current
+        ),
         "semantic_request": semantic.get("semantic_request") or current,
         "semantic_frame": semantic_frame,
         "previous_visual_generation_memory": deepcopy(
