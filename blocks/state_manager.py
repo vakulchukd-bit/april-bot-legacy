@@ -167,6 +167,18 @@ _POST_PROVIDER_NAME_RE = re.compile(
 _POST_PROVIDER_LATIN_NAME_RE = re.compile(
     r"\b[A-Z][a-z-]{2,}(?:\s+[A-Z][a-z-]{2,}){1,2}\b"
 )
+_POST_PROVIDER_ENTITY_PATTERNS = (
+    re.compile(r"\bравносторонн(?:ий|его|ему|им|ом|ые|ых|ыми)?\s+треугольник(?:а|у|ом|е|и|ов|ами)?\b", re.IGNORECASE),
+    re.compile(r"\bразносторонн(?:ий|его|ему|им|ом|ые|ых|ыми)?\s+треугольник(?:а|у|ом|е|и|ов|ами)?\b", re.IGNORECASE),
+    re.compile(r"\bравнобедренн(?:ый|ого|ому|ым|ом|ые|ых|ыми)?\s+треугольник(?:а|у|ом|е|и|ов|ами)?\b", re.IGNORECASE),
+    re.compile(r"\bпрямоугольн(?:ый|ого|ому|ым|ом|ые|ых|ыми)?\s+треугольник(?:а|у|ом|е|и|ов|ами)?\b", re.IGNORECASE),
+)
+_POST_PROVIDER_ENTITY_ALIASES = {
+    "равносторонний треугольник": "равносторонний треугольник",
+    "разносторонний треугольник": "разносторонний треугольник",
+    "равнобедренный треугольник": "равнобедренный треугольник",
+    "прямоугольный треугольник": "прямоугольный треугольник",
+}
 _POST_PROVIDER_SUBTOPICS = (
     ("comparison", ("сравн", "сопостав")),
     ("image", ("нарисуй", "изобрази", "картинк", "изображени", "рисунк", "портрет")),
@@ -233,6 +245,16 @@ def _derive_post_provider_memory_semantics(
     low = f"{request_text} {answer_text}".lower()
 
     names = _post_provider_full_names(request_text, answer_text)
+    domain_entities = []
+    domain_seen = set()
+    for source in (request_text, answer_text):
+        for pattern in _POST_PROVIDER_ENTITY_PATTERNS:
+            for match in pattern.findall(source):
+                normalized = re.sub(r"\s+", " ", str(match)).strip().lower()
+                canonical = _POST_PROVIDER_ENTITY_ALIASES.get(normalized, normalized)
+                if canonical and canonical not in domain_seen:
+                    domain_seen.add(canonical)
+                    domain_entities.append(canonical)
     prior_entities = []
     raw_prior = previous_anchor.get("entities") or previous_anchor.get("active_entities") or []
     if isinstance(raw_prior, str):
@@ -244,7 +266,7 @@ def _derive_post_provider_memory_semantics(
         prior_entities = [x.strip() for x in re.split(r"\s+и\s+|,", prior_active) if x.strip()]
 
     if relation == "NEW":
-        entities = names[:6]
+        entities = domain_entities[:6] or names[:6]
         if len(entities) >= 2:
             topic = " и ".join(entities[:4])
         elif len(entities) == 1:
@@ -254,11 +276,11 @@ def _derive_post_provider_memory_semantics(
                 provisional.get("topic") or provisional.get("canonical_topic") or ""
             ).strip()[:220]
     elif relation == "RECALL":
-        entities = names[:6] or prior_entities[:6]
+        entities = domain_entities[:6] or names[:6] or prior_entities[:6]
         topic = " и ".join(entities[:4]) if len(entities) >= 2 else (entities[0] if entities else "")
         topic = topic or str(previous_anchor.get("topic") or provisional.get("topic") or "").strip()[:220]
     else:
-        entities = prior_entities[:6] or names[:6]
+        entities = prior_entities[:6] or domain_entities[:6] or names[:6]
         topic = str(previous_anchor.get("topic") or "").strip()[:220]
         if not topic:
             topic = " и ".join(entities[:4]) if len(entities) >= 2 else (entities[0] if entities else "")
