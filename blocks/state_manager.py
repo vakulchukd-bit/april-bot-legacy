@@ -227,6 +227,161 @@ def _post_provider_clean_request(text):
     return value.strip(" .,!?:;—-")[:220]
 
 
+_POST_PROVIDER_STOPWORDS = {
+    "а", "и", "или", "но", "да", "же", "ли", "не", "ни", "это", "этот", "эта", "эти", "этого",
+    "этом", "того", "такой", "такие", "так", "тут", "там", "вот", "как", "чем", "что", "кто", "где",
+    "когда", "почему", "зачем", "какой", "какая", "какие", "какое", "каких", "каким", "какими",
+    "перед", "после", "про", "о", "об", "обо", "по", "на", "в", "из", "с", "со", "к", "ко", "для",
+    "мне", "меня", "ты", "вы", "я", "мы", "они", "их", "них", "им", "ими", "его", "ее", "её", "ему",
+    "можешь", "можеш", "можно", "нужно", "надо", "хочу", "хотел", "хотела", "давай", "расскажи", "скажи",
+    "объясни", "покажи", "нарисуй", "изобрази", "создай", "сделай", "сравни", "выдай", "выведи", "напиши",
+    "ответь", "рассчитай", "посчитай", "проверь", "найди", "готово", "готов", "конечно", "правильно", "верно",
+    "круг",  # removed below only where used as a generic command-like token; kept as a valid concept by extractor rules
+}
+
+_POST_PROVIDER_INFLECTIONS = {
+    "овала": "овал", "овалу": "овал", "овале": "овал", "овалом": "овал",
+    "круга": "круг", "кругу": "круг", "круге": "кругом", "кругом": "круг",
+    "треугольника": "треугольник", "треугольнику": "треугольник", "треугольником": "треугольник",
+    "треугольнике": "треугольник", "треугольники": "треугольник", "треугольниками": "треугольник",
+    "треугольников": "треугольник", "треугольниках": "треугольник",
+    "овалами": "овал", "кругами": "круг",
+}
+
+
+def _post_provider_normalize_concept(value: str) -> str:
+    value = re.sub(r"\s+", " ", str(value or "").strip(" .,!?:;—-\"'«»"))
+    if not value:
+        return ""
+    value = re.sub(r"^(?:это|вот|про|о|об|для|между|от|с)\s+", "", value, flags=re.IGNORECASE)
+    words = value.split()
+    if not words:
+        return ""
+    if len(words) <= 3:
+        last = words[-1].lower()
+        if last in _POST_PROVIDER_INFLECTIONS:
+            words[-1] = _POST_PROVIDER_INFLECTIONS[last]
+        value = " ".join(words)
+    if value.lower() in {"чем", "какие", "какая", "какой", "можешь", "можеш", "нарисуй", "объясни", "расскажи"}:
+        return ""
+    return value[:180]
+
+
+def _post_provider_is_concept(value: str) -> bool:
+    norm = _post_provider_normalize_concept(value)
+    if not norm:
+        return False
+    low = norm.casefold()
+    if low in _POST_PROVIDER_STOPWORDS:
+        # Explicitly allow real geometric concepts that overlap the compact stopword set.
+        return low in {"круг"}
+    if re.fullmatch(r"[0-9]+", norm):
+        return False
+    if len(norm) < 2:
+        return False
+    return True
+
+
+def _post_provider_split_concepts(value: str) -> list[str]:
+    value = str(value or "").strip()
+    if not value:
+        return []
+    value = re.sub(r"\s+", " ", value)
+    pieces = re.split(r"\s+(?:и|или|,|/|&|\+|vs\.?|против)\s+", value, flags=re.IGNORECASE)
+    out = []
+    for piece in pieces:
+        norm = _post_provider_normalize_concept(piece)
+        if _post_provider_is_concept(norm):
+            if norm.casefold() not in {x.casefold() for x in out}:
+                out.append(norm)
+    return out[:6]
+
+
+def _post_provider_extract_request_concepts(text: str) -> list[str]:
+    value = re.sub(r"\s+", " ", str(text or "").strip())
+    if not value:
+        return []
+    candidates: list[str] = []
+    patterns = (
+        r"\b(?:чем\s+отличается|чем\s+отличаются|разница\s+между)\s+(.+?)\s+от\s+(.+?)(?:[?.!]|$)",
+        r"\b(?:между)\s+(.+?)\s+и\s+(.+?)(?:[?.!]|$)",
+        r"\b(?:сравни|сопоставь)\s+(.+?)(?:[?.!]|$)",
+        r"\b(?:про|об|о)\s+(.+?)(?:[?.!]|$)",
+        r"\b(?:от)\s+(.+?)(?:[?.!]|$)",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, value, flags=re.IGNORECASE):
+            candidates.extend(_post_provider_split_concepts(match.group(1)))
+            if match.lastindex and match.lastindex >= 2:
+                candidates.extend(_post_provider_split_concepts(match.group(2)))
+    # Explicit Latin/proper names, including single-word names.
+    for token in re.findall(r"\b[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{2,}\b", value):
+        if token.casefold() not in _POST_PROVIDER_STOPWORDS and token.casefold() not in {x.casefold() for x in candidates}:
+            candidates.append(token)
+    # Noun-like lower-case concepts in two common patterns.
+    for match in re.finditer(r"\b([а-яё-]{3,})\s+от\s+([а-яё-]{3,})\b", value, flags=re.IGNORECASE):
+        for token in match.groups():
+            norm = _post_provider_normalize_concept(token)
+            if _post_provider_is_concept(norm) and norm.casefold() not in {x.casefold() for x in candidates}:
+                candidates.append(norm)
+    return candidates[:8]
+
+
+def _post_provider_extract_answer_concepts(answer: str) -> list[str]:
+    value = re.sub(r"\s+", " ", str(answer or "").strip())
+    if not value:
+        return []
+    candidates: list[str] = []
+    # Provider answers frequently establish the subject in "X — ...", "X: ...",
+    # or "X имеет/является/это ..." form. Prefer these over surface command words.
+    patterns = (
+        r"(?:^|[.!?]\s+)([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{1,}(?:\s+[A-Za-zА-Яа-яЁё-]{1,}){0,2})\s+[—-]\s",
+        r"(?:^|[.!?]\s+)([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{1,}(?:\s+[A-Za-zА-Яа-яЁё-]{1,}){0,2})\s*:\s",
+        r"\b([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{1,}(?:\s+[A-Za-zА-Яа-яЁё-]{1,}){0,2})\s+(?:имеет|является|это|—)\b",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, value):
+            parts = _post_provider_split_concepts(match.group(1))
+            candidates.extend(parts)
+    # Repeated standalone proper/Latin names.
+    for token in re.findall(r"\b[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{2,}\b", value):
+        if token.casefold() not in _POST_PROVIDER_STOPWORDS and token.casefold() not in {x.casefold() for x in candidates}:
+            candidates.append(token)
+    # High-signal lowercase subjects appearing as the subject of a sentence.
+    for match in re.finditer(r"(?:^|[.!?]\s+)([а-яё][а-яё-]{2,}(?:\s+[а-яё][а-яё-]{2,}){0,2})\s+(?:имеет|является|это|—)\b", value, flags=re.IGNORECASE):
+        candidates.extend(_post_provider_split_concepts(match.group(1)))
+    clean = []
+    for candidate in candidates:
+        norm = _post_provider_normalize_concept(candidate)
+        if not _post_provider_is_concept(norm):
+            continue
+        if norm.casefold() not in {x.casefold() for x in clean}:
+            clean.append(norm)
+    return clean[:8]
+
+
+def _post_provider_full_names(*texts):
+    names = []
+    seen = set()
+    for text in texts:
+        value = str(text or "")
+        candidates = list(_POST_PROVIDER_NAME_RE.findall(value)) + list(_POST_PROVIDER_LATIN_NAME_RE.findall(value))
+        # Also collect single capitalized names, not only 2+ word names.
+        candidates += re.findall(r"\b[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{2,}\b", value)
+        for candidate in candidates:
+            normalized = _post_provider_normalize_concept(candidate)
+            if not normalized:
+                continue
+            if normalized.casefold() in _POST_PROVIDER_IGNORED_NAMES:
+                continue
+            key = normalized.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(normalized)
+    return names
+
+
 def _derive_post_provider_memory_semantics(
     current_request,
     answer,
@@ -235,52 +390,53 @@ def _derive_post_provider_memory_semantics(
     relation="NEW",
     render_types=None,
 ):
-    """Build canonical dialogue semantics from the completed Provider result."""
+    """Build canonical dialogue semantics ONLY after Provider has completed the turn.
+
+    Provider output is the semantic authority for the completed turn. The pre-provider
+    interpretation is retained as audit evidence and never supplies topic/entity identity
+    when the completed result contains enough subject evidence.
+    """
     provisional = provisional if isinstance(provisional, dict) else {}
     previous_anchor = previous_anchor if isinstance(previous_anchor, dict) else {}
     relation = str(relation or "NEW").strip().upper()
     render_types = [str(x or "").strip().lower() for x in (render_types or []) if str(x or "").strip()]
     request_text = str(current_request or "").strip()[:1200]
     answer_text = str(answer or "").strip()[:4000]
-    low = f"{request_text} {answer_text}".lower()
 
-    names = _post_provider_full_names(request_text, answer_text)
-    domain_entities = []
-    domain_seen = set()
-    for source in (request_text, answer_text):
-        for pattern in _POST_PROVIDER_ENTITY_PATTERNS:
-            for match in pattern.findall(source):
-                normalized = re.sub(r"\s+", " ", str(match)).strip().lower()
-                canonical = _POST_PROVIDER_ENTITY_ALIASES.get(normalized, normalized)
-                if canonical and canonical not in domain_seen:
-                    domain_seen.add(canonical)
-                    domain_entities.append(canonical)
     prior_entities = []
     raw_prior = previous_anchor.get("entities") or previous_anchor.get("active_entities") or []
     if isinstance(raw_prior, str):
-        prior_entities = [x.strip() for x in re.split(r"\s+и\s+|,", raw_prior) if x.strip()]
+        prior_entities = _post_provider_split_concepts(raw_prior)
     elif isinstance(raw_prior, (list, tuple)):
-        prior_entities = [str(x).strip() for x in raw_prior if str(x).strip()]
-    prior_active = str(previous_anchor.get("active_entity") or "").strip()
+        prior_entities = [
+            _post_provider_normalize_concept(x) for x in raw_prior
+            if _post_provider_normalize_concept(x)
+        ]
+    prior_active = _post_provider_normalize_concept(previous_anchor.get("active_entity") or "")
     if prior_active and not prior_entities:
-        prior_entities = [x.strip() for x in re.split(r"\s+и\s+|,", prior_active) if x.strip()]
+        prior_entities = _post_provider_split_concepts(prior_active) or [prior_active]
+
+    answer_concepts = _post_provider_extract_answer_concepts(answer_text)
+    request_concepts = _post_provider_extract_request_concepts(request_text)
+    names = _post_provider_full_names(request_text, answer_text)
 
     if relation == "NEW":
-        entities = domain_entities[:6] or names[:6]
-        if len(entities) >= 2:
-            topic = " и ".join(entities[:4])
-        elif len(entities) == 1:
-            topic = entities[0]
-        else:
+        # Completed Provider answer wins. Request concepts are only the fallback for
+        # answers that don't restate their subject explicitly.
+        entities = answer_concepts[:6] or request_concepts[:6] or names[:6]
+        topic = " и ".join(entities[:4]) if len(entities) >= 2 else (entities[0] if entities else "")
+        if not topic:
             topic = _post_provider_clean_request(request_text) or str(
                 provisional.get("topic") or provisional.get("canonical_topic") or ""
             ).strip()[:220]
     elif relation == "RECALL":
-        entities = domain_entities[:6] or names[:6] or prior_entities[:6]
+        entities = answer_concepts[:6] or prior_entities[:6] or request_concepts[:6] or names[:6]
         topic = " и ".join(entities[:4]) if len(entities) >= 2 else (entities[0] if entities else "")
         topic = topic or str(previous_anchor.get("topic") or provisional.get("topic") or "").strip()[:220]
     else:
-        entities = prior_entities[:6] or domain_entities[:6] or names[:6]
+        # CONTINUE is branch-preserving. A short follow-up must never replace the
+        # branch subject with a leading interrogative/command token.
+        entities = prior_entities[:6] or answer_concepts[:6] or request_concepts[:6] or names[:6]
         topic = str(previous_anchor.get("topic") or "").strip()[:220]
         if not topic:
             topic = " и ".join(entities[:4]) if len(entities) >= 2 else (entities[0] if entities else "")
@@ -288,7 +444,7 @@ def _derive_post_provider_memory_semantics(
             topic = str(provisional.get("topic") or provisional.get("canonical_topic") or "").strip()[:220]
 
     subtopic = ""
-    haystack = low + " " + " ".join(render_types)
+    haystack = f"{request_text} {answer_text}".lower()
     for label, markers in _POST_PROVIDER_SUBTOPICS:
         if label in render_types or any(marker in haystack for marker in markers):
             subtopic = label
@@ -296,13 +452,11 @@ def _derive_post_provider_memory_semantics(
 
     active_entity = (
         " и ".join(entities[:4]) if len(entities) >= 2
-        else (entities[0] if entities else prior_active or str(
-            provisional.get("active_entity") or provisional.get("entity") or ""
-        ).strip()[:180])
+        else (entities[0] if entities else prior_active or "")
     )
     return {
-        "version": "post_provider_dialogue_memory_v1",
-        "source_of_truth": "USER_REQUEST_PLUS_APRIL_ANSWER",
+        "version": "post_provider_dialogue_memory_v2",
+        "source_of_truth": "USER_REQUEST_PLUS_PROVIDER_RESPONSE",
         "memory_source": "POST_PROVIDER_OPENAI_RESPONSE",
         "topic": topic or _post_provider_clean_request(request_text),
         "subtopic": subtopic,
@@ -1525,7 +1679,7 @@ class QuantumMemoryEngine:
     @staticmethod
     def _advance_active_dialogue_sequence(
         state_obj, user_id, relation, current_request, answer,
-        dialogue_vector=None, selected_operand=None
+        dialogue_vector=None, selected_operand=None, canonical_semantics=None
     ):
         """Advance one authenticated dialogue sequence without mixing tasks.
 
@@ -1537,6 +1691,10 @@ class QuantumMemoryEngine:
         if not isinstance(state_obj, dict):
             raise TypeError("state_obj must be dict")
         dv = dialogue_vector if isinstance(dialogue_vector, dict) else {}
+        canonical_turn = state_obj.get("canonical_dialogue_turn") if isinstance(state_obj.get("canonical_dialogue_turn"), dict) else {}
+        current_canonical = canonical_semantics if isinstance(canonical_semantics, dict) else {}
+        previous_canonical = canonical_turn.get("memory_semantics") if isinstance(canonical_turn.get("memory_semantics"), dict) else canonical_turn
+        canonical_semantics = current_canonical or previous_canonical
         relation = str(relation or "NEW").strip().upper()
         if relation not in {"NEW", "CONTINUE", "RECALL"}:
             relation = "NEW"
@@ -1615,6 +1773,18 @@ class QuantumMemoryEngine:
                 if not supplied_id or not active_task_id or supplied_id == active_task_id:
                     target_task = {**target_task, **deepcopy(supplied)}
                     active_task_id = str(target_task.get("task_id") or active_task_id).strip()
+            # Canonical completed-turn identity outranks every pre-provider task mirror.
+            if canonical_semantics:
+                if canonical_semantics.get("topic"):
+                    target_task["topic"] = str(canonical_semantics.get("topic"))[:220]
+                    target_task["canonical_topic"] = target_task["topic"]
+                if canonical_semantics.get("entities"):
+                    target_task["entities"] = deepcopy(canonical_semantics.get("entities") or [])[:6]
+                if canonical_semantics.get("active_entity"):
+                    target_task["entity"] = str(canonical_semantics.get("active_entity"))[:220]
+                    target_task["active_entity"] = target_task["entity"]
+                if canonical_semantics.get("subtopic"):
+                    target_task["subtopic"] = str(canonical_semantics.get("subtopic"))[:80]
 
         if relation == "NEW":
             # A NEW topic is a child task of the SAME authenticated 12h dialogue
@@ -1649,7 +1819,15 @@ class QuantumMemoryEngine:
             target_task.setdefault("kind", "topic_task")
             target_task["task_id"] = active_task_id
             target_task["sequence_id"] = current_id
-            target_task["topic"] = target_task.get("topic") or seed_topic or None
+            target_task["topic"] = str(canonical_semantics.get("topic") or seed_topic or target_task.get("topic") or "")[:220] or None
+            target_task["canonical_topic"] = target_task.get("topic")
+            if canonical_semantics.get("entities"):
+                target_task["entities"] = deepcopy(canonical_semantics.get("entities") or [])[:6]
+            if canonical_semantics.get("active_entity"):
+                target_task["entity"] = str(canonical_semantics.get("active_entity"))[:220]
+                target_task["active_entity"] = target_task["entity"]
+            if canonical_semantics.get("subtopic"):
+                target_task["subtopic"] = str(canonical_semantics.get("subtopic"))[:80]
             target_task["created_at"] = target_task.get("created_at") or now
             target_task["task_revision"] = int(target_task.get("task_revision") or 0) + 1
 
@@ -1773,7 +1951,8 @@ class QuantumMemoryEngine:
             "sequence_id": current_id,
             "branch_id": current.get("branch_id") or current_id,
             "task_id": active_task_id or None,
-            "topic": target_task.get("topic") if target_task else (current.get("topic") or dv.get("canonical_topic") or None),
+            "topic": (str(canonical_semantics.get("topic"))[:220] if canonical_semantics.get("topic") else (target_task.get("topic") if target_task else (current.get("topic") or dv.get("canonical_topic") or None))),
+            "entities": deepcopy(canonical_semantics.get("entities") or current.get("entities") or [])[:6],
             "status": "active",
             "user_id": user_key,
             "conversation_id": conversation_id,
@@ -1790,7 +1969,7 @@ class QuantumMemoryEngine:
             "task_registry": deepcopy(sequence_tasks),
             "relation": relation,
             "restored": relation == "RECALL",
-            "active_entity": str(dv.get("active_entity") or current.get("active_entity") or "")[:180],
+            "active_entity": str(canonical_semantics.get("active_entity") or dv.get("active_entity") or current.get("active_entity") or "")[:220],
             "branch_label": branch_label,
             "branch_type": str(dv.get("branch_type") or target_task.get("branch_type") or "topic") if target_task else str(dv.get("branch_type") or "topic"),
             "linked_branch_ids": deepcopy(target_task.get("linked_branch_ids") or dv.get("linked_branch_ids") or []) if target_task else deepcopy(dv.get("linked_branch_ids") or []),
@@ -2499,6 +2678,189 @@ def _sanitize_persisted_dialog(state_obj):
     state_obj["dialog"] = clean[-HOT_DIALOG_LIMIT:]
     state_obj["internal_dialog_events"] = internal[-VISUAL_HISTORY_LIMIT:]
 
+
+def _repair_canonical_dialogue_memory(state_obj):
+    """Repair legacy semantic fields from the existing USER↔APRIL archive.
+
+    Old deployments stored correct USER/APRIL text together with incorrect topic/entity
+    values such as a leading command word. The repair walks the live authenticated 12h
+    archive chronologically and rebuilds semantic identity from each completed pair.
+    """
+    if not isinstance(state_obj, dict):
+        return False
+    timeline = state_obj.get("memory_timeline") if isinstance(state_obj.get("memory_timeline"), dict) else {}
+    day0 = timeline.get("day_0") if isinstance(timeline.get("day_0"), dict) else {}
+    pairs = day0.get("dialog_pairs") if isinstance(day0.get("dialog_pairs"), list) else []
+    if not pairs:
+        return False
+    user_id = str(state_obj.get("user_id") or (state_obj.get("memory_scope") or {}).get("user_id") or "").strip()
+    conversation_id = str(state_obj.get("conversation_id") or (state_obj.get("memory_scope") or {}).get("conversation_id") or "").strip()
+    now = time.time()
+    ordered = sorted(
+        [p for p in pairs if isinstance(p, dict)],
+        key=lambda p: float(p.get("created_at") or p.get("timestamp") or 0.0),
+    )
+    previous_anchor = {}
+    changed = False
+    latest_pair = None
+    for pair in ordered:
+        if user_id and str(pair.get("user_id") or "") not in {"", user_id}:
+            continue
+        if conversation_id and str(pair.get("conversation_id") or "") not in {"", conversation_id}:
+            continue
+        try:
+            ts = float(pair.get("created_at") or pair.get("timestamp") or 0.0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        if ts and (now - ts) >= USER_CONTENT_RETENTION_SECONDS:
+            continue
+        req = str(pair.get("user_request") or pair.get("user_meaning") or "").strip()
+        ans = str(pair.get("april_answer") or pair.get("april_meaning") or pair.get("answer") or "").strip()
+        relation = str(pair.get("dialogue_relation") or pair.get("relation") or "NEW").upper()
+        semantics = _derive_post_provider_memory_semantics(
+            req,
+            ans,
+            provisional={},
+            previous_anchor=previous_anchor,
+            relation=relation,
+            render_types=pair.get("render_block_types") or pair.get("presentation_types") or [],
+        )
+        for key, value in {
+            "topic": semantics.get("topic") or "",
+            "sequence_topic": semantics.get("topic") or "",
+            "subtopic": semantics.get("subtopic") or "",
+            "entities": deepcopy(semantics.get("entities") or []),
+            "active_entity": semantics.get("active_entity") or "",
+            "memory_semantics": deepcopy(semantics),
+            "source_of_truth": "USER_REQUEST_PLUS_PROVIDER_RESPONSE",
+            "memory_source": "POST_PROVIDER_OPENAI_RESPONSE",
+        }.items():
+            if pair.get(key) != value:
+                pair[key] = value
+                changed = True
+        semantic_state = pair.get("semantic_state") if isinstance(pair.get("semantic_state"), dict) else {}
+        semantic_state.update({
+            "topic": semantics.get("topic") or "",
+            "subtopic": semantics.get("subtopic") or "",
+            "entity": semantics.get("active_entity") or "",
+            "active_entity": semantics.get("active_entity") or "",
+            "entities": deepcopy(semantics.get("entities") or []),
+            "relation": relation,
+            "memory_truth": deepcopy(semantics),
+            "source_of_truth": "USER_REQUEST_PLUS_PROVIDER_RESPONSE",
+            "memory_source": "POST_PROVIDER_OPENAI_RESPONSE",
+        })
+        if pair.get("semantic_state") != semantic_state:
+            pair["semantic_state"] = semantic_state
+            changed = True
+        previous_anchor = deepcopy(semantics)
+        latest_pair = pair
+
+    day0["dialog_pairs"] = ordered[-SESSION_MEMORY_LIMIT:]
+    timeline["day_0"] = day0
+    state_obj["memory_timeline"] = timeline
+
+    if latest_pair:
+        canonical = deepcopy(latest_pair.get("memory_semantics") or {})
+        canonical.update({
+            "user_id": user_id,
+            "conversation_id": conversation_id,
+            "sequence_id": str(latest_pair.get("sequence_id") or ""),
+            "task_id": str(latest_pair.get("task_id") or ""),
+            "sequence_turn_index": int(latest_pair.get("sequence_turn_index") or 0),
+            "created_at": float(latest_pair.get("created_at") or now),
+            "expires_after_hours": DIALOGUE_WINDOW_HOURS,
+        })
+        if state_obj.get("dialogue_memory_anchor") != canonical:
+            state_obj["dialogue_memory_anchor"] = deepcopy(canonical)
+            changed = True
+        turn = deepcopy(canonical)
+        turn["record_type"] = "canonical_dialogue_turn"
+        turn["source_of_truth"] = "USER_REQUEST_PLUS_PROVIDER_RESPONSE"
+        if state_obj.get("canonical_dialogue_turn") != turn:
+            state_obj["canonical_dialogue_turn"] = turn
+            changed = True
+
+        # Rehydrate active sequence/topic/task mirrors strictly from the repaired pair archive.
+        sequence_id = str(latest_pair.get("sequence_id") or "").strip()
+        if sequence_id:
+            registry = QuantumMemoryEngine._rebuild_task_registry_from_pairs(
+                state_obj, sequence_id, user_id, conversation_id
+            )
+            if registry:
+                # Rebuild every task's semantic identity from its latest canonical pair.
+                # Legacy task mirrors such as entity="Нарисуй" are never authoritative.
+                for task_id, task in list(registry.items()):
+                    if not isinstance(task, dict):
+                        continue
+                    matching = [
+                        pair for pair in ordered
+                        if isinstance(pair, dict)
+                        and str(pair.get("sequence_id") or "") == sequence_id
+                        and str(pair.get("task_id") or "") == str(task_id)
+                    ]
+                    if matching:
+                        matching.sort(key=lambda item: float(item.get("created_at") or item.get("timestamp") or 0.0))
+                        latest_task_pair = matching[-1]
+                        latest_sem = latest_task_pair.get("memory_semantics") if isinstance(latest_task_pair.get("memory_semantics"), dict) else {}
+                        if latest_sem:
+                            task["topic"] = latest_sem.get("topic") or task.get("topic")
+                            task["canonical_topic"] = latest_sem.get("topic") or task.get("canonical_topic")
+                            task["entities"] = deepcopy(latest_sem.get("entities") or [])
+                            task["entity"] = latest_sem.get("active_entity") or task.get("entity") or ""
+                            task["active_entity"] = latest_sem.get("active_entity") or task.get("active_entity") or ""
+                            task["subtopic"] = latest_sem.get("subtopic") or task.get("subtopic") or ""
+                        task["last_user_request"] = str(latest_task_pair.get("user_request") or task.get("last_user_request") or "")[:1200]
+                        task["last_april_answer"] = str(latest_task_pair.get("april_answer") or task.get("last_april_answer") or "")[:2200]
+                        task["last_answer"] = task["last_april_answer"]
+                        task["last_turn_at"] = float(latest_task_pair.get("created_at") or task.get("last_turn_at") or time.time())
+                        task["updated_at"] = task["last_turn_at"]
+                        registry[str(task_id)] = task
+                state_obj["dialogue_task_registry"] = deepcopy(registry)
+                active_task_id = str(latest_pair.get("task_id") or "").strip()
+                task = deepcopy(registry.get(active_task_id) or {})
+                seq = state_obj.get("active_dialogue_sequence") if isinstance(state_obj.get("active_dialogue_sequence"), dict) else build_default_active_dialogue_sequence()
+                seq.update({
+                    "sequence_id": sequence_id,
+                    "user_id": user_id,
+                    "conversation_id": conversation_id,
+                    "status": "active",
+                    "topic": canonical.get("topic") or "",
+                    "entities": deepcopy(canonical.get("entities") or []),
+                    "active_entity": canonical.get("active_entity") or "",
+                    "last_user_request": req if (req := str(latest_pair.get("user_request") or "").strip()) else "",
+                    "last_april_answer": str(latest_pair.get("april_answer") or "").strip(),
+                    "last_turn_at": float(latest_pair.get("created_at") or now),
+                    "turn_count": int(latest_pair.get("sequence_turn_index") or 0),
+                    "response_count": int(latest_pair.get("sequence_turn_index") or 0),
+                    "task_id": active_task_id or seq.get("task_id"),
+                    "task_response_count": int(task.get("response_count") or 0),
+                    "task_registry": deepcopy(registry),
+                    "active_task": deepcopy(task),
+                    "interactive_task_state": deepcopy(task),
+                    "open_task": deepcopy(task),
+                    "task_state": deepcopy(task),
+                    "restored": True,
+                })
+                state_obj["active_dialogue_sequence"] = seq
+                state_obj["active_dialogue_task_id"] = str(seq.get("task_id") or "")
+                for key in ("active_task", "interactive_task_state", "open_task", "april_active_task"):
+                    if task:
+                        state_obj[key] = deepcopy(task)
+                state_obj["april_active_topic"] = canonical.get("topic") or ""
+                state_obj["april_active_entity"] = canonical.get("active_entity") or ""
+                state_obj["current_topic"] = canonical.get("topic") or state_obj.get("current_topic")
+                state_obj["current_object"] = canonical.get("active_entity") or state_obj.get("current_object")
+                focus = state_obj.get("focus_state") if isinstance(state_obj.get("focus_state"), dict) else {}
+                focus.update({
+                    "active_topic": canonical.get("topic") or focus.get("active_topic"),
+                    "active_object": canonical.get("active_entity") or focus.get("active_object"),
+                    "intent_freshness": 1.0,
+                })
+                state_obj["focus_state"] = focus
+
+    return changed
+
 def get_state(user_id):
     key = str(user_id)
 
@@ -2566,6 +2928,9 @@ def get_state(user_id):
                 "last_rollover": cycle.get("last_rollover") or now_ts,
             }
         rolled = QUANTUM_MEMORY_ENGINE.rollover(state[key])
+        repaired = _repair_canonical_dialogue_memory(state[key])
+        # Re-normalize the active sequence strictly from repaired canonical pairs.
+        QUANTUM_MEMORY_ENGINE._ensure_active_dialogue_sequence(state[key])
 
         # Authenticated per-user memory owns the live task. Reject stale/foreign task objects
         # even when a legacy persistence record accidentally carries today's
@@ -2583,7 +2948,7 @@ def get_state(user_id):
             state[key]["active_dialogue_sequence"] = active_sequence
 
         removed_hot = _cleanup_hot_content(state[key])
-        if removed_hot or rolled:
+        if removed_hot or rolled or repaired:
             QUANTUM_MEMORY_ENGINE.refresh_scene(state[key])
             try:
                 if callable(save_memory):
@@ -4523,6 +4888,7 @@ def update_scene_context(
     current_request="",
     answer="",
     *,
+    provider_result=None,
     visual_generation_memory=None,
     internal_context=False,
     persist=True,
@@ -4641,6 +5007,19 @@ def update_scene_context(
 
     current_request_text = str(current_request or "").strip()
     answer_text = str(answer or "").strip()[:4000]
+
+    # The completed Provider envelope is the only authoritative completed-turn source.
+    provider_payload = provider_result if isinstance(provider_result, dict) else {}
+    provider_machine = provider_payload.get("machine_response") if isinstance(provider_payload.get("machine_response"), dict) else provider_payload
+    provider_metadata = provider_machine.get("metadata") if isinstance(provider_machine.get("metadata"), dict) else {}
+    provider_answer = str(
+        provider_machine.get("answer")
+        or provider_machine.get("content")
+        or provider_machine.get("response")
+        or answer_text
+    ).strip()[:4000]
+    if provider_answer:
+        answer_text = provider_answer
 
     semantic_scene_state = {}
     metadata = contract.get("metadata") if isinstance(contract.get("metadata"), dict) else {}
@@ -4792,30 +5171,35 @@ def update_scene_context(
     if not previous_anchor:
         previous_seq = state_obj.get("active_dialogue_sequence") if isinstance(state_obj.get("active_dialogue_sequence"), dict) else {}
         previous_anchor = {
-            "topic": previous_seq.get("topic") or state_obj.get("current_topic") or state_obj.get("april_active_topic") or "",
+            "topic": previous_seq.get("topic") or "",
             "entities": previous_seq.get("entities") or [],
-            "active_entity": previous_seq.get("active_entity") or state_obj.get("active_entity") or "",
+            "active_entity": previous_seq.get("active_entity") or "",
             "user_request": previous_seq.get("last_user_request") or "",
             "april_answer": previous_seq.get("last_april_answer") or "",
         }
 
     # Canonical semantic memory is built only after Provider/OpenAI has returned
-    # the real USER request + APRIL answer. The earlier interpretation remains
-    # available as audit evidence, but cannot become memory truth on its own.
+    # the completed USER request + APRIL answer. Pre-provider interpretation is audit only.
     post_provider_semantics = _derive_post_provider_memory_semantics(
         current_request_text,
         answer_text,
-        provisional=semantic_scene_state,
+        provisional={},
         previous_anchor=previous_anchor,
         relation=resolved_relation,
         render_types=block_types or presentation_types,
     )
+    post_provider_semantics["provider_contract"] = {
+        "present": bool(provider_payload),
+        "structured": bool(provider_machine),
+        "image_generation_spec": deepcopy(provider_metadata.get("image_generation_spec") or {}),
+        "render_blocks_count": len(provider_machine.get("render_blocks") or []) if isinstance(provider_machine.get("render_blocks"), list) else 0,
+    }
 
     dialogue_vector = deepcopy(provisional_dialogue_vector)
-    dialogue_vector["canonical_topic"] = post_provider_semantics.get("topic") or dialogue_vector.get("canonical_topic") or current_request_text[:220]
+    dialogue_vector["canonical_topic"] = post_provider_semantics.get("topic") or current_request_text[:220]
     dialogue_vector["active_topic"] = post_provider_semantics.get("topic") or dialogue_vector.get("active_topic") or current_request_text[:220]
     dialogue_vector["topic"] = dialogue_vector["canonical_topic"]
-    dialogue_vector["active_entity"] = post_provider_semantics.get("active_entity") or dialogue_vector.get("active_entity") or ""
+    dialogue_vector["active_entity"] = post_provider_semantics.get("active_entity") or ""
     dialogue_vector["entities"] = deepcopy(post_provider_semantics.get("entities") or [])
     dialogue_vector["subtopic"] = post_provider_semantics.get("subtopic") or dialogue_vector.get("subtopic") or ""
     dialogue_vector["memory_semantics"] = deepcopy(post_provider_semantics)
@@ -4846,6 +5230,7 @@ def update_scene_context(
         answer_text,
         dialogue_vector=dialogue_vector,
         selected_operand=selected_operand,
+        canonical_semantics=post_provider_semantics,
     )
 
     # Refresh the scene-level task mirror from the canonical sequence state. The
@@ -4988,6 +5373,14 @@ def update_scene_context(
         "semantic_state": deepcopy(semantic_scene_state),
         "memory_semantics": deepcopy(post_provider_semantics),
         "pre_provider_interpretation": deepcopy(metadata.get("semantic_scene_state") or {}),
+        "provider_structured_result": {
+            "answer": answer_text,
+            "render_block_types": list(block_types),
+            "metadata": {
+                "provider_version": str(provider_metadata.get("provider_version") or ""),
+                "image_generation_spec_present": bool(provider_metadata.get("image_generation_spec")),
+            },
+        },
         "memory_source": "POST_PROVIDER_OPENAI_RESPONSE",
         "source_of_truth": "USER_REQUEST_PLUS_APRIL_ANSWER",
         "subtopic": post_provider_semantics.get("subtopic") or "",
@@ -5061,6 +5454,34 @@ def update_scene_context(
     }
     state_obj["semantic_scene_state"] = deepcopy(semantic_scene_state)
     scene_record["semantic_state"] = deepcopy(semantic_scene_state)
+
+    # SINGLE MEMORY AUTHORITY: this is the completed USER↔APRIL turn leaving Provider.
+    canonical_turn = deepcopy(post_provider_semantics)
+    canonical_turn.update({
+        "record_type": "canonical_dialogue_turn",
+        "user_id": str(user_id),
+        "conversation_id": conversation_id,
+        "sequence_id": str(active_sequence.get("sequence_id") or ""),
+        "task_id": str(active_sequence.get("task_id") or ""),
+        "sequence_turn_index": int(active_sequence.get("turn_count") or 0),
+        "created_at": now,
+        "expires_after_hours": DIALOGUE_WINDOW_HOURS,
+    })
+    state_obj["canonical_dialogue_turn"] = deepcopy(canonical_turn)
+    state_obj["dialogue_memory_anchor"] = deepcopy(canonical_turn)
+
+    # Compatibility mirrors are derived from canonical memory, never used as its source.
+    state_obj["april_active_topic"] = canonical_turn.get("topic") or ""
+    state_obj["april_active_entity"] = canonical_turn.get("active_entity") or ""
+    state_obj["current_topic"] = canonical_turn.get("topic") or state_obj.get("current_topic")
+    state_obj["current_object"] = canonical_turn.get("active_entity") or state_obj.get("current_object")
+    focus = state_obj.get("focus_state") if isinstance(state_obj.get("focus_state"), dict) else {}
+    focus.update({
+        "active_topic": canonical_turn.get("topic") or focus.get("active_topic"),
+        "active_object": canonical_turn.get("active_entity") or focus.get("active_object"),
+        "intent_freshness": 1.0,
+    })
+    state_obj["focus_state"] = focus
     # Keep the same post-Provider semantic truth on the scene contract returned
     # to WEB; render blocks/signals are untouched.
     active_contract = state_obj.get("active_scene_contract") if isinstance(state_obj.get("active_scene_contract"), dict) else {}
