@@ -1011,8 +1011,13 @@ _df_new_topic_markers = (
 )
 _df_recall_markers = (
     "вернемся к", "вернёмся к", "вернись к", "вернись к теме", "вернись к разговору",
-    "вспомни", "помнишь", "что мы обсуждали", "о чем мы говорили", "о чём мы говорили",
+    "вспомни", "помнишь", "напомни", "что мы обсуждали", "о чем мы говорили",
+    "о чём мы говорили", "о чем мы разговаривали", "о чём мы разговаривали",
+    "про что мы говорили", "про что мы разговаривали", "что мы обсуждали",
     "что я спрашивал", "что я спрашивала", "что я просил", "что я просила",
+    "какие темы мы обсуждали", "что было в нашем диалоге", "что было в нашем разговоре",
+    "что мы тут обсуждали", "что мы здесь обсуждали", "о чем мы тут говорили",
+    "о чём мы тут говорили", "что ты помнишь из нашего разговора",
 )
 _df_feedback_markers = (
     "мне нравится", "мне очень нравится", "мне понравилось", "мне очень понравилось",
@@ -1102,19 +1107,42 @@ def _df_explicit_new(text: str, active_topic: str = "", active_entity: str = "")
 
 
 def _df_memory_scope_request(text: str) -> bool:
-    """Detect a request to inspect the active conversation memory itself.
+    """Recognize a genuine request to recall the conversation as a whole.
 
-    This is semantic evidence, not a route selector: relation handling remains
-    responsible for deciding RECALL, and StateManager remains responsible for
-    materializing the authenticated 12-hour window.
+    Memory recall is a semantic operation, not an entity/topic trigger. Natural
+    formulations such as ``Расскажи о чем мы разговаривали`` must resolve to
+    RECALL before subject extraction can manufacture a topic from the tail
+    ``чем мы разговаривали``.
     """
     low = _df_low(text)
+    if not low:
+        return False
+
     if any(marker in low for marker in _df_recall_markers):
         return True
+
+    conversational_recall = bool(re.search(
+        r"^(?:расскажи|скажи|напомни|покажи|перечисли|выдай|вспомни)?\s*"
+        r"(?:о\s+ч[её]м|про\s+что|что)\s+мы\s+"
+        r"(?:тут\s+|здесь\s+)?(?:говорили|разговаривали|обсуждали|обсудили|обсуждаем)\b",
+        low,
+    ))
+    if conversational_recall:
+        return True
+
+    summary_recall = bool(re.search(
+        r"^(?:расскажи|скажи|напомни|покажи|перечисли|выдай)?\s*"
+        r"(?:что\s+было|что\s+мы\s+делали|что\s+ты\s+помнишь|"
+        r"какие\s+темы\s+(?:мы\s+)?(?:обсуждали|говорили))",
+        low,
+    ))
+    if summary_recall:
+        return True
+
     term_hits = sum(1 for term in _df_memory_scope_terms if term in low)
     action_hits = sum(1 for verb in _df_memory_scope_actions if re.search(rf"\b{re.escape(verb)}\b", low))
     explicit_window = bool(re.search(r"\b(?:двенадцат|12)[- ]?(?:час|ч)\w*\b", low))
-    return bool((term_hits >= 2 and action_hits >= 1) or (explicit_window and term_hits >= 1 and action_hits >= 1))
+    return bool(term_hits >= 1 and action_hits >= 1) or bool(explicit_window and term_hits >= 1 and action_hits >= 1)
 
 
 def _df_explicit_recall(text: str) -> bool:
@@ -1159,6 +1187,10 @@ def _df_extract_subject(text: str) -> str:
     if not value:
         return ""
     low = _df_strip_discourse_prefix(value)
+
+    # Conversation-memory questions are meta requests, never semantic subjects.
+    if _df_memory_scope_request(low):
+        return ""
 
     # Visual deictic requests ("эту сцену", "эту картинку") contain no new
     # semantic subject. The referenced result is resolved by the link engine.
@@ -1299,6 +1331,20 @@ def _df_canonical_subject_from_turn(canonical: dict[str, Any]) -> str:
     if entities:
         return entities[0]
 
+    # The actual assistant/OpenAI answer is the strongest recovery source when
+    # legacy canonical fields contain a command word such as "Раскажи" or a
+    # visual-command tail such as "на картинке как она выглядит".
+    answer = _df_text(canonical.get("april_answer") or canonical.get("summary"), 2200)
+    if answer:
+        proper = re.findall(
+            r"\b[А-ЯЁ][а-яё-]{2,}(?:\s+[А-ЯЁ][а-яё-]{2,}){0,2}\b"
+            r"|\b[A-Z][A-Za-z0-9-]{2,}(?:\s+[A-Z][A-Za-z0-9-]{2,}){0,2}\b",
+            answer,
+        )
+        for candidate in proper:
+            if not _df_is_generic_entity(candidate):
+                return _df_normalize_subject(candidate)
+
     for source in (
         canonical.get("user_request"),
         canonical.get("request"),
@@ -1307,14 +1353,6 @@ def _df_canonical_subject_from_turn(canonical: dict[str, Any]) -> str:
         candidate = _df_extract_subject(_df_text(source, 1000))
         if candidate and not _df_is_generic_entity(candidate):
             return candidate
-
-    answer = _df_text(canonical.get("april_answer") or canonical.get("summary"), 2200)
-    if answer:
-        # Prefer multi-word proper names, then the first useful proper name.
-        proper = re.findall(r"\b[А-ЯЁ][а-яё-]{2,}(?:\s+[А-ЯЁ][а-яё-]{2,}){0,2}\b", answer)
-        for candidate in proper:
-            if not _df_is_generic_entity(candidate):
-                return _df_normalize_subject(candidate)
     return ""
 
 
@@ -1411,7 +1449,7 @@ def _df_build_semantic_chain_context(
     chain.append({"role": "user", "content": current_q})
 
     return {
-        "version": "semantic_chain_v1",
+        "version": "semantic_chain_v2_dialogue_memory",
         "available": bool(prev_q or prev_a),
         "entity_definition": semantic_definition,
         "previous_user_question": prev_q,
@@ -1421,9 +1459,11 @@ def _df_build_semantic_chain_context(
         "continuation_instruction": (
             "Интерпретируй текущий вопрос как продолжение только если его смысл связан "
             "с предыдущим вопросом и предыдущим ответом. Не создавай сущность из слов "
-            "команды/дискурса. Смысл предыдущего ответа важнее названия entity."
+            "команды/дискурса. Смысл предыдущего ответа важнее названия entity. "
+            "При RECALL сначала восстанови смысл последних диалоговых пар, затем кратко "
+            "назови обсуждавшиеся темы и предложи продолжить выбранную тему."
         ),
-        "provider_context_priority": "previous_answer_then_previous_question_then_entity",
+        "provider_context_priority": "previous_answer_then_previous_question_then_active_memory_window_then_entity",
     }
 
 
@@ -1437,19 +1477,26 @@ def _df_build_openai_continuation_request(
         return {}
     chain = list(semantic_chain.get("chain") or [])
     return {
-        "version": "openai_semantic_continuation_request_v1",
-        "mode": "CONTINUE_SEMANTIC_CHAIN" if relation == "CONTINUE" else "RECALL_SEMANTIC_CHAIN",
+        "version": "openai_semantic_continuation_request_v2_dialogue_memory",
+        "mode": "CONTINUE_SEMANTIC_CHAIN" if relation == "CONTINUE" else "RECALL_DIALOGUE_MEMORY",
         "relation": relation,
         "messages": chain,
         "semantic_entity_definition": deepcopy(semantic_chain.get("entity_definition") or {}),
-        "instruction": _df_text(semantic_chain.get("continuation_instruction"), 600),
+        "instruction": _df_text(semantic_chain.get("continuation_instruction"), 900),
+        "memory_recall": {
+            "enabled": relation == "RECALL",
+            "use_latest_authenticated_15_pairs": relation == "RECALL",
+            "operation": "summarize_recent_dialogue_then_offer_resume" if relation == "RECALL" else "continue_current_branch",
+        },
         "do_not": [
             "do_not_reselect_memory_branch",
             "do_not_treat_command_words_as_entities",
             "do_not_replace_previous_answer_with_entity_label",
             "do_not_answer_an_old_question_instead_of_current_question",
+            "do_not_claim_no_context_when_authenticated_dialogue_window_is_available",
         ],
         "answer_source_priority": [
+            "active_memory_recall_window",
             "previous_openai_answer",
             "previous_user_question",
             "semantic_entity_definition.entity",
@@ -1688,7 +1735,15 @@ def _df_active_sequence_digest(
     # we walk it backwards and materialize only the newest target_count pairs for
     # this authenticated sequence. This preserves response speed as the 12h archive
     # grows while keeping the working window dynamically sliding.
-    for day_index in reversed(range(MEMORY_SLOTS if 'MEMORY_SLOTS' in globals() else 1)):
+    day_indexes = sorted(
+        (
+            int(key.split("_", 1)[1])
+            for key in timeline.keys()
+            if isinstance(key, str) and key.startswith("day_") and key.split("_", 1)[1].isdigit()
+        ),
+        reverse=True,
+    )
+    for day_index in day_indexes:
         day = timeline.get(f"day_{day_index}")
         if not isinstance(day, dict):
             continue
@@ -2628,7 +2683,12 @@ def _df_resolve_relation(
     sequence_digest = sequence_digest if isinstance(sequence_digest, dict) else {}
     branches = branches if isinstance(branches, dict) else {}
 
+    explicit_new_boundary = _df_strong_topic_boundary(text)
     explicit_recall = _df_explicit_recall(text)
+    # A declared new topic always starts a new branch. RECALL is only for a
+    # request whose semantic purpose is to return to conversation memory.
+    if explicit_new_boundary:
+        return "NEW", "EXPLICIT_TOPIC_BOUNDARY"
     if explicit_recall:
         return "RECALL", "REFERENCE_OLD_TOPIC"
 
@@ -2909,14 +2969,21 @@ def _df_understand(
     representation = render_probe["requested"][0] if render_probe["requested"] else "text"
 
     if _df_memory_scope_request(text):
+        # Memory recall is a meta-operation over the authenticated dialogue; it
+        # must not overwrite the live topic with the phrase "диалоговая память".
+        # Keep the active semantic identity alongside the recall operation so the
+        # next ordinary turn can continue the same branch without a synthetic
+        # topic/task being created.
         return {
-            "topic": "диалоговая память",
-            "entity": "",
+            "topic": clean_active_topic or "диалоговая память",
+            "entity": clean_active_entity,
             "operation": operation,
             "goal": goal,
             "representation": representation,
             "semantic_request": _df_text(text, 1200),
             "explicit_subject": "",
+            "memory_recall": True,
+            "memory_recall_scope": "authenticated_12h_active_sequence",
         }
 
     # A concrete subject in the current request is authoritative during
@@ -3225,8 +3292,10 @@ def _df_provider_plan(
         ],
     }
 
-    if relation == "CONTINUE":
-        # The active branch digest outranks topic-word similarity. It is the
+    if relation in {"CONTINUE", "RECALL"}:
+        # The active dialogue memory is authoritative for both live continuation
+        # and explicit memory recall. Rendering/routing never selects context.
+        # The current branch digest outranks topic-word similarity. It is the
         # compact picture that lets the model understand an elliptical turn.
         base["required_context"].insert(
             0,
@@ -3333,6 +3402,39 @@ def _df_provider_plan(
             }
         )
 
+    if relation == "RECALL" and active_sequence_digest:
+        compact_recall_window = []
+        for row in list(active_sequence_digest.get("recent_trajectory") or [])[-ACTIVE_DIALOGUE_WINDOW_PAIRS:]:
+            if not isinstance(row, dict):
+                continue
+            compact_recall_window.append({
+                "turn": int(row.get("turn") or 0),
+                "topic": _df_text(row.get("topic"), 80),
+                "user": _df_text(row.get("user"), 120),
+                "april": _df_text(row.get("april"), 180),
+                "relation": _df_text(row.get("relation"), 24),
+            })
+        base["required_context"].insert(0, {
+            "key": "MEMORY_RECALL_CONTEXT",
+            "priority": 1.0,
+            "value": {
+                "mode": "BROAD_DIALOGUE_RECALL" if not related_branches else "BRANCH_DIALOGUE_RECALL",
+                "authenticated": True,
+                "sequence_id": _df_text(active_sequence_digest.get("sequence_id") or sequence_id, 80),
+                "window_hours": DIALOGUE_WINDOW_HOURS,
+                "pair_limit": ACTIVE_DIALOGUE_WINDOW_PAIRS,
+                "pairs": compact_recall_window[-ACTIVE_DIALOGUE_WINDOW_PAIRS:],
+                "topics": list(active_sequence_digest.get("topic_path") or [])[-12:],
+                "instruction": (
+                    "Используй эти пары как фактическую память разговора. Определи "
+                    "реально обсуждавшиеся темы, кратко напомни их пользователю и "
+                    "предложи выбрать/продолжить одну из них. Не говори, что контекста "
+                    "нет, если пары присутствуют. Не создавай новую тему из запроса "
+                    "о памяти."
+                ),
+            },
+        })
+
     if related_branches:
         base["required_context"].append({
             "key": "RELATED_TOPIC_BRANCHES",
@@ -3345,11 +3447,17 @@ def _df_provider_plan(
             base["required_context"].append(
                 {
                     "key": "ACTIVE_DIALOGUE_TRAJECTORY",
-                    "priority": 0.995,
+                    "priority": 0.999,
                     "value": deepcopy(active_sequence_digest),
                 }
             )
             base["new_topic_minimal_context"] = False
+        if semantic_chain.get("available"):
+            base["required_context"].append({
+                "key": "SEMANTIC_CONTINUATION_CHAIN",
+                "priority": 0.998,
+                "value": deepcopy(semantic_chain),
+            })
         if selected_memory:
             base["required_context"].append(
                 {
@@ -3728,10 +3836,13 @@ def _df_interpret_live_turn(
         or active_topic
         or previous_april
     )
+    explicit_new_boundary = _df_strong_topic_boundary(current)
     explicit_recall = _df_explicit_recall(current)
 
     provisional_relation = (
-        "RECALL"
+        "NEW"
+        if explicit_new_boundary
+        else "RECALL"
         if explicit_recall
         else "CONTINUE"
         if has_live_branch
@@ -4039,16 +4150,22 @@ def _df_interpret_live_turn(
         semantic["entity"] = _df_text(prior_task.get("entity") or active_entity or "", 180)
         if live_role == "answer_to_active_question":
             semantic["candidate_answer"] = current
-    task = _df_task_state(
-        current,
-        relation,
-        task_probe,
-        prior_task,
-        semantic.get("topic") or active_topic,
-        semantic.get("entity") or active_entity,
-        sequence_id,
-        active_context,
-    )
+    if relation == "RECALL":
+        # Broad memory recall is not a new dialogue task. A specifically recalled
+        # branch may carry its historical task; otherwise keep task state empty.
+        recalled_task = selected_branch.get("active_task") if isinstance(selected_branch, dict) else None
+        task = deepcopy(recalled_task) if isinstance(recalled_task, dict) and recalled_task else {}
+    else:
+        task = _df_task_state(
+            current,
+            relation,
+            task_probe,
+            prior_task,
+            semantic.get("topic") or active_topic,
+            semantic.get("entity") or active_entity,
+            sequence_id,
+            active_context,
+        )
     if task and turn_relation == "BRANCH_COMPARISON":
         task["branch_type"] = "comparison"
         task["linked_branch_ids"] = [
@@ -4131,8 +4248,15 @@ def _df_interpret_live_turn(
     development["next_logical_step"] = (
         "answer_current_request"
         if relation != "RECALL"
-        else "answer_recalled_branch_request"
+        else "summarize_recent_dialogue_and_offer_resume"
     )
+    if relation == "RECALL":
+        development["memory_recall"] = {
+            "broad": not bool(selected_branch),
+            "pair_limit": ACTIVE_DIALOGUE_WINDOW_PAIRS,
+            "window_hours": DIALOGUE_WINDOW_HOURS,
+            "authenticated_sequence_required": True,
+        }
     development["active_sequence_digest_version"] = (
         branch_digest_for_provider.get("version")
         if branch_digest_for_provider
@@ -4154,6 +4278,12 @@ def _df_interpret_live_turn(
         task_probe.get("live_question_source") or "", 40
     )
     semantic["relation_definition"] = _DF_RELATION_DEFINITIONS.get(relation, "")
+    semantic["memory_recall"] = {
+        "requested": relation == "RECALL",
+        "broad_conversation_recall": relation == "RECALL" and not bool(selected_branch),
+        "active_window_pairs": ACTIVE_DIALOGUE_WINDOW_PAIRS if relation == "RECALL" else 0,
+        "window_hours": DIALOGUE_WINDOW_HOURS if relation == "RECALL" else 0,
+    }
     semantic["semantic_link"] = deepcopy(semantic_reference) if semantic_reference.get("resolved") else {}
     semantic["semantic_link_required_action"] = (
         "APPLY_TO_PREVIOUS_RESULT"
@@ -4557,6 +4687,8 @@ def _df_interpret_live_turn(
         "semantic_frame": deepcopy(semantic_frame),
         "dialogue_development": deepcopy(development),
         "provider_context_plan": deepcopy(provider_plan),
+        "memory_recall": deepcopy(semantic.get("memory_recall") or {}),
+        "semantic_chain": deepcopy(semantic.get("semantic_chain") or {}),
         "active_sequence_digest": deepcopy(
             branch_digest_for_provider
         ),
