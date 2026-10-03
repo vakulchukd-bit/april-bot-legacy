@@ -1164,6 +1164,19 @@ def _df_visual_reference_entity(
         return ""
 
     sources: list[str] = []
+    canonical = state.get("canonical_dialogue_turn") if isinstance(state, dict) and isinstance(state.get("canonical_dialogue_turn"), dict) else {}
+    if canonical:
+        canonical_entities = canonical.get("entities") if isinstance(canonical.get("entities"), list) else []
+        if len(canonical_entities) >= 2 and re.search(r"\b(?:их|них|им|ими|обоих|обеих)\b", low):
+            return " и ".join(_df_text(x, 180) for x in canonical_entities[:4] if _df_text(x, 180))
+        if canonical_entities:
+            sources.append(" и ".join(_df_text(x, 180) for x in canonical_entities if _df_text(x, 180)))
+        sources.extend([
+            _df_text(canonical.get("active_entity"), 300),
+            _df_text(canonical.get("topic"), 300),
+            _df_text(canonical.get("user_request"), 1200),
+            _df_text(canonical.get("april_answer"), 2400),
+        ])
     anchor = state.get("dialogue_memory_anchor") if isinstance(state, dict) and isinstance(state.get("dialogue_memory_anchor"), dict) else {}
     if anchor:
         entities = anchor.get("entities") or []
@@ -1250,19 +1263,28 @@ def _df_normalize_subject(value: str) -> str:
 
 
 def _df_extract_previous(history: list[Any], state: dict[str, Any]) -> tuple[str, str]:
-    """Return the real immediately preceding USER↔APRIL pair for this session.
+    """Return the latest completed USER↔APRIL pair from canonical 12h memory."""
+    canonical = state.get("canonical_dialogue_turn") if isinstance(state.get("canonical_dialogue_turn"), dict) else {}
+    if canonical:
+        user = _df_text(canonical.get("user_request"), 1200)
+        april = _df_text(canonical.get("april_answer"), 2200)
+        if user or april:
+            return user, april
 
-    Task-local state is a secondary source. The parent authenticated sequence is
-    authoritative for discourse order, so a task switch cannot make the previous
-    turn disappear from interpretation.
-    """
+    anchor = state.get("dialogue_memory_anchor") if isinstance(state.get("dialogue_memory_anchor"), dict) else {}
+    if anchor:
+        user = _df_text(anchor.get("user_request"), 1200)
+        april = _df_text(anchor.get("april_answer"), 2200)
+        if user or april:
+            return user, april
+
+    # Pair archive is the durable authenticated source. Ignore task mirrors here.
+    timeline = state.get("memory_timeline") if isinstance(state.get("memory_timeline"), dict) else {}
     seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
     sequence_id = _df_text(seq.get("sequence_id"), 120)
     user_id = _df_text(state.get("user_id") or (state.get("memory_scope") or {}).get("user_id"), 120)
     conversation_id = _df_text(state.get("conversation_id") or (state.get("memory_scope") or {}).get("conversation_id"), 160)
-
-    candidates: list[tuple[int, float, str, str]] = []
-    timeline = state.get("memory_timeline") if isinstance(state.get("memory_timeline"), dict) else {}
+    candidates = []
     now = time.time()
     for day in timeline.values():
         if not isinstance(day, dict):
@@ -1282,66 +1304,22 @@ def _df_extract_previous(history: list[Any], state: dict[str, Any]) -> tuple[str
                 created_at = 0.0
             if created_at and now - created_at >= USER_CONTENT_RETENTION_SECONDS:
                 continue
-            try:
-                turn_index = int(raw.get("sequence_turn_index") or 0)
-            except (TypeError, ValueError):
-                turn_index = 0
-            user = _df_text(raw.get("user_request") or raw.get("user_meaning") or raw.get("user"), 1200)
-            april = _df_text(raw.get("april_answer") or raw.get("april_meaning") or raw.get("answer") or raw.get("answer_summary"), 2200)
-            if user or april:
-                candidates.append((turn_index, created_at, user, april))
-
+            candidates.append(raw)
     if candidates:
-        candidates.sort(key=lambda item: (item[0], item[1]))
-        _turn, _created, user, april = candidates[-1]
-        if user or april:
-            return user, april
+        candidates.sort(key=lambda item: (int(item.get("sequence_turn_index") or 0), float(item.get("created_at") or 0.0)))
+        last = candidates[-1]
+        return (
+            _df_text(last.get("user_request") or last.get("user_meaning"), 1200),
+            _df_text(last.get("april_answer") or last.get("april_meaning") or last.get("answer"), 2200),
+        )
 
-    # The post-Provider canonical anchor is the direct latest-turn source.
-    anchor = state.get("dialogue_memory_anchor") if isinstance(state.get("dialogue_memory_anchor"), dict) else {}
-    if anchor:
-        anchor_user = _df_text(anchor.get("user_request"), 1200)
-        anchor_april = _df_text(anchor.get("april_answer"), 2200)
-        if anchor_user or anchor_april:
-            return anchor_user, anchor_april
-
-    # Sequence head is the next-best source when pair archival was delayed.
+    # Compatibility fallback only when canonical memory is genuinely unavailable.
     seq_user = _df_text(seq.get("last_user_request") or state.get("last_user_turn"), 1200)
     seq_april = _df_text(seq.get("last_april_answer") or state.get("last_april_turn"), 2200)
     if seq_user or seq_april:
         return seq_user, seq_april
+    return "", ""
 
-    # Only now use task-local/legacy context as a compatibility fallback.
-    active_context = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
-    last_result = active_context.get("last_completed_result") if isinstance(active_context.get("last_completed_result"), dict) else {}
-    if last_result:
-        return (
-            _df_text(last_result.get("user_request") or last_result.get("current_request"), 1200),
-            _df_text(last_result.get("assistant_answer") or last_result.get("april_answer"), 2200),
-        )
-
-    prev_user = ""
-    prev_april = ""
-    for item in reversed(history if isinstance(history, list) else []):
-        if not isinstance(item, dict):
-            continue
-        user = item.get("user") if isinstance(item.get("user"), dict) else {}
-        apr = item.get("april") if isinstance(item.get("april"), dict) else {}
-        if not prev_user:
-            prev_user = _df_text(
-                user.get("text") or user.get("content") or item.get("text")
-                or (item.get("role") == "user" and item.get("content")),
-                1200,
-            )
-        if not prev_april:
-            prev_april = _df_text(
-                apr.get("answer") or apr.get("content") or item.get("answer")
-                or (item.get("role") in {"assistant", "april", "bot"} and item.get("content")),
-                2200,
-            )
-        if prev_user and prev_april:
-            break
-    return prev_user, prev_april
 
 def _df_active_sequence_digest(
     state: dict[str, Any],
@@ -1706,7 +1684,9 @@ def _df_topic_from_state(state: dict[str, Any]) -> str:
     active_ctx = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
     active_task = _df_active_task(state)
     anchor = state.get("dialogue_memory_anchor") if isinstance(state.get("dialogue_memory_anchor"), dict) else {}
+    canonical = state.get("canonical_dialogue_turn") if isinstance(state.get("canonical_dialogue_turn"), dict) else {}
     for value in (
+        canonical.get("topic"),
         anchor.get("topic"),
         active_task.get("topic"),
         active_ctx.get("topic"),
@@ -1724,8 +1704,12 @@ def _df_entity_from_state(state: dict[str, Any]) -> str:
     active_task = _df_active_task(state)
     active_ctx = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
     anchor = state.get("dialogue_memory_anchor") if isinstance(state.get("dialogue_memory_anchor"), dict) else {}
+    canonical = state.get("canonical_dialogue_turn") if isinstance(state.get("canonical_dialogue_turn"), dict) else {}
+    canonical_entities = canonical.get("entities") if isinstance(canonical.get("entities"), list) else []
     anchor_entities = anchor.get("entities") if isinstance(anchor.get("entities"), list) else []
     for value in (
+        canonical.get("active_entity"),
+        *canonical_entities,
         anchor.get("active_entity"),
         *anchor_entities,
         active_task.get("entity"),
@@ -3114,8 +3098,14 @@ def _df_interpret_live_turn(
         else {}
     )
     previous_user, previous_april = _df_extract_previous(history, state)
-    active_topic = _df_topic_from_state(state)
-    active_entity = _df_entity_from_state(state)
+    canonical_turn = state.get("canonical_dialogue_turn") if isinstance(state.get("canonical_dialogue_turn"), dict) else {}
+    active_topic = _df_text(canonical_turn.get("topic"), 220) or _df_topic_from_state(state)
+    canonical_entities = canonical_turn.get("entities") if isinstance(canonical_turn.get("entities"), list) else []
+    active_entity = (
+        _df_text(canonical_turn.get("active_entity"), 220)
+        or _df_text(" и ".join(str(x) for x in canonical_entities[:4]), 220)
+        or _df_entity_from_state(state)
+    )
     active_context = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
     prior_task = _df_active_task(state)
     context_task = active_context.get("task") if isinstance(active_context.get("task"), dict) else {}
