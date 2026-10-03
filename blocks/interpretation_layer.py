@@ -1054,12 +1054,54 @@ def _df_explicit_recall(text: str) -> bool:
     return _df_memory_scope_request(text)
 
 
+_DF_GENERIC_ENTITY_WORDS = {
+    "чем", "что", "кто", "где", "как", "почему", "зачем", "какой", "какая", "какие",
+    "можешь", "можеш", "нарисуй", "покажи", "изобрази", "сделай", "создай", "построй",
+    "расскажи", "объясни", "сравни", "дай", "выдай", "теперь", "дальше", "это", "вот",
+}
+
+def _df_is_generic_entity(value: Any) -> bool:
+    return _df_low(value) in _DF_GENERIC_ENTITY_WORDS or not _df_low(value)
+
+
+def _df_extract_subjects_from_comparison(text: str) -> list[str]:
+    value = _df_text(text, 1200)
+    if not value:
+        return []
+    patterns = (
+        r"\bчем\s+отлича(?:ется|ются)\s+(.+?)\s+от\s+(.+?)(?:[?.!]|$)",
+        r"\bразница\s+между\s+(.+?)\s+и\s+(.+?)(?:[?.!]|$)",
+        r"\bсравни\s+(.+?)(?:[?.!]|$)",
+        r"\bмежду\s+(.+?)\s+и\s+(.+?)(?:[?.!]|$)",
+    )
+    out = []
+    for pattern in patterns:
+        match = re.search(pattern, value, flags=re.IGNORECASE)
+        if not match:
+            continue
+        for group in match.groups():
+            if not group:
+                continue
+            parts = re.split(r"\s+(?:и|или|,|/|&|против)\s+", group, flags=re.IGNORECASE)
+            for part in parts:
+                candidate = _df_normalize_subject(part.strip(" .,!?:;—-"))
+                if candidate and not _df_is_generic_entity(candidate) and _df_low(candidate) not in {x.casefold() for x in out}:
+                    out.append(candidate)
+        if len(out) >= 2:
+            break
+    return out[:6]
+
+
 def _df_extract_subject(text: str) -> str:
     """Extract the semantic operand without inventing a topic from sentence tails."""
     value = _df_text(text, 1000)
     if not value:
         return ""
     low = _df_low(value)
+
+    comparison_subjects = _df_extract_subjects_from_comparison(value)
+    if comparison_subjects:
+        return " и ".join(comparison_subjects[:4])
 
     # Visual plural deictics are references, not semantic operands.
     if re.match(r"^(?:а\s+)?(?:нарисуй|изобрази|сгенерируй|создай)\s+(?:их|них|обоих|обеих)\b", low):
@@ -1164,6 +1206,35 @@ def _df_visual_reference_entity(
         return ""
 
     sources: list[str] = []
+    # Resolve plural visual references from the immediately preceding comparison
+    # question before any proper-name fallback. This prevents words such as
+    # "Чем"/"Нарисуй" from becoming the entity of the image task.
+    prior_comparisons = []
+    for candidate_text in (previous_user, previous_april):
+        prior_comparisons.extend(_df_extract_subjects_from_comparison(candidate_text))
+    if len(prior_comparisons) >= 2 and re.search(r"\b(?:их|них|им|ими|обоих|обеих)\b", low):
+        unique = []
+        for item in prior_comparisons:
+            norm = _df_normalize_subject(item)
+            if norm and not _df_is_generic_entity(norm) and norm.casefold() not in {x.casefold() for x in unique}:
+                unique.append(norm)
+        if len(unique) >= 2:
+            return " и ".join(unique[:4])
+    continuity_anchor = state.get("visual_continuity_anchor") if isinstance(state, dict) and isinstance(state.get("visual_continuity_anchor"), dict) else {}
+    if continuity_anchor:
+        anchor_entities = [
+            _df_text(x, 180) for x in (continuity_anchor.get("entities") or [])
+            if _df_text(x, 180) and not _df_is_generic_entity(x)
+        ]
+        if len(anchor_entities) >= 2 and re.search(r"\b(?:их|них|им|ими|обоих|обеих)\b", low):
+            return " и ".join(anchor_entities[:4])
+        sources.extend([
+            " и ".join(anchor_entities),
+            _df_text(continuity_anchor.get("active_entity"), 220),
+            _df_text(continuity_anchor.get("topic"), 500),
+            _df_text(continuity_anchor.get("user_request"), 1200),
+            _df_text(continuity_anchor.get("april_answer"), 2200),
+        ])
     canonical = state.get("canonical_dialogue_turn") if isinstance(state, dict) and isinstance(state.get("canonical_dialogue_turn"), dict) else {}
     if canonical:
         canonical_entities = canonical.get("entities") if isinstance(canonical.get("entities"), list) else []
@@ -1226,8 +1297,11 @@ def _df_visual_reference_entity(
         strong = []
         for candidate in proper:
             parts = candidate.split()
-            if parts and parts[0].lower() not in ignored:
-                strong.append(_df_text(candidate, 180))
+            candidate_text = _df_text(candidate, 180)
+            if (parts and parts[0].lower() not in ignored
+                    and not _df_is_generic_entity(candidate_text)
+                    and _df_low(candidate_text) not in {"чем", "нарисуй", "покажи", "это"}):
+                strong.append(candidate_text)
         if plural_reference and strong:
             unique = []
             for candidate in strong:
@@ -1256,6 +1330,17 @@ def _df_normalize_subject(value: str) -> str:
         "илона маска": "илон маск",
         "яблоки": "яблоко",
         "яблок": "яблоко",
+        "угла": "угол",
+        "углы": "угол",
+        "овала": "овал",
+        "овалы": "овал",
+        "круга": "круг",
+        "круги": "круг",
+        "квадрата": "квадрат",
+        "квадраты": "квадрат",
+        "трапеции": "трапеция",
+        "трапецией": "трапеция",
+        "треугольники": "треугольник",
         "угадайки": "игра в угадайки",
         "угадайка": "игра в угадайки",
     }
@@ -3106,6 +3191,15 @@ def _df_interpret_live_turn(
         or _df_text(" и ".join(str(x) for x in canonical_entities[:4]), 220)
         or _df_entity_from_state(state)
     )
+    if _df_is_generic_entity(active_entity):
+        recovered = _df_extract_subjects_from_comparison(active_topic or "")
+        if len(recovered) >= 2:
+            active_entity = " и ".join(recovered[:4])
+        else:
+            anchor = state.get("visual_continuity_anchor") if isinstance(state.get("visual_continuity_anchor"), dict) else {}
+            anchor_entities = [str(x).strip() for x in (anchor.get("entities") or []) if str(x).strip() and not _df_is_generic_entity(x)]
+            if len(anchor_entities) >= 2:
+                active_entity = " и ".join(anchor_entities[:4])
     active_context = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
     prior_task = _df_active_task(state)
     context_task = active_context.get("task") if isinstance(active_context.get("task"), dict) else {}
@@ -3158,8 +3252,10 @@ def _df_interpret_live_turn(
     digest_topic = _df_text(active_sequence_digest.get("current_topic"), 220)
     if digest_topic and _df_low(digest_topic) not in {
         "если", "это", "такое", "такой", "так", "пронумеруй", "выдай", "проверь",
-    }:
+    } and not _df_is_generic_entity(digest_topic):
         active_topic = digest_topic
+
+    comparison_subjects = _df_extract_subjects_from_comparison(current)
 
     # ------------------------------------------------------------------
     # 2) Cheap evidence probes. They cannot own relation or routing.
@@ -3228,6 +3324,13 @@ def _df_interpret_live_turn(
         task_probe,
         render_probe,
     )
+    if comparison_subjects and not visual_ref_entity:
+        semantic["comparison_subjects"] = comparison_subjects
+        if semantic.get("representation") == "image" and re.search(r"\b(?:их|них|обоих|обеих)\b", current.casefold()):
+            semantic["reference_entity"] = " и ".join(comparison_subjects[:4])
+            semantic["entity"] = " и ".join(comparison_subjects[:4])
+            semantic["topic"] = " и ".join(comparison_subjects[:4])
+
     if visual_ref_entity:
         # For a deictic image-edit request ("его/её/этого человека") the
         # resolved visual entity is authoritative. Do not let the generic
@@ -3371,6 +3474,26 @@ def _df_interpret_live_turn(
         semantic["explicit_subject"] = ""
         active_entity = visual_ref_entity
         active_topic = visual_ref_entity
+
+    # Final semantic guard: a generic interrogative/command can never overwrite
+    # the concrete branch subject. This is especially important for image follow-ups.
+    if _df_is_generic_entity(active_entity):
+        recovered = list(comparison_subjects or [])
+        if len(recovered) < 2:
+            anchor = state.get("visual_continuity_anchor") if isinstance(state.get("visual_continuity_anchor"), dict) else {}
+            recovered = [
+                _df_normalize_subject(x) for x in (anchor.get("entities") or [])
+                if _df_normalize_subject(x) and not _df_is_generic_entity(x)
+            ]
+        if len(recovered) >= 2:
+            active_entity = " и ".join(recovered[:4])
+            if relation == "CONTINUE":
+                active_topic = active_entity
+            semantic["entity"] = active_entity
+            semantic["topic"] = semantic.get("topic") if relation == "RECALL" else active_topic
+        elif not _df_is_generic_entity(active_topic):
+            active_entity = active_topic
+            semantic["entity"] = active_entity
 
     # ------------------------------------------------------------------
     # 5) Apply the final relation to semantic identity.
