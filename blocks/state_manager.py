@@ -56,8 +56,11 @@ MEMORY_TTL_SECONDS = DIALOGUE_WINDOW_SECONDS
 USER_CONTENT_RETENTION_SECONDS = DIALOGUE_WINDOW_SECONDS
 MEMORY_SLOTS = 1
 
-SESSION_MEMORY_LIMIT = 1600
-HOT_DIALOG_LIMIT = 30
+SESSION_MEMORY_LIMIT = 1600  # legacy compatibility for summaries/limits outside canonical hot dialogue
+HOT_DIALOG_LIMIT = 3
+CANONICAL_DIALOG_HOT_LIMIT = 3
+RECALL_INDEX_LIMIT = 512
+MEMORY_HOURLY_CLEANUP_SECONDS = 3600.0
 TOPIC_CLASSES = ["A", "B", "C", "D", "E"]
 
 _INTERNAL_BRANCH_ALPHABET_RU = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
@@ -2948,9 +2951,17 @@ def _repair_canonical_dialogue_memory(state_obj):
     return changed
 
 def get_state(user_id):
+    """Fast authenticated state access.
+
+    The request hot path deliberately does NOT rebuild the 12h archive, task registry,
+    embeddings, or canonical history. Those operations belong to Provider completion
+    and/or the hourly maintenance worker. Historical 12h data is recall-only evidence.
+    """
     key = str(user_id)
+    maintenance_due = False
 
     with _state_lock:
+        needs_full_normalization = False
         if key not in state:
             db_state = None
             try:
@@ -2965,83 +2976,169 @@ def get_state(user_id):
             else:
                 state[key] = build_default_state()
                 safe_state_log(f"NEW STATE: {key}")
+            needs_full_normalization = True
 
-        state[key]["user_id"] = key
-        profile = state[key].get("user_profile")
+        obj = state[key]
+        obj["user_id"] = key
+        profile = obj.get("user_profile")
         if not isinstance(profile, dict):
             profile = {}
         profile.setdefault("name", "")
         profile.setdefault("name_source", "")
         profile.setdefault("updated_at", None)
-        state[key]["user_profile"] = profile
-        if not state[key].get("conversation_id"):
-            state[key]["conversation_id"] = (
+        obj["user_profile"] = profile
+        if not obj.get("conversation_id"):
+            obj["conversation_id"] = (
                 f"april-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:24]}"
             )
-        state[key]["memory_scope"] = {
+        obj["memory_scope"] = {
             "user_id": key,
-            "conversation_id": state[key]["conversation_id"],
+            "conversation_id": obj["conversation_id"],
             "scope_version": "USER_SCOPED_SCENE_V2",
         }
-        QUANTUM_MEMORY_ENGINE.ensure(state[key])
-        _sanitize_persisted_dialog(state[key])
-        # The 12-hour memory window is authenticated per user and anchored to the
-        # beginning of that user's dialogue. All time fields are UTC/epoch based.
-        cycle = state[key].get("memory_cycle") if isinstance(state[key].get("memory_cycle"), dict) else {}
-        now_ts = time.time()
-        if cycle.get("anchor_mode") != "USER_DIALOGUE_START_12H_V1":
-            seq = state[key].get("active_dialogue_sequence") if isinstance(state[key].get("active_dialogue_sequence"), dict) else {}
-            anchor = float(seq.get("started_at") or cycle.get("session_start_utc") or 0.0)
-            if anchor <= 0.0:
-                pairs = ((state[key].get("memory_timeline") or {}).get("day_0") or {}).get("dialog_pairs", [])
-                timestamps = []
-                for item in pairs:
-                    if not isinstance(item, dict):
-                        continue
-                    try:
-                        ts = float(item.get("created_at") or item.get("timestamp") or 0.0)
-                    except (TypeError, ValueError):
-                        ts = 0.0
-                    if ts > 0.0:
-                        timestamps.append(ts)
-                anchor = min(timestamps or [now_ts])
-            state[key]["memory_cycle"] = {
-                "anchor_mode": "USER_DIALOGUE_START_12H_V1",
-                "session_start_utc": anchor,
-                "window_start_utc": anchor,
-                "window_key": datetime.fromtimestamp(anchor, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "seed_cutoff_utc": anchor - DIALOGUE_SEED_SECONDS,
-                "last_rollover": cycle.get("last_rollover") or now_ts,
-            }
-        rolled = QUANTUM_MEMORY_ENGINE.rollover(state[key])
-        repaired = _repair_canonical_dialogue_memory(state[key])
-        # Re-normalize the active sequence strictly from repaired canonical pairs.
-        QUANTUM_MEMORY_ENGINE._ensure_active_dialogue_sequence(state[key])
 
-        # Authenticated per-user memory owns the live task. Reject stale/foreign task objects
-        # even when a legacy persistence record accidentally carries today's
-        # window key or omits task timestamps.
-        active_sequence = state[key].get("active_dialogue_sequence") if isinstance(state[key].get("active_dialogue_sequence"), dict) else {}
-        for task_key in ("interactive_task_state", "open_task", "active_task"):
-            candidate = state[key].get(task_key) if isinstance(state[key].get(task_key), dict) else {}
-            valid = QUANTUM_MEMORY_ENGINE._task_belongs_to_sequence(candidate, active_sequence, now=time.time())
-            state[key][task_key] = valid
-            if isinstance(active_sequence, dict) and task_key in {"interactive_task_state", "open_task", "active_task"}:
-                seq_field = task_key if task_key != "open_task" else "open_task"
-                active_sequence[seq_field] = deepcopy(valid)
-        if isinstance(active_sequence, dict):
-            active_sequence["task_state"] = deepcopy(active_sequence.get("active_task") or {})
-            state[key]["active_dialogue_sequence"] = active_sequence
+        # Full normalization is a one-time load/migration operation. Re-running
+        # QuantumMemoryEngine.ensure() on every message would rebuild task/sequence
+        # state and scan the 12h archive, defeating the fast hot path.
+        if needs_full_normalization or obj.get("_state_manager_normalized_version") != 3:
+            QUANTUM_MEMORY_ENGINE.ensure(obj)
+            _sanitize_persisted_dialog(obj)
+            obj["_state_manager_normalized_version"] = 3
+        else:
+            # The live dialog is already capped; this is intentionally O(3).
+            dialog = obj.get("dialog")
+            if isinstance(dialog, list) and len(dialog) > CANONICAL_DIALOG_HOT_LIMIT:
+                obj["dialog"] = dialog[-CANONICAL_DIALOG_HOT_LIMIT:]
 
-        removed_hot = _cleanup_hot_content(state[key])
-        if removed_hot or rolled or repaired:
-            QUANTUM_MEMORY_ENGINE.refresh_scene(state[key])
-            try:
-                if callable(save_memory):
-                    save_memory(key, _persistable_snapshot(state[key]))
-            except Exception as exc:
-                safe_state_log(f"MEMORY TTL PERSIST FAILED: {exc}")
-        return state[key]
+        cleanup = obj.get("memory_cleanup") if isinstance(obj.get("memory_cleanup"), dict) else {}
+        try:
+            last_cleanup = float(cleanup.get("last_cleanup_at") or 0.0)
+        except (TypeError, ValueError):
+            last_cleanup = 0.0
+        maintenance_due = (not last_cleanup) or (time.time() - last_cleanup >= MEMORY_HOURLY_CLEANUP_SECONDS)
+
+        result = obj
+
+    if maintenance_due:
+        _schedule_hourly_memory_maintenance(key)
+    return result
+
+
+def _append_recall_index(state_obj, pair):
+    """Keep a compact 12h recall index while full dialogue is limited to the last 3 turns."""
+    if not isinstance(state_obj, dict) or not isinstance(pair, dict):
+        return
+    now = time.time()
+    idx = state_obj.get("dialogue_recall_index")
+    if not isinstance(idx, list):
+        idx = []
+    item = {
+        "user_id": str(pair.get("user_id") or state_obj.get("user_id") or ""),
+        "conversation_id": str(pair.get("conversation_id") or state_obj.get("conversation_id") or ""),
+        "created_at": float(pair.get("created_at") or now),
+        "sequence_id": str(pair.get("sequence_id") or ""),
+        "sequence_turn_index": int(pair.get("sequence_turn_index") or 0),
+        "relation": str(pair.get("dialogue_relation") or pair.get("relation") or "NEW").upper(),
+        "topic": safe_trim_text(pair.get("topic") or pair.get("sequence_topic") or "", 220),
+        "subtopic": safe_trim_text(pair.get("subtopic") or "", 180),
+        "entities": [safe_trim_text(x, 120) for x in safe_list(pair.get("entities"))[:8] if str(x).strip()],
+        "active_entity": safe_trim_text(pair.get("active_entity") or "", 160),
+        "user_request": safe_trim_text(pair.get("user_request") or pair.get("user_meaning") or "", 360),
+        "answer_summary": safe_trim_text(pair.get("answer_summary") or pair.get("april_meaning") or pair.get("april_answer") or "", 500),
+        "source_of_truth": "USER_REQUEST_PLUS_PROVIDER_RESPONSE",
+        "memory_source": "POST_PROVIDER_OPENAI_RESPONSE",
+    }
+    fingerprint = (item["conversation_id"], item["sequence_turn_index"], item["user_request"])
+    idx = [x for x in idx if not (isinstance(x, dict) and (str(x.get("conversation_id") or ""), int(x.get("sequence_turn_index") or 0), str(x.get("user_request") or "")) == fingerprint)]
+    idx.append(item)
+    cutoff = now - DIALOGUE_WINDOW_SECONDS
+    idx = [x for x in idx if isinstance(x, dict) and float(x.get("created_at") or 0.0) >= cutoff]
+    idx.sort(key=lambda x: float(x.get("created_at") or 0.0))
+    state_obj["dialogue_recall_index"] = idx[-RECALL_INDEX_LIMIT:]
+    state_obj["dialogue_recall_policy"] = {
+        "full_turns_kept": CANONICAL_DIALOG_HOT_LIMIT,
+        "recall_index_hours": DIALOGUE_WINDOW_HOURS,
+        "recall_index_max": RECALL_INDEX_LIMIT,
+        "full_archive_is_recall_only": True,
+    }
+
+
+def _repair_latest_canonical_dialogue_memory(state_obj):
+    """Cheap maintenance: repair only the last 3 completed turns and current task mirrors."""
+    if not isinstance(state_obj, dict):
+        return False
+    timeline = state_obj.get("memory_timeline") if isinstance(state_obj.get("memory_timeline"), dict) else {}
+    day0 = timeline.get("day_0") if isinstance(timeline.get("day_0"), dict) else {}
+    pairs = [p for p in day0.get("dialog_pairs", []) if isinstance(p, dict)][-CANONICAL_DIALOG_HOT_LIMIT:]
+    if not pairs:
+        return False
+    changed = False
+    latest = pairs[-1]
+    # Provider-produced memory_semantics is authoritative; never re-infer it from a command word.
+    sem = latest.get("memory_semantics") if isinstance(latest.get("memory_semantics"), dict) else {}
+    if sem:
+        canonical = deepcopy(sem)
+        canonical.update({
+            "user_id": str(state_obj.get("user_id") or ""),
+            "conversation_id": str(state_obj.get("conversation_id") or ""),
+            "sequence_id": str(latest.get("sequence_id") or ""),
+            "task_id": str(latest.get("task_id") or ""),
+            "sequence_turn_index": int(latest.get("sequence_turn_index") or 0),
+            "created_at": float(latest.get("created_at") or time.time()),
+            "expires_after_hours": DIALOGUE_WINDOW_HOURS,
+            "source_of_truth": "USER_REQUEST_PLUS_PROVIDER_RESPONSE",
+        })
+        if state_obj.get("dialogue_memory_anchor") != canonical:
+            state_obj["dialogue_memory_anchor"] = deepcopy(canonical)
+            turn = deepcopy(canonical)
+            turn["record_type"] = "canonical_dialogue_turn"
+            state_obj["canonical_dialogue_turn"] = turn
+            changed = True
+        # Replace stale active entity/topic mirrors from the latest Provider semantics only.
+        seq = state_obj.get("active_dialogue_sequence") if isinstance(state_obj.get("active_dialogue_sequence"), dict) else {}
+        for k, v in (("topic", canonical.get("topic") or ""), ("active_entity", canonical.get("active_entity") or ""), ("entities", deepcopy(canonical.get("entities") or []))):
+            if seq.get(k) != v:
+                seq[k] = v
+                changed = True
+        state_obj["active_dialogue_sequence"] = seq
+    return changed
+
+
+def _schedule_hourly_memory_maintenance(user_id):
+    uid = str(user_id)
+    with _MEMORY_MAINTENANCE_LOCK:
+        if uid in _MEMORY_MAINTENANCE_WORKERS:
+            return
+        _MEMORY_MAINTENANCE_WORKERS.add(uid)
+
+    def _worker():
+        try:
+            with _state_lock:
+                obj = state.get(uid)
+                if not isinstance(obj, dict):
+                    return
+                cleanup = obj.get("memory_cleanup") if isinstance(obj.get("memory_cleanup"), dict) else {}
+                try:
+                    last = float(cleanup.get("last_cleanup_at") or 0.0)
+                except (TypeError, ValueError):
+                    last = 0.0
+                if last and time.time() - last < MEMORY_HOURLY_CLEANUP_SECONDS:
+                    return
+                removed = _cleanup_hot_content(obj)
+                repaired = _repair_latest_canonical_dialogue_memory(obj)
+                if removed or repaired:
+                    QUANTUM_MEMORY_ENGINE.refresh_scene(obj)
+                snapshot = _persistable_snapshot(obj)
+            if callable(save_memory):
+                save_memory(uid, snapshot)
+            safe_state_log(f"HOURLY MEMORY CLEANUP: user={uid} removed={removed} full_turns={CANONICAL_DIALOG_HOT_LIMIT} recall_index={len(obj.get('dialogue_recall_index') or [])}")
+        except Exception as exc:
+            safe_state_log(f"HOURLY MEMORY CLEANUP ERROR: {exc}")
+        finally:
+            with _MEMORY_MAINTENANCE_LOCK:
+                _MEMORY_MAINTENANCE_WORKERS.discard(uid)
+
+    threading.Thread(target=_worker, name="april-memory-hourly-cleanup", daemon=True).start()
 
 
 def _cleanup_hot_content(state_obj, now=None):
@@ -3070,7 +3167,7 @@ def _cleanup_hot_content(state_obj, now=None):
             removed += 1
             continue
         kept_dialog.append(item)
-    state_obj["dialog"] = kept_dialog[-HOT_DIALOG_LIMIT:]
+    state_obj["dialog"] = kept_dialog[-CANONICAL_DIALOG_HOT_LIMIT:]
 
     internal_events = safe_list(state_obj.get("internal_dialog_events"))
     kept_internal = []
@@ -3084,7 +3181,7 @@ def _cleanup_hot_content(state_obj, now=None):
             removed += 1
             continue
         kept_internal.append(item)
-    state_obj["internal_dialog_events"] = kept_internal[-VISUAL_HISTORY_LIMIT:]
+    state_obj["internal_dialog_events"] = kept_internal[-CANONICAL_DIALOG_HOT_LIMIT:]
 
     for content_key, timestamp_key in (("last_user_turn", "last_user_turn_at"), ("last_april_turn", "last_april_turn_at"), ("current_scene_request", "current_scene_request_at")):
         value = state_obj.get(content_key)
@@ -3137,7 +3234,7 @@ def _cleanup_hot_content(state_obj, now=None):
                 removed += 1
                 continue
         kept_memory.append(item)
-    state_obj["image_memory"] = kept_memory[-IMAGE_MEMORY_LIMIT:]
+    state_obj["image_memory"] = kept_memory[-3:]
 
     prompt = state_obj.get("last_prompt")
     prompt_stamp = state_obj.get("last_prompt_at")
@@ -3165,11 +3262,55 @@ def _cleanup_hot_content(state_obj, now=None):
         removed += 1
     state_obj["meta"] = meta
 
+    # Full dialogue archive is intentionally hot-only: keep exactly the last 3 completed
+    # USER↔APRIL turns. Older turns survive only as compact 12h recall index entries.
+    timeline = state_obj.get("memory_timeline") if isinstance(state_obj.get("memory_timeline"), dict) else {}
+    day0 = timeline.get("day_0") if isinstance(timeline.get("day_0"), dict) else {}
+    if day0:
+        pairs = [x for x in day0.get("dialog_pairs", []) if isinstance(x, dict)]
+        # Before deleting legacy/full turns, preserve only compact recall facts for the
+        # still-valid 12h window. This migrates old state once, without carrying full answers.
+        for pair in pairs:
+            try:
+                pts = float(pair.get("created_at") or pair.get("timestamp") or 0.0)
+            except (TypeError, ValueError):
+                pts = 0.0
+            if pts and now - pts < DIALOGUE_WINDOW_SECONDS:
+                _append_recall_index(state_obj, pair)
+        if len(pairs) > CANONICAL_DIALOG_HOT_LIMIT:
+            removed += len(pairs) - CANONICAL_DIALOG_HOT_LIMIT
+        day0["dialog_pairs"] = pairs[-CANONICAL_DIALOG_HOT_LIMIT:]
+        # Visual history is also capped; the active/current scene pointers are untouched.
+        for field, limit in (("visual_scenes", 3), ("topics", 3), ("objects", 3), ("intent_signals", 3)):
+            values = day0.get(field) if isinstance(day0.get(field), list) else []
+            if len(values) > limit:
+                removed += len(values) - limit
+                day0[field] = values[-limit:]
+        timeline["day_0"] = day0
+        state_obj["memory_timeline"] = timeline
+
+    recall_index = state_obj.get("dialogue_recall_index") if isinstance(state_obj.get("dialogue_recall_index"), list) else []
+    cutoff = now - DIALOGUE_WINDOW_SECONDS
+    state_obj["dialogue_recall_index"] = [
+        x for x in recall_index
+        if isinstance(x, dict) and float(x.get("created_at") or 0.0) >= cutoff
+    ][-RECALL_INDEX_LIMIT:]
+
     state_obj["user_content_retention"] = {
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "ttl_seconds": USER_CONTENT_RETENTION_SECONDS,
-        "policy": "all_user_content_rolling_ttl",
+        "hourly_cleanup_seconds": MEMORY_HOURLY_CLEANUP_SECONDS,
+        "full_dialog_turns": CANONICAL_DIALOG_HOT_LIMIT,
+        "policy": "hourly_hot_cleanup_plus_12h_compact_recall",
         "last_cleanup_at": now,
+    }
+    state_obj["memory_cleanup"] = {
+        "last_cleanup_at": now,
+        "last_cleanup_utc": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+        "removed_count": removed,
+        "window": "hourly_hot_3_plus_12h_recall_index",
+        "full_dialog_turns": CANONICAL_DIALOG_HOT_LIMIT,
+        "recall_index_hours": DIALOGUE_WINDOW_HOURS,
     }
     return removed
 
@@ -3242,17 +3383,14 @@ def persist_state(user_id):
 _PERSIST_BACKGROUND_LOCK = threading.RLock()
 _PERSIST_BACKGROUND_QUEUES = {}
 _PERSIST_BACKGROUND_WORKERS = set()
+_MEMORY_MAINTENANCE_LOCK = threading.RLock()
+_MEMORY_MAINTENANCE_WORKERS = set()
 
 def persist_state_background(user_id):
+    """Queue a persistence marker; serialization and DB I/O happen only in the worker."""
     uid = str(user_id)
-    try:
-        snapshot = _persistable_snapshot(get_state(uid))
-    except Exception as exc:
-        safe_state_log(f"BACKGROUND PERSIST SNAPSHOT ERROR: {exc}")
-        return
-
     with _PERSIST_BACKGROUND_LOCK:
-        _PERSIST_BACKGROUND_QUEUES[uid] = snapshot
+        _PERSIST_BACKGROUND_QUEUES[uid] = True
         if uid in _PERSIST_BACKGROUND_WORKERS:
             return
         _PERSIST_BACKGROUND_WORKERS.add(uid)
@@ -3260,24 +3398,23 @@ def persist_state_background(user_id):
     def _worker():
         while True:
             with _PERSIST_BACKGROUND_LOCK:
-                payload = _PERSIST_BACKGROUND_QUEUES.pop(uid, None)
-            if payload is None:
+                pending = _PERSIST_BACKGROUND_QUEUES.pop(uid, None)
+            if pending is None:
                 with _PERSIST_BACKGROUND_LOCK:
                     _PERSIST_BACKGROUND_WORKERS.discard(uid)
                 return
             try:
+                with _state_lock:
+                    obj = state.get(uid)
+                    if not isinstance(obj, dict):
+                        continue
+                    snapshot = _persistable_snapshot(obj)
                 if callable(save_memory):
-                    save_memory(uid, payload)
+                    save_memory(uid, snapshot)
             except Exception as exc:
                 safe_state_log(f"BACKGROUND PERSIST ERROR: {exc}")
-                # Keep the request path non-blocking. A future turn can publish a
-                # fresh snapshot without making persistence failures user-visible.
 
-    threading.Thread(
-        target=_worker,
-        name="april-state-persist",
-        daemon=True,
-    ).start()
+    threading.Thread(target=_worker, name="april-state-persist", daemon=True).start()
 
 
 # =====================================================
@@ -3495,6 +3632,7 @@ def _archive_dialog_pair(state_obj, user_id, user_msg, april_msg):
         )
     ]
     state_obj["memory_timeline"] = timeline
+    _append_recall_index(state_obj, record)
 
 
 def compress_dialog_to_summary(state_obj):
@@ -5928,7 +6066,8 @@ def update_scene_context(
         for item in pairs[-HOT_DIALOG_LIMIT:]
     ):
         pairs.append(pair)
-    day0["dialog_pairs"] = pairs[-SESSION_MEMORY_LIMIT:]
+    day0["dialog_pairs"] = pairs[-CANONICAL_DIALOG_HOT_LIMIT:]
+    _append_recall_index(state_obj, pair)
 
     # Keep the scene in durable visual history, without allowing old entries to
     # become active again merely because a new request is text-only.
