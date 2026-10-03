@@ -1052,7 +1052,7 @@ class ProcessorScene:
             dialogue_memory = build_dialogue_memory_bridge(
                 self.user_id,
                 query=self.request,
-                limit=8,
+                limit=15,
                 relation=relation,
                 target_sequence_id=_text(
                     dialogue.get("target_sequence_id")
