@@ -2893,6 +2893,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
             contract,
             current_request=request_text,
             answer=response.answer,
+            provider_result=provider_contract,
             visual_generation_memory=dialogue_visual_generation_memory,
             internal_context=bool(kwargs.get("internal_context", False)),
             # The canonical state is updated synchronously in memory, but the
