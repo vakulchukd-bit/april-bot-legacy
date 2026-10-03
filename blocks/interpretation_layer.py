@@ -1054,54 +1054,12 @@ def _df_explicit_recall(text: str) -> bool:
     return _df_memory_scope_request(text)
 
 
-_DF_GENERIC_ENTITY_WORDS = {
-    "чем", "что", "кто", "где", "как", "почему", "зачем", "какой", "какая", "какие",
-    "можешь", "можеш", "нарисуй", "покажи", "изобрази", "сделай", "создай", "построй",
-    "расскажи", "объясни", "сравни", "дай", "выдай", "теперь", "дальше", "это", "вот",
-}
-
-def _df_is_generic_entity(value: Any) -> bool:
-    return _df_low(value) in _DF_GENERIC_ENTITY_WORDS or not _df_low(value)
-
-
-def _df_extract_subjects_from_comparison(text: str) -> list[str]:
-    value = _df_text(text, 1200)
-    if not value:
-        return []
-    patterns = (
-        r"\bчем\s+отлича(?:ется|ются)\s+(.+?)\s+от\s+(.+?)(?:[?.!]|$)",
-        r"\bразница\s+между\s+(.+?)\s+и\s+(.+?)(?:[?.!]|$)",
-        r"\bсравни\s+(.+?)(?:[?.!]|$)",
-        r"\bмежду\s+(.+?)\s+и\s+(.+?)(?:[?.!]|$)",
-    )
-    out = []
-    for pattern in patterns:
-        match = re.search(pattern, value, flags=re.IGNORECASE)
-        if not match:
-            continue
-        for group in match.groups():
-            if not group:
-                continue
-            parts = re.split(r"\s+(?:и|или|,|/|&|против)\s+", group, flags=re.IGNORECASE)
-            for part in parts:
-                candidate = _df_normalize_subject(part.strip(" .,!?:;—-"))
-                if candidate and not _df_is_generic_entity(candidate) and _df_low(candidate) not in {x.casefold() for x in out}:
-                    out.append(candidate)
-        if len(out) >= 2:
-            break
-    return out[:6]
-
-
 def _df_extract_subject(text: str) -> str:
     """Extract the semantic operand without inventing a topic from sentence tails."""
     value = _df_text(text, 1000)
     if not value:
         return ""
     low = _df_low(value)
-
-    comparison_subjects = _df_extract_subjects_from_comparison(value)
-    if comparison_subjects:
-        return " и ".join(comparison_subjects[:4])
 
     # Visual plural deictics are references, not semantic operands.
     if re.match(r"^(?:а\s+)?(?:нарисуй|изобрази|сгенерируй|создай)\s+(?:их|них|обоих|обеих)\b", low):
@@ -1138,6 +1096,7 @@ def _df_extract_subject(text: str) -> str:
     match = re.match(rf"^(?:а\s+)?{head}\s+(.+)$", low, re.IGNORECASE)
     if match:
         candidate = match.group(1).strip(" .,!?:;—-\n")
+        candidate = re.sub(r"^(?:мне|меня|для\s+меня)\s+", "", candidate, flags=re.IGNORECASE)
         candidate = re.sub(
             r"\s+(?:прописью|словами|подробно|кратко|пожалуйста|сейчас)$",
             "",
@@ -1190,134 +1149,45 @@ def _df_visual_reference_entity(
     previous_april: str = "",
     state: dict[str, Any] | None = None,
 ) -> str:
-    """Resolve an image-edit pronoun to the nearest semantic person/object.
+    """Resolve a deictic reference against ONE authoritative live turn.
 
-    This is deliberately local and evidence-based: it never calls a model and it
-    only runs for visual requests containing a deictic/person reference. Prefer
-    the immediately preceding visual scene/answer, then the previous assistant
-    turn, then the previous user turn.
+    The post-Provider canonical dialogue turn is the only semantic owner for
+    unqualified references such as ``его/её/их/них/этого``. Legacy tasks, old
+    visual scenes and branch registries are deliberately excluded: they remain
+    historical evidence and may only be selected by an explicit RECALL request.
     """
     low = _df_low(text)
     if not re.search(
-        r"\b(?:их|них|им|ими|обоих|обеих|его|ее|её|этого\s+(?:человека|мужчину|мужчины)|эту\s+женщину|"
-        r"этого|на\s+(?:нём|нем|ней)|его\s+на|её\s+на|ее\s+на)\b",
+        r"\b(?:их|них|им|ими|обоих|обеих|его|ее|её|этого\s+(?:человека|мужчину|мужчины)|"
+        r"эту\s+женщину|этого|на\s+(?:нём|нем|ней)|его\s+на|её\s+на|ее\s+на)\b",
         low,
     ):
         return ""
+    if not isinstance(state, dict):
+        return ""
 
-    sources: list[str] = []
-    # Resolve plural visual references from the immediately preceding comparison
-    # question before any proper-name fallback. This prevents words such as
-    # "Чем"/"Нарисуй" from becoming the entity of the image task.
-    prior_comparisons = []
-    for candidate_text in (previous_user, previous_april):
-        prior_comparisons.extend(_df_extract_subjects_from_comparison(candidate_text))
-    if len(prior_comparisons) >= 2 and re.search(r"\b(?:их|них|им|ими|обоих|обеих)\b", low):
-        unique = []
-        for item in prior_comparisons:
-            norm = _df_normalize_subject(item)
-            if norm and not _df_is_generic_entity(norm) and norm.casefold() not in {x.casefold() for x in unique}:
-                unique.append(norm)
-        if len(unique) >= 2:
-            return " и ".join(unique[:4])
-    continuity_anchor = state.get("visual_continuity_anchor") if isinstance(state, dict) and isinstance(state.get("visual_continuity_anchor"), dict) else {}
-    if continuity_anchor:
-        anchor_entities = [
-            _df_text(x, 180) for x in (continuity_anchor.get("entities") or [])
-            if _df_text(x, 180) and not _df_is_generic_entity(x)
-        ]
-        if len(anchor_entities) >= 2 and re.search(r"\b(?:их|них|им|ими|обоих|обеих)\b", low):
-            return " и ".join(anchor_entities[:4])
-        sources.extend([
-            " и ".join(anchor_entities),
-            _df_text(continuity_anchor.get("active_entity"), 220),
-            _df_text(continuity_anchor.get("topic"), 500),
-            _df_text(continuity_anchor.get("user_request"), 1200),
-            _df_text(continuity_anchor.get("april_answer"), 2200),
-        ])
-    canonical = state.get("canonical_dialogue_turn") if isinstance(state, dict) and isinstance(state.get("canonical_dialogue_turn"), dict) else {}
-    if canonical:
-        canonical_entities = canonical.get("entities") if isinstance(canonical.get("entities"), list) else []
-        if len(canonical_entities) >= 2 and re.search(r"\b(?:их|них|им|ими|обоих|обеих)\b", low):
-            return " и ".join(_df_text(x, 180) for x in canonical_entities[:4] if _df_text(x, 180))
-        if canonical_entities:
-            sources.append(" и ".join(_df_text(x, 180) for x in canonical_entities if _df_text(x, 180)))
-        sources.extend([
-            _df_text(canonical.get("active_entity"), 300),
-            _df_text(canonical.get("topic"), 300),
-            _df_text(canonical.get("user_request"), 1200),
-            _df_text(canonical.get("april_answer"), 2400),
-        ])
-    anchor = state.get("dialogue_memory_anchor") if isinstance(state, dict) and isinstance(state.get("dialogue_memory_anchor"), dict) else {}
-    if anchor:
-        entities = anchor.get("entities") or []
-        if isinstance(entities, list):
-            compact_entities = [
-                _df_text(x, 180)
-                for x in entities
-                if _df_text(x, 180)
-            ]
-            if compact_entities:
-                if len(compact_entities) >= 2 and re.search(r"\b(?:их|них|им|ими|обоих|обеих)\b", low):
-                    return " и ".join(compact_entities[:4])
-                sources.append(" и ".join(compact_entities))
-        sources.extend([
-            _df_text(anchor.get("active_entity"), 300),
-            _df_text(anchor.get("topic"), 300),
-            _df_text(anchor.get("user_request"), 1200),
-            _df_text(anchor.get("april_answer"), 2400),
-        ])
-    visual_scene = state.get("current_visual_scene") if isinstance(state, dict) else None
-    if isinstance(visual_scene, dict):
-        sources.extend([
-            _df_text(visual_scene.get("april_answer") or visual_scene.get("answer"), 2400),
-            _df_text(visual_scene.get("summary"), 1200),
-            _df_text(visual_scene.get("topic"), 300),
-            _df_text(visual_scene.get("user_request"), 600),
-        ])
-    sources.extend([_df_text(previous_april, 2400), _df_text(previous_user, 1200)])
+    canonical = state.get("canonical_dialogue_turn")
+    if not isinstance(canonical, dict):
+        return ""
 
-    ignored = {
-        "апрель", "сейчас", "теперь", "пожалуйста", "конечно", "хорошо", "готово",
-        "вот", "да", "кто", "что", "расскажи", "объясни", "покажи", "нарисуй",
-        "сделай", "сделаем", "изображу", "изобразить", "в", "на", "про", "это",
-        "этого", "его", "ее", "её",
-    }
-    # Prefer the first strong proper-name pair/single name in the preceding
-    # assistant description. For "Сергей Есенин ... Анна Снегина" this keeps
-    # the actual subject rather than a later work title.
-    plural_reference = bool(re.search(r"\b(?:их|них|им|ими|обоих|обеих)\b", low))
-    for source in sources:
-        if not source:
-            continue
-        proper = re.findall(
-            r"\b[А-ЯЁ][а-яё-]{2,}(?:\s+[А-ЯЁ][а-яё-]{2,}){0,2}\b",
-            source,
-        )
-        strong = []
-        for candidate in proper:
-            parts = candidate.split()
-            candidate_text = _df_text(candidate, 180)
-            if (parts and parts[0].lower() not in ignored
-                    and not _df_is_generic_entity(candidate_text)
-                    and _df_low(candidate_text) not in {"чем", "нарисуй", "покажи", "это"}):
-                strong.append(candidate_text)
-        if plural_reference and strong:
-            unique = []
-            for candidate in strong:
-                if candidate.lower() not in {x.lower() for x in unique}:
-                    unique.append(candidate)
-            if len(unique) >= 2:
-                return " и ".join(unique[:4])
-        if strong:
-            return strong[0]
+    entities = [
+        _df_text(x, 180)
+        for x in (canonical.get("entities") or [])
+        if _df_text(x, 180)
+    ]
+    plural = bool(re.search(r"\b(?:их|них|им|ими|обоих|обеих)\b", low))
+    if plural and len(entities) >= 2:
+        return " и ".join(entities[:4])
 
-        # Compact fallback for a Russian "о <name> ..." phrase.
-        match = re.search(r"\b(?:о|об|про)\s+([а-яё-]{3,})", _df_low(source))
-        if match:
-            candidate = _df_text(match.group(1), 120)
-            if candidate and candidate not in {"этом", "этого", "ней", "нем", "него"}:
-                return candidate
+    active = _df_text(canonical.get("active_entity"), 220)
+    if active:
+        return active
+    if entities:
+        return entities[0]
+
+    # No canonical subject means the system has insufficient evidence. Do not
+    # fall back to previous visual artifacts or an old task just to manufacture
+    # an answer. The Provider can then request/resolve the missing context safely.
     return ""
 
 
@@ -1330,17 +1200,6 @@ def _df_normalize_subject(value: str) -> str:
         "илона маска": "илон маск",
         "яблоки": "яблоко",
         "яблок": "яблоко",
-        "угла": "угол",
-        "углы": "угол",
-        "овала": "овал",
-        "овалы": "овал",
-        "круга": "круг",
-        "круги": "круг",
-        "квадрата": "квадрат",
-        "квадраты": "квадрат",
-        "трапеции": "трапеция",
-        "трапецией": "трапеция",
-        "треугольники": "треугольник",
         "угадайки": "игра в угадайки",
         "угадайка": "игра в угадайки",
     }
@@ -1583,6 +1442,28 @@ def _df_active_sequence_digest(
     task_rules = deepcopy(task_record.get("dialogue_rules") or {})
     task_response_count = int(task_record.get("response_count") or task_record.get("task_response_count") or 0)
 
+    # Canonical post-Provider turn is the active semantic snapshot. Historical
+    # task rows remain available in task_summaries, but their topics cannot leak
+    # into current_topic/current_focus/current_task_topic.
+    canonical = state.get("canonical_dialogue_turn") if isinstance(state.get("canonical_dialogue_turn"), dict) else {}
+    canonical_topic = _df_text(canonical.get("topic"), 220)
+    canonical_entity = _df_text(canonical.get("active_entity"), 220)
+    canonical_user = _df_text(canonical.get("user_request"), 260)
+    canonical_april = _df_text(canonical.get("april_answer"), 420)
+    canonical_task_id = _df_text(canonical.get("task_id"), 100)
+    if canonical_topic:
+        root_topic = canonical_topic
+        latest_topic = canonical_topic
+        task_topic = canonical_topic
+    if canonical_entity:
+        task_entity = canonical_entity
+    if canonical_task_id:
+        tid = canonical_task_id
+    if canonical_user:
+        last_user = canonical_user
+    if canonical_april:
+        last_april = canonical_april
+
     return {
         "version": "active_sequence_digest_v5_12h_sequence_window",
         "source": "authenticated_active_sequence",
@@ -1765,15 +1646,18 @@ def _df_active_task(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _df_topic_from_state(state: dict[str, Any]) -> str:
+    """Return the current topic from the canonical completed turn first.
+
+    Task/branch mirrors are historical operational state and cannot outrank the
+    post-Provider dialogue memory.
+    """
     seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
     active_ctx = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
-    active_task = _df_active_task(state)
     anchor = state.get("dialogue_memory_anchor") if isinstance(state.get("dialogue_memory_anchor"), dict) else {}
     canonical = state.get("canonical_dialogue_turn") if isinstance(state.get("canonical_dialogue_turn"), dict) else {}
     for value in (
         canonical.get("topic"),
         anchor.get("topic"),
-        active_task.get("topic"),
         active_ctx.get("topic"),
         seq.get("topic"),
         state.get("april_active_topic"),
@@ -1786,31 +1670,17 @@ def _df_topic_from_state(state: dict[str, Any]) -> str:
 
 
 def _df_entity_from_state(state: dict[str, Any]) -> str:
-    active_task = _df_active_task(state)
-    active_ctx = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
-    anchor = state.get("dialogue_memory_anchor") if isinstance(state.get("dialogue_memory_anchor"), dict) else {}
+    """Return the current semantic subject from the post-Provider turn only."""
     canonical = state.get("canonical_dialogue_turn") if isinstance(state.get("canonical_dialogue_turn"), dict) else {}
-    canonical_entities = canonical.get("entities") if isinstance(canonical.get("entities"), list) else []
-    anchor_entities = anchor.get("entities") if isinstance(anchor.get("entities"), list) else []
-    for value in (
-        canonical.get("active_entity"),
-        *canonical_entities,
-        anchor.get("active_entity"),
-        *anchor_entities,
-        active_task.get("entity"),
-        active_task.get("active_entity"),
-        active_ctx.get("active_entity"),
-        state.get("april_active_entity"),
-        state.get("active_entity"),
-        state.get("current_object"),
-        state.get("focus_state", {}).get("active_object") if isinstance(state.get("focus_state"), dict) else "",
-    ):
-        if _df_text(value) and _df_low(value) not in {
-            "text", "вопрос", "ответ", "контекст", "контекст я же загадывал", "игра",
-            "если", "то", "это", "этот", "эта", "такое", "такой", "такие",
-            "кто", "что", "где", "когда", "почему", "как", "потом",
-        }:
-            return _df_text(value, 180)
+    if not canonical:
+        return ""
+    active = _df_text(canonical.get("active_entity"), 220)
+    if active and _df_low(active) not in {"чем", "что", "кто", "как", "где", "почему", "зачем", "нарисуй", "покажи", "опиши"}:
+        return active
+    for value in canonical.get("entities") or []:
+        value = _df_text(value, 180)
+        if value and _df_low(value) not in {"чем", "что", "кто", "как", "где", "почему", "зачем", "нарисуй", "покажи", "опиши"}:
+            return value
     return ""
 
 
@@ -3191,15 +3061,6 @@ def _df_interpret_live_turn(
         or _df_text(" и ".join(str(x) for x in canonical_entities[:4]), 220)
         or _df_entity_from_state(state)
     )
-    if _df_is_generic_entity(active_entity):
-        recovered = _df_extract_subjects_from_comparison(active_topic or "")
-        if len(recovered) >= 2:
-            active_entity = " и ".join(recovered[:4])
-        else:
-            anchor = state.get("visual_continuity_anchor") if isinstance(state.get("visual_continuity_anchor"), dict) else {}
-            anchor_entities = [str(x).strip() for x in (anchor.get("entities") or []) if str(x).strip() and not _df_is_generic_entity(x)]
-            if len(anchor_entities) >= 2:
-                active_entity = " и ".join(anchor_entities[:4])
     active_context = state.get("active_dialogue_context") if isinstance(state.get("active_dialogue_context"), dict) else {}
     prior_task = _df_active_task(state)
     context_task = active_context.get("task") if isinstance(active_context.get("task"), dict) else {}
@@ -3207,9 +3068,21 @@ def _df_interpret_live_turn(
     prior_task_id = _df_text(prior_task.get("task_id"), 100) if isinstance(prior_task, dict) else ""
     if context_task and (not prior_task or not prior_task_id or not context_task_id or prior_task_id == context_task_id):
         prior_task = deepcopy(context_task)
+
+    # A completed canonical turn owns the current branch. A task from an older
+    # turn in the same 12h sequence is historical and cannot become the subject
+    # of a new pronoun/reference just because it remains in task_registry.
+    canonical_task_id = _df_text(canonical_turn.get("task_id"), 100)
+    if canonical_task_id:
+        candidate_task_id = _df_text(prior_task.get("task_id"), 100) if isinstance(prior_task, dict) else ""
+        if candidate_task_id and candidate_task_id != canonical_task_id:
+            prior_task = {}
+        context_task_id = canonical_task_id
+
     active_seq_id = _df_text(seq.get("sequence_id"), 80)
     active_task_id = _df_text(
-        seq.get("task_id")
+        canonical_turn.get("task_id")
+        or seq.get("task_id")
         or state.get("active_dialogue_task_id")
         or prior_task.get("task_id")
         or "",
@@ -3250,12 +3123,13 @@ def _df_interpret_live_turn(
         task_id=active_task_id,
     )
     digest_topic = _df_text(active_sequence_digest.get("current_topic"), 220)
-    if digest_topic and _df_low(digest_topic) not in {
+    # The digest contains historical branch/task mirrors. Once a completed
+    # post-Provider canonical turn exists, it is authoritative and the digest
+    # must not overwrite it with an older task topic.
+    if not canonical_turn and digest_topic and _df_low(digest_topic) not in {
         "если", "это", "такое", "такой", "так", "пронумеруй", "выдай", "проверь",
-    } and not _df_is_generic_entity(digest_topic):
+    }:
         active_topic = digest_topic
-
-    comparison_subjects = _df_extract_subjects_from_comparison(current)
 
     # ------------------------------------------------------------------
     # 2) Cheap evidence probes. They cannot own relation or routing.
@@ -3324,13 +3198,6 @@ def _df_interpret_live_turn(
         task_probe,
         render_probe,
     )
-    if comparison_subjects and not visual_ref_entity:
-        semantic["comparison_subjects"] = comparison_subjects
-        if semantic.get("representation") == "image" and re.search(r"\b(?:их|них|обоих|обеих)\b", current.casefold()):
-            semantic["reference_entity"] = " и ".join(comparison_subjects[:4])
-            semantic["entity"] = " и ".join(comparison_subjects[:4])
-            semantic["topic"] = " и ".join(comparison_subjects[:4])
-
     if visual_ref_entity:
         # For a deictic image-edit request ("его/её/этого человека") the
         # resolved visual entity is authoritative. Do not let the generic
@@ -3474,26 +3341,6 @@ def _df_interpret_live_turn(
         semantic["explicit_subject"] = ""
         active_entity = visual_ref_entity
         active_topic = visual_ref_entity
-
-    # Final semantic guard: a generic interrogative/command can never overwrite
-    # the concrete branch subject. This is especially important for image follow-ups.
-    if _df_is_generic_entity(active_entity):
-        recovered = list(comparison_subjects or [])
-        if len(recovered) < 2:
-            anchor = state.get("visual_continuity_anchor") if isinstance(state.get("visual_continuity_anchor"), dict) else {}
-            recovered = [
-                _df_normalize_subject(x) for x in (anchor.get("entities") or [])
-                if _df_normalize_subject(x) and not _df_is_generic_entity(x)
-            ]
-        if len(recovered) >= 2:
-            active_entity = " и ".join(recovered[:4])
-            if relation == "CONTINUE":
-                active_topic = active_entity
-            semantic["entity"] = active_entity
-            semantic["topic"] = semantic.get("topic") if relation == "RECALL" else active_topic
-        elif not _df_is_generic_entity(active_topic):
-            active_entity = active_topic
-            semantic["entity"] = active_entity
 
     # ------------------------------------------------------------------
     # 5) Apply the final relation to semantic identity.
