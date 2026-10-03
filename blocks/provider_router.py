@@ -4489,7 +4489,8 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
     ).lower()
     image_generation_mode = visual_mode == "image_generation"
     fallback_image_prompt = _safe_text(
-        (source_payload.get("intent") or {}).get("semantic_request")
+        (source_payload.get("intent") or {}).get("visual_generation_request")
+        or (source_payload.get("intent") or {}).get("semantic_request")
         or (source_payload.get("intent") or {}).get("resolved_request")
         or _extract_request_text(source_payload)
         or (source_payload.get("conversation") or {}).get("resolved_request")
