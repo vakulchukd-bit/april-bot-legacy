@@ -1080,6 +1080,22 @@ def _df_feedback_probe(
     scene = canonical.get("visual_scene") if isinstance(canonical.get("visual_scene"), dict) else {}
     topic = _df_text(canonical.get("topic") or canonical.get("canonical_topic") or scene.get("topic"), 220)
     entities = [_df_text(x, 180) for x in (canonical.get("entities") or []) if _df_text(x, 180)]
+
+    render_types = list(
+        scene.get("render_block_types")
+        or canonical.get("render_block_types")
+        or []
+    )
+    representation = _df_text(
+        canonical.get("representation")
+        or canonical.get("production_representation")
+        or "",
+        80,
+    )
+
+    if not representation and "image" in render_types:
+        representation = "image"
+
     target = {
         "type": "LAST_ASSISTANT_ACTION",
         "turn_id": _df_text(canonical.get("turn_id"), 120),
@@ -1087,6 +1103,8 @@ def _df_feedback_probe(
         "operation": _df_text(canonical.get("operation") or scene.get("operation"), 80),
         "topic": topic,
         "entities": entities[:4],
+        "representation": representation,
+        "artifact_reference": bool(representation in _df_structured or "image" in render_types),
     }
     return {
         "feedback": True,
@@ -1185,6 +1203,133 @@ def _df_extract_subject(text: str) -> str:
 
     return ""
 
+def _df_reference_primary_subject(canonical: dict[str, Any]) -> str:
+    """
+    Resolve the primary semantic subject of the last canonical turn.
+
+    Correction-only rule:
+      - prefer a subject explicitly represented by the previous canonical
+        semantic frame;
+      - then use the subject recoverable from the previous user request;
+      - use active_entity/entities only as supporting evidence.
+
+    This prevents contextual additions from becoming the subject itself.
+    Example:
+        previous user: "Что такое зима"
+        noisy active_entity: "Зима и Северном"
+        resolved subject: "зима"
+
+    No language-specific trigger list is used here.
+    """
+    if not isinstance(canonical, dict):
+        return ""
+
+    candidates: list[str] = []
+
+    semantic_frame = canonical.get("semantic_frame")
+    if isinstance(semantic_frame, dict):
+        for key in (
+            "explicit_subject",
+            "topic",
+            "entity",
+            "object",
+            "subject",
+        ):
+            value = _df_text(
+                semantic_frame.get(key),
+                220,
+            )
+            if value:
+                candidates.append(value)
+
+    semantic_understanding = canonical.get(
+        "semantic_understanding"
+    )
+    if isinstance(semantic_understanding, dict):
+        for key in (
+            "topic",
+            "entity",
+            "object",
+        ):
+            value = _df_text(
+                semantic_understanding.get(key),
+                220,
+            )
+            if value:
+                candidates.append(value)
+
+    for key in (
+        "explicit_subject",
+        "resolved_entity",
+        "active_entity",
+        "entity",
+        "topic",
+        "canonical_topic",
+    ):
+        value = _df_text(
+            canonical.get(key),
+            220,
+        )
+        if value:
+            candidates.append(value)
+
+    entities = canonical.get("entities")
+    if isinstance(entities, list):
+        candidates.extend(
+            _df_text(x, 220)
+            for x in entities
+            if _df_text(x, 220)
+        )
+
+    # Strongest generic evidence: recover the operand from the previous
+    # canonical user request. This fixes aggregate/noisy active entities
+    # without introducing a vocabulary table.
+    previous_request = _df_text(
+        canonical.get("user_request")
+        or canonical.get("canonical_user_request")
+        or canonical.get("resolved_request"),
+        1200,
+    )
+    extracted = _df_extract_subject(
+        previous_request
+    ) if previous_request else ""
+    extracted = _df_normalize_subject(
+        extracted
+    ) if extracted else ""
+
+    if extracted:
+        # If an existing candidate semantically contains the extracted subject,
+        # the extracted subject is the cleaner primary operand.
+        for candidate in candidates:
+            if (
+                candidate
+                and _df_overlap(
+                    extracted,
+                    candidate,
+                ) >= 0.20
+            ):
+                return extracted
+
+        # Otherwise the extracted subject itself is the best available
+        # self-contained semantic operand.
+        return extracted
+
+    # Fall back to the first clean semantic candidate.
+    for candidate in candidates:
+        low = _df_low(candidate)
+        if not low:
+            continue
+        if low in {
+            "если", "это", "такое", "такой", "так", "кто", "что",
+            "как", "где", "почему", "зачем", "следующее", "дальше",
+            "отвечай", "овечай", "покажи", "нарисуй", "создай",
+        }:
+            continue
+        return _df_text(candidate, 220)
+
+    return ""
+
+
 def _df_visual_reference_entity(
     text: str,
     previous_user: str = "",
@@ -1217,15 +1362,18 @@ def _df_visual_reference_entity(
         for x in (canonical.get("entities") or [])
         if _df_text(x, 180)
     ]
+
     plural = bool(re.search(r"\b(?:их|них|им|ими|обоих|обеих)\b", low))
     if plural and len(entities) >= 2:
+        # Plural references are still resolved from the canonical entity set.
+        # The singular case below is repaired through the primary semantic subject.
         return " и ".join(entities[:4])
 
-    active = _df_text(canonical.get("active_entity"), 220)
-    if active:
-        return active
-    if entities:
-        return entities[0]
+    primary = _df_reference_primary_subject(
+        canonical
+    )
+    if primary:
+        return primary
 
     # No canonical subject means the system has insufficient evidence. Do not
     # fall back to previous visual artifacts or an old task just to manufacture
@@ -3227,8 +3375,13 @@ def _df_interpret_live_turn(
             state=state,
         )
         if visual_ref_entity:
+            # Reference target is a resolved semantic operand, not a new topic.
             active_entity = visual_ref_entity
-            active_topic = visual_ref_entity
+            primary_topic = _df_reference_primary_subject(
+                canonical_turn
+            )
+            if primary_topic:
+                active_topic = primary_topic
 
     dialogue_probe = _df_dialogue_bigunok(
         current,
@@ -3426,10 +3579,14 @@ def _df_interpret_live_turn(
         turn_relation = "VISUAL_REFERENCE_FOLLOWUP"
         semantic["reference_entity"] = visual_ref_entity
         semantic["entity"] = visual_ref_entity
-        semantic["topic"] = visual_ref_entity
+        # A visual reference operates on the existing semantic topic.
+        # Only create a topic from the resolved subject when the current
+        # branch has no usable topic.
+        semantic["topic"] = active_topic or visual_ref_entity
         semantic["explicit_subject"] = ""
         active_entity = visual_ref_entity
-        active_topic = visual_ref_entity
+        if not active_topic:
+            active_topic = visual_ref_entity
 
     # ------------------------------------------------------------------
     # 5) Apply the final relation to semantic identity.
@@ -3775,9 +3932,12 @@ def _df_interpret_live_turn(
             180,
         ),
         "reference_target": _df_text(
-            selected_branch.get("canonical_entity")
-            if selected_branch
-            else "",
+            (
+                selected_branch.get("canonical_entity")
+                if selected_branch
+                else ""
+            )
+            or visual_ref_entity,
             180,
         ),
         "operation": _df_text(
@@ -4094,9 +4254,12 @@ def _df_interpret_live_turn(
         "active_topic": semantic.get("topic"),
         "resolved_entity": semantic.get("entity"),
         "resolved_reference": _df_text(
-            selected_branch.get("canonical_entity")
-            if selected_branch
-            else "",
+            (
+                selected_branch.get("canonical_entity")
+                if selected_branch
+                else ""
+            )
+            or visual_ref_entity,
             180,
         ),
         "interactive_task_state": deepcopy(task),
