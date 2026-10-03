@@ -1346,10 +1346,21 @@ def _df_active_sequence_digest(
     rows: list[dict[str, Any]] = []
     timeline = state.get("memory_timeline") if isinstance(state.get("memory_timeline"), dict) else {}
     now = time.time()
-    for day in timeline.values():
+    target_count = max(1, min(int(limit or ACTIVE_DIALOGUE_WINDOW_PAIRS), ACTIVE_DIALOGUE_WINDOW_PAIRS))
+    seen_rows = set()
+
+    # The memory archive itself remains time-bounded elsewhere. On the hot path
+    # we walk it backwards and materialize only the newest target_count pairs for
+    # this authenticated sequence. This preserves response speed as the 12h archive
+    # grows while keeping the working window dynamically sliding.
+    for day_index in reversed(range(MEMORY_SLOTS if 'MEMORY_SLOTS' in globals() else 1)):
+        day = timeline.get(f"day_{day_index}")
         if not isinstance(day, dict):
             continue
-        for raw in day.get("dialog_pairs", []):
+        pairs = day.get("dialog_pairs", [])
+        if not isinstance(pairs, list):
+            continue
+        for raw in reversed(pairs):
             if not isinstance(raw, dict):
                 continue
             raw_sid = _df_text(raw.get("sequence_id"), 120)
@@ -1371,7 +1382,7 @@ def _df_active_sequence_digest(
                 turn_index = int(raw.get("sequence_turn_index") or 0)
             except (TypeError, ValueError):
                 turn_index = 0
-            rows.append({
+            row = {
                 "sequence_turn_index": turn_index,
                 "task_response_number": int(raw.get("task_response_number") or raw.get("response_count") or 0),
                 "task_id": _df_text(raw.get("task_id"), 100),
@@ -1380,7 +1391,16 @@ def _df_active_sequence_digest(
                 "user": _df_text(raw.get("user_request") or raw.get("user_meaning") or raw.get("user"), 260),
                 "april": _df_text(raw.get("april_answer") or raw.get("april_meaning") or raw.get("answer") or raw.get("answer_summary"), 420),
                 "relation": _df_text(raw.get("dialogue_relation") or raw.get("relation"), 40).upper(),
-            })
+            }
+            signature = (row["sequence_turn_index"], row["task_id"], row["user"], row["april"])
+            if signature in seen_rows:
+                continue
+            seen_rows.add(signature)
+            rows.append(row)
+            if len(rows) >= target_count:
+                break
+        if len(rows) >= target_count:
+            break
 
     # Legacy recovery: history can still contain the current sequence even when
     # the durable pair archive was not populated by an older writer.
@@ -2454,6 +2474,20 @@ def _df_resolve_relation(
             return "CONTINUE", "ACTIVE_BRANCH_AFFINITY"
         if low in _df_confirm | _df_reject | _df_short_filler:
             return "CONTINUE", "DISCOURSE_CONTINUATION"
+
+        # Structural dialogue rule: an utterance that has no independently
+        # resolved subject remains inside the authenticated live branch. This is
+        # intentionally semantic and not a vocabulary trigger: the same rule
+        # works for natural inflections and new wording (e.g. "а в чём сюжет",
+        # "а где это происходило", "почему так получилось").
+        if (
+            seq.get("sequence_id")
+            and not _df_strong_topic_boundary(text)
+            and not _df_explicit_recall(text)
+            and not _df_extract_subject(text)
+        ):
+            return "CONTINUE", "SUBJECTLESS_LIVE_BRANCH"
+
         return "NEW", "UNRELATED_SHORT_TURN"
 
     if task_action:
@@ -3233,10 +3267,17 @@ def _df_interpret_live_turn(
             state, user_id=user_id, conversation_id=conversation_id, sequence_id=active_seq_id,
         )
     visual_generation_memory_ref = _df_visual_generation_memory_reference(visual_generation_memory)
-    active_sequence_digest = (
-        _df_active_sequence_digest(state, history, active_seq_id, limit=6, task_id=active_task_id)
-        if explicit_recall else _df_compact_active_sequence_digest(state, canonical_turn, active_seq_id)
+    # Ordinary continuation uses the same authenticated sliding window as RECALL.
+    # The window is read-only context: it does not delete or replace the 12h archive.
+    active_sequence_digest = _df_active_sequence_digest(
+        state, history, active_seq_id,
+        limit=ACTIVE_DIALOGUE_WINDOW_PAIRS,
+        task_id=active_task_id,
     )
+    if not active_sequence_digest.get("sequence_id"):
+        active_sequence_digest = _df_compact_active_sequence_digest(
+            state, canonical_turn, active_seq_id
+        )
     digest_topic = _df_text(active_sequence_digest.get("current_topic"), 220)
     # The digest contains historical branch/task mirrors. Once a completed
     # post-Provider canonical turn exists, it is authoritative and the digest
