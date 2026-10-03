@@ -1521,6 +1521,211 @@ def interpret_request(
         "history_is_semantic_evidence": True,
     }
 
+    # REQUIRED by the current canonical Provider packet.
+    scene_composition = [representation]
+    if "text" not in scene_composition:
+        scene_composition.insert(0, "text")
+    result["scene_composition"] = list(dict.fromkeys(scene_composition))
+
+    provider_plan = {
+        "version": "april_provider_handoff_v1",
+        "authority": "INTERPRETATION",
+        "relation": relation,
+        "current_user_request": current,
+        "current_request_authoritative": True,
+        "provider_must_not_reselect_context": True,
+        "hard_budget_tokens": PROVIDER_INPUT_HARD_BUDGET,
+        "soft_target_tokens": (
+            820 if relation == "CONTINUE"
+            else 800 if relation == "RECALL"
+            else 850
+        ),
+        "scene_composition": _copy(result["scene_composition"]),
+        "required_context": [
+            {
+                "key": "SEMANTIC_CORE",
+                "priority": 1.0,
+                "value": {
+                    "topic": inferred_topic,
+                    "goal": inferred_goal,
+                    "operation": inferred_operation,
+                    "representation": representation,
+                    "relation": relation,
+                    "active_subject": _copy(active_subject),
+                },
+            },
+            {
+                "key": "OUTPUT_CONTRACT",
+                "priority": 0.99,
+                "value": {
+                    "representation": representation,
+                    "requested_outputs": _copy(result["scene_composition"]),
+                    "render_authorized": True,
+                    "render_mode": (
+                        "STRUCTURED_OUTPUT"
+                        if representation in STRUCTURED_KINDS
+                        else "TEXT_ONLY"
+                    ),
+                    "preserve_all_data_points": True,
+                },
+            },
+            {
+                "key": "DIALOGUE_MEMORY",
+                "priority": 1.0,
+                "value": {
+                    "window_hours": DIALOGUE_WINDOW_HOURS,
+                    "source_turn_ids": list(source_turn_ids),
+                    "structured_data": _copy(data),
+                    "selected_artifact": _copy(selected_artifact),
+                },
+            },
+        ],
+        "optional_context": [],
+        "excluded_context": [
+            "UNRELATED_WINDOW_MEMORY",
+            "STALE_GLOBAL_ENTITY",
+            "SECONDARY_ROUTE",
+        ],
+    }
+    result["provider_context_plan"] = provider_plan
+
+    # The existing Provider normalizer accepts the plan from top-level,
+    # conversation, or constraints. Keep one canonical object referenced in
+    # all envelopes; this is compatibility, not a second route.
+    result["conversation"] = {
+        "current_request": current,
+        "provider_context_plan": _copy(provider_plan),
+        "scene_composition": _copy(result["scene_composition"]),
+    }
+    result["constraints"] = {
+        "provider_context_plan": _copy(provider_plan),
+        "scene_composition": _copy(result["scene_composition"]),
+        "structured_output_required": True,
+    }
+
+    result["dialogue_contract"] = {
+        "relation": relation,
+        "continuation": relation == "CONTINUE",
+        "reference_to_previous": relation == "RECALL",
+        "current_request": current,
+        "canonical": True,
+        "decision_owner": DECISION_OWNER,
+    }
+    result["semantic_frame"] = {
+        "topic": inferred_topic,
+        "goal": inferred_goal,
+        "operation": inferred_operation,
+        "representation": representation,
+        "relation": relation,
+        "data": _copy(data),
+        "temporal_scope": _copy(temporal_scope if isinstance(temporal_scope, dict) else {}),
+    }
+    result["turn_meaning"] = {
+        "current_request": current,
+        "relation": relation,
+        "topic": inferred_topic,
+        "operation": inferred_operation,
+        "representation": representation,
+        "data_available": data is not None,
+    }
+    result["turn_sync"] = {
+        "authority": DECISION_OWNER,
+        "current_request": current,
+        "relation": relation,
+        "topic": inferred_topic,
+        "representation": representation,
+    }
+    result["interpretation_control"] = {
+        "render_authorized": True,
+        "render_mode": (
+            "STRUCTURED_OUTPUT"
+            if representation in STRUCTURED_KINDS
+            else "TEXT_ONLY"
+        ),
+        "representation": representation,
+        "relation": relation,
+        "single_route": True,
+        "scene_contract": True,
+    }
+    result["requested_outputs"] = _copy(result["scene_composition"])
+    result["required_artifacts"] = (
+        [representation]
+        if representation in STRUCTURED_KINDS
+        else []
+    )
+    result["render_authorized"] = True
+    result["render_mode"] = (
+        "STRUCTURED_OUTPUT"
+        if representation in STRUCTURED_KINDS
+        else "TEXT_ONLY"
+    )
+    result["dialogue_strategy"] = {
+        "mode": (
+            "continue_existing_branch"
+            if relation == "CONTINUE"
+            else "recall_existing_branch"
+            if relation == "RECALL"
+            else "start_new_branch"
+        ),
+        "context_source": (
+            "structured_dialogue_memory"
+            if relation in {"CONTINUE", "RECALL"}
+            else "current_request"
+        ),
+        "preserve_previous_structured_data": bool(
+            relation in {"CONTINUE", "RECALL"} and data is not None
+        ),
+    }
+    result["continuation_content_analysis"] = {
+        "relation": relation,
+        "active_subject": _copy(active_subject),
+        "source_turn_ids": list(source_turn_ids),
+        "data_reuse": bool(
+            relation in {"CONTINUE", "RECALL"} and data is not None
+        ),
+    }
+    result["dialogue_development"] = {
+        "relation": relation,
+        "current_request": current,
+        "previous_result": _copy(
+            selected_turn.assistant_structured
+            if selected_turn is not None
+            else {}
+        ),
+        "continuation_anchor": (
+            "structured_artifact"
+            if data is not None
+            else "dialogue_turn"
+            if relation in {"CONTINUE", "RECALL"}
+            else "current_turn"
+        ),
+        "next_operation": inferred_operation,
+        "representation": representation,
+    }
+    result["cognitive_workspace"] = {
+        "current_user_request": current,
+        "active_topic": inferred_topic,
+        "active_goal": inferred_goal,
+        "active_entity": _text(
+            active_subject.get("description")
+            if isinstance(active_subject, dict)
+            else ""
+        ),
+        "operation": inferred_operation,
+        "representation": representation,
+        "task_continuation": relation == "CONTINUE",
+        "provider_context_plan": _copy(provider_plan),
+        "dialogue_development": _copy(result["dialogue_development"]),
+    }
+    result["quantum_state"] = {
+        "single_route": True,
+        "decision_owner": DECISION_OWNER,
+        "interpretation_complete": True,
+        "relation_resolved": True,
+        "provider_context_ready": True,
+        "structured_output_ready": True,
+    }
+
     return result
 
 
@@ -1733,8 +1938,17 @@ def build_provider_request(
         context_limit=context_limit,
     )
 
+    provider_plan = _copy(
+        interpretation.get("provider_context_plan") or {}
+    )
+    scene_composition = _copy(
+        interpretation.get("scene_composition")
+        or provider_plan.get("scene_composition")
+        or []
+    )
+
     return {
-        "version": "april_unified_provider_handoff_v1",
+        "version": "april_unified_provider_handoff_v2",
         "transport": TRANSPORT_NAME,
         "single_route": True,
         "provider_must_not_reselect_context": True,
@@ -1742,6 +1956,18 @@ def build_provider_request(
         "current_request": current_request,
         "interpretation": _copy(interpretation),
         "dialogue_context": context,
+        "provider_context_plan": provider_plan,
+        "scene_composition": scene_composition,
+        "conversation": {
+            "current_request": current_request,
+            "provider_context_plan": _copy(provider_plan),
+            "scene_composition": _copy(scene_composition),
+        },
+        "constraints": {
+            "provider_context_plan": _copy(provider_plan),
+            "scene_composition": _copy(scene_composition),
+            "structured_output_required": True,
+        },
         "structured_output_required": True,
         "preserve_all_data_points": True,
     }
@@ -2845,6 +3071,63 @@ async def fake_provider(
             },
         },
     }
+
+
+
+async def regression_test():
+    """
+    Regression for the live failure:
+        DIALOGUE_PROVIDER_PLAN_MISSING -> HTTP 500 -> empty April bubble.
+
+    This test verifies that Interpretation emits the Provider plan before the
+    existing provider_router sees the request.
+    """
+    state = build_test_state()
+    result = interpret_request(
+        "Покажи данные о прибыли",
+        history=[],
+        state=state,
+    )
+
+    assert isinstance(result, dict)
+    assert result["provider_context_plan"]["authority"] == "INTERPRETATION"
+    assert result["provider_context_plan"]["scene_composition"]
+    assert result["scene_composition"]
+    assert result["requested_outputs"]
+    assert result["render_authorized"] is True
+
+    # Verify the 12h memory + structured artifact path with 30 data points.
+    await process_turn(
+        user_id="test-user",
+        conversation_id="test-conversation",
+        current_request="Покажи данные о прибыли",
+        state=state,
+        provider_call=fake_provider,
+    )
+
+    result2 = await process_turn(
+        user_id="test-user",
+        conversation_id="test-conversation",
+        current_request="Теперь эти же данные покажи линейным графиком",
+        state=state,
+        provider_call=fake_provider,
+    )
+
+    assert result2["interpretation"]["relation"] == "CONTINUE"
+    assert result2["interpretation"]["provider_context_plan"]
+    assert result2["interpretation"]["provider_context_plan"]["authority"] == "INTERPRETATION"
+
+    structured = result2["canonical_turn"]["assistant_structured"]
+    assert isinstance(structured, dict)
+    data = structured.get("data") or {}
+    assert len(data.get("x") or []) == 30
+    assert len(data.get("y") or []) == 30
+
+    print("REGRESSION OK")
+    print("provider_context_plan = READY")
+    print("scene_composition =", result2["interpretation"]["scene_composition"])
+    print("relation =", result2["interpretation"]["relation"])
+    print("points_preserved =", len(data.get("x") or []))
 
 
 __all__ = [
