@@ -82,7 +82,6 @@ from blocks.state_manager import (
     update_visual_summary,
     prepare_visual_context_for_turn,
     restore_visual_context_after_turn,
-    persist_state_background,
 )
 from blocks.image_engine import (
     get_image_generation_status,
@@ -1278,10 +1277,8 @@ async def process_web_message(
             for block in blocks
         )
         restore_visual_context_after_turn(user_id, new_scene_active=new_scene_active, persist=False)
-        if isinstance(normalized_local, dict) and normalized_local.get("scene_contract"):
-            # All Web-turn mutations are now complete. Persist one final snapshot
-            # outside the HTTP critical path instead of waiting on PostgreSQL.
-            persist_state_background(user_id)
+        # No full-state snapshot is persisted. Canonical dialogue pairs are committed
+        # once by state_manager.update_scene_context(); PostgreSQL cleanup is UTC-driven.
 
 
 
