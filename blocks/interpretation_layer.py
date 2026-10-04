@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Sequence, Iterable
 
 from rapidfuzz import fuzz
+from dialogue_understanding_engine import build_semantic_context
 
 RESPONSE_COMPLEXITY_LOW = "LOW"
 RESPONSE_COMPLEXITY_MEDIUM = "MEDIUM"
@@ -4703,42 +4704,13 @@ def _pair_first_understand(
     }
 
 
-def _pair_first_visual_generation_request(current: str, previous_user: str, render_probe: dict[str, Any]) -> str:
-    """Resolve an elliptical image trigger to the immediately preceding concrete image request.
-
-    The current turn still owns routing (for example ``"На картинке"``), while the
-    preceding USER turn supplies the subject when the current wording is only a
-    deictic/elliptical reference. This keeps visual generation semantically aligned
-    with the authenticated USER↔APRIL pair without inventing a new subject.
-    """
-    if not isinstance(render_probe, dict) or render_probe.get("requested") != ["image"]:
-        return ""
-    current = _df_text(current, 1200).strip()
-    previous_user = _df_text(previous_user, 1200).strip()
-    if not current or not previous_user:
-        return ""
-    previous_low = _df_low(previous_user)
-    if not re.search(
-        r"\b(?:нарисуй|нарисовать|рисунок|создай|создать|сделай|сделать|изобрази|изобразить|покажи|показать|сгенерируй|сгенерировать)\b",
-        previous_low,
-    ):
-        return ""
-    low = _df_low(current)
-    elliptical = bool(re.fullmatch(
-        r"(?:на\s+(?:картинке|изображении|ней|нём|нем)|на\s+картинке|покажи(?:\s+это)?|сделай(?:\s+это)?|нарисуй(?:\s+это)?)",
-        low,
-    ))
-    if not elliptical:
-        elliptical = bool(re.search(
-            r"(?:на\s+(?:картинке|изображении|ней|нём|нем)|на\s+картинке)\s*$",
-            low,
-        ))
-    if not elliptical:
-        return ""
-    return previous_user
-
-
 def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = None, state: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Interpret the current turn by traversing the authenticated dialogue ledger.
+
+    NEW/CONTINUE is decided by the dedicated semantic dialogue engine.  The
+    previous pair is evidence, not an automatic anchor.  The selected operand
+    may therefore be any pair in the current authenticated window.
+    """
     started = time.perf_counter()
     current = _df_text(text, 1200)
     state = state if isinstance(state, dict) else {}
@@ -4746,6 +4718,7 @@ def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = No
     previous = rows[-1] if rows else {}
     previous_user = _df_text(previous.get("user"), 1200)
     previous_april = _df_text(previous.get("april"), 2200)
+
     active_seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
     sequence_id = _df_text(active_seq.get("sequence_id"), 100)
     if not sequence_id:
@@ -4756,98 +4729,91 @@ def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = No
             cycle_ts = 0.0
         sequence_id = _clean_sequence_id(uid, cycle_ts) if cycle_ts else hashlib.sha256(f"{uid}|dialogue".encode("utf-8")).hexdigest()[:20]
 
+    # One semantic pass over the complete authenticated pair window.
+    decision = build_semantic_context(current, rows)
+    relation = _df_text(decision.get("relation") or "NEW", 32)
+    turn_relation = _df_text(decision.get("reason") or "", 160)
+    selected_memory = deepcopy(decision.get("selected_memory_operand") or {})
+    selected_index = int(decision.get("selected_memory_index", -1) or -1)
+
+    # The selected pair is the semantic operand. It can be older than the last
+    # pair; this is the key difference from last-pair anchoring.
+    selected_row = {}
+    if selected_index >= 0:
+        for row in rows:
+            if int(row.get("turn") or -1) == selected_index:
+                selected_row = deepcopy(row)
+                break
+    if selected_row and not selected_memory:
+        selected_memory = {
+            "index": selected_index,
+            "user": selected_row.get("user", ""),
+            "april": selected_row.get("april", ""),
+            "entities": [],
+        }
+
     render_probe = _df_render_probe(current)
-    visual_generation_request = _pair_first_visual_generation_request(
-        current, previous_user, render_probe
-    )
-    provisional_relation = "RECALL" if _pair_first_recall_request(current) else "CONTINUE" if rows else "NEW"
-    semantic = _pair_first_understand(current, provisional_relation, "", "", "", {}, render_probe, feedback_probe={})
-    relation, turn_relation = _pair_first_resolve_relation(
-        current,
-        state,
-        previous_april,
-        "",
-        "",
-        {},
-        {
-            "deictic": bool(_df_deictic.search(_df_low(current))),
-            "direct_reference": bool(_PAIR_FIRST_DIRECT_REF_RE.search(_df_low(current))),
-            "topic_overlap": _pair_first_similarity(_df_low(current), previous) if previous else 0.0,
-        },
-        semantic=semantic,
-        sequence_digest=_pair_first_active_sequence_digest(state, history or [], sequence_id, limit=ACTIVE_DIALOGUE_WINDOW_PAIRS),
-        branches={},
-    )
-
-    digest = _pair_first_active_sequence_digest(state, history or [], sequence_id, limit=ACTIVE_DIALOGUE_WINDOW_PAIRS)
-    selected_memory = {}
-    if relation == "RECALL":
-        try:
-            ranked = search_dialogue_memory(_df_text(state.get("user_id"), 120), current, limit=8)
-            matches = ranked.get("matches") if isinstance(ranked, dict) else []
-        except Exception:
-            matches = []
-        if matches:
-            selected_memory = {
-                "type": "dialogue_pair_search",
-                "query": current,
-                "total_pairs": len(rows),
-                "matches": deepcopy(matches),
-                "history_source": "USER_APRIL_PAIRS",
-            }
-        else:
-            selected_memory = {
-                "type": "dialogue_pair_search",
-                "query": current,
-                "total_pairs": len(rows),
-                "matches": [],
-                "history_source": "USER_APRIL_PAIRS",
-            }
-
+    # Representation is determined from the current request; relation is
+    # determined independently by semantic memory traversal.
+    semantic = _pair_first_understand(current, relation, turn_relation, "", "", {}, render_probe, feedback_probe={})
     render_plan = _df_render_plan(current, relation, semantic, render_probe)
-    development = _pair_first_dialogue_development(relation, sequence_id, current, previous)
-    dialogue_rules = (active_seq.get("dialogue_rules") if isinstance(active_seq.get("dialogue_rules"), dict) else {})
+
+    digest = _pair_first_active_sequence_digest(
+        state, history or [], sequence_id, limit=ACTIVE_DIALOGUE_WINDOW_PAIRS
+    )
+    development = _pair_first_dialogue_development(
+        relation, sequence_id, current, selected_row or previous
+    )
+    dialogue_rules = active_seq.get("dialogue_rules") if isinstance(active_seq.get("dialogue_rules"), dict) else {}
+
+    # Compact recovery set: the engine has already ranked the whole memory.  We
+    # expose only the best few candidates to the next layer so it can recover an
+    # incomplete selected operand without searching the database again.
+    relevant_candidates = deepcopy(decision.get("relevant_memory_candidates") or [])[:6]
     pair_context = {
-        "version": "active_dialogue_pair_context_v1",
+        "version": "semantic_dialogue_context_v2",
         "sequence_id": sequence_id,
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "seed_hours": PAIR_FIRST_SEED_HOURS,
         "previous_user_turn": previous_user,
         "previous_april_turn": previous_april,
         "active_sequence_turns": deepcopy(digest.get("active_sequence_turns") or []),
+        "selected_memory_index": selected_index,
+        "selected_memory_operand": deepcopy(selected_memory),
+        "relevant_window_turns": relevant_candidates,
         "history_source": "USER_APRIL_PAIRS",
-        "visual_generation_request": visual_generation_request,
+        "selection_policy": decision.get("selection_policy"),
+        "relation_confidence": decision.get("confidence", 0.0),
+        "relation_reason": decision.get("reason", ""),
     }
+
     provider_plan = _df_provider_plan(
         current,
         relation,
         turn_relation,
         semantic,
         {},
-        previous_user,
-        previous_april,
+        selected_row.get("user", previous_user) if selected_row else previous_user,
+        selected_row.get("april", previous_april) if selected_row else previous_april,
         sequence_id,
         render_plan,
         development,
-        selected_memory,
+        {
+            "type": "semantic_dialogue_selection",
+            "query": current,
+            "selected_memory_index": selected_index,
+            "selected": deepcopy(selected_memory),
+            "candidates": relevant_candidates,
+            "history_source": "USER_APRIL_PAIRS",
+        } if relation == "CONTINUE" else {},
         active_sequence_digest=digest,
         active_dialogue_context=pair_context,
         dialogue_rules=dialogue_rules,
         related_branches=[],
     )
-    if visual_generation_request:
-        provider_plan.setdefault("required_context", []).insert(
-            0,
-            {
-                "key": "VISUAL_GENERATION_REQUEST",
-                "priority": 1.0,
-                "value": visual_generation_request,
-            },
-        )
-        provider_plan["visual_generation_request"] = visual_generation_request
 
     continuation = relation == "CONTINUE"
-    memory_mode = "memory_query" if relation == "RECALL" else "dialogue"
+    memory_mode = "memory_query" if relation == "RECALL" else "dialogue" if continuation else "current_turn"
     semantic_frame = {
         "topic": "",
         "current_turn_role": "current_turn",
@@ -4857,50 +4823,59 @@ def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = No
         "representation": semantic.get("representation"),
         "entity": "",
         "relation": relation,
-        "understanding_stage": "pair_history_before_provider",
+        "understanding_stage": "semantic_dialogue_memory_before_provider",
         "memory_source": "USER_APRIL_PAIRS",
     }
     semantic_understanding = {
-        "version": "semantic_understanding_pair_first_v1",
-        "topic": "",
-        "entity": "",
+        "version": "semantic_understanding_dialogue_memory_v2",
         "operation": semantic.get("operation"),
         "goal": semantic.get("goal"),
         "representation": semantic.get("representation"),
         "relation": relation,
         "relation_definition": {
-            "NEW": "новый самостоятельный смысловой предмет",
-            "CONTINUE": "продолжение последней USER↔APRIL пары",
+            "NEW": "новый самостоятельный смысловой вектор",
+            "CONTINUE": "продолжение семантически выбранной USER↔APRIL ветки",
             "RECALL": "поиск по сохранённым USER↔APRIL парам текущего UTC окна",
         }.get(relation, ""),
+        "relation_reason": decision.get("reason", ""),
+        "relation_confidence": decision.get("confidence", 0.0),
         "dialogue_pair_context": {
             "previous_user": previous_user,
             "previous_april": previous_april,
+            "selected_user": selected_memory.get("user", ""),
+            "selected_april": selected_memory.get("april", ""),
+            "selected_memory_index": selected_index,
             "pair_count": len(rows),
         },
-        "entities": [],
-        "topics": [],
-        "provider_context_priority": "dialogue_pairs_then_current_request",
+        "memory_traversal": {
+            "scope": "authenticated_dialogue_window_all_pairs",
+            "selected_memory_index": selected_index,
+            "candidate_count": len(relevant_candidates),
+            "selection_policy": decision.get("selection_policy"),
+        },
+        "provider_context_priority": "selected_dialogue_operand_then_current_request",
     }
     dialogue_contract = {
-        "version": "april_dialogue_contract_pair_first_v1",
+        "version": "april_dialogue_contract_semantic_memory_v2",
         "relation": relation,
         "continuation": continuation,
-        "reference_to_previous": continuation or relation == "RECALL",
-        "context_dependency": "dialogue_pair_history" if continuation else "dialogue_pair_recall" if relation == "RECALL" else "current_turn_only",
+        "reference_to_previous": bool(decision.get("current_frame", {}).get("reference_signal", 0.0)) or relation == "RECALL",
+        "context_dependency": "selected_dialogue_pair" if continuation else "dialogue_pair_recall" if relation == "RECALL" else "current_turn_only",
         "active_topic": "",
         "canonical_topic": "",
         "active_entity": "",
         "resolved_entity": "",
         "resolved_request": current,
-        "visual_generation_request": visual_generation_request,
         "previous_user_turn": previous_user,
         "previous_april_turn": previous_april,
+        "selected_memory_index": selected_index,
+        "selected_memory_operand": deepcopy(selected_memory),
+        "relevant_window_turns": relevant_candidates,
+        "selection_policy": decision.get("selection_policy"),
+        "relation_reason": decision.get("reason", ""),
+        "relation_confidence": decision.get("confidence", 0.0),
         "sequence_id": sequence_id,
         "target_sequence_id": sequence_id,
-        "target_task_id": "",
-        "task_relation": {},
-        "task_transition": {},
         "dialogue_rules": deepcopy(dialogue_rules),
         "dialogue_pair_history": deepcopy(digest.get("active_sequence_turns") or []),
         "memory_source": "USER_APRIL_PAIRS",
@@ -4908,19 +4883,18 @@ def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = No
     response_sequence = {
         "sequence_id": sequence_id,
         "turn_index": int(digest.get("turn_count") or 0) + 1,
-        "source": "dialogue_pair_history",
+        "source": "semantic_dialogue_memory",
+        "selected_memory_index": selected_index,
     }
     result = {
-        "version": PAIR_FIRST_INTERPRETATION_VERSION,
+        "version": "semantic_dialogue_interpretation_v2",
         "type": "text" if semantic.get("representation") == "text" else semantic.get("representation"),
         "operation": semantic.get("operation") or "answer",
-        # No persistent/current entity name is emitted; representation is carried separately.
         "object": "",
         "goal": semantic.get("goal") or "answer",
         "normalized_text": current,
         "resolved_request": current,
         "semantic_request": current,
-        "visual_generation_request": visual_generation_request,
         "canonical_topic": "",
         "resolved_entity": "",
         "representation": semantic.get("representation") or "text",
@@ -4930,20 +4904,19 @@ def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = No
             "render_authorized": bool(render_plan.get("authorized")),
             "render_mode": _df_text(render_plan.get("mode") or "TEXT_ONLY", 80),
             "relation": relation,
-            "decision_owner": PAIR_FIRST_RELATION_OWNER,
+            "decision_owner": "SEMANTIC_DIALOGUE_ENGINE",
         },
         "semantic_frame": semantic_frame,
-        "semantic_understanding": {
-            **semantic_understanding,
-            "visual_generation_request": visual_generation_request,
-        },
+        "semantic_understanding": semantic_understanding,
         "dialogue_contract": dialogue_contract,
         "dialogue_vector": {
             "relation": relation,
             "continuation": continuation,
-            "reference": bool(dialogue_contract["reference_to_previous"]),
+            "reference": dialogue_contract["reference_to_previous"],
             "previous_user_turn": previous_user,
             "previous_april_turn": previous_april,
+            "selected_memory_index": selected_index,
+            "selected_memory_operand": deepcopy(selected_memory),
             "sequence_id": sequence_id,
             "memory_source": "USER_APRIL_PAIRS",
         },
@@ -4957,9 +4930,10 @@ def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = No
         "task_transition": {},
         "task_action": False,
         "pending_resolved": False,
-        "selected_memory_index": 0 if selected_memory else -1,
+        "selected_memory_index": selected_index,
         "selected_memory_operand": deepcopy(selected_memory),
         "selected_memory_record": deepcopy(selected_memory),
+        "relevant_memory_candidates": relevant_candidates,
         "memory_mode": memory_mode,
         "memory_query": relation == "RECALL",
         "cognitive_workspace": {
@@ -4971,6 +4945,8 @@ def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = No
             "relation": relation,
             "sequence_id": sequence_id,
             "semantic_frame": semantic_frame,
+            "selected_memory_index": selected_index,
+            "selected_memory_operand": deepcopy(selected_memory),
             "pair_history": deepcopy(digest.get("active_sequence_turns") or []),
             "provider_context_plan": provider_plan,
             "task_continuation": False,
@@ -4980,19 +4956,19 @@ def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = No
             "artifact_reference": bool(render_plan.get("artifact_reference")),
             "dialogue_relation": relation,
             "sequence_id": sequence_id,
-            "topic_source": "NONE",
-            "entity_source": "NONE",
+            "topic_source": "SEMANTIC_DIALOGUE_MEMORY",
+            "entity_source": "SEMANTIC_DIALOGUE_MEMORY",
             "memory_source": "USER_APRIL_PAIRS",
         },
         "bigunoks": {
-            "dialogue": "evidence_only",
-            "memory": "pair_history_only",
+            "dialogue": "semantic_evidence",
+            "memory": "authenticated_pair_traversal",
             "relation": relation,
         },
         "stage_order": [
             "REQUEST_RECEIPT",
             "AUTHENTICATED_DIALOGUE_PAIRS",
-            "CONTEXTUAL_UNDERSTANDING",
+            "SEMANTIC_MEMORY_TRAVERSAL",
             "DIALOGUE_RELATION_RESOLUTION",
             "RESPONSE_DEVELOPMENT",
             "RENDER_PLAN",
@@ -5001,7 +4977,7 @@ def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = No
         ],
         "provider_context_authority": "INTERPRETATION",
         "provider_must_not_reselect_context": True,
-        "decision_owner": PAIR_FIRST_RELATION_OWNER,
+        "decision_owner": "SEMANTIC_DIALOGUE_ENGINE",
         "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
     }
     return result
