@@ -107,7 +107,7 @@ REPRESENTATION_HYPOTHESES = {
 }
 
 SEMANTIC_TURN_PROTOTYPES = {
-    "identity": "пользователь спрашивает кто ты как тебя зовут представься назови себя; the user asks who you are or what your name is",
+    "identity": "пользователь спрашивает кто ты как тебя зовут представься твое имя своё имя расскажи о себе; the user asks who you are or what your name is",
     "greeting": "пользователь приветствует ассистента начинает непринужденный разговор; the user is greeting the assistant",
     "question": "пользователь задаёт вопрос просит ответ или разъяснение сколько равен вычисли посчитай значение; the user asks a question requiring an answer or calculation",
     "request": "пользователь просит выполнить задачу сделать действие создать результат; the user asks the assistant to perform a task",
@@ -218,7 +218,7 @@ REPRESENTATION_UNIVERSE = (
 STRUCTURED_REPRESENTATIONS = tuple(x for x in REPRESENTATION_UNIVERSE if x != "text")
 
 OPERATION_HYPOTHESES = {
-    "answer": "ответить объяснить рассказать сообщить дать информацию",
+    "answer": "ответить объяснить рассказать сообщить дать информацию назвать называть название наименование",
     "build": "создать построить сформировать нарисовать начертить изобразить результат",
     "present": "показать отобразить продемонстрировать вывести представить результат",
 
@@ -1336,58 +1336,120 @@ class QuantumInterpretationEngine:
         best_obj, best_obj_score = best(obj_scores, "text")
         best_goal, best_goal_score = best(goal_scores, "understand")
         best_dialogue, best_dialogue_score = best(dial_scores, "statement")
-        visual_reference_lock = max(
-            float(dial_scores.get("memory_query", 0.0) or 0.0),
-            float(dial_scores.get("reformulation", 0.0) or 0.0),
-            float(dial_scores.get("reference", 0.0) or 0.0),
-        ) >= 0.04
+        memory_query_score = float(dial_scores.get("memory_query", 0.0) or 0.0)
+        reference_score = float(dial_scores.get("reference", 0.0) or 0.0)
+        reformulation_score = float(dial_scores.get("reformulation", 0.0) or 0.0)
+        artifact_reference_score = float(dial_scores.get("artifact_reference", 0.0) or 0.0)
+        reference_signal = max(reference_score, reformulation_score, artifact_reference_score)
+        # A complete visual build such as "Нарисуй кота" naturally overlaps with
+        # the artifact-reference prototype because of the verb "нарисуй". Do not
+        # cancel a real visual task on that signal alone. Require independent
+        # reference/reformulation evidence (or a strong memory query) before the
+        # current turn is locked to historical context.
+        explicit_visual_reference = bool(
+            artifact_reference_score >= 0.080
+            and (reference_score + reformulation_score >= 0.100)
+        )
+        visual_reference_lock = bool(
+            memory_query_score >= 0.160
+            or explicit_visual_reference
+        )
 
         structured_rep = best_rep in {
             "diagram", "graph", "formula", "image", "gallery", "table",
             "code", "link", "audio", "video", "file", "action", "scene",
             "memory", "visual_context",
         }
-        visual_rep = best_rep in {"diagram", "image", "gallery", "graph"}
-        visual_object = best_obj in {"diagram", "image", "gallery", "graph"}
-        visual_operation = best_op in {"build", "modify", "present"}
-        visual_goal = best_goal in {"visualize", "transform", "present"}
+
+        # Representation hypotheses are evidence, not authorization.  A weak
+        # char-matrix resemblance (for example a dog breed question matching the
+        # generic image prototype) must not launch a visual route.  Visuality is
+        # considered meaningful only when the measured representation/object signal
+        # is strong enough and the measured operation is actually a production verb.
+        visual_rep = bool(
+            best_rep in {"diagram", "image", "gallery", "graph"}
+            and best_rep_score >= 0.035
+        )
+        visual_object = bool(
+            best_obj in {"diagram", "image", "gallery", "graph"}
+            and best_obj_score >= 0.040
+        )
+        visual_operation = bool(
+            best_op in {"build", "modify", "present"}
+            and best_op_score >= 0.080
+        )
+        visual_goal = bool(
+            best_goal in {"visualize", "transform", "present"}
+            and best_goal_score >= 0.060
+        )
         memory_query = best_dialogue == "memory_query"
         followup_dialogue = best_dialogue in {
             "continuation", "reformulation", "correction", "reference",
             "artifact_reference", "affirmation", "rejection",
         }
+
+        content_tokens = [
+            token for token in QuantumContextUnderstandingEngine._content_tokens(text)
+            if token and len(token) >= 2
+        ]
+        # A complete visual task has both a measured production operation and a
+        # concrete current-turn content operand. This lets "Нарисуй кота" remain
+        # independent even if the generic artifact-reference prototype scores high,
+        # while the incomplete "Да нарисуй" must inherit its operand from 12h memory.
+        current_visual_task_complete = bool(
+            not visual_reference_lock
+            and visual_operation
+            and (visual_rep or visual_object)
+            and len(content_tokens) >= 2
+        )
+        effective_followup_dialogue = bool(
+            followup_dialogue and not current_visual_task_complete
+        )
         # Self-containment is a semantic task property, not the generic dialogue
         # classifier result.  In particular, short visual commands such as
         # ``Нарисуй кота`` are complete because they contain a concrete visual
         # operand, while ``Да нарисуй`` is deliberately incomplete and must inherit
         # the latest visual operand from the authenticated 12h pair memory.
-        semantic_self_contained = bool(
+        meaningful_structured_rep = bool(
+            structured_rep and best_rep_score >= 0.035
+        )
+        meaningful_object = bool(
+            best_obj != "text" and best_obj_score >= 0.040
+        )
+        # Ordinary factual/list/explanation requests are complete semantic tasks
+        # even when their best object prototype is noisy.  This is what prevents
+        # a self-contained question such as “Назови любую породу собаки” from
+        # being reassigned to an older visual branch in the 12h memory.
+        textual_self_contained = bool(
             not followup_dialogue
             and not memory_query
             and best_op in {
-                "build", "create", "generate", "modify", "present",
-                "transform", "redraw", "visualize", "compare", "calculate",
-                "analyze", "retrieve", "list", "explain",
+                "answer", "list", "explain", "retrieve", "calculate",
+                "compare", "summarize",
             }
-            and (best_obj != "text" or structured_rep)
+            and len(QuantumContextUnderstandingEngine._content_tokens(text)) >= 2
         )
-        content_tokens = [
-            token for token in QuantumContextUnderstandingEngine._content_tokens(text)
-            if token and len(token) >= 2
-        ]
+        semantic_self_contained = bool(
+            not effective_followup_dialogue
+            and not memory_query
+            and (
+                textual_self_contained
+                or (
+                    best_op in {
+                        "build", "create", "generate", "modify", "present",
+                        "transform", "redraw", "visualize",
+                    }
+                    and (meaningful_object or meaningful_structured_rep)
+                )
+            )
+        )
         # For image generation the object itself is the decisive operand.
         # Do not let similarity to a previous image turn make a complete current
         # request inherit that older prompt.  A memory-query turn is never a
         # generation request, even if it contains words like "нарисуй".
         current_visual_self_contained = bool(
             not memory_query
-            and visual_operation
-            and bool(visual_operation and (visual_rep or visual_object))
-            and (
-                len(content_tokens) >= 2
-                or (best_obj != "text" and best_obj_score >= 0.10)
-                or (best_rep == "image" and best_rep_score >= 0.10)
-            )
+            and current_visual_task_complete
         )
         self_contained = current_visual_self_contained or semantic_self_contained
 
@@ -1643,6 +1705,7 @@ class QuantumInterpretationEngine:
         current_scores = {
             "dialogue": self._family_scores(current, "dialogue", SEMANTIC_TURN_PROTOTYPES),
             "representation": self._family_scores(current, "representation", REPRESENTATION_HYPOTHESES),
+            "operation": self._operation_family_scores(current),
             "object": self._family_scores(current, "object", OBJECT_HYPOTHESES),
             "goal": self._family_scores(current, "goal", GOAL_HYPOTHESES),
             "domain": self._family_scores(current, "domain", DOMAIN_HYPOTHESES),
@@ -1671,6 +1734,7 @@ class QuantumInterpretationEngine:
             scores = {
                 "dialogue": self._family_scores(text, "dialogue", SEMANTIC_TURN_PROTOTYPES),
                 "representation": self._family_scores(text, "representation", REPRESENTATION_HYPOTHESES),
+                "operation": self._operation_family_scores(text),
                 "object": self._family_scores(text, "object", OBJECT_HYPOTHESES),
                 "goal": self._family_scores(text, "goal", GOAL_HYPOTHESES),
                 "domain": self._family_scores(text, "domain", DOMAIN_HYPOTHESES),
@@ -1826,10 +1890,14 @@ class QuantumInterpretationEngine:
         margin = best_score - second_score
         coherent_followup = bool(followup_evidence >= 0.08 or best_dialogue_label in followup_labels)
 
-        # If the strongest branch is the latest branch, it is CONTINUE.  If an
-        # older branch wins by a meaningful semantic margin, it is RECALL.  This is
-        # the key difference from the old "always use the latest pair" behaviour.
-        if best_score >= continue_threshold and margin >= margin_required and coherent_followup:
+        # A semantically complete current task owns this turn. Similarity to an
+        # older USER↔APRIL pair is evidence only and can never convert a complete
+        # request into CONTINUE/RECALL. Incomplete or explicit reference turns remain
+        # eligible for context resolution below.
+        if current_self_contained:
+            relation = "NEW"
+            selected = {}
+        elif best_score >= continue_threshold and margin >= margin_required and coherent_followup:
             relation = "CONTINUE" if best["index"] == latest_index else "RECALL"
             selected = best
         elif implicit_context_dependency and latest is not None:
@@ -2006,10 +2074,18 @@ class QuantumInterpretationEngine:
         )
         semantic_reference = bool(
             dialogue_best == "reference"
+            and reference_evidence >= 0.080
             and has_context
             and not current_self_contained
         )
-        semantic_memory_query = bool(dialogue_best == "memory_query" and has_context)
+        # The generic memory-query prototype can weakly match ordinary follow-up
+        # wording (for example "расскажи подробнее"). Treat it as an actual memory
+        # query only when its measured score is materially above background noise.
+        semantic_memory_query = bool(
+            dialogue_best == "memory_query"
+            and memory_evidence >= 0.160
+            and has_context
+        )
 
         # A dialogue classifier is authoritative for discourse act.  Similarity
         # only supplies topical context and never upgrades an independent task.
@@ -2463,6 +2539,7 @@ class QuantumInterpretationEngine:
             )
             if (
                 bool(features.get("visual_action"))
+                and bool(features.get("self_contained"))
                 and operation in visual_ops
                 and memory_query < 0.04
                 and image_score >= 0.035
@@ -2832,14 +2909,12 @@ class QuantumInterpretationEngine:
         # Never promote the literal current/previous user sentence to the active
         # topic. StateManager's authenticated pair window is the dialogue source
         # of truth; generic discourse requests must remain queries over that window.
-        active_topic=self.normalize(
-            state.get("active_topic")
-            or state.get("current_topic")
-            or semantic.get("active_topic")
-            or cognition.get("active_topic")
-            or ""
-        )
-        active_goal=self.normalize(state.get("active_goal") or state.get("current_goal") or semantic.get("active_goal") or cognition.get("active_goal"))
+        # For authenticated dialogue, continuation authority comes from the
+        # existing 12-hour USER↔APRIL pair window. Do not let stale topic/goal
+        # slots from older entity/topic engines hijack the current turn. The
+        # context engine reconstructs the active meaning from the pair trajectory.
+        active_topic = ""
+        active_goal = ""
         p=self.measure(text,previous_assistant=last_a,previous_user=last_u,active_topic=active_topic,active_goal=active_goal)
         previous_scene = state.get("current_visual_scene") or state.get("active_visual_scene")
         if not isinstance(previous_scene, dict):
@@ -3100,13 +3175,31 @@ class QuantumInterpretationEngine:
             "memory_query": float(current_dialogue_scores.get("memory_query", 0.0) or 0.0),
             "reformulation": float(current_dialogue_scores.get("reformulation", 0.0) or 0.0),
             "reference": float(current_dialogue_scores.get("reference", 0.0) or 0.0),
+            "artifact_reference": float(current_dialogue_scores.get("artifact_reference", 0.0) or 0.0),
         }
-        visual_reference_lock = max(reference_scores.values() or [0.0]) >= 0.04
+        reference_signal = max(reference_scores.values() or [0.0])
+        current_op_score = float(p.get("operation_scores", {}).get(current_operation, 0.0) or 0.0)
+        # Artifact/reference similarity alone is not enough to cancel a genuine
+        # visual request: words such as "нарисуй" naturally overlap with the
+        # historical-artifact prototype. Require supporting discourse evidence
+        # from reference/reformulation as well, while keeping the 12h memory
+        # query threshold authoritative.
+        explicit_visual_reference = bool(
+            reference_scores["artifact_reference"] >= 0.080
+            and (
+                reference_scores["reference"] + reference_scores["reformulation"] >= 0.100
+            )
+        )
+        visual_reference_lock = bool(
+            reference_scores["memory_query"] >= 0.160
+            or explicit_visual_reference
+        )
         explicit_visual_task = (
             not visual_reference_lock
             and current_memory_query < 0.04
             and current_operation in {"build", "create", "generate", "modify", "present", "transform", "redraw", "visualize"}
-            and (current_visual_action or current_image_evidence >= 0.035)
+            and current_visual_action
+            and current_image_evidence >= 0.035
         )
         visual_generation_request = ""
         current_self_contained = bool((p.get("request_features") or {}).get("self_contained"))
@@ -3159,6 +3252,14 @@ class QuantumInterpretationEngine:
                     "selected_memory_operand": dict(visual_generation_context),
                 })
                 continuation = True
+
+        # An incomplete visual request without an authenticated 12h visual operand
+        # must not launch a random image with an underspecified prompt.
+        if production in {"image", "gallery"} and not visual_generation_request:
+            production = "text"
+            source = "INCOMPLETE_VISUAL_WITHOUT_AUTHENTICATED_CONTEXT"
+            locked = False
+
         # A short continuation question does not acquire a structured renderer
         # merely because the representation matrix found a weak candidate.
         # Structured output must be supported by the current turn's operation,
@@ -3342,8 +3443,18 @@ class QuantumInterpretationEngine:
         visual_schema = visual_schema_rank[0][0] if visual_schema_rank else ""
         visual_schema_confidence = float(visual_schema_rank[0][1]) if visual_schema_rank else 0.0
         ascii_schema_advisory = False
+        semantic_task_object = p["best_object"]
+        semantic_task_goal = p["best_goal"]
+        # The resolved production representation is authoritative for the provider
+        # handoff. Weak cross-prototype scores must not leak a stale visual object or
+        # visual goal into a text turn and make the Provider emit an image-only JSON.
+        if production == "text" and not visual_generation_request:
+            if semantic_task_object in {"image", "gallery", "diagram", "graph"}:
+                semantic_task_object = "text"
+            if semantic_task_goal in {"visualize", "transform", "present"}:
+                semantic_task_goal = "understand"
         semantic_task={
-            "operation":p["best_operation"],"object":p["best_object"],"goal":p["best_goal"],
+            "operation":p["best_operation"],"object":semantic_task_object,"goal":semantic_task_goal,
             "representation":production,
             "visual_schema":visual_schema,
             "visual_schema_confidence":visual_schema_confidence,
