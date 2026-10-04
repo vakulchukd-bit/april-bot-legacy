@@ -5665,9 +5665,9 @@ class SequentialInterpretation:
             "pending_resolved": bool(semantic_result.get("pending_resolved")),
             "resolved_request": _text(semantic_result.get("resolved_request") or request),
             "resolved_reference": _text(semantic_result.get("resolved_reference") or ""),
-            "resolved_entity": _text(semantic_result.get("resolved_entity") or contract.get("resolved_entity") or workspace.get("active_entity")),
-            "resolved_entity_source": _text(contract.get("resolved_entity_source") or "INTERPRETATION_RUNTIME"),
-            "active_entity": _text(semantic_result.get("resolved_entity") or contract.get("active_entity") or workspace.get("active_entity")),
+            "resolved_entity": "",
+            "resolved_entity_source": "disabled_pair_context",
+            "active_entity": "",
             "continuation_content_analysis": semantic_result.get("continuation_content_analysis") if isinstance(semantic_result.get("continuation_content_analysis"), dict) else {},
             "dialogue_strategy": semantic_result.get("dialogue_strategy") if isinstance(semantic_result.get("dialogue_strategy"), dict) else {},
             "dialogue_development": _compact(development, max_depth=6, max_items=12),
@@ -5712,7 +5712,13 @@ class SequentialInterpretation:
         operation = _text(semantic_result.get("operation") or "answer")
         goal = _text(semantic_result.get("goal") or "answer")
         topic = _text(semantic_result.get("canonical_topic") or dialogue.get("canonical_topic") or representation)
-        entity = _text(semantic_result.get("resolved_entity") or dialogue.get("resolved_entity") or representation)
+        entity = ""
+        visual_generation_request = _text(
+            semantic_result.get("visual_generation_request")
+            or dialogue.get("visual_generation_request")
+            or _as_dict(semantic_result.get("dialogue_vector")).get("visual_generation_request")
+            or ""
+        )
         requested = [
             _text(x).lower() for x in (semantic_result.get("requested_outputs") or render_plan.get("requested_outputs") or ["text"])
             if _text(x).strip()
@@ -5724,19 +5730,31 @@ class SequentialInterpretation:
             "sequence_id": _text(dialogue.get("sequence_id")),
             "task": _compact(dialogue.get("active_task") or {}, max_depth=5, max_items=10),
         }
-        if representation == "image" and operation in {"build", "visualize", "modify", "transform", "redraw"}:
+        if representation in {"image", "gallery"} and operation in {"build", "create", "generate", "visualize", "modify", "transform", "redraw", "present"}:
             attrs["visual_production_mode"] = "image_generation"
         if representation == "link" and ("telegram" in request.lower() or "телеграм" in request.lower()):
             attrs["visual_production_mode"] = "link"
         return_intent = self._make_intent(operation, entity or representation, representation, goal, topic, attrs)
+        if representation in {"image", "gallery"}:
+            requested = [representation]
+        render_authorized = bool(
+            control.get("render_authorized")
+            or render_plan.get("authorized")
+            or representation in {"image", "gallery"}
+        )
+        render_mode = _text(control.get("render_mode") or render_plan.get("mode") or "TEXT_ONLY")
+        if representation in {"image", "gallery"}:
+            render_mode = "IMAGE_GENERATION"
         return_intent.update({
             "requested_outputs": requested or ["text"],
+            "visual_generation_request": visual_generation_request,
             "production_representation_locked": True,
-            "render_authorized": bool(control.get("render_authorized") or render_plan.get("authorized")),
-            "render_mode": _text(control.get("render_mode") or render_plan.get("mode") or "TEXT_ONLY"),
+            "render_authorized": render_authorized,
+            "render_mode": render_mode,
             "interpretation_control": _compact(control, max_depth=4, max_items=12),
             "semantic_understanding": _compact(semantic_result.get("semantic_understanding") or {}, max_depth=5, max_items=10),
             "semantic_request": _text(semantic_result.get("semantic_request") or dialogue.get("resolved_request") or request),
+            "visual_generation_request": visual_generation_request,
             "semantic_result": semantic_result,
         })
         return return_intent
@@ -5986,7 +6004,9 @@ class ProcessorScene:
             _text(x).lower() for x in (intent.get("requested_outputs") or [])
             if _text(x).strip()
         ]
-        if bool(intent.get("render_authorized")) and authorized_outputs:
+        if representation in {"image", "gallery"}:
+            requested_outputs = [representation]
+        elif bool(intent.get("render_authorized")) and authorized_outputs:
             for item in authorized_outputs:
                 if item != "text" and item in _STRUCTURED_TYPES and item not in requested_outputs:
                     requested_outputs.append(item)
@@ -6236,6 +6256,7 @@ class ProcessorScene:
             "provider_context_authority": "INTERPRETATION",
             "interpretation_relation_audit": interpretation_relation_audit,
             "current_user_request": self.request,
+            "visual_generation_request": visual_generation_request,
             "semantic_request": _text(
                 semantic_result.get("semantic_request")
                 or _as_dict(semantic_result.get("semantic_understanding")).get("provider", {}).get("semantic_request")
@@ -7391,6 +7412,7 @@ async def _route_image_through_room_registry(
         pipeline_stage="artifact_route",
         context={
             "current_user_request": _text(conversation.get("current_request") or request.intent.get("normalized_text")),
+            "visual_generation_request": _text(request.intent.get("visual_generation_request") or conversation.get("visual_generation_request")),
             "resolved_request": _text(conversation.get("resolved_request") or request.intent.get("resolved_request")),
             "semantic_request": _text(request.intent.get("semantic_request") or request.intent.get("resolved_request")),
             "dialogue_contract": deepcopy(dialogue_contract),
