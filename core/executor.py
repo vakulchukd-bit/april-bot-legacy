@@ -6667,7 +6667,33 @@ class ProcessorScene:
         blocks = self._canonicalize_blocks(provider_blocks, request)
         answer = _text(machine_payload.get("answer") or machine_payload.get("content"))
         if not answer:
-            raise RuntimeError("EMPTY_PROVIDER_ANSWER")
+            # Structured output may legitimately carry the visible result without
+            # a narrative answer.  Preserve the SceneContract invariant by deriving
+            # a minimal carrier from already-authorized blocks; never emit an empty
+            # assistant bubble and never re-run semantic interpretation here.
+            for block in list(blocks or []):
+                if not isinstance(block, dict):
+                    continue
+                kind = _text(
+                    block.get("type") or block.get("artifact_type") or block.get("representation")
+                ).lower()
+                if kind in {"text", "markdown"}:
+                    candidate = _text(block.get("content") or block.get("text") or block.get("answer"))
+                    if candidate:
+                        answer = candidate
+                        break
+            if not answer:
+                structured_kinds = {
+                    _text(
+                        block.get("type") or block.get("artifact_type") or block.get("representation")
+                    ).lower()
+                    for block in list(blocks or [])
+                    if isinstance(block, dict)
+                }
+                if structured_kinds - {"text", "markdown"}:
+                    answer = "Готово — результат подготовлен."
+            if not answer:
+                raise RuntimeError("EMPTY_PROVIDER_ANSWER")
 
         # Transport invariant: a human-visible answer must never be represented
         # by an empty text block. Some provider payloads contain a valid answer
