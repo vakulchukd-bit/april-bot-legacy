@@ -5617,14 +5617,36 @@ class SequentialInterpretation:
         contract = semantic_result.get("dialogue_contract") if isinstance(semantic_result.get("dialogue_contract"), dict) else {}
         vector = semantic_result.get("dialogue_vector") if isinstance(semantic_result.get("dialogue_vector"), dict) else {}
         workspace = semantic_result.get("cognitive_workspace") if isinstance(semantic_result.get("cognitive_workspace"), dict) else {}
+        # Canonical dialogue state is the Interpretation three-way relation.
+        # Topic-level evidence (NEW_TOPIC/SAME_TOPIC/CONTINUE_TOPIC/INDEPENDENT)
+        # is never allowed to crash the production route. Keep it as evidence and
+        # normalize only the execution state consumed by the existing processor.
         relation = _text(
-            contract.get("relation")
+            contract.get("three_way_relation")
             or semantic_result.get("three_way_relation")
+            or vector.get("three_way_relation")
+            or contract.get("relation")
             or vector.get("relation")
             or "NEW"
         ).upper()
+        relation_alias = {
+            "NEW_TOPIC": "NEW",
+            "INDEPENDENT": "NEW",
+            "SAME_TOPIC": "NEW",
+            "CONTINUE_TOPIC": "CONTINUE",
+            "CONTINUATION": "CONTINUE",
+            "MEMORY_QUERY": "RECALL",
+        }
+        relation = relation_alias.get(relation, relation)
         if relation not in {"NEW", "CONTINUE", "RECALL"}:
-            raise RuntimeError(f"INVALID_INTERPRETATION_RELATION:{relation}")
+            # Never turn an interpretation vocabulary mismatch into an empty Web
+            # response. Fall back to the explicit continuation/reference flags
+            # already owned by Interpretation.
+            relation = (
+                "RECALL" if bool(contract.get("reference_to_previous") or semantic_result.get("reference_to_previous"))
+                else "CONTINUE" if bool(contract.get("continuation") or semantic_result.get("continuation"))
+                else "NEW"
+            )
         task_state = (
             semantic_result.get("interactive_task_state")
             if isinstance(semantic_result.get("interactive_task_state"), dict)
@@ -6548,6 +6570,11 @@ class ProcessorScene:
             },
         )
         setattr(request, "dialogue_contract", dialogue_contract)
+        # Keep the Interpretation-authored Provider plan as a direct attribute as
+        # well as its existing conversation/constraints copies. This is a transport
+        # invariant: later normalization must never lose the frozen plan because of
+        # a serializer/compaction boundary.
+        setattr(request, "provider_context_plan", deepcopy(provider_context_plan))
         setattr(request, "turn_meaning", context)
         setattr(request, "response_output_tokens", output_budget)
         setattr(request, "quantum_state", {
