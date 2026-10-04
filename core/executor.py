@@ -7911,3 +7911,42 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
             "render_blocks": list(getattr(contract, "render_blocks", []) or []),
         },
     }
+
+
+# ============================================================================
+# CANONICAL INTERPRETER BRIDGE — 2026-10-04
+# ============================================================================
+# Executor keeps its compatibility implementation for historical imports, but
+# production turns must use the pair-first interpretation owned by
+# blocks.interpretation_layer. This prevents the duplicate legacy interpreter
+# from recreating topic/entity memory decisions.
+from blocks.interpretation_layer import interpret_request as _PAIR_FIRST_INTERPRET_REQUEST
+
+
+def interpret_request(text, cognition=None, semantic=None, history=None, state=None):
+    return _PAIR_FIRST_INTERPRET_REQUEST(
+        text,
+        cognition=cognition,
+        semantic=semantic,
+        history=history or [],
+        state=state or {},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Canonical pair-first intent sanitization. Memory does not expose entities.
+# ---------------------------------------------------------------------------
+_original_sequential_intent = SequentialInterpretation.intent
+
+def _pair_first_clean_intent(self, text: str, *args, **kwargs):
+    result = _original_sequential_intent(self, text, *args, **kwargs)
+    if isinstance(result, dict):
+        result["topic"] = ""
+        result["object"] = ""
+        result["resolved_entity"] = ""
+        if isinstance(result.get("semantic_result"), dict):
+            result["semantic_result"]["canonical_topic"] = ""
+            result["semantic_result"]["resolved_entity"] = ""
+    return result
+
+SequentialInterpretation.intent = _pair_first_clean_intent
