@@ -6186,6 +6186,12 @@ class ProcessorScene:
             semantic_result,
         )
 
+        visual_generation_request = _text(
+            semantic_result.get("visual_generation_request")
+            or dialogue.get("visual_generation_request")
+            or ""
+        ) if representation in {"image", "gallery"} else ""
+
         context = {
             "relation": relation,
             "continuation": bool(dialogue["continuation"]),
@@ -6437,6 +6443,7 @@ class ProcessorScene:
                     or _as_dict(semantic_result.get("semantic_understanding")).get("provider", {}).get("semantic_request")
                     or resolved_request
                 ),
+                "visual_generation_request": visual_generation_request,
                 "semantic_frame": _compact(semantic_result.get("semantic_frame") or {}, max_depth=3, max_items=8),
                 "semantic_understanding": _compact(semantic_result.get("semantic_understanding") or {}, max_depth=5, max_items=10),
                 "attributes": _compact(intent.get("attributes") or {}),
@@ -6470,6 +6477,7 @@ class ProcessorScene:
                 "provider_context_plan": _compact(provider_context_plan, max_depth=7, max_items=14),
                 "provider_context_authority": "INTERPRETATION",
                 "current_user_request": self.request,
+                "visual_generation_request": visual_generation_request,
                 "user_id": self.user_id,
                 "conversation_id": dialogue_memory.get("conversation_id"),
             },
@@ -6513,6 +6521,7 @@ class ProcessorScene:
                         or _as_dict(semantic_result.get("semantic_understanding")).get("provider", {}).get("semantic_request")
                         or resolved_request
                     ),
+                    "visual_generation_request": visual_generation_request,
                     "semantic_understanding": _compact(semantic_result.get("semantic_understanding") or {}, max_depth=5, max_items=10),
                     "dialogue_relation": relation,
                     "semantic_frame": _compact(semantic_result.get("semantic_frame") or {}, max_depth=3, max_items=8),
