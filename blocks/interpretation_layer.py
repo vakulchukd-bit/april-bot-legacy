@@ -1240,7 +1240,7 @@ class QuantumInterpretationEngine:
         for label, hypothesis in REPRESENTATION_HYPOTHESES.items():
             hypothesis_tokens = {
                 token for token in self._tokens(hypothesis)
-                if len(token) >= 4 and not token.isascii()
+                if len(token) >= 4 and any(ord(ch) > 127 for ch in token)
             }
             if hypothesis_tokens & negated_tokens:
                 negated.add(label)
@@ -1470,8 +1470,6 @@ class QuantumInterpretationEngine:
                 and (visual_object or best_rep_score >= 0.16)
                 and (visual_goal or best_goal_score >= 0.08)
             ),
-            "ascii_schema_advisory": False,
-            "ascii_schema_score": 0.0,
             "self_contained": self_contained,
             "memory_query": memory_query,
             "visual_reference_lock": visual_reference_lock,
@@ -2516,42 +2514,40 @@ class QuantumInterpretationEngine:
         return history
 
     def _find_visual_generation_context(self, pairs: list[dict[str, Any]] | None) -> dict[str, Any]:
-        """Select the latest real image-generation request from authenticated 12h memory."""
-        visual_ops = {"build", "create", "generate", "modify", "present", "transform", "redraw", "visualize"}
+        """Select the latest original visual-production USER turn from the 12h pair memory."""
         candidates = []
-        for pair in pairs or []:
+        for index, pair in enumerate(pairs or []):
             if not isinstance(pair, dict):
                 continue
             user = self.normalize(pair.get("user"))
             if not user:
                 continue
-            try:
-                profile = self.measure(user)
-            except Exception:
+            representation = self._pair_first_representation(user)
+            if representation not in {"image", "gallery"}:
                 continue
-            features = profile.get("request_features") if isinstance(profile.get("request_features"), dict) else {}
+            profile = self.measure(user)
             operation = str(profile.get("best_operation") or "").lower()
             scores = profile.get("dialogue_scores") if isinstance(profile.get("dialogue_scores"), dict) else {}
             memory_query = float(scores.get("memory_query", 0.0) or 0.0)
-            image_score = max(
-                float((profile.get("representation_scores") or {}).get("image", 0.0) or 0.0),
-                float((profile.get("object_scores") or {}).get("image", 0.0) or 0.0),
+            # Only original production turns are candidates. A later "modify this
+            # image" turn must bind to this pair, not replace it as the source.
+            if operation not in {"build", "create", "generate", "visualize"}:
+                continue
+            if memory_query >= 0.04:
+                continue
+            candidates.append({
+                "user": user,
+                "turn_index": pair.get("turn_index", index),
+                "created_at": pair.get("created_at", 0.0),
+                "score": 1.0,
+                "source": "STATE_MANAGER_AUTHENTICATED_12H_PAIRS",
+            })
+        candidates.sort(
+            key=lambda x: (
+                float(x.get("created_at") or 0.0),
+                int(x.get("turn_index") or 0),
             )
-            if (
-                bool(features.get("visual_action"))
-                and bool(features.get("self_contained"))
-                and operation in visual_ops
-                and memory_query < 0.04
-                and image_score >= 0.035
-            ):
-                candidates.append({
-                    "user": user,
-                    "turn_index": pair.get("turn_index", -1),
-                    "created_at": pair.get("created_at", 0.0),
-                    "score": round(image_score, 6),
-                    "source": "STATE_MANAGER_AUTHENTICATED_12H_PAIRS",
-                })
-        candidates.sort(key=lambda x: (float(x.get("created_at") or 0.0), int(x.get("turn_index") or 0)))
+        )
         return candidates[-1] if candidates else {}
 
     def _history(self,history):
@@ -2655,6 +2651,162 @@ class QuantumInterpretationEngine:
             self._cache[key]=profile
             if len(self._cache)>self._cache_limit: self._cache.pop(next(iter(self._cache)))
         return profile
+
+    @staticmethod
+    def _pair_first_subject(pairs: list[dict[str, str]], current: str) -> str:
+        """Return the dialogue subject from a USER↔APRIL pair, never from an entity engine."""
+        if not pairs:
+            return str(current or "").strip()
+        row = pairs[-1] if isinstance(pairs[-1], dict) else {}
+        user = str(row.get("user") or row.get("user_text") or "").strip()
+        april = str(row.get("april") or row.get("assistant") or row.get("result") or "").strip()
+        # The user's last complete request is the canonical subject; APRIL's answer is
+        # retained as supporting context rather than converted into a topic/entity.
+        return user or april or str(current or "").strip()
+
+    def _pair_first_relation(
+        self,
+        current: str,
+        pairs: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        """Resolve NEW/CONTINUE/RECALL using only authenticated dialogue pairs."""
+        current_n = normalize_text(current)
+        if not current_n:
+            return {"relation": "NEW", "selected_pair": {}, "selected_index": -1, "score": 0.0}
+
+        lower = current_n.casefold()
+        recall_request = any(
+            phrase in lower
+            for phrase in (
+                "вспомни", "о чем мы говорили", "о чём мы говорили",
+                "что я спрашивал", "что я спрашивала", "последних диалог",
+                "последних разговор", "что было раньше", "вспомни последние",
+            )
+        )
+        if recall_request:
+            return {
+                "relation": "RECALL",
+                "selected_pair": pairs[-1] if pairs else {},
+                "selected_index": len(pairs) - 1 if pairs else -1,
+                "score": 1.0,
+            }
+
+        if not pairs:
+            return {"relation": "NEW", "selected_pair": {}, "selected_index": -1, "score": 0.0}
+
+        best_index = len(pairs) - 1
+        best_score = 0.0
+        best_pair: dict[str, str] = {}
+        # Pair similarity determines whether the current request continues the
+        # immediately preceding meaning. No named entities or entity graph are used.
+        for index, raw in enumerate(pairs[-12:]):
+            pair = raw if isinstance(raw, dict) else {}
+            pair_text = " ".join(
+                str(pair.get(key) or "").strip()
+                for key in ("user", "april", "assistant", "result")
+            ).strip()
+            if not pair_text:
+                continue
+            score = float(self.similarity(current_n, pair_text).get("score", 0.0) or 0.0)
+            if score >= best_score:
+                best_score = score
+                best_pair = pair
+                best_index = len(pairs) - min(12, len(pairs)) + index
+
+        last_pair = pairs[-1] if isinstance(pairs[-1], dict) else {}
+        last_user = str(last_pair.get("user") or last_pair.get("user_text") or "").strip()
+        last_assistant = str(
+            last_pair.get("april") or last_pair.get("assistant") or last_pair.get("result") or ""
+        ).strip()
+        immediate_score = max(
+            self.similarity(current_n, last_user).get("score", 0.0) if last_user else 0.0,
+            self.similarity(current_n, last_assistant).get("score", 0.0) if last_assistant else 0.0,
+        )
+
+        reference_like = any(
+            token in lower
+            for token in ("это", "этот", "эту", "эти", "этим", "него", "неё", "не это")
+        )
+        correction_like = any(
+            token in lower
+            for token in ("исправь", "исправься", "не то", "не картинка", "переделай", "перерисуй")
+        )
+        current_rep = self._pair_first_representation(current_n)
+        last_rep = self._pair_first_representation(last_user)
+        current_operation = str(
+            self.measure(current_n).get("best_operation") or ""
+        ).lower()
+
+        # Artifact corrections/references must bind to the latest prior pair that
+        # produced the same representation, not to whichever older pair happens to
+        # have the highest lexical similarity.
+        same_rep_pair = {}
+        same_rep_index = -1
+        if current_rep != "text" and (reference_like or correction_like):
+            for offset, raw_pair in reversed(list(enumerate(pairs))):
+                pair_user = str(
+                    (raw_pair or {}).get("user")
+                    or (raw_pair or {}).get("user_text")
+                    or ""
+                ).strip() if isinstance(raw_pair, dict) else ""
+                if self._pair_first_representation(pair_user) == current_rep:
+                    same_rep_pair = raw_pair if isinstance(raw_pair, dict) else {}
+                    same_rep_index = offset
+                    break
+
+        pair_same_representation = bool(
+            same_rep_pair
+            and current_operation in {"modify", "reformulate", "present", "build", "generate"}
+        )
+        short_followup = len(current_n.split()) <= 8
+
+        if pair_same_representation and (reference_like or correction_like):
+            best_pair = same_rep_pair
+            best_index = same_rep_index
+            relation = "CONTINUE"
+        elif correction_like and (immediate_score >= 0.18 or best_score >= 0.22):
+            relation = "CONTINUE"
+        elif reference_like and (immediate_score >= 0.18 or best_score >= 0.22):
+            relation = "CONTINUE"
+        elif current_rep != "image" and short_followup and immediate_score >= 0.34:
+            relation = "CONTINUE"
+        elif current_rep != "image" and best_score >= 0.58 and immediate_score >= 0.28:
+            relation = "CONTINUE"
+        else:
+            relation = "NEW"
+
+        return {
+            "relation": relation,
+            "selected_pair": best_pair if relation == "CONTINUE" else {},
+            "selected_index": best_index if relation == "CONTINUE" else -1,
+            "score": max(immediate_score, best_score),
+        }
+
+    @staticmethod
+    def _pair_first_representation(current: str) -> str:
+        """Resolve the requested output form from the current utterance only."""
+        value = normalize_text(current).casefold()
+        if not value:
+            return "text"
+        if re.search(r"(?:формул\w*|уравнени\w*|математичес\w* выраж)", value):
+            return "formula"
+        if re.search(r"(?:код|python|пайтон|скрипт)", value):
+            return "code"
+        if re.search(r"(?:таблиц\w*|таблич\w*)", value):
+            return "table"
+        if re.search(r"(?:график\w*)", value):
+            return "graph"
+        if re.search(r"(?:диаграмм\w*|схем\w*|блок[- ]?схем\w*)", value):
+            return "diagram"
+        if re.search(
+            r"(?:нарисуй|нарисовать|рисунок|картин\w*|изображени\w*|фото|портрет|"
+            r"сгенерируй изображени\w*|создай изображени\w*|перерисуй)",
+            value,
+        ):
+            return "image"
+        if re.search(r"(?:галере\w*|подборк\w* изображени)", value):
+            return "gallery"
+        return "text"
 
     def _resolve_production(self,text,profile,explicit):
         # Canonical upstream interpretation may lock one representation.
@@ -2934,6 +3086,18 @@ class QuantumInterpretationEngine:
         except Exception:
             pass
         recent_dialogue_pairs = list(canonical_pairs[-15:]) if canonical_pairs else self._recent_dialogue_pairs(history, limit=15)
+
+        # CANONICAL DIALOGUE AUTHORITY:
+        # relation/subject comes from authenticated USER↔APRIL pairs;
+        # representation comes only from the current request. No entity/topic engine
+        # is allowed to replace the pair subject.
+        pair_first = self._pair_first_relation(text, recent_dialogue_pairs)
+        pair_subject = self._pair_first_subject(
+            recent_dialogue_pairs if pair_first.get("relation") in {"CONTINUE", "RECALL"} else [],
+            text,
+        )
+        pair_representation = self._pair_first_representation(text)
+
         visual_generation_context = self._find_visual_generation_context(recent_dialogue_pairs)
         dialogue_packet = self.dialogue(
             text,
@@ -2945,7 +3109,50 @@ class QuantumInterpretationEngine:
             recent_dialogue_pairs=recent_dialogue_pairs,
         )
         d=dialogue_packet["dialogue"]
-        dialogue_vector=dialogue_packet.get("dialogue_relation", {})
+        dialogue_vector=dict(dialogue_packet.get("dialogue_relation", {}) or {})
+        canonical_relation = str(pair_first.get("relation") or "NEW").upper()
+        if canonical_relation == "RECALL":
+            dialogue_vector.update({
+                "three_way_relation": "RECALL",
+                "relation": "RECALL",
+                "request_relation": "RECALL",
+                "request_dependency": "recall",
+                "continuation": False,
+                "reference_to_previous": True,
+                "selected_memory_index": pair_first.get("selected_index", -1),
+                "selected_memory_operand": pair_first.get("selected_pair") or {},
+                "three_way_confidence": float(pair_first.get("score", 0.0) or 0.0),
+            })
+        elif canonical_relation == "CONTINUE":
+            dialogue_vector.update({
+                "three_way_relation": "CONTINUE",
+                "relation": "CONTINUE_TOPIC",
+                "request_relation": "CONTINUE_TOPIC",
+                "request_dependency": "continuation",
+                "continuation": True,
+                "reference_to_previous": bool(pair_first.get("selected_pair")),
+                "selected_memory_index": pair_first.get("selected_index", -1),
+                "selected_memory_operand": pair_first.get("selected_pair") or {},
+                "three_way_confidence": float(pair_first.get("score", 0.0) or 0.0),
+            })
+        else:
+            dialogue_vector.update({
+                "three_way_relation": "NEW",
+                "relation": "NEW_TOPIC",
+                "request_relation": "NEW_TOPIC",
+                "request_dependency": "independent",
+                "continuation": False,
+                "reference_to_previous": False,
+                "selected_memory_index": -1,
+                "selected_memory_operand": {},
+                "three_way_confidence": 1.0,
+            })
+        d=dict(d or {})
+        d.update({
+            "continuation_score": float(pair_first.get("score", 0.0) or 0.0) if canonical_relation == "CONTINUE" else 0.0,
+            "reference_score": float(pair_first.get("score", 0.0) or 0.0) if canonical_relation == "RECALL" else 0.0,
+            "three_way_relation": canonical_relation,
+        })
         explicit=(semantic.get("required_representations") or cognition.get("required_representations") or [])
 
         # Context-first fusion.  This is the interpretation authority for topic,
@@ -3075,6 +3282,11 @@ class QuantumInterpretationEngine:
         }:
             active_topic = reconstructed_topic
 
+        # Pair subject is the canonical dialogue subject. Never replace it with a
+        # surface verb such as "Покажи" or "Расскажи".
+        if pair_first.get("relation") in {"CONTINUE", "RECALL"}:
+            active_topic = pair_subject
+
         # Semantic coreference may establish a historical continuation even when
         # the prototype classifier ranks the surface turn as a generic question.
         if (
@@ -3118,6 +3330,10 @@ class QuantumInterpretationEngine:
 
         explicit=(semantic.get("required_representations") or cognition.get("required_representations") or [])
         production,source,locked=self._resolve_production(text,p,explicit)
+        if not explicit and pair_representation != "text":
+            production = pair_representation
+            source = "CURRENT_REQUEST_REPRESENTATION"
+            locked = True
 
         # Context Task Matrix can repair a polluted raw representation ranking.
         # Prefer the semantically supported current-turn object (formula/code/link/
@@ -3167,8 +3383,12 @@ class QuantumInterpretationEngine:
         current_image_evidence = max(
             float(p.get("representation_scores", {}).get("image", 0.0) or 0.0),
             float(p.get("object_scores", {}).get("image", 0.0) or 0.0),
+            1.0 if pair_representation == "image" else 0.0,
         )
-        current_visual_action = bool((p.get("request_features") or {}).get("visual_action"))
+        current_visual_action = bool(
+            (p.get("request_features") or {}).get("visual_action")
+            or pair_representation == "image"
+        )
         current_dialogue_scores = p.get("dialogue_scores") if isinstance(p.get("dialogue_scores"), dict) else {}
         current_memory_query = float(current_dialogue_scores.get("memory_query", 0.0) or 0.0)
         reference_scores = {
@@ -3203,9 +3423,15 @@ class QuantumInterpretationEngine:
         )
         visual_generation_request = ""
         current_self_contained = bool((p.get("request_features") or {}).get("self_contained"))
+        if canonical_relation == "CONTINUE" and pair_first.get("selected_pair"):
+            current_self_contained = False
         # A reference/recollection turn must never inherit the previous visual
         # renderer merely because the current text contains a visual verb/object.
         # The 12h pair dialogue remains available as context, but output stays text.
+        # Pair-first image continuation is a real redraw request, not a recall.
+        if canonical_relation == "CONTINUE" and pair_representation == "image":
+            visual_reference_lock = False
+
         if visual_reference_lock:
             production = "text"
             source = "STATE_MANAGER_AUTHENTICATED_12H_PAIRS_REFERENCE"
@@ -3231,6 +3457,13 @@ class QuantumInterpretationEngine:
                 visual_generation_request = self.normalize(visual_generation_context.get("user"))
                 dialogue_vector["visual_context_source"] = "STATE_MANAGER_AUTHENTICATED_12H_PAIRS"
                 dialogue_vector["visual_context_turn_index"] = visual_generation_context.get("turn_index", -1)
+            elif pair_first.get("selected_pair"):
+                selected = pair_first.get("selected_pair") if isinstance(pair_first.get("selected_pair"), dict) else {}
+                visual_generation_request = self.normalize(
+                    selected.get("user") or selected.get("user_text") or ""
+                )
+                dialogue_vector["visual_context_source"] = "STATE_MANAGER_AUTHENTICATED_12H_PAIRS"
+                dialogue_vector["visual_context_turn_index"] = pair_first.get("selected_index", -1)
             if visual_generation_request:
                 production = "image"
                 source = (
@@ -3442,7 +3675,6 @@ class QuantumInterpretationEngine:
         visual_schema_rank = sorted(visual_schema_scores.items(), key=lambda item: float(item[1]), reverse=True)
         visual_schema = visual_schema_rank[0][0] if visual_schema_rank else ""
         visual_schema_confidence = float(visual_schema_rank[0][1]) if visual_schema_rank else 0.0
-        ascii_schema_advisory = False
         semantic_task_object = p["best_object"]
         semantic_task_goal = p["best_goal"]
         # The resolved production representation is authoritative for the provider
@@ -3458,8 +3690,6 @@ class QuantumInterpretationEngine:
             "representation":production,
             "visual_schema":visual_schema,
             "visual_schema_confidence":visual_schema_confidence,
-            "ascii_schema_advisory": False,
-            "ascii_schema_score": 0.0,
             "visual_generation_request": visual_generation_request,
             "visual_generation_source": (
                 "STATE_MANAGER_AUTHENTICATED_12H_PAIRS"
@@ -3476,7 +3706,7 @@ class QuantumInterpretationEngine:
         if production in {"image", "gallery"}:
             presentation_recommendations = [
                 item for item in presentation_recommendations
-                if str(item.get("representation") or "").lower() not in {"text", "ascii"}
+                if str(item.get("representation") or "").lower() != "text"
             ]
         presentation={
             "version":"quantum_interpretation_transport_v4","decision_owner":DECISION_OWNER,
@@ -3502,6 +3732,16 @@ class QuantumInterpretationEngine:
                 "CONTINUE" if continuation else "RECALL" if reference else "NEW"
             ),
             "topic_relation": dialogue_vector.get("relation", "NEW_TOPIC"),
+            "canonical_topic": pair_subject,
+            "resolved_entity": "",
+            "active_entity": "",
+            "semantic_frame": {
+                "topic": pair_subject,
+                "operation": p.get("best_operation") or "answer",
+                "goal": p.get("best_goal") or "answer",
+                "representation": production,
+                "relation": canonical_relation,
+            },
             "normalized":text,"required_domains":domains,"candidate_domains":domains,
             "required_representations":[production],"candidate_representations":[production],
             "requested_representations":[production],"requested_representation":production,
@@ -3527,7 +3767,7 @@ class QuantumInterpretationEngine:
             ),
             "context_understanding": context_understanding,
             "topic_understanding": topic_understanding,
-            "entity_understanding": entities_understanding,
+            "entity_understanding": {"source": "dialogue_pair_only", "entities": [], "coreference": []},
             "authenticated_dialogue_memory": {
                 "source": "STATE_MANAGER_AUTHENTICATED_12H_PAIRS",
                 "window_hours": 12,
@@ -3536,7 +3776,6 @@ class QuantumInterpretationEngine:
             },
             "turn_structure_understanding": turn_structure_understanding,
             "task_understanding": task_understanding,
-            "ascii_schema_advisory": False,
             "resolved_scene":resolved_scene,
             "reference_resolution":reference_resolution,
             "presentation_transport":presentation,"presentation_signal":presentation,
@@ -3556,6 +3795,9 @@ class QuantumInterpretationEngine:
                 "history_window_size": len(recent_dialogue_pairs),
                 "history_task_context": history_task_context,
                 "visual_generation_request": visual_generation_request,
+                "pair_first_subject": pair_subject,
+                "pair_first_relation": str(dialogue_vector.get("three_way_relation") or canonical_relation).upper(),
+                "pair_first_representation": pair_representation,
                 "visual_generation_source": (
                     "STATE_MANAGER_AUTHENTICATED_12H_PAIRS"
                     if visual_generation_request and not current_self_contained
@@ -3663,7 +3905,7 @@ class QuantumInterpretationEngine:
             "possible_capability":"renderer" if production!="text" else None,"possible_output":production,
             "possible_scene_type":production,"current_representation":production,
             "unresolved_intent":not locked,"memory_query":memory,
-            "continuation":d["continuation_score"],"continuation_target":last_a or active_topic,
+            "continuation":d["continuation_score"],"continuation_target":pair_subject or last_a or active_topic,
             "dialogue_relation": dialogue_vector.get("relation", "NEW_TOPIC"),
             "dialogue_subtype": dialogue_vector.get("subtype", "NEW_TOPIC"),
             "visual_schema": visual_schema,
