@@ -313,6 +313,13 @@ async def generate(
         provider_metadata = context.get("provider_metadata") if isinstance(context, dict) and isinstance(context.get("provider_metadata"), dict) else {}
         provider_signal = context.get("image_generation_signal") if isinstance(context, dict) and isinstance(context.get("image_generation_signal"), dict) else provider_metadata.get("image_generation_signal") if isinstance(provider_metadata.get("image_generation_signal"), dict) else {}
         current_request = str(context.get("current_user_request") or "").strip() if isinstance(context, dict) else ""
+        dialogue_contract = context.get("dialogue_contract") if isinstance(context, dict) and isinstance(context.get("dialogue_contract"), dict) else {}
+        visual_generation_request = str(
+            context.get("visual_generation_request")
+            or dialogue_contract.get("visual_generation_request")
+            or provider_metadata.get("visual_generation_request")
+            or ""
+        ).strip() if isinstance(context, dict) else ""
         signal_route = str(provider_signal.get("route") or "").strip().upper()
         signal_execute = provider_signal.get("execute") is True
         signal_anchor = str(provider_signal.get("request_anchor") or "").strip()
@@ -328,7 +335,11 @@ async def generate(
         # The canonical same-turn request is the immutable anti-substitution anchor.
         # A valid Provider signal may supply the visual generation prompt for GPT Image 2; if its
         # signal is missing or stale, discard that prompt and use only this turn's request.
-        if signal_valid and signal_prompt:
+        if visual_generation_request:
+            clean_spec["prompt"] = visual_generation_request
+            clean_spec["openai_structured_visual_plan_semantic"] = visual_generation_request
+            prompt_source = "interpretation_visual_generation_request"
+        elif signal_valid and signal_prompt:
             clean_spec["prompt"] = signal_prompt
             prompt_source = "provider_signal_gpt_image_2"
         elif current_request:
@@ -353,6 +364,7 @@ async def generate(
                 "signal_route": signal_route or "none",
                 "request_anchor_matches": signal_anchor_matches,
                 "prompt_source": prompt_source,
+                "visual_generation_request": visual_generation_request,
                 "target": "C_APRIL_IMAGES_GENERATOR",
             },
         )
