@@ -6805,6 +6805,23 @@ def persist_state_background(user_id):
     return None
 
 
+def invalidate_user_memory_cache(user_id):
+    """Invalidate only the in-process authenticated memory snapshot.
+
+    PostgreSQL ``dialogue_memory`` is the durable source of truth. This helper
+    exists for the user-registry route so account creation/login cannot leave a
+    stale anonymous runtime snapshot attached to the same public April ID. It
+    never deletes dialogue rows and never changes the 12h UTC retention policy.
+    """
+    uid = _clean_uid(user_id)
+    if not uid:
+        return False
+    with _state_lock:
+        removed = state.pop(uid, None)
+    safe_state_log(f"MEMORY CACHE INVALIDATED user={uid} removed={bool(removed)}")
+    return bool(removed)
+
+
 def add_dialog(user_id, role, content, metadata=None, *, persist=True):
     """Runtime conversation buffer only. Database writes happen once per completed pair."""
     uid = _clean_uid(user_id)
