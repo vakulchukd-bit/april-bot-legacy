@@ -259,7 +259,6 @@ GOAL_HYPOTHESES = {
 # Visual schema is a semantic subtype of an already-resolved representation.
 # It is evidence only: it never routes by keyword and never owns renderer choice.
 VISUAL_SCHEMA_HYPOTHESES = {
-    "text_schema": "текстовая схема ASCII схема текстовая блок-схема последовательность шагов стрелки пункты обозначения узлы связи в тексте; textual schematic or ASCII-style text schema using characters and arrows",
     "function": "mathematical function equation dependency f(x) y of x curve coordinate plot; mathematical function against an axis",
     "series": "ряд данных последовательность измерений значения изменение динамика тренд временной ряд развитие по оси; ordered measurements or changing values",
     "timeline": "временная шкала хронология история периоды эпохи эры события даты раньше позже начало конец продолжительность последовательность во времени развитие существование вымирание; temporal history chronology eras periods dates and events",
@@ -389,60 +388,14 @@ class QuantumContextUnderstandingEngine:
 
     @classmethod
     def _entities(cls, text: Any) -> list[dict[str, Any]]:
-        source = str(text or "")
-        found: list[dict[str, Any]] = []
-        seen: set[str] = set()
+        """Entity extraction is intentionally disabled on the dialogue hot path.
 
-        patterns = (
-            ("url", r"https?://[^\s)\]}>,]+"),
-            ("email", r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b"),
-            (
-                "proper_name",
-                r"\b[А-ЯЁA-Z][а-яёa-z]+(?:\s+[А-ЯЁA-Z][а-яёa-z]+){1,4}\b",
-            ),
-            (
-                "proper_name",
-                r"\b[А-ЯЁA-Z][а-яёa-z]{2,}\b",
-            ),
-            (
-                "formula_symbol",
-                r"\b(?:[A-Za-z](?:\^[A-Za-z0-9+\-]+)?|[A-Za-z]\s*=\s*[A-Za-z0-9^_()+*/.\-]+)\b",
-            ),
-            (
-                "number_expression",
-                r"(?<![\w.])[-+]?\d+(?:[.,]\d+)?(?:\s*[+\-*/×÷]\s*[-+]?\d+(?:[.,]\d+)?)+",
-            ),
-            (
-                "code_identifier",
-                r"\b[A-Za-z_][A-Za-z0-9_]{2,}(?:\.[A-Za-z_][A-Za-z0-9_]{1,})+\b",
-            ),
-        )
-        for kind, pattern in patterns:
-            for match in re.finditer(pattern, source):
-                value = match.group(0).strip(".,:;()[]{}<>\"'")
-                if not value:
-                    continue
-                # Single-token proper names are valid even in mid-sentence.
-                # Exclude only generic discourse/function words.
-                if kind == "proper_name" and len(value.split()) == 1:
-                    if value.casefold() in {
-                        "кто", "что", "когда", "где", "куда", "почему", "зачем",
-                        "сколько", "какая", "какой", "какое", "какие", "расскажи",
-                        "покажи", "объясни", "сделай", "скажи", "а", "и", "но",
-                        "the", "what", "who", "when", "where", "why", "how",
-                    }:
-                        continue
-                key = (kind, value.casefold())
-                if key in seen:
-                    continue
-                seen.add(key)
-                found.append({
-                    "type": kind,
-                    "value": value,
-                    "start": match.start(),
-                    "end": match.end(),
-                })
-        return found[:48]
+        Dialogue meaning is reconstructed from authenticated USER↔APRIL pairs in
+        the 12-hour StateManager memory. Objects/representations are measured by
+        the semantic matrix, but named-entity graphs are not used to choose a
+        continuation, topic, or renderer.
+        """
+        return []
 
     @classmethod
     def _ordinals(cls, text: Any) -> list[int]:
@@ -794,12 +747,9 @@ class QuantumContextUnderstandingEngine:
 
     @staticmethod
     def _shared_entities(current_entities: list[dict[str, Any]], prior_entities: list[dict[str, Any]]) -> list[str]:
-        current = {str(x.get("value")).casefold() for x in current_entities}
-        return [
-            str(x.get("value"))
-            for x in prior_entities
-            if str(x.get("value")).casefold() in current
-        ][:16]
+        # Entity overlap is not a dialogue authority. CONTINUE/RECALL is derived
+        # from the authenticated pair history instead.
+        return []
 
     def _topic_profiles(
         self,
@@ -865,93 +815,13 @@ class QuantumContextUnderstandingEngine:
         prior_text: str,
         topic_profiles: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        current_tokens = set(cls._tokens(current))
-        has_pronoun = bool(current_tokens & cls._PRONOUNS)
-        ordinals = cls._ordinals(current)
-        local_reference = cls._is_current_turn_reference(current)
+        """No entity/coreference engine: references use dialogue pairs only.
 
-        if not has_pronoun and not ordinals:
-            return []
-
-        entities = cls._entities(prior_text)
-        scored = []
-        for entity in entities:
-            kind = entity["type"]
-            value = entity["value"]
-            score = 0.0
-            if kind == "proper_name":
-                score += 0.34
-            elif kind in {"formula_symbol", "number_expression", "code_identifier"}:
-                score += 0.22
-            if topic_profiles:
-                shared = any(
-                    value.casefold() in {str(x).casefold() for x in profile.get("shared_entities", [])}
-                    for profile in topic_profiles[:4]
-                )
-                topic_labels = {
-                    str(profile.get("topic") or "").casefold()
-                    for profile in topic_profiles[:4]
-                    if profile.get("topic")
-                }
-                if shared:
-                    score += 0.34
-                if value.casefold() in topic_labels:
-                    score += 0.46
-            scored.append({
-                "entity": value,
-                "type": kind,
-                "score": round(min(1.0, score), 6),
-            })
-
-        scored.sort(key=lambda item: item["score"], reverse=True)
-
-        if local_reference:
-            return [{
-                "type": "current_turn_ordinal",
-                "ordinal_targets": ordinals,
-                "historical_reference_blocked": True,
-                "candidates": [],
-                "confidence": 0.98,
-            }]
-
-        # A standalone ordinal after a previous numbered answer refers to that
-        # previous answer only when the antecedent exists structurally.
-        if ordinals:
-            numbered = []
-            for match in re.finditer(
-                r"(?:^|\s)(\d{1,3})[.)]\s+(.+?)(?=(?:\s+\d{1,3}[.)]\s+)|$)",
-                prior_text,
-                flags=re.S,
-            ):
-                numbered.append({
-                    "index": int(match.group(1)),
-                    "content": re.sub(r"\s+", " ", match.group(2)).strip()[:1000],
-                })
-            ordinal_target = ordinals[0]
-            selected = [
-                item for item in numbered if item["index"] == ordinal_target
-            ]
-            if selected:
-                return [{
-                    "type": "historical_ordinal",
-                    "ordinal_targets": ordinals,
-                    "historical_reference_blocked": False,
-                    "candidates": [{
-                        "entity": f"item_{ordinal_target}",
-                        "type": "historical_list_item",
-                        "content": selected[0]["content"],
-                        "score": 0.94,
-                    }],
-                    "confidence": 0.94,
-                }]
-
-        return [{
-            "type": "historical_entity",
-            "ordinal_targets": ordinals,
-            "historical_reference_blocked": False,
-            "candidates": scored[:8],
-            "confidence": round(float(scored[0]["score"]) if scored else 0.0, 6),
-        }]
+        The canonical dialogue selector already chooses a prior USER↔APRIL pair.
+        Returning no entity candidates prevents named-entity logic from competing
+        with the StateManager 12-hour contextual memory.
+        """
+        return []
 
     def _nli_verify(
         self,
@@ -1481,14 +1351,6 @@ class QuantumInterpretationEngine:
         visual_operation = best_op in {"build", "modify", "present"}
         visual_goal = best_goal in {"visualize", "transform", "present"}
         memory_query = best_dialogue == "memory_query"
-        visual_schema_scores = measured.get("visual_schema", {}) if isinstance(measured.get("visual_schema"), dict) else {}
-        text_schema_score = float(visual_schema_scores.get("text_schema", 0.0) or 0.0)
-        ascii_schema_advisory = bool(
-            best_rep == "text"
-            and text_schema_score >= 0.10
-            and best_op in {"answer", "build", "present", "explain", "list"}
-        )
-
         followup_dialogue = best_dialogue in {
             "continuation", "reformulation", "correction", "reference",
             "artifact_reference", "affirmation", "rejection",
@@ -1523,8 +1385,8 @@ class QuantumInterpretationEngine:
                 and (visual_object or best_rep_score >= 0.16)
                 and (visual_goal or best_goal_score >= 0.08)
             ),
-            "ascii_schema_advisory": ascii_schema_advisory,
-            "ascii_schema_score": text_schema_score,
+            "ascii_schema_advisory": False,
+            "ascii_schema_score": 0.0,
             "self_contained": self_contained,
             "memory_query": memory_query,
             "semantic_best_representation": best_rep,
@@ -1818,6 +1680,30 @@ class QuantumInterpretationEngine:
             ]
             family_score = sum(family_scores) / len(family_scores)
 
+            # Pair-context lexical morphology is used only as a bounded bridge when
+            # semantic similarity is sparse. It compares content tokens against the
+            # authenticated USER↔APRIL pair; it is not an entity list or trigger table.
+            current_content = QUANTUM_CONTEXT_ENGINE._content_tokens(current)
+            pair_content = QUANTUM_CONTEXT_ENGINE._content_tokens(combined)
+            context_anchor_score = 0.0
+            for token in current_content:
+                for prior_token in pair_content:
+                    if token == prior_token:
+                        context_anchor_score = max(context_anchor_score, 1.0)
+                    else:
+                        # Short character agreement handles inflectional forms such as
+                        # "лилии" -> "лилиях" without inventing an entity.
+                        common_prefix = 0
+                        for a, b in zip(token, prior_token):
+                            if a != b:
+                                break
+                            common_prefix += 1
+                        if common_prefix >= 4:
+                            context_anchor_score = max(
+                                context_anchor_score,
+                                common_prefix / max(len(token), len(prior_token)),
+                            )
+            
             # Structural dependency is semantic evidence, not a trigger.  If the
             # current request is incomplete, a pair that carries a concrete object,
             # goal, representation, or prior result gets a modest advantage.
@@ -1835,10 +1721,11 @@ class QuantumInterpretationEngine:
             recency_bonus = 0.025 * recency
 
             score = (
-                0.34 * text_score
-                + 0.24 * user_score
+                0.30 * text_score
+                + 0.18 * user_score
                 + 0.08 * answer_score
-                + 0.26 * family_score
+                + 0.22 * family_score
+                + 0.17 * context_anchor_score
                 + incompleteness_bonus
                 + recency_bonus
             )
@@ -1849,6 +1736,7 @@ class QuantumInterpretationEngine:
                 "user_score": user_score,
                 "answer_score": answer_score,
                 "family_score": family_score,
+                "context_anchor_score": context_anchor_score,
                 "pair_specificity": pair_specificity,
                 "pair": pair,
             })
@@ -1931,6 +1819,16 @@ class QuantumInterpretationEngine:
             selected = latest
         elif (
             not current_self_contained
+            and best["context_anchor_score"] >= 0.68
+            and best["index"] == latest_index
+        ):
+            # The current turn contains a content-bearing continuation anchor found
+            # directly inside the latest authenticated pair. This covers inflected
+            # forms and short follow-ups when matrix similarity is too sparse.
+            relation = "CONTINUE"
+            selected = best
+        elif (
+            not current_self_contained
             and best_score >= continue_threshold
             and margin >= margin_required
             and best["pair_specificity"] >= 1.0
@@ -1970,6 +1868,7 @@ class QuantumInterpretationEngine:
                     "user_score": round(float(x["user_score"]), 6),
                     "answer_score": round(float(x["answer_score"]), 6),
                     "family_score": round(float(x["family_score"]), 6),
+                    "context_anchor_score": round(float(x.get("context_anchor_score", 0.0)), 6),
                 }
                 for x in scored[:10]
             ],
@@ -2478,24 +2377,19 @@ class QuantumInterpretationEngine:
         best_goal=goal_rank[0][0] if goal_rank else "understand"
         best_goal_score=float(goal.get(best_goal,0.0))
 
-        # A textual/ASCII schema is an optional format advisory for the TEXT
-        # block. It must win only when the semantic matrix itself identifies a
-        # textual-schema intent and the request has not already been resolved
-        # to a different structured representation.
-        visual_schema_scores = dict(profile.get("visual_schema_scores") or {})
-        text_schema_score = float(visual_schema_scores.get("text_schema", 0.0) or 0.0)
-        diagram_score = float(visual_schema_scores.get("diagram", 0.0) or 0.0)
-        text_schema_format_intent = bool(
-            text_schema_score >= 0.15
-            and text_schema_score >= diagram_score + 0.04
-            and best_op in {"build", "present", "answer", "explain", "list", "modify"}
-        )
+        # Canonical image task: an action that constructs/presents a visual object
+        # must route to the image renderer even when the representation matrix
+        # under-scores the single word "image". This is a task-vector decision
+        # (operation + object + visual action), not a lexical trigger.
+        image_rep_score = float(rep.get("image", 0.0) or 0.0)
+        image_obj_score = float(obj.get("image", 0.0) or 0.0)
         if (
-            text_schema_format_intent
-            and best_rep in {"text", "diagram"}
-            and best_obj in {"text", "diagram"}
+            best_op in {"build", "modify", "present"}
+            and features.get("visual_action") is True
+            and (best_obj == "image" or image_obj_score >= 0.035)
+            and (best_rep == "image" or image_rep_score >= 0.035)
         ):
-            return "text", "semantic_text_schema_format_advisory", True
+            return "image", "semantic_visual_image_task", True
 
         compatible_ops={
             "graph":{"build","modify","present","calculate","analyze","list","explain"},
@@ -2632,86 +2526,35 @@ class QuantumInterpretationEngine:
         semantic_profile: dict[str, Any] | None = None,
         reference_authorized: bool = False,
     ) -> dict:
-        """Resolve an already-authorized semantic reference generically.
+        """Resolve an authorized reference from the previous dialogue pair only.
 
-        Authorization comes from the canonical dialogue vector.  This method
-        extracts a candidate antecedent from the immediately previous exchange;
-        it does not classify the current turn using word triggers.
+        No entity extraction is performed here. The previous USER↔APRIL exchange
+        itself is the context operand.
         """
         current = cls.normalize(text)
         prev = cls.normalize(previous_assistant)
-        if not current or not prev or not reference_authorized:
+        prior_user = cls.normalize(previous_user)
+        if not current or not reference_authorized or not (prior_user or prev):
             return {
                 "present": False, "target": "", "candidates": [], "confidence": 0.0,
-                "source": "semantic_entity_reference", "anaphoric": False,
-                "short_followup": False, "resolved": False,
+                "source": "authenticated_dialogue_context", "anaphoric": False,
+                "short_followup": len(cls._tokens(current)) <= 8, "resolved": False,
             }
 
-        profile = semantic_profile if isinstance(semantic_profile, dict) else {}
-        candidates: list[str] = []
-
-        # Generic entity extraction from the authoritative previous USER↔APRIL
-        # pair. This is content extraction, not request classification.
-        patterns = (
-            r"\b(?:[А-ЯЁA-Z][а-яёa-z]+(?:\s+[А-ЯЁA-Z][а-яёa-z]+){1,4})\b",
-            r"\b[А-ЯЁA-Z][а-яёa-z]{2,}\b",
-        )
-        stop = {
-            "Это", "Он", "Она", "Они", "Когда", "Куда",
-            "Построй", "Покажи", "Создай", "Изобрази",
-            "Нарисуй", "Чертёж", "Чертеж", "Готов",
-            "имеет", "имеют", "стороны", "сторон", "длина",
-            "длины", "сантиметр", "сантиметры",
-        }
-        for source in (previous_user, prev):
-            for pattern in patterns:
-                for match in re.findall(pattern, source):
-                    value = cls.normalize(match).strip('.,:;()[]{}<>—-"')
-                    if value and value not in stop and value not in candidates:
-                        candidates.append(value)
-                    if len(candidates) >= 16:
-                        break
-                if len(candidates) >= 16:
-                    break
-
-        if len(candidates) < 16:
-            ignored = {
-                "покажи", "показать", "изобрази", "изобразить", "создай", "создать",
-                "построй", "построить", "начерти", "начертить", "нарисуй", "нарисовать",
-                "чертёж", "чертеж", "чертежа", "чертёже", "сторона", "сторонами", "стороны",
-                "это", "этот", "эта", "эти", "его", "ее", "её", "их",
-            }
-            for token in cls._tokens(previous_user.lower()):
-                if len(token) >= 4 and token not in ignored and token not in {x.lower() for x in candidates}:
-                    candidates.append(token)
-                if len(candidates) >= 16:
-                    break
-
-        target = max(
-            candidates,
-            key=lambda value: (
-                1 if any(token.isalpha() for token in cls._tokens(value)) else 0,
-                len(value.split()),
-                len(value),
-            ),
-            default="",
-        )
-        confidence = 0.96 if target else 0.0
-
+        # Prefer the previous USER request as the contextual operand. The previous
+        # APRIL answer remains available through DIALOGUE_ANCHOR/TRAJECTORY.
+        target = prior_user or prev
         return {
-            "present": bool(target),
+            "present": True,
             "target": target,
-            "candidates": candidates[:12],
-            "confidence": confidence,
-            "source": "semantic_entity_reference",
+            "candidates": [],
+            "confidence": 0.98,
+            "source": "authenticated_dialogue_context",
             "anaphoric": True,
             "short_followup": len(cls._tokens(current)) <= 8,
-            "resolved": bool(target),
+            "resolved": True,
             "semantic_reference_authorized": True,
-            "semantic_profile": {
-                "best_dialogue": cls.normalize(profile.get("dialogue_best")),
-                "best_representation": cls.normalize(profile.get("best_representation")),
-            },
+            "context_operand_type": "dialogue_pair",
         }
 
     def _resolve_scene_context(self,text,state,continuation,reference,memory=False,active_topic=""):
@@ -2809,7 +2652,12 @@ class QuantumInterpretationEngine:
         topic_understanding = context_understanding.get("topic") if isinstance(context_understanding.get("topic"), dict) else {}
         discourse_understanding = context_understanding.get("discourse") if isinstance(context_understanding.get("discourse"), dict) else {}
         dialogue_selection = context_understanding.get("dialogue_selection") if isinstance(context_understanding.get("dialogue_selection"), dict) else {}
-        entities_understanding = context_understanding.get("entities") if isinstance(context_understanding.get("entities"), dict) else {}
+        entities_understanding = {
+            "current": [],
+            "shared_with_active_topic": [],
+            "coreference": [],
+            "source": "dialogue_context_only",
+        }
 
         # Context-understanding owns the three-way relationship. Downstream code
         # receives the selected memory operand, rather than re-deciding from a
@@ -3162,21 +3010,14 @@ class QuantumInterpretationEngine:
         visual_schema_rank = sorted(visual_schema_scores.items(), key=lambda item: float(item[1]), reverse=True)
         visual_schema = visual_schema_rank[0][0] if visual_schema_rank else ""
         visual_schema_confidence = float(visual_schema_rank[0][1]) if visual_schema_rank else 0.0
-        text_schema_score = float(
-            p.get("request_features", {}).get("ascii_schema_score", 0.0) or 0.0
-        )
-        ascii_schema_advisory = bool(
-            production == "text"
-            and text_schema_score >= 0.15
-            and p.get("best_operation") in {"build", "present", "answer", "explain", "list", "modify"}
-        )
+        ascii_schema_advisory = False
         semantic_task={
             "operation":p["best_operation"],"object":p["best_object"],"goal":p["best_goal"],
             "representation":production,
             "visual_schema":visual_schema,
             "visual_schema_confidence":visual_schema_confidence,
-            "ascii_schema_advisory": ascii_schema_advisory,
-            "ascii_schema_score": float(p.get("request_features", {}).get("ascii_schema_score", 0.0) or 0.0),
+            "ascii_schema_advisory": False,
+            "ascii_schema_score": 0.0,
             "operation_scores":p["operation_scores"],"object_scores":p["object_scores"],"goal_scores":p["goal_scores"]
         }
         presentation_recommendations = self._presentation_recommendations(
@@ -3200,13 +3041,6 @@ class QuantumInterpretationEngine:
             "recommendations": presentation_recommendations,
             "scene_plan": [x["scene_recommendation"] for x in presentation_recommendations],
         }
-        if ascii_schema_advisory:
-            presentation["format_advisory"] = {
-                "format": "ascii",
-                "scope": "text_block",
-                "mode": "optional",
-                "reason": "semantic_text_schema_request",
-            }
         result=build_result(text)
         result.update({
             "type":p["dialogue_best"],"subtype":production,"scene_type":production,
@@ -3235,7 +3069,7 @@ class QuantumInterpretationEngine:
             "entity_understanding": entities_understanding,
             "turn_structure_understanding": turn_structure_understanding,
             "task_understanding": task_understanding,
-            "ascii_schema_advisory": ascii_schema_advisory,
+            "ascii_schema_advisory": False,
             "resolved_scene":resolved_scene,
             "reference_resolution":reference_resolution,
             "presentation_transport":presentation,"presentation_signal":presentation,
@@ -3243,7 +3077,9 @@ class QuantumInterpretationEngine:
             "presentation_signals":presentation["signals"],
             "scene_recommendations":[x["scene_recommendation"] for x in presentation_recommendations],
             "scene_plan":[x["scene_recommendation"] for x in presentation_recommendations],
-            "dialogue_memory_window": self._recent_dialogue_pairs(history, limit=10),
+            "dialogue_memory_window": self._recent_dialogue_pairs(history, limit=15),
+            "dialogue_memory_source": "STATE_MANAGER_12H_PAIRS",
+            "dialogue_memory_pair_count": len(self._recent_dialogue_pairs(history, limit=15)),
             "dialogue_vector": {
                 **dict(dialogue_vector or {}),
                 "reference_resolution": reference_resolution,
@@ -4434,15 +4270,124 @@ def _base_interpret_request(
 # Canonical interpretation entrypoint
 # ---------------------------------------------------------------------------
 
+
+def _state_manager_dialogue_history(
+    state: dict[str, Any] | None,
+    provided_history: list | None,
+    *,
+    limit: int = 15,
+) -> list[dict[str, Any]]:
+    """Project authenticated StateManager 12-hour pairs into interpreter history.
+
+    StateManager is the source of truth for continuation. The interpreter receives
+    the already-loaded ``memory_timeline.day_0.dialog_pairs`` and does not query
+    entity/topic archives. A lazy bridge fallback is used only when the current
+    state snapshot does not carry the pair window.
+    """
+    state_obj = state if isinstance(state, dict) else {}
+    existing = provided_history if isinstance(provided_history, list) else []
+    memory_scope = state_obj.get("memory_scope") if isinstance(state_obj.get("memory_scope"), dict) else {}
+    authenticated = bool(memory_scope.get("authenticated"))
+    rows: list[dict[str, Any]] = []
+
+    timeline = state_obj.get("memory_timeline")
+    day = timeline.get("day_0") if isinstance(timeline, dict) else None
+    pairs = day.get("dialog_pairs") if isinstance(day, dict) else None
+
+    if isinstance(pairs, list):
+        for row in pairs:
+            if not isinstance(row, dict):
+                continue
+            user_obj = row.get("user") if isinstance(row.get("user"), dict) else {}
+            april_obj = row.get("april") if isinstance(row.get("april"), dict) else {}
+            user_text = str(
+                row.get("user_text") or row.get("user") or user_obj.get("text") or user_obj.get("content") or ""
+            ).strip()
+            april_text = str(
+                row.get("april_text") or row.get("april") or row.get("assistant") or april_obj.get("answer") or april_obj.get("content") or ""
+            ).strip()
+            if user_text and april_text:
+                rows.append({
+                    "turn_id": row.get("turn_index"),
+                    "created_at": row.get("created_at"),
+                    "user": user_text,
+                    "april": april_text,
+                })
+
+    # If the interpreter was invoked with a clean/minimal snapshot, use the
+    # existing StateManager bridge function; never invent another memory store.
+    if not rows and state_obj.get("user_id"):
+        try:
+            from blocks.state_manager import build_dialogue_memory_bridge
+            bridge = build_dialogue_memory_bridge(
+                state_obj.get("user_id"),
+                query="",
+                limit=max(1, int(limit)),
+                relation="CONTINUE",
+            )
+            bridge_rows = bridge.get("dialogue_pairs") or bridge.get("active_sequence_turns") or []
+            for row in bridge_rows:
+                if not isinstance(row, dict):
+                    continue
+                user_text = str(row.get("user") or row.get("user_text") or "").strip()
+                april_text = str(row.get("april") or row.get("april_text") or row.get("assistant") or "").strip()
+                if user_text and april_text:
+                    rows.append({
+                        "turn_id": row.get("turn") or row.get("turn_index"),
+                        "created_at": row.get("created_at"),
+                        "user": user_text,
+                        "april": april_text,
+                    })
+        except Exception:
+            pass
+
+    # Deduplicate and keep chronological order. Provided runtime history is kept
+    # only when pair memory is unavailable, so StateManager remains authoritative.
+    if rows:
+        dedup: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in rows:
+            key = (str(row.get("turn_id") or ""), row.get("user", ""), row.get("april", ""))
+            dedup[key] = row
+        rows = list(dedup.values())
+        rows.sort(key=lambda x: (float(x.get("created_at") or 0.0), int(x.get("turn_id") or 0)))
+        rows = rows[-max(1, int(limit)):]
+        history_out: list[dict[str, Any]] = []
+        for row in rows:
+            history_out.append({
+                "role": "user",
+                "content": row["user"],
+                "turn_id": row.get("turn_id"),
+                "timestamp": row.get("created_at"),
+                "metadata": {"source": "state_manager_dialogue_memory_12h", "context_authority": "STATE_MANAGER"},
+            })
+            history_out.append({
+                "role": "assistant",
+                "content": row["april"],
+                "turn_id": row.get("turn_id"),
+                "timestamp": row.get("created_at"),
+                "metadata": {"source": "state_manager_dialogue_memory_12h", "context_authority": "STATE_MANAGER"},
+            })
+        return history_out
+
+    # Authenticated dialogue never falls back to legacy topic/entity buffers: the
+    # 12-hour USER↔APRIL pair store is the sole continuation source.
+    if authenticated:
+        return []
+    return existing
+
 def interpret_request(
     text, cognition=None, semantic=None, history=None, state=None
 ):
+    state_obj = state if isinstance(state, dict) else {}
+    memory_history = _state_manager_dialogue_history(
+        state_obj, history, limit=15
+    )
     return QUANTUM_INTERPRETATION_ENGINE.interpret(
         text,
         cognition=cognition,
         semantic=semantic,
-        history=history,
-        state=state,
+        history=memory_history,
+        state=state_obj,
     )
 
 
