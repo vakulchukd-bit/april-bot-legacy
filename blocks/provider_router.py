@@ -1477,7 +1477,7 @@ def _minimal_plan_context(plan: dict[str, Any]) -> dict[str, Any]:
 
     semantic = by_key.get("SEMANTIC_CORE")
     if isinstance(semantic, dict):
-        keep = ("intent", "operation", "goal", "domain", "subdomain", "topic", "entity", "representation")
+        keep = ("intent", "operation", "goal", "domain", "subdomain", "topic", "representation", "visual_generation_request")
         out["semantic_core"] = {
             key: _semantic_excerpt(semantic.get(key), 100)
             for key in keep
@@ -1488,7 +1488,7 @@ def _minimal_plan_context(plan: dict[str, Any]) -> dict[str, Any]:
 
     contract = by_key.get("OUTPUT_CONTRACT")
     if isinstance(contract, dict):
-        keep = ("representation", "requested_outputs", "operation", "render_authorized")
+        keep = ("representation", "requested_outputs", "operation", "render_authorized", "visual_generation_request", "no_text_fallback_for_image")
         out["output_contract"] = {
             key: contract.get(key)
             for key in keep
@@ -1511,12 +1511,28 @@ def _minimal_plan_context(plan: dict[str, Any]) -> dict[str, Any]:
 
     anchor = by_key.get("DIALOGUE_ANCHOR")
     if isinstance(anchor, dict):
-        keep = ("previous_user_turn", "previous_april_turn", "topic", "entity", "turn_relation")
+        keep = ("previous_user_turn", "previous_april_turn", "topic", "turn_relation")
         out["dialogue_anchor"] = {
             key: _semantic_excerpt(anchor.get(key), 180)
             for key in keep
             if anchor.get(key) not in (None, "", [], {})
         }
+
+    # Emergency compaction must retain some of the authenticated pair trajectory.
+    # Eight compact pairs preserve the conversation thread while keeping the
+    # Provider input below the existing hard budget.
+    trajectory = by_key.get("ACTIVE_DIALOGUE_TRAJECTORY")
+    if isinstance(trajectory, list):
+        compact_trajectory = []
+        for pair in trajectory[-8:]:
+            if not isinstance(pair, dict):
+                continue
+            user = _semantic_excerpt(pair.get("user") or pair.get("user_text"), 80)
+            april = _semantic_excerpt(pair.get("april") or pair.get("april_text") or pair.get("assistant"), 110)
+            if user or april:
+                compact_trajectory.append({"user": user, "april": april})
+        if compact_trajectory:
+            out["authenticated_dialogue_trajectory"] = compact_trajectory
 
     development = by_key.get("DIALOGUE_DEVELOPMENT")
     if isinstance(development, dict):
@@ -3660,6 +3676,21 @@ def _strip_image_technical_fallback(value: Any) -> str:
     return re.sub(r"\s{2,}", " ", cleaned).strip(" \t\r\n-—:;")
 
 
+def _looks_like_ascii_art(value: Any) -> bool:
+    """Return True for compact ASCII drawings that must never be user-visible in image mode."""
+    text = _safe_text(value).strip()
+    if not text or "\n" not in text:
+        return False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+    symbol_count = sum(ch in r"/\\()<>^_@|[]{}" for ch in text)
+    alpha_count = sum(ch.isalpha() for ch in text)
+    digit_count = sum(ch.isdigit() for ch in text)
+    # ASCII art has several graphic-symbol characters and very little prose.
+    return symbol_count >= 6 and alpha_count <= 24 and digit_count <= 4
+
+
 def _is_image_technical_fallback(value: Any) -> bool:
     raw = re.sub(r"\s+", " ", _safe_text(value)).strip().casefold()
     expected = _IMAGE_TECHNICAL_FALLBACK.casefold()
@@ -3694,14 +3725,36 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         or source_metadata.get("visual_production_mode")
         or ""
     ).lower()
-    image_generation_mode = visual_mode == "image_generation"
+    intent_payload = source_payload.get("intent") if isinstance(source_payload.get("intent"), dict) else {}
+    conversation_payload = source_payload.get("conversation") if isinstance(source_payload.get("conversation"), dict) else {}
+    dialogue_contract_payload = (
+        (source_constraints.get("dialogue_contract") or {})
+        if isinstance(source_constraints.get("dialogue_contract"), dict)
+        else {}
+    )
+    source_outputs = {
+        _safe_text(item).strip().lower()
+        for item in (source_payload.get("requested_outputs") or [])
+        if _safe_text(item).strip()
+    }
     fallback_image_prompt = _safe_text(
-        (source_payload.get("intent") or {}).get("semantic_request")
-        or (source_payload.get("intent") or {}).get("resolved_request")
+        intent_payload.get("visual_generation_request")
+        or conversation_payload.get("visual_generation_request")
+        or dialogue_contract_payload.get("visual_generation_request")
+        or (source_constraints.get("metadata") or {}).get("visual_generation_request")
+        or intent_payload.get("semantic_request")
+        or intent_payload.get("resolved_request")
+        or conversation_payload.get("resolved_request")
+        or conversation_payload.get("current_request")
         or _extract_request_text(source_payload)
-        or (source_payload.get("conversation") or {}).get("resolved_request")
-        or (source_payload.get("conversation") or {}).get("current_request")
     ).strip()
+    image_generation_mode = bool(
+        visual_mode == "image_generation"
+        or _safe_text(intent_payload.get("type") or intent_payload.get("representation")).strip().lower() in {"image", "gallery"}
+        or "image" in source_outputs
+        or "gallery" in source_outputs
+    )
+
 
     top_level_visual_blocks, top_level_visual_metadata = _promote_top_level_visual_outputs(
         canonical_payload,
@@ -3740,6 +3793,8 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         sanitized_answer = _strip_image_technical_fallback(answer)
         if sanitized_answer != answer:
             answer = sanitized_answer
+        if _looks_like_ascii_art(answer):
+            answer = "Готово — изображение подготавливается."
 
     if not answer and visual_mode == "image_generation":
         candidate_metadata = dict(canonical_payload.get("metadata") or {}) if isinstance(canonical_payload.get("metadata"), dict) else {}
@@ -3766,6 +3821,8 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
     content = _unwrap_model_answer(canonical_payload.get("content") or answer)
     if not content:
         content = answer
+    if image_generation_mode and _looks_like_ascii_art(content):
+        content = answer
     blocks = _sanitize_render_block_texts(
         _clean_render_blocks(canonical_payload.get("render_blocks", []) or []),
         answer,
@@ -3773,6 +3830,15 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
 
     if top_level_visual_blocks:
         blocks.extend(top_level_visual_blocks)
+    if image_generation_mode:
+        blocks = [
+            block for block in blocks
+            if not (
+                isinstance(block, dict)
+                and _safe_text(block.get("type") or block.get("artifact_type") or "").lower() in {"text", "markdown"}
+                and _looks_like_ascii_art(block.get("content") or block.get("text") or block.get("answer") or "")
+            )
+        ]
     if not blocks:
         blocks = [{
             "type": "text",
@@ -4007,9 +4073,23 @@ def provider_finalize_for_executor(contract: dict) -> dict:
     source_preview = contract.get("processor_input") if isinstance(contract.get("processor_input"), dict) else {}
     source_constraints_preview = source_preview.get("constraints") if isinstance(source_preview.get("constraints"), dict) else {}
     source_plan_preview = source_constraints_preview.get("representation_plan") if isinstance(source_constraints_preview.get("representation_plan"), dict) else {}
-    image_generation_preview = _safe_text(source_plan_preview.get("visual_production_mode") or "").strip().lower() == "image_generation"
+    payload = source_preview
+    source_intent_preview = payload.get("intent") if isinstance(payload.get("intent"), dict) else {}
+    source_outputs_preview = {
+        _safe_text(item).strip().lower()
+        for item in (payload.get("requested_outputs") or [])
+        if _safe_text(item).strip()
+    }
+    image_generation_preview = bool(
+        _safe_text(source_plan_preview.get("visual_production_mode") or "").strip().lower() == "image_generation"
+        or _safe_text(source_intent_preview.get("type") or source_intent_preview.get("representation")).strip().lower() in {"image", "gallery"}
+        or "image" in source_outputs_preview
+        or "gallery" in source_outputs_preview
+    )
     if image_generation_preview:
         answer = _strip_image_technical_fallback(answer)
+        if _looks_like_ascii_art(answer):
+            answer = "Готово — изображение подготавливается."
         if not answer:
             answer = "Готово — изображение подготовлено."
     if not answer:
