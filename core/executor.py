@@ -20,6 +20,12 @@ from typing import Any, Dict, List, Sequence, Iterable
 
 from rapidfuzz import fuzz
 
+# One semantic authority: Interpretation Layer.
+from blocks.interpretation_layer import (
+    QUANTUM_INTERPRETATION_ENGINE as _CANONICAL_INTERPRETER,
+    interpret_request as _PAIR_FIRST_INTERPRET_REQUEST,
+)
+
 RESPONSE_COMPLEXITY_LOW = "LOW"
 RESPONSE_COMPLEXITY_MEDIUM = "MEDIUM"
 RESPONSE_COMPLEXITY_HIGH = "HIGH"
@@ -191,164 +197,13 @@ class SemanticEvidence:
 
 
 
-class QuantumInterpretationEngine:
-    """Single lightweight interpretation engine backed by rapidfuzz."""
-    VERSION = "APRIL-ARC-LIGHT-1"
-    def __init__(self) -> None:
-        self._lock = threading.RLock(); self._cache = {}; self._cache_limit = 512
 
-    @staticmethod
-    def normalize(text: Any) -> str:
-        return re.sub(r"\s+", " ", str(text or "").strip())
-
-    @staticmethod
-    def _tokens(text: Any) -> list[str]:
-        return re.findall(r"[a-zа-яёіїєґ0-9_]+", QuantumInterpretationEngine.normalize(text).lower())
-
-    @classmethod
-    def _similarity_value(cls, a: Any, b: Any) -> float:
-        aa, bb = cls.normalize(a), cls.normalize(b)
-        if not aa or not bb: return 0.0
-        ts = fuzz.token_set_ratio(aa, bb) / 100.0
-        pr = fuzz.partial_ratio(aa, bb) / 100.0
-        return round(max(ts * .72 + pr * .28, ts), 6)
-
-    def similarity(self, text_a: str, text_b: str) -> dict[str, Any]:
-        score = self._similarity_value(text_a, text_b)
-        return {"score": score, "source": "rapidfuzz_arc", "measured": bool(score), "cached": False}
-
-    def similarities(self, text: str, candidates: Sequence[str]) -> dict[str, float]:
-        return {self.normalize(c): self._similarity_value(text, c) for c in candidates if self.normalize(c)}
-
-    def prewarm_static(self, candidates: Sequence[str]) -> int:
-        return len({self.normalize(x) for x in candidates if self.normalize(x)})
-
-    def _history(self, history: Any) -> tuple[str, str, Any]:
-        last_a = last_u = ""; reply = None
-        turns = history if isinstance(history, list) else []
-        for item in reversed(turns):
-            if not isinstance(item, dict): continue
-            role = self.normalize(item.get("role")).lower()
-            if not last_a and role in {"assistant","april","bot"}:
-                last_a = self.normalize(item.get("answer") or item.get("content") or item.get("summary") or item.get("text")); reply = item.get("turn_id")
-            if not last_u and role in {"user","human"}:
-                last_u = self.normalize(item.get("content") or item.get("text") or item.get("answer"))
-            if last_a and last_u: break
-        return last_a, last_u, reply
-
-    def _family_scores(self, text: str, prototypes: dict[str, str]) -> dict[str, float]:
-        if not text: return {k: 0.0 for k in prototypes}
-        return {k: self._similarity_value(text, v) for k, v in prototypes.items()}
-
-    def _context_scores(self, text: str, previous_assistant: str = "", previous_user: str = "", active_topic: str = "", active_goal: str = "") -> dict[str, float]:
-        return {
-            "previous_assistant": self._similarity_value(text, previous_assistant),
-            "previous_user": self._similarity_value(text, previous_user),
-            "active_topic": self._similarity_value(text, active_topic),
-            "active_goal": self._similarity_value(text, active_goal),
-        }
-
-    def _linguistic(self, text: str) -> dict[str, Any]:
-        tokens = self._tokens(text)
-        return {"language": None, "tokens": tokens, "lemmas": tokens, "pos": [], "dependencies": [], "entities": [], "sentences": [text] if text else [], "source": "arc_light", "engine": self.VERSION}
-
-    def scene_matrix(self, *, dialogue: dict[str,float], representation: dict[str,float], domain: dict[str,float], capability: dict[str,float], context: dict[str,float], modalities: dict[str,Any] | None = None, explicit_representations: Sequence[str] = ()) -> dict[str,Any]:
-        vector = [
-            max((dialogue.get(x,0.0) for x in ("continuation","reference","question","request")), default=0.0),
-            max(representation.values(), default=0.0), max(domain.values(), default=0.0),
-            max(capability.values(), default=0.0), max(context.values(), default=0.0),
-            max(context.get("active_topic",0.0), context.get("active_goal",0.0), 0.0),
-            min(1.0, sum(v not in (None,"",{},[]) for v in (modalities or {}).values())/3.0),
-        ]
-        raw = []
-        for row in _SCENE_WEIGHTS:
-            raw.append(sum(a*b for a,b in zip(row, vector)))
-        for scene in SCENE_MATRIX_LABELS:
-            raw[SCENE_MATRIX_LABELS.index(scene)] += .34 * float(representation.get(scene,0.0))
-            raw[SCENE_MATRIX_LABELS.index(scene)] += .10 * float(capability.get(SCENE_MATRIX_CAPABILITY[scene],0.0))
-        for domain_name, bias_map in SCENE_MATRIX_DOMAIN_BIAS.items():
-            ds = float(domain.get(domain_name,0.0))
-            for scene,bias in bias_map.items(): raw[SCENE_MATRIX_LABELS.index(scene)] += ds*bias
-        for scene in explicit_representations:
-            if scene in SCENE_MATRIX_LABELS: raw[SCENE_MATRIX_LABELS.index(scene)] += .45
-        mx = max(raw, default=0.0); scores = [x/mx if mx else 0.0 for x in raw]
-        ranked = sorted(zip(SCENE_MATRIX_LABELS,scores), key=lambda x:x[1], reverse=True)
-        return {"labels":[x[0] for x in ranked],"scores":[round(float(x[1]),6) for x in ranked],"best_scene":ranked[0][0],"best_score":round(float(ranked[0][1]),6),"margin":round(float(ranked[0][1]-(ranked[1][1] if len(ranked)>1 else 0.0)),6),"feature_order":list(SCENE_MATRIX_FEATURES),"feature_vector":[round(x,6) for x in vector],"matrix_shape":[len(_SCENE_WEIGHTS),len(SCENE_MATRIX_FEATURES)],"explicit_representations":list(explicit_representations),"engine":"arc_light","mode":"fuzzy_evidence_fusion","decision_owner":DECISION_OWNER,"evidence_only":True}
-
-    def measure(self, text: str, *, previous_assistant: str = "", previous_user: str = "", active_topic: str = "", active_goal: str = "", modalities: dict[str,Any] | None = None) -> dict[str,Any]:
-        text = self.normalize(text); key = (text, previous_assistant, previous_user, active_topic, active_goal)
-        with self._lock:
-            if key in self._cache: return deepcopy(self._cache[key])
-        dialogue = self._family_scores(text, DIALOGUE_PROTOTYPES)
-        representation = self._family_scores(text, REPRESENTATION_HYPOTHESES)
-        domain = self._family_scores(text, DOMAIN_HYPOTHESES)
-        capability = self._family_scores(text, CAPABILITY_HYPOTHESES)
-        context = self._context_scores(text, previous_assistant, previous_user, active_topic, active_goal)
-        dialogue_ranked = sorted(dialogue.items(), key=lambda x:x[1], reverse=True)
-        rep_ranked = sorted(representation.items(), key=lambda x:x[1], reverse=True)
-        best_dialogue, best_d = dialogue_ranked[0] if dialogue_ranked else ("question",0.0)
-        best_rep, rep_d = rep_ranked[0] if rep_ranked else ("text",0.0)
-        explicit_reps = [k for k,v in sorted(representation.items(), key=lambda x:x[1], reverse=True) if k != "text" and v >= .58 and v >= representation.get("text",0.0)+.06]
-        scene = self.scene_matrix(dialogue=dialogue, representation=representation, domain=domain, capability=capability, context=context, modalities=modalities, explicit_representations=explicit_reps)
-        profile = {"dialogue_scores": dialogue,"representation_scores": representation,"domain_scores": domain,"capability_scores": capability,"context_scores": context,"dialogue_best":best_dialogue,"dialogue_confidence":float(best_d),"best_representation":best_rep,"best_representation_score":float(rep_d),"representation_margin":float(rep_d-(rep_ranked[1][1] if len(rep_ranked)>1 else 0.0)),"explicit_representations":explicit_reps,"identity_request":dialogue.get("identity",0.0)>=max(.55, dialogue.get("continuation",0.0)),"fast_social":best_dialogue in {"identity","greeting"} and len(text.split())<=24,"scene_matrix":scene,"source":"arc_light_fuzzy"}
-        with self._lock:
-            self._cache[key]=deepcopy(profile)
-            if len(self._cache)>self._cache_limit: self._cache.pop(next(iter(self._cache)))
-        return profile
-
-    def fast_semantic_profile(self, text: str, previous_assistant: str = "", previous_user: str = "", active_topic: str = "", active_goal: str = "") -> dict[str,Any]:
-        return self.measure(text, previous_assistant=previous_assistant, previous_user=previous_user, active_topic=active_topic, active_goal=active_goal)
-
-    def turn_measurement(self, text: str, previous_assistant: str = "", previous_user: str = "", active_goal: str = "", active_topic: str = "") -> dict[str,Any]:
-        p=self.measure(text, previous_assistant=previous_assistant, previous_user=previous_user, active_topic=active_topic, active_goal=active_goal)
-        return {"linguistic":self._linguistic(text),"dialogue_nli":{"labels":list(p["dialogue_scores"]),"scores":list(p["dialogue_scores"].values()),"source":"arc_light"},"representation_nli":{"labels":list(p["representation_scores"]),"scores":list(p["representation_scores"].values()),"source":"arc_light"},"domain_nli":{"labels":list(p["domain_scores"]),"scores":list(p["domain_scores"].values()),"source":"arc_light"},"capability_nli":{"labels":list(p["capability_scores"]),"scores":list(p["capability_scores"].values()),"source":"arc_light"},"embeddings":dict(p["context_scores"]),"decision_owner":DECISION_OWNER,"evidence_only":True,"engine":"arc_light_turn_engine"}
-
-    def dialogue(self, text: str, previous_assistant: str = "", previous_user: str = "", active_goal: str = "", active_topic: str = "", open_task: dict[str,Any] | None = None) -> dict[str,Any]:
-        p=self.measure(text, previous_assistant=previous_assistant, previous_user=previous_user, active_topic=active_topic, active_goal=active_goal); d=p["dialogue_scores"]; c=p["context_scores"]; best=p["dialogue_best"]
-        continuation_score=max(d.get("continuation",0.0), .76*c.get("previous_assistant",0.0), .62*c.get("previous_user",0.0), .70*c.get("active_topic",0.0))
-        reference_score=max(d.get("reference",0.0), .84*c.get("previous_assistant",0.0), .66*c.get("previous_user",0.0), .72*c.get("active_topic",0.0), d.get("memory_query",0.0))
-        task = open_task if isinstance(open_task,dict) else {}
-        task_signal = bool(task and (task.get("active") or task.get("status") == "open"))
-        if task_signal and any(x in best for x in ("continuation","reference","correction","reformulation")): continuation_score=max(continuation_score,.90)
-        continuation=bool(previous_assistant and (best in {"continuation","reformulation","correction","reference","affirmation","rejection"} or continuation_score>=.66 or task_signal and len(text.split())<=12))
-        return {"dialogue":{"label":best,"confidence":float(max(d.values(),default=0.0)),"continuation_score":float(continuation_score),"reference_score":float(reference_score),"topic_score":float(c.get("active_topic",0.0)),"goal_score":float(c.get("active_goal",0.0))},"linguistic":self._linguistic(text),"continuation":continuation,"reference_to_previous":bool(previous_assistant and reference_score>=.60),"identity_request":bool(p["identity_request"]),"nli":{"labels":list(d),"scores":list(d.values()),"source":"arc_light"},"decision_owner":DECISION_OWNER,"evidence_only":True,"engine":"arc_light_dialogue_engine"}
-
-    def representations(self, text: str, context: str = "") -> dict[str,Any]:
-        p=self.measure(text, active_topic=context); return {"nli":{"labels":list(p["representation_scores"]),"scores":list(p["representation_scores"].values()),"source":"arc_light"},"measurements":[{"type":k,"score":float(v),"source":"arc_light"} for k,v in sorted(p["representation_scores"].items(), key=lambda x:x[1], reverse=True)],"context_similarity":{"score":float(p["context_scores"].get("active_topic",0.0)),"source":"arc_light"},"decision_owner":DECISION_OWNER,"evidence_only":True,"engine":"arc_light_representation_engine"}
-
-    def domains(self, text: str) -> dict[str,Any]:
-        p=self.measure(text); return {"measurements":[{"domain":k,"score":float(v)} for k,v in sorted(p["domain_scores"].items(), key=lambda x:x[1], reverse=True)],"decision_owner":DECISION_OWNER,"evidence_only":True,"engine":"arc_light_domain_engine"}
-
-    def classify(self, text: str, hypotheses: Sequence[str]) -> dict[str,Any]:
-        p=self.measure(text); all_scores={**p["dialogue_scores"],**p["representation_scores"],**p["domain_scores"],**p["capability_scores"]}; ranked=sorted(((str(x),float(all_scores.get(x,0.0))) for x in hypotheses), key=lambda x:x[1], reverse=True); return {"labels":[x[0] for x in ranked],"scores":[x[1] for x in ranked],"source":"arc_light"}
-
-    def _resolve_scene_context(self, text: str, state: dict[str,Any], *, continuation: bool, reference: bool, active_topic: str = "") -> dict[str,Any]:
-        if not isinstance(state,dict) or not (continuation or reference): return {}
-        scene = state.get("current_visual_scene") or state.get("active_visual_scene")
-        if not isinstance(scene,dict): return {}
-        hay=" ".join(str(scene.get(k) or "") for k in ("topic","user_request","summary","april_answer"))
-        score=1.0 if continuation else self._similarity_value(text, hay)
-        return {"relation":"current_scene","confidence":round(score,6),"scene_id":str(scene.get("scene_id") or ""),"turn_id":scene.get("turn_id"),"topic":self.normalize(scene.get("topic")),"user_request":self.normalize(scene.get("user_request") or scene.get("current_request")),"answer":self.normalize(scene.get("april_answer") or scene.get("answer") or scene.get("content")),"summary":self.normalize(scene.get("summary")),"render_block_types":list(scene.get("render_block_types") or []),"presentation_types":list(scene.get("presentation_types") or []),"renderer_state":scene.get("renderer_state") if isinstance(scene.get("renderer_state"),dict) else {},"semantic_source":"arc_light_scene_resolution","evidence_only":True}
-
-    def interpret(self, text: str, cognition: dict|None=None, semantic: dict|None=None, history: list|None=None, state: dict|None=None) -> dict[str,Any] | None:
-        fn=globals().get("_df_interpret_live_turn")
-        if callable(fn): return fn(text, history=history or [], state=state or {})
-        return self.measure(text)
-
-
-QUANTUM_INTERPRETATION_ENGINE = QuantumInterpretationEngine()
-QUANTUM_FAST_SEMANTIC = QUANTUM_INTERPRETATION_ENGINE
-QUANTUM_LINGUISTIC_ENGINE = QUANTUM_INTERPRETATION_ENGINE
-QUANTUM_EMBEDDING_ENGINE = QUANTUM_INTERPRETATION_ENGINE
-QUANTUM_INTENT_ENGINE = QUANTUM_INTERPRETATION_ENGINE
-QUANTUM_EVIDENCE_FUSION = QUANTUM_INTERPRETATION_ENGINE
-QUANTUM_DIALOGUE_ENGINE = QUANTUM_INTERPRETATION_ENGINE
-
-# Compatibility API: the shared runtime is now the lightweight ARC engine itself.
-SEMANTIC_MODEL_NAME = "rapidfuzz-arc-light"
+# Compatibility names point to the same single canonical interpretation object.
+QUANTUM_INTERPRETATION_ENGINE = _CANONICAL_INTERPRETER
+SEMANTIC_MODEL_NAME = "canonical-interpretation"
 
 def get_shared_semantic_encoder():
-    return QUANTUM_INTERPRETATION_ENGINE
+    return _CANONICAL_INTERPRETER
 
 def _runtime_ready_guard() -> None:
     return None
@@ -366,15 +221,7 @@ def _ensure_nli_runtime() -> None:
     return None
 
 def _lightweight_linguistic(text: str) -> Dict[str, Any]:
-    return QUANTUM_INTERPRETATION_ENGINE._linguistic(normalize_text(text))
-
-QuantumFastSemanticEngine = QuantumInterpretationEngine
-QuantumLinguisticEngine = QuantumInterpretationEngine
-QuantumEmbeddingEngine = QuantumInterpretationEngine
-QuantumIntentEngine = QuantumInterpretationEngine
-QuantumEvidenceFusionEngine = QuantumInterpretationEngine
-QuantumDialogueEngine = QuantumInterpretationEngine
-QuantumSceneInterpretationMatrix = QuantumInterpretationEngine
+    return _CANONICAL_INTERPRETER._linguistic(normalize_text(text))
 
 def build_scene_blueprint(
     *,
@@ -8004,7 +7851,7 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
 # production turns must use the pair-first interpretation owned by
 # blocks.interpretation_layer. This prevents the duplicate legacy interpreter
 # from recreating topic/entity memory decisions.
-from blocks.interpretation_layer import interpret_request as _PAIR_FIRST_INTERPRET_REQUEST
+
 
 
 def interpret_request(text, cognition=None, semantic=None, history=None, state=None):
@@ -8017,20 +7864,3 @@ def interpret_request(text, cognition=None, semantic=None, history=None, state=N
     )
 
 
-# ---------------------------------------------------------------------------
-# Canonical pair-first intent sanitization. Memory does not expose entities.
-# ---------------------------------------------------------------------------
-_original_sequential_intent = SequentialInterpretation.intent
-
-def _pair_first_clean_intent(self, text: str, *args, **kwargs):
-    result = _original_sequential_intent(self, text, *args, **kwargs)
-    if isinstance(result, dict):
-        result["topic"] = ""
-        result["object"] = ""
-        result["resolved_entity"] = ""
-        if isinstance(result.get("semantic_result"), dict):
-            result["semantic_result"]["canonical_topic"] = ""
-            result["semantic_result"]["resolved_entity"] = ""
-    return result
-
-SequentialInterpretation.intent = _pair_first_clean_intent
