@@ -1239,6 +1239,15 @@ def _looks_like_visual_ascii(line: str) -> bool:
     return False
 
 
+def _looks_like_ascii_cat(text: str) -> bool:
+    line = str(text or "").strip()
+    if not line or len(line) > 120:
+        return False
+    if re.fullmatch(r"[\\/()<>^_ .oO-]+", line) and re.search(r"(?:o\.o|O\.O|\^|>\s*<|_/)", line, re.IGNORECASE):
+        return True
+    return False
+
+
 def _strip_duplicate_structured_text(answer: str, requested_outputs: list[str]) -> str:
     """Keep visible text explanatory; dedicated blocks own visual syntax/data."""
     if not answer:
@@ -1261,6 +1270,9 @@ def _strip_duplicate_structured_text(answer: str, requested_outputs: list[str]) 
                 continue
 
         if outputs.intersection({"graph", "diagram"}) and _looks_like_visual_ascii(raw_line):
+            continue
+
+        if "image" in outputs and _looks_like_ascii_cat(raw_line):
             continue
 
         if "formula" in outputs and line:
@@ -2478,10 +2490,18 @@ def _build_provider_user_text_from_plan(
             _json_piece("DIALOGUE_DEVELOPMENT", development, depth=3, items=4, keys=7)
         )
     if any(_safe_text(x).strip().lower() == "image_generation" for x in requested):
+        visual_generation_request = _safe_text(
+            (payload.get("constraints") or {}).get("metadata", {}).get("visual_generation_request")
+            if isinstance(payload.get("constraints"), dict) and isinstance((payload.get("constraints") or {}).get("metadata"), dict)
+            else ""
+        ).strip()
+        if visual_generation_request:
+            mandatory.append("VISUAL_GENERATION_REQUEST: " + visual_generation_request)
         mandatory.extend([
             "IMAGE_GENERATION_HANDOFF: emit metadata.image_generation_signal in the same response; route=C_APRIL_IMAGES_GENERATOR, execute=true, request_anchor=REQUEST exactly, prompt_source=OPENAI_STRUCTURED_VISUAL_PLAN, target_model=gpt-image-2, single_route=true.",
-            "IMAGE_GENERATION_PROMPT_RULE: metadata.image_generation_spec.prompt and image_generation_signal.prompt must carry the OpenAI-authored semantic visual generation meaning; request_anchor remains the exact current user trigger. Preserve the OpenAI-described subject and attributes, and never replace the semantic plan with the trigger sentence.",
+            "IMAGE_GENERATION_PROMPT_RULE: metadata.image_generation_spec.prompt and image_generation_signal.prompt must carry the semantic visual generation meaning selected by Interpretation. If VISUAL_GENERATION_REQUEST is supplied for an elliptical reference, it is the authoritative subject for generation; request_anchor remains the exact current user trigger. Never replace the resolved visual subject with the trigger sentence.",
             "GPT_IMAGE_2_TARGET: prepare a concrete visual generation prompt for gpt-image-2; one scene, explicit subject first, requested attributes only, no conversational filler, no prior-scene carryover, no pixels/URLs/data URIs/alternate providers.",
+            "IMAGE_TEXT_RULE: when image_generation is requested, do not emit ASCII art or a text drawing of the image; the text channel may contain only a short status/caption and the actual visual must be produced by C_APRIL_IMAGES_GENERATOR.",
         ])
 
     required = [
@@ -4676,6 +4696,14 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             and signal_prompt
         )
 
+        visual_generation_request = ""
+        source_metadata = source_request.get("constraints", {}).get("metadata") if isinstance(source_request.get("constraints"), dict) and isinstance(source_request.get("constraints", {}).get("metadata"), dict) else {}
+        visual_generation_request = _safe_text(
+            source_metadata.get("visual_generation_request")
+            or (source_request.get("conversation") or {}).get("visual_generation_request")
+            or (source_request.get("dialogue_contract") or {}).get("visual_generation_request")
+        ).strip()
+
         normalized_spec = _build_image_generation_spec_from_provider(
             candidate_spec if isinstance(candidate_spec, dict) else canonical_payload.get("image"),
             fallback_prompt=fallback_image_prompt,
@@ -4698,6 +4726,9 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
                 normalized_spec.get("visual_context"),
                 semantic_generation_prompt,
             )
+            if visual_generation_request:
+                semantic_generation_prompt = visual_generation_request
+                normalized_spec["openai_structured_visual_plan_semantic"] = visual_generation_request
             normalized_spec["prompt"] = semantic_generation_prompt
             normalized_spec["request_anchor"] = fallback_image_prompt
             normalized_spec["render_profile"] = profile["name"]
@@ -4708,6 +4739,7 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             metadata["image_generation_prompt_grounding"] = "OPENAI_SEMANTIC_PLAN_PLUS_STRUCTURED_PLAN"
             metadata["image_generation_user_trigger"] = fallback_image_prompt
             metadata["image_generation_semantic_prompt"] = semantic_generation_prompt[:12000]
+            metadata["visual_generation_request"] = visual_generation_request
             metadata["image_render_profile"] = profile["name"]
             metadata["image_render_profile_source"] = profile["source"]
             metadata["openai_structured_visual_plan_preserved"] = raw_plan is not None
@@ -4857,6 +4889,8 @@ def provider_finalize_for_executor(contract: dict) -> dict:
     # The visible text is cleaned only after structured render payloads are materialized.
     raw_answer_for_visuals = answer
     answer = _strip_duplicate_structured_text(answer, requested_outputs)
+    if image_generation_preview and not answer:
+        answer = "Готово — изображение подготовлено."
 
     constraints = payload.get("constraints", {}) if isinstance(payload.get("constraints"), dict) else {}
     metadata = constraints.get("metadata", {}) if isinstance(constraints.get("metadata"), dict) else {}
