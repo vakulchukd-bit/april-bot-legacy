@@ -4703,6 +4703,41 @@ def _pair_first_understand(
     }
 
 
+def _pair_first_visual_generation_request(current: str, previous_user: str, render_probe: dict[str, Any]) -> str:
+    """Resolve an elliptical image trigger to the immediately preceding concrete image request.
+
+    The current turn still owns routing (for example ``"На картинке"``), while the
+    preceding USER turn supplies the subject when the current wording is only a
+    deictic/elliptical reference. This keeps visual generation semantically aligned
+    with the authenticated USER↔APRIL pair without inventing a new subject.
+    """
+    if not isinstance(render_probe, dict) or render_probe.get("requested") != ["image"]:
+        return ""
+    current = _df_text(current, 1200).strip()
+    previous_user = _df_text(previous_user, 1200).strip()
+    if not current or not previous_user:
+        return ""
+    previous_low = _df_low(previous_user)
+    if not re.search(
+        r"\b(?:нарисуй|нарисовать|рисунок|создай|создать|сделай|сделать|изобрази|изобразить|покажи|показать|сгенерируй|сгенерировать)\b",
+        previous_low,
+    ):
+        return ""
+    low = _df_low(current)
+    elliptical = bool(re.fullmatch(
+        r"(?:на\s+(?:картинке|изображении|ней|нём|нем)|на\s+картинке|покажи(?:\s+это)?|сделай(?:\s+это)?|нарисуй(?:\s+это)?)",
+        low,
+    ))
+    if not elliptical:
+        elliptical = bool(re.search(
+            r"(?:на\s+(?:картинке|изображении|ней|нём|нем)|на\s+картинке)\s*$",
+            low,
+        ))
+    if not elliptical:
+        return ""
+    return previous_user
+
+
 def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = None, state: dict[str, Any] | None = None) -> dict[str, Any]:
     started = time.perf_counter()
     current = _df_text(text, 1200)
@@ -4722,6 +4757,9 @@ def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = No
         sequence_id = _clean_sequence_id(uid, cycle_ts) if cycle_ts else hashlib.sha256(f"{uid}|dialogue".encode("utf-8")).hexdigest()[:20]
 
     render_probe = _df_render_probe(current)
+    visual_generation_request = _pair_first_visual_generation_request(
+        current, previous_user, render_probe
+    )
     provisional_relation = "RECALL" if _pair_first_recall_request(current) else "CONTINUE" if rows else "NEW"
     semantic = _pair_first_understand(current, provisional_relation, "", "", "", {}, render_probe, feedback_probe={})
     relation, turn_relation = _pair_first_resolve_relation(
@@ -4778,6 +4816,7 @@ def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = No
         "previous_april_turn": previous_april,
         "active_sequence_turns": deepcopy(digest.get("active_sequence_turns") or []),
         "history_source": "USER_APRIL_PAIRS",
+        "visual_generation_request": visual_generation_request,
     }
     provider_plan = _df_provider_plan(
         current,
@@ -4796,6 +4835,16 @@ def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = No
         dialogue_rules=dialogue_rules,
         related_branches=[],
     )
+    if visual_generation_request:
+        provider_plan.setdefault("required_context", []).insert(
+            0,
+            {
+                "key": "VISUAL_GENERATION_REQUEST",
+                "priority": 1.0,
+                "value": visual_generation_request,
+            },
+        )
+        provider_plan["visual_generation_request"] = visual_generation_request
 
     continuation = relation == "CONTINUE"
     memory_mode = "memory_query" if relation == "RECALL" else "dialogue"
@@ -4844,6 +4893,7 @@ def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = No
         "active_entity": "",
         "resolved_entity": "",
         "resolved_request": current,
+        "visual_generation_request": visual_generation_request,
         "previous_user_turn": previous_user,
         "previous_april_turn": previous_april,
         "sequence_id": sequence_id,
@@ -4870,6 +4920,7 @@ def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = No
         "normalized_text": current,
         "resolved_request": current,
         "semantic_request": current,
+        "visual_generation_request": visual_generation_request,
         "canonical_topic": "",
         "resolved_entity": "",
         "representation": semantic.get("representation") or "text",
@@ -4882,7 +4933,10 @@ def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = No
             "decision_owner": PAIR_FIRST_RELATION_OWNER,
         },
         "semantic_frame": semantic_frame,
-        "semantic_understanding": semantic_understanding,
+        "semantic_understanding": {
+            **semantic_understanding,
+            "visual_generation_request": visual_generation_request,
+        },
         "dialogue_contract": dialogue_contract,
         "dialogue_vector": {
             "relation": relation,
