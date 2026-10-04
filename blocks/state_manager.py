@@ -25,12 +25,26 @@ from copy import deepcopy
 from typing import Any
 
 try:
-    from storage import get_user_plan, load_memory, save_memory
+    from storage import (
+        get_user_plan,
+        is_authenticated_user,
+        load_dialogue_pairs,
+        save_dialogue_pair,
+        search_dialogue_memory,
+        cleanup_dialogue_memory_utc,
+        dialogue_window_bounds,
+        utc_cycle_start,
+    )
     _STORAGE_IMPORT_ERROR = None
 except Exception as exc:
     get_user_plan = None
-    load_memory = None
-    save_memory = None
+    is_authenticated_user = None
+    load_dialogue_pairs = None
+    save_dialogue_pair = None
+    search_dialogue_memory = None
+    cleanup_dialogue_memory_utc = None
+    dialogue_window_bounds = None
+    utc_cycle_start = None
     _STORAGE_IMPORT_ERROR = exc
 
 
@@ -2964,19 +2978,8 @@ def get_state(user_id):
     with _state_lock:
         needs_full_normalization = False
         if key not in state:
-            db_state = None
-            try:
-                if callable(load_memory):
-                    db_state = load_memory(key)
-            except Exception as exc:
-                safe_state_log(f"STATE LOAD FAILED: {exc}")
-
-            if isinstance(db_state, dict):
-                state[key] = db_state
-                safe_state_log(f"STATE RESTORED: {key}")
-            else:
-                state[key] = build_default_state()
-                safe_state_log(f"NEW STATE: {key}")
+            state[key] = build_default_state()
+            safe_state_log(f"NEW EPHEMERAL STATE: {key}")
             needs_full_normalization = True
 
         obj = state[key]
@@ -3130,9 +3133,7 @@ def _schedule_hourly_memory_maintenance(user_id):
                 if removed or repaired:
                     QUANTUM_MEMORY_ENGINE.refresh_scene(obj)
                 snapshot = _persistable_snapshot(obj)
-            if callable(save_memory):
-                save_memory(uid, snapshot)
-            safe_state_log(f"HOURLY MEMORY CLEANUP: user={uid} removed={removed} full_turns={CANONICAL_DIALOG_HOT_LIMIT} recall_index={len(obj.get('dialogue_recall_index') or [])}")
+            safe_state_log(f"HOURLY MEMORY CLEANUP: user={uid} removed={removed} pair_turns={CANONICAL_DIALOG_HOT_LIMIT}")
         except Exception as exc:
             safe_state_log(f"HOURLY MEMORY CLEANUP ERROR: {exc}")
         finally:
@@ -3372,12 +3373,12 @@ def _persistable_snapshot(value, _active=None):
 
 
 def persist_state(user_id):
+    # Legacy name retained only for callers; no full-state persistence exists.
     try:
-        state_obj = get_state(user_id)
-        if callable(save_memory):
-            save_memory(str(user_id), _persistable_snapshot(state_obj))
+        get_state(user_id)
     except Exception as exc:
-        safe_state_log(f"PERSIST ERROR: {exc}")
+        safe_state_log(f"PERSIST STATE READ ERROR: {exc}")
+    return None
 
 
 # The Web chat path must not wait on PostgreSQL after the canonical SceneContract
@@ -3411,9 +3412,6 @@ def persist_state_background(user_id):
                     obj = state.get(uid)
                     if not isinstance(obj, dict):
                         continue
-                    snapshot = _persistable_snapshot(obj)
-                if callable(save_memory):
-                    save_memory(uid, snapshot)
             except Exception as exc:
                 safe_state_log(f"BACKGROUND PERSIST ERROR: {exc}")
 
@@ -6511,3 +6509,636 @@ def initialize_state_engine():
 
 
 initialize_state_engine()
+
+
+# ============================================================================
+# CANONICAL PAIR-ONLY PERSISTENCE OVERRIDE — 2026-10-04
+# ============================================================================
+# The historical QuantumMemoryEngine above is retained only for compatibility
+# with callers that import its old helper names. Production persistence is
+# deliberately narrowed here to one source of truth:
+#     authenticated user -> USER↔APRIL pairs -> fixed UTC 12h window.
+# No entity/topic/task/scene index is written to PostgreSQL.
+
+CLEAN_DIALOGUE_MEMORY_VERSION = "dialogue_pairs_utc12h_v3"
+CLEAN_DIALOGUE_SEQUENCE_VERSION = "utc12h_pair_sequence_v1"
+CLEAN_DIALOGUE_WINDOW_PAIRS = 15
+
+
+def _clean_uid(user_id: Any) -> str:
+    return str(user_id or "").strip()
+
+
+def _clean_pair_from_row(row: Any) -> dict[str, Any] | None:
+    if not isinstance(row, dict):
+        return None
+    user = str(row.get("user_text") or row.get("user_request") or row.get("user_meaning") or row.get("user") or "").strip()
+    april = str(row.get("april_text") or row.get("april_answer") or row.get("april_meaning") or row.get("answer") or "").strip()
+    if not user or not april:
+        return None
+    try:
+        created = float(row.get("created_at") or row.get("timestamp") or 0.0)
+    except (TypeError, ValueError):
+        created = 0.0
+    try:
+        turn = int(row.get("turn_index") or row.get("sequence_turn_index") or row.get("turn") or 0)
+    except (TypeError, ValueError):
+        turn = 0
+    return {
+        "user_text": user,
+        "april_text": april,
+        "created_at": created,
+        "turn_index": turn,
+    }
+
+
+def _clean_pairs_from_state(state_obj: dict[str, Any]) -> list[dict[str, Any]]:
+    timeline = state_obj.get("memory_timeline") if isinstance(state_obj.get("memory_timeline"), dict) else {}
+    day = timeline.get("day_0") if isinstance(timeline.get("day_0"), dict) else {}
+    source = day.get("dialog_pairs") if isinstance(day.get("dialog_pairs"), list) else []
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for item in source:
+        pair = _clean_pair_from_row(item)
+        if not pair:
+            continue
+        sig = (pair["turn_index"], pair["created_at"], pair["user_text"], pair["april_text"])
+        if sig in seen:
+            continue
+        seen.add(sig)
+        result.append(pair)
+    result.sort(key=lambda x: (x["created_at"], x["turn_index"]))
+    return result
+
+
+def _clean_sequence_id(user_id: str, cycle_start_ts: float) -> str:
+    raw = f"{user_id}|{int(cycle_start_ts)}|{CLEAN_DIALOGUE_SEQUENCE_VERSION}"
+    return "seq-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+
+
+def _clean_conversation_id(user_id: str, cycle_start_ts: float) -> str:
+    raw = f"{user_id}|{int(cycle_start_ts)}|conversation-v1"
+    return "conv-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _clean_runtime_memory_scope(state_obj: dict[str, Any], user_id: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Synchronize only the pair memory view into the existing runtime state."""
+    if not isinstance(state_obj, dict):
+        state_obj = build_default_state()
+
+    current_ts = time.time()
+    try:
+        cycle = utc_cycle_start(current_ts)
+        cycle_ts = cycle.timestamp()
+        seed_start, _ = dialogue_window_bounds(current_ts)
+        seed_ts = seed_start.timestamp()
+    except Exception:
+        cycle_ts = current_ts - (current_ts % DIALOGUE_WINDOW_SECONDS)
+        seed_ts = cycle_ts - DIALOGUE_SEED_SECONDS
+        cycle = datetime.fromtimestamp(cycle_ts, tz=timezone.utc)
+
+    sequence_id = _clean_sequence_id(user_id, cycle_ts)
+    conversation_id = _clean_conversation_id(user_id, cycle_ts)
+
+    timeline = state_obj.setdefault("memory_timeline", {})
+    day = timeline.setdefault("day_0", build_memory_day())
+    day["dialog_pairs"] = deepcopy(rows)
+    # Entity/topic/intent archives are no longer memory sources.
+    day["topics"] = []
+    day["objects"] = []
+    day["intent_signals"] = []
+    for slot in TOPIC_CLASSES:
+        day[slot] = []
+
+    state_obj["memory_timeline"] = {"day_0": day}
+    state_obj["user_id"] = user_id
+    state_obj["conversation_id"] = conversation_id
+    state_obj["current_topic"] = None
+    state_obj["current_object"] = None
+    state_obj["active_entity"] = None
+    state_obj["april_active_topic"] = None
+    state_obj["april_active_entity"] = None
+    state_obj["last_entity"] = None
+
+    last = rows[-1] if rows else None
+    first_created = rows[0]["created_at"] if rows else None
+    last_created = rows[-1]["created_at"] if rows else None
+
+    # Keep one lightweight runtime sequence object. It contains no subject/entity
+    # memory; the conversation meaning is reconstructed from the pair archive.
+    seq = state_obj.get("active_dialogue_sequence") if isinstance(state_obj.get("active_dialogue_sequence"), dict) else {}
+    seq.update({
+        "version": CLEAN_DIALOGUE_SEQUENCE_VERSION,
+        "sequence_id": sequence_id,
+        "conversation_id": conversation_id,
+        "user_id": user_id,
+        "branch_id": None,
+        "task_id": None,
+        "topic": None,
+        "entity": None,
+        "active_entity": None,
+        "turn_count": len(rows),
+        "response_count": len(rows),
+        "task_response_count": 0,
+        "started_at": first_created,
+        "last_turn_at": last_created,
+        "last_user_request": last["user_text"] if last else "",
+        "last_april_answer": last["april_text"] if last else "",
+        "last_task_result": {},
+        "last_answer_basis": {},
+        "task_registry": {},
+        "relation": "CONTINUE" if rows else "NEW",
+        "dialogue_rules": deepcopy(seq.get("dialogue_rules") or {}),
+    })
+    state_obj["active_dialogue_sequence"] = seq
+
+    ctx = state_obj.get("active_dialogue_context") if isinstance(state_obj.get("active_dialogue_context"), dict) else {}
+    ctx.update({
+        "version": "active_dialogue_context_pair_first_v1",
+        "scope": {"user_id": user_id, "conversation_id": conversation_id},
+        "sequence_id": sequence_id,
+        "task_id": None,
+        "objective": "",
+        "task": {},
+        "intent": "",
+        "goal": "",
+        "topic": "",
+        "active_entity": "",
+        "response_sequence": {"sequence_id": sequence_id, "sequence_turn_index": len(rows)},
+        "completed_results": [],
+        "last_completed_result": {},
+        "updated_at": current_ts,
+    })
+    state_obj["active_dialogue_context"] = ctx
+
+    state_obj["dialogue_branch_index"] = {
+        "version": "dialogue_pair_history_only_v1",
+        "active_sequence_id": sequence_id,
+        "target_sequence_id": sequence_id,
+        "target_branch_id": "",
+        "resolution_mode": "PAIR_HISTORY_ONLY",
+        "branches": [],
+    }
+    state_obj["active_dialogue_branch_id"] = ""
+
+    state_obj["canonical_dialogue_turn"] = {
+        "user_id": user_id,
+        "conversation_id": conversation_id,
+        "dialogue_sequence_id": sequence_id,
+        "sequence_turn_index": int(last["turn_index"] if last else 0),
+        "user_request": last["user_text"] if last else "",
+        "april_answer": last["april_text"] if last else "",
+        "created_at": last["created_at"] if last else None,
+    }
+    state_obj["dialogue_memory_anchor"] = {
+        "version": "dialogue_pair_anchor_v1",
+        "user_id": user_id,
+        "conversation_id": conversation_id,
+        "sequence_id": sequence_id,
+        "previous_user_turn": last["user_text"] if last else "",
+        "previous_april_turn": last["april_text"] if last else "",
+        "turn_index": int(last["turn_index"] if last else 0),
+        "created_at": last["created_at"] if last else None,
+    }
+    state_obj["memory_cycle"] = {
+        "anchor_mode": "FIXED_UTC_12H",
+        "session_start_utc": cycle_ts,
+        "window_key": cycle.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "window_start_utc": cycle_ts,
+        "seed_cutoff_utc": seed_ts,
+        "last_rollover": cycle_ts,
+        "window_hours": DIALOGUE_WINDOW_HOURS,
+        "seed_hours": DIALOGUE_SEED_HOURS,
+        "authenticated_only": True,
+        "source": "dialogue_memory",
+    }
+    state_obj["memory_version"] = CLEAN_DIALOGUE_MEMORY_VERSION
+    state_obj["memory_summary"] = ""
+    state_obj["memory_matrix"] = {}
+    state_obj["dialogue_resolution"] = {
+        "relation": "CONTINUE" if rows else "NEW",
+        "selected_memory_index": -1,
+        "selected_memory_operand": {},
+        "selected_memory_record": {},
+        "previous_result": {},
+        "development_state": {},
+        "source_scene_id": "",
+        "resolved_request": "",
+        "confidence": 0.0,
+        "authoritative": True,
+        "memory_source": "USER_APRIL_PAIRS",
+        "updated_at": current_ts,
+    }
+    state_obj["last_user_turn"] = last["user_text"] if last else ""
+    state_obj["last_user_turn_at"] = last["created_at"] if last else None
+    state_obj["last_april_turn"] = last["april_text"] if last else ""
+    state_obj["last_april_turn_at"] = last["created_at"] if last else None
+    return state_obj
+
+
+def _clean_load_authenticated_state(user_id: Any) -> dict[str, Any]:
+    uid = _clean_uid(user_id)
+    base = state.get(uid) if uid else None
+    if not isinstance(base, dict):
+        base = build_default_state()
+
+    auth_ok = bool(is_authenticated_user(uid)) if callable(is_authenticated_user) and uid else False
+    if not auth_ok:
+        # Anonymous/unregistered state is explicitly ephemeral and contains no DB
+        # dialogue memory.
+        base = _clean_runtime_memory_scope(base, uid, [])
+        base["memory_scope"] = {
+            "user_id": uid,
+            "authenticated": False,
+            "persistence": "disabled",
+            "source": "auth_required",
+        }
+        state[uid] = base
+        return base
+
+    try:
+        cleanup_dialogue_memory_utc(uid)
+    except Exception as exc:
+        safe_state_log(f"UTC PAIR CLEANUP READ ERROR: {exc}")
+
+    try:
+        rows = load_dialogue_pairs(uid, limit=0)
+    except Exception as exc:
+        safe_state_log(f"PAIR LOAD ERROR: {exc}")
+        rows = []
+    rows = [p for p in (_clean_pair_from_row(x) for x in rows) if p]
+    base = _clean_runtime_memory_scope(base, uid, rows)
+    base["memory_scope"] = {
+        "user_id": uid,
+        "authenticated": True,
+        "persistence": "dialogue_memory",
+        "window_hours": DIALOGUE_WINDOW_HOURS,
+        "seed_hours": DIALOGUE_SEED_HOURS,
+        "source": "POSTGRES_DIALOGUE_MEMORY_PAIRS",
+    }
+    state[uid] = base
+    return base
+
+
+# Replace the old DB-backed full-state loader.
+def get_state(user_id):
+    with _state_lock:
+        return _clean_load_authenticated_state(user_id)
+
+
+# The old state snapshot writer is intentionally disabled. Pair writes are made
+# only at the completed USER↔APRIL commit point in update_scene_context().
+def persist_state(user_id):
+    try:
+        cleanup_dialogue_memory_utc(str(user_id))
+    except Exception as exc:
+        safe_state_log(f"PERSIST CLEANUP ERROR: {exc}")
+    return None
+
+
+def persist_state_background(user_id):
+    """Compatibility API: persist only the canonical pair store, never the state JSON."""
+    try:
+        cleanup_dialogue_memory_utc(str(user_id))
+    except Exception as exc:
+        safe_state_log(f"BACKGROUND PAIR CLEANUP ERROR: {exc}")
+    return None
+
+
+def add_dialog(user_id, role, content, metadata=None, *, persist=True):
+    """Runtime conversation buffer only. Database writes happen once per completed pair."""
+    uid = _clean_uid(user_id)
+    state_obj = get_state(uid)
+    role_name = str(role or "").strip().lower()
+    text = str(content or "").strip()
+    if text:
+        item = {
+            "role": role_name,
+            "content": text,
+            "timestamp": time.time(),
+            "metadata": deepcopy(metadata or {}),
+        }
+        dialog = state_obj.setdefault("dialog", [])
+        dialog.append(item)
+        state_obj["dialog"] = dialog[-60:]
+        state_obj["meta"] = state_obj.get("meta") if isinstance(state_obj.get("meta"), dict) else {}
+        if role_name in {"user", "human"}:
+            state_obj["last_user_turn"] = text
+            state_obj["last_user_turn_at"] = item["timestamp"]
+        elif role_name in {"assistant", "april", "bot"}:
+            state_obj["last_april_turn"] = text
+            state_obj["last_april_turn_at"] = item["timestamp"]
+    return state_obj
+
+
+_ORIGINAL_UPDATE_SCENE_CONTEXT_PAIR_MEMORY = update_scene_context
+
+
+def update_scene_context(
+    user_id,
+    contract,
+    *,
+    current_request=None,
+    answer=None,
+    provider_result=None,
+    visual_generation_memory=None,
+    internal_context=False,
+    persist=True,
+):
+    """Preserve the existing scene pipeline but commit only a compact pair to DB."""
+    result = _ORIGINAL_UPDATE_SCENE_CONTEXT_PAIR_MEMORY(
+        user_id,
+        contract,
+        current_request=current_request,
+        answer=answer,
+        provider_result=provider_result,
+        visual_generation_memory=visual_generation_memory,
+        internal_context=bool(internal_context),
+        persist=False,
+    )
+    if not internal_context:
+        uid = _clean_uid(user_id)
+        request_text = str(current_request or "").strip()
+        answer_text = str(answer or "").strip()
+        auth_ok = bool(is_authenticated_user(uid)) if callable(is_authenticated_user) and uid else False
+        if auth_ok and request_text and answer_text:
+            current_rows = []
+            try:
+                current_rows = load_dialogue_pairs(uid, limit=0)
+            except Exception:
+                current_rows = []
+            clean_rows = [p for p in (_clean_pair_from_row(x) for x in current_rows) if p]
+            turn_index = (max((int(p.get("turn_index") or 0) for p in clean_rows), default=0) + 1)
+            try:
+                save_dialogue_pair(
+                    uid,
+                    request_text,
+                    answer_text,
+                    created_at=time.time(),
+                    turn_index=turn_index,
+                )
+                clean_rows = [p for p in (_clean_pair_from_row(x) for x in load_dialogue_pairs(uid, limit=0)) if p]
+                with _state_lock:
+                    _clean_runtime_memory_scope(state.get(uid) if isinstance(state.get(uid), dict) else build_default_state(), uid, clean_rows)
+                    state[uid]["dialog"] = state[uid].get("dialog", [])[-60:]
+            except Exception as exc:
+                safe_state_log(f"PAIR PERSIST ERROR: {exc}")
+    if persist:
+        persist_state(user_id)
+    return result
+
+
+def _clean_sequence_pairs_from_runtime(state_obj: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = _clean_pairs_from_state(state_obj)
+    rows.sort(key=lambda x: (float(x.get("created_at") or 0.0), int(x.get("turn_index") or 0)))
+    return rows
+
+
+# Pair-only replacement for the old rich memory query engine.
+def _clean_engine_ensure_runtime(self, state_obj):
+    uid = _clean_uid((state_obj or {}).get("user_id")) if isinstance(state_obj, dict) else ""
+    if uid and callable(is_authenticated_user) and is_authenticated_user(uid):
+        try:
+            cleanup_dialogue_memory_utc(uid)
+            rows = load_dialogue_pairs(uid, limit=0)
+        except Exception:
+            rows = []
+        rows = [p for p in (_clean_pair_from_row(x) for x in rows) if p]
+        return _clean_runtime_memory_scope(state_obj if isinstance(state_obj, dict) else build_default_state(), uid, rows)
+    return _clean_runtime_memory_scope(state_obj if isinstance(state_obj, dict) else build_default_state(), uid, [])
+
+
+QuantumMemoryEngine.ensure_runtime = _clean_engine_ensure_runtime
+
+
+def _clean_engine_iter_memory_records(self, state_obj):
+    for row in _clean_sequence_pairs_from_runtime(state_obj):
+        yield {
+            "record_type": "dialog_pair",
+            "user": row["user_text"],
+            "april": row["april_text"],
+            "created_at": row["created_at"],
+            "turn_index": row["turn_index"],
+        }
+
+
+def _clean_engine_query(self, state_obj, query, *, limit=8, retrieval_mode="semantic"):
+    pairs = _clean_sequence_pairs_from_runtime(state_obj)
+    q = str(query or "").strip().lower()
+    if not q:
+        selected = pairs[-max(1, int(limit or 8)):]
+    else:
+        scored = []
+        for row in pairs:
+            hay = f"{row['user_text']} {row['april_text']}".lower()
+            exact = fuzz.token_set_ratio(q, hay) / 100.0 if q else 0.0
+            partial = fuzz.partial_ratio(q, hay) / 100.0 if q else 0.0
+            recency = max(0.0, 1.0 - max(0.0, time.time() - float(row['created_at'] or 0.0)) / DIALOGUE_WINDOW_SECONDS)
+            score = exact * 0.68 + partial * 0.22 + recency * 0.10
+            scored.append((score, row))
+        scored.sort(key=lambda x: (x[0], float(x[1].get("created_at") or 0.0)), reverse=True)
+        selected = [r for _s, r in scored[:max(1, int(limit or 8))]]
+    return {
+        "engine": "dialogue_pairs_v1",
+        "mode": "pair_search",
+        "query": query,
+        "total_pairs": len(pairs),
+        "records": [
+            {
+                "score": 1.0,
+                "turn_index": int(r["turn_index"]),
+                "created_at": float(r["created_at"]),
+                "user": r["user_text"],
+                "april": r["april_text"],
+            }
+            for r in selected
+        ],
+        "topic_index": [],
+        "entity_index": [],
+        "authenticated_only": True,
+        "window_hours": DIALOGUE_WINDOW_HOURS,
+        "seed_hours": DIALOGUE_SEED_HOURS,
+    }
+
+
+def _clean_engine_build_memory_matrix(self, state_obj, query="", limit=8):
+    result = _clean_engine_query(self, state_obj, query, limit=limit, retrieval_mode="semantic")
+    return {
+        "engine": "dialogue_pairs_v1",
+        "query": query,
+        "window_hours": DIALOGUE_WINDOW_HOURS,
+        "records": result.get("records", []),
+        "labels": [],
+        "entities": [],
+        "topics": [],
+        "mode": "pair_history_only",
+        "evidence_only": True,
+    }
+
+
+QuantumMemoryEngine.iter_memory_records = _clean_engine_iter_memory_records
+QuantumMemoryEngine.query = _clean_engine_query
+QuantumMemoryEngine.build_memory_matrix = _clean_engine_build_memory_matrix
+
+
+# ============================================================================
+# PAIR-ONLY DIALOGUE BRIDGE / HISTORY SEARCH API
+# ============================================================================
+
+def build_dialogue_memory_bridge(
+    user_id,
+    query="",
+    limit=CLEAN_DIALOGUE_WINDOW_PAIRS,
+    *,
+    relation="AUTO",
+    target_sequence_id="",
+    target_task_id="",
+):
+    uid = _clean_uid(user_id)
+    state_obj = get_state(uid)
+    auth_ok = bool((state_obj.get("memory_scope") or {}).get("authenticated"))
+    if not auth_ok:
+        return {
+            "version": "dialogue_pairs_v1",
+            "authenticated": False,
+            "relation": "NEW",
+            "window_hours": DIALOGUE_WINDOW_HOURS,
+            "seed_hours": DIALOGUE_SEED_HOURS,
+            "selected_records": [],
+            "dialogue_pairs": [],
+        }
+
+    rows = _clean_sequence_pairs_from_runtime(state_obj)
+    seq = state_obj.get("active_dialogue_sequence") if isinstance(state_obj.get("active_dialogue_sequence"), dict) else {}
+    sequence_id = _clean_text_bridge(target_sequence_id or seq.get("sequence_id"), 100)
+    mode = str(relation or "AUTO").strip().upper()
+    if mode == "AUTO":
+        mode = str((state_obj.get("dialogue_resolution") or {}).get("relation") or "CONTINUE" if rows else "NEW").upper()
+    if mode not in {"NEW", "CONTINUE", "RECALL"}:
+        mode = "NEW"
+
+    selected = rows[-max(1, int(limit or CLEAN_DIALOGUE_WINDOW_PAIRS)):]
+    matches: list[dict[str, Any]] = []
+    if mode == "RECALL":
+        try:
+            search = search_dialogue_memory(uid, query, limit=max(1, int(limit or 8)))
+            matches = [
+                {
+                    "score": float(item.get("score") or 0.0),
+                    "turn_index": int(item.get("turn_index") or 0),
+                    "created_at": float(item.get("created_at") or 0.0),
+                    "user": str(item.get("user") or ""),
+                    "april": str(item.get("april") or ""),
+                }
+                for item in (search.get("matches") or []) if isinstance(item, dict)
+            ]
+        except Exception:
+            matches = []
+        if matches:
+            selected = [
+                {
+                    "user_text": m["user"],
+                    "april_text": m["april"],
+                    "created_at": m["created_at"],
+                    "turn_index": m["turn_index"],
+                }
+                for m in matches
+            ]
+
+    def compact(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "turn": int(row.get("turn_index") or 0),
+            "created_at": float(row.get("created_at") or 0.0),
+            "user": str(row.get("user_text") or ""),
+            "april": str(row.get("april_text") or ""),
+        }
+
+    records = [compact(x) for x in selected]
+    return {
+        "version": "dialogue_pairs_v1",
+        "authenticated": True,
+        "relation": mode,
+        "window_hours": DIALOGUE_WINDOW_HOURS,
+        "seed_hours": DIALOGUE_SEED_HOURS,
+        "sequence_id": sequence_id,
+        "selected_sequence_id": sequence_id,
+        "current_turn_count": len(rows),
+        "active_sequence_turns": records,
+        "relevant_window_turns": records,
+        "dialogue_pairs": records,
+        "selected_records": records,
+        "memory_search": matches if mode == "RECALL" else [],
+        "history_source": "USER_APRIL_PAIRS",
+        "topic_index": [],
+        "entity_index": [],
+        "task_index": [],
+        "authenticated_only": True,
+    }
+
+
+def _clean_text_bridge(value: Any, limit: int = 120) -> str:
+    value = str(value or "").strip()
+    return value[:limit]
+
+
+# ============================================================================
+# UTC ROLLOVER — fixed half-day boundary, retain one-hour seed
+# ============================================================================
+
+def memory_rollover_if_needed(user_id):
+    uid = _clean_uid(user_id)
+    try:
+        removed = cleanup_dialogue_memory_utc(uid) if callable(cleanup_dialogue_memory_utc) else 0
+        if removed:
+            safe_state_log(f"UTC ROLLOVER CLEANUP user={uid} removed={removed}")
+    except Exception as exc:
+        safe_state_log(f"UTC ROLLOVER ERROR: {exc}")
+    get_state(uid)
+    return state.get(uid, {})
+
+
+def ensure_memory_engine(state_obj):
+    return _clean_engine_ensure_runtime(QUANTUM_MEMORY_ENGINE, state_obj)
+
+
+def query_dynamic_memory(user_id, query, limit=8, retrieval_mode="semantic"):
+    uid = _clean_uid(user_id)
+    if not callable(is_authenticated_user) or not is_authenticated_user(uid):
+        return {
+            "engine": "dialogue_pairs_v1",
+            "authenticated": False,
+            "query": query,
+            "records": [],
+            "matches": [],
+            "topic_index": [],
+            "entity_index": [],
+        }
+    return search_dialogue_memory(uid, query, limit=limit)
+
+
+def build_quantum_memory_matrix(user_id, query="", limit=8):
+    result = query_dynamic_memory(user_id, query, limit=limit)
+    return {
+        "engine": "dialogue_pairs_v1",
+        "query": query,
+        "records": result.get("matches") or result.get("records") or [],
+        "topics": [],
+        "entities": [],
+        "labels": [],
+        "window_hours": DIALOGUE_WINDOW_HOURS,
+        "mode": "pair_history_only",
+        "evidence_only": True,
+    }
+
+
+def build_quantum_memory_signal(user_id, query="", limit=8):
+    result = query_dynamic_memory(user_id, query, limit=limit)
+    return {
+        "engine": "dialogue_pairs_v1",
+        "window_hours": DIALOGUE_WINDOW_HOURS,
+        "seed_hours": DIALOGUE_SEED_HOURS,
+        "signal": result,
+        "decision_owner": "QUANTUM_PROCESSOR",
+        "evidence_only": True,
+        "memory_source": "USER_APRIL_PAIRS",
+    }
