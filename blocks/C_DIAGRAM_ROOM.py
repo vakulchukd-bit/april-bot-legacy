@@ -98,9 +98,9 @@ def _extract_payload(task: Dict[str, Any]) -> Dict[str, Any]:
         "layout", "orientation", "views", "geometry", "dimensions",
         "annotations", "legend", "constraints", "cross_connections",
         "operation", "safety", "switch_states", "states", "notes",
-        "caption", "metadata", "ascii", "ascii_preview", "svg", "svg_payload",
+        "caption", "metadata", "svg", "svg_payload",
         "elements", "vertices", "points", "segments", "labels",
-        "coordinate_system", "construction", "ascii", "ascii_preview",
+        "coordinate_system", "construction",
     )
     for key in keys:
         if key in task:
@@ -205,12 +205,6 @@ def _select_renderer(payload: Dict[str, Any]) -> str:
         if explicit in {"ArithmeticDiagram", "arithmeticdiagram", "SvgBlock", "svgblock"}:
             return "SvgBlock" if explicit.lower() == "svgblock" else "ArithmeticDiagram"
         return "SvgBlock"
-
-    # Plain ASCII schematics are still canonical diagrams. The Web renderer
-    # displays them directly from the artifact payload; do not downgrade them
-    # to GalleryBlock, which has no textual schematic renderer.
-    if _text(payload.get("ascii") or payload.get("ascii_preview")):
-        return "DiagramRenderer"
 
     if explicit:
         return explicit
@@ -726,8 +720,8 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
 
     renderer = _select_renderer(source)
 
-    if not svg and not svg_payload and source.get("ascii"):
-        diagram_type = "ascii_schematic"
+    if not svg and not svg_payload and source.get("nodes"):
+        diagram_type = "structured_schematic"
 
     representation = _text(
         source.get("representation"),
@@ -745,8 +739,6 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
         or source.get("elements")
         or source.get("vertices")
         or source.get("points")
-        or source.get("ascii")
-        or source.get("ascii_preview")
     )
 
     if not render_ready:
