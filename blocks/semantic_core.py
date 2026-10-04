@@ -1513,19 +1513,6 @@ def analyze(text: str, state: dict=None, history: list=None,
     result["required_outputs"] = list(semantic_scene_outputs)
     result["requested_representation"] = production or (semantic_scene_outputs[0] if semantic_scene_outputs else None)
 
-    ascii_schema_advisory = bool(
-        interpreted.get("ascii_schema_advisory")
-        and not production
-    )
-    result["ascii_schema_advisory"] = ascii_schema_advisory
-    if ascii_schema_advisory:
-        result["format_advisory"] = {
-            "format": "ascii",
-            "scope": "text_block",
-            "mode": "optional",
-            "reason": "semantic_text_schema_request",
-        }
-
     # These fields are explicitly inert. Semantic Core is evidence transport,
     # not a routing/rendering/execution layer.
     result["representation_authority"] = (
