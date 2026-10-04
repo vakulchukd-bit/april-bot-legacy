@@ -3381,6 +3381,25 @@ class QuantumInterpretationEngine:
                 "single_route":True,"decision_owner":DECISION_OWNER
             },
         })
+        # Freeze the provider handoff inside the Interpretation layer itself.
+        # This is the canonical semantic boundary: Provider receives a prepared
+        # plan and never has to guess whether the turn is NEW/CONTINUE/RECALL.
+        provider_context_plan = _build_provider_context_plan(
+            text,
+            result.get("dialogue_vector") if isinstance(result.get("dialogue_vector"), dict) else dialogue_vector,
+            result.get("dialogue_contract") if isinstance(result.get("dialogue_contract"), dict) else {},
+            semantic_task,
+            {
+                **presentation,
+                "requested_outputs": [production],
+            },
+            self._recent_dialogue_pairs(history, limit=10),
+            history_task_context,
+            continuation,
+            reference,
+        )
+        result["provider_context_plan"] = provider_context_plan
+
         result["evidence"]={"representation":evidence,
                             "domain":[{"domain":k,"score":float(v)} for k,v in p["domain_scores"].items()],
                             "math":p["representation_scores"].get("formula",0.0),
@@ -3392,6 +3411,8 @@ class QuantumInterpretationEngine:
                             "information":p["capability_scores"].get("information",0.0),
                             "dialogue":result["dialogue_contract"]}
         result["interpretation_state"]=synchronize_interpretation_context(build_interpretation_state(),result)
+        if isinstance(result.get("interpretation_state"), dict):
+            result["interpretation_state"]["provider_context_plan"] = provider_context_plan
         result["transport_state"]=export_transport_state(result["interpretation_state"],result)
         result["transport_diagnostics"]=build_transport_diagnostics(result)
         bridge_machine_response(result,result["transport_state"])
@@ -4103,6 +4124,128 @@ class QuantumMemoryUnderstandingEngine:
 
 
 QUANTUM_MEMORY_UNDERSTANDING_ENGINE = QuantumMemoryUnderstandingEngine()
+
+
+def _build_provider_context_plan(
+    current_request: str,
+    dialogue_vector: dict[str, Any],
+    dialogue_contract: dict[str, Any],
+    semantic_task: dict[str, Any],
+    presentation: dict[str, Any],
+    history_window: list,
+    history_task_context: dict[str, Any],
+    continuation: bool,
+    reference: bool,
+) -> dict[str, Any]:
+    """Freeze the Interpretation-owned Provider context before transport.
+
+    The Provider never selects a branch or searches memory. This plan contains the
+    already-resolved semantic decision and only the bounded evidence needed to answer
+    a continuation/recall turn. NEW turns intentionally carry no historical dialogue.
+    """
+    relation = str(
+        dialogue_vector.get("three_way_relation")
+        or dialogue_contract.get("three_way_relation")
+        or dialogue_contract.get("relation")
+        or ("CONTINUE" if continuation else "RECALL" if reference else "NEW")
+    ).upper()
+    relation = {
+        "NEW_TOPIC": "NEW",
+        "INDEPENDENT": "NEW",
+        "SAME_TOPIC": "NEW",
+        "CONTINUE_TOPIC": "CONTINUE",
+        "CONTINUATION": "CONTINUE",
+        "MEMORY_QUERY": "RECALL",
+    }.get(relation, relation)
+    if relation not in {"NEW", "CONTINUE", "RECALL"}:
+        relation = "RECALL" if reference else "CONTINUE" if continuation else "NEW"
+
+    current_request = str(
+        current_request
+        or dialogue_contract.get("current_request")
+        or dialogue_contract.get("resolved_request")
+        or ""
+    ).strip()
+    requested_outputs = [
+        str(item).strip()
+        for item in (presentation.get("requested_outputs") or dialogue_vector.get("requested_outputs") or [semantic_task.get("representation") or "text"])
+        if str(item).strip()
+    ][:6]
+
+    semantic_core = {
+        "topic": semantic_task.get("topic") or dialogue_contract.get("active_topic"),
+        "entity": semantic_task.get("entity") or dialogue_contract.get("active_entity"),
+        "operation": semantic_task.get("operation"),
+        "goal": semantic_task.get("goal"),
+        "representation": semantic_task.get("representation"),
+        "turn_relation": relation,
+    }
+    semantic_core = {k: v for k, v in semantic_core.items() if v not in (None, "", [], {})}
+
+    plan = {
+        "version": "april_provider_handoff_from_interpretation_v1",
+        "relation": relation,
+        "turn_relation": str(dialogue_vector.get("subtype") or relation),
+        "current_user_request": current_request,
+        "current_request_authoritative": True,
+        "context_selection_done_before_provider": True,
+        "provider_must_not_reselect_context": True,
+        "provider_continuation_contract": "Use only the Interpretation-selected dialogue operand/trajectory for CONTINUE or RECALL.",
+        "hard_budget_tokens": 900,
+        "soft_target_tokens": 820,
+        "new_topic_minimal_context": relation == "NEW",
+        "required_context": [
+            {"key": "SEMANTIC_CORE", "priority": 1.0, "value": semantic_core},
+            {
+                "key": "OUTPUT_CONTRACT",
+                "priority": 0.99,
+                "value": {
+                    "representation": semantic_task.get("representation"),
+                    "requested_outputs": requested_outputs,
+                },
+            },
+        ],
+        "optional_context": [],
+        "excluded_context": [
+            "FULL_HISTORY",
+            "OTHER_TOPIC_BRANCHES",
+            "UNRELATED_WINDOW_MEMORY",
+            "STALE_GLOBAL_ENTITY",
+        ],
+    }
+
+    if relation in {"CONTINUE", "RECALL"}:
+        selected_operand = dialogue_vector.get("selected_memory_operand")
+        anchor = {
+            "previous_user_turn": dialogue_contract.get("previous_user_turn") or dialogue_vector.get("previous_user_turn") or "",
+            "previous_april_turn": dialogue_contract.get("previous_april_turn") or dialogue_vector.get("previous_april_turn") or "",
+            "active_topic": dialogue_contract.get("active_topic") or dialogue_vector.get("active_topic") or "",
+            "active_entity": dialogue_contract.get("active_entity") or "",
+            "sequence_id": dialogue_contract.get("sequence_id") or "",
+            "selected_memory_operand": selected_operand if isinstance(selected_operand, dict) else {},
+        }
+        plan["required_context"].append({
+            "key": "DIALOGUE_ANCHOR",
+            "priority": 0.998,
+            "value": anchor,
+        })
+
+        bounded_history = [x for x in (history_window or []) if isinstance(x, dict)][-10:]
+        if bounded_history:
+            plan["required_context"].append({
+                "key": "ACTIVE_DIALOGUE_TRAJECTORY",
+                "priority": 0.997,
+                "value": bounded_history,
+            })
+
+        if history_task_context.get("required"):
+            plan["required_context"].append({
+                "key": "ACTIVE_TASK",
+                "priority": 0.99,
+                "value": history_task_context,
+            })
+
+    return plan
 
 
 def normalize_text(text: Any) -> str:
