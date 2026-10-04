@@ -153,6 +153,27 @@ def _is_authenticated_row(row: Any) -> bool:
     )
 
 
+def _canonical_user_id(cur, user_id: Any) -> str | None:
+    """Resolve either the DB user_id or the public April ID to DB user_id.
+
+    The Web client identifies an authenticated user by ``april_id``. Older
+    installations may have a different internal ``users.user_id``. Dialogue
+    memory has a foreign key to ``users.user_id``, so every persistent-memory
+    query must normalize the identifier before touching ``dialogue_memory``.
+    """
+    value = str(user_id or "").strip()
+    if not value:
+        return None
+    cur.execute(
+        "SELECT user_id, april_id, email, provider FROM users WHERE user_id = %s OR april_id = %s LIMIT 1",
+        (value, value),
+    )
+    row = cur.fetchone()
+    if not _is_authenticated_row(row):
+        return None
+    return str(row.get("user_id") or "").strip()
+
+
 def is_authenticated_user(user_id: Any) -> bool:
     """Only a registered auth-backed row may own persistent dialogue memory."""
     conn = get_conn()
@@ -162,15 +183,7 @@ def is_authenticated_user(user_id: Any) -> bool:
     try:
         with conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT user_id, email, provider
-                    FROM users
-                    WHERE user_id = %s
-                    """,
-                    (uid,),
-                )
-                return _is_authenticated_row(cur.fetchone())
+                return _canonical_user_id(cur, uid) is not None
     except Exception:
         return False
     finally:
@@ -367,8 +380,8 @@ def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | i
                 if user_id is None:
                     cur.execute("DELETE FROM dialogue_memory WHERE created_at < %s", (cutoff,))
                 else:
-                    uid = str(user_id)
-                    if not _is_authenticated_cursor(cur, uid):
+                    uid = _canonical_user_id(cur, user_id)
+                    if not uid:
                         return 0
                     cur.execute(
                         "DELETE FROM dialogue_memory WHERE user_id = %s AND created_at < %s",
@@ -382,11 +395,8 @@ def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | i
 
 
 def _is_authenticated_cursor(cur, uid: str) -> bool:
-    cur.execute(
-        "SELECT user_id, email, provider FROM users WHERE user_id = %s",
-        (uid,),
-    )
-    return _is_authenticated_row(cur.fetchone())
+    """Compatibility helper using the same user_id/April-ID normalization."""
+    return _canonical_user_id(cur, uid) is not None
 
 
 def _pair_hash(uid: str, created_ts: float, turn_index: int, user_text: str, april_text: str) -> str:
@@ -424,7 +434,8 @@ def save_dialogue_pair(
     try:
         with conn:
             with conn.cursor() as cur:
-                if not _is_authenticated_cursor(cur, uid):
+                uid = _canonical_user_id(cur, uid)
+                if not uid:
                     return False
                 # Clean before insert so the database never accumulates stale memory.
                 seed_start, _ = dialogue_window_bounds(dt)
@@ -459,7 +470,8 @@ def load_dialogue_pairs(user_id: Any, *, limit: int = 0, timestamp: float | int 
     try:
         with conn:
             with conn.cursor() as cur:
-                if not _is_authenticated_cursor(cur, uid):
+                uid = _canonical_user_id(cur, uid)
+                if not uid:
                     return []
                 cur.execute(
                     """
