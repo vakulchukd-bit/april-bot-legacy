@@ -3676,21 +3676,6 @@ def _strip_image_technical_fallback(value: Any) -> str:
     return re.sub(r"\s{2,}", " ", cleaned).strip(" \t\r\n-—:;")
 
 
-def _looks_like_ascii_art(value: Any) -> bool:
-    """Return True for compact ASCII drawings that must never be user-visible in image mode."""
-    text = _safe_text(value).strip()
-    if not text or "\n" not in text:
-        return False
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if len(lines) < 2:
-        return False
-    symbol_count = sum(ch in r"/\\()<>^_@|[]{}" for ch in text)
-    alpha_count = sum(ch.isalpha() for ch in text)
-    digit_count = sum(ch.isdigit() for ch in text)
-    # ASCII art has several graphic-symbol characters and very little prose.
-    return symbol_count >= 6 and alpha_count <= 24 and digit_count <= 4
-
-
 def _is_image_technical_fallback(value: Any) -> bool:
     raw = re.sub(r"\s+", " ", _safe_text(value)).strip().casefold()
     expected = _IMAGE_TECHNICAL_FALLBACK.casefold()
@@ -3843,8 +3828,6 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         sanitized_answer = _strip_image_technical_fallback(answer)
         if sanitized_answer != answer:
             answer = sanitized_answer
-        if _looks_like_ascii_art(answer):
-            answer = "Готово — изображение подготавливается."
 
     if not answer and visual_mode == "image_generation":
         candidate_metadata = dict(canonical_payload.get("metadata") or {}) if isinstance(canonical_payload.get("metadata"), dict) else {}
@@ -3870,8 +3853,6 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
     content = _unwrap_model_answer(canonical_payload.get("content") or answer)
     if not content:
         content = answer
-    if image_generation_mode and _looks_like_ascii_art(content):
-        content = answer
     blocks = _sanitize_render_block_texts(
         _clean_render_blocks(canonical_payload.get("render_blocks", []) or []),
         answer,
@@ -3885,7 +3866,6 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             if not (
                 isinstance(block, dict)
                 and _safe_text(block.get("type") or block.get("artifact_type") or "").lower() in {"text", "markdown"}
-                and _looks_like_ascii_art(block.get("content") or block.get("text") or block.get("answer") or "")
             )
         ]
     if not blocks:
@@ -4138,8 +4118,6 @@ def provider_finalize_for_executor(contract: dict) -> dict:
     )
     if image_generation_preview:
         answer = _strip_image_technical_fallback(answer)
-        if _looks_like_ascii_art(answer):
-            answer = "Готово — изображение подготавливается."
         if not answer:
             answer = "Готово — изображение подготовлено."
     if not answer:
