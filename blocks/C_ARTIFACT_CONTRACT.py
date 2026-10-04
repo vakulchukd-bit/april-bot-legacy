@@ -2125,7 +2125,6 @@ def _canonical_visual_payload_for_dedupe(block: Dict[str, Any]) -> Any:
             "edges": payload.get("edges") or [],
             "elements": payload.get("elements") or payload.get("shapes") or [],
             "points": payload.get("points") or [],
-            "ascii": str(payload.get("ascii") or payload.get("ascii_preview") or "").strip(),
         }
 
     if block_type in {"graph", "table"}:
