@@ -66,7 +66,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v15_fast_context_no_cold_model_v1"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v16_12h_pair_dialogue_visual_v3"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
@@ -708,10 +708,9 @@ class QuantumContextUnderstandingEngine:
                 str(scene.get("topic") or ""),
                 str(scene.get("summary") or ""),
             ])
-        entities = cls._entities(" ".join(texts))
-        names = [x["value"] for x in entities if x["type"] == "proper_name"]
-        if names:
-            return max(names, key=lambda x: (len(x.split()), len(x)))
+        # Entity extraction is deliberately absent from dialogue topic labeling.
+        # The topic label is a compact semantic projection of the authenticated
+        # USER↔APRIL pair, not an entity-engine result.
         content = [
             token for token in cls._content_tokens(" ".join(texts))
             if not token.isdigit()
@@ -759,7 +758,6 @@ class QuantumContextUnderstandingEngine:
         previous_scene: dict[str, Any] | None,
     ) -> list[dict[str, Any]]:
         profiles = []
-        current_entities = self._entities(current)
         candidates = list(reversed(recent_pairs[-self.TOPIC_WINDOW:]))
         if active_topic:
             candidates.insert(0, {"user": active_topic, "assistant": active_topic, "source": "active_topic"})
@@ -770,8 +768,7 @@ class QuantumContextUnderstandingEngine:
             if not pair_text:
                 continue
             sim, source = self._embedding_similarity(current, pair_text)
-            prior_entities = self._entities(pair_text)
-            shared = self._shared_entities(current_entities, prior_entities)
+            shared = []
             current_terms = set(self._content_tokens(current))
             prior_terms = set(self._content_tokens(pair_text))
             lexical_overlap = (
@@ -780,10 +777,9 @@ class QuantumContextUnderstandingEngine:
             recency = 1.0 / (1.0 + 0.12 * (idx - 1))
             topic_label = self._topic_label(pair, previous_scene)
             topic_score = (
-                0.58 * sim
-                + 0.22 * (len(shared) / max(1, min(4, len(current_entities) or 1)))
-                + 0.12 * lexical_overlap
-                + 0.08 * recency
+                0.76 * sim
+                + 0.14 * lexical_overlap
+                + 0.10 * recency
             )
             profiles.append({
                 "pair_index": idx,
@@ -968,14 +964,14 @@ class QuantumContextUnderstandingEngine:
         )
 
         topic_similarity = float(top_topic.get("semantic_similarity", 0.0) or 0.0)
-        shared_entities = list(top_topic.get("shared_entities") or [])
-        current_entities = self._entities(current)
+        shared_entities = []
+        current_entities = []
 
+        # Topic shift is a pair-context semantic decision. No entity graph is
+        # consulted or allowed to veto/force a dialogue transition.
         topic_shift = bool(
             top_topic
             and topic_similarity < 0.24
-            and not shared_entities
-            and len(current_entities) > 0
         )
         if topic_shift and current_topic_label:
             reconstructed_topic = current_topic_label
@@ -1101,7 +1097,7 @@ class QuantumContextUnderstandingEngine:
                 "current": current_entities[:24],
                 "shared_with_active_topic": shared_entities[:16],
                 "coreference": coreference,
-                "source": "semantic_entity_graph",
+                "source": "disabled_pair_context",
             },
             "turn_structure": {
                 "segments": request_segments,
@@ -1122,7 +1118,7 @@ class QuantumContextUnderstandingEngine:
                 "historical_reference": historical_reference,
                 "self_contained": self_contained,
                 "confidence": round(float(discourse_confidence), 6),
-                "source": "topic_entity_discourse_fusion",
+                "source": "authenticated_pair_discourse_fusion",
             },
             "task": {
                 "actions": action_matrix,
@@ -1340,6 +1336,11 @@ class QuantumInterpretationEngine:
         best_obj, best_obj_score = best(obj_scores, "text")
         best_goal, best_goal_score = best(goal_scores, "understand")
         best_dialogue, best_dialogue_score = best(dial_scores, "statement")
+        visual_reference_lock = max(
+            float(dial_scores.get("memory_query", 0.0) or 0.0),
+            float(dial_scores.get("reformulation", 0.0) or 0.0),
+            float(dial_scores.get("reference", 0.0) or 0.0),
+        ) >= 0.04
 
         structured_rep = best_rep in {
             "diagram", "graph", "formula", "image", "gallery", "table",
@@ -1355,18 +1356,40 @@ class QuantumInterpretationEngine:
             "continuation", "reformulation", "correction", "reference",
             "artifact_reference", "affirmation", "rejection",
         }
-        # A task is self-contained only when the semantic dialogue classifier does
-        # not describe it as a follow-up/reference and the current semantic task
-        # itself supplies an operation plus an object/structured representation.
-        self_contained = bool(
+        # Self-containment is a semantic task property, not the generic dialogue
+        # classifier result.  In particular, short visual commands such as
+        # ``Нарисуй кота`` are complete because they contain a concrete visual
+        # operand, while ``Да нарисуй`` is deliberately incomplete and must inherit
+        # the latest visual operand from the authenticated 12h pair memory.
+        semantic_self_contained = bool(
             not followup_dialogue
             and not memory_query
             and best_op in {
-                "build", "modify", "present", "compare", "calculate",
+                "build", "create", "generate", "modify", "present",
+                "transform", "redraw", "visualize", "compare", "calculate",
                 "analyze", "retrieve", "list", "explain",
             }
             and (best_obj != "text" or structured_rep)
         )
+        content_tokens = [
+            token for token in QuantumContextUnderstandingEngine._content_tokens(text)
+            if token and len(token) >= 2
+        ]
+        # For image generation the object itself is the decisive operand.
+        # Do not let similarity to a previous image turn make a complete current
+        # request inherit that older prompt.  A memory-query turn is never a
+        # generation request, even if it contains words like "нарисуй".
+        current_visual_self_contained = bool(
+            not memory_query
+            and visual_operation
+            and bool(visual_operation and (visual_rep or visual_object))
+            and (
+                len(content_tokens) >= 2
+                or (best_obj != "text" and best_obj_score >= 0.10)
+                or (best_rep == "image" and best_rep_score >= 0.10)
+            )
+        )
+        self_contained = current_visual_self_contained or semantic_self_contained
 
         return {
             "visual_action": bool(visual_operation and (visual_rep or visual_object)),
@@ -1389,6 +1412,7 @@ class QuantumInterpretationEngine:
             "ascii_schema_score": 0.0,
             "self_contained": self_contained,
             "memory_query": memory_query,
+            "visual_reference_lock": visual_reference_lock,
             "semantic_best_representation": best_rep,
             "semantic_best_operation": best_op,
             "semantic_best_object": best_obj,
@@ -2248,6 +2272,211 @@ class QuantumInterpretationEngine:
     def prewarm_static(self,candidates):
         return len({self.normalize(x) for x in candidates if self.normalize(x)})
 
+    @classmethod
+    def _state_dialogue_pairs(cls, state: dict[str, Any], *, user_id: str = "", limit: int = 15) -> list[dict[str, Any]]:
+        """Read authenticated USER↔APRIL pairs from the canonical 12h StateManager/Strong store."""
+        if not isinstance(state, dict):
+            return []
+        uid = str(
+            user_id
+            or state.get("user_id")
+            or (state.get("memory_scope") or {}).get("user_id")
+            or state.get("authenticated_user_id")
+            or ""
+        ).strip()
+
+        # Fast path: the authenticated StateManager snapshot already carries the
+        # canonical pair window. Read it directly and only touch the persistent
+        # bridge when the runtime snapshot is incomplete. This preserves the same
+        # source of truth while removing an unnecessary store read from every turn.
+        scope = state.get("memory_scope") if isinstance(state.get("memory_scope"), dict) else {}
+        if scope.get("authenticated") or uid:
+            timeline = state.get("memory_timeline") if isinstance(state.get("memory_timeline"), dict) else {}
+            direct_rows = []
+            cutoff = time.time() - 12 * 60 * 60
+            for day_key, day in sorted(timeline.items(), key=lambda x: str(x[0]), reverse=True):
+                if not isinstance(day_key, str) or not day_key.startswith("day_") or not isinstance(day, dict):
+                    continue
+                rows = day.get("dialog_pairs")
+                if not isinstance(rows, list):
+                    continue
+                for raw in rows:
+                    if not isinstance(raw, dict):
+                        continue
+                    user = cls.normalize(raw.get("user") or raw.get("user_text") or raw.get("user_request"))
+                    april = cls.normalize(raw.get("april") or raw.get("april_text") or raw.get("april_answer") or raw.get("answer"))
+                    if not user or not april:
+                        continue
+                    try:
+                        created_at = float(raw.get("created_at") or raw.get("timestamp") or 0.0)
+                    except Exception:
+                        created_at = 0.0
+                    if created_at and created_at < cutoff:
+                        continue
+                    direct_rows.append({
+                        "user": user[:1200], "april": april[:1800], "result": april[:1800],
+                        "turn_index": int(raw.get("turn_index") or raw.get("sequence_turn_index") or raw.get("turn") or 0),
+                        "created_at": created_at,
+                        "source": "STATE_MANAGER_AUTHENTICATED_12H_PAIRS",
+                        "history_source": "USER_APRIL_PAIRS",
+                    })
+            if direct_rows:
+                direct_rows.sort(key=lambda x: (float(x.get("created_at") or 0.0), int(x.get("turn_index") or 0)))
+                return direct_rows[-max(1, int(limit or 15)): ]
+
+        # The bridge is the canonical persistence boundary. This keeps the
+        # interpretation layer connected to the same 12h pair store that records
+        # the conversation after each completed turn.
+        if uid:
+            try:
+                from blocks.state_manager import build_dialogue_memory_bridge
+                bridge = build_dialogue_memory_bridge(
+                    uid,
+                    query="",
+                    limit=max(1, int(limit or 15)),
+                    relation="AUTO",
+                    target_sequence_id=str(
+                        (state.get("active_dialogue_sequence") or {}).get("sequence_id")
+                        if isinstance(state.get("active_dialogue_sequence"), dict)
+                        else ""
+                    ),
+                )
+                if isinstance(bridge, dict) and bridge.get("authenticated"):
+                    rows = bridge.get("dialogue_pairs") or bridge.get("active_sequence_turns") or bridge.get("relevant_window_turns")
+                    if isinstance(rows, list):
+                        out = []
+                        for raw in rows[-max(1, int(limit or 15)):]:
+                            if not isinstance(raw, dict):
+                                continue
+                            user = cls.normalize(raw.get("user") or raw.get("user_text") or raw.get("user_request"))
+                            april = cls.normalize(raw.get("april") or raw.get("april_text") or raw.get("april_answer") or raw.get("answer"))
+                            if not user or not april:
+                                continue
+                            try:
+                                turn_index = int(raw.get("turn") or raw.get("turn_index") or 0)
+                            except Exception:
+                                turn_index = 0
+                            try:
+                                created_at = float(raw.get("created_at") or 0.0)
+                            except Exception:
+                                created_at = 0.0
+                            out.append({
+                                "user": user[:1200],
+                                "april": april[:1800],
+                                "result": april[:1800],
+                                "turn_index": turn_index,
+                                "created_at": created_at,
+                                "source": "STATE_MANAGER_AUTHENTICATED_12H_PAIRS",
+                                "history_source": "USER_APRIL_PAIRS",
+                            })
+                        if out:
+                            return out[-max(1, int(limit or 15)):]
+            except Exception as exc:
+                print("⚠️ APRIL 12H MEMORY BRIDGE:", exc)
+
+        scope = state.get("memory_scope") if isinstance(state.get("memory_scope"), dict) else {}
+        if not scope.get("authenticated") and not uid:
+            return []
+        timeline = state.get("memory_timeline") if isinstance(state.get("memory_timeline"), dict) else {}
+        cutoff = time.time() - 12 * 60 * 60
+        out, seen = [], set()
+        for day_key, day in sorted(timeline.items(), key=lambda x: str(x[0]), reverse=True):
+            if not isinstance(day_key, str) or not day_key.startswith("day_") or not isinstance(day, dict):
+                continue
+            rows = day.get("dialog_pairs")
+            if not isinstance(rows, list):
+                continue
+            for raw in rows:
+                if not isinstance(raw, dict):
+                    continue
+                user = cls.normalize(
+                    raw.get("user_text") or raw.get("user_request") or raw.get("user")
+                    or raw.get("user_meaning") or raw.get("user_message")
+                )
+                april = cls.normalize(
+                    raw.get("april_text") or raw.get("april_answer") or raw.get("answer")
+                    or raw.get("april") or raw.get("april_meaning")
+                )
+                if not user or not april:
+                    continue
+                try:
+                    created_at = float(raw.get("created_at") or raw.get("timestamp") or 0.0)
+                except Exception:
+                    created_at = 0.0
+                if created_at and created_at < cutoff:
+                    continue
+                try:
+                    turn_index = int(raw.get("turn_index") or raw.get("sequence_turn_index") or raw.get("turn") or 0)
+                except Exception:
+                    turn_index = 0
+                sig = (user, april, created_at, turn_index)
+                if sig in seen:
+                    continue
+                seen.add(sig)
+                out.append({
+                    "user": user[:1200],
+                    "april": april[:1800],
+                    "result": april[:1800],
+                    "turn_index": turn_index,
+                    "created_at": created_at,
+                    "source": "STATE_MANAGER_AUTHENTICATED_12H_PAIRS",
+                    "history_source": "USER_APRIL_PAIRS",
+                })
+        out.sort(key=lambda x: (float(x.get("created_at") or 0.0), int(x.get("turn_index") or 0)))
+        return out[-max(1, int(limit or 15)):]
+
+    @classmethod
+    def _pairs_to_history(cls, pairs: list[dict[str, Any]]) -> list[dict[str, str]]:
+        history = []
+        for pair in pairs or []:
+            if not isinstance(pair, dict):
+                continue
+            user = cls.normalize(pair.get("user"))
+            april = cls.normalize(pair.get("april") or pair.get("result"))
+            if user:
+                history.append({"role": "user", "content": user})
+            if april:
+                history.append({"role": "assistant", "content": april})
+        return history
+
+    def _find_visual_generation_context(self, pairs: list[dict[str, Any]] | None) -> dict[str, Any]:
+        """Select the latest real image-generation request from authenticated 12h memory."""
+        visual_ops = {"build", "create", "generate", "modify", "present", "transform", "redraw", "visualize"}
+        candidates = []
+        for pair in pairs or []:
+            if not isinstance(pair, dict):
+                continue
+            user = self.normalize(pair.get("user"))
+            if not user:
+                continue
+            try:
+                profile = self.measure(user)
+            except Exception:
+                continue
+            features = profile.get("request_features") if isinstance(profile.get("request_features"), dict) else {}
+            operation = str(profile.get("best_operation") or "").lower()
+            scores = profile.get("dialogue_scores") if isinstance(profile.get("dialogue_scores"), dict) else {}
+            memory_query = float(scores.get("memory_query", 0.0) or 0.0)
+            image_score = max(
+                float((profile.get("representation_scores") or {}).get("image", 0.0) or 0.0),
+                float((profile.get("object_scores") or {}).get("image", 0.0) or 0.0),
+            )
+            if (
+                bool(features.get("visual_action"))
+                and operation in visual_ops
+                and memory_query < 0.04
+                and image_score >= 0.035
+            ):
+                candidates.append({
+                    "user": user,
+                    "turn_index": pair.get("turn_index", -1),
+                    "created_at": pair.get("created_at", 0.0),
+                    "score": round(image_score, 6),
+                    "source": "STATE_MANAGER_AUTHENTICATED_12H_PAIRS",
+                })
+        candidates.sort(key=lambda x: (float(x.get("created_at") or 0.0), int(x.get("turn_index") or 0)))
+        return candidates[-1] if candidates else {}
+
     def _history(self,history):
         last_a=last_u=""; reply_to=None
         for item in reversed(history if isinstance(history,list) else []):
@@ -2584,8 +2813,32 @@ class QuantumInterpretationEngine:
         semantic=semantic if isinstance(semantic,dict) else {}
         state=state if isinstance(state,dict) else {}
         history=history if isinstance(history,list) else []
+        canonical_pairs = self._state_dialogue_pairs(
+            state,
+            user_id=str(
+                state.get("user_id")
+                or (state.get("memory_scope") or {}).get("user_id")
+                or ""
+            ),
+            limit=15,
+        )
+        if canonical_pairs:
+            history = self._pairs_to_history(canonical_pairs)
         last_a,last_u,reply_to=self._history(history)
-        active_topic=self.normalize(state.get("active_topic") or state.get("current_topic") or semantic.get("active_topic") or cognition.get("active_topic"))
+        if canonical_pairs:
+            last_pair = canonical_pairs[-1]
+            last_u = self.normalize(last_pair.get("user")) or last_u
+            last_a = self.normalize(last_pair.get("april") or last_pair.get("result")) or last_a
+        # Never promote the literal current/previous user sentence to the active
+        # topic. StateManager's authenticated pair window is the dialogue source
+        # of truth; generic discourse requests must remain queries over that window.
+        active_topic=self.normalize(
+            state.get("active_topic")
+            or state.get("current_topic")
+            or semantic.get("active_topic")
+            or cognition.get("active_topic")
+            or ""
+        )
         active_goal=self.normalize(state.get("active_goal") or state.get("current_goal") or semantic.get("active_goal") or cognition.get("active_goal"))
         p=self.measure(text,previous_assistant=last_a,previous_user=last_u,active_topic=active_topic,active_goal=active_goal)
         previous_scene = state.get("current_visual_scene") or state.get("active_visual_scene")
@@ -2605,7 +2858,8 @@ class QuantumInterpretationEngine:
                 previous_scene = {}
         except Exception:
             pass
-        recent_dialogue_pairs = self._recent_dialogue_pairs(history, limit=10)
+        recent_dialogue_pairs = list(canonical_pairs[-15:]) if canonical_pairs else self._recent_dialogue_pairs(history, limit=15)
+        visual_generation_context = self._find_visual_generation_context(recent_dialogue_pairs)
         dialogue_packet = self.dialogue(
             text,
             previous_assistant=last_a,
@@ -2653,10 +2907,12 @@ class QuantumInterpretationEngine:
         discourse_understanding = context_understanding.get("discourse") if isinstance(context_understanding.get("discourse"), dict) else {}
         dialogue_selection = context_understanding.get("dialogue_selection") if isinstance(context_understanding.get("dialogue_selection"), dict) else {}
         entities_understanding = {
+            "enabled": False,
             "current": [],
             "shared_with_active_topic": [],
             "coreference": [],
-            "source": "dialogue_context_only",
+            "candidates": [],
+            "source": "disabled_pair_context",
         }
 
         # Context-understanding owns the three-way relationship. Downstream code
@@ -2828,6 +3084,81 @@ class QuantumInterpretationEngine:
             dialogue_packet.get("continuation")
             or dialogue_vector.get("relation") == "CONTINUE_TOPIC"
         )
+
+        # The 12h pair memory supplies the visual operand for underspecified
+        # continuation turns. A memory/reference question does not generate an
+        # image just because an older turn contained an image request.
+        current_operation = str(p.get("best_operation") or "").lower()
+        current_image_evidence = max(
+            float(p.get("representation_scores", {}).get("image", 0.0) or 0.0),
+            float(p.get("object_scores", {}).get("image", 0.0) or 0.0),
+        )
+        current_visual_action = bool((p.get("request_features") or {}).get("visual_action"))
+        current_dialogue_scores = p.get("dialogue_scores") if isinstance(p.get("dialogue_scores"), dict) else {}
+        current_memory_query = float(current_dialogue_scores.get("memory_query", 0.0) or 0.0)
+        reference_scores = {
+            "memory_query": float(current_dialogue_scores.get("memory_query", 0.0) or 0.0),
+            "reformulation": float(current_dialogue_scores.get("reformulation", 0.0) or 0.0),
+            "reference": float(current_dialogue_scores.get("reference", 0.0) or 0.0),
+        }
+        visual_reference_lock = max(reference_scores.values() or [0.0]) >= 0.04
+        explicit_visual_task = (
+            not visual_reference_lock
+            and current_memory_query < 0.04
+            and current_operation in {"build", "create", "generate", "modify", "present", "transform", "redraw", "visualize"}
+            and (current_visual_action or current_image_evidence >= 0.035)
+        )
+        visual_generation_request = ""
+        current_self_contained = bool((p.get("request_features") or {}).get("self_contained"))
+        # A reference/recollection turn must never inherit the previous visual
+        # renderer merely because the current text contains a visual verb/object.
+        # The 12h pair dialogue remains available as context, but output stays text.
+        if visual_reference_lock:
+            production = "text"
+            source = "STATE_MANAGER_AUTHENTICATED_12H_PAIRS_REFERENCE"
+            locked = False
+            continuation = False
+            dialogue_vector.update({
+                "three_way_relation": "RECALL",
+                "relation": "MEMORY_QUERY",
+                "topic_relation": "MEMORY_QUERY",
+                "request_relation": "RECALL",
+                "request_dependency": "recall",
+                "continuation": False,
+                "reference_to_previous": True,
+            })
+
+        if explicit_visual_task:
+            # A complete request supplies its own immutable visual operand. Only an
+            # incomplete follow-up inherits the operand from 12h pair memory.
+            if current_self_contained:
+                visual_generation_request = text
+                dialogue_vector["visual_context_source"] = "CURRENT_AUTHENTICATED_TURN"
+            elif visual_generation_context:
+                visual_generation_request = self.normalize(visual_generation_context.get("user"))
+                dialogue_vector["visual_context_source"] = "STATE_MANAGER_AUTHENTICATED_12H_PAIRS"
+                dialogue_vector["visual_context_turn_index"] = visual_generation_context.get("turn_index", -1)
+            if visual_generation_request:
+                production = "image"
+                source = (
+                    "STATE_MANAGER_AUTHENTICATED_12H_PAIRS"
+                    if not current_self_contained
+                    else "CURRENT_AUTHENTICATED_TURN"
+                )
+                locked = True
+                dialogue_vector["visual_generation_request"] = visual_generation_request
+            if visual_generation_request and not current_self_contained:
+                dialogue_vector.update({
+                    "three_way_relation": "CONTINUE",
+                    "relation": "CONTINUE_TOPIC",
+                    "topic_relation": "SAME_TOPIC",
+                    "request_relation": "CONTINUE_TOPIC",
+                    "request_dependency": "continuation",
+                    "continuation": True,
+                    "reference_to_previous": False,
+                    "selected_memory_operand": dict(visual_generation_context),
+                })
+                continuation = True
         # A short continuation question does not acquire a structured renderer
         # merely because the representation matrix found a weak candidate.
         # Structured output must be supported by the current turn's operation,
@@ -3018,12 +3349,24 @@ class QuantumInterpretationEngine:
             "visual_schema_confidence":visual_schema_confidence,
             "ascii_schema_advisory": False,
             "ascii_schema_score": 0.0,
+            "visual_generation_request": visual_generation_request,
+            "visual_generation_source": (
+                "STATE_MANAGER_AUTHENTICATED_12H_PAIRS"
+                if visual_generation_request and not current_self_contained
+                else "CURRENT_AUTHENTICATED_TURN"
+                if visual_generation_request else ""
+            ),
             "operation_scores":p["operation_scores"],"object_scores":p["object_scores"],"goal_scores":p["goal_scores"]
         }
         presentation_recommendations = self._presentation_recommendations(
             text, p, production, locked=locked, continuation=continuation,
             previous_scene=previous_scene, explicit=explicit,
         )
+        if production in {"image", "gallery"}:
+            presentation_recommendations = [
+                item for item in presentation_recommendations
+                if str(item.get("representation") or "").lower() not in {"text", "ascii"}
+            ]
         presentation={
             "version":"quantum_interpretation_transport_v4","decision_owner":DECISION_OWNER,
             "single_route":True, "production_representation":production,
@@ -3064,9 +3407,22 @@ class QuantumInterpretationEngine:
                 "production_representation_locked":locked,"scene_matrix":matrix
             },
             "semantic_task":semantic_task,
+            "visual_generation_request": visual_generation_request,
+            "visual_generation_source": (
+                "STATE_MANAGER_AUTHENTICATED_12H_PAIRS"
+                if visual_generation_request and not current_self_contained
+                else "CURRENT_AUTHENTICATED_TURN"
+                if visual_generation_request else ""
+            ),
             "context_understanding": context_understanding,
             "topic_understanding": topic_understanding,
             "entity_understanding": entities_understanding,
+            "authenticated_dialogue_memory": {
+                "source": "STATE_MANAGER_AUTHENTICATED_12H_PAIRS",
+                "window_hours": 12,
+                "pair_limit": 15,
+                "pair_count": len(recent_dialogue_pairs),
+            },
             "turn_structure_understanding": turn_structure_understanding,
             "task_understanding": task_understanding,
             "ascii_schema_advisory": False,
@@ -3077,17 +3433,24 @@ class QuantumInterpretationEngine:
             "presentation_signals":presentation["signals"],
             "scene_recommendations":[x["scene_recommendation"] for x in presentation_recommendations],
             "scene_plan":[x["scene_recommendation"] for x in presentation_recommendations],
-            "dialogue_memory_window": self._recent_dialogue_pairs(history, limit=15),
+            "dialogue_memory_window": list(recent_dialogue_pairs[-15:]),
             "dialogue_memory_source": "STATE_MANAGER_12H_PAIRS",
-            "dialogue_memory_pair_count": len(self._recent_dialogue_pairs(history, limit=15)),
+            "dialogue_memory_pair_count": len(recent_dialogue_pairs),
             "dialogue_vector": {
                 **dict(dialogue_vector or {}),
                 "reference_resolution": reference_resolution,
                 "resolved_reference": resolved_reference,
                 "resolved_request": resolved_request,
                 "history_dependent_task": bool(history_task_context.get("required")),
-                "history_window_size": len(self._recent_dialogue_pairs(history, limit=10)),
+                "history_window_size": len(recent_dialogue_pairs),
                 "history_task_context": history_task_context,
+                "visual_generation_request": visual_generation_request,
+                "visual_generation_source": (
+                    "STATE_MANAGER_AUTHENTICATED_12H_PAIRS"
+                    if visual_generation_request and not current_self_contained
+                    else "CURRENT_AUTHENTICATED_TURN"
+                    if visual_generation_request else ""
+                ),
             },
             "dialogue_delta": {
                 "mode": dialogue_vector.get("delta_mode"),
@@ -3229,7 +3592,7 @@ class QuantumInterpretationEngine:
                 **presentation,
                 "requested_outputs": [production],
             },
-            self._recent_dialogue_pairs(history, limit=10),
+            recent_dialogue_pairs[-15:],
             history_task_context,
             continuation,
             reference,
@@ -4010,10 +4373,10 @@ def _build_provider_context_plan(
 
     semantic_core = {
         "topic": semantic_task.get("topic") or dialogue_contract.get("active_topic"),
-        "entity": semantic_task.get("entity") or dialogue_contract.get("active_entity"),
         "operation": semantic_task.get("operation"),
         "goal": semantic_task.get("goal"),
         "representation": semantic_task.get("representation"),
+        "visual_generation_request": semantic_task.get("visual_generation_request") or dialogue_vector.get("visual_generation_request"),
         "turn_relation": relation,
     }
     semantic_core = {k: v for k, v in semantic_core.items() if v not in (None, "", [], {})}
@@ -4038,6 +4401,8 @@ def _build_provider_context_plan(
                 "value": {
                     "representation": semantic_task.get("representation"),
                     "requested_outputs": requested_outputs,
+                    "visual_generation_request": semantic_task.get("visual_generation_request") or dialogue_vector.get("visual_generation_request"),
+                    "no_text_fallback_for_image": bool(semantic_task.get("representation") in {"image", "gallery"}),
                 },
             },
         ],
@@ -4056,7 +4421,6 @@ def _build_provider_context_plan(
             "previous_user_turn": dialogue_contract.get("previous_user_turn") or dialogue_vector.get("previous_user_turn") or "",
             "previous_april_turn": dialogue_contract.get("previous_april_turn") or dialogue_vector.get("previous_april_turn") or "",
             "active_topic": dialogue_contract.get("active_topic") or dialogue_vector.get("active_topic") or "",
-            "active_entity": dialogue_contract.get("active_entity") or "",
             "sequence_id": dialogue_contract.get("sequence_id") or "",
             "selected_memory_operand": selected_operand if isinstance(selected_operand, dict) else {},
         }
@@ -4066,7 +4430,7 @@ def _build_provider_context_plan(
             "value": anchor,
         })
 
-        bounded_history = [x for x in (history_window or []) if isinstance(x, dict)][-10:]
+        bounded_history = [x for x in (history_window or []) if isinstance(x, dict)][-15:]
         if bounded_history:
             plan["required_context"].append({
                 "key": "ACTIVE_DIALOGUE_TRAJECTORY",
