@@ -759,9 +759,11 @@ class ImageGenerateRoom(Room):
                 or ""
             ).strip()
             dialogue_contract = context.get("dialogue_contract") if isinstance(context.get("dialogue_contract"), dict) else {}
+            dialogue_vector = context.get("dialogue_vector") if isinstance(context.get("dialogue_vector"), dict) else {}
             visual_generation_request = str(
                 context.get("visual_generation_request")
                 or dialogue_contract.get("visual_generation_request")
+                or dialogue_vector.get("visual_generation_request")
                 or ""
             ).strip()
 
