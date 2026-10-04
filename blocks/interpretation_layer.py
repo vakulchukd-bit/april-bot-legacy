@@ -34,6 +34,9 @@ USER_CONTENT_RETENTION_SECONDS = DIALOGUE_WINDOW_HOURS * 3600
 # Full authenticated 12h dialogue remains available in memory.
 ACTIVE_DIALOGUE_WINDOW_PAIRS = 15
 
+# Pair-first memory retention: keep the immediately preceding UTC hour as seed.
+PAIR_FIRST_SEED_HOURS = 1
+
 PROVIDER_INPUT_HARD_BUDGET = 900
 PROVIDER_INPUT_SOFT_TARGET_NEW = 850
 PROVIDER_INPUT_SOFT_TARGET_CONTINUE = 820
@@ -4356,3 +4359,641 @@ def run_active_window15_regression() -> dict[str, Any]:
         "checks": checks,
     }
 
+
+
+# ============================================================================
+# CANONICAL PAIR-FIRST DIALOGUE OVERRIDE — 2026-10-04
+# ============================================================================
+# Production interpretation no longer treats topic/entity/task mirrors as
+# conversation memory. The only persistent semantic history is the authenticated
+# USER↔APRIL pair archive supplied by StateManager.
+
+PAIR_FIRST_INTERPRETATION_VERSION = "pair_first_interpretation_v1"
+PAIR_FIRST_RELATION_OWNER = "INTERPRETATION_RUNTIME"
+_PAIR_FIRST_COMMANDS = (
+    "назови", "скажи", "дай", "выдай", "укажи", "выбери", "напиши",
+    "приведи", "расскажи", "объясни", "покажи", "проверь", "найди",
+    "опиши", "создай", "нарисуй", "изобрази", "сгенерируй", "построй",
+    "рассчитай", "посчитай", "ответь", "определи", "сравни", "измени",
+    "исправь", "переделай", "добавь", "убери", "убирай", "разверни",
+    "поверни", "сделай",
+)
+_PAIR_FIRST_FILLERS = {
+    "а", "ну", "так", "теперь", "опять", "ещё", "еще", "пожалуйста",
+    "послушай", "смотри", "понимаешь", "понял", "поняла", "я понял", "я поняла",
+}
+_PAIR_FIRST_DEICTIC_WORDS = {
+    "он", "она", "оно", "они", "его", "её", "ее", "их", "ему", "ей", "им",
+    "этот", "эта", "это", "эти", "этого", "этом", "эту", "тут", "там", "здесь",
+}
+_PAIR_FIRST_RECALL_RE = re.compile(
+    r"(?:вспомни|напомни|помнишь|помнишь\s+ли|что\s+мы\s+обсуждали|о\s+чем\s+мы\s+говорили|"
+    r"о\s+чём\s+мы\s+говорили|что\s+я\s+спрашивал|что\s+я\s+спрашивала|"
+    r"что\s+ты\s+помнишь|что\s+ты\s+помниш|поищи|ищи|найди).{0,80}(?:памят|диалог|разговор|раньше|обсуждал|говорил|спрашивал)",
+    re.IGNORECASE,
+)
+_PAIR_FIRST_DIRECT_REF_RE = re.compile(
+    r"\b(?:его|её|ее|их|этому|этого|этом|эту|это|он|она|оно|они|там|здесь|так|такой|такая|такое|"
+    r"как\s+раньше|как\s+до\s+этого)\b",
+    re.IGNORECASE,
+)
+_PAIR_FIRST_MODIFIER_RE = re.compile(
+    r"^(?:а\s+)?(?:(?:ну|так|теперь|опять)\s+)*(?:убери|убирай|добавь|измени|исправь|переделай|"
+    r"разверни|поверни|перенеси|поставь|сделай|покажи|продолжай|продолжим|дальше)\b",
+    re.IGNORECASE,
+)
+
+
+def _pair_first_rows(state: dict[str, Any]) -> list[dict[str, Any]]:
+    timeline = state.get("memory_timeline") if isinstance(state.get("memory_timeline"), dict) else {}
+    day = timeline.get("day_0") if isinstance(timeline.get("day_0"), dict) else {}
+    raw_rows = day.get("dialog_pairs") if isinstance(day.get("dialog_pairs"), list) else []
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    now = time.time()
+    cutoff = now - USER_CONTENT_RETENTION_SECONDS
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            continue
+        user = _df_text(raw.get("user_text") or raw.get("user_request") or raw.get("user_meaning") or raw.get("user"), 1200)
+        april = _df_text(raw.get("april_text") or raw.get("april_answer") or raw.get("april_meaning") or raw.get("answer"), 2200)
+        if not user or not april:
+            continue
+        try:
+            created = float(raw.get("created_at") or raw.get("timestamp") or 0.0)
+        except (TypeError, ValueError):
+            created = 0.0
+        if created and created < cutoff:
+            continue
+        try:
+            turn = int(raw.get("turn_index") or raw.get("sequence_turn_index") or raw.get("turn") or len(rows) + 1)
+        except (TypeError, ValueError):
+            turn = len(rows) + 1
+        row = {
+            "turn": turn,
+            "created_at": created,
+            "user": user,
+            "april": april,
+        }
+        sig = (turn, created, user, april)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        rows.append(row)
+    rows.sort(key=lambda x: (float(x.get("created_at") or 0.0), int(x.get("turn") or 0)))
+    return rows
+
+
+def _pair_first_previous_pair(state: dict[str, Any]) -> dict[str, Any]:
+    rows = _pair_first_rows(state)
+    return rows[-1] if rows else {}
+
+
+def _pair_first_recall_request(text: str) -> bool:
+    low = _df_low(text)
+    if _PAIR_FIRST_RECALL_RE.search(text):
+        return True
+    if re.search(r"\b(?:вспомни|напомни|помнишь|что\s+мы\s+обсуждали|о\s+чем\s+мы\s+говорили|о\s+чём\s+мы\s+говорили)\b", low):
+        return True
+    if re.search(r"\b(?:поищи|ищи|найди)\b", low) and re.search(r"\b(?:памят|диалог|разговор|истори)\b", low):
+        return True
+    return False
+
+
+def _pair_first_subject(text: str) -> str:
+    """Return a concrete subject only when the current turn actually names one."""
+    value = _df_text(text, 1200)
+    if not value:
+        return ""
+    low = _df_low(value).strip(" .,!?:;—-")
+    if _pair_first_recall_request(value):
+        return ""
+
+    low = re.sub(r"^(?:а|ну|так|теперь|опять|пожалуйста)\s+", "", low).strip()
+    # Conversational/knowledge prefaces do not become subjects.
+    low = re.sub(r"^(?:я\s+)?(?:понял|поняла|понимаю|смотри|слушай|понимаешь)\s*[,:-]?\s*", "", low)
+    low = re.sub(r"^(?:ты\s+)?(?:знаешь|знаеш|помнишь|помниш)\s+(?:ли\s+)?", "", low)
+
+    quoted = re.search(r'[«"]([^»"]{2,220})[»"]', value)
+    if quoted:
+        return _df_text(quoted.group(1), 220)
+
+    for pattern in (
+        r"^(?:что|кто)\s+(?:такое|такой|такая|такое|такие)\s+(.+)$",
+        r"^(?:кто)\s+это\s+(.+)$",
+    ):
+        m = re.match(pattern, low, re.IGNORECASE)
+        if m:
+            candidate = m.group(1).strip(" .,!?:;—-")
+            return "" if _pair_first_is_deictic_only(candidate) else _df_text(candidate, 220)
+
+    # Explicit "про/об/о" frame.
+    m = re.match(r"^(?:.+?\s+)?(?:про|об|о)\s+(.+)$", low, re.IGNORECASE)
+    if m:
+        candidate = m.group(1).strip(" .,!?:;—-")
+        if candidate and not _pair_first_is_deictic_only(candidate):
+            return _df_text(candidate, 220)
+
+    # Commands name a subject only after the command head. Deictics alone are
+    # references to the previous pair and therefore return no new subject.
+    command = "(?:" + "|".join(re.escape(x) for x in _PAIR_FIRST_COMMANDS) + ")"
+    m = re.match(rf"^(?:а\s+)?{command}\b\s*(.*)$", low, re.IGNORECASE)
+    if m:
+        candidate = m.group(1).strip(" .,!?:;—-")
+        if not candidate or _pair_first_is_deictic_only(candidate):
+            return ""
+        # Remove trailing request framing that contains no actual operand.
+        candidate = re.sub(r"\b(?:в другую сторону|по центру|первую и последнюю|какие остаются)\b", "", candidate).strip()
+        if not candidate:
+            return ""
+        return _df_text(candidate, 220)
+
+    # Bare modifier/continuation commands are intentionally subjectless.
+    if _PAIR_FIRST_MODIFIER_RE.match(low):
+        tail = re.sub(_PAIR_FIRST_MODIFIER_RE, "", low, count=1).strip(" .,!?:;—-")
+        if not tail or _pair_first_is_deictic_only(tail):
+            return ""
+
+    # A plain short conversational continuation has no new subject.
+    tokens = _df_tokens(low)
+    if len(tokens) <= 5:
+        return ""
+
+    # Keep a meaningful noun-like tail only if it is not built entirely from
+    # discourse/action words. This branch is deliberately conservative.
+    stop = set(_PAIR_FIRST_FILLERS) | _PAIR_FIRST_DEICTIC_WORDS | set(_PAIR_FIRST_COMMANDS)
+    meaningful = [tok for tok in tokens if tok not in stop]
+    return _df_text(" ".join(meaningful[-8:]), 220) if meaningful else ""
+
+
+def _pair_first_is_deictic_only(value: str) -> bool:
+    toks = _df_tokens(value)
+    if not toks:
+        return True
+    return all(tok in _PAIR_FIRST_DEICTIC_WORDS or tok in {"сюда", "туда", "так", "такой", "такая", "такое"} for tok in toks)
+
+
+def _pair_first_similarity(text: str, pair: dict[str, Any]) -> float:
+    hay = f"{pair.get('user') or ''} {pair.get('april') or ''}"
+    return max(
+        _df_overlap(text, hay),
+        _df_overlap(text, pair.get("user") or ""),
+        _df_overlap(text, pair.get("april") or ""),
+    )
+
+
+def _pair_first_active_sequence_digest(
+    state: dict[str, Any],
+    history: list[Any],
+    sequence_id: str,
+    *,
+    limit: int = ACTIVE_DIALOGUE_WINDOW_PAIRS,
+    task_id: str = "",
+) -> dict[str, Any]:
+    rows = _pair_first_rows(state)
+    active = rows[-max(1, min(int(limit or ACTIVE_DIALOGUE_WINDOW_PAIRS), ACTIVE_DIALOGUE_WINDOW_PAIRS)):]
+    previous = active[-1] if active else {}
+    sid = _df_text(sequence_id or (state.get("active_dialogue_sequence") or {}).get("sequence_id"), 100)
+    return {
+        "version": "dialogue_pair_digest_v1",
+        "source": "authenticated_dialogue_memory_pairs",
+        "sequence_id": sid,
+        "dialogue_window_hours": DIALOGUE_WINDOW_HOURS,
+        "seed_hours": PAIR_FIRST_SEED_HOURS,
+        "history_scope": "authenticated_12h_dialogue_pairs",
+        "window_record_count": len(rows),
+        "active_window_count": len(active),
+        "turn_count": int(previous.get("turn") or 0),
+        "root_topic": "",
+        "current_topic": "",
+        "current_task_topic": "",
+        "current_focus": "",
+        "last_user": previous.get("user", ""),
+        "last_april": previous.get("april", ""),
+        "previous_user": active[-2].get("user", "") if len(active) >= 2 else "",
+        "previous_april": active[-2].get("april", "") if len(active) >= 2 else "",
+        "recent_trajectory": deepcopy(active),
+        "active_sequence_turns": deepcopy(active),
+        "dialogue_pairs": deepcopy(rows),
+        "task_trajectory": [],
+        "task_summaries": [],
+        "topic_path": [],
+        "coverage": "pair_history_only",
+        "window_complete": True,
+        "other_branches_included": False,
+        "full_history_included": len(rows) <= len(active),
+    }
+
+
+def _pair_first_dialogue_development(relation: str, sequence_id: str, current_request: str, previous: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "version": "dialogue_development_pair_first_v1",
+        "relation": relation,
+        "same_dialogue": relation in {"CONTINUE", "RECALL"},
+        "sequence_id": sequence_id,
+        "active_topic": "",
+        "active_entity": "",
+        "current_request": current_request,
+        "previous_user_turn": previous.get("user", ""),
+        "previous_april_turn": previous.get("april", ""),
+        "open_loops": [],
+        "pending_obligations": [],
+        "next_logical_step": "search_pair_history_and_answer_current_request" if relation == "RECALL" else "answer_current_request",
+        "continuation_anchor": "dialogue_pair" if relation in {"CONTINUE", "RECALL"} else "current_turn",
+        "visual_continuity": False,
+    }
+
+
+def _pair_first_resolve_relation(
+    text: str,
+    state: dict[str, Any],
+    previous_april: str,
+    active_topic: str,
+    active_entity: str,
+    task_probe: dict[str, Any],
+    dialogue_probe: dict[str, Any],
+    *,
+    feedback_probe: dict[str, Any] | None = None,
+    semantic: dict[str, Any] | None = None,
+    sequence_digest: dict[str, Any] | None = None,
+    branches: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    rows = _pair_first_rows(state)
+    if _pair_first_recall_request(text):
+        return "RECALL", "MEMORY_RECALL_BY_DIALOGUE_PAIRS"
+    if not rows:
+        return "NEW", "NEW_DIALOGUE_NO_HISTORY"
+
+    low = _df_low(text)
+    if re.search(r"\b(?:новая\s+тема|сменим\s+тему|другая\s+тема|начн(?:ём|ем)\s+сначала)\b", low):
+        return "NEW", "EXPLICIT_NEW_TOPIC"
+
+    previous = rows[-1]
+    short = len(_df_tokens(low)) <= 7
+    direct_ref = bool(_PAIR_FIRST_DIRECT_REF_RE.search(low) or _df_deictic.search(low))
+    modifier = bool(_PAIR_FIRST_MODIFIER_RE.match(low))
+    explicit_subject = _pair_first_subject(text)
+
+    # Explicitly named subject: continue only when the subject is connected to
+    # the actual prior pair history. Otherwise start a new branch without
+    # resurrecting any old entity/task mirror.
+    if explicit_subject:
+        subject_score = max(
+            _df_overlap(explicit_subject, previous.get("user", "")),
+            _df_overlap(explicit_subject, previous.get("april", "")),
+        )
+        if subject_score >= 0.24:
+            return "CONTINUE", "ACTIVE_SUBJECT_FROM_DIALOGUE_PAIR"
+        # A visual deictic or direct modification command remains a continuation
+        # even if the subject parser found a weak tail.
+        if direct_ref or modifier:
+            return "CONTINUE", "PAIR_REFERENCE_FOLLOWUP"
+        return "NEW", "DIFFERENT_SUBJECT_IN_CURRENT_TURN"
+
+    if direct_ref or modifier or short:
+        return "CONTINUE", "ELLIPTICAL_PAIR_CONTINUATION"
+
+    # A longer subjectless sentence is still compared directly against the last
+    # USER/APRIL pair. No topic/entity state participates in this decision.
+    pair_score = max(_pair_first_similarity(low, row) for row in rows[-6:]) if rows else 0.0
+    if pair_score >= 0.20:
+        return "CONTINUE", "DIALOGUE_PAIR_AFFINITY"
+    return "NEW", "SELF_CONTAINED_NEW_SUBJECT"
+
+
+def _pair_first_understand(
+    text: str,
+    relation: str,
+    turn_relation: str,
+    active_topic: str,
+    active_entity: str,
+    task_probe: dict[str, Any],
+    render_probe: dict[str, Any],
+    feedback_probe: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    low = _df_low(text)
+    feedback_probe = feedback_probe if isinstance(feedback_probe, dict) else {}
+    if _pair_first_recall_request(text):
+        operation, goal = "recall", "memory_recall"
+    elif any(x in low for x in ("объясни", "объяснить", "почему", "разъясни", "что такое")):
+        operation, goal = "explain", "understand"
+    elif render_probe.get("requested"):
+        operation = "modify" if any(x in low for x in ("измени", "переделай", "добавь", "убери", "разверни", "поверни")) else "build"
+        goal = "present"
+    elif any(x in low for x in ("проверь", "проанализируй", "разбери", "анализируй")):
+        operation, goal = "analyze", "diagnose_or_analyze"
+    else:
+        operation, goal = "answer", "answer"
+
+    representation = (render_probe.get("requested") or ["text"])[0]
+    subject = _pair_first_subject(text)
+    return {
+        "topic": "",
+        "entity": "",
+        "operation": operation,
+        "goal": goal,
+        "representation": representation,
+        "semantic_request": _df_text(text, 1200),
+        "explicit_subject": subject,
+        "reference_entity": "",
+        "current_turn_role": "memory_recall" if relation == "RECALL" else "current_turn",
+        "answer_to_active_task": False,
+        "active_entity": "",
+        "memory_source": "USER_APRIL_PAIRS",
+    }
+
+
+def _pair_first_interpret_live_turn(text: str, *, history: list[Any] | None = None, state: dict[str, Any] | None = None) -> dict[str, Any]:
+    started = time.perf_counter()
+    current = _df_text(text, 1200)
+    state = state if isinstance(state, dict) else {}
+    rows = _pair_first_rows(state)
+    previous = rows[-1] if rows else {}
+    previous_user = _df_text(previous.get("user"), 1200)
+    previous_april = _df_text(previous.get("april"), 2200)
+    active_seq = state.get("active_dialogue_sequence") if isinstance(state.get("active_dialogue_sequence"), dict) else {}
+    sequence_id = _df_text(active_seq.get("sequence_id"), 100)
+    if not sequence_id:
+        uid = _df_text(state.get("user_id"), 120)
+        try:
+            cycle_ts = float((state.get("memory_cycle") or {}).get("window_start_utc") or 0.0)
+        except Exception:
+            cycle_ts = 0.0
+        sequence_id = _clean_sequence_id(uid, cycle_ts) if cycle_ts else hashlib.sha256(f"{uid}|dialogue".encode("utf-8")).hexdigest()[:20]
+
+    render_probe = _df_render_probe(current)
+    provisional_relation = "RECALL" if _pair_first_recall_request(current) else "CONTINUE" if rows else "NEW"
+    semantic = _pair_first_understand(current, provisional_relation, "", "", "", {}, render_probe, feedback_probe={})
+    relation, turn_relation = _pair_first_resolve_relation(
+        current,
+        state,
+        previous_april,
+        "",
+        "",
+        {},
+        {
+            "deictic": bool(_df_deictic.search(_df_low(current))),
+            "direct_reference": bool(_PAIR_FIRST_DIRECT_REF_RE.search(_df_low(current))),
+            "topic_overlap": _pair_first_similarity(_df_low(current), previous) if previous else 0.0,
+        },
+        semantic=semantic,
+        sequence_digest=_pair_first_active_sequence_digest(state, history or [], sequence_id, limit=ACTIVE_DIALOGUE_WINDOW_PAIRS),
+        branches={},
+    )
+
+    digest = _pair_first_active_sequence_digest(state, history or [], sequence_id, limit=ACTIVE_DIALOGUE_WINDOW_PAIRS)
+    selected_memory = {}
+    if relation == "RECALL":
+        try:
+            ranked = search_dialogue_memory(_df_text(state.get("user_id"), 120), current, limit=8)
+            matches = ranked.get("matches") if isinstance(ranked, dict) else []
+        except Exception:
+            matches = []
+        if matches:
+            selected_memory = {
+                "type": "dialogue_pair_search",
+                "query": current,
+                "total_pairs": len(rows),
+                "matches": deepcopy(matches),
+                "history_source": "USER_APRIL_PAIRS",
+            }
+        else:
+            selected_memory = {
+                "type": "dialogue_pair_search",
+                "query": current,
+                "total_pairs": len(rows),
+                "matches": [],
+                "history_source": "USER_APRIL_PAIRS",
+            }
+
+    render_plan = _df_render_plan(current, relation, semantic, render_probe)
+    development = _pair_first_dialogue_development(relation, sequence_id, current, previous)
+    dialogue_rules = (active_seq.get("dialogue_rules") if isinstance(active_seq.get("dialogue_rules"), dict) else {})
+    pair_context = {
+        "version": "active_dialogue_pair_context_v1",
+        "sequence_id": sequence_id,
+        "window_hours": DIALOGUE_WINDOW_HOURS,
+        "seed_hours": PAIR_FIRST_SEED_HOURS,
+        "previous_user_turn": previous_user,
+        "previous_april_turn": previous_april,
+        "active_sequence_turns": deepcopy(digest.get("active_sequence_turns") or []),
+        "history_source": "USER_APRIL_PAIRS",
+    }
+    provider_plan = _df_provider_plan(
+        current,
+        relation,
+        turn_relation,
+        semantic,
+        {},
+        previous_user,
+        previous_april,
+        sequence_id,
+        render_plan,
+        development,
+        selected_memory,
+        active_sequence_digest=digest,
+        active_dialogue_context=pair_context,
+        dialogue_rules=dialogue_rules,
+        related_branches=[],
+    )
+
+    continuation = relation == "CONTINUE"
+    memory_mode = "memory_query" if relation == "RECALL" else "dialogue"
+    semantic_frame = {
+        "topic": "",
+        "current_turn_role": "current_turn",
+        "answer_to_active_task": False,
+        "operation": semantic.get("operation"),
+        "goal": semantic.get("goal"),
+        "representation": semantic.get("representation"),
+        "entity": "",
+        "relation": relation,
+        "understanding_stage": "pair_history_before_provider",
+        "memory_source": "USER_APRIL_PAIRS",
+    }
+    semantic_understanding = {
+        "version": "semantic_understanding_pair_first_v1",
+        "topic": "",
+        "entity": "",
+        "operation": semantic.get("operation"),
+        "goal": semantic.get("goal"),
+        "representation": semantic.get("representation"),
+        "relation": relation,
+        "relation_definition": {
+            "NEW": "новый самостоятельный смысловой предмет",
+            "CONTINUE": "продолжение последней USER↔APRIL пары",
+            "RECALL": "поиск по сохранённым USER↔APRIL парам текущего UTC окна",
+        }.get(relation, ""),
+        "dialogue_pair_context": {
+            "previous_user": previous_user,
+            "previous_april": previous_april,
+            "pair_count": len(rows),
+        },
+        "entities": [],
+        "topics": [],
+        "provider_context_priority": "dialogue_pairs_then_current_request",
+    }
+    dialogue_contract = {
+        "version": "april_dialogue_contract_pair_first_v1",
+        "relation": relation,
+        "continuation": continuation,
+        "reference_to_previous": continuation or relation == "RECALL",
+        "context_dependency": "dialogue_pair_history" if continuation else "dialogue_pair_recall" if relation == "RECALL" else "current_turn_only",
+        "active_topic": "",
+        "canonical_topic": "",
+        "active_entity": "",
+        "resolved_entity": "",
+        "resolved_request": current,
+        "previous_user_turn": previous_user,
+        "previous_april_turn": previous_april,
+        "sequence_id": sequence_id,
+        "target_sequence_id": sequence_id,
+        "target_task_id": "",
+        "task_relation": {},
+        "task_transition": {},
+        "dialogue_rules": deepcopy(dialogue_rules),
+        "dialogue_pair_history": deepcopy(digest.get("active_sequence_turns") or []),
+        "memory_source": "USER_APRIL_PAIRS",
+    }
+    response_sequence = {
+        "sequence_id": sequence_id,
+        "turn_index": int(digest.get("turn_count") or 0) + 1,
+        "source": "dialogue_pair_history",
+    }
+    result = {
+        "version": PAIR_FIRST_INTERPRETATION_VERSION,
+        "type": "text" if semantic.get("representation") == "text" else semantic.get("representation"),
+        "operation": semantic.get("operation") or "answer",
+        # No persistent/current entity name is emitted; representation is carried separately.
+        "object": "",
+        "goal": semantic.get("goal") or "answer",
+        "normalized_text": current,
+        "resolved_request": current,
+        "semantic_request": current,
+        "canonical_topic": "",
+        "resolved_entity": "",
+        "representation": semantic.get("representation") or "text",
+        "requested_outputs": deepcopy(render_plan.get("requested_outputs") or ["text"]),
+        "render_plan": render_plan,
+        "interpretation_control": {
+            "render_authorized": bool(render_plan.get("authorized")),
+            "render_mode": _df_text(render_plan.get("mode") or "TEXT_ONLY", 80),
+            "relation": relation,
+            "decision_owner": PAIR_FIRST_RELATION_OWNER,
+        },
+        "semantic_frame": semantic_frame,
+        "semantic_understanding": semantic_understanding,
+        "dialogue_contract": dialogue_contract,
+        "dialogue_vector": {
+            "relation": relation,
+            "continuation": continuation,
+            "reference": bool(dialogue_contract["reference_to_previous"]),
+            "previous_user_turn": previous_user,
+            "previous_april_turn": previous_april,
+            "sequence_id": sequence_id,
+            "memory_source": "USER_APRIL_PAIRS",
+        },
+        "dialogue_development": development,
+        "active_dialogue_context": pair_context,
+        "active_dialogue_sequence": digest,
+        "provider_context_plan": provider_plan,
+        "interactive_task_state": {},
+        "task_memory": {},
+        "task_relation": {},
+        "task_transition": {},
+        "task_action": False,
+        "pending_resolved": False,
+        "selected_memory_index": 0 if selected_memory else -1,
+        "selected_memory_operand": deepcopy(selected_memory),
+        "selected_memory_record": deepcopy(selected_memory),
+        "memory_mode": memory_mode,
+        "memory_query": relation == "RECALL",
+        "cognitive_workspace": {
+            "active_topic": "",
+            "active_entity": "",
+            "operation": semantic.get("operation"),
+            "goal": semantic.get("goal"),
+            "representation": semantic.get("representation"),
+            "relation": relation,
+            "sequence_id": sequence_id,
+            "semantic_frame": semantic_frame,
+            "pair_history": deepcopy(digest.get("active_sequence_turns") or []),
+            "provider_context_plan": provider_plan,
+            "task_continuation": False,
+        },
+        "attributes": {
+            "visual_production_mode": _df_text(render_plan.get("mode") or "text").lower(),
+            "artifact_reference": bool(render_plan.get("artifact_reference")),
+            "dialogue_relation": relation,
+            "sequence_id": sequence_id,
+            "topic_source": "NONE",
+            "entity_source": "NONE",
+            "memory_source": "USER_APRIL_PAIRS",
+        },
+        "bigunoks": {
+            "dialogue": "evidence_only",
+            "memory": "pair_history_only",
+            "relation": relation,
+        },
+        "stage_order": [
+            "REQUEST_RECEIPT",
+            "AUTHENTICATED_DIALOGUE_PAIRS",
+            "CONTEXTUAL_UNDERSTANDING",
+            "DIALOGUE_RELATION_RESOLUTION",
+            "RESPONSE_DEVELOPMENT",
+            "RENDER_PLAN",
+            "PROVIDER_HANDOFF",
+            "SCENE_CONTRACT",
+        ],
+        "provider_context_authority": "INTERPRETATION",
+        "provider_must_not_reselect_context": True,
+        "decision_owner": PAIR_FIRST_RELATION_OWNER,
+        "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+    }
+    return result
+
+
+# Canonical public interpreter for production turns.
+def interpret_request(text, cognition=None, semantic=None, history=None, state=None):
+    return _pair_first_interpret_live_turn(text, history=history or [], state=state or {})
+
+
+def _df_active_sequence_digest(state, history, sequence_id, *, limit=ACTIVE_DIALOGUE_WINDOW_PAIRS, task_id=""):
+    return _pair_first_active_sequence_digest(state, history or [], sequence_id, limit=limit, task_id=task_id)
+
+
+def _df_explicit_recall(text: str) -> bool:
+    return _pair_first_recall_request(text)
+
+
+def _df_memory_scope_request(text: str) -> bool:
+    return _pair_first_recall_request(text)
+
+
+def _df_extract_subject(text: str) -> str:
+    return _pair_first_subject(text)
+
+
+def _df_topic_from_state(state: dict[str, Any]) -> str:
+    return ""
+
+
+def _df_entity_from_state(state: dict[str, Any]) -> str:
+    return ""
+
+
+def _df_resolve_relation(text, state, previous_april, active_topic, active_entity, task_probe, dialogue_probe, *, feedback_probe=None, semantic=None, sequence_digest=None, branches=None):
+    return _pair_first_resolve_relation(
+        text, state, previous_april, "", "", task_probe or {}, dialogue_probe or {},
+        feedback_probe=feedback_probe, semantic=semantic, sequence_digest=sequence_digest, branches=branches,
+    )
+
+
+def _df_understand(text, relation, turn_relation, active_topic, active_entity, task_probe, render_probe, feedback_probe=None):
+    return _pair_first_understand(text, relation, turn_relation, "", "", task_probe or {}, render_probe or {}, feedback_probe=feedback_probe)
+
+
+# Legacy entity/branch repair writers are no longer allowed to feed production
+# interpretation. They remain name-compatible only and return empty evidence.
+def _df_branch_index(state, active_seq, active_topic, active_entity):
+    return {"version": "pair_history_only", "branches": []}
