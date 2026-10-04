@@ -99,6 +99,8 @@ def _drop_unwanted_columns(cur, table: str) -> None:
 
 _CLEANUP_LOCK = threading.RLock()
 _CLEANUP_WORKER_STARTED = False
+_DB_INIT_LOCK = threading.RLock()
+_DB_INITIALIZED = False
 
 
 def get_conn():
@@ -153,12 +155,18 @@ def _is_authenticated_row(row: Any) -> bool:
     )
 
 
-def is_authenticated_user(user_id: Any) -> bool:
-    """Only a registered auth-backed row may own persistent dialogue memory."""
+def resolve_authenticated_user_id(user_id: Any) -> str:
+    """Resolve the canonical PostgreSQL users.user_id for an authenticated account.
+
+    The browser normally sends April ID, but older rows may have a different
+    internal user_id. Memory must bind to the authenticated account either way.
+    """
     conn = get_conn()
     if not conn:
-        return False
-    uid = str(user_id)
+        return ""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return ""
     try:
         with conn:
             with conn.cursor() as cur:
@@ -166,15 +174,26 @@ def is_authenticated_user(user_id: Any) -> bool:
                     """
                     SELECT user_id, email, provider
                     FROM users
-                    WHERE user_id = %s
+                    WHERE (user_id = %s OR april_id = %s)
+                      AND COALESCE(TRIM(email), '') <> ''
+                      AND COALESCE(TRIM(provider), '') <> ''
+                    ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
+                    LIMIT 1
                     """,
-                    (uid,),
+                    (uid, uid, uid),
                 )
-                return _is_authenticated_row(cur.fetchone())
+                row = cur.fetchone()
+                if not row:
+                    return ""
+                return str(row.get("user_id") or "").strip()
     except Exception:
-        return False
+        return ""
     finally:
         conn.close()
+
+
+def is_authenticated_user(user_id: Any) -> bool:
+    return bool(resolve_authenticated_user_id(user_id))
 
 
 def _schema_cleanup(cur) -> None:
@@ -185,142 +204,150 @@ def _schema_cleanup(cur) -> None:
 
 
 def init_db() -> None:
-    conn = get_conn()
-    if not conn:
-        return
+    """Create/migrate the canonical schema before the web app accepts turns.
 
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS users (
-                        user_id TEXT PRIMARY KEY,
-                        april_id TEXT,
-                        email TEXT,
-                        name TEXT,
-                        provider TEXT,
-                        provider_user_id TEXT,
-                        plan TEXT NOT NULL DEFAULT 'free',
-                        subscription_until DOUBLE PRECISION NOT NULL DEFAULT 0,
-                        warned BOOLEAN NOT NULL DEFAULT FALSE,
-                        messages_today INTEGER NOT NULL DEFAULT 0,
-                        images_today INTEGER NOT NULL DEFAULT 0,
-                        last_reset TEXT NOT NULL DEFAULT CURRENT_DATE::TEXT,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        last_login_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    Safe to call from either Gunicorn/import startup or the legacy __main__ path.
+    """
+    global _DB_INITIALIZED
+    with _DB_INIT_LOCK:
+        if _DB_INITIALIZED:
+            return
+        conn = get_conn()
+        if not conn:
+            print("STATE: POSTGRES INIT SKIPPED: DATABASE_URL is not configured", flush=True)
+            return
+
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS users (
+                            user_id TEXT PRIMARY KEY,
+                            april_id TEXT,
+                            email TEXT,
+                            name TEXT,
+                            provider TEXT,
+                            provider_user_id TEXT,
+                            plan TEXT NOT NULL DEFAULT 'free',
+                            subscription_until DOUBLE PRECISION NOT NULL DEFAULT 0,
+                            warned BOOLEAN NOT NULL DEFAULT FALSE,
+                            messages_today INTEGER NOT NULL DEFAULT 0,
+                            images_today INTEGER NOT NULL DEFAULT 0,
+                            last_reset TEXT NOT NULL DEFAULT CURRENT_DATE::TEXT,
+                            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            last_login_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                        )
+                        """
                     )
-                    """
-                )
-                # Idempotent migration for installations that already have users.
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS april_id TEXT")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS provider TEXT")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS provider_user_id TEXT")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS plan TEXT DEFAULT 'free'")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_until DOUBLE PRECISION DEFAULT 0")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS warned BOOLEAN DEFAULT FALSE")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS messages_today INTEGER DEFAULT 0")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS images_today INTEGER DEFAULT 0")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_reset TEXT DEFAULT CURRENT_DATE::TEXT")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
+                    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS april_id TEXT")
+                    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT")
+                    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT")
+                    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS provider TEXT")
+                    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS provider_user_id TEXT")
+                    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS plan TEXT DEFAULT 'free'")
+                    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_until DOUBLE PRECISION DEFAULT 0")
+                    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS warned BOOLEAN DEFAULT FALSE")
+                    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS messages_today INTEGER DEFAULT 0")
+                    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS images_today INTEGER DEFAULT 0")
+                    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_reset TEXT DEFAULT CURRENT_DATE::TEXT")
+                    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
+                    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
 
-                cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_april_id ON users(april_id) WHERE april_id IS NOT NULL AND april_id <> ''")
-                cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL AND email <> ''")
+                    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_april_id ON users(april_id) WHERE april_id IS NOT NULL AND april_id <> ''")
+                    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL AND email <> ''")
 
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS payments (
-                        id BIGSERIAL PRIMARY KEY,
-                        user_id TEXT NOT NULL,
-                        plan TEXT NOT NULL,
-                        amount INTEGER NOT NULL DEFAULT 0,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS payments (
+                            id BIGSERIAL PRIMARY KEY,
+                            user_id TEXT NOT NULL,
+                            plan TEXT NOT NULL,
+                            amount INTEGER NOT NULL DEFAULT 0,
+                            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                        )
+                        """
                     )
-                    """
-                )
-                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS id BIGSERIAL")
-                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS user_id TEXT")
-                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS plan TEXT")
-                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS amount INTEGER DEFAULT 0")
-                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_created ON payments(user_id, created_at DESC)")
+                    cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS id BIGSERIAL")
+                    cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS user_id TEXT")
+                    cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS plan TEXT")
+                    cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS amount INTEGER DEFAULT 0")
+                    cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_created ON payments(user_id, created_at DESC)")
 
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS dialogue_memory (
-                        id BIGSERIAL PRIMARY KEY,
-                        user_id TEXT NOT NULL,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        turn_index INTEGER NOT NULL,
-                        user_text TEXT NOT NULL,
-                        april_text TEXT NOT NULL,
-                        pair_hash TEXT NOT NULL UNIQUE
+                    # Canonical authenticated USER↔APRIL pair archive.
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS dialogue_memory (
+                            id BIGSERIAL PRIMARY KEY,
+                            user_id TEXT NOT NULL,
+                            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            turn_index INTEGER NOT NULL DEFAULT 0,
+                            user_text TEXT NOT NULL,
+                            april_text TEXT NOT NULL,
+                            pair_hash TEXT NOT NULL UNIQUE
+                        )
+                        """
                     )
-                    """
-                )
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS id BIGSERIAL")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS user_id TEXT")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS turn_index INTEGER DEFAULT 0")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS user_text TEXT")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS april_text TEXT")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS pair_hash TEXT")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_memory_user_created ON dialogue_memory(user_id, created_at DESC)")
+                    cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS id BIGSERIAL")
+                    cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS user_id TEXT")
+                    cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
+                    cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS turn_index INTEGER DEFAULT 0")
+                    cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS user_text TEXT")
+                    cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS april_text TEXT")
+                    cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS pair_hash TEXT")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_memory_user_created ON dialogue_memory(user_id, created_at DESC)")
 
-                # Required destructive sanitization: known legacy memory stores are
-                # no longer part of the schema and must not survive deployment.
-                _schema_cleanup(cur)
+                    _schema_cleanup(cur)
+                    _drop_unwanted_columns(cur, "users")
+                    _drop_unwanted_columns(cur, "payments")
+                    _drop_unwanted_columns(cur, "dialogue_memory")
 
-                # Remove any columns that are not part of the canonical minimal schema.
-                _drop_unwanted_columns(cur, "users")
-                _drop_unwanted_columns(cur, "payments")
-                _drop_unwanted_columns(cur, "dialogue_memory")
+                    cur.execute(
+                        """
+                        DELETE FROM dialogue_memory d
+                        WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.user_id = d.user_id)
+                        """
+                    )
+                    cur.execute(
+                        """
+                        DO $$
+                        BEGIN
+                            IF NOT EXISTS (
+                                SELECT 1 FROM pg_constraint
+                                WHERE conrelid = 'dialogue_memory'::regclass
+                                  AND conname = 'fk_dialogue_memory_user'
+                            ) THEN
+                                ALTER TABLE dialogue_memory
+                                ADD CONSTRAINT fk_dialogue_memory_user
+                                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE;
+                            END IF;
+                        END $$;
+                        """
+                    )
 
-                # Remove orphan dialogue rows before adding the authenticated-user FK.
-                cur.execute(
-                    """
-                    DELETE FROM dialogue_memory d
-                    WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.user_id = d.user_id)
-                    """
-                )
-                cur.execute(
-                    """
-                    DO $$
-                    BEGIN
-                        IF NOT EXISTS (
-                            SELECT 1
-                            FROM pg_constraint
-                            WHERE conrelid = 'dialogue_memory'::regclass
-                              AND conname = 'fk_dialogue_memory_user'
-                        ) THEN
-                            ALTER TABLE dialogue_memory
-                            ADD CONSTRAINT fk_dialogue_memory_user
-                            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE;
-                        END IF;
-                    END $$;
-                    """
-                )
+                    cur.execute("UPDATE users SET plan='free' WHERE plan IS NULL")
+                    cur.execute("UPDATE users SET subscription_until=0 WHERE subscription_until IS NULL")
+                    cur.execute("UPDATE users SET warned=FALSE WHERE warned IS NULL")
+                    cur.execute("UPDATE users SET messages_today=0 WHERE messages_today IS NULL")
+                    cur.execute("UPDATE users SET images_today=0 WHERE images_today IS NULL")
+                    cur.execute("UPDATE users SET last_reset=%s WHERE last_reset IS NULL OR last_reset=''", (today(),))
+                    cur.execute("UPDATE users SET created_at=CURRENT_TIMESTAMP WHERE created_at IS NULL")
+                    cur.execute("UPDATE users SET last_login_at=CURRENT_TIMESTAMP WHERE last_login_at IS NULL")
 
-                # Repair missing defaults/nulls left by old installations.
-                cur.execute("UPDATE users SET plan='free' WHERE plan IS NULL")
-                cur.execute("UPDATE users SET subscription_until=0 WHERE subscription_until IS NULL")
-                cur.execute("UPDATE users SET warned=FALSE WHERE warned IS NULL")
-                cur.execute("UPDATE users SET messages_today=0 WHERE messages_today IS NULL")
-                cur.execute("UPDATE users SET images_today=0 WHERE images_today IS NULL")
-                cur.execute("UPDATE users SET last_reset=%s WHERE last_reset IS NULL OR last_reset=''", (today(),))
-                cur.execute("UPDATE users SET created_at=CURRENT_TIMESTAMP WHERE created_at IS NULL")
-                cur.execute("UPDATE users SET last_login_at=CURRENT_TIMESTAMP WHERE last_login_at IS NULL")
-
-        cleanup_dialogue_memory_utc()
-    finally:
-        conn.close()
-
-    # Existing installations may predate the authenticated April ID columns.
-    backfill_april_ids()
-    _start_cleanup_worker()
+            # One startup cleanup is enough to repair an installation that was
+            # offline across a 00:00/12:00 UTC boundary. Runtime turns do not run
+            # destructive cleanup queries on every request.
+            cleanup_dialogue_memory_utc()
+            backfill_april_ids()
+            _start_cleanup_worker()
+            _DB_INITIALIZED = True
+            print(
+                "STATE: POSTGRES DIALOGUE MEMORY READY: table=dialogue_memory, window=12h, seed=1h, cleanup=UTC_00_12",
+                flush=True,
+            )
+        finally:
+            conn.close()
 
 
 def _start_cleanup_worker() -> None:
@@ -345,6 +372,7 @@ def _start_cleanup_worker() -> None:
                 print(f"STATE: UTC DIALOGUE CLEANUP ERROR: {exc}")
                 time.sleep(300.0)
 
+    print("STATE: UTC DIALOGUE CLEANUP WORKER STARTED", flush=True)
     threading.Thread(target=worker, name="april-dialogue-utc-cleanup", daemon=True).start()
 
 
@@ -383,8 +411,15 @@ def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | i
 
 def _is_authenticated_cursor(cur, uid: str) -> bool:
     cur.execute(
-        "SELECT user_id, email, provider FROM users WHERE user_id = %s",
-        (uid,),
+        """
+        SELECT user_id, email, provider
+        FROM users
+        WHERE (user_id = %s OR april_id = %s)
+          AND COALESCE(TRIM(email), '') <> ''
+          AND COALESCE(TRIM(provider), '') <> ''
+        LIMIT 1
+        """,
+        (str(uid), str(uid)),
     )
     return _is_authenticated_row(cur.fetchone())
 
@@ -403,7 +438,7 @@ def save_dialogue_pair(
     turn_index: int = 0,
 ) -> bool:
     """Persist one authenticated USER↔APRIL pair and nothing else."""
-    uid = str(user_id)
+    uid = resolve_authenticated_user_id(user_id)
     user_value = str(user_text or "").strip()
     april_value = str(april_text or "").strip()
     if not uid or not user_value or not april_value:
@@ -424,14 +459,10 @@ def save_dialogue_pair(
     try:
         with conn:
             with conn.cursor() as cur:
-                if not _is_authenticated_cursor(cur, uid):
+                if not uid:
                     return False
-                # Clean before insert so the database never accumulates stale memory.
-                seed_start, _ = dialogue_window_bounds(dt)
-                cur.execute(
-                    "DELETE FROM dialogue_memory WHERE user_id = %s AND created_at < %s",
-                    (uid, seed_start),
-                )
+                # Physical deletion is owned by the lightweight UTC cleanup worker.
+                # The insert path stays read/write-only to keep chat latency low.
                 pair_hash = _pair_hash(uid, created_ts, int(turn_index or 0), user_value, april_value)
                 cur.execute(
                     """
@@ -451,15 +482,15 @@ def save_dialogue_pair(
 
 def load_dialogue_pairs(user_id: Any, *, limit: int = 0, timestamp: float | int | datetime | None = None) -> list[dict[str, Any]]:
     """Load authenticated dialogue pairs inside the current UTC seed+cycle window."""
-    uid = str(user_id)
+    uid = resolve_authenticated_user_id(user_id)
     conn = get_conn()
-    if not conn:
+    if not conn or not uid:
         return []
     seed_start, current = dialogue_window_bounds(timestamp)
     try:
         with conn:
             with conn.cursor() as cur:
-                if not _is_authenticated_cursor(cur, uid):
+                if not uid:
                     return []
                 cur.execute(
                     """
