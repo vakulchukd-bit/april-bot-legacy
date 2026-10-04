@@ -21,7 +21,7 @@ from blocks.presentation_formatter import canonical_payload_for_block, validate_
 # APRIL PROVIDER — CANONICAL LUNA ROUTE
 # ============================================================
 
-APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_3_5_visual_plan_complement_v3_dynamic_dialogue"
+APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_3_5_visual_plan_complement_v2"
 APRIL_QUANTUM_PROVIDER_MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-5.6-luna")
 APRIL_QUANTUM_PROVIDER_SINGLE_CALL = True
 APRIL_QUANTUM_PROVIDER_NO_MODEL_ESCALATION = True
@@ -68,15 +68,8 @@ April's internal response provider. Return exactly one MachineResponse JSON obje
 
 The Quantum Processor owns interpretation, dialogue relation, resolved task, representation,
 requested outputs and reference resolution. Treat those fields as authoritative.
-When DIALOGUE_RULES/RESPONSE_SEQUENCE/TASK_RESULT_STATE are supplied, they are semantic dialogue
-context. DIALOGUE_RULES is internal-only metadata. It must never create a visible prefix, counter,
-letter, number, marker, or formatting token. RESPONSE_SEQUENCE is internal conversation position only.
-Never derive visible formatting from task_response_count, sequence_turn_index, branch labels, task IDs,
-or internal response paths. The current request is authoritative over stale branch/topic state.
-Answer the resolved current request only. For continuation turns use only the supplied active branch context. For branch recall, use the
-explicitly selected recalled branch. For comparisons, use only the explicitly supplied linked branches
-and answer the current comparison. Never reselect memory or turn an internal branch label into visible text.
-For independent turns do not import historical context.
+Answer the resolved current request only. For continuation/reference turns use only the
+supplied live dialogue context. For independent turns do not import historical context.
 
 DIALOGUE_DEVELOPMENT is the authoritative semantic trajectory: preserve the active topic,
 goal, relevant result, open work and user-requested future actions. Help a hesitant user with
@@ -94,20 +87,6 @@ put the direct answer in `answer` and mirror it in `content` and a text render b
 If structured output is requested, keep its render block structured and complete:
 type, renderer, viewer, payload, scene_contract=true.
 Preserve every requested representation and never invent an unrequested one.
-
-For `diagram` / `electrical_schematic` output, do not return a vague list of boxes. Build a
-complete structured schematic from the current request and only the facts explicitly established
-in the current answer/context. The diagram payload should contain: `title`, `diagram_type`,
-`direction`, `nodes`, `edges`, and when applicable `legend`, `notes`, `safety`, `operation`.
-Each node should identify `id`, `ref`, `kind`, `symbol`, `label`, and any explicitly known
-`value`/`rating` plus `ports`/`terminals`. Each connection should identify `from`, `to`,
-`from_terminal`, `to_terminal`, and an explicit `label`/`wire`/`net` when the conductor has a
-known role such as `+12 V`, `GND`, `L`, `N`, `PE`, or `OUT`. Keep separate physical terminals
-separate: never merge `+` and `−`/`GND` into one connection. For electrical schematics,
-connections describe actual circuit topology, not merely visual proximity. If the requested
-schematic is simple, still provide the complete circuit path and return path. Do not invent
-component ratings, wire gauges, standards, or safety devices that the user did not specify;
-put unknowns into `notes` only when useful.
 For `image_generation`, return one semantic generation handoff only:
 `metadata.image_generation_spec` and `metadata.image_generation_signal`.
 The current user request is the immutable generation trigger/anchor. It selects the image route
@@ -165,12 +144,6 @@ Use the supplied dialogue strategy as response guidance:
 EXPAND adds new information; DEEPEN explains causes; DISCUSS engages the point;
 SOLVE advances a concrete problem; CORRECT fixes the disputed point; REACT responds naturally;
 CONTINUE_NATURAL keeps the thread moving. Use covered content only to avoid unnecessary repetition.
-
-When DIALOGUE_RULES is present, it is internal-only dialogue metadata. Preserve it in memory when the user
-has established such a preference, but NEVER emit its marker/letter/number in the visible answer. RESPONSE_SEQUENCE
-and all task counters/branch labels/response paths are internal state only. A NEW topic keeps the same parent
-12h conversation but does not inherit the previous task's subject or answer. The current request always has
-semantic authority over stale active-task state.
 
 When INTERACTIVE_TASK_STATE is present, it is the active conversational work item.
 Its role, phase, latest question, accumulated clues and Q&A history are authoritative.
@@ -420,23 +393,13 @@ def _build_adaptive_task_digest(
 def _build_live_dialogue_digest(dialogue: dict[str, Any]) -> dict[str, Any]:
     """Keep only the live conversational facts required for a continuation."""
     contract = dialogue if isinstance(dialogue, dict) else {}
-    response_sequence = contract.get("response_sequence") if isinstance(contract.get("response_sequence"), dict) else {}
-    dialogue_rules = contract.get("dialogue_rules") if isinstance(contract.get("dialogue_rules"), dict) else {}
     digest: dict[str, Any] = {
         "relation": _safe_text(contract.get("relation")),
         "dependency": _safe_text(contract.get("context_dependency")),
         "topic": _semantic_excerpt(contract.get("canonical_topic"), 120),
-        "task_id": _safe_text(contract.get("task_id")),
         "prev_user": _semantic_excerpt(contract.get("previous_user_turn"), 170),
         "prev_april": _semantic_excerpt(contract.get("previous_april_turn"), 220),
     }
-    if dialogue_rules:
-        digest["dialogue_rules"] = _compact_value(dialogue_rules, max_depth=2, max_items=6, max_keys=8)
-    if response_sequence:
-        digest["response_sequence"] = _compact_value(response_sequence, max_depth=2, max_items=6, max_keys=8)
-    previous_result = contract.get("previous_result") if isinstance(contract.get("previous_result"), dict) else {}
-    if previous_result:
-        digest["previous_result"] = _compact_value(previous_result, max_depth=2, max_items=8, max_keys=8)
     # Only carry the scene identity when it can matter for reference continuity.
     if contract.get("reference_to_previous") or str(contract.get("context_dependency") or "").lower() in {
         "artifact", "reference", "pending", "recall"
@@ -523,94 +486,6 @@ def _adaptive_target_budget(*, mode: str, task_active: bool, continuation: bool)
     return max(760, min(860, target))
 
 
-def _compact_packet_value(value: Any, *, depth: int = 0, max_depth: int = 2,
-                           max_items: int = 3, max_keys: int = 8,
-                           leaf_limit: int = 90) -> Any:
-    """Recursively compact provider packet data without losing the newest facts."""
-    if depth > max_depth:
-        return None
-    if value in (None, "", [], {}):
-        return None
-    if isinstance(value, (bool, int, float)):
-        return value
-    if isinstance(value, str):
-        return _semantic_excerpt(value, leaf_limit)
-    if isinstance(value, dict):
-        out: dict[str, Any] = {}
-        for key, item in list(value.items())[:max_keys]:
-            compact = _compact_packet_value(
-                item,
-                depth=depth + 1,
-                max_depth=max_depth,
-                max_items=max_items,
-                max_keys=max_keys,
-                leaf_limit=leaf_limit,
-            )
-            if compact not in (None, "", [], {}):
-                out[str(key)] = compact
-        return out
-    if isinstance(value, (list, tuple, set)):
-        seq = list(value)
-        if len(seq) > max_items:
-            seq = seq[-max_items:]
-        out = []
-        for item in seq:
-            compact = _compact_packet_value(
-                item,
-                depth=depth + 1,
-                max_depth=max_depth,
-                max_items=max_items,
-                max_keys=max_keys,
-                leaf_limit=leaf_limit,
-            )
-            if compact not in (None, "", [], {}):
-                out.append(compact)
-        return out
-    return _semantic_excerpt(_safe_text(value), leaf_limit)
-
-
-def _compact_packet_piece(piece: str, limit: int, *, label_floor: int = 24) -> str:
-    """Compact one provider packet section while preserving its semantic label."""
-    raw = _safe_text(piece).strip()
-    if len(raw) <= limit:
-        return raw
-    if ":" not in raw:
-        return _semantic_excerpt(raw, max(label_floor, limit))
-
-    label, payload = raw.split(":", 1)
-    label = label.strip()
-    payload = payload.strip()
-    payload_limit = max(24, limit - len(label) - 2)
-
-    if payload.startswith(("{", "[")):
-        try:
-            parsed = json.loads(payload)
-            for leaf_limit, max_items, max_keys, max_depth in (
-                (72, 3, 8, 4),
-                (54, 2, 6, 3),
-                (40, 2, 5, 2),
-            ):
-                compact = _compact_packet_value(
-                    parsed,
-                    max_depth=max_depth,
-                    max_items=max_items,
-                    max_keys=max_keys,
-                    leaf_limit=leaf_limit,
-                )
-                candidate = label + ": " + json.dumps(
-                    compact,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    default=str,
-                )
-                if len(candidate) <= limit:
-                    return candidate
-        except Exception:
-            pass
-
-    return label + ": " + _semantic_excerpt(payload, payload_limit)
-
-
 def _adaptive_pack(
     system_prompt: str,
     mandatory: list[str],
@@ -619,10 +494,11 @@ def _adaptive_pack(
     hard_budget: int = INPUT_TOKEN_BUDGET,
     target_budget: int = ADAPTIVE_PROVIDER_TARGET_TOKENS,
 ) -> tuple[str, dict[str, Any]]:
-    """Pack provider context with a guaranteed live-continuation packet.
+    """Pack provider context by semantic priority, progressively compressing each tier.
 
-    Required dialogue state is compressed before removal. A short follow-up cannot
-    fail merely because the authenticated task history gained another turn.
+    Invariant: local estimated input <= hard_budget. Memory is not mutated. The packer
+    only creates the provider-facing projection and will degrade optional context before
+    ever considering the current request.
     """
     prompt = _safe_text(system_prompt).strip()
     selected = list(mandatory)
@@ -632,6 +508,7 @@ def _adaptive_pack(
     def total(text_parts: list[str], prompt_text: str = prompt) -> int:
         return _estimate_input_tokens(prompt_text) + _estimate_input_tokens("\n".join(text_parts))
 
+    # If the system prompt itself is too expensive, use the compact equivalent.
     if total(selected) > target_budget:
         prompt = (
             "April provider. Return one compact MachineResponse JSON object. "
@@ -640,14 +517,23 @@ def _adaptive_pack(
             "Preserve requested structured output. Never expose internal state."
         )
 
+    # Every optional tier carries a compression ladder. Each item is selected at the
+    # first level that fits; low-priority items may therefore survive in compact form.
     for name, raw_piece in optional_tiers:
         if not raw_piece:
             continue
+
         variants = [raw_piece]
-        for limit in (360, 210, 150, 100):
-            compact_piece = _compact_packet_piece(raw_piece, limit)
-            if compact_piece not in variants:
-                variants.append(compact_piece)
+        compact_piece = _shrink_packet_piece(raw_piece, 360)
+        if compact_piece != raw_piece:
+            variants.append(compact_piece)
+        minimal_piece = _shrink_packet_piece(raw_piece, 210)
+        if minimal_piece not in variants:
+            variants.append(minimal_piece)
+        micro_piece = _shrink_packet_piece(raw_piece, 150)
+        if micro_piece not in variants:
+            variants.append(micro_piece)
+
         chosen = None
         for idx, candidate in enumerate(variants):
             if total(selected + [candidate]) <= target_budget:
@@ -655,6 +541,7 @@ def _adaptive_pack(
                 if idx > 0:
                     compressed.append(name)
                 break
+
         if chosen is not None:
             selected.append(chosen)
         else:
@@ -662,6 +549,7 @@ def _adaptive_pack(
 
     used = total(selected)
 
+    # Hard-budget pass: trim optional sections from lowest priority to highest priority.
     if used > hard_budget:
         for idx in range(len(selected) - 1, len(mandatory) - 1, -1):
             removed = selected.pop(idx)
@@ -670,126 +558,37 @@ def _adaptive_pack(
             if used <= hard_budget:
                 break
 
+    # Emergency degradation preserves the protected semantic contract. Never
+    # replace it with a bare request/mode pair: output contract, requested outputs,
+    # cognitive core and active task must remain represented. Only the textual
+    # payloads of protected sections may be compacted further.
     if used > hard_budget:
-        priority_limits = {
-            "REQUEST": 360,
-            "DIALOGUE_ANCHOR": 220,
-            "ACTIVE_TASK": 180,
-            "TASK_RESULT_STATE": 180,
-            "RESPONSE_SEQUENCE": 160,
-            "DIALOGUE_RULES": 140,
-            "SEMANTIC_CORE": 140,
-            "OUTPUT_CONTRACT": 140,
-            "ACTIVE_DIALOGUE_CONTEXT": 150,
-            "ACTIVE_DIALOGUE_TRAJECTORY": 150,
-            "SEMANTIC_FRAME": 120,
-            "DIALOGUE_DEVELOPMENT": 120,
-        }
-        compacted: list[str] = []
+        compacted = []
         for piece in mandatory:
             label = piece.split(":", 1)[0].strip().upper()
-            limit = priority_limits.get(label, 110)
-            compacted_piece = _compact_packet_piece(piece, limit)
-            if compacted_piece != piece:
-                compressed.append("protected:" + label)
-            compacted.append(compacted_piece)
+            if label == "REQUEST":
+                value = _semantic_excerpt(piece.split(":", 1)[1], 360)
+                compacted.append("REQUEST: " + value)
+            elif label in {"COGNITIVE_CORE", "RENDER_CONTRACT", "ACTIVE_TASK", "DIALOGUE_ANCHOR"}:
+                compacted.append(_shrink_packet_piece(piece, 260))
+            else:
+                compacted.append(piece)
         selected = compacted
-        dropped.append("protected_context_recursive_compaction")
+        dropped.append("emergency_protected_compaction")
         used = total(selected)
 
+    # Deterministic final guarantee. The current request is reduced semantically,
+    # never dropped, until the local estimate fits the hard envelope.
     if used > hard_budget:
-        removable_labels = [
-            "ACTIVE_DIALOGUE_CONTEXT",
-            "ACTIVE_DIALOGUE_TRAJECTORY",
-            "SEMANTIC_FRAME",
-            "DIALOGUE_DEVELOPMENT",
-            "OUTPUT_CONTRACT",
-            "SEMANTIC_CORE",
-        ]
-        for remove_label in removable_labels:
-            if used <= hard_budget:
-                break
-            filtered = []
-            removed_any = False
-            for piece in selected:
-                label = piece.split(":", 1)[0].strip().upper()
-                if label == remove_label:
-                    removed_any = True
-                    continue
-                filtered.append(piece)
-            if removed_any:
-                selected = filtered
-                dropped.append("redundant_protected_trim:" + remove_label)
+        request_text = next((x.split(":", 1)[1].strip() for x in selected if x.startswith("REQUEST:")), "")
+        for limit in (130, 110, 90, 70, 50):
+            candidate = "REQUEST: " + _semantic_excerpt(request_text, limit)
+            trial = [x for x in selected if not x.startswith("REQUEST:")]
+            trial.insert(1, candidate)
+            if total(trial) <= hard_budget:
+                selected = trial
                 used = total(selected)
-
-    if used > hard_budget:
-        pieces_by_label = {
-            piece.split(":", 1)[0].strip().upper(): piece
-            for piece in selected
-            if ":" in piece
-        }
-        request_piece = next(
-            (piece for piece in selected if piece.startswith("REQUEST:")),
-            "REQUEST: " + _semantic_excerpt(
-                next((x.split(":", 1)[1].strip() for x in selected if x.startswith("REQUEST:")), ""),
-                180,
-            ),
-        )
-        final_pieces = [
-            request_piece,
-            pieces_by_label.get("RELATION", "RELATION: CONTINUE"),
-            pieces_by_label.get("REQUESTED", "REQUESTED: [\"text\"]"),
-            pieces_by_label.get("RESPONSE_SEQUENCE", ""),
-            pieces_by_label.get("DIALOGUE_ANCHOR", ""),
-            pieces_by_label.get("TASK_RESULT_STATE", ""),
-            pieces_by_label.get("ACTIVE_TASK", ""),
-            pieces_by_label.get("DIALOGUE_RULES", ""),
-            pieces_by_label.get("RESPONSE_FORMAT", "RESPONSE_FORMAT: Return one complete logical MachineResponse JSON answer."),
-        ]
-        final_pieces = [x for x in final_pieces if x]
-
-        for limit_map in (
-            {"REQUEST": 220, "DIALOGUE_ANCHOR": 180, "TASK_RESULT_STATE": 150, "ACTIVE_TASK": 120, "DIALOGUE_RULES": 100, "RESPONSE_SEQUENCE": 120},
-            {"REQUEST": 160, "DIALOGUE_ANCHOR": 150, "TASK_RESULT_STATE": 110, "ACTIVE_TASK": 90, "DIALOGUE_RULES": 80, "RESPONSE_SEQUENCE": 100},
-            {"REQUEST": 120, "DIALOGUE_ANCHOR": 120, "TASK_RESULT_STATE": 80, "ACTIVE_TASK": 60, "DIALOGUE_RULES": 60, "RESPONSE_SEQUENCE": 80},
-        ):
-            trial = []
-            for piece in final_pieces:
-                label = piece.split(":", 1)[0].strip().upper()
-                trial.append(_compact_packet_piece(piece, limit_map.get(label, 100)))
-            trial_used = total(trial)
-            if trial_used <= hard_budget:
-                final_pieces = trial
-                used = trial_used
-                selected = final_pieces
                 break
-        else:
-            request = next((x.split(":", 1)[1].strip() for x in final_pieces if x.startswith("REQUEST:")), "")
-            core = [
-                "REQUEST: " + _semantic_excerpt(request, 90),
-                pieces_by_label.get("RELATION", "RELATION: CONTINUE"),
-                pieces_by_label.get("REQUESTED", "REQUESTED: [\"text\"]"),
-                _compact_packet_piece(pieces_by_label.get("RESPONSE_SEQUENCE", "RESPONSE_SEQUENCE: {}"), 72),
-                _compact_packet_piece(pieces_by_label.get("DIALOGUE_ANCHOR", "DIALOGUE_ANCHOR: {}"), 110),
-                pieces_by_label.get("RESPONSE_FORMAT", "RESPONSE_FORMAT: Return one complete logical MachineResponse JSON answer."),
-            ]
-            # Keep REQUEST, RELATION and DIALOGUE_ANCHOR as the final semantic core.
-            # Remove requested-output metadata before the anchor when space is tight.
-            while total(core) > hard_budget and len(core) > 3:
-                removed = False
-                for label in ("REQUESTED", "RESPONSE_SEQUENCE"):
-                    for idx in range(len(core) - 1, -1, -1):
-                        if core[idx].split(":", 1)[0].strip().upper() == label:
-                            core.pop(idx)
-                            removed = True
-                            break
-                    if removed:
-                        break
-                if not removed:
-                    break
-            selected = core
-            used = total(selected)
-        dropped.append("protected_continuation_packet")
 
     return "\n".join(selected), {
         "estimated_input_tokens": used,
@@ -804,7 +603,6 @@ def _adaptive_pack(
         "target_budget": target_budget,
         "hard_budget": hard_budget,
     }
-
 
 def _dialogue_contract(payload: dict[str, Any]) -> dict[str, Any]:
     contract = payload.get("dialogue_contract")
@@ -969,35 +767,15 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
     if not isinstance(compact_dialogue, dict):
         compact_dialogue = {}
         compact["dialogue_contract"] = compact_dialogue
-    dialogue_relation = _safe_text(
-        raw_dialogue.get("relation")
-        or raw_dialogue.get("three_way_relation")
-        or "NEW"
-    ).upper()
-    dialogue_sequence_id = _safe_text(
-        raw_dialogue.get("sequence_id")
-        or raw_dialogue.get("target_sequence_id")
-    )
     task_state = (
         raw_dialogue.get("interactive_task_state")
         if isinstance(raw_dialogue.get("interactive_task_state"), dict)
         else raw_dialogue.get("open_task")
         if isinstance(raw_dialogue.get("open_task"), dict)
+        else raw.get("interactive_task_state")
+        if isinstance(raw.get("interactive_task_state"), dict)
         else {}
     )
-    if isinstance(task_state, dict) and task_state:
-        task_sequence_id = _safe_text(task_state.get("sequence_id") or task_state.get("active_sequence_id"))
-        task_owned = bool(
-            raw_dialogue.get("task_continuation")
-            or raw_dialogue.get("task_action")
-            or raw_dialogue.get("task_definition")
-        )
-        if dialogue_sequence_id and task_sequence_id and task_sequence_id != dialogue_sequence_id:
-            task_state = {}
-        elif dialogue_relation == "NEW" and not task_owned:
-            task_state = {}
-        elif dialogue_relation == "CONTINUE" and not task_owned:
-            task_state = {}
     if isinstance(task_state, dict) and task_state:
         task_state = _compact_value(task_state, max_depth=6, max_items=16, max_keys=20) or {}
         compact_dialogue["interactive_task_state"] = task_state
@@ -1149,10 +927,10 @@ def _render_block_renderer(block_type: str) -> str:
     return {
         "text": "MessageTextBlock",
         "markdown": "MessageTextBlock",
-        "formula": "FormulaRenderer",
+        "formula": "MessageTextBlock",
         "table": "TableBlock",
         "graph": "GraphBlock",
-        "diagram": "DiagramRenderer",
+        "diagram": "GalleryBlock",
         "gallery": "GalleryBlock",
         "image": "GalleryBlock",
         "code": "CodeBlock",
@@ -1186,596 +964,44 @@ def _canonical_requested_outputs(payload: dict[str, Any]) -> list[str]:
     return result or ["text"]
 
 
-def _normalize_formula_for_render(value: Any) -> str:
-    """Return only the mathematical source for the dedicated FormulaRenderer."""
-    text = normalize_response_text(value)
-    if not text:
-        return ""
-
-    text = text.replace("\r", "").replace("\n", " ").strip()
-    text = re.sub(r"^```(?:latex|tex|math)?\s*|```$", "", text, flags=re.IGNORECASE).strip()
-    text = re.sub(r"^\s*(?:formula|формула(?:\s+[^:]+)?):\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^\s*\\\[", "", text).strip()
-    text = re.sub(r"\\\]\s*$", "", text).strip()
-    text = re.sub(r"^\s*\\\(", "", text).strip()
-    text = re.sub(r"\\\)\s*$", "", text).strip()
-    text = re.sub(r"^\s*\$+|\$+\s*$", "", text).strip()
-
-    # Keep mathematical grouping braces/parentheses. Remove only presentation
-    # arrows and transport wrappers that do not belong to the formula itself.
-    text = text.replace("→", " ").replace("←", " ").replace("↔", " ").replace("⟶", " ")
-    text = re.sub(r"^\s*[\[\]⟦⟧<>]+\s*|\s*[\[\]⟦⟧<>]+\s*$", "", text)
-
-    # A provider may append a prose explanation to an otherwise valid equation.
-    # Keep the equation only; the explanation belongs in the normal text block.
-    text = re.split(r"\s+(?:где|where)\s+", text, maxsplit=1, flags=re.IGNORECASE)[0].strip()
-    return re.sub(r"\s{2,}", " ", text)
-
-
-def _extract_formula_from_text(text: str) -> str:
-    raw = normalize_response_text(text)
-    if not raw:
-        return ""
-
-    candidates = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        candidate = line.split(":", 1)[1].strip() if ":" in line else line
-        math_score = sum(ch in candidate for ch in "=^_\\+-*/") + (2 if re.search(r"[{}]", candidate) else 0)
-        if "=" in candidate or math_score >= 2:
-            candidates.append(candidate)
-    return _normalize_formula_for_render(candidates[0] if candidates else "")
-
-
-def _looks_like_visual_ascii(line: str) -> bool:
-    text = str(line or "")
-    box_chars = "┌┐└┘├┤┬┴┼│─━═║╔╗╚╝╠╣╦╩╬"
-    if sum(ch in box_chars for ch in text) >= 4:
-        return True
-    if re.search(r"(?:-{2,}|─{2,}|━{2,}|→|<-|->|⟶)", text) and len(text) >= 18:
-        return True
-    return False
-
-
-def _looks_like_ascii_cat(text: str) -> bool:
-    line = str(text or "").strip()
-    if not line or len(line) > 120:
-        return False
-    if re.fullmatch(r"[\\/()<>^_ .oO-]+", line) and re.search(r"(?:o\.o|O\.O|\^|>\s*<|_/)", line, re.IGNORECASE):
-        return True
-    return False
-
-
 def _strip_duplicate_structured_text(answer: str, requested_outputs: list[str]) -> str:
-    """Keep visible text explanatory; dedicated blocks own visual syntax/data."""
+    """Keep the visible answer aligned with the canonical output plan.
+
+    For text-only turns, structured markdown emitted by the model is not a
+    second presentation channel; it is removed so the Web renderer can own
+    representation. For explicit table output, the dedicated TableBlock owns
+    the table and the prose copy is removed as before.
+    """
     if not answer:
         return answer
-
-    outputs = {str(x).strip().lower() for x in (requested_outputs or [])}
-    if outputs == {"text"}:
+    text_only = list(requested_outputs or []) == ["text"]
+    if not text_only and "table" not in requested_outputs:
         return answer
 
     lines = answer.splitlines()
     out: list[str] = []
-    for raw_line in lines:
-        line = raw_line.strip()
-
-        if "table" in outputs and line.count("|") >= 2:
-            if re.search(r"\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)+\|?", line):
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        is_pipe = line.count("|") >= 2
+        if is_pipe:
+            j = i
+            run = 0
+            separator = False
+            while j < len(lines) and lines[j].count("|") >= 2:
+                current = lines[j].strip()
+                if re.fullmatch(r"\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?", current):
+                    separator = True
+                run += 1
+                j += 1
+            if run >= 3 and separator:
+                i = j
                 continue
-            # A pipe-table row is visual data, not visible narrative.
-            if line.startswith("|") and line.endswith("|"):
-                continue
-
-        if outputs.intersection({"graph", "diagram"}) and _looks_like_visual_ascii(raw_line):
-            continue
-
-        if "image" in outputs and _looks_like_ascii_cat(raw_line):
-            continue
-
-        if "formula" in outputs and line:
-            candidate = line.split(":", 1)[1].strip() if ":" in line else line
-            normalized = _normalize_formula_for_render(candidate)
-            if normalized and ("=" in candidate or re.search(r"\\[A-Za-z]+|[{}^_]", candidate)):
-                if ":" in line:
-                    # Preserve a human label such as “Формула Эйлера:”.
-                    out.append(line.split(":", 1)[0].rstrip() + ":")
-                continue
-
-        out.append(raw_line)
+        out.append(line)
+        i += 1
 
     cleaned = "\n".join(out).strip()
     return re.sub(r"\n{3,}", "\n\n", cleaned)
-
-
-def _dialogue_graph_payload(answer: str) -> dict[str, Any]:
-    """Build an authorized graph payload without adding another model call.
-
-    Priority:
-      1) preserve a complete Markdown data table already present in the answer;
-      2) for an explicit one-week linear-growth answer, derive all seven points
-         from the stated endpoints (only when the answer explicitly says growth
-         is uniform);
-      3) otherwise keep the historical two-endpoint behavior as the last guard.
-    """
-    text = normalize_response_text(answer)
-    if not text:
-        return {}
-
-    # Preserve complete provider tables first.
-    lines = text.splitlines()
-    separator = re.compile(
-        r"^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)+\|?\s*$"
-    )
-
-    def cells(line: str) -> list[str]:
-        line = str(line or "").strip()
-        if "|" not in line:
-            return []
-        if line.startswith("|"):
-            line = line[1:]
-        if line.endswith("|"):
-            line = line[:-1]
-        return [part.strip() for part in line.split("|")]
-
-    def number(value: str) -> float | None:
-        raw = re.sub(r"\s+", "", str(value or "")).replace("−", "-").replace("–", "-")
-        raw = re.sub(r"[^0-9eE+\-.,]", "", raw)
-        if raw.count(",") and raw.count("."):
-            if raw.rfind(",") > raw.rfind("."):
-                raw = raw.replace(".", "").replace(",", ".")
-            else:
-                raw = raw.replace(",", "")
-        else:
-            raw = raw.replace(",", ".")
-        try:
-            value = float(raw)
-        except Exception:
-            return None
-        return value if value == value and value not in {float("inf"), float("-inf")} else None
-
-    for index in range(len(lines) - 2):
-        headers = cells(lines[index])
-        if len(headers) < 2 or not separator.match(lines[index + 1]):
-            continue
-        points = []
-        row_index = index + 2
-        while row_index < len(lines):
-            row = cells(lines[row_index])
-            if len(row) < 2:
-                break
-            y_value = number(row[1])
-            if y_value is None or not row[0]:
-                break
-            x_value = number(row[0])
-            points.append({"x": x_value if x_value is not None else row[0], "y": y_value})
-            row_index += 1
-        if len(points) >= 2:
-            title = ""
-            for candidate in reversed(lines[:index]):
-                candidate = candidate.strip().strip("#* ")
-                if candidate and "|" not in candidate:
-                    title = candidate.rstrip(":").strip()
-                    break
-            return {
-                "representation": "line",
-                "title": title or "Graph",
-                "series": [{
-                    "label": headers[1] or "Value",
-                    "type": "points",
-                    "points": points,
-                    "x": [point["x"] for point in points],
-                    "y": [point["y"] for point in points],
-                }],
-                "x_axis": {"type": "categorical", "label": headers[0] or "Period"},
-                "y_axis": {"type": "numeric", "label": headers[1] or "Value"},
-                "grid": True,
-                "source": "provider_markdown_table_preserved",
-            }
-
-    match = re.search(
-        r"(?:с|от)\s*([0-9][0-9\s.,]*)\s*([^\n,;]+?)\s+(?:до|к)\s*([0-9][0-9\s.,]*)\s*([^\n.;]+)",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if not match:
-        return {}
-
-    start = number(match.group(1))
-    end = number(match.group(3))
-    if start is None or end is None:
-        return {}
-
-    period_match = re.search(
-        r"\b(?:за|протягом)\s+(неделю|недели|week)\b",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if period_match:
-        period = period_match.group(1).lower()
-        # Seven daily points are justified only when the answer explicitly says
-        # the change is uniform/linear; this avoids inventing hidden data.
-        if re.search(r"\b(равномерн|линейн|одинаков)\w*\b", text, flags=re.IGNORECASE):
-            count = 7
-            step = (end - start) / (count - 1)
-            points = []
-            for index in range(count):
-                value = start + step * index
-                if index in {0, count - 1}:
-                    value = round(value, 2)
-                else:
-                    value = round(value + 1e-12, 2)
-                points.append({"x": f"День {index + 1}", "y": value})
-            return {
-                "representation": "line",
-                "title": "График роста",
-                "series": [{
-                    "label": "Значение",
-                    "type": "points",
-                    "points": points,
-                    "x": [point["x"] for point in points],
-                    "y": [point["y"] for point in points],
-                }],
-                "x_axis": {"type": "categorical", "label": "День"},
-                "y_axis": {"type": "numeric", "label": "Значение"},
-                "grid": True,
-                "metadata": {
-                    "source": "explicit_endpoints_uniform_week",
-                    "derived": True,
-                    "derivation": "linear_interpolation",
-                    "point_count": 7,
-                },
-                "source": "dialogue_answer_explicit_values",
-            }
-
-    return {
-        "representation": "line",
-        "title": "Рост",
-        "series": [{
-            "label": "Значение",
-            "points": [
-                {"x": "Начало", "y": start},
-                {"x": "Конец", "y": end},
-            ],
-        }],
-        "x_axis": {"type": "categorical", "label": "Период"},
-        "y_axis": {"type": "numeric", "label": "Значение"},
-        "source": "dialogue_answer_explicit_values",
-    }
-
-
-def _ascii_diagram_to_payload(answer: str) -> dict[str, Any]:
-    """Convert an explicit connector-line diagram into a richer structured diagram.
-
-    This is only a transport fallback for providers that returned an ASCII/text
-    schematic instead of the requested diagram object. It derives metadata from
-    the text that is already present; it does not invent ratings, values or
-    hidden connections.
-    """
-    text = normalize_response_text(answer)
-    lines = [line.strip() for line in text.splitlines() if _looks_like_visual_ascii(line)]
-    nodes: list[dict[str, Any]] = []
-    edges: list[dict[str, Any]] = []
-    node_index: dict[str, str] = {}
-
-    def infer_kind(label: str) -> tuple[str, str, str]:
-        low = label.lower()
-        if any(token in low for token in ("батар", "источник", "блок питания", "блока питания", "power supply")):
-            return "source", "power_supply", "PS"
-        if any(token in low for token in ("предохран", "fuse")):
-            return "protection", "fuse", "F"
-        if any(token in low for token in ("выключател", "переключател", "switch", "dpdt")):
-            return "switch", "switch", "S"
-        if any(token in low for token in ("ламп", "светиль", "load", "гирлянд")):
-            return "load", "lamp", "H"
-        if any(token in low for token in ("двигател", "motor")):
-            return "load", "motor", "M"
-        if any(token in low for token in ("резист", "resistor")):
-            return "passive", "resistor", "R"
-        if any(token in low for token in ("контроллер", "controller", "контактор", "contactor", "реле", "relay")):
-            return "control", "controller", "K"
-        return "node", "component", "X"
-
-    def explicit_rating(label: str) -> str:
-        # Preserve only ratings explicitly written in the source text.
-        match = re.search(
-            r"(?i)\b\d+(?:[.,]\d+)?\s*(?:к?в|v|вольт(?:а|ов)?|a|амп(?:ер|ера|еров)?)\b",
-            label,
-        )
-        return match.group(0) if match else ""
-
-    def canonical_node_key(label: str) -> tuple[str, str]:
-        key = re.sub(r"\s+", " ", label.strip(" →←─—_━═\t"))
-        key = re.sub(r"[\[\]{}]", "", key).strip()
-        key = key.replace("(+) ", "+ ").replace("(-) ", "- ").replace("(−) ", "− ")
-        key = re.sub(r"[()]", "", key).strip()
-        if not key:
-            return "", ""
-
-        low = key.lower()
-        terminal = ""
-        if re.match(r"^\+\s*", key):
-            terminal = "plus"
-        elif re.match(r"^(?:−|-)\s*", key):
-            terminal = "minus"
-
-        # "+ блока питания" and "− блока питания" are two terminals of one
-        # physical source. Keep one source node and annotate the concrete edge
-        # terminal instead of rendering two fake power-supply components.
-        if "блок питания" in low or "блока питания" in low or "power supply" in low:
-            return "Блок питания", terminal
-
-        return key, terminal
-
-    def node_id(label: str) -> tuple[str, str]:
-        key, terminal = canonical_node_key(label)
-        if not key or len(key) > 80:
-            return "", ""
-
-        if key not in node_index:
-            nid = f"n{len(node_index) + 1}"
-            node_index[key] = nid
-            role, symbol, ref_prefix = infer_kind(key)
-            item: dict[str, Any] = {
-                "id": nid,
-                "ref": f"{ref_prefix}{sum(1 for n in nodes if str(n.get('ref','')).startswith(ref_prefix)) + 1}",
-                "kind": role,
-                "symbol": symbol,
-                "label": key,
-            }
-            rating = explicit_rating(label)
-            if rating:
-                item["rating"] = rating
-
-            ports: list[dict[str, str]] = []
-            if "+" in label:
-                ports.append({"id": "plus", "label": "+"})
-            if "−" in label or re.search(r"(?<![A-Za-z])-", label):
-                ports.append({"id": "minus", "label": "−"})
-            if ports:
-                item["ports"] = ports
-            nodes.append(item)
-        else:
-            # Merge explicit source polarity discovered on a later occurrence
-            # into the already-created source node.
-            for existing in nodes:
-                if existing.get("id") == node_index[key]:
-                    ports = list(existing.get("ports") or [])
-                    if terminal and not any(str(p.get("id")) == terminal for p in ports if isinstance(p, dict)):
-                        ports.append({"id": terminal, "label": "+" if terminal == "plus" else "−"})
-                    if ports:
-                        existing["ports"] = ports
-                    break
-
-        return node_index[key], terminal
-
-    for line in lines:
-        parts = [
-            part.strip()
-            for part in re.split(
-                r"\s*(?:─{2,}|—{2,}|━{2,}|═{2,}|-{2,}|→|->|⟶|⇒)\s*",
-                line,
-            )
-            if part.strip()
-        ]
-        if len(parts) < 2 or len(parts) > 10:
-            continue
-
-        endpoints = [node_id(part) for part in parts]
-        endpoints = [(nid, terminal) for nid, terminal in endpoints if nid]
-        for (left, left_terminal), (right, right_terminal) in zip(endpoints, endpoints[1:]):
-            edge_id = f"e{len(edges) + 1}"
-            edge: dict[str, Any] = {
-                "id": edge_id,
-                "from": left,
-                "to": right,
-            }
-            if left_terminal:
-                edge["from_terminal"] = left_terminal
-            if right_terminal:
-                edge["to_terminal"] = right_terminal
-            edges.append(edge)
-
-    if len(nodes) < 2 or not edges:
-        return {}
-
-    title = ""
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if line and not _looks_like_visual_ascii(line):
-            if any(token in line.lower() for token in ("схем", "диаграм", "подключ", "circuit")):
-                title = line.rstrip(":").strip()
-                break
-
-    if 2 <= len(nodes) <= 10:
-        for index, node in enumerate(nodes):
-            node["x"] = float(index)
-            node["y"] = 0.0
-
-    electrical = any(
-        n.get("symbol") in {"power_supply", "fuse", "switch", "lamp", "motor", "resistor", "controller"}
-        for n in nodes
-    )
-
-    return {
-        "representation": "diagram",
-        "diagram_type": "electrical_schematic" if electrical else "diagram",
-        "direction": "horizontal",
-        "title": title or "Схема подключения",
-        "nodes": nodes,
-        "edges": edges,
-        "legend": [
-            {"ref": str(n.get("ref")), "label": str(n.get("label"))}
-            for n in nodes
-            if n.get("ref")
-        ],
-        "source": "dialogue_answer_visual_syntax",
-    }
-
-
-def _normalize_electrical_diagram_payload(payload: dict[str, Any], answer_source: str = "") -> dict[str, Any]:
-    """Normalize an already supplied electrical diagram without changing its topology."""
-    if not isinstance(payload, dict):
-        return payload
-    result = dict(payload)
-    nodes = payload.get("nodes") or payload.get("components") or []
-    edges = payload.get("edges") or payload.get("connections") or []
-    if not isinstance(nodes, list):
-        nodes = []
-    if not isinstance(edges, list):
-        edges = []
-
-    def txt(v):
-        return str(v).strip() if v is not None else ""
-
-    def infer_symbol(node):
-        raw = " ".join(txt(node.get(k)) for k in ("kind","symbol","type","label","name")).lower()
-        if any(x in raw for x in ("блок питания","источник","battery","батар")):
-            return "power_supply", "power"
-        if any(x in raw for x in ("предохран","fuse")):
-            return "fuse", "protection"
-        if any(x in raw for x in ("выключател","переключател","switch")):
-            return "switch", "switch"
-        if any(x in raw for x in ("ламп","светиль","lamp","light")):
-            return "lamp", "load"
-        if any(x in raw for x in ("двигател","motor")):
-            return "motor", "load"
-        if any(x in raw for x in ("резист","resistor")):
-            return "resistor", "passive"
-        return txt(node.get("symbol")) or "component", txt(node.get("kind")) or "component"
-
-    normalized_nodes=[]
-    for i, raw in enumerate(nodes):
-        n=dict(raw) if isinstance(raw, dict) else {"label":txt(raw)}
-        n.setdefault("id", txt(n.get("node_id")) or f"n{i+1}")
-        n.setdefault("label", txt(n.get("name")) or txt(n.get("title")) or txt(n.get("id")))
-        sym, kind = infer_symbol(n)
-        n.setdefault("symbol", sym)
-        n.setdefault("kind", kind)
-        if not n.get("ref"):
-            prefix={"power_supply":"PS","fuse":"F","switch":"S","lamp":"L","motor":"M","resistor":"R"}.get(sym,"X")
-            n["ref"]=f"{prefix}{sum(1 for x in normalized_nodes if txt(x.get('ref')).startswith(prefix))+1}"
-        normalized_nodes.append(n)
-
-    node_ids={txt(n.get("id")) for n in normalized_nodes}
-    normalized_edges=[]
-    for raw in edges:
-        if not isinstance(raw, dict):
-            continue
-        e=dict(raw)
-        e["from"]=txt(e.get("from") or e.get("source") or e.get("start"))
-        e["to"]=txt(e.get("to") or e.get("target") or e.get("end"))
-        if e["from"] not in node_ids or e["to"] not in node_ids:
-            continue
-        # Preserve explicit terminal semantics; never guess them here.
-        if e.get("from_terminal") is not None: e["from_terminal"]=txt(e["from_terminal"])
-        if e.get("to_terminal") is not None: e["to_terminal"]=txt(e["to_terminal"])
-        normalized_edges.append(e)
-
-    result["nodes"]=normalized_nodes
-    result["components"]=normalized_nodes
-    result["edges"]=normalized_edges
-    result["connections"]=normalized_edges
-    result.setdefault("diagram_type", "electrical_schematic")
-    result.setdefault("direction", "horizontal")
-    result["render_profile"]={
-        "style":"technical_schematic",
-        "topology_authoritative":True,
-        "show_reference_designators":True,
-        "show_terminals":True,
-        "show_wire_labels":True,
-        "orthogonal_wires":True,
-        "avoid_component_overlap":True,
-        "preserve_explicit_positions":True,
-    }
-    return result
-
-def _materialize_provider_visual_fields(
-    machine_response: dict[str, Any],
-    existing_blocks: list[dict],
-    requested_outputs: list[str],
-    answer_source: str,
-) -> list[dict]:
-    """Promote structured MachineResponse fields into the single Scene stream."""
-    result = list(existing_blocks or [])
-    outputs = {str(x).strip().lower() for x in (requested_outputs or [])}
-
-    def has_type(kind: str) -> bool:
-        for block in result:
-            if not isinstance(block, dict):
-                continue
-            if _safe_text(block.get("type") or block.get("artifact_type")).lower() != kind:
-                continue
-            valid, _ = validate_render_block_payload(kind, block)
-            if valid:
-                return True
-        return False
-
-    candidates: list[tuple[str, Any]] = []
-    if "formula" in outputs and not has_type("formula"):
-        value = (
-            machine_response.get("formula")
-            or machine_response.get("latex")
-            or machine_response.get("equation")
-            or machine_response.get("expression")
-            or machine_response.get("math")
-            or _extract_formula_from_text(answer_source)
-        )
-        formula = _normalize_formula_for_render(value)
-        if formula:
-            candidates.append(("formula", {"formula": formula, "latex": formula}))
-
-    if "graph" in outputs and not has_type("graph"):
-        graph_payload = machine_response.get("graph") or machine_response.get("graph_data") or machine_response.get("chart")
-        if isinstance(graph_payload, dict):
-            candidates.append(("graph", graph_payload))
-        elif isinstance(graph_payload, list) and graph_payload:
-            candidates.append(("graph", {"series": graph_payload}))
-        else:
-            inferred = _dialogue_graph_payload(answer_source)
-            if inferred:
-                candidates.append(("graph", inferred))
-
-    if "diagram" in outputs and not has_type("diagram"):
-        diagram_payload = machine_response.get("diagram") or machine_response.get("schema") or machine_response.get("schematic")
-        if isinstance(diagram_payload, dict):
-            candidates.append(("diagram", _normalize_electrical_diagram_payload(diagram_payload, answer_source)))
-        else:
-            inferred_diagram = _ascii_diagram_to_payload(answer_source)
-            if inferred_diagram:
-                formula_value = (
-                    machine_response.get("formula")
-                    or machine_response.get("latex")
-                    or machine_response.get("equation")
-                    or machine_response.get("expression")
-                )
-                if formula_value:
-                    inferred_diagram["linked_formula"] = _safe_text(formula_value)
-                candidates.append(("diagram", inferred_diagram))
-
-    if "table" in outputs and not has_type("table"):
-        table_payload = machine_response.get("table") or machine_response.get("table_data")
-        if isinstance(table_payload, dict):
-            candidates.append(("table", table_payload))
-        elif isinstance(table_payload, list) and table_payload:
-            candidates.append(("table", {"data": table_payload}))
-
-    for kind, payload in candidates:
-        result.append({
-            "type": kind,
-            "artifact_type": kind,
-            "renderer": _render_block_renderer(kind),
-            "viewer": _render_block_renderer(kind),
-            "payload": payload,
-            "content": "",
-            "text": "",
-            "scene_contract": True,
-            "provider_payload": True,
-            "canonical_provider_payload": True,
-        })
-    return result
 
 
 
@@ -1938,55 +1164,11 @@ def _materialize_artifacts_as_render_blocks(
     return result
 
 
-def _provider_visual_key(block: dict[str, Any]) -> str:
-    kind = _safe_text(block.get("type") or block.get("artifact_type")).lower()
-    if kind not in {"formula", "graph", "table", "diagram", "image", "gallery", "link", "file"}:
-        return ""
-    payload = block.get("payload") if isinstance(block.get("payload"), dict) else canonical_payload_for_block(block)
-    if kind in {"image", "gallery"}:
-        images = payload.get("images") or payload.get("gallery") or []
-        sources = []
-        if isinstance(images, list):
-            for item in images:
-                if isinstance(item, str):
-                    src = item
-                elif isinstance(item, dict):
-                    src = item.get("src") or item.get("url") or item.get("image") or item.get("asset_url")
-                else:
-                    src = ""
-                if src:
-                    sources.append(_safe_text(src))
-        if sources:
-            payload = {"sources": sorted(set(sources))}
-        else:
-            source = _safe_text(payload.get("src") or payload.get("url") or block.get("src") or block.get("url"))
-            payload = {"sources": [source]} if source else {"sources": []}
-    elif kind == "formula":
-        payload = {"formula": _normalize_formula_for_render(payload.get("formula") or payload.get("latex") or payload.get("equation") or payload.get("expression") or block.get("content"))}
-    elif kind == "diagram":
-        svg = _safe_text(payload.get("svg") or payload.get("drawing") or payload.get("svg_payload"))
-        payload = {"svg": " ".join(svg.split())} if svg else {
-            "nodes": payload.get("nodes") or [],
-            "edges": payload.get("edges") or [],
-            "elements": payload.get("elements") or payload.get("shapes") or [],
-            "points": payload.get("points") or [],
-        }
-    elif kind in {"link", "file"}:
-        url = _safe_text(block.get("url") or block.get("href") or payload.get("url") or payload.get("href"))
-        payload = {"url": url.split("#", 1)[0].rstrip("/").lower()}
-    try:
-        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-    except Exception:
-        raw = repr(payload)
-    return f"visual:{kind}:{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:20]}"
-
-
 def _dedupe_render_blocks(blocks: list[dict], answer: str, requested_outputs: list[str]) -> list[dict]:
     """Canonicalize one answer + structured artifacts without losing unique payloads."""
     clean = _clean_render_blocks(blocks)
     result: list[dict] = []
     seen = set()
-    semantic_seen: dict[str, int] = {}
     text_added = False
 
     for block in clean:
@@ -2011,19 +1193,7 @@ def _dedupe_render_blocks(blocks: list[dict], answer: str, requested_outputs: li
         sig = (btype, json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)[:8000])
         if sig in seen:
             continue
-        semantic_key = _provider_visual_key(block)
-        if semantic_key and semantic_key in semantic_seen:
-            previous_index = semantic_seen[semantic_key]
-            previous = result[previous_index]
-            previous_renderer = _safe_text(previous.get("renderer")).lower()
-            candidate_renderer = _safe_text(block.get("renderer")).lower()
-            generic = {"textblock", "messagetextblock", "markdownblock"}
-            if previous_renderer in generic and candidate_renderer not in generic:
-                result[previous_index] = block
-            continue
         seen.add(sig)
-        if semantic_key:
-            semantic_seen[semantic_key] = len(result)
         result.append(block)
 
     # Guarantee one text block, but do not duplicate a provider text block.
@@ -2150,7 +1320,7 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
             fields.append(("DIALOGUE_STRATEGY", _compact_value(strategy, max_depth=3, max_items=8, max_keys=12)))
         if isinstance(analysis, dict) and analysis.get("active"):
             # Compact delta only: the provider needs enough prior-content knowledge
-            # to avoid repetition, not the entire live dialogue ledger in prose.
+            # to avoid repetition, not the entire seven-day ledger in prose.
             delta = {
                 "mode": analysis.get("mode"),
                 "intent": analysis.get("intent"),
@@ -2168,17 +1338,17 @@ def _select_context_fields(payload: dict[str, Any]) -> list[tuple[str, Any]]:
         if isinstance(dialogue_memory, dict):
             compact_memory = _compact_value(
                 {
-                    "window_hours": dialogue_memory.get("window_hours", 12),
+                    "window_days": dialogue_memory.get("window_days", 7),
                     "active_sequence": dialogue_memory.get("active_sequence"),
                     "active_sequence_turns": dialogue_memory.get("active_sequence_turns"),
-                    "relevant_window_turns": dialogue_memory.get("relevant_window_turns"),
+                    "relevant_7d_turns": dialogue_memory.get("relevant_7d_turns"),
                 },
                 max_depth=5,
                 max_items=5,
                 max_keys=12,
             )
             if compact_memory:
-                fields.append(("TWELVE_HOUR_DIALOGUE_MEMORY", compact_memory))
+                fields.append(("SEVEN_DAY_DIALOGUE_MEMORY", compact_memory))
 
     if continuation and dialogue.get("previous_april_turn"):
         fields.append(("PREVIOUS_APRIL_TURN", dialogue.get("previous_april_turn")))
@@ -2329,10 +1499,8 @@ def _minimal_plan_context(plan: dict[str, Any]) -> dict[str, Any]:
     task = by_key.get("ACTIVE_TASK")
     if isinstance(task, dict):
         keep = (
-            "task_id", "sequence_id", "kind", "role", "phase", "expected_input_type", "topic", "goal",
-            "last_question", "candidate_answer", "last_user_answer", "last_answered_question",
-            "last_input_role", "last_input_confidence",
-            "response_count", "task_response_count", "last_result", "last_answer_basis",
+            "kind", "role", "phase", "expected_input_type", "topic", "goal",
+            "last_question", "candidate_answer", "last_user_answer",
         )
         out["active_task"] = {
             key: _semantic_excerpt(task.get(key), 160)
@@ -2340,22 +1508,9 @@ def _minimal_plan_context(plan: dict[str, Any]) -> dict[str, Any]:
             if task.get(key) not in (None, "", [], {})
         }
 
-    rules = by_key.get("DIALOGUE_RULES")
-    if isinstance(rules, dict) and rules:
-        out["dialogue_rules"] = _compact_value(rules, max_depth=2, max_items=6, max_keys=8)
-    sequence = by_key.get("RESPONSE_SEQUENCE")
-    if isinstance(sequence, dict) and sequence:
-        out["response_sequence"] = _compact_value(sequence, max_depth=2, max_items=6, max_keys=8)
-    result_state = by_key.get("TASK_RESULT_STATE")
-    if isinstance(result_state, dict) and result_state:
-        out["task_result_state"] = _compact_value(result_state, max_depth=3, max_items=6, max_keys=8)
-
     anchor = by_key.get("DIALOGUE_ANCHOR")
     if isinstance(anchor, dict):
-        keep = (
-            "previous_user_turn", "previous_april_turn", "topic", "entity", "turn_relation",
-            "current_turn_role", "answer_to_active_task", "active_question",
-        )
+        keep = ("previous_user_turn", "previous_april_turn", "topic", "entity", "turn_relation")
         out["dialogue_anchor"] = {
             key: _semantic_excerpt(anchor.get(key), 180)
             for key in keep
@@ -2419,42 +1574,16 @@ def _build_provider_user_text_from_plan(
         requested = [requested]
     requested = [x for x in requested if _safe_text(x).strip()]
 
-    # Diagram output is a semantic payload, not prose/ASCII art. Keep this contract
-    # tiny so the 900-token input ceiling is preserved.
-    diagram_requested = any(
-        _safe_text(x).strip().lower() == "diagram" for x in requested
-    )
-
-    # A NEW topic is isolated from other task operands, but a dialogue-level rule
-    # (for example sequential numbering) still belongs to the authenticated sequence.
-    # Preserve only the explicitly protected task-scoped sections; never import old topic data.
+    # A NEW topic is intentionally isolated.  The current request is the only
+    # conversational operand; semantic metadata is already encoded in the request
+    # and provider system contract. This prevents stale topic/entity leakage.
     if relation == "NEW" and bool(plan.get("new_topic_minimal_context")):
-        sections = {
-            _safe_text(x.get("key") or x.get("name")).upper(): x.get("value")
-            for x in list(plan.get("required_context") or [])
-            if isinstance(x, dict)
-        }
-        protected_parts = [
-            "APRIL CANONICAL REQUEST",
-            "REQUEST: " + current_request,
-            "RELATION: NEW",
-        ]
-        rules = sections.get("DIALOGUE_RULES")
-        if rules not in (None, "", [], {}):
-            protected_parts.append(_json_piece("DIALOGUE_RULES", rules, depth=2, items=6, keys=8))
-        sequence = sections.get("RESPONSE_SEQUENCE")
-        if sequence not in (None, "", [], {}):
-            protected_parts.append(_json_piece("RESPONSE_SEQUENCE", sequence, depth=2, items=6, keys=8))
-        result_state = sections.get("TASK_RESULT_STATE")
-        if result_state not in (None, "", [], {}):
-            protected_parts.append(_json_piece("TASK_RESULT_STATE", result_state, depth=3, items=6, keys=8))
-        protected_parts.append("RESPONSE_FORMAT: Return exactly one complete logical answer as MachineResponse JSON.")
-        minimal = "\n".join(protected_parts)
+        minimal = "APRIL CANONICAL REQUEST\nREQUEST: " + current_request
         return minimal, {
             "provider_context_plan_version": _safe_text(plan.get("version")),
             "provider_context_authority": "INTERPRETATION",
             "provider_must_not_reselect_context": True,
-            "plan_required_selected": ["CURRENT_REQUEST", "DIALOGUE_RULES", "RESPONSE_SEQUENCE", "TASK_RESULT_STATE"],
+            "plan_required_selected": ["CURRENT_REQUEST"],
             "plan_optional_candidates": [],
             "plan_excluded": [
                 _safe_text(x.get("key") or x.get("name"))
@@ -2475,10 +1604,6 @@ def _build_provider_user_text_from_plan(
         "REQUESTED: " + json.dumps(requested[:6], ensure_ascii=False, separators=(",", ":")),
         "RESPONSE_FORMAT: Return exactly one complete logical answer as MachineResponse JSON. Use only the supplied context plan.",
     ]
-    if diagram_requested:
-        mandatory.append(
-            "DIAGRAM_OUTPUT: include one complete structured diagram object; nodes must carry id, ref (when determinable), kind, symbol (when determinable), label, value/rating when explicitly known, and known terminals/ports; edges must carry from, to, from_terminal/to_terminal when known, net/wire/label when known; include diagram_type, direction, title, legend/notes when useful; when formula+diagram are requested together, link the same-turn formula relation/variables into diagram notes or linked_formula without inventing numeric values; preserve every requested connection; keep answer text concise; do not substitute ASCII/text for diagram data and never invent unknown component ratings or terminals."
-        )
 
     development = plan.get("dialogue_development")
     # CONTINUE already carries the compact DIALOGUE_ANCHOR +
@@ -2490,18 +1615,10 @@ def _build_provider_user_text_from_plan(
             _json_piece("DIALOGUE_DEVELOPMENT", development, depth=3, items=4, keys=7)
         )
     if any(_safe_text(x).strip().lower() == "image_generation" for x in requested):
-        visual_generation_request = _safe_text(
-            (payload.get("constraints") or {}).get("metadata", {}).get("visual_generation_request")
-            if isinstance(payload.get("constraints"), dict) and isinstance((payload.get("constraints") or {}).get("metadata"), dict)
-            else ""
-        ).strip()
-        if visual_generation_request:
-            mandatory.append("VISUAL_GENERATION_REQUEST: " + visual_generation_request)
         mandatory.extend([
             "IMAGE_GENERATION_HANDOFF: emit metadata.image_generation_signal in the same response; route=C_APRIL_IMAGES_GENERATOR, execute=true, request_anchor=REQUEST exactly, prompt_source=OPENAI_STRUCTURED_VISUAL_PLAN, target_model=gpt-image-2, single_route=true.",
-            "IMAGE_GENERATION_PROMPT_RULE: metadata.image_generation_spec.prompt and image_generation_signal.prompt must carry the semantic visual generation meaning selected by Interpretation. If VISUAL_GENERATION_REQUEST is supplied for an elliptical reference, it is the authoritative subject for generation; request_anchor remains the exact current user trigger. Never replace the resolved visual subject with the trigger sentence.",
+            "IMAGE_GENERATION_PROMPT_RULE: metadata.image_generation_spec.prompt and image_generation_signal.prompt must carry the OpenAI-authored semantic visual generation meaning; request_anchor remains the exact current user trigger. Preserve the OpenAI-described subject and attributes, and never replace the semantic plan with the trigger sentence.",
             "GPT_IMAGE_2_TARGET: prepare a concrete visual generation prompt for gpt-image-2; one scene, explicit subject first, requested attributes only, no conversational filler, no prior-scene carryover, no pixels/URLs/data URIs/alternate providers.",
-            "IMAGE_TEXT_RULE: when image_generation is requested, do not emit ASCII art or a text drawing of the image; the text channel may contain only a short status/caption and the actual visual must be produced by C_APRIL_IMAGES_GENERATOR.",
         ])
 
     required = [
@@ -2579,6 +1696,7 @@ def _build_provider_user_text(payload: dict[str, Any], budget_tokens: int) -> st
             value = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
         return f"{label}: {value}"
 
+    dialogue = _dialogue_contract(payload)
     mandatory = [
         "APRIL CANONICAL REQUEST",
         render("REQUEST", fields[0][1]),
@@ -2586,6 +1704,20 @@ def _build_provider_user_text(payload: dict[str, Any], budget_tokens: int) -> st
         render("COMPLEXITY", complexity),
         render("OUTPUT_CAP", output_tokens),
     ]
+
+    # Interpretation is the sole owner of context selection.  When a turn is
+    # CONTINUE, the selected semantic operand is protected as mandatory context
+    # so the Provider cannot silently fall back to the most recent pair.
+    selected_operand = dialogue.get("selected_memory_operand")
+    if dialogue.get("continuation") and isinstance(selected_operand, dict) and selected_operand:
+        protected = {
+            "index": selected_operand.get("index"),
+            "user": selected_operand.get("user", ""),
+            "april": selected_operand.get("april", ""),
+            "entities": selected_operand.get("entities", []),
+        }
+        mandatory.append(render("SELECTED_DIALOGUE_OPERAND", protected))
+        mandatory.append(render("DIALOGUE_SELECTION_RULE", "Use the selected operand as the context target; do not reselect another pair."))
 
     pieces = list(mandatory)
     used = _estimate_input_tokens("\n".join(pieces))
@@ -2670,11 +1802,9 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     if _estimate_input_tokens(system_prompt) > 420:
         system_prompt = (
             "April internal response provider. Return exactly one MachineResponse JSON object. "
-            "Quantum Processor owns current request, relation, task, representation and context plan. For diagram/electrical_schematic output, return real circuit topology: nodes with ref/kind/symbol/ports and edges with from/to/from_terminal/to_terminal plus known wire/net labels; keep source positive and negative terminals distinct; include only explicitly known values/ratings. "
-            "DIALOGUE_RULES/OUTPUT_RULE/RESPONSE_SEQUENCE are internal semantic metadata only; never emit counters, letters, "
-            "markers or branch labels. The current request is authoritative; TASK_RESULT_STATE is supplied history only. "
-            "Use only supplied context; never reselect or reinterpret branch state. "
-            "do not reselect, search, reinterpret or substitute context. Never expose internal state."
+            "Quantum Processor owns current request, dialogue relation, task, representation and context plan. "
+            "Use only the supplied context plan. Do not add, search, reinterpret or substitute context. "
+            "Preserve requested structured representations and never expose internal state."
         )
 
     # New canonical path: Interpretation has already selected context semantically.
@@ -2850,7 +1980,7 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         )
     elif effective_mode == "diagram":
         mandatory.append(
-            "MODE_RULE: return one complete diagram object with compact nodes[{id,label,kind}] and edges[{from,to,label}]; preserve every requested connection; keep answer concise; no ASCII substitute."
+            "MODE_RULE: return one complete diagram with explicit nodes/edges or vector shapes; no duplicates."
         )
     elif effective_mode == "graph":
         mandatory.append(
@@ -2909,24 +2039,10 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         if isinstance(dialogue.get("interactive_task_state"), dict)
         else dialogue.get("open_task")
         if isinstance(dialogue.get("open_task"), dict)
+        else payload.get("interactive_task_state")
+        if isinstance(payload.get("interactive_task_state"), dict)
         else {}
     )
-    task_sequence_id = _safe_text(task_state.get("sequence_id") or task_state.get("active_sequence_id")) if isinstance(task_state, dict) else ""
-    dialogue_sequence_id = _safe_text(
-        dialogue.get("sequence_id")
-        or dialogue.get("target_sequence_id")
-    )
-    task_owned = bool(
-        dialogue.get("task_continuation")
-        or dialogue.get("task_action")
-        or dialogue.get("task_definition")
-    )
-    if dialogue_sequence_id and task_sequence_id and task_sequence_id != dialogue_sequence_id:
-        task_state = {}
-    elif relation == "NEW" and not task_owned:
-        task_state = {}
-    elif relation == "CONTINUE" and not task_owned:
-        task_state = {}
     task_memory = (
         dialogue.get("task_memory")
         if isinstance(dialogue.get("task_memory"), dict)
@@ -3090,8 +2206,8 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
                 if compact:
                     recent.append(compact)
             if recent:
-                optional.append(("dialogue_window_memory", _json_piece(
-                    "MEMORY_EVIDENCE", {"window_hours": dialogue_memory.get("window_hours", 12), "recent": recent},
+                optional.append(("seven_day_memory", _json_piece(
+                    "MEMORY_EVIDENCE", {"window_days": dialogue_memory.get("window_days", 7), "recent": recent},
                     depth=3, items=3, keys=4
                 )))
 
@@ -3602,42 +2718,6 @@ def _image_prompt_from_provider_payload(value: Any) -> str:
         candidate = _image_prompt_from_provider_payload(nested)
         if candidate:
             return candidate
-
-    # OpenAI can return the actual same-turn visual plan as an SVG object:
-    # {format: "svg", content: "<svg>...<text>Квадрат</text>..."}.  It is a
-    # structured plan, not a prose prompt, so recover only its semantic labels
-    # here.  This prevents a deictic trigger such as "нарисуй их" from replacing
-    # the resolved subject while preserving the original SVG in raw-plan storage.
-    nested_image = value.get("image") if isinstance(value.get("image"), dict) else None
-    if nested_image and isinstance(value.get("text"), str):
-        text_hint = re.sub(r"\s+", " ", value.get("text", "")).strip()
-        if text_hint and len(text_hint) <= 1600:
-            # Keep it as semantic evidence only when the nested image has no richer
-            # prompt/description. The original request remains request_anchor.
-            if _safe_text(nested_image.get("format")).strip().lower() not in {"svg", "xml"}:
-                return text_hint
-
-    fmt = _safe_text(value.get("format")).strip().lower()
-    svg_content = value.get("content") or value.get("data")
-    if fmt in {"svg", "xml"} and isinstance(svg_content, str):
-        labels = []
-        seen = set()
-        for match in re.finditer(r"<text\b[^>]*>(.*?)</text>", svg_content, flags=re.IGNORECASE | re.DOTALL):
-            label = re.sub(r"<[^>]+>", " ", match.group(1))
-            label = (label.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-                     .replace("&quot;", '"').replace("&#39;", "'") )
-            label = re.sub(r"\s+", " ", label).strip()
-            if not label:
-                continue
-            key_label = label.casefold()
-            if key_label in seen:
-                continue
-            seen.add(key_label)
-            labels.append(label)
-            if len(labels) >= 8:
-                break
-        if labels:
-            return "Визуальный план: " + "; ".join(labels)
     return ""
 
 
@@ -4394,23 +3474,9 @@ def _top_level_visual_block(kind: str, value: Any) -> dict[str, Any] | None:
         return None
 
     # Other structured top-level fields already carry a semantic payload.
-    # Scalar values must stay bound to their semantic field; using a generic
-    # ``content`` carrier makes the structured validator reject formula/link/
-    # graph values during provider finalization.
-    if isinstance(value, dict):
-        payload = dict(value)
-    elif value not in (None, ""):
-        scalar_key = {
-            "formula": "formula",
-            "graph": "data",
-            "table": "data",
-            "diagram": "svg" if isinstance(value, str) else "data",
-            "code": "code",
-            "link": "url",
-        }.get(kind, "content")
-        payload = {scalar_key: value}
-    else:
-        payload = {}
+    payload = dict(value) if isinstance(value, dict) else (
+        {"content": value} if value not in (None, "") else {}
+    )
     if not payload:
         return None
     return {
@@ -4545,8 +3611,7 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
     ).lower()
     image_generation_mode = visual_mode == "image_generation"
     fallback_image_prompt = _safe_text(
-        (source_payload.get("intent") or {}).get("visual_generation_request")
-        or (source_payload.get("intent") or {}).get("semantic_request")
+        (source_payload.get("intent") or {}).get("semantic_request")
         or (source_payload.get("intent") or {}).get("resolved_request")
         or _extract_request_text(source_payload)
         or (source_payload.get("conversation") or {}).get("resolved_request")
@@ -4696,14 +3761,6 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             and signal_prompt
         )
 
-        visual_generation_request = ""
-        source_metadata = source_request.get("constraints", {}).get("metadata") if isinstance(source_request.get("constraints"), dict) and isinstance(source_request.get("constraints", {}).get("metadata"), dict) else {}
-        visual_generation_request = _safe_text(
-            source_metadata.get("visual_generation_request")
-            or (source_request.get("conversation") or {}).get("visual_generation_request")
-            or (source_request.get("dialogue_contract") or {}).get("visual_generation_request")
-        ).strip()
-
         normalized_spec = _build_image_generation_spec_from_provider(
             candidate_spec if isinstance(candidate_spec, dict) else canonical_payload.get("image"),
             fallback_prompt=fallback_image_prompt,
@@ -4726,9 +3783,6 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
                 normalized_spec.get("visual_context"),
                 semantic_generation_prompt,
             )
-            if visual_generation_request:
-                semantic_generation_prompt = visual_generation_request
-                normalized_spec["openai_structured_visual_plan_semantic"] = visual_generation_request
             normalized_spec["prompt"] = semantic_generation_prompt
             normalized_spec["request_anchor"] = fallback_image_prompt
             normalized_spec["render_profile"] = profile["name"]
@@ -4739,7 +3793,6 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             metadata["image_generation_prompt_grounding"] = "OPENAI_SEMANTIC_PLAN_PLUS_STRUCTURED_PLAN"
             metadata["image_generation_user_trigger"] = fallback_image_prompt
             metadata["image_generation_semantic_prompt"] = semantic_generation_prompt[:12000]
-            metadata["visual_generation_request"] = visual_generation_request
             metadata["image_render_profile"] = profile["name"]
             metadata["image_render_profile_source"] = profile["source"]
             metadata["openai_structured_visual_plan_preserved"] = raw_plan is not None
@@ -4885,12 +3938,8 @@ def provider_finalize_for_executor(contract: dict) -> dict:
         requested_outputs = ["text"]
     mr.setdefault("metadata", {})["canonical_output_plan_before_finalize"] = list(requested_outputs)
 
-    # Preserve the provider's original answer as the source for visual data.
-    # The visible text is cleaned only after structured render payloads are materialized.
-    raw_answer_for_visuals = answer
+    # Remove duplicated full structured representations from the narrative channel.
     answer = _strip_duplicate_structured_text(answer, requested_outputs)
-    if image_generation_preview and not answer:
-        answer = "Готово — изображение подготовлено."
 
     constraints = payload.get("constraints", {}) if isinstance(payload.get("constraints"), dict) else {}
     metadata = constraints.get("metadata", {}) if isinstance(constraints.get("metadata"), dict) else {}
@@ -4919,11 +3968,8 @@ def provider_finalize_for_executor(contract: dict) -> dict:
 
     mr["answer"] = answer
     mr["content"] = answer
-    mr.setdefault("metadata", {})["post_provider_render_stage"] = "AFTER_PROVIDER"
-    mr.setdefault("metadata", {})["post_provider_render_authority"] = "EXECUTOR_SCENE_CONTRACT"
-    # The same cleaned narrative is used by all downstream Scene builders.
-    # Structured visual payloads live only in render_blocks.
-    mr["response"] = _strip_image_technical_fallback(answer) if image_generation_preview else answer
+    response_text = normalize_response_text(mr.get("response") or answer)
+    mr["response"] = _strip_image_technical_fallback(response_text) if image_generation_preview else response_text
     mr["content"] = _strip_image_technical_fallback(mr["content"]) if image_generation_preview else mr["content"]
 
     original_blocks = mr.get("render_blocks") or []
@@ -4940,12 +3986,6 @@ def provider_finalize_for_executor(contract: dict) -> dict:
     original_blocks = _materialize_artifacts_as_render_blocks(
         mr["artifacts"],
         original_blocks,
-    )
-    original_blocks = _materialize_provider_visual_fields(
-        mr,
-        original_blocks,
-        requested_outputs,
-        raw_answer_for_visuals,
     )
     mr["render_blocks"] = _dedupe_render_blocks(
         original_blocks,
