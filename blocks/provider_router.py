@@ -3697,6 +3697,39 @@ def _is_image_technical_fallback(value: Any) -> bool:
     return raw == expected
 
 
+def _recover_human_answer_from_structured_outputs(payload: Any, *, text_only: bool = False) -> str:
+    """Recover a concise human answer from a structured provider envelope.
+
+    Transport recovery only. It never authorizes an image route.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    outputs = payload.get("outputs")
+    if not isinstance(outputs, list):
+        return ""
+    candidates: list[str] = []
+    for item in outputs[:8]:
+        if not isinstance(item, dict):
+            continue
+        value = _safe_text(
+            item.get("text")
+            or item.get("answer")
+            or item.get("content")
+            or item.get("name")
+            or item.get("title")
+            or ""
+        ).strip()
+        if not value and _safe_text(item.get("type")).lower() in {"image", "gallery"}:
+            prompt = _safe_text(item.get("prompt") or item.get("description") or "").strip()
+            if prompt:
+                value = re.split(r"\s[—–-]\s", prompt, maxsplit=1)[0].strip() or prompt
+        if value:
+            candidates.append(value)
+    if not candidates:
+        return ""
+    return ", ".join(dict.fromkeys(candidates))[:1200] if text_only else candidates[0][:1200]
+
+
 def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[str, Any]:
     if isinstance(raw_text, dict) and raw_text.get("type") == "provider_response":
         return raw_text
@@ -3786,6 +3819,23 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
                     answer = candidate
                     break
 
+    # Some Responses/API variants return a structured MachineResponse with
+    # `outputs` but no narrative answer. If the processor requested text, recover
+    # the human-readable subject instead of manufacturing a generic failure.
+    source_is_text_only = bool(
+        source_outputs
+        and all(item in {"text", "markdown"} for item in source_outputs)
+    )
+    structured_output_recovery_used = False
+    if not answer:
+        recovered_structured = _recover_human_answer_from_structured_outputs(
+            canonical_payload,
+            text_only=source_is_text_only and not image_generation_mode,
+        )
+        if recovered_structured:
+            answer = recovered_structured
+            structured_output_recovery_used = True
+
     # This is transport-level text emitted by the first OpenAI step. Keep it in
     # IMAGE PROMPT TRACE: OPENAI RAW OUTPUT, but never allow it into the visible
     # provider answer or downstream image-generation content.
@@ -3813,8 +3863,7 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         answer = _recover_answer_from_source_request(source_request)
         recovery_used = bool(answer)
     if not answer:
-        answer = "Не удалось сформировать ответ."
-        recovery_used = True
+        raise RuntimeError("EMPTY_PROVIDER_ANSWER")
 
     # Never preserve a machine JSON envelope as visible content. The canonical
     # human content follows the already-unwrapped answer.
@@ -3868,6 +3917,7 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         "parsed_answer_chars": len(answer),
         "parsed_content_chars": len(content),
         "canonical_answer_recovery_used": bool(recovery_used),
+        "structured_output_answer_recovery_used": bool(structured_output_recovery_used),
         "parsed_render_blocks": len(canonical_payload.get("render_blocks") or []) if isinstance(canonical_payload.get("render_blocks"), list) else 0,
         "parsed_artifacts": len(canonical_payload.get("artifacts") or []) if isinstance(canonical_payload.get("artifacts"), list) else 0,
     }
