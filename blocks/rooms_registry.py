@@ -2173,11 +2173,9 @@ def _provider_markdown_graph_block(provider_response: Optional[MachineResponse])
 def _provider_structured_block(provider_response: Optional[MachineResponse], kind: str) -> dict[str, Any]:
     """Return the provider block already carrying the requested structure.
 
-    The Room Register never decides what the user meant.  When Interpretation
-    has already authorized a diagram but the model returned only an ASCII
-    fenced drawing, preserve that exact provider payload as diagram source so
-    C_DIAGRAM_ROOM can render it.  This is transport preservation, not semantic
-    inference and not a parallel/fallback route.
+    The Room Register never decides what the user meant. It only preserves
+    structured provider blocks that match the representation authorized by
+    Interpretation. Text-only diagram output is not converted into a diagram block.
     """
     if provider_response is None:
         return {}
@@ -2190,32 +2188,6 @@ def _provider_structured_block(provider_response: Optional[MachineResponse], kin
         ).strip().lower()
         if raw_kind == wanted:
             return dict(raw)
-
-    if wanted == "diagram":
-        answer = str(
-            getattr(provider_response, "answer", "")
-            or getattr(provider_response, "content", "")
-            or getattr(provider_response, "response", "")
-            or ""
-        ).strip()
-        if answer and "```" in answer and any(ch in answer for ch in ("──", "│", "┌", "┐", "└", "┘", "→", "←")):
-            match = re.search(r"```(?:text|ascii|diagram|txt)?\s*\n?(.*?)```", answer, flags=re.IGNORECASE | re.DOTALL)
-            ascii_source = (match.group(1) if match else answer).strip()
-            if ascii_source:
-                return {
-                    "type": "diagram",
-                    "artifact_type": "diagram",
-                    "renderer": "DiagramRenderer",
-                    "viewer": "DiagramRenderer",
-                    "payload": {
-                        "ascii": ascii_source,
-                        "ascii_preview": ascii_source,
-                        "representation": "schematic",
-                        "source": "provider_ascii_payload",
-                    },
-                    "scene_contract": True,
-                    "human_visible": True,
-                }
 
     if wanted == "graph":
         graph_block = _provider_markdown_graph_block(provider_response)
