@@ -7142,3 +7142,217 @@ def build_quantum_memory_signal(user_id, query="", limit=8):
         "evidence_only": True,
         "memory_source": "USER_APRIL_PAIRS",
     }
+
+
+# ============================================================================
+# FINAL CANONICAL 12H USER MEMORY RUNTIME PATCH — 2026-10-04
+# ============================================================================
+# This section intentionally overrides the older compatibility definitions above.
+# The production hot path is:
+#   authenticated user -> load USER↔APRIL pairs once per process/cycle ->
+#   Interpretation reads pairs -> Provider receives pair trajectory ->
+#   completed pair is persisted -> lightweight UTC worker performs deletion.
+# No entity/topic archive participates in continuation.
+
+try:
+    from storage import resolve_authenticated_user_id as _resolve_authenticated_user_id
+except Exception:
+    _resolve_authenticated_user_id = None
+
+_FAST_MEMORY_CACHE_LOCK = threading.RLock()
+_FAST_MEMORY_DB_HYDRATED: set[str] = set()
+_FAST_MEMORY_DB_IDS: dict[str, str] = {}
+_FAST_MEMORY_CYCLE_KEYS: dict[str, str] = {}
+
+
+def _fast_memory_cycle_key() -> str:
+    try:
+        return utc_cycle_start(time.time()).strftime("%Y-%m-%dT%H:%M:%SZ") if callable(utc_cycle_start) else ""
+    except Exception:
+        return ""
+
+
+def invalidate_user_memory_cache(user_id: Any) -> None:
+    """Force the next request to re-read this authenticated user's 12h pair memory."""
+    uid = _clean_uid(user_id)
+    if not uid:
+        return
+    with _FAST_MEMORY_CACHE_LOCK:
+        _FAST_MEMORY_DB_HYDRATED.discard(uid)
+        _FAST_MEMORY_DB_IDS.pop(uid, None)
+        _FAST_MEMORY_CYCLE_KEYS.pop(uid, None)
+
+
+def _fast_memory_auth_id(uid: str) -> str:
+    if callable(_resolve_authenticated_user_id):
+        try:
+            return str(_resolve_authenticated_user_id(uid) or "").strip()
+        except Exception:
+            return ""
+    try:
+        return uid if callable(is_authenticated_user) and is_authenticated_user(uid) else ""
+    except Exception:
+        return ""
+
+
+def _fast_memory_load(uid: str, *, force: bool = False) -> dict[str, Any]:
+    cycle_key = _fast_memory_cycle_key()
+    with _FAST_MEMORY_CACHE_LOCK:
+        hydrated = uid in _FAST_MEMORY_DB_HYDRATED
+        previous_cycle = _FAST_MEMORY_CYCLE_KEYS.get(uid, "")
+        db_uid = _FAST_MEMORY_DB_IDS.get(uid, "")
+        if not force and hydrated and previous_cycle == cycle_key:
+            return state.get(uid) if isinstance(state.get(uid), dict) else build_default_state()
+        if not db_uid:
+            db_uid = _fast_memory_auth_id(uid)
+        if not db_uid:
+            obj = state.get(uid) if isinstance(state.get(uid), dict) else build_default_state()
+            obj = _clean_runtime_memory_scope(obj, uid, [])
+            obj["memory_scope"] = {
+                "user_id": uid,
+                "authenticated": False,
+                "persistence": "disabled",
+                "source": "auth_required",
+                "window_hours": DIALOGUE_WINDOW_HOURS,
+                "seed_hours": DIALOGUE_SEED_HOURS,
+            }
+            state[uid] = obj
+            # Do not negative-cache authentication. Login may be established
+            # immediately after this request.
+            return obj
+
+        try:
+            rows = load_dialogue_pairs(db_uid, limit=0) if callable(load_dialogue_pairs) else []
+        except Exception as exc:
+            safe_state_log(f"PAIR LOAD ERROR: {exc}")
+            rows = []
+        rows = [p for p in (_clean_pair_from_row(x) for x in rows) if p]
+        obj = state.get(uid) if isinstance(state.get(uid), dict) else build_default_state()
+        obj = _clean_runtime_memory_scope(obj, uid, rows)
+        obj["memory_scope"] = {
+            "user_id": uid,
+            "db_user_id": db_uid,
+            "authenticated": True,
+            "persistence": "dialogue_memory",
+            "window_hours": DIALOGUE_WINDOW_HOURS,
+            "seed_hours": DIALOGUE_SEED_HOURS,
+            "source": "POSTGRES_DIALOGUE_MEMORY_PAIRS",
+            "cycle_key_utc": cycle_key,
+        }
+        state[uid] = obj
+        _FAST_MEMORY_DB_HYDRATED.add(uid)
+        _FAST_MEMORY_DB_IDS[uid] = db_uid
+        _FAST_MEMORY_CYCLE_KEYS[uid] = cycle_key
+        return obj
+
+
+def get_state(user_id):
+    """Fast per-user state access with one DB hydration per UTC cycle/process."""
+    uid = _clean_uid(user_id)
+    if not uid:
+        return build_default_state()
+    with _state_lock:
+        obj = _fast_memory_load(uid)
+        # Keep the hot UI dialogue buffer tiny. The 12h archive lives only in
+        # memory_timeline.day_0 + PostgreSQL dialogue_memory.
+        dialog = obj.get("dialog")
+        if isinstance(dialog, list) and len(dialog) > CANONICAL_DIALOG_HOT_LIMIT:
+            obj["dialog"] = dialog[-CANONICAL_DIALOG_HOT_LIMIT:]
+        return obj
+
+
+def persist_state(user_id):
+    """Compatibility no-op. UTC cleanup is handled by the dedicated storage worker."""
+    return get_state(user_id)
+
+
+def persist_state_background(user_id):
+    """Compatibility no-op; canonical pair writes happen at completed-turn commit."""
+    return get_state(user_id)
+
+
+def _fast_runtime_rows(uid: str) -> list[dict[str, Any]]:
+    obj = get_state(uid)
+    timeline = obj.get("memory_timeline") if isinstance(obj.get("memory_timeline"), dict) else {}
+    day = timeline.get("day_0") if isinstance(timeline.get("day_0"), dict) else {}
+    rows = day.get("dialog_pairs") if isinstance(day.get("dialog_pairs"), list) else []
+    return [p for p in (_clean_pair_from_row(x) for x in rows) if p]
+
+
+def update_scene_context(
+    user_id,
+    contract,
+    *,
+    current_request=None,
+    answer=None,
+    provider_result=None,
+    visual_generation_memory=None,
+    internal_context=False,
+    persist=True,
+):
+    """Canonical scene commit + one authenticated USER↔APRIL pair write."""
+    result = _ORIGINAL_UPDATE_SCENE_CONTEXT_PAIR_MEMORY(
+        user_id,
+        contract,
+        current_request=current_request,
+        answer=answer,
+        provider_result=provider_result,
+        visual_generation_memory=visual_generation_memory,
+        internal_context=bool(internal_context),
+        persist=False,
+    )
+    if internal_context:
+        return result
+
+    uid = _clean_uid(user_id)
+    request_text = str(current_request or "").strip()
+    answer_text = str(answer or "").strip()
+    state_obj = get_state(uid)
+    scope = state_obj.get("memory_scope") if isinstance(state_obj.get("memory_scope"), dict) else {}
+    if not bool(scope.get("authenticated")) or not request_text or not answer_text:
+        return result
+
+    rows = _fast_runtime_rows(uid)
+    duplicate = any(
+        str(row.get("user_text") or "").strip() == request_text
+        and str(row.get("april_text") or "").strip() == answer_text
+        for row in rows[-2:]
+    )
+    if duplicate:
+        return result
+
+    created_ts = time.time()
+    turn_index = max((int(row.get("turn_index") or 0) for row in rows), default=0) + 1
+    try:
+        saved = bool(save_dialogue_pair(
+            uid,
+            request_text,
+            answer_text,
+            created_at=created_ts,
+            turn_index=turn_index,
+        ))
+    except Exception as exc:
+        saved = False
+        safe_state_log(f"PAIR PERSIST ERROR: {exc}")
+    if not saved:
+        return result
+
+    # Update the per-user runtime immediately; do not perform a second SELECT.
+    pair = {
+        "user_id": str(scope.get("db_user_id") or uid),
+        "created_at": created_ts,
+        "turn_index": turn_index,
+        "user_text": request_text,
+        "april_text": answer_text,
+    }
+    current_rows = _fast_runtime_rows(uid)
+    current_rows.append(pair)
+    current_rows = [p for p in current_rows if float(p.get("created_at") or 0.0) >= (time.time() - DIALOGUE_WINDOW_SECONDS)]
+    with _state_lock:
+        obj = state.get(uid) if isinstance(state.get(uid), dict) else build_default_state()
+        _clean_runtime_memory_scope(obj, uid, current_rows)
+        state[uid] = obj
+        _FAST_MEMORY_DB_HYDRATED.add(uid)
+        _FAST_MEMORY_DB_IDS[uid] = str(scope.get("db_user_id") or uid)
+        _FAST_MEMORY_CYCLE_KEYS[uid] = _fast_memory_cycle_key()
+    return result
