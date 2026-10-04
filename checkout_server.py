@@ -74,6 +74,7 @@ from storage import (
     find_or_create_user,
     init_db
 )
+from blocks.state_manager import invalidate_user_memory_cache
 
 from core.executor import execute
 from blocks.state_manager import (
@@ -92,6 +93,14 @@ from blocks.image_engine import (
 from blocks.provider_router import (
     transcribe_voice
 )
+
+# Database schema must exist even when Railway/Gunicorn imports checkout_server:app
+# instead of executing `python checkout_server.py`.
+try:
+    init_db()
+except Exception as _storage_boot_error:
+    print("STATE: POSTGRES INIT ERROR:", _storage_boot_error, flush=True)
+
 
 
 # =========================================================
@@ -2254,6 +2263,9 @@ def find_or_create_user_route():
             provider=provider,
             provider_user_id=provider_user_id
         )
+
+        if user:
+            invalidate_user_memory_cache(user.get("april_id") or user.get("user_id") or "")
 
         return jsonify({
             "success": True,
