@@ -634,8 +634,9 @@ def machine_request_to_dict(machine_request: Any) -> dict[str, Any]:
             if value not in (None, "", [], {}):
                 raw[name] = value
         # Executor-added attributes are read from the same MachineRequest,
-        # not from a second route.
-        for name in ("dialogue_contract", "semantic", "response_decision"):
+        # not from a second route. Provider context is included here too so a
+        # compact/serialized conversation cannot silently erase the frozen plan.
+        for name in ("dialogue_contract", "semantic", "response_decision", "provider_context_plan"):
             value = getattr(machine_request, name, None)
             if isinstance(value, dict) and value:
                 raw[name] = value
@@ -1811,8 +1812,92 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     # Provider only serializes and compresses the plan to <= 900 total input tokens.
     provider_plan = _provider_context_plan(payload)
     dialogue_contract = _dialogue_contract(payload)
+
+    # The Provider must not reinterpret context, but a missing transport copy of
+    # the already-frozen plan must never become a Web 500/empty assistant bubble.
+    # Reconstruct only the minimum canonical envelope from Interpretation-owned
+    # fields already present on this MachineRequest. No memory search or topic
+    # selection is performed here. The full plan remains authoritative whenever
+    # it is available.
     if dialogue_contract and not provider_plan:
-        raise RuntimeError("DIALOGUE_PROVIDER_PLAN_MISSING")
+        relation = _safe_text(
+            dialogue_contract.get("three_way_relation")
+            or dialogue_contract.get("relation")
+            or "NEW"
+        ).upper()
+        relation = {
+            "NEW_TOPIC": "NEW",
+            "INDEPENDENT": "NEW",
+            "SAME_TOPIC": "NEW",
+            "CONTINUE_TOPIC": "CONTINUE",
+            "CONTINUATION": "CONTINUE",
+            "MEMORY_QUERY": "RECALL",
+        }.get(relation, relation)
+        if relation not in {"NEW", "CONTINUE", "RECALL"}:
+            relation = (
+                "RECALL" if dialogue_contract.get("reference_to_previous")
+                else "CONTINUE" if dialogue_contract.get("continuation")
+                else "NEW"
+            )
+        current_request = _safe_text(
+            dialogue_contract.get("current_request")
+            or dialogue_contract.get("resolved_request")
+            or _extract_request_text(payload)
+        )
+        semantic_frame = dialogue_contract.get("semantic_frame") if isinstance(dialogue_contract.get("semantic_frame"), dict) else {}
+        provider_plan = {
+            "version": "april_provider_handoff_transport_recovery_v1",
+            "relation": relation,
+            "turn_relation": _safe_text(dialogue_contract.get("turn_relation") or relation),
+            "current_user_request": current_request,
+            "current_request_authoritative": True,
+            "context_selection_done_before_provider": True,
+            "provider_must_not_reselect_context": True,
+            "hard_budget_tokens": INPUT_TOKEN_BUDGET,
+            "soft_target_tokens": min(820, INPUT_TOKEN_BUDGET),
+            "new_topic_minimal_context": relation == "NEW",
+            "required_context": [
+                {
+                    "key": "SEMANTIC_CORE",
+                    "priority": 1.0,
+                    "value": {
+                        "topic": dialogue_contract.get("canonical_topic") or semantic_frame.get("topic"),
+                        "entity": dialogue_contract.get("active_entity") or semantic_frame.get("entity"),
+                        "operation": semantic_frame.get("operation"),
+                        "goal": semantic_frame.get("goal"),
+                        "representation": semantic_frame.get("representation"),
+                    },
+                },
+                {
+                    "key": "OUTPUT_CONTRACT",
+                    "priority": 0.99,
+                    "value": {
+                        "representation": semantic_frame.get("representation"),
+                        "requested_outputs": payload.get("requested_outputs") or [],
+                    },
+                },
+            ],
+            "optional_context": [],
+            "excluded_context": ["FULL_HISTORY", "OTHER_TOPIC_BRANCHES", "STALE_GLOBAL_ENTITY"],
+        }
+        selected_operand = dialogue_contract.get("selected_memory_operand")
+        if relation in {"CONTINUE", "RECALL"} and isinstance(selected_operand, dict) and selected_operand:
+            provider_plan["required_context"].append({
+                "key": "DIALOGUE_ANCHOR",
+                "priority": 0.995,
+                "value": {
+                    "previous_user_turn": dialogue_contract.get("previous_user_turn", ""),
+                    "previous_april_turn": dialogue_contract.get("previous_april_turn", ""),
+                    "selected_memory_operand": selected_operand,
+                    "sequence_id": dialogue_contract.get("sequence_id", ""),
+                },
+            })
+        provider_log({
+            "provider_context_plan_recovered": True,
+            "provider_context_plan_recovery_reason": "transport_copy_missing",
+            "provider_context_authority": "INTERPRETATION",
+            "relation": relation,
+        })
     if provider_plan:
         authoritative_request = _safe_text(provider_plan.get("current_user_request"))
         payload_request = _extract_request_text(payload)
@@ -4136,7 +4221,7 @@ async def generate_text(messages: Any, temperature: Any = None,
             "input_token_budget": INPUT_TOKEN_BUDGET,
             "single_call": True,
             "no_model_escalation": True,
-            "provider_context_plan_version": _safe_text(provider_plan.get("version")),
+            "provider_context_plan_version": _safe_text(provider_plan.get("version") if isinstance(provider_plan, dict) else ""),
             "provider_context_authority": "INTERPRETATION" if provider_plan else "LEGACY",
             "provider_must_not_reselect_context": bool(provider_plan),
         })
@@ -4247,7 +4332,7 @@ async def generate_text(messages: Any, temperature: Any = None,
             "response_complexity": complexity,
             "response_output_tokens": output_tokens,
             "input_token_budget": INPUT_TOKEN_BUDGET,
-            "provider_context_plan_version": _safe_text(provider_plan.get("version")),
+            "provider_context_plan_version": _safe_text(provider_plan.get("version") if isinstance(provider_plan, dict) else ""),
             "provider_context_authority": "INTERPRETATION" if provider_plan else "LEGACY",
         })
 
