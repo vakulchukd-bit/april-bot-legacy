@@ -1004,6 +1004,7 @@ class QuantumContextUnderstandingEngine:
         active_goal: str = "",
         previous_scene: dict[str, Any] | None = None,
         semantic_profile: dict[str, Any] | None = None,
+        precomputed_dialogue_selection: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         current = self._compact(current, 2200)
         history = history if isinstance(history, list) else []
@@ -1033,11 +1034,17 @@ class QuantumContextUnderstandingEngine:
                 pending_user = ""
         recent_pairs = recent_pairs[-self.TOPIC_WINDOW:]
 
-        dialogue_selection = self.semantic_engine._select_three_way_dialogue_relation(
-            current, recent_pairs, active_topic=self._compact(active_topic, 500),
-            previous_assistant=self._compact(recent_pairs[-1].get("assistant"), 1200) if recent_pairs else "",
-            previous_user=self._compact(recent_pairs[-1].get("user"), 1200) if recent_pairs else "",
-        )
+        if isinstance(precomputed_dialogue_selection, dict) and str(precomputed_dialogue_selection.get("relation") or "").upper() in {"NEW", "CONTINUE", "RECALL"}:
+            # The canonical dialogue selector has already run in the same
+            # interpretation pass. Reuse its exact three-way result instead of
+            # executing the branch selector a second time for context fusion.
+            dialogue_selection = dict(precomputed_dialogue_selection)
+        else:
+            dialogue_selection = self.semantic_engine._select_three_way_dialogue_relation(
+                current, recent_pairs, active_topic=self._compact(active_topic, 500),
+                previous_assistant=self._compact(recent_pairs[-1].get("assistant"), 1200) if recent_pairs else "",
+                previous_user=self._compact(recent_pairs[-1].get("user"), 1200) if recent_pairs else "",
+            )
         selected_pair = dialogue_selection.get("selected_pair") if isinstance(dialogue_selection.get("selected_pair"), dict) else {}
         canonical_three_way = str(dialogue_selection.get("relation") or "NEW").upper()
 
@@ -2772,6 +2779,21 @@ class QuantumInterpretationEngine:
         # Context-first fusion.  This is the interpretation authority for topic,
         # entity/reference and current-turn structure.  It augments the existing
         # matrix instead of creating a second route.
+        precomputed_dialogue_selection = {
+            "relation": str(dialogue_vector.get("three_way_relation") or (
+                "CONTINUE" if dialogue_vector.get("continuation")
+                else "RECALL" if dialogue_vector.get("request_relation") == "RECALL"
+                else "NEW"
+            )).upper(),
+            "confidence": float(dialogue_vector.get("three_way_confidence", 0.0) or 0.0),
+            "selected_index": int(dialogue_vector.get("selected_memory_index", -1) or -1),
+            "selected_pair": dialogue_vector.get("selected_memory_operand") if isinstance(dialogue_vector.get("selected_memory_operand"), dict) else {},
+            "latest_score": float(dialogue_vector.get("latest_score", 0.0) or 0.0),
+            "best_score": float(dialogue_vector.get("best_score", 0.0) or 0.0),
+            "second_score": float(dialogue_vector.get("second_score", 0.0) or 0.0),
+            "margin": float(dialogue_vector.get("margin", 0.0) or 0.0),
+            "source": "reused_from_canonical_dialogue_relation",
+        }
         context_understanding = QUANTUM_CONTEXT_ENGINE.analyze(
             text,
             history=history,
@@ -2782,6 +2804,7 @@ class QuantumInterpretationEngine:
             active_goal=active_goal,
             previous_scene=previous_scene,
             semantic_profile=p,
+            precomputed_dialogue_selection=precomputed_dialogue_selection,
         )
         topic_understanding = context_understanding.get("topic") if isinstance(context_understanding.get("topic"), dict) else {}
         discourse_understanding = context_understanding.get("discourse") if isinstance(context_understanding.get("discourse"), dict) else {}
@@ -3187,6 +3210,10 @@ class QuantumInterpretationEngine:
         result=build_result(text)
         result.update({
             "type":p["dialogue_best"],"subtype":production,"scene_type":production,
+            "relation": dialogue_vector.get("three_way_relation") or (
+                "CONTINUE" if continuation else "RECALL" if reference else "NEW"
+            ),
+            "topic_relation": dialogue_vector.get("relation", "NEW_TOPIC"),
             "normalized":text,"required_domains":domains,"candidate_domains":domains,
             "required_representations":[production],"candidate_representations":[production],
             "requested_representations":[production],"requested_representation":production,
@@ -3275,7 +3302,14 @@ class QuantumInterpretationEngine:
                     "CONTINUE" if continuation else "RECALL" if reference else "NEW"
                 ),
                 "selected_memory_operand": dialogue_vector.get("selected_memory_operand") or {},
-                "relation": dialogue_vector.get("relation", "NEW_TOPIC"),
+                # `relation` is the single canonical three-way state consumed by
+                # the processor: NEW / CONTINUE / RECALL. The topic-level relation
+                # remains available separately and is never used as the dialogue
+                # execution state.
+                "relation": dialogue_vector.get("three_way_relation") or (
+                    "CONTINUE" if continuation else "RECALL" if reference else "NEW"
+                ),
+                "topic_relation": dialogue_vector.get("relation", "NEW_TOPIC"),
                 "subtype": dialogue_vector.get("subtype", "NEW_TOPIC"),
                 "avoid_repeat": True,
                 "canonical":True,"version":"quantum_dialogue_field_v4"
