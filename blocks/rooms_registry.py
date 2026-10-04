@@ -758,6 +758,12 @@ class ImageGenerateRoom(Room):
                 or semantic.get("semantic_request")
                 or ""
             ).strip()
+            dialogue_contract = context.get("dialogue_contract") if isinstance(context.get("dialogue_contract"), dict) else {}
+            visual_generation_request = str(
+                context.get("visual_generation_request")
+                or dialogue_contract.get("visual_generation_request")
+                or ""
+            ).strip()
 
             provider_metadata = context.get("provider_metadata") if isinstance(context.get("provider_metadata"), dict) else {}
             provider_signal = provider_metadata.get("image_generation_signal")
@@ -804,7 +810,9 @@ class ImageGenerateRoom(Room):
             # generator receives the current request and no historical prompt.
             spec_prompt = str(image_spec.get("prompt") or "").strip() if image_spec else ""
             signal_prompt = str(provider_signal.get("prompt") or "").strip()
-            if signal_valid and signal_prompt:
+            if visual_generation_request:
+                prompt = visual_generation_request
+            elif signal_valid and signal_prompt:
                 prompt = signal_prompt
             else:
                 prompt = request_anchor or spec_prompt or semantic_request
@@ -814,6 +822,9 @@ class ImageGenerateRoom(Room):
             if image_spec:
                 image_spec["generator_signal"] = "C_APRIL_IMAGES_GENERATOR"
                 image_spec["request_anchor"] = request_anchor
+                if visual_generation_request:
+                    image_spec["prompt"] = visual_generation_request
+                    image_spec["openai_structured_visual_plan_semantic"] = visual_generation_request
 
             print(
                 "🧭 IMAGE GENERATION HANDOFF",
@@ -839,6 +850,7 @@ class ImageGenerateRoom(Room):
                 "image_generation_signal": deepcopy(provider_signal),
                 "current_user_request": raw_request,
                 "semantic_request": semantic_request,
+                "visual_generation_request": visual_generation_request,
                 "request_id": str(getattr(request, "request_id", "") or ""),
             }
 
