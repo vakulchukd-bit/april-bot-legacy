@@ -6294,7 +6294,7 @@ def _clean_pair_from_row(row: Any) -> dict[str, Any] | None:
         "topic", "subtopic", "dialogue_relation", "relation",
         "visual_scene_id", "scene_id", "visual_attachment",
         "visual_generation_memory", "memory_semantics", "semantic_state",
-        "visual_summary", "structured_response", "source",
+        "visual_summary", "source",
     ):
         value = row.get(key)
         if value not in (None, "", [], {}):
@@ -6600,135 +6600,6 @@ def add_dialog(user_id, role, content, metadata=None, *, persist=True):
     return state_obj
 
 
-def _compact_provider_structured_response(value: Any, *, max_chars: int = 50000) -> dict[str, Any]:
-    """Keep the Provider structured state while dropping binary image payloads."""
-    def clean(node: Any, depth: int = 0) -> Any:
-        if depth > 8:
-            return None
-        if isinstance(node, dict):
-            out = {}
-            for key, item in node.items():
-                key_text = str(key)
-                lower_key = key_text.lower()
-                if lower_key in {
-                    "image_base64", "image_data_uri", "data_uri", "base64",
-                    "image_bytes", "png_bytes", "raw_image_bytes",
-                }:
-                    continue
-                cleaned = clean(item, depth + 1)
-                if cleaned not in (None, "", [], {}):
-                    out[key] = cleaned
-            return out
-        if isinstance(node, list):
-            return [x for x in (clean(item, depth + 1) for item in node[:32]) if x not in (None, "", [], {})]
-        if isinstance(node, (str, int, float, bool)):
-            text = str(node) if isinstance(node, str) else node
-            if isinstance(text, str):
-                if text.startswith("data:image/") and len(text) > 4000:
-                    return "[image-data-omitted]"
-                return text[:12000]
-            return text
-        return str(node)[:12000]
-
-    cleaned = clean(value)
-    if not isinstance(cleaned, dict):
-        return {}
-    try:
-        import json
-        encoded = json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"), default=str)
-        if len(encoded) <= max_chars:
-            return cleaned
-    except Exception:
-        return cleaned
-
-    # Preserve the canonical envelope and trim only the largest optional branch.
-    trimmed = dict(cleaned)
-    for key in ("artifacts", "artifacts_payload", "render_blocks", "metadata"):
-        value = trimmed.get(key)
-        if isinstance(value, list):
-            trimmed[key] = value[:8]
-        elif isinstance(value, dict):
-            trimmed[key] = {k: v for k, v in list(value.items())[:40]}
-        try:
-            encoded = json.dumps(trimmed, ensure_ascii=False, separators=(",", ":"), default=str)
-            if len(encoded) <= max_chars:
-                break
-        except Exception:
-            break
-    return trimmed
-
-
-def persist_provider_dialogue_pair(
-    user_id: Any,
-    current_request: str,
-    provider_result: Any,
-) -> bool:
-    """Commit USER↔Provider structured state before any Room/Scene/Web routing."""
-    uid = _clean_uid(user_id)
-    request_text = str(current_request or "").strip()
-    payload = provider_result if isinstance(provider_result, dict) else {}
-    machine = payload.get("machine_response") if isinstance(payload.get("machine_response"), dict) else {}
-    answer_text = str(
-        machine.get("answer")
-        or machine.get("content")
-        or machine.get("response")
-        or ""
-    ).strip()
-    if not uid or not request_text or not answer_text or not isinstance(machine, dict):
-        return False
-
-    structured = {
-        "version": "provider_structured_dialogue_v1",
-        "request": request_text,
-        "openai_structured_response": _compact_provider_structured_response(machine),
-        "provider_model": str(payload.get("provider_model") or machine.get("provider") or "openai"),
-        "provider_calls": int(payload.get("provider_calls") or machine.get("provider_calls") or 1),
-        "saved_at": time.time(),
-    }
-
-    auth_ok = bool(is_authenticated_user(uid)) if callable(is_authenticated_user) else True
-    if not (auth_ok and callable(save_dialogue_pair)):
-        return False
-
-    try:
-        current_rows = load_dialogue_pairs(uid, limit=0) if callable(load_dialogue_pairs) else []
-        clean_rows = [p for p in (_clean_pair_from_row(x) for x in (current_rows or [])) if p]
-        pair_created_at = time.time()
-        turn_index = max((int(p.get("turn_index") or 0) for p in clean_rows), default=0) + 1
-        saved = bool(save_dialogue_pair(
-            uid,
-            request_text,
-            answer_text,
-            created_at=pair_created_at,
-            turn_index=turn_index,
-            structured_response=structured,
-        ))
-        if saved:
-            with _state_lock:
-                live_state = state.get(uid) if isinstance(state.get(uid), dict) else {}
-                live_state["_provider_boundary_pair_commit"] = {
-                    "request": request_text,
-                    "answer": answer_text,
-                    "created_at": pair_created_at,
-                    "turn_index": turn_index,
-                    "structured_response": deepcopy(structured),
-                }
-                state[uid] = live_state
-            safe_state_log(
-                f"PAIR PROVIDER BOUNDARY COMMIT user={uid} saved=True structured=True "
-                f"turn={turn_index}"
-            )
-            try:
-                from blocks.interpretation_layer import invalidate_pair_cache
-                invalidate_pair_cache(uid)
-            except Exception:
-                pass
-        return saved
-    except Exception as exc:
-        safe_state_log(f"PAIR PROVIDER BOUNDARY ERROR: {exc}")
-        return False
-
-
 _ORIGINAL_UPDATE_SCENE_CONTEXT_PAIR_MEMORY = update_scene_context
 
 
@@ -6758,16 +6629,6 @@ def update_scene_context(
         uid = _clean_uid(user_id)
         request_text = str(current_request or "").strip()
         answer_text = str(answer or "").strip()
-        provider_boundary_commit = {}
-        with _state_lock:
-            live_state_snapshot = state.get(uid) if isinstance(state.get(uid), dict) else {}
-            marker = live_state_snapshot.get("_provider_boundary_pair_commit")
-            if isinstance(marker, dict):
-                if (
-                    str(marker.get("request") or "").strip() == request_text
-                    and str(marker.get("answer") or "").strip() == answer_text
-                ):
-                    provider_boundary_commit = deepcopy(marker)
         if uid and request_text and answer_text:
             # FIRST COMMIT TO THE LIVE RUNTIME.  The next HTTP turn must be able
             # to see the just-completed USER↔APRIL pair even when PostgreSQL is
@@ -6831,11 +6692,6 @@ def update_scene_context(
                         live_pair["scene_id"] = live_visual_attachment.get("scene_id") or ""
                     if isinstance(visual_generation_memory, dict) and visual_generation_memory:
                         live_pair["visual_generation_memory"] = deepcopy(visual_generation_memory)
-                    if provider_boundary_commit:
-                        live_pair["structured_response"] = deepcopy(
-                            provider_boundary_commit.get("structured_response") or {}
-                        )
-                        live_pair["provider_boundary_commit"] = True
                     pairs.append(live_pair)
                     day0["dialog_pairs"] = pairs[-ACTIVE_DIALOGUE_WINDOW_PAIRS:]
                     live_state["memory_timeline"] = {"day_0": day0}
@@ -6850,12 +6706,7 @@ def update_scene_context(
             # the runtime archive from PostgreSQL when the write is confirmed and
             # a successful read actually returns the pair window.
             auth_ok = bool(is_authenticated_user(uid)) if callable(is_authenticated_user) else True
-            if provider_boundary_commit:
-                safe_state_log(
-                    f"PAIR PERSIST REUSED_PROVIDER_BOUNDARY user={uid} turn={provider_boundary_commit.get('turn_index')} "
-                    f"structured=True"
-                )
-            elif auth_ok and callable(save_dialogue_pair):
+            if auth_ok and callable(save_dialogue_pair):
                 try:
                     current_rows = []
                     if callable(load_dialogue_pairs):
@@ -6891,16 +6742,6 @@ def update_scene_context(
                     safe_state_log(f"PAIR PERSIST ERROR: {exc}")
             elif uid and request_text and answer_text:
                 safe_state_log(f"PAIR PERSIST SKIPPED user={uid} auth={auth_ok} writer={callable(save_dialogue_pair)}")
-    with _state_lock:
-        live_state = state.get(_clean_uid(user_id)) if isinstance(state.get(_clean_uid(user_id)), dict) else None
-        if isinstance(live_state, dict) and isinstance(live_state.get("_provider_boundary_pair_commit"), dict):
-            marker = live_state.get("_provider_boundary_pair_commit")
-            if (
-                str(marker.get("request") or "").strip() == str(current_request or "").strip()
-                and str(marker.get("answer") or "").strip() == str(answer or "").strip()
-            ):
-                live_state.pop("_provider_boundary_pair_commit", None)
-                state[_clean_uid(user_id)] = live_state
     if persist:
         persist_state(user_id)
     return result
