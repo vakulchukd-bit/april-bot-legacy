@@ -7859,8 +7859,8 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
     # drawing despite the canonical output contract, suppress that payload before
     # SceneContract so it can never pollute the Web answer. The image/structured
     # room route remains the only visual producer.
-    if isinstance(response, MachineResponse):
-        raw_answer = _text(response.answer or response.content or response.response)
+    if isinstance(preview_response, MachineResponse):
+        raw_answer = _text(preview_response.answer or preview_response.content or preview_response.response)
         lines = [line.strip() for line in raw_answer.splitlines() if line.strip()]
         drawing_chars = sum(len(re.findall(r"[\\/_|+=\-]{3,}", line)) for line in lines)
         ascii_like = bool(
@@ -7869,12 +7869,12 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
             and sum(ch.isalpha() for ch in raw_answer) < max(8, len(raw_answer) * 0.35)
         ) or bool(re.search(r"```(?:ascii|text|txt)?\s*\n", raw_answer, flags=re.I))
         if ascii_like:
-            response.answer = ""
-            response.content = ""
-            response.response = ""
-            response.summary = ""
-            response.metadata = dict(response.metadata or {})
-            response.metadata["ascii_suppressed"] = True
+            preview_response.answer = ""
+            preview_response.content = ""
+            preview_response.response = ""
+            preview_response.summary = ""
+            preview_response.metadata = dict(preview_response.metadata or {})
+            preview_response.metadata["ascii_suppressed"] = True
 
     response, scene, contract = processor.build_scene(request, provider_contract)
     response.metadata["timing"] = {"provider_ms": provider_ms}
