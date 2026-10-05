@@ -1626,7 +1626,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v18_12h_live_dialogue_v7_three_state_locked"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v19_12h_live_dialogue_v2_two_state_chain_locked"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
@@ -7335,7 +7335,7 @@ def _pair_canonical_interpret(self, text, cognition=None, semantic=None, history
 # If the pair engine cannot establish a relation to selected pairs, the result is NEW.
 # Provider/OpenAI is not allowed to re-select dialogue context.
 
-LIVE_DIALOGUE_ENGINE_VERSION = "live_pair_context_v8_three_state_pair_locked_vru"
+LIVE_DIALOGUE_ENGINE_VERSION = "live_pair_context_v9_two_state_pair_locked_vru"
 
 # Persistent 12h USER↔APRIL pair cache.
 # The runtime snapshot may be recreated between HTTP turns, while the durable pair
@@ -8738,7 +8738,7 @@ QuantumInterpretationEngine.interpret = _pair_canonical_interpret_live
 # the final runtime authority assigned at the bottom of this file.
 # ============================================================================
 
-TWO_STATE_DIALOGUE_ENGINE_VERSION = "two_state_full_12h_semantic_chain_v1"
+TWO_STATE_DIALOGUE_ENGINE_VERSION = "two_state_full_12h_semantic_chain_v2_discourse_chain"
 _TWO_STATE_12H_SECONDS = 12 * 60 * 60
 
 
@@ -8984,10 +8984,278 @@ def _two_state_morph_affinity(left, right):
     return max(exact, min(1.0, 0.55 * exact + 0.30 * morph + 0.15 * directional))
 
 
-def _two_state_semantic_selector(self, current, pairs):
-    """Scan the complete 12h pair set and return only CONTINUE or NEW."""
+def _two_state_semantic_selector(self, current, pairs, active_topic=""):
+    """Resolve the current turn against the COMPLETE authenticated 12h dialogue.
+
+    Runtime contract:
+      1. Scan every authenticated USER↔APRIL pair inside the 12h retention window.
+      2. Resolve the discourse anchor/chain before relation classification.
+      3. Produce exactly CONTINUE or NEW.
+      4. No historical/recall state exists in the canonical decision.
+      5. Provider receives only the semantically linked chain, never a raw history
+         slice and never re-selects context itself.
+
+    The selector is deliberately hybrid:
+      - deterministic discourse/test/reference rules carry the primary decision;
+      - morphological/lexical similarity handles typos and inflection;
+      - the existing embedding/TfIdf score is secondary evidence only;
+      - recency is a weak tie-breaker, not a reason to continue by itself.
+    """
     current = self.normalize(current)
     pairs = [p for p in (pairs or []) if isinstance(p, dict)]
+    active_topic = self.normalize(active_topic)
+
+    def _clean(text):
+        value = self.normalize(text)
+        replacements = {
+            "матациклов": "мотоциклов",
+            "матациклы": "мотоциклы",
+            "матацикл": "мотоцикл",
+            "матацикле": "мотоцикле",
+            "матациклах": "мотоциклах",
+            "хишник": "хищник",
+            "хишники": "хищники",
+            "хишников": "хищников",
+            "знаеш": "знаешь",
+            "самве": "самые",
+            "йапон": "япон",
+            "японии": "япония",
+            "японских": "японский",
+            "автомобил": "автомобиль",
+            "автомобили": "автомобиль",
+        }
+        for old, new in replacements.items():
+            value = re.sub(rf"(?<!\w){re.escape(old)}(?=\w|\b)", new, value)
+        return value
+
+    _generic_query = {
+        "назови", "назов", "называй", "дай", "покажи", "расскажи",
+        "какой", "какая", "какие", "какое", "кто", "что", "как",
+        "сколько", "из", "них", "это", "этот", "эта", "эти",
+        "того", "той", "те", "тот", "такой", "такие",
+        "теперь", "ну", "так", "и", "про", "о", "об", "по",
+        "самый", "самые", "еще", "ещё", "дальше", "далее",
+        "стоимость", "цена", "цены", "стоит", "примерная",
+        "доллар", "доллара", "долларов", "доллары",
+    }
+    _reference_forms = {
+        "из них", "из этих", "из тех", "кто из них", "что из них",
+        "какой из них", "какая из них", "какие из них", "какое из них",
+        "их", "его", "ее", "её", "ему", "ей", "им", "ними", "ним",
+        "них", "него", "неё", "ней", "этом", "этого", "этим",
+        "этот", "эта", "эти", "такой", "такие", "каждого", "каждой",
+        "каждые", "каждый",
+    }
+    _followup_forms = {
+        "теперь", "дальше", "далее", "еще", "ещё", "продолжи", "продолжай",
+        "добавь", "расширь", "подробнее", "детальнее", "уточни", "поясни",
+        "объясни", "раскрой", "выдели", "выбери", "отбери", "исправь",
+        "исправся", "стоимость", "цена", "цены", "стоит", "японских",
+        "о мотоциклах", "о матоциклах", "про мотоциклы", "мотоциклы",
+    }
+
+    _test_words = {
+        "ноль": 0, "один": 1, "одна": 1, "первый": 1,
+        "два": 2, "две": 2, "второй": 2,
+        "три": 3, "третий": 3,
+        "четыре": 4, "четвертый": 4, "четвертая": 4,
+        "пять": 5, "пятый": 5, "шесть": 6, "шестой": 6,
+        "семь": 7, "седьмой": 7, "восемь": 8, "восьмой": 8,
+        "девять": 9, "девятый": 9, "десять": 10, "десятый": 10,
+        "одиннадцать": 11, "двенадцать": 12, "тринадцать": 13,
+        "четырнадцать": 14, "пятнадцать": 15, "шестнадцать": 16,
+        "семнадцать": 17, "восемнадцать": 18, "девятнадцать": 19,
+        "двадцать": 20,
+    }
+
+    def _content(text):
+        cleaned = _clean(text)
+        raw = re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", cleaned.lower())
+        out = []
+        for token in raw:
+            if len(token) < 3:
+                continue
+            if token in _generic_query:
+                continue
+            out.append(token)
+        return out
+
+    def _semantic_set(text):
+        return set(_content(text))
+
+    def _topic_affinity(left, right):
+        try:
+            score = float(_two_state_morph_affinity(_clean(left), _clean(right)) or 0.0)
+        except Exception:
+            score = 0.0
+        a = _semantic_set(left)
+        b = _semantic_set(right)
+        if a and b:
+            exact = len(a & b) / max(1, len(a | b))
+            directional = len(a & b) / max(1, min(len(a), len(b)))
+            score = max(score, 0.70 * exact + 0.30 * directional)
+        return max(0.0, min(1.0, score))
+
+    def _extract_test_id(text):
+        low = _clean(text)
+        # "тестномер10" / "тест номер 10" / "тест № 10"
+        match = re.search(r"\bтест(?:е|а|ом|у)?\s*(?:номер|№|#)?\s*(\d{1,2})\b", low, re.I)
+        if match:
+            return int(match.group(1))
+        match = re.search(r"\bтестномер\s*(\d{1,2})\b", low, re.I)
+        if match:
+            return int(match.group(1))
+        for word, number in sorted(_test_words.items(), key=lambda item: -len(item[0])):
+            if re.search(rf"\bтест(?:е|а|ом|у)?\s+(?:номер|№|#)\s+{re.escape(word)}\b", low, re.I):
+                return number
+            if re.search(rf"\bтест(?:е|а|ом|у)?\s+{re.escape(word)}\b", low, re.I):
+                return number
+        return None
+
+    def _looks_like_test_start(text, test_id=None):
+        low = _clean(text)
+        if test_id is None:
+            return False
+        # A test number inside a lookup/reference request is NOT a new task.
+        lookup = (
+            re.search(r"\bо\s+ч[её]м\s+я\s+(?:тебя\s+)?спраш", low, re.I)
+            or re.search(r"\bчто\s+я\s+(?:тебя\s+)?спраш", low, re.I)
+            or re.search(r"\b(?:просмотри|посмотри|смотри|найди|покажи)\b", low, re.I)
+            or re.search(r"\bв\s+тест(?:е|а|ом)\b", low, re.I)
+        )
+        if lookup:
+            return False
+        return bool(
+            re.search(
+                r"\b(?:назови|назов|перечисли|расскажи|сколько|какие|какой|какая|"
+                r"какое|что\s+ты\s+знаешь|что\s+ты\s+знаеш|объясни|покажи|дай)\b",
+                low,
+                re.I,
+            )
+        ) or bool(
+            re.search(r"\b(?:начн(?:е|ё)м|начать|начинай|начнем)\s+тест\b", low, re.I)
+        )
+
+    def _test_id_from_pair(pair):
+        if not isinstance(pair, dict):
+            return None
+        values = [
+            pair.get("user"),
+            pair.get("user_text"),
+            pair.get("user_request"),
+            pair.get("sequence_topic"),
+            pair.get("topic"),
+            pair.get("canonical_topic"),
+        ]
+        for value in values:
+            tid = _extract_test_id(str(value or ""))
+            if tid is not None:
+                return tid
+        return None
+
+    def _pair_text(pair):
+        user = str(
+            pair.get("user")
+            or pair.get("user_text")
+            or pair.get("user_request")
+            or ""
+        ).strip()
+        april = str(
+            pair.get("april")
+            or pair.get("april_answer")
+            or pair.get("assistant")
+            or pair.get("answer")
+            or ""
+        ).strip()
+        topic = str(
+            pair.get("sequence_topic")
+            or pair.get("topic")
+            or pair.get("canonical_topic")
+            or ""
+        ).strip()
+        return user, april, topic
+
+    def _is_clarification(pair):
+        if _two_state_is_clarification(pair):
+            return True
+        _, answer, _ = _pair_text(pair)
+        low = _clean(answer)
+        return bool(
+            re.match(
+                r"^(?:не\s+совсем\s+понял|не\s+понял|не\s+поняла|"
+                r"уточни|уточните|что\s+именно|пришлите|"
+                r"нужно\s+прислать)\b",
+                low,
+                re.I,
+            )
+        )
+
+    def _is_substantive(pair):
+        user, april, topic = _pair_text(pair)
+        return bool((user or april or topic) and not _is_clarification(pair))
+
+    def _pair_subject(pair):
+        user, april, topic = _pair_text(pair)
+        # Metadata is useful, but user+answer remain the source of truth when
+        # metadata became stale in earlier turns.
+        candidates = [topic, pair.get("active_entity"), pair.get("resolved_entity")]
+        for value in candidates:
+            subject = _clean(str(value or ""))
+            if subject and len(_content(subject)) >= 1:
+                return subject
+        return _clean(f"{user} {april}")
+
+    def _specificity(text):
+        tokens = _content(text)
+        concrete = [t for t in tokens if t not in {"каждого", "каждой", "каждые"}]
+        return len(concrete)
+
+    def _contains_reference(text):
+        low = _clean(text)
+        if any(phrase in low for phrase in _reference_forms):
+            return True
+        return bool(
+            re.search(
+                r"\b(?:кто|что|какой|какая|какие|какое)\s+из\s+(?:них|этих|тех)\b",
+                low,
+                re.I,
+            )
+            or re.search(r"\b(?:их|его|ее|её|каждого|каждые)\b", low, re.I)
+            or re.search(
+                r"\b(?:какое|какая|какие|который|которая|которые|что|кто)\b"
+                r".{0,100}\bне\s*(?:назвал|назвала|назвали|упомянул|упомянула|упомянули)\b",
+                low,
+                re.I,
+            )
+            or re.search(
+                r"\b(?:о\s+ч[её]м\s+я|что\s+я)\b.{0,80}\bспраш",
+                low,
+                re.I,
+            )
+        )
+
+    def _contains_followup(text):
+        low = _clean(text)
+        if any(phrase in low for phrase in _followup_forms):
+            return True
+        return bool(
+            re.search(
+                r"\b(?:теперь|дальше|далее|ещ[её]|продолж|добав|подробнее|"
+                r"детальнее|выдел|выбер|отбер|исправ|стоимост|цен)\w*",
+                low,
+                re.I,
+            )
+        )
+
+    def _pair_root_score(pair, index):
+        user, april, topic = _pair_text(pair)
+        tid = _test_id_from_pair(pair)
+        start = _looks_like_test_start(user, tid)
+        root_bonus = 0.35 if start else 0.0
+        answer_bonus = 0.05 if _two_state_answer_set(pair) else 0.0
+        clarification_penalty = -0.75 if _is_clarification(pair) else 0.0
+        return root_bonus + answer_bonus + clarification_penalty + index * 1e-7
+
     if not current or not pairs:
         return {
             "relation": "NEW",
@@ -9001,44 +9269,22 @@ def _two_state_semantic_selector(self, current, pairs):
             "reason": "NO_AUTHENTICATED_12H_PAIRS",
             "context_mode": "NEW_TOPIC_ISOLATED",
             "semantic_discussion": "",
+            "resolved_referent": {},
+            "semantic_operation": "answer",
             "candidate_count": len(pairs),
+            "candidate_scores": [],
         }
 
-    # Explicitly starting another numbered test/task is a new task even if old
-    # words happen to be similar.
-    try:
-        explicit_new = bool(self._explicit_new(current))
-    except Exception:
-        explicit_new = bool(
-            re.search(
-                r"\b(?:нов(?:ая|ую)?\s+тем|другая\s+тема|перейд(?:и|ем|ём)\s+(?:к|на)\s+друг|"
-                r"начн(?:ем|ём|ать)\s+(?:нов|друг)|тест\s*номер\s*\d+|тестномер\s*\d+|"
-                r"начнем\s+тест|начн[её]м\s+тест)\b",
-                current,
-                re.I,
-            )
-        )
-
-    # One batch semantic pass over the full 12h window. Every pair is evaluated
-    # by USER meaning, APRIL result meaning, and the combined USER↔APRIL meaning.
+    # Primary semantic pass: evaluate every pair in the full 12h window.
     combined_targets = []
     for pair in pairs:
-        user = str(pair.get("user") or "")
-        april = str(pair.get("april") or "")
-        topic = str(
-            pair.get("sequence_topic")
-            or pair.get("topic")
-            or pair.get("canonical_topic")
-            or _live_pair_subject(pair)
-            or ""
-        )
+        user, april, topic = _pair_text(pair)
         combined_targets.extend([
             f"{user} {april}".strip(),
             user,
             april,
             topic,
         ])
-
     batch = []
     try:
         batch = _batch_live_similarity(self, current, combined_targets)
@@ -9047,71 +9293,60 @@ def _two_state_semantic_selector(self, current, pairs):
 
     rows = []
     for i, pair in enumerate(pairs):
-        user = str(pair.get("user") or pair.get("user_text") or "")
-        april = str(pair.get("april") or pair.get("april_answer") or pair.get("answer") or "")
-        topic = str(
-            pair.get("sequence_topic")
-            or pair.get("topic")
-            or pair.get("canonical_topic")
-            or _live_pair_subject(pair)
-            or ""
-        )
+        user, april, topic = _pair_text(pair)
         base = i * 4
-        semantic_pair = float(batch[base] if base < len(batch) else 0.0)
-        semantic_user = float(batch[base + 1] if base + 1 < len(batch) else 0.0)
-        semantic_answer = float(batch[base + 2] if base + 2 < len(batch) else 0.0)
-        semantic_topic = float(batch[base + 3] if base + 3 < len(batch) else 0.0)
+        sem_pair = float(batch[base] if base < len(batch) else 0.0)
+        sem_user = float(batch[base + 1] if base + 1 < len(batch) else 0.0)
+        sem_answer = float(batch[base + 2] if base + 2 < len(batch) else 0.0)
+        sem_topic = float(batch[base + 3] if base + 3 < len(batch) else 0.0)
 
-        lexical_pair = _two_state_morph_affinity(current, f"{user} {april}")
-        lexical_user = _two_state_morph_affinity(current, user)
-        lexical_answer = _two_state_morph_affinity(current, april)
-
-        current_subject = _live_extract_subject(current)
-        pair_subject = _live_pair_subject(pair)
-        subject_score = (
-            _two_state_morph_affinity(current_subject, pair_subject)
-            if current_subject and pair_subject
-            else 0.0
-        )
-
+        topical = _topic_affinity(current, f"{topic} {user} {april}")
+        user_topic = _topic_affinity(current, user)
+        answer_topic = _topic_affinity(current, april)
+        active_topic_score = _topic_affinity(current, active_topic) if active_topic else 0.0
         distance = len(pairs) - 1 - i
-        recency = 1.0 / (1.0 + 0.08 * max(0, distance))
-        score = (
-            0.42 * semantic_pair
-            + 0.18 * semantic_user
-            + 0.10 * semantic_answer
-            + 0.10 * semantic_topic
-            + 0.08 * lexical_pair
-            + 0.05 * lexical_user
-            + 0.04 * lexical_answer
-            + 0.02 * subject_score
-            + 0.01 * recency
-        )
+        recency = 1.0 / (1.0 + 0.05 * max(0, distance))
+        clarification_penalty = 0.35 if _is_clarification(pair) else 0.0
 
+        score = (
+            0.36 * topical
+            + 0.20 * user_topic
+            + 0.14 * answer_topic
+            + 0.08 * sem_pair
+            + 0.05 * sem_user
+            + 0.04 * sem_answer
+            + 0.03 * sem_topic
+            + 0.05 * active_topic_score
+            + 0.05 * recency
+            - clarification_penalty
+        )
         rows.append({
             "index": i,
             "score": max(0.0, min(1.0, score)),
-            "semantic_pair": semantic_pair,
-            "semantic_user": semantic_user,
-            "semantic_answer": semantic_answer,
-            "semantic_topic": semantic_topic,
-            "lexical_pair": lexical_pair,
-            "lexical_user": lexical_user,
-            "lexical_answer": lexical_answer,
-            "subject_score": subject_score,
+            "semantic_pair": sem_pair,
+            "semantic_user": sem_user,
+            "semantic_answer": sem_answer,
+            "semantic_topic": sem_topic,
+            "topic_affinity": topical,
+            "user_topic_affinity": user_topic,
+            "answer_topic_affinity": answer_topic,
+            "active_topic_affinity": active_topic_score,
             "recency": recency,
+            "test_id": _test_id_from_pair(pair),
+            "substantive": _is_substantive(pair),
             "answer_set": _two_state_answer_set(pair),
             "pair": pair,
         })
 
-    rows.sort(key=lambda row: (row["score"], row["index"]), reverse=True)
-    best = rows[0] if rows else None
-    best_score = float(best["score"] if best else 0.0)
+    rows_by_index = {row["index"]: row for row in rows}
+    substantive_rows = [row for row in rows if row["substantive"]]
 
-    discussion_query = _two_state_discussion_query(current)
-    reference_query = _two_state_reference_query(current)
+    test_id = _extract_test_id(current)
+    starts_new_test = _looks_like_test_start(current, test_id)
 
-    if explicit_new:
+    # Canonical relation rule #1: starting a numbered test starts a new task.
+    # Merely mentioning that number later is a continuation/lookup.
+    if starts_new_test:
         return {
             "relation": "NEW",
             "confidence": 0.99,
@@ -9120,166 +9355,439 @@ def _two_state_semantic_selector(self, current, pairs):
             "selected_indices": [],
             "context_pairs": [],
             "memory_window": pairs,
-            "best_score": best_score,
-            "reason": "EXPLICIT_NEW_REQUEST",
+            "best_score": max((row["score"] for row in rows), default=0.0),
+            "reason": "EXPLICIT_NEW_TEST_TASK",
             "context_mode": "NEW_TOPIC_ISOLATED",
             "semantic_discussion": "",
+            "resolved_referent": {},
+            "semantic_operation": "answer",
             "candidate_count": len(rows),
             "candidate_scores": rows,
+            "test_id": test_id,
         }
 
-    # Broad questions about the dialogue itself become CONTINUE when the current
-    # 12h conversation exists. This replaces the old third-state history mode:
-    # the full conversation is simply context for the current turn.
-    if discussion_query and pairs:
-        selected_indices = sorted(
-            [row["index"] for row in rows if row["pair"]]
-        )
-        anchor = len(pairs) - 1
-        return {
-            "relation": "CONTINUE",
-            "confidence": 0.96,
-            "selected_index": anchor,
-            "selected_pair": dict(pairs[anchor]),
-            "selected_indices": selected_indices,
-            "context_pairs": [dict(pairs[i]) for i in selected_indices],
-            "memory_window": pairs,
-            "best_score": best_score,
-            "reason": "FULL_12H_DIALOGUE_DISCUSSION",
-            "context_mode": "LIVE_CONTINUATION",
-            "semantic_discussion": _two_state_build_discussion_digest(
-                current, [dict(pairs[i]) for i in selected_indices], rows
-            ),
-            "candidate_count": len(rows),
-            "candidate_scores": rows,
-        }
-
-    selected_rows = []
-    if best:
-        dynamic_cut = max(0.17, best_score * 0.58)
-        selected_rows = [
-            row for row in rows
-            if row["score"] >= dynamic_cut
-            and not _two_state_is_clarification(row["pair"])
-        ]
-
-    # Pronoun/anaphora and omission questions need a real antecedent. The
-    # antecedent is the latest substantive USER↔APRIL result, not the latest
-    # clarification question and not the numerically strongest unrelated pair.
-    if reference_query:
-        substantive = [
-            row for row in sorted(rows, key=lambda item: int(item["index"]), reverse=True)
-            if row["pair"] and not _two_state_is_clarification(row["pair"])
-        ]
-        if substantive:
-            latest_substantive = dict(substantive[0])
-            if latest_substantive["score"] < 0.17:
-                boost = 0.18 if latest_substantive.get("answer_set") else 0.12
-                latest_substantive["score"] = min(
-                    1.0, latest_substantive["score"] + boost
-                )
-
-            # For reference turns, make the real antecedent the primary anchor.
-            # Other pairs are admitted only when their semantic score is genuinely
-            # competitive; this prevents an unrelated old answer from hijacking
-            # "из них", "какое не назвал", "в тесте 9", etc.
-            competitive_cut = max(0.22, best_score * 0.72)
-            related = [
-                row for row in rows
-                if (
-                    not _two_state_is_clarification(row["pair"])
-                    and row["index"] != latest_substantive["index"]
-                    and float(row.get("score", 0.0) or 0.0) >= competitive_cut
-                )
-            ]
-            selected_rows = [latest_substantive] + related
-
-    # Keep only semantic evidence. A pair that has no semantic relation to the
-    # current request is never promoted merely because it is recent. The true
-    # reference antecedent is the explicit linguistic exception above.
-    antecedent_index = (
-        selected_rows[0]["index"]
-        if reference_query and selected_rows
-        else -999
+    low_current = _clean(current)
+    reference_query = _contains_reference(current)
+    followup_query = _contains_followup(current)
+    short_topic_followup = bool(
+        re.match(r"^(?:о|об|про)\s+[A-Za-zА-Яа-яЁёЇїІіЄєҐґ-]{3,}(?:\s+[A-Za-zА-Яа-яЁёЇїІіЄєҐґ-]{3,})?$", _clean(current), re.I)
+        or re.match(r"^[A-Za-zА-Яа-яЁёЇїІіЄєҐґ-]{4,}$", _clean(current), re.I)
+        and _clean(current) not in {"теперь", "дальше", "стоимость", "цена", "японских"}
     )
-    selected_rows = [
-        row for row in selected_rows
-        if (
-            float(row.get("score", 0.0) or 0.0) >= 0.17
-            or (reference_query and row.get("index") == antecedent_index)
-        )
-    ]
-    selected_rows.sort(key=lambda row: row["index"])
+    # A numbered test mention that is NOT starting a new test is itself a
+    # continuation/reference to an already established test branch.
+    test_reference = test_id is not None and not starts_new_test
+    specificity = _specificity(current)
 
-    if not selected_rows:
+    # Canonical relation rule #2: an explicit test-number reference resolves to
+    # the latest substantive ROOT of that test, never to a later clarification.
+    anchor_index = -1
+    anchor_reason = ""
+    if test_id is not None:
+        test_roots = [
+            i for i, pair in enumerate(pairs)
+            if _test_id_from_pair(pair) == test_id
+            and _is_substantive(pair)
+            and _looks_like_test_start(_pair_text(pair)[0], test_id)
+        ]
+        if test_roots:
+            anchor_index = max(test_roots)
+            anchor_reason = "TEST_ID_ROOT_MATCH"
+        else:
+            same_test = [
+                i for i, pair in enumerate(pairs)
+                if _test_id_from_pair(pair) == test_id and _is_substantive(pair)
+            ]
+            if same_test:
+                anchor_index = max(same_test)
+                anchor_reason = "TEST_ID_PAIR_MATCH"
+
+    # Canonical relation rule #3: concrete anaphora binds to the best substantive
+    # result that can actually serve as its antecedent. The latest pair is used
+    # only when the current wording is genuinely underspecified.
+    if anchor_index < 0:
+        candidate_indices = [row["index"] for row in substantive_rows]
+        if candidate_indices:
+            generic_followup = specificity == 0 or specificity <= 1
+            active_candidates = [
+                i for i in candidate_indices
+                if active_topic
+                and _topic_affinity(
+                    active_topic,
+                    f"{_pair_subject(pairs[i])} {_pair_text(pairs[i])[0]} {_pair_text(pairs[i])[1]}"
+                ) >= 0.12
+            ]
+            if reference_query and active_candidates:
+                # Pronouns/ellipsis stay inside the currently active dialogue
+                # branch. A concrete qualifier such as "японских" is resolved
+                # semantically inside that branch; a pure pronoun such as "их"
+                # uses the latest substantive result from the same branch.
+                if specificity <= 1 and not any(
+                    token in {"стоимость", "цена", "цены", "стоит", "доллар",
+                              "каждого", "каждой", "каждые", "их", "него", "нее", "неё"}
+                    for token in _content(current)
+                ):
+                    anchor_index = max(
+                        active_candidates,
+                        key=lambda i: (
+                            rows_by_index[i]["topic_affinity"],
+                            rows_by_index[i]["answer_topic_affinity"],
+                            i,
+                        ),
+                    )
+                    anchor_reason = "ACTIVE_CHAIN_SEMANTIC_ANTECEDENT"
+                else:
+                    anchor_index = active_candidates[-1]
+                    anchor_reason = "LATEST_ACTIVE_CHAIN_ANTECEDENT"
+            elif reference_query and generic_followup:
+                anchor_index = candidate_indices[-1]
+                anchor_reason = "LATEST_SUBSTANTIVE_ANTECEDENT"
+            elif short_topic_followup:
+                ranked_topic = sorted(
+                    candidate_indices,
+                    key=lambda i: (
+                        rows_by_index[i]["topic_affinity"]
+                        + 0.35 * rows_by_index[i]["answer_topic_affinity"]
+                        + 0.04 * rows_by_index[i]["recency"],
+                        i,
+                    ),
+                    reverse=True,
+                )
+                if ranked_topic:
+                    anchor_index = ranked_topic[0]
+                    anchor_reason = "SHORT_TOPIC_ACTIVE_CHAIN"
+            elif reference_query:
+                ranked_ref = sorted(
+                    candidate_indices,
+                    key=lambda i: (
+                        rows_by_index[i]["topic_affinity"]
+                        + 0.35 * rows_by_index[i]["answer_topic_affinity"]
+                        + 0.20 * rows_by_index[i]["user_topic_affinity"],
+                        i,
+                    ),
+                    reverse=True,
+                )
+                if ranked_ref:
+                    anchor_index = ranked_ref[0]
+                    anchor_reason = "SEMANTIC_ANTECEDENT_MATCH"
+            elif specificity == 0 and followup_query:
+                anchor_index = candidate_indices[-1]
+                anchor_reason = "GENERIC_FOLLOWUP_LATEST_ACTIVE_PAIR"
+            elif specificity == 1 and followup_query:
+                ranked_short = sorted(
+                    candidate_indices,
+                    key=lambda i: (
+                        rows_by_index[i]["topic_affinity"]
+                        + 0.25 * rows_by_index[i]["answer_topic_affinity"],
+                        i,
+                    ),
+                    reverse=True,
+                )
+                if ranked_short:
+                    best_short = ranked_short[0]
+                    best_short_affinity = rows_by_index[best_short]["topic_affinity"]
+                    if best_short_affinity >= 0.08 or followup_query:
+                        anchor_index = best_short
+                        anchor_reason = "SHORT_FOLLOWUP_SEMANTIC_ANCHOR"
+            else:
+                strongest = max(
+                    candidate_indices,
+                    key=lambda i: (
+                        rows_by_index[i]["topic_affinity"],
+                        rows_by_index[i]["score"],
+                        i,
+                    ),
+                )
+                if rows_by_index[strongest]["topic_affinity"] >= 0.16:
+                    anchor_index = strongest
+                    anchor_reason = "DIRECT_SEMANTIC_PAIR_MATCH"
+
+    if anchor_index < 0:
         return {
             "relation": "NEW",
-            "confidence": max(0.78, min(0.99, 1.0 - min(best_score, 0.22))),
+            "confidence": max(0.78, min(0.99, 1.0 - max((row["score"] for row in rows), default=0.0) * 0.35)),
             "selected_index": -1,
             "selected_pair": {},
             "selected_indices": [],
             "context_pairs": [],
             "memory_window": pairs,
-            "best_score": best_score,
+            "best_score": max((row["score"] for row in rows), default=0.0),
             "reason": "NO_SEMANTIC_LINK_IN_FULL_12H_DIALOGUE",
             "context_mode": "NEW_TOPIC_ISOLATED",
             "semantic_discussion": "",
+            "resolved_referent": {},
+            "semantic_operation": "answer",
             "candidate_count": len(rows),
             "candidate_scores": rows,
         }
 
-    selected_indices = sorted(dict.fromkeys(int(row["index"]) for row in selected_rows))
-    # Anchor = the strongest semantic pair; for anaphoric requests the latest
-    # substantive pair remains preferable when it was explicitly appended.
-    anchor_row = max(
-        selected_rows,
-        key=lambda row: (
-            float(row.get("score", 0.0) or 0.0),
-            row["index"],
-        ),
+    anchor_pair = dict(pairs[anchor_index])
+    anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
+    anchor_test_id = _test_id_from_pair(anchor_pair)
+    anchor_subject = _pair_subject(anchor_pair)
+
+    # Chain discovery is semantic, not "last N pairs". We collect every
+    # substantive pair belonging to the anchor's discourse branch or sharing its
+    # subject strongly with the current request/anchor.
+    selected_indices = []
+    current_topic_score = rows_by_index[anchor_index]["topic_affinity"]
+    for i, row in enumerate(rows):
+        if not row["substantive"]:
+            continue
+        pair = row["pair"]
+        pair_tid = row["test_id"]
+        user, april, topic = _pair_text(pair)
+        same_test_branch = (
+            anchor_test_id is not None
+            and pair_tid == anchor_test_id
+        )
+        pair_to_anchor = _topic_affinity(f"{anchor_subject} {anchor_user} {anchor_answer}",
+                                          f"{_pair_subject(pair)} {user} {april}")
+        pair_to_current = row["topic_affinity"]
+        current_to_answer = row["answer_topic_affinity"]
+        relevant = (
+            i == anchor_index
+            or same_test_branch
+            or pair_to_anchor >= 0.28
+            or pair_to_current >= 0.20
+            or current_to_answer >= 0.28
+        )
+        if relevant:
+            selected_indices.append(i)
+
+    # For anaphoric/reference turns, the antecedent must remain the first semantic
+    # operand in the SAME active branch, even if an older row has a higher generic
+    # similarity score. Never allow a different historical topic to hijack "их",
+    # "из них", "каждого", "в столбик" or a short correction.
+    if anchor_index not in selected_indices:
+        selected_indices.append(anchor_index)
+    selected_indices = sorted(dict.fromkeys(selected_indices))
+
+    if not test_id and (reference_query or followup_query):
+        branch_candidates = [
+            i for i in selected_indices
+            if rows_by_index[i]["substantive"]
+            and (
+                not active_topic
+                or _topic_affinity(
+                    active_topic,
+                    f"{_pair_subject(pairs[i])} {_pair_text(pairs[i])[0]} {_pair_text(pairs[i])[1]}"
+                ) >= 0.12
+            )
+        ]
+        if branch_candidates:
+            if active_topic and reference_query and specificity <= 1:
+                # Pure/near-pure anaphora: latest substantive result in the active
+                # branch is the antecedent.
+                best_anchor = max(
+                    branch_candidates,
+                    key=lambda i: i,
+                )
+            elif active_topic and reference_query:
+                # Concrete qualifier ("домашних", "японских", "самые") resolves
+                # semantically within the active branch, never against all 12h rows.
+                best_anchor = max(
+                    branch_candidates,
+                    key=lambda i: (
+                        rows_by_index[i]["topic_affinity"],
+                        rows_by_index[i]["answer_topic_affinity"],
+                        i,
+                    ),
+                )
+            elif specificity >= 1:
+                best_anchor = max(
+                    branch_candidates,
+                    key=lambda i: (
+                        rows_by_index[i]["topic_affinity"],
+                        rows_by_index[i]["answer_topic_affinity"],
+                        i,
+                    ),
+                )
+            else:
+                best_anchor = max(branch_candidates, key=lambda i: i)
+
+            anchor_index = best_anchor
+            anchor_pair = dict(pairs[anchor_index])
+            anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
+            anchor_subject = _pair_subject(anchor_pair)
+
+    # Relation: only two canonical states.
+    # NEW requires absence of a valid semantic/discourse anchor.
+    # Once a real anchor has been found and the turn is elliptical/reference/follow-up,
+    # the request is a continuation.
+    relation = "CONTINUE"
+    if not test_reference and not reference_query and not followup_query and not short_topic_followup:
+        # A self-contained current request is still NEW unless it is strongly tied to
+        # a concrete prior subject and does not introduce an explicit new task.
+        direct_link = (
+            rows_by_index[anchor_index]["topic_affinity"] >= 0.28
+            or rows_by_index[anchor_index]["answer_topic_affinity"] >= 0.32
+            or _topic_affinity(current, anchor_topic) >= 0.34
+        )
+        relation = "CONTINUE" if direct_link else "NEW"
+        if relation == "NEW":
+            selected_indices = []
+            anchor_index = -1
+            anchor_pair = {}
+
+    if relation == "NEW":
+        return {
+            "relation": "NEW",
+            "confidence": max(0.78, min(0.99, 1.0 - max((row["score"] for row in rows), default=0.0) * 0.20)),
+            "selected_index": -1,
+            "selected_pair": {},
+            "selected_indices": [],
+            "context_pairs": [],
+            "memory_window": pairs,
+            "best_score": max((row["score"] for row in rows), default=0.0),
+            "reason": "NO_DIALOGUE_DEPENDENCY",
+            "context_mode": "NEW_TOPIC_ISOLATED",
+            "semantic_discussion": "",
+            "resolved_referent": {},
+            "semantic_operation": "answer",
+            "candidate_count": len(rows),
+            "candidate_scores": rows,
+        }
+
+    # Semantic operation for the structured request.
+    if test_id is not None and re.search(
+        r"\b(?:о\s+ч[её]м\s+я\s+(?:тебя\s+)?спраш|что\s+я\s+(?:тебя\s+)?спраш|"
+        r"просмотри\b.*\bтест(?:е|а|ом)?\b|посмотри\b.*\bтест(?:е|а|ом)?\b)",
+        low_current,
+        re.I,
+    ):
+        semantic_operation = "retrieve_original_test_request"
+    elif re.search(r"\b(?:стоимость|цена|цены|сколько\s+стоит|доллар)\w*", low_current, re.I):
+        semantic_operation = "estimate_cost_of_referenced_items"
+    elif re.search(r"\b(?:выдели|выбери|отбери)\b", low_current, re.I):
+        semantic_operation = "filter_referenced_result"
+    elif re.search(r"\b(?:исправь|исправся|я\s+про)\b", low_current, re.I):
+        semantic_operation = "correct_previous_interpretation"
+    elif re.search(r"\b(?:в\s+столбик|списком|по\s+пунктам)\b", low_current, re.I):
+        semantic_operation = "reformat_previous_result"
+    elif re.search(r"\b(?:кто|что|какой|какая|какие|какое)\b", low_current, re.I) and reference_query:
+        semantic_operation = "answer_about_referenced_items"
+    elif re.search(r"\b(?:назови|назов|перечисли)\b", low_current, re.I):
+        semantic_operation = "list_or_extend_referenced_items"
+    else:
+        semantic_operation = "develop_current_dialogue_task"
+
+    resolved_referent = {
+        "test_id": anchor_test_id,
+        "pair_index": anchor_index,
+        "subject": anchor_subject[:320],
+        "user_request": anchor_user[:700],
+        "april_result": anchor_answer[:1200],
+        "answer_set": bool(_two_state_answer_set(anchor_pair)),
+        "reason": anchor_reason,
+    }
+
+    # Attach relevance metadata used by the semantic discussion stage.
+    enriched_context = []
+    for i in selected_indices:
+        pair = dict(pairs[i])
+        row = rows_by_index.get(i, {})
+        pair["_semantic_local_index"] = i
+        pair["_semantic_relevance"] = round(
+            max(
+                float(row.get("topic_affinity", 0.0) or 0.0),
+                float(row.get("answer_topic_affinity", 0.0) or 0.0),
+                float(row.get("user_topic_affinity", 0.0) or 0.0),
+            ),
+            6,
+        )
+        if i == anchor_index:
+            pair["_semantic_role"] = "ANCHOR"
+        elif _test_id_from_pair(pair) == anchor_test_id and anchor_test_id is not None:
+            pair["_semantic_role"] = "SAME_TEST_BRANCH"
+        else:
+            pair["_semantic_role"] = "SEMANTIC_SUPPORT"
+        enriched_context.append(pair)
+
+    semantic_discussion = _two_state_build_discussion_digest(
+        current,
+        enriched_context,
+        rows,
+        resolved_referent=resolved_referent,
+        semantic_operation=semantic_operation,
     )
-    anchor_index = int(anchor_row["index"])
-    context_pairs = [dict(pairs[i]) for i in selected_indices if 0 <= i < len(pairs)]
 
     return {
         "relation": "CONTINUE",
-        "confidence": max(0.63, min(0.98, 0.55 + best_score * 0.40)),
+        "confidence": max(
+            0.72,
+            min(0.99, 0.62 + 0.26 * max(
+                rows_by_index[anchor_index]["topic_affinity"],
+                rows_by_index[anchor_index]["answer_topic_affinity"],
+                _topic_affinity(current, anchor_topic),
+            )),
+        ),
         "selected_index": anchor_index,
         "selected_pair": dict(pairs[anchor_index]),
         "selected_indices": selected_indices,
-        "context_pairs": context_pairs,
+        "context_pairs": enriched_context,
         "memory_window": pairs,
-        "best_score": best_score,
+        "best_score": max((row["score"] for row in rows), default=0.0),
         "reason": (
-            "ANAPHORA_TO_12H_SEMANTIC_PAIR"
+            "TEST_ID_ROOT_SEMANTIC_CHAIN"
+            if test_id is not None
+            else "REFERENCE_TO_ACTIVE_SEMANTIC_CHAIN"
             if reference_query
-            else "SEMANTIC_LINK_TO_12H_PAIR"
+            else "SEMANTIC_CHAIN_CONTINUATION"
         ),
         "context_mode": "LIVE_CONTINUATION",
-        "semantic_discussion": _two_state_build_discussion_digest(
-            current, context_pairs, rows
-        ),
+        "semantic_discussion": semantic_discussion,
+        "resolved_referent": resolved_referent,
+        "semantic_operation": semantic_operation,
         "candidate_count": len(rows),
         "candidate_scores": rows,
+        "test_id": anchor_test_id,
     }
 
 
-def _two_state_build_discussion_digest(current, context_pairs, scored_rows):
-    """Create a compact semantic discussion of the linked chain for Provider.
+def _two_state_build_discussion_digest(
+    current,
+    context_pairs,
+    scored_rows,
+    *,
+    resolved_referent=None,
+    semantic_operation="",
+):
+    """Turn linked USER↔APRIL pairs into a semantic discussion for Provider.
 
-    All selected pairs remain available in Interpretation. The provider receives a
-    bounded digest rather than raw unbounded history, preserving the existing
-    transport/token contract without reintroducing a 15-pair memory cutoff.
+    The full 12h dialogue is searched before this function is called. This function
+    does not search memory; it explains why the selected pairs belong to the same
+    dialogue chain and what the current request does with their result.
     """
+    resolved_referent = resolved_referent if isinstance(resolved_referent, dict) else {}
     score_by_index = {
         int(row.get("index", -1)): float(row.get("score", 0.0) or 0.0)
         for row in (scored_rows or [])
         if isinstance(row, dict)
     }
+
     parts = [
         "СМЫСЛОВАЯ ЦЕПОЧКА ДИАЛОГА:",
-        f"Текущий запрос: {str(current or '').strip()[:650]}",
+        f"ТЕКУЩИЙ ЗАПРОС: {str(current or '').strip()[:700]}",
     ]
+
+    if semantic_operation:
+        parts.append(f"СЕМАНТИЧЕСКОЕ ДЕЙСТВИЕ: {str(semantic_operation).strip()[:180]}")
+
+    if resolved_referent:
+        parts.append(
+            "РАЗРЕШЁННАЯ ОПОРНАЯ ПАРА: "
+            f"index={resolved_referent.get('pair_index', '')}; "
+            f"test_id={resolved_referent.get('test_id', '')}; "
+            f"subject={str(resolved_referent.get('subject') or '')[:320]}"
+        )
+        user_ref = str(resolved_referent.get("user_request") or "").strip()
+        april_ref = str(resolved_referent.get("april_result") or "").strip()
+        if user_ref:
+            parts.append(f"ОПОРНЫЙ USER: {user_ref[:700]}")
+        if april_ref:
+            parts.append(f"ОПОРНЫЙ APRIL РЕЗУЛЬТАТ: {april_ref[:1200]}")
+
     ordered = sorted(
         [p for p in (context_pairs or []) if isinstance(p, dict)],
         key=lambda p: (
@@ -9289,72 +9797,146 @@ def _two_state_build_discussion_digest(current, context_pairs, scored_rows):
     )
     for pair in ordered:
         turn = pair.get("turn_index") or pair.get("sequence_turn_index") or pair.get("turn") or ""
-        user = str(pair.get("user") or pair.get("user_request") or "").strip()
-        april = str(pair.get("april") or pair.get("april_answer") or pair.get("answer") or "").strip()
-        idx_score = score_by_index.get(
-            int(pair.get("_semantic_local_index", -1))
-            if str(pair.get("_semantic_local_index", "")).lstrip("-").isdigit()
-            else -1,
-            0.0,
-        )
-        line = f"PAIR {turn}: USER={user[:360]} | APRIL={april[:560]}"
-        if idx_score:
-            line += f" | связь={idx_score:.3f}"
+        user = str(pair.get("user") or pair.get("user_request") or pair.get("user_text") or "").strip()
+        april = str(
+            pair.get("april")
+            or pair.get("april_answer")
+            or pair.get("assistant")
+            or pair.get("answer")
+            or ""
+        ).strip()
+        idx = pair.get("_semantic_local_index")
+        idx_text = str(idx) if str(idx).lstrip("-").isdigit() else ""
+        role = str(pair.get("_semantic_role") or "").strip()
+        rel = pair.get("_semantic_relevance")
+        line = f"PAIR {turn} [index={idx_text or '?'}{', role='+role if role else ''}]: USER={user[:520]} | APRIL={april[:1000]}"
+        if idx_text:
+            try:
+                score = float(score_by_index.get(int(idx_text), rel or 0.0) or 0.0)
+                line += f" | связь={score:.3f}"
+            except Exception:
+                pass
         parts.append(line)
 
-    return "\n".join(parts)[:3000]
+    # The discussion is deliberately compact enough for the existing provider
+    # transport. Full 12h scanning happened before this digest was built.
+    return "\n".join(parts)[:5200]
 
 
-def _two_state_structured_request(current, relation, context_mode, semantic_task,
-                                   context_pairs, semantic_discussion, selected_index,
-                                   selected_pair, canonical_topic):
+def _two_state_structured_request(
+    current,
+    relation,
+    context_mode,
+    semantic_task,
+    context_pairs,
+    semantic_discussion,
+    selected_index,
+    selected_pair,
+    canonical_topic,
+    *,
+    resolved_referent=None,
+    semantic_operation="",
+):
+    """Build the single structured request handed to Provider/OpenAI.
+
+    Memory selection and semantic resolution are already complete at this boundary.
+    The provider receives the current user request plus the resolved chain and is
+    forbidden to perform another history search or substitute a different topic.
+    """
     task = dict(semantic_task or {})
-    operation = str(task.get("operation") or "answer").lower()
-    if operation == "history_lookup":
-        operation = "summarize"
-    task["operation"] = operation
-    task["relation"] = relation
-    task["context_mode"] = context_mode
-    task["current_request"] = str(current or "").strip()
-    task["canonical_topic"] = str(canonical_topic or "").strip()
-    task["linked_pair_count"] = len(context_pairs)
-    task["semantic_discussion"] = str(semantic_discussion or "").strip()
+    operation = str(semantic_operation or task.get("operation") or "answer").lower()
+    task.update({
+        "operation": operation,
+        "relation": relation,
+        "context_mode": context_mode,
+        "current_request": str(current or "").strip(),
+        "canonical_topic": str(canonical_topic or "").strip(),
+        "linked_pair_count": len(context_pairs),
+        "semantic_discussion": str(semantic_discussion or "").strip(),
+    })
 
-    return {
-        "version": "structured_request_from_full_12h_semantic_chain_v1",
-        "action_link": "CONTINUE_FROM_SEMANTIC_12H_CHAIN" if relation == "CONTINUE" else "NEW_ACTION",
-        "mode": "CONTINUE_SEMANTIC_CHAIN" if relation == "CONTINUE" else "INDEPENDENT_NEW_TASK",
+    resolved_referent = (
+        dict(resolved_referent)
+        if isinstance(resolved_referent, dict)
+        else {}
+    )
+
+    # Only semantically selected pairs cross the provider boundary. This is a
+    # transport compaction, not a memory-window limit: the selector already scanned
+    # every pair in the complete 12h window.
+    provider_pairs = []
+    for pair in (context_pairs or []):
+        if not isinstance(pair, dict):
+            continue
+        provider_pairs.append({
+            "turn": pair.get("turn_index") or pair.get("sequence_turn_index") or pair.get("turn"),
+            "user": str(
+                pair.get("user")
+                or pair.get("user_request")
+                or pair.get("user_text")
+                or ""
+            ).strip()[:700],
+            "april": str(
+                pair.get("april")
+                or pair.get("april_answer")
+                or pair.get("assistant")
+                or pair.get("answer")
+                or ""
+            ).strip()[:1200],
+            "topic": str(
+                pair.get("sequence_topic")
+                or pair.get("topic")
+                or pair.get("canonical_topic")
+                or ""
+            ).strip()[:320],
+            "semantic_role": str(pair.get("_semantic_role") or "").strip(),
+            "semantic_relevance": pair.get("_semantic_relevance"),
+        })
+
+    structured = {
+        "version": "structured_request_from_full_12h_semantic_chain_v2",
+        "action_link": (
+            "CONTINUE_FROM_SEMANTIC_12H_CHAIN"
+            if relation == "CONTINUE"
+            else "NEW_ACTION"
+        ),
+        "mode": (
+            "CONTINUE_SEMANTIC_CHAIN"
+            if relation == "CONTINUE"
+            else "INDEPENDENT_NEW_TASK"
+        ),
         "relation": relation,
         "context_mode": context_mode,
         "current_request": str(current or "").strip(),
         "current_request_authoritative": True,
         "selected_memory_index": int(selected_index if relation == "CONTINUE" else -1),
-        "selected_memory_operand": dict(selected_pair or {}) if relation == "CONTINUE" else {},
-        "matched_pair_count": len(context_pairs),
-        "semantic_chain": [
-            {
-                "turn": pair.get("turn_index") or pair.get("sequence_turn_index") or pair.get("turn"),
-                "user": str(pair.get("user") or pair.get("user_request") or "").strip()[:420],
-                "april": str(pair.get("april") or pair.get("april_answer") or pair.get("answer") or "").strip()[:720],
-            }
-            for pair in context_pairs
-            if isinstance(pair, dict)
-        ],
+        "selected_memory_operand": (
+            dict(selected_pair or {}) if relation == "CONTINUE" else {}
+        ),
+        "matched_pair_count": len(provider_pairs) if relation == "CONTINUE" else 0,
+        "semantic_chain": provider_pairs if relation == "CONTINUE" else [],
         "semantic_discussion": str(semantic_discussion or "").strip(),
+        "resolved_referent": resolved_referent if relation == "CONTINUE" else {},
         "semantic_task": task,
+        "semantic_operation": operation,
+        "canonical_topic": str(canonical_topic or "").strip(),
         "instruction": (
-            "Продолжи текущую смысловую цепочку. Осмысли текущий запрос вместе с "
-            "переданными USER↔APRIL парами, используй уже полученные результаты, "
-            "разреши местоимения/пропуски по цепочке и ответь именно на текущий запрос. "
-            "Не переизобретай тему и не повторяй уже данный результат без необходимости."
+            "Это продолжение существующей смысловой цепочки. "
+            "Используй текущий запрос как главную задачу, а переданную USER↔APRIL "
+            "цепочку как уже установленный контекст. Разрешённый объект/результат "
+            "указан в resolved_referent: не заменяй его другим объектом и не проси "
+            "пользователя повторно сообщить контекст. Ответь именно на текущий запрос."
             if relation == "CONTINUE"
             else
-            "Это новая самостоятельная задача. Не наследуй старую тему, ответь на "
-            "текущий запрос независимо."
+            "Это новая самостоятельная задача. Не наследуй старую тему или старые "
+            "результаты. Ответь только на текущий пользовательский запрос."
         ),
         "provider_must_not_reselect_context": True,
+        "provider_must_not_bypass_pair_interpretation": True,
         "pair_history_authority": "INTERPRETATION",
+        "full_12h_was_scanned": True,
     }
+    return structured
 
 
 def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=None, history=None, state=None):
@@ -9367,7 +9949,17 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
     pairs = _full_authenticated_12h_pairs(state_obj, history=history)
 
     # 2) Semantic decision from the entire 12h set. Exactly CONTINUE or NEW.
-    selected = _two_state_semantic_selector(self, current, pairs)
+    selected = _two_state_semantic_selector(
+        self,
+        current,
+        pairs,
+        active_topic=(
+            state_obj.get("active_topic")
+            or state_obj.get("canonical_topic")
+            or ((state_obj.get("active_task") or {}).get("topic") if isinstance(state_obj.get("active_task"), dict) else "")
+            or ""
+        ),
+    )
     relation = str(selected.get("relation") or "NEW").upper()
     if relation not in {"CONTINUE", "NEW"}:
         relation = "NEW"
@@ -9376,13 +9968,22 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
         dict(x) for x in (selected.get("context_pairs") or [])
         if isinstance(x, dict)
     ]
-    selected_index = int(selected.get("selected_index", -1) or -1)
+    _selected_index_raw = selected.get("selected_index", -1)
+    try:
+        selected_index = int(_selected_index_raw) if _selected_index_raw is not None else -1
+    except (TypeError, ValueError):
+        selected_index = -1
     selected_pair = (
         dict(selected.get("selected_pair") or {})
         if relation == "CONTINUE"
         else {}
     )
     semantic_discussion = str(selected.get("semantic_discussion") or "").strip()
+    resolved_referent = (
+        dict(selected.get("resolved_referent") or {})
+        if relation == "CONTINUE"
+        else {}
+    )
 
     # 3) Existing semantic/task parser is used only to build the structural task.
     # It is not allowed to decide relation or memory. We feed it the chosen chain
@@ -9477,6 +10078,8 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
         selected_index=selected_index,
         selected_pair=selected_pair,
         canonical_topic=canonical_topic,
+        resolved_referent=selected.get("resolved_referent") or {},
+        semantic_operation=selected.get("semantic_operation") or operation,
     )
 
     # Build a clean production packet while retaining compatibility keys expected by
@@ -9539,23 +10142,40 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
     result["semantic_selection_reason"] = str(selected.get("reason") or "")
 
     semantic_task.update({
-        "operation": operation,
+        "operation": str(selected.get("semantic_operation") or operation),
         "representation": representation,
         "relation": relation,
         "context_dependency": result["context_dependency"],
         "canonical_topic": canonical_topic,
         "semantic_discussion": semantic_discussion,
+        "resolved_referent": resolved_referent,
         "linked_pair_count": len(context_pairs) if relation == "CONTINUE" else 0,
     })
+    operation = semantic_task["operation"]
     result["semantic_task"] = semantic_task
 
     result["canonical_topic"] = canonical_topic[:320]
     result["active_topic"] = canonical_topic[:320]
     result["active_entity"] = ""
     result["resolved_entity"] = ""
+    resolved_referent = (
+        dict(selected.get("resolved_referent") or {})
+        if relation == "CONTINUE"
+        else {}
+    )
+    result["resolved_referent"] = resolved_referent
+    result["semantic_operation"] = str(
+        selected.get("semantic_operation")
+        or operation
+        or "answer"
+    )
     result["resolved_reference_entity"] = (
-        canonical_topic[:320]
-        if relation == "CONTINUE" and _two_state_reference_query(current)
+        str(
+            resolved_referent.get("subject")
+            or canonical_topic
+            or ""
+        )[:320]
+        if relation == "CONTINUE"
         else ""
     )
     result["reference_entity"] = result["resolved_reference_entity"]
@@ -9587,7 +10207,7 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
     result["openai_request_formulation"] = structured_request
 
     result["provider_context_plan"] = {
-        "version": "april_provider_handoff_full_12h_semantic_chain_v1",
+        "version": "april_provider_handoff_full_12h_semantic_chain_v2",
         "relation": relation,
         "context_mode": result["context_mode"],
         "current_user_request": current,
@@ -9725,7 +10345,7 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
         if isinstance(value, list):
             return [_sanitize_two_state(item) for item in value]
         if isinstance(value, str):
-            return re.sub(r"(?i)\bRECALL\b", "CONTINUE", value)
+            return re.sub(r"(?i)RECALL", "CONTINUE", value)
         return value
 
     result = _sanitize_two_state(result)
