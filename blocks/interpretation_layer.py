@@ -6215,17 +6215,35 @@ def _live_relation_selector(
             selected_index = int(best_row["index"] if best_row else latest_index)
             selected_source = best_row
         selected_pair = dict(selected_source["pair"] if selected_source else window[-1])
-        # Keep neighbors around the matched pair, not merely the latest turns.
-        selected_pos = selected_index
-        start = max(0, selected_pos - 2)
-        end = min(len(window), selected_pos + 2)
-        context_pairs = list(window[start:end]) or [selected_pair]
-        if selected_pair and not any(
-            str(x.get("user") or "") == str(selected_pair.get("user") or "")
-            and str(x.get("april") or "") == str(selected_pair.get("april") or "")
-            for x in context_pairs
+        # Keep only the 1..4 pairs that are semantically related to the
+        # selected continuation anchor. The full 12h window never crosses into
+        # the Provider route.
+        relation_floor = max(0.10, best_score * 0.55)
+        related_rows = [
+            row for row in scored
+            if float(row.get("score", 0.0) or 0.0) >= relation_floor
+        ]
+        related_rows.sort(
+            key=lambda row: (float(row.get("score", 0.0) or 0.0), row.get("index", -1)),
+            reverse=True,
+        )
+        selected_rows = related_rows[:4]
+        if selected_source and not any(
+            row.get("index") == selected_source.get("index")
+            for row in selected_rows
         ):
-            context_pairs = (context_pairs + [selected_pair])[-4:]
+            selected_rows = [selected_source] + selected_rows[:3]
+        selected_rows = sorted(
+            selected_rows[:4],
+            key=lambda row: row.get("index", -1),
+        )
+        context_pairs = [
+            dict(row["pair"])
+            for row in selected_rows
+            if isinstance(row.get("pair"), dict)
+        ]
+        if selected_pair and not context_pairs:
+            context_pairs = [selected_pair]
         context_mode = "LIVE_CONTINUATION"
         resolved_entity = (
             latest_subject if pronoun_followup else
@@ -6243,9 +6261,10 @@ def _live_relation_selector(
         relation = "NEW"
         selected_index = -1
         selected_pair = {}
-        related = bool(best_row and best_score >= 0.16)
-        context_pairs = window[max(0, int(best_row["index"]) - 1):int(best_row["index"]) + 2] if related and best_row else []
-        context_mode = "NEW_TOPIC_WITH_CONTEXT" if related else "NEW_TOPIC_ISOLATED"
+        # NEW means a clean new task. The pair window was used only to decide
+        # that no continuation applies; no old pair is forwarded downstream.
+        context_pairs = []
+        context_mode = "NEW_TOPIC_ISOLATED"
         reference_resolution = {}
 
     # Semantic action linkage describes what the current request does relative to
@@ -6414,80 +6433,146 @@ def _pair_role_history(pairs):
 
 
 def _compact_pair_for_formulation(pair):
+    """Compact one selected authenticated pair for the OpenAI semantic request."""
     if not isinstance(pair, dict):
         return {}
-    return {
+    visual = pair.get("visual_attachment")
+    visual_id = {}
+    if isinstance(visual, dict):
+        for key in ("artifact_id", "block_id", "scene_id", "asset_path", "mime_type"):
+            if visual.get(key) not in (None, "", [], {}):
+                visual_id[key] = str(visual.get(key))[:120]
+    result = {
         "turn": pair.get("turn") or pair.get("turn_index") or pair.get("sequence_turn_index"),
-        "user": str(pair.get("user") or pair.get("user_text") or pair.get("user_request") or "").strip()[:900],
-        "april": str(pair.get("april") or pair.get("april_text") or pair.get("april_answer") or pair.get("assistant") or "").strip()[:1600],
-        "topic": str(pair.get("topic") or pair.get("sequence_topic") or pair.get("canonical_topic") or "").strip()[:260],
-        "visual_attachment": dict(pair.get("visual_attachment") or {}) if isinstance(pair.get("visual_attachment"), dict) else {},
+        "user": str(
+            pair.get("user") or pair.get("user_text") or pair.get("user_request") or ""
+        ).strip()[:240],
+        "april": str(
+            pair.get("april") or pair.get("april_text") or pair.get("april_answer") or pair.get("assistant") or ""
+        ).strip()[:360],
+        "topic": str(
+            pair.get("topic") or pair.get("sequence_topic") or pair.get("canonical_topic") or ""
+        ).strip()[:120],
     }
+    if visual_id:
+        result["visual"] = visual_id
+    return {k: v for k, v in result.items() if v not in (None, "", {}, [])}
 
 
-def _build_pair_first_response_formulation(current, selected, selected_index, relation, context_mode):
-    """Build the actual semantic bridge that will be handed to OpenAI.
+def _build_pair_first_response_formulation(
+    current,
+    selected,
+    selected_index,
+    relation,
+    context_mode,
+    matched_pairs=None,
+):
+    """Build one compact semantic request for OpenAI from selected dialogue evidence.
 
-    It is deliberately data-driven: current request + matched USER↔APRIL pair(s)
-    determine whether the next turn extends the previous action, starts a related
-    task, or is independent. No trigger phrase is used to manufacture the answer.
+    Full authenticated 12h memory is an Interpretation-side search space only.
+    Provider receives this compact formulation instead of the entire history.
     """
     selected_pair = _compact_pair_for_formulation(selected)
-    user = selected_pair.get("user", "")
-    april = selected_pair.get("april", "")
+    raw_pairs = matched_pairs if isinstance(matched_pairs, list) else []
+    compact_pairs = [
+        _compact_pair_for_formulation(pair)
+        for pair in raw_pairs
+        if isinstance(pair, dict)
+    ]
+    compact_pairs = [pair for pair in compact_pairs if pair][:4]
+
+    if relation == "CONTINUE" and selected_pair:
+        selected_turn = str(selected_pair.get("turn") or "")
+        selected_user = str(selected_pair.get("user") or "")
+        if not any(
+            str(pair.get("turn") or "") == selected_turn
+            and str(pair.get("user") or "") == selected_user
+            for pair in compact_pairs
+        ):
+            compact_pairs.insert(0, selected_pair)
+        compact_pairs = compact_pairs[:4]
+
+    discussion_parts = []
+    for pair in compact_pairs[:4]:
+        topic = str(pair.get("topic") or "").strip()
+        user_text = str(pair.get("user") or "").strip()
+        if topic:
+            discussion_parts.append(topic[:140])
+        elif user_text:
+            discussion_parts.append(user_text[:140])
+    discussion = "; ".join(dict.fromkeys(x for x in discussion_parts if x))[:520]
+
     if relation == "CONTINUE":
-        mode = "CONTINUE_FROM_MATCHED_PAIR"
-        action_link = "CONTINUE_PREVIOUS_ACTION"
+        mode = "CONTINUE_FROM_MATCHED_PAIRS"
+        action_link = "CONTINUE_PREVIOUS_DIALOGUE"
         instruction = (
-            "Сначала восстанови смысл выбранной USER↔APRIL пары, затем интерпретируй "
-            "текущий запрос как следующий шаг этого же разговора. Сохраняй предмет, "
-            "референты, фактический результат и действие предыдущего ответа. Ответь "
-            "именно на текущий запрос, а не повторяй предыдущий ответ. Не используй "
-            "шаблонный ответ и не говори, что контекста нет."
+            "Текущий запрос определён как продолжение выбранного фрагмента диалога. "
+            "Используй только переданные связанные USER↔APRIL пары как основание: "
+            "учти уже обсуждённое и полученный результат, затем развивай тему в сторону "
+            "текущего запроса. Не повторяй предыдущий ответ и не ищи другую память."
         )
     elif context_mode == "HISTORY_LOOKUP":
-        mode = "HISTORY_RECALL_FROM_PAIRS"
-        action_link = "RECALL_ACTUAL_DIALOGUE_PAIRS"
+        mode = "HISTORY_RECALL_FROM_SELECTED_PAIRS"
+        action_link = "RECALL_SELECTED_DIALOGUE"
         instruction = (
-            "Восстанови фактический ход разговора по переданным USER↔APRIL парам. "
-            "Назови реально обсуждавшиеся темы и кратко покажи, как они связаны. "
-            "Не утверждай, что предыдущего диалога нет, когда пары переданы."
-        )
-    elif context_mode == "NEW_TOPIC_WITH_CONTEXT":
-        mode = "NEW_FROM_RELATED_PAIRS"
-        action_link = "NEW_ACTION_RELATED_TO_HISTORY"
-        instruction = (
-            "Текущий запрос является новой задачей, но он смыслово связан с найденными "
-            "парами. Используй их только как фон, чтобы понять, от чего пользователь "
-            "переходит и куда развивает разговор. Не превращай новую задачу в ответ "
-            "на старую."
+            "Ответь по переданным выбранным парам: восстанови, о чём фактически говорили. "
+            "Не утверждай, что контекста нет, когда пары переданы."
         )
     else:
         mode = "INDEPENDENT_NEW_TASK"
         action_link = "NEW_ACTION"
-        instruction = "Ответь на текущий запрос как на самостоятельную задачу без наследования старого смысла."
-    return {
-        "version": "pair_first_response_formulation_v3",
+        instruction = (
+            "Текущий запрос — новая задача. Не наследуй старую тему и не используй "
+            "предыдущие пары. Сформируй самостоятельный, естественный ответ."
+        )
+
+    result = {
+        "version": "pair_first_response_formulation_v4_compact",
         "relation": relation,
         "context_mode": context_mode,
+        "pair_first": True,
         "current_request": str(current or "").strip()[:2400],
         "matched_pair_index": int(selected_index if selected_index is not None else -1),
-        "matched_pair": selected_pair,
+        "matched_pair": selected_pair if relation == "CONTINUE" else {},
+        "matched_pairs": (
+            compact_pairs
+            if relation == "CONTINUE" or context_mode == "HISTORY_LOOKUP"
+            else []
+        ),
+        "discussion_summary": (
+            discussion if relation == "CONTINUE" or context_mode == "HISTORY_LOOKUP" else ""
+        ),
         "action_link": action_link,
         "mode": mode,
-        "previous_user_question": user,
-        "previous_april_answer": april,
-        "messages": ([
-            {"role": "user", "content": user},
-            {"role": "assistant", "content": april},
-            {"role": "user", "content": str(current or "").strip()[:2400]},
-        ] if relation == "CONTINUE" and (user or april) else ([
-            {"role": "assistant", "content": april},
-            {"role": "user", "content": str(current or "").strip()[:2400]},
-        ] if context_mode == "NEW_TOPIC_WITH_CONTEXT" and april else [{"role": "user", "content": str(current or "").strip()[:2400]}])),
         "instruction": instruction,
     }
 
+    if relation == "CONTINUE" and compact_pairs:
+        result["previous_user_question"] = compact_pairs[0].get("user", "")
+        result["previous_april_answer"] = compact_pairs[0].get("april", "")
+        result["messages"] = [
+            {"role": "user", "content": pair.get("user", "")}
+            for pair in compact_pairs
+            if pair.get("user")
+        ]
+        result["messages"].append(
+            {"role": "user", "content": str(current or "").strip()[:2400]}
+        )
+    elif context_mode == "HISTORY_LOOKUP":
+        result["messages"] = [
+            {"role": "user", "content": pair.get("user", "")}
+            for pair in compact_pairs
+            if pair.get("user")
+        ]
+        result["messages"].append(
+            {"role": "user", "content": str(current or "").strip()[:2400]}
+        )
+    else:
+        result["messages"] = [
+            {"role": "user", "content": str(current or "").strip()[:2400]}
+        ]
+
+    return result
 
 def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, history=None, state=None):
     state_obj = state if isinstance(state, dict) else {}
@@ -6530,7 +6615,12 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         dict(selected.get("response_formulation"))
         if isinstance(selected.get("response_formulation"), dict)
         else _build_pair_first_response_formulation(
-            current, formulation_pair, selected_index, relation, context_mode
+            current,
+            formulation_pair,
+            selected_index,
+            relation,
+            context_mode,
+            matched_pairs=context_pairs,
         )
     )
 
@@ -6747,8 +6837,15 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
     result["required_representations"] = [base_rep]
     result["visual_generation_request"] = visual_request
 
+    # Provider boundary: only the compact structured request crosses.
+    # The authenticated 12h memory remains an Interpretation-side search space.
+    provider_formulation_pairs = (
+        [dict(x) for x in context_pairs[-4:]]
+        if relation == "CONTINUE" or history_lookup
+        else []
+    )
     provider_plan = {
-        "version": "april_provider_handoff_pair_12h_v3_live_context",
+        "version": "april_provider_handoff_structured_request_v4",
         "relation": relation,
         "context_mode": context_mode,
         "current_user_request": current,
@@ -6758,81 +6855,57 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         "context_selection_done_before_provider": True,
         "provider_must_not_reselect_context": True,
         "hard_budget_tokens": 900,
-        "soft_target_tokens": 820,
-        "provider_continuation_contract": "PAIR_FIRST_12H_LIVE_V3",
-        "pair_history_authority": "AUTHENTICATED_USER_APRIL_12H",
-        "pair_history_count": len(provider_context_pairs),
-        "new_topic_minimal_context": context_mode == "NEW_TOPIC_ISOLATED",
-        "context_background_only": context_mode in {"NEW_TOPIC_WITH_CONTEXT", "HISTORY_LOOKUP"},
+        "soft_target_tokens": (
+            800 if len(current) > 1800
+            else 570 if len(current) > 900
+            else 300
+        ),
+        "provider_continuation_contract": "STRUCTURED_REQUEST_FROM_SELECTED_PAIRS",
+        "pair_history_authority": "INTERPRETATION_ONLY",
+        "pair_history_count": len(provider_formulation_pairs),
+        "new_topic_minimal_context": relation == "NEW",
+        "context_background_only": False,
         "history_lookup": history_lookup,
         "required_context": [
-            {"key": "RESPONSE_FORMULATION", "priority": 1.02, "value": dict(response_formulation)},
-            {"key": "PAIR_MATCH", "priority": 1.015, "value": {
-                "selected_index": selected_index,
-                "match_score": float(selected.get("best_score") or selected.get("latest_score") or 0.0),
-                "selected_pair": _compact_pair_for_formulation(selected_pair),
-                "related_pair": _compact_pair_for_formulation(selected.get("related_pair") or {}),
-                "context_pairs": [_compact_pair_for_formulation(x) for x in context_pairs[-4:]],
-                "match_method": "semantic_user_april_pair_matching",
-            }},
-            {"key": "SEMANTIC_CORE", "priority": 1.0, "value": {
-                "topic": canonical_topic,
-                "operation": operation,
-                "representation": base_rep,
-                "turn_relation": relation,
-                "context_mode": context_mode,
-                "resolved_reference_entity": resolved_reference_entity,
-                "resolved_request": current,
-                "dialogue_anchor": canonical_topic,
-            }},
-            {"key": "OUTPUT_CONTRACT", "priority": 0.99, "value": {
-                "representation": base_rep,
-                "requested_outputs": [base_rep],
-                "visual_generation_request": visual_request,
-                "no_text_fallback_for_image": base_rep in {"image", "gallery"},
-                "ascii_allowed": False,
-            }},
+            {
+                "key": "RESPONSE_FORMULATION",
+                "priority": 1.02,
+                "value": dict(response_formulation),
+            },
+            {
+                "key": "SEMANTIC_CORE",
+                "priority": 1.0,
+                "value": {
+                    "topic": canonical_topic,
+                    "operation": operation,
+                    "representation": base_rep,
+                    "turn_relation": relation,
+                    "context_mode": context_mode,
+                    "resolved_reference_entity": resolved_reference_entity,
+                    "resolved_request": current,
+                },
+            },
+            {
+                "key": "OUTPUT_CONTRACT",
+                "priority": 0.99,
+                "value": {
+                    "representation": base_rep,
+                    "requested_outputs": [base_rep],
+                    "visual_generation_request": visual_request,
+                    "no_text_fallback_for_image": base_rep in {"image", "gallery"},
+                    "ascii_allowed": False,
+                },
+            },
         ],
         "optional_context": [],
-        "excluded_context": ["GLOBAL_TOPIC_INDEX", "ENTITY_INDEX", "LEGACY_INTENT_ENGINE", "UNBOUNDED_HISTORY"],
+        "excluded_context": [
+            "FULL_12H_DIALOGUE",
+            "UNRELATED_PAIRS",
+            "GLOBAL_TOPIC_INDEX",
+            "ENTITY_INDEX",
+            "LEGACY_INTENT_ENGINE",
+        ],
     }
-    if context_mode != "NEW_TOPIC_ISOLATED" and context_pairs:
-        provider_plan["required_context"].append({
-            "key": "ACTIVE_DIALOGUE_TRAJECTORY" if relation == "CONTINUE" else "CONTEXT_BACKGROUND",
-            "priority": 0.998 if relation == "CONTINUE" else 0.93,
-            "value": {
-                "background_only": relation == "NEW",
-                "pairs": provider_context_pairs,
-                "anchor_index": int((selected.get("context_anchor_index", -1) if selected.get("context_anchor_index", -1) is not None else -1)),
-                "history_lookup": history_lookup,
-            },
-        })
-    if relation == "CONTINUE" and selected_pair:
-        provider_plan["required_context"].append({
-            "key": "DIALOGUE_ANCHOR",
-            "priority": 0.997,
-            "value": {
-                "selected_memory_index": selected_index,
-                "selected_memory_operand": provider_selected_pair,
-                "anchor_user": provider_selected_pair.get("user") or "",
-                "anchor_april": provider_selected_pair.get("april") or "",
-                "resolved_referent": resolved_reference_entity or canonical_topic,
-                "pair_window_hours": 12,
-                "reference_resolution": reference_resolution,
-                "history_source": "AUTHENTICATED_12H_USER_APRIL_PAIRS",
-            },
-        })
-    if history_lookup:
-        provider_plan["required_context"].append({
-            "key": "HISTORY_CONTEXT_CHECK",
-            "priority": 0.996,
-            "value": {
-                "mode": "HISTORY_LOOKUP",
-                "anchor_index": int((selected.get("context_anchor_index", -1) if selected.get("context_anchor_index", -1) is not None else -1)),
-                "pair_count": len(context_pairs),
-            },
-        })
-
     print(
         "🧭 APRIL OPENAI FORMULATION READY:",
         {
