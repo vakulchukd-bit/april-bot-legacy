@@ -6019,14 +6019,24 @@ class ProcessorScene:
             base_topic = _text(pending_task.get("topic") or pending_task.get("representation"))
             resolved_request = f"Продолжение задания: {base_topic}. Ответ пользователя: {self.request}"
 
-        if relation in {"CONTINUE", "RECALL"}:
-            # Interpretation has already selected the branch. Executor only
-            # carries the prepared active-branch memory forward.
+        history_lookup_mode = bool(
+            dialogue.get("history_lookup")
+            or _text(dialogue.get("context_mode")).upper() == "HISTORY_LOOKUP"
+            or _text(semantic_result.get("context_mode")).upper() == "HISTORY_LOOKUP"
+        )
+        if relation in {"CONTINUE", "RECALL"} or history_lookup_mode:
+            # Interpretation has already selected the context. HISTORY_LOOKUP is
+            # intentionally a NEW task at the dialogue-relation layer, but it still
+            # requires the authenticated 12h pair window as executable background
+            # context. The old code dropped it because it only built this bridge
+            # for CONTINUE/RECALL, producing an empty Provider context for
+            # "найди в диалоге прошлом".
+            bridge_relation = "CONTINUE" if relation == "CONTINUE" else "RECALL" if relation == "RECALL" else "RECALL"
             dialogue_memory = build_dialogue_memory_bridge(
                 self.user_id,
                 query=self.request,
                 limit=15,
-                relation=relation,
+                relation=bridge_relation,
                 target_sequence_id=_text(
                     dialogue.get("target_sequence_id")
                     or dialogue.get("sequence_id")
@@ -6037,6 +6047,9 @@ class ProcessorScene:
                     or semantic_result.get("task_id")
                 ),
             )
+            dialogue_memory["retrieval_mode"] = "HISTORY_LOOKUP" if history_lookup_mode and relation == "NEW" else dialogue_memory.get("retrieval_mode")
+            dialogue_memory["history_lookup"] = history_lookup_mode
+            dialogue_memory["current_relation"] = relation
         else:
             dialogue_memory = {
                 "relation": "NEW",
