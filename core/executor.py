@@ -5001,7 +5001,7 @@ from blocks.provider_router import generate_text
 from blocks.reasoning_state import build_turn_synchronization_snapshot
 from blocks.goal_engine import build_goal_evidence, evaluate_goal_progress
 from blocks.response_decision import build_completion_decision
-from blocks.state_manager import get_state, update_scene_context, build_dialogue_memory_bridge, persist_provider_dialogue_pair
+from blocks.state_manager import get_state, update_scene_context, build_dialogue_memory_bridge
 from blocks.presentation_formatter import canonical_payload_for_block, validate_render_block_payload
 from blocks.rooms_registry import registry_route_machine_request
 
@@ -7897,17 +7897,6 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
     provider_contract = await generate_text(request)
     provider_ms = round((time.perf_counter() - started) * 1000, 1)
 
-    # Provider boundary checkpoint: persist the exact structured OpenAI response
-    # together with the current user request before any Room/Scene/Web materialization.
-    # This does not add another provider call and excludes binary image payloads.
-    provider_boundary_structured_persisted = False
-    try:
-        provider_boundary_structured_persisted = bool(
-            persist_provider_dialogue_pair(user_id, request_text, provider_contract)
-        )
-    except Exception as exc:
-        print("⚠️ APRIL PROVIDER STRUCTURED MEMORY WRITE:", exc)
-
     # Provider returns the image plan; the local image engine materializes it
     # before the processor creates the final SceneContract. No second provider.
     # Do not gate this handoff on the provider envelope shape: the Interpreter
@@ -7926,7 +7915,6 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
         machine_preview,
         request.dialogue_contract if isinstance(request.dialogue_contract, dict) else {},
     )
-    machine_preview.setdefault("metadata", {})["provider_boundary_structured_persisted"] = provider_boundary_structured_persisted
     preview_response = MachineResponse(
         answer=_text(machine_preview.get("answer")),
         content=_text(machine_preview.get("content")),
@@ -8072,12 +8060,8 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
             persist=False,
         )
         response.metadata["dialogue_committed"] = True
-        response.metadata["dialogue_commit_stage"] = (
-            "PROVIDER_BOUNDARY_STRUCTURED_THEN_SCENE_IN_MEMORY_BEFORE_DELIVERY"
-            if provider_boundary_structured_persisted
-            else "SCENE_IN_MEMORY_BEFORE_DELIVERY"
-        )
-        response.metadata["dialogue_persistence"] = "provider_boundary_structured_pair" if provider_boundary_structured_persisted else "scene_pair_persistence"
+        response.metadata["dialogue_commit_stage"] = "POST_PROVIDER_SCENE_IN_MEMORY_BEFORE_DELIVERY"
+        response.metadata["dialogue_persistence"] = "background_after_delivery_commit"
     except Exception as exc:
         print("⚠️ APRIL SCENE MEMORY WRITE:", exc)
 
