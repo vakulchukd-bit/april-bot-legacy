@@ -140,6 +140,13 @@ resolved request, representation and requested outputs. Continuation/reference t
 use the supplied authenticated USER↔APRIL sequence context; do not interpret a short follow-up
 in isolation and do not invent an antecedent.
 
+RELATION is deliberately two-state: CONTINUE or NEW. CONTEXT_MODE is a separate axis.
+When RELATION=NEW with CONTEXT_MODE=NEW_TOPIC_WITH_CONTEXT or HISTORY_LOOKUP, the current
+request is a new task and must be executed as such; supplied pairs are background evidence only
+for understanding references, chronology or why the new task is related. Never silently turn such
+a NEW request into continuation of the previous task. HISTORY_LOOKUP is a context-use mode, not a
+third dialogue relation and must never cause a RECALL branch.
+
 Use the supplied dialogue strategy as response guidance:
 EXPAND adds new information; DEEPEN explains causes; DISCUSS engages the point;
 SOLVE advances a concrete problem; CORRECT fixes the disputed point; REACT responds naturally;
@@ -1463,6 +1470,7 @@ def _minimal_plan_context(plan: dict[str, Any]) -> dict[str, Any]:
     relation = _safe_text(plan.get("relation") or "NEW").upper()
     out: dict[str, Any] = {
         "relation": relation,
+        "context_mode": _safe_text(plan.get("context_mode") or ""),
         "current_request": _semantic_excerpt(plan.get("current_user_request") or "", 360),
     }
 
@@ -1551,16 +1559,16 @@ def _minimal_plan_context(plan: dict[str, Any]) -> dict[str, Any]:
     elif development not in (None, "", [], {}):
         out["dialogue_development"] = _semantic_excerpt(development, 520)
 
-    memory = by_key.get("MEMORY_RECALL")
-    if relation == "RECALL" and memory not in (None, "", [], {}):
+    memory = by_key.get("HISTORY_CONTEXT")
+    if relation == "NEW" and memory not in (None, "", [], {}):
         if isinstance(memory, list):
-            out["memory_recall"] = [
+            out["history_context"] = [
                 _compact_value(item, max_depth=2, max_items=4, max_keys=8)
                 for item in memory[:2]
                 if isinstance(item, dict)
             ]
         else:
-            out["memory_recall"] = _semantic_excerpt(memory, 260)
+            out["history_context"] = _semantic_excerpt(memory, 260)
 
     return {
         key: value for key, value in out.items()
@@ -1591,9 +1599,9 @@ def _build_provider_user_text_from_plan(
         requested = [requested]
     requested = [x for x in requested if _safe_text(x).strip()]
 
-    # A NEW topic is intentionally isolated.  The current request is the only
-    # conversational operand; semantic metadata is already encoded in the request
-    # and provider system contract. This prevents stale topic/entity leakage.
+    # An isolated NEW task is intentionally compact. NEW_WITH_CONTEXT and
+    # HISTORY_LOOKUP are allowed to serialize the Interpretation-selected pair window
+    # as background without turning the task into CONTINUE.
     if relation == "NEW" and bool(plan.get("new_topic_minimal_context")):
         minimal = "APRIL CANONICAL REQUEST\nREQUEST: " + current_request
         return minimal, {
@@ -1765,9 +1773,10 @@ def _provider_system_prompt_for_payload(payload: dict[str, Any]) -> str:
     if provider_plan:
         relation = _safe_text(provider_plan.get("relation") or "NEW").upper()
         task_active = bool(provider_plan.get("active_task"))
-        recall = relation == "RECALL"
+        context_mode = _safe_text(provider_plan.get("context_mode") or "").lower()
         continuation = relation == "CONTINUE"
-        return PROVIDER_DIALOGUE_SYSTEM_PROMPT if continuation or recall or task_active else PROVIDER_MACHINE_SYSTEM_PROMPT
+        context_aware_new = context_mode in {"new_topic_with_context", "history_lookup"}
+        return PROVIDER_DIALOGUE_SYSTEM_PROMPT if continuation or context_aware_new or task_active else PROVIDER_MACHINE_SYSTEM_PROMPT
 
     dialogue = _dialogue_contract(payload)
     workspace = (
@@ -1819,7 +1828,8 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
     if _estimate_input_tokens(system_prompt) > 420:
         system_prompt = (
             "April internal response provider. Return exactly one MachineResponse JSON object. "
-            "Quantum Processor owns current request, dialogue relation, task, representation and context plan. "
+            "Quantum Processor owns current request, two-state dialogue relation, context mode, task, representation and context plan. "
+            "RELATION=NEW always executes the current request as a new task; NEW_TOPIC_WITH_CONTEXT/HISTORY_LOOKUP context is background only. "
             "Use only the supplied context plan. Do not add, search, reinterpret or substitute context. "
             "Preserve requested structured representations and never expose internal state."
         )
@@ -1847,14 +1857,12 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             "SAME_TOPIC": "NEW",
             "CONTINUE_TOPIC": "CONTINUE",
             "CONTINUATION": "CONTINUE",
-            "MEMORY_QUERY": "RECALL",
+            "MEMORY_QUERY": "NEW",
         }.get(relation, relation)
-        if relation not in {"NEW", "CONTINUE", "RECALL"}:
-            relation = (
-                "RECALL" if dialogue_contract.get("reference_to_previous")
-                else "CONTINUE" if dialogue_contract.get("continuation")
-                else "NEW"
-            )
+        if relation == "RECALL":
+            relation = "CONTINUE" if dialogue_contract.get("reference_to_previous") else "NEW"
+        if relation not in {"NEW", "CONTINUE"}:
+            relation = "CONTINUE" if dialogue_contract.get("continuation") else "NEW"
         current_request = _safe_text(
             dialogue_contract.get("current_request")
             or dialogue_contract.get("resolved_request")
@@ -1897,7 +1905,7 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             "excluded_context": ["FULL_HISTORY", "OTHER_TOPIC_BRANCHES", "STALE_GLOBAL_ENTITY"],
         }
         selected_operand = dialogue_contract.get("selected_memory_operand")
-        if relation in {"CONTINUE", "RECALL"} and isinstance(selected_operand, dict) and selected_operand:
+        if relation == "CONTINUE" and isinstance(selected_operand, dict) and selected_operand:
             provider_plan["required_context"].append({
                 "key": "DIALOGUE_ANCHOR",
                 "priority": 0.995,
