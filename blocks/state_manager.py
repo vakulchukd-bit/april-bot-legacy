@@ -4161,7 +4161,13 @@ def build_dialogue_memory_bridge(
         "retrieval_mode": mode,
         "target_sequence_id": selected_sequence_id,
         "target_task_id": selected_task_id,
+        "authenticated": bool(user_key),
         "active_sequence": active_meta,
+        "dialogue_pairs": (
+            recent_sequence_records
+            if mode in {"CONTINUE", "RECALL"}
+            else []
+        ),
         "active_sequence_turns": (
             recent_sequence_records
             if mode in {"CONTINUE", "RECALL"}
@@ -5046,7 +5052,7 @@ def update_scene_context(
     post_provider_semantics = _derive_post_provider_memory_semantics(
         current_request_text,
         answer_text,
-        provisional=dialogue_vector,
+        provisional=provisional_dialogue_vector,
         previous_anchor=previous_anchor,
         relation=resolved_relation,
         render_types=block_types or presentation_types,
@@ -6434,6 +6440,7 @@ def _clean_load_authenticated_state(user_id: Any) -> dict[str, Any]:
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "seed_hours": DIALOGUE_SEED_HOURS,
         "source": "POSTGRES_DIALOGUE_MEMORY_PAIRS",
+        "authority": "AUTHENTICATED_USER_APRIL_PAIRS",
     }
     state[uid] = base
     return base
@@ -6553,6 +6560,13 @@ def update_scene_context(
                     created_at=time.time(),
                     turn_index=turn_index,
                 )
+                # Keep the interpretation hot-path cache coherent with the durable
+                # pair store immediately after a completed USER↔APRIL commit.
+                try:
+                    from blocks.interpretation_layer import invalidate_pair_cache
+                    invalidate_pair_cache(uid)
+                except Exception:
+                    pass
                 clean_rows = [p for p in (_clean_pair_from_row(x) for x in load_dialogue_pairs(uid, limit=0)) if p]
                 with _state_lock:
                     _clean_runtime_memory_scope(state.get(uid) if isinstance(state.get(uid), dict) else build_default_state(), uid, clean_rows)
@@ -6808,24 +6822,49 @@ def _purge_entity_routing_fields(obj):
 _STATE_GET_STATE_ORIGINAL = get_state
 
 def get_state(user_id):
-    obj=_STATE_GET_STATE_ORIGINAL(user_id)
-    uid=str(user_id or "")
-    scope=obj.get("memory_scope") if isinstance(obj,dict) and isinstance(obj.get("memory_scope"),dict) else {}
-    authenticated=bool(scope.get("authenticated") or scope.get("user_id"))
-    if authenticated and uid:
-        timeline=obj.get("memory_timeline") if isinstance(obj.get("memory_timeline"),dict) else {}
-        pair_count=sum(len(day.get("dialog_pairs") or []) for day in timeline.values() if isinstance(day,dict) and isinstance(day.get("dialog_pairs"),list))
-        if pair_count == 0:
-            try:
-                rows=load_dialogue_pairs(uid, limit=0)
-            except Exception:
-                rows=[]
-            if rows:
-                try:
-                    clean=[p for p in (_clean_pair_from_row(x) for x in rows) if p]
-                    obj=_clean_runtime_memory_scope(obj, uid, clean)
-                except Exception:
-                    pass
+    """Fast authenticated state access for the live dialogue hot path.
+
+    A process performs the canonical authenticated DB load only when the runtime
+    snapshot is missing/not initialized. Completed USER↔APRIL pairs are committed
+    by update_scene_context() and mirrored into the same runtime snapshot, so later
+    turns do not reopen PostgreSQL merely to reconstruct already-loaded context.
+    """
+    uid = _clean_uid(user_id)
+    if not uid:
+        return _STATE_GET_STATE_ORIGINAL(user_id)
+
+    with _state_lock:
+        obj = state.get(uid)
+        scope = obj.get("memory_scope") if isinstance(obj, dict) and isinstance(obj.get("memory_scope"), dict) else {}
+        ready = (
+            isinstance(obj, dict)
+            and int(obj.get("_state_manager_normalized_version") or 0) == 3
+            and bool(scope.get("authenticated"))
+        )
+
+    if not ready:
+        obj = _STATE_GET_STATE_ORIGINAL(uid)
+        if isinstance(obj, dict):
+            # Mark the canonical DB-backed bootstrap as complete. Every subsequent
+            # turn stays on this hot in-memory snapshot until authentication/cache
+            # invalidation explicitly removes it.
+            obj["_state_manager_normalized_version"] = 3
+
+    if not isinstance(obj, dict):
+        obj = build_default_state()
+        obj["user_id"] = uid
+
+    scope = obj.get("memory_scope") if isinstance(obj.get("memory_scope"), dict) else {}
+    if scope.get("authenticated"):
+        _purge_entity_routing_fields(obj)
+        return obj
+
+    obj["memory_scope"] = {
+        "user_id": uid,
+        "authenticated": False,
+        "persistence": "disabled",
+        "source": "auth_required",
+    }
     _purge_entity_routing_fields(obj)
     return obj
 
