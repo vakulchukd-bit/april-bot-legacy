@@ -144,18 +144,14 @@ resolved request, representation and requested outputs. Continuation/reference t
 use the supplied authenticated USER↔APRIL sequence context; do not interpret a short follow-up
 in isolation and do not invent an antecedent.
 
-RELATION is deliberately two-state: CONTINUE or NEW. CONTEXT_MODE is a separate axis.
-When RELATION=NEW with CONTEXT_MODE=NEW_TOPIC_WITH_CONTEXT or HISTORY_LOOKUP, the current
-request is a new task and must be executed as such; supplied pairs are background evidence only
-for understanding references, chronology or why the new task is related. Never silently turn such
-a NEW request into continuation of the previous task. HISTORY_LOOKUP is a context-use mode, not a
-third dialogue relation and must never cause a RECALL branch.
-
-Use RESPONSE_FORMULATION as the authoritative semantic formulation of the next turn.
-It is built after matching the current request against authenticated 12-hour USER↔APRIL pairs.
-Do not reduce it to trigger words or a canned response. For CONTINUE, follow the matched pair
-trajectory and answer the current request as its next logical action. For NEW_TOPIC_WITH_CONTEXT,
-use the matched history only as background and develop the new task independently.
+RELATION is deliberately two-state: CONTINUE or NEW.
+RESPONSE_FORMULATION is the authoritative semantic formulation of the next turn.
+Interpretation has already searched the authenticated 12-hour USER↔APRIL memory and selected
+only the 1..4 pairs relevant to a CONTINUE request. Those selected pairs are embedded inside
+RESPONSE_FORMULATION. Do not search, reselect, reconstruct, or request the rest of memory.
+For CONTINUE, use only the supplied formulation and matched pairs to answer the current request
+as the next logical action, preserving what was already discussed and avoiding repetition.
+For NEW, the request is independent and no prior dialogue pairs are supplied or to be inferred.
 
 Use the supplied dialogue strategy as response guidance:
 EXPAND adds new information; DEEPEN explains causes; DISCUSS engages the point;
@@ -1613,11 +1609,11 @@ def _build_provider_user_text_from_plan(
     *,
     system_prompt: str,
 ) -> tuple[str, dict[str, Any]]:
-    """Serialize the Interpretation plan without reselecting context.
+    """Serialize only the compact Interpretation-authored structured request.
 
-    Required/optional/excluded context has already been decided upstream.
-    The provider packer only performs progressive compression to fit the 900-token
-    envelope. The current user request remains the first semantic operand.
+    Interpretation performs the 12h pair search, selects the related 1..4 pairs,
+    decides CONTINUE/NEW and builds RESPONSE_FORMULATION. Provider never receives
+    the full dialogue window and never searches memory.
     """
     current_request = _safe_text(
         plan.get("current_user_request")
@@ -1630,90 +1626,69 @@ def _build_provider_user_text_from_plan(
         requested = [requested]
     requested = [x for x in requested if _safe_text(x).strip()]
 
-    # An isolated NEW task is intentionally compact. NEW_WITH_CONTEXT and
-    # HISTORY_LOOKUP are allowed to serialize the Interpretation-selected pair window
-    # as background without turning the task into CONTINUE.
-    isolated_new = (
-        relation == "NEW"
-        and bool(plan.get("new_topic_minimal_context"))
-        and not bool(plan.get("context_background_only"))
-        and not bool(plan.get("history_lookup"))
-    )
-    if isolated_new:
-        minimal = "APRIL CANONICAL REQUEST\nREQUEST: " + current_request
-        return minimal, {
-            "provider_context_plan_version": _safe_text(plan.get("version")),
-            "provider_context_authority": "INTERPRETATION",
-            "provider_must_not_reselect_context": True,
-            "plan_required_selected": ["CURRENT_REQUEST"],
-            "plan_optional_candidates": [],
-            "plan_excluded": [
-                _safe_text(x.get("key") or x.get("name"))
-                for x in list(plan.get("excluded_context") or [])[:32]
-                if isinstance(x, dict)
-            ],
-            "new_topic_minimal_context": True,
-            "current_request_length_chars": len(current_request),
-            "estimated_input_tokens": _estimate_input_tokens(minimal),
-            "hard_budget_tokens": int(plan.get("hard_budget_tokens") or INPUT_TOKEN_BUDGET),
-            "soft_target_tokens": int(plan.get("soft_target_tokens") or min(850, INPUT_TOKEN_BUDGET)),
-        }
-
+    # Canonical small OpenAI request. The compression system below remains unchanged;
+    # it is only a final safety net for unusually large user requests.
     mandatory: list[str] = [
-        "APRIL CANONICAL REQUEST",
+        "APRIL CANONICAL STRUCTURED REQUEST",
         "REQUEST: " + current_request,
         "RELATION: " + relation,
-        "REQUESTED: " + json.dumps(requested[:6], ensure_ascii=False, separators=(",", ":")),
-        "RESPONSE_FORMAT: Return exactly one complete logical answer as MachineResponse JSON. Use only the supplied context plan.",
     ]
 
-    development = plan.get("dialogue_development")
-    # CONTINUE already carries the compact DIALOGUE_ANCHOR +
-    # CONTINUATION_INTEREST sections. Serializing a second development object
-    # duplicates the same state and consumes the hard input envelope. Keep the
-    # development section only for RECALL/other non-continuation paths.
-    if development not in (None, "", [], {}) and relation != "CONTINUE":
+    by_key = {}
+    for section in list(plan.get("required_context") or []):
+        if not isinstance(section, dict):
+            continue
+        key = _safe_text(section.get("key") or section.get("name")).upper()
+        if key:
+            by_key[key] = section.get("value")
+
+    formulation = by_key.get("RESPONSE_FORMULATION")
+    if formulation not in (None, "", [], {}):
         mandatory.append(
-            _json_piece("DIALOGUE_DEVELOPMENT", development, depth=3, items=4, keys=7)
+            _json_piece("RESPONSE_FORMULATION", formulation, depth=5, items=6, keys=16)
         )
+
+    semantic_core = by_key.get("SEMANTIC_CORE")
+    if isinstance(semantic_core, dict):
+        keep = (
+            "topic", "operation", "goal", "representation",
+            "turn_relation", "context_mode", "resolved_reference_entity",
+            "resolved_request",
+        )
+        semantic_small = {
+            key: _semantic_excerpt(semantic_core.get(key), 180)
+            for key in keep
+            if semantic_core.get(key) not in (None, "", [], {})
+        }
+        if semantic_small:
+            mandatory.append(_json_piece("SEMANTIC_CORE", semantic_small, depth=2, items=8, keys=12))
+    elif semantic_core not in (None, "", [], {}):
+        mandatory.append(_semantic_excerpt("SEMANTIC_CORE: " + str(semantic_core), 420))
+
+    output_contract = by_key.get("OUTPUT_CONTRACT")
+    if isinstance(output_contract, dict):
+        keep = (
+            "representation", "requested_outputs",
+            "visual_generation_request", "no_text_fallback_for_image",
+            "ascii_allowed",
+        )
+        output_small = {
+            key: output_contract.get(key)
+            for key in keep
+            if output_contract.get(key) not in (None, "", [], {})
+        }
+        if output_small:
+            mandatory.append(_json_piece("OUTPUT_CONTRACT", output_small, depth=2, items=6, keys=10))
+
     if any(_safe_text(x).strip().lower() == "image_generation" for x in requested):
         mandatory.extend([
             "IMAGE_GENERATION_HANDOFF: emit metadata.image_generation_signal in the same response; route=C_APRIL_IMAGES_GENERATOR, execute=true, request_anchor=REQUEST exactly, prompt_source=OPENAI_STRUCTURED_VISUAL_PLAN, target_model=gpt-image-2, single_route=true.",
-            "IMAGE_GENERATION_PROMPT_RULE: metadata.image_generation_spec.prompt and image_generation_signal.prompt must carry the OpenAI-authored semantic visual generation meaning; request_anchor remains the exact current user trigger. Preserve the OpenAI-described subject and attributes, and never replace the semantic plan with the trigger sentence.",
-            "GPT_IMAGE_2_TARGET: prepare a concrete visual generation prompt for gpt-image-2; one scene, explicit subject first, requested attributes only, no conversational filler, no prior-scene carryover, no pixels/URLs/data URIs/alternate providers.",
+            "IMAGE_GENERATION_PROMPT_RULE: preserve the OpenAI-authored semantic visual meaning; request_anchor is the exact current user request.",
         ])
 
-    required = [
-        x for x in (plan.get("required_context") or [])
-        if isinstance(x, dict) and _safe_text(x.get("key") or x.get("name")).upper() != "CURRENT_REQUEST"
-    ]
-    optional = [
-        x for x in (plan.get("optional_context") or [])
-        if isinstance(x, dict)
-    ]
-    required.sort(key=lambda x: (-float(x.get("priority", 0.0) or 0.0), _safe_text(x.get("key") or x.get("name"))))
-    optional.sort(key=lambda x: (-float(x.get("priority", 0.0) or 0.0), _safe_text(x.get("key") or x.get("name"))))
-
-    for section in required:
-        key = _safe_text(section.get("key") or section.get("name")).upper()
-        if relation == "CONTINUE" and key == "DIALOGUE_DEVELOPMENT":
-            # CONTINUATION_INTEREST is the single compact progression contract.
-            continue
-        piece = _plan_section_text(section)
-        if piece:
-            mandatory.append(piece)
-
-    optional_tiers: list[tuple[str, str]] = []
-    for section in optional:
-        piece = _plan_section_text(section)
-        if piece:
-            optional_tiers.append((
-                _safe_text(section.get("key") or section.get("name")).lower(),
-                piece,
-            ))
-
+    # NEW is deliberately clean. No historical pairs or background are serialized.
     hard = int(plan.get("hard_budget_tokens") or INPUT_TOKEN_BUDGET)
-    soft = int(plan.get("soft_target_tokens") or min(850, hard - 50))
+    soft = int(plan.get("soft_target_tokens") or 300)
     system_tokens = _estimate_input_tokens(system_prompt)
     user_hard = max(1, hard - system_tokens)
     user_target = max(1, min(soft - system_tokens, user_hard))
@@ -1721,7 +1696,7 @@ def _build_provider_user_text_from_plan(
     user_text, meta = _adaptive_pack(
         "",
         mandatory,
-        optional_tiers,
+        [],
         hard_budget=user_hard,
         target_budget=user_target,
     )
@@ -1733,17 +1708,17 @@ def _build_provider_user_text_from_plan(
         "provider_must_not_reselect_context": True,
         "plan_required_selected": [
             _safe_text(x.get("key") or x.get("name"))
-            for x in required[:16]
+            for x in list(plan.get("required_context") or [])
+            if isinstance(x, dict)
         ],
-        "plan_optional_candidates": [
-            _safe_text(x.get("key") or x.get("name"))
-            for x in optional[:16]
-        ],
+        "plan_optional_candidates": [],
         "plan_excluded": [
             _safe_text(x.get("key") or x.get("name"))
             for x in list(plan.get("excluded_context") or [])[:16]
             if isinstance(x, dict)
         ],
+        "new_topic_minimal_context": relation == "NEW",
+        "selected_pair_count": int(plan.get("pair_history_count") or 0),
         "current_request_length_chars": len(current_request),
     }
 
