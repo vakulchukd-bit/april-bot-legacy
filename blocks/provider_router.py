@@ -151,6 +151,12 @@ for understanding references, chronology or why the new task is related. Never s
 a NEW request into continuation of the previous task. HISTORY_LOOKUP is a context-use mode, not a
 third dialogue relation and must never cause a RECALL branch.
 
+Use RESPONSE_FORMULATION as the authoritative semantic formulation of the next turn.
+It is built after matching the current request against authenticated 12-hour USER↔APRIL pairs.
+Do not reduce it to trigger words or a canned response. For CONTINUE, follow the matched pair
+trajectory and answer the current request as its next logical action. For NEW_TOPIC_WITH_CONTEXT,
+use the matched history only as background and develop the new task independently.
+
 Use the supplied dialogue strategy as response guidance:
 EXPAND adds new information; DEEPEN explains causes; DISCUSS engages the point;
 SOLVE advances a concrete problem; CORRECT fixes the disputed point; REACT responds naturally;
@@ -1497,6 +1503,14 @@ def _minimal_plan_context(plan: dict[str, Any]) -> dict[str, Any]:
             key = _safe_text(section.get("key") or section.get("name")).upper()
             if key and key not in by_key:
                 by_key[key] = section.get("value")
+
+    formulation = by_key.get("RESPONSE_FORMULATION")
+    if formulation not in (None, "", [], {}):
+        out["response_formulation"] = _compact_value(formulation, max_depth=4, max_items=8, max_keys=12)
+
+    pair_match = by_key.get("PAIR_MATCH")
+    if pair_match not in (None, "", [], {}):
+        out["pair_match"] = _compact_value(pair_match, max_depth=4, max_items=8, max_keys=10)
 
     semantic = by_key.get("SEMANTIC_CORE")
     if isinstance(semantic, dict):
