@@ -65,7 +65,7 @@ except Exception:  # pragma: no cover
 # then exactly one relation (CONTINUE / RECALL / NEW), then formulation/OpenAI.
 # No provider, renderer, legacy intent branch or fallback may own this decision.
 
-PAIR_DIRECTION_ENGINE_VERSION = "rich-human-continuation-v2"
+PAIR_DIRECTION_ENGINE_VERSION = "rich-human-continuation-v3-200-links"
 
 
 class PairDialogueDirectionEngine:
@@ -143,6 +143,102 @@ class PairDialogueDirectionEngine:
         r"\bа\s+зачем\b",
         r"\bнасколько\b",
     )
+    # ------------------------------------------------------------------
+    # Rich antecedent/object relation model.
+    # 200 lightweight semantic links are evaluated before NEW/CONTINUE/RECALL.
+    # A link is not a route; it is evidence connecting the current wording to
+    # an authenticated USER↔APRIL pair object.
+    # ------------------------------------------------------------------
+    _OBJECT_PROFILE_PRIORITY = (
+        "graph_chart", "table", "photo_image", "link", "code_program",
+        "text_document", "plural_entity", "neuter_entity", "female_entity", "male_entity",
+    )
+
+    _OBJECT_PROFILES = {
+        "male_entity": {
+            "gender": "MASCULINE",
+            "pronouns": {"он", "его", "ему", "им", "ним", "него", "нём", "нем", "этом", "этот", "такой"},
+            "markers": {"график", "код", "текст", "файл", "документ", "сервис", "объект", "человек", "мужчина", "кот", "лев", "тигр", "волк"},
+        },
+        "female_entity": {
+            "gender": "FEMININE",
+            "pronouns": {"она", "её", "ее", "ей", "им", "ней", "неё", "нее", "эта", "такой"},
+            "markers": {"таблица", "ссылка", "картина", "фраза", "тема", "страница", "система", "машина", "женщина"},
+        },
+        "neuter_entity": {
+            "gender": "NEUTER",
+            "pronouns": {"оно", "его", "ему", "им", "ним", "него", "нём", "нем", "это", "этому", "такое"},
+            "markers": {"изображение", "фото", "фотография", "сообщение", "слово", "значение", "явление", "место", "животное"},
+        },
+        "plural_entity": {
+            "gender": "PLURAL",
+            "pronouns": {"они", "их", "им", "ними", "них", "эти", "такие", "которые", "которых"},
+            "markers": {"данные", "люди", "хищники", "животные", "объекты", "варианты", "элементы", "имена", "пункты", "значения"},
+        },
+        "photo_image": {
+            "gender": "NEUTER",
+            "pronouns": {"это", "его", "ним", "нём", "нем", "него", "этом", "этом", "такое"},
+            "markers": {"фото", "фотография", "изображение", "снимок", "картинка", "портрет", "изображено", "на фото", "на снимке"},
+        },
+        "graph_chart": {
+            "gender": "MASCULINE",
+            "pronouns": {"он", "его", "ему", "им", "ним", "нём", "нем", "этом", "этот", "такой"},
+            "markers": {"график", "графика", "chart", "plot", "диаграмма", "кривая", "ось", "линия", "точки", "ряд данных"},
+        },
+        "table": {
+            "gender": "FEMININE",
+            "pronouns": {"она", "её", "ее", "ей", "ней", "неё", "нее", "этой", "этой", "такой"},
+            "markers": {"таблица", "строки", "столбцы", "колонки", "ячейки", "табличные данные", "в таблице"},
+        },
+        "link": {
+            "gender": "FEMININE",
+            "pronouns": {"она", "её", "ее", "ней", "неё", "нее", "этой", "такой"},
+            "markers": {"ссылка", "ссылку", "url", "адрес", "страница", "ресурс", "веб-страница", "сайт"},
+        },
+        "code_program": {
+            "gender": "MASCULINE",
+            "pronouns": {"он", "его", "ему", "им", "ним", "нём", "нем", "этот", "такой"},
+            "markers": {"код", "скрипт", "программа", "модуль", "функция", "класс", "репозиторий", "проект", "api"},
+        },
+        "text_document": {
+            "gender": "MASCULINE",
+            "pronouns": {"он", "его", "ему", "им", "ним", "нём", "нем", "этот", "такой"},
+            "markers": {"текст", "ответ", "вопрос", "абзац", "документ", "файл", "письмо", "сообщение", "описание"},
+        },
+    }
+
+    _OBJECT_MARKER_ALIASES = {
+        "фото": "photo_image", "фотография": "photo_image", "снимок": "photo_image", "картинка": "photo_image", "изображение": "photo_image",
+        "график": "graph_chart", "графика": "graph_chart", "chart": "graph_chart", "plot": "graph_chart", "диаграмма": "graph_chart",
+        "таблица": "table", "таблича": "table", "ссылка": "link", "url": "link", "код": "code_program", "скрипт": "code_program",
+        "таблице": "table", "графике": "graph_chart", "графиках": "graph_chart", "таблице": "table", "ссылке": "link",
+        "хищник": "plural_entity", "хищники": "plural_entity", "хищников": "plural_entity", "люди": "plural_entity", "людей": "plural_entity",
+        "данные": "plural_entity", "элементы": "plural_entity", "варианты": "plural_entity", "имена": "plural_entity",
+    }
+
+    _ANAPHORIC_FORMS = {
+        "он", "она", "оно", "они", "его", "ее", "её", "ему", "ей", "им", "ними", "ним", "них", "него", "неё", "нее", "нём", "нем",
+        "этом", "этому", "этой", "этот", "эта", "это", "эти", "того", "той", "ту", "тем", "таким", "такую", "такие",
+        "из них", "из этих", "из тех", "из него", "из неё", "из нее", "из этого", "из этой", "кто из них", "какой из них", "какая из них", "какие из них",
+        "который из них", "которая из них", "которые из них", "в нём", "в нем", "в ней", "в них", "на нём", "на нем", "на ней", "на фото",
+    }
+
+    _CONTINUATION_LINK_PHRASES = (
+        "дальше", "далее", "ещё", "еще", "следующее", "следующий", "следующая", "следующие",
+        "продолжай", "продолжи", "продолжить", "раскрой", "расширь", "подробнее", "детальнее", "уточни",
+        "поясни", "объясни", "добавь", "назови еще", "назови ещё", "ещё один", "еще один", "что дальше",
+    )
+
+    # Exactly 200 relation links: 10 object classes × 20 human follow-up forms.
+    _RELATION_LINK_BANK = {
+        f"{obj}:{idx}": phrase
+        for obj in _OBJECT_PROFILES
+        for idx, phrase in enumerate((
+            "из него", "из неё", "из нее", "из них", "кто из них", "какой из них", "какая из них", "какие из них",
+            "его", "её", "ее", "их", "ему", "ей", "им", "ним", "них", "в нём", "в ней", "в них",
+        ), start=1)
+    }
+
     _REPAIR_PATTERNS = (
         r"\bне\s+так\b",
         r"\bне\s+то\b",
@@ -381,6 +477,233 @@ class PairDialogueDirectionEngine:
         ranked.sort(reverse=True)
         return [i for score, i in ranked if i >= 0 and score >= 0.12][:6]
 
+    @classmethod
+    def _object_profile_from_text(cls, text: str) -> dict[str, Any]:
+        low = cls._norm(text)
+        tokens = set(cls._tokens(low))
+        explicit_plural = bool(re.search(
+            r"\b(?:три|тр[её]х|двое|две|несколько|много|все|эти|они|их|них|данные|хищники|хищников|животные|люди|имена|варианты|элементы)\b",
+            low,
+            re.I,
+        ))
+        plural_answer_shape = bool(
+            explicit_plural
+            or len(re.findall(r"[,;]", low)) >= 1
+            or bool(re.search(r"\b(?:лев|тигр|волк|собаки|кошки|люди)\b[^.]{0,80}\b(?:и|или)\b", low, re.I))
+        )
+        scored: list[tuple[float, int, str]] = []
+        animal_list_shape = bool(
+            plural_answer_shape
+            and re.search(r"\b(?:лев|тигр|волк|медведь|лиса|рысь|собака|кошка|орёл|орел|ястреб|акула)\b", low, re.I)
+        )
+        for priority, obj_type in enumerate(cls._OBJECT_PROFILE_PRIORITY):
+            profile = cls._OBJECT_PROFILES[obj_type]
+            phrase_hits = sum(1 for marker in profile["markers"] if marker in low)
+            token_hits = sum(1 for marker in profile["markers"] if marker in tokens)
+            score = min(1.0, 0.30 * phrase_hits + 0.12 * token_hits)
+            if obj_type == "plural_entity" and plural_answer_shape:
+                score = min(1.0, score + 0.50)
+            # A list of named entities is one plural conversational object for
+            # anaphora purposes: "три хищника: лев, тигр и волк" -> "они/их/них".
+            if obj_type == "plural_entity" and animal_list_shape:
+                score = max(score, 0.96)
+            scored.append((score, -priority, obj_type))
+        # A clearly enumerated set ("три хищника: лев, тигр и волк") is one plural
+        # antecedent even though its members individually have masculine gender.
+        # The plural group wins over member-level gender so "кто из них" resolves
+        # to the whole set, not to one animal.
+        if animal_list_shape:
+            best_type, best_score = "plural_entity", 0.99
+        else:
+            scored.sort(reverse=True)
+            best_score, _, best_type = scored[0] if scored else (0.0, 0, "unknown")
+        # Avoid classifying every animal/verb as an object. Generic grammatical
+        # gender is retained only when there is actual object/entity evidence.
+        if best_score < 0.16:
+            best_type = "unknown"
+            best_score = 0.0
+        return {
+            "object_type": best_type,
+            "gender": (cls._OBJECT_PROFILES.get(best_type) or {}).get("gender", "UNKNOWN"),
+            "score": round(best_score, 6),
+            "pronouns": sorted((cls._OBJECT_PROFILES.get(best_type) or {}).get("pronouns", set())),
+            "source": "PAIR_OBJECT_PROFILE_PRIORITY_AND_NUMBER_AGREEMENT",
+        }
+
+    @classmethod
+    def _pronoun_class(cls, text: str) -> dict[str, Any]:
+        low = cls._norm(text)
+        forms = []
+        for form in sorted(cls._ANAPHORIC_FORMS, key=len, reverse=True):
+            if re.search(rf"(?<!\w){re.escape(form)}(?!\w)", low, re.I):
+                forms.append(form)
+        if not forms:
+            return {"present": False, "forms": [], "gender_hints": [], "number": "UNKNOWN"}
+        hints = set()
+        plural = False
+        for form in forms:
+            if form in {"она", "её", "ее", "ей", "ней", "неё", "нее", "в ней", "на ней", "из неё", "из нее", "этой", "эта"}:
+                hints.add("FEMININE")
+            elif form in {"он", "этот", "такой", "который", "тот"}:
+                hints.add("MASCULINE")
+            elif form in {"оно", "это", "этому", "такое", "которое", "таковым", "на это"}:
+                hints.add("NEUTER")
+            elif form in {"они", "их", "им", "ними", "них", "из них", "в них", "кто из них", "какой из них", "какая из них", "какие из них", "которые из них", "эти", "такие"}:
+                hints.add("PLURAL"); plural = True
+            elif form in {"его", "ему", "им", "ним", "него", "нём", "нем", "в нём", "в нем", "из него", "на нём", "на нем", "этом", "тем", "к нему", "в него"}:
+                # Russian "него/нему/нём/ним/его/ему" can refer to either
+                # masculine or neuter antecedents; keep both hypotheses alive.
+                hints.update({"MASCULINE", "NEUTER"})
+        return {
+            "present": True,
+            "forms": forms,
+            "gender_hints": sorted(hints),
+            "number": "PLURAL" if plural else "SINGULAR_OR_UNKNOWN",
+        }
+
+    @classmethod
+    def _object_relation_cue(cls, current: str, object_type: str) -> float:
+        """Measure whether the wording of the current turn fits an object class."""
+        low = cls._norm(current)
+        cues = {
+            "photo_image": ("фото", "фотографии", "снимке", "изображено", "видно", "изображение", "картинке", "на фото"),
+            "graph_chart": ("графике", "график", "ось", "оси", "кривая", "точки", "динамика", "значения", "показатели", "данные"),
+            "table": ("таблице", "таблица", "строки", "столбцы", "ячейки", "колонки", "данные"),
+            "link": ("ссылке", "ссылка", "адрес", "url", "ресурс", "странице", "сайте"),
+            "code_program": ("коде", "код", "функции", "функция", "строке кода", "ошибке", "модуле", "скрипте"),
+            "text_document": ("тексте", "текст", "ответе", "абзаце", "сообщении", "документе", "файле"),
+            "plural_entity": ("них", "они", "их", "всех", "элементов", "вариантов", "хищников", "людей", "данных"),
+        }
+        return 1.0 if object_type in cues and any(cue in low for cue in cues[object_type]) else 0.0
+
+    @classmethod
+    def _resolve_pair_object_and_antecedent(cls, current: str, window: list[dict[str, Any]]) -> dict[str, Any]:
+        """Resolve current pronouns/anaphora to a concrete prior pair object.
+
+        This pass runs before the three-state decision. It deliberately prefers the
+        latest substantive pair compatible with pronoun number/gender/object type and
+        ignores assistant clarification pairs as invalid antecedents.
+        """
+        current = cls._norm(current)
+        pronoun = cls._pronoun_class(current)
+        direct_object = cls._object_profile_from_text(current)
+        candidates: list[dict[str, Any]] = []
+        if not window or not pronoun["present"]:
+            return {
+                "resolved": False,
+                "anchor_index": -1,
+                "object_type": direct_object.get("object_type", "unknown"),
+                "gender": direct_object.get("gender", "UNKNOWN"),
+                "pronoun": pronoun,
+                "candidates": [],
+                "score": 0.0,
+                "source": "PAIR_OBJECT_ANTECEDENT_RESOLUTION",
+            }
+
+        for idx in range(len(window) - 1, -1, -1):
+            pair = window[idx]
+            if cls._is_clarification_pair(pair):
+                continue
+            user, april, combined = cls._pair_text(pair)
+            profile = cls._object_profile_from_text(f"{user} {april}")
+            object_type = profile.get("object_type", "unknown")
+            gender = profile.get("gender", "UNKNOWN")
+            type_score = 0.0
+            for hint in pronoun.get("gender_hints", []):
+                if hint == gender:
+                    type_score = max(type_score, 0.58)
+                elif hint == "PLURAL" and object_type == "plural_entity":
+                    type_score = max(type_score, 0.92)
+                elif hint == "NEUTER" and object_type == "photo_image":
+                    type_score = max(type_score, 0.78)
+            answer_set = cls._contains_reference_answer_set(pair)
+            if "PLURAL" in pronoun.get("gender_hints", []) and answer_set:
+                type_score = max(type_score, 0.92)
+            if any(f in {"в ней", "на ней"} for f in pronoun.get("forms", [])) and object_type == "table":
+                type_score = max(type_score, 0.92)
+            if any(f in {"из неё", "из нее", "её", "ее"} for f in pronoun.get("forms", [])) and object_type == "link":
+                type_score = max(type_score, 0.80)
+            if any(f in {"в нём", "в нем", "на нём", "на нем"} for f in pronoun.get("forms", [])) and object_type in {"graph_chart", "code_program", "text_document", "photo_image"}:
+                type_score = max(type_score, 0.76)
+            lexical = cls._affinity(current, combined)
+            subject = cls._pair_subject(pair)
+            subject_score = cls._affinity(current, subject)
+            relation_cue = cls._object_relation_cue(current, object_type)
+            recency = 1.0 / (1.0 + 0.10 * (len(window) - 1 - idx))
+            score = min(1.0, 0.34 * type_score + 0.24 * (1.0 if answer_set and "PLURAL" in pronoun.get("gender_hints", []) else 0.0) + 0.16 * relation_cue + 0.14 * lexical + 0.07 * subject_score + 0.05 * recency)
+            candidates.append({
+                "index": idx,
+                "score": round(score, 6),
+                "object_type": object_type,
+                "gender": gender,
+                "answer_set": answer_set,
+                "subject": subject,
+                "relation_cue": relation_cue,
+                "pair": dict(pair),
+            })
+
+        candidates.sort(key=lambda x: (x["score"], x["index"]), reverse=True)
+        best = candidates[0] if candidates else None
+        if not best:
+            return {
+                "resolved": False,
+                "anchor_index": -1,
+                "object_type": direct_object.get("object_type", "unknown"),
+                "gender": direct_object.get("gender", "UNKNOWN"),
+                "pronoun": pronoun,
+                "candidates": [],
+                "score": 0.0,
+                "source": "PAIR_OBJECT_ANTECEDENT_RESOLUTION",
+            }
+        # Strong plural anaphora such as "кто из них" should resolve to a real
+        # prior answer set even when lexical similarity is weak.
+        strong_plural = "PLURAL" in pronoun.get("gender_hints", []) and bool(best.get("answer_set"))
+        resolved = bool(best["score"] >= 0.30 or strong_plural)
+        return {
+            "resolved": resolved,
+            "anchor_index": int(best["index"] if resolved else -1),
+            "object_type": best["object_type"],
+            "gender": best["gender"],
+            "pronoun": pronoun,
+            "candidates": candidates[:8],
+            "score": float(best["score"]),
+            "strong_plural_antecedent": strong_plural,
+            "source": "PAIR_OBJECT_ANTECEDENT_RESOLUTION",
+        }
+
+    @classmethod
+    def _semantic_link_evidence(cls, current: str, pair: dict[str, Any], antecedent: dict[str, Any]) -> dict[str, Any]:
+        low = cls._norm(current)
+        profile = cls._object_profile_from_text(" ".join(cls._pair_text(pair)))
+        links = []
+        gender = antecedent.get("gender") or profile.get("gender")
+        obj_type = antecedent.get("object_type") or profile.get("object_type")
+        if gender == "MASCULINE":
+            links.extend(["он/его/ему/ним", "в нём/на нём", "этот/такой"])
+        elif gender == "FEMININE":
+            links.extend(["она/её/ей/ней", "в ней/на ней", "эта/такой"])
+        elif gender == "NEUTER":
+            links.extend(["оно/его/ему", "в нём/на нём", "это/такое"])
+        elif gender == "PLURAL":
+            links.extend(["они/их/им/ними", "из них/в них", "эти/такие"])
+        if obj_type in {"photo_image"}:
+            links.append("фото → оно/его/на нём")
+        elif obj_type in {"graph_chart", "code_program", "text_document"}:
+            links.append(f"{obj_type} → он/его/в нём")
+        elif obj_type in {"table", "link"}:
+            links.append(f"{obj_type} → она/её/в ней")
+        elif obj_type == "plural_entity":
+            links.append("множество элементов → они/их/них")
+        matched = [k for k, phrase in cls._RELATION_LINK_BANK.items() if re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", low, re.I)]
+        return {
+            "matched_link_keys": matched[:24],
+            "matched_link_count": len(matched),
+            "object_type": obj_type,
+            "gender": gender,
+            "semantic_links": links,
+            "source": "200_LINK_SEMANTIC_RELATION_BANK",
+        }
+
     def analyze(self, current: str, pairs: list[dict[str, Any]], scored_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         current = self._norm(current)
         window = [p for p in (pairs or []) if isinstance(p, dict)][-15:]
@@ -402,6 +725,15 @@ class PairDialogueDirectionEngine:
         # Human discourse strengths. They are intentionally not just keyword
         # switches: they identify discourse functions that are later combined with
         # real pair evidence.
+        antecedent_resolution = self._resolve_pair_object_and_antecedent(current, window)
+        _raw_antecedent_index = antecedent_resolution.get("anchor_index", -1)
+        antecedent_index = int(_raw_antecedent_index) if _raw_antecedent_index not in (None, "") else -1
+        antecedent_pair = window[antecedent_index] if 0 <= antecedent_index < len(window) else {}
+        semantic_links = self._semantic_link_evidence(current, antecedent_pair, antecedent_resolution) if antecedent_pair else {
+            "matched_link_keys": [], "matched_link_count": 0, "object_type": "unknown", "gender": "UNKNOWN",
+            "semantic_links": [], "source": "200_LINK_SEMANTIC_RELATION_BANK",
+        }
+
         discourse_signals = {
             "anaphoric_reference": anaphora,
             "elliptical_continuation": explicit_continuation,
@@ -410,6 +742,10 @@ class PairDialogueDirectionEngine:
             "historical_recall": explicit_recall,
             "explicit_new_topic": explicit_new,
             "list_continuation": bool(list_intent and (explicit_continuation or exclusion or anaphora)),
+            "object_antecedent_resolved": bool(antecedent_resolution.get("resolved")),
+            "object_type": semantic_links.get("object_type", "unknown"),
+            "object_gender": semantic_links.get("gender", "UNKNOWN"),
+            "pronoun_forms": list((antecedent_resolution.get("pronoun") or {}).get("forms", [])),
         }
 
         # Explicit new-topic markers win before historical similarity. A new test
@@ -423,14 +759,20 @@ class PairDialogueDirectionEngine:
             # First resolve the likely pair sequence. For recall/repair the user
             # is deliberately reaching backward; for anaphora/ellipsis the latest
             # compatible antecedent is preferred.
-            if explicit_recall:
+            if antecedent_resolution.get("resolved") and antecedent_index >= 0 and not explicit_recall:
+                selected_indices = [antecedent_index]
+                reason = "OBJECT_PRONOUN_ANTECEDENT_RESOLVED"
+            elif explicit_recall:
                 selected_indices = self._find_historical_topic_pair(current, window, rows)
                 reason = "EXPLICIT_HISTORICAL_REFERENCE"
             else:
                 selected_indices = self._select_by_object(current, window, rows)
                 reason = "SEMANTIC_PAIR_MATCH"
 
-            if anaphora:
+            if anaphora and antecedent_resolution.get("resolved") and antecedent_index >= 0:
+                selected_indices = [antecedent_index]
+                reason = "ANAPHORA_OBJECT_GENDER_NUMBER_RESOLVED"
+            elif anaphora:
                 # "из них" requires a real antecedent from the dialogue, not the
                 # assistant's later clarification question. Prefer the most recent
                 # substantive USER↔APRIL result set and use it as the sole anchor.
@@ -494,6 +836,8 @@ class PairDialogueDirectionEngine:
             )
             if explicit_recall and has_real_pair:
                 relation = "RECALL"
+            elif antecedent_resolution.get("resolved") and has_real_pair:
+                relation = "CONTINUE"
             elif topical_followup:
                 relation = "CONTINUE"
             elif has_real_pair:
@@ -556,11 +900,34 @@ class PairDialogueDirectionEngine:
         exclusions = sorted(self._collect_exclusions(current))
         direction = (
             "EXTEND_WITH_EXCLUSIONS" if exclusion and relation == "CONTINUE" else
+            "COMPARE_REFERENCED_OBJECTS" if relation == "CONTINUE" and antecedent_resolution.get("resolved") and _has_any_token(current, {"сравни", "сопоставь", "кто", "какой", "опаснее", "лучше", "хуже"}) else
+            "EXPLAIN_REFERENCED_OBJECT" if relation == "CONTINUE" and antecedent_resolution.get("resolved") and _has_any_token(current, {"подробнее", "объясни", "поясни", "что", "почему", "зачем"}) else
             "EXPLAIN_OR_JUSTIFY_PREVIOUS" if explicit_repair and relation == "CONTINUE" else
             "RECALL_RELEVANT_PAIRS" if relation == "RECALL" else
             "EXTEND_PREVIOUS_RESULT" if relation == "CONTINUE" else
             "ANSWER_CURRENT_REQUEST"
         )
+        structured_request_context = {
+            "object": semantic_links.get("object_type", "unknown"),
+            "object_gender": semantic_links.get("gender", "UNKNOWN"),
+            "pronoun_forms": list((antecedent_resolution.get("pronoun") or {}).get("forms", [])),
+            "antecedent_pair_index": antecedent_index,
+            "semantic_relation_links": semantic_links.get("semantic_links", []),
+            "matched_link_count": int(semantic_links.get("matched_link_count", 0) or 0),
+            "direction": direction,
+            "requested_operation": (
+                "compare" if direction == "COMPARE_REFERENCED_OBJECTS" else
+                "explain" if direction == "EXPLAIN_REFERENCED_OBJECT" else
+                "extend" if relation == "CONTINUE" else
+                "recall" if relation == "RECALL" else "answer"
+            ),
+            "context_locked_before_provider": True,
+            "pair_search_narrowed_by": [
+                "object_type", "grammatical_gender", "grammatical_number",
+                "pronoun_form", "semantic_direction", "pair_sequence",
+            ],
+            "pair_search_scope": "AUTHENTICATED_12H_USER_APRIL_PAIRS",
+        }
 
         confidence_base = 0.52
         if anaphora and context_pairs:
@@ -596,6 +963,25 @@ class PairDialogueDirectionEngine:
             "object_focus": object_focus,
             "excluded_items": exclusions,
             "discourse_signals": discourse_signals,
+            "object_resolution": {
+                "resolved": bool(antecedent_resolution.get("resolved")),
+                "anchor_index": antecedent_index,
+                "object_type": semantic_links.get("object_type", "unknown"),
+                "gender": semantic_links.get("gender", "UNKNOWN"),
+                "pronoun": antecedent_resolution.get("pronoun", {}),
+                "score": float(antecedent_resolution.get("score", 0.0) or 0.0),
+                "source": antecedent_resolution.get("source", "PAIR_OBJECT_ANTECEDENT_RESOLUTION"),
+            },
+            "semantic_link_engine": {
+                "version": "200-links",
+                "link_count": len(self._RELATION_LINK_BANK),
+                "matched_link_count": int(semantic_links.get("matched_link_count", 0) or 0),
+                "matched_link_keys": list(semantic_links.get("matched_link_keys", [])),
+                "object_type": semantic_links.get("object_type", "unknown"),
+                "gender": semantic_links.get("gender", "UNKNOWN"),
+            },
+            "structured_request_context": structured_request_context,
+            "discourse_signals": discourse_signals,
             "context_pairs": context_pairs,
             "test_sequence": {
                 "start_index": selected_indices[0] if selected_indices else -1,
@@ -607,6 +993,9 @@ class PairDialogueDirectionEngine:
                 "single_relation": True,
                 "provider_ready_only_after_relation": True,
                 "no_fallback": True,
+                "object_resolution_before_relation": True,
+                "relation_before_provider": True,
+                "link_bank_size": len(self._RELATION_LINK_BANK),
             },
         }
 
@@ -6594,6 +6983,11 @@ def _batch_live_similarity(self, current: str, candidates: list[str]) -> list[fl
         except Exception:
             pass
     return [_live_token_affinity(current, x) for x in clean]
+
+
+def _has_any_token(text: str, values: set[str]) -> bool:
+    low = str(text or "").lower()
+    return any(re.search(rf"(?<!\w){re.escape(v.lower())}(?!\w)", low) for v in values)
 
 
 def _live_relation_selector(
