@@ -6029,19 +6029,60 @@ class ProcessorScene:
             or _text(dialogue.get("context_mode")).upper() == "HISTORY_LOOKUP"
             or _text(semantic_result.get("context_mode")).upper() == "HISTORY_LOOKUP"
         )
-        if relation in {"CONTINUE", "RECALL"} or history_lookup_mode:
-            # Interpretation has already selected the context. HISTORY_LOOKUP is
-            # intentionally a NEW task at the dialogue-relation layer, but it still
-            # requires the authenticated 12h pair window as executable background
-            # context. The old code dropped it because it only built this bridge
-            # for CONTINUE/RECALL, producing an empty Provider context for
-            # "найди в диалоге прошлом".
-            bridge_relation = "CONTINUE" if relation == "CONTINUE" else "RECALL" if relation == "RECALL" else "RECALL"
+        if relation == "CONTINUE":
+            # Interpretation has already matched the authenticated 12h window.
+            # Do not query memory again here. Carry only the 1..4 pairs selected
+            # by the pair-first interpreter into the execution snapshot.
+            selected_pairs = [
+                dict(x) for x in (
+                    dialogue.get("selected_context_pairs")
+                    or dialogue.get("context_pairs")
+                    or []
+                )
+                if isinstance(x, dict)
+            ][:4]
+            selected_pair = (
+                dict(dialogue.get("selected_memory_operand"))
+                if isinstance(dialogue.get("selected_memory_operand"), dict)
+                else {}
+            )
+            if selected_pair and not selected_pairs:
+                selected_pairs = [selected_pair]
+
+            dialogue_memory = {
+                "relation": "CONTINUE",
+                "current_turn_only": False,
+                "selection_source": "INTERPRETATION_PAIR_FIRST",
+                "selected_sequence_id": _text(
+                    dialogue.get("target_sequence_id")
+                    or dialogue.get("sequence_id")
+                ),
+                "selected_records": selected_pairs,
+                "dialogue_pairs": selected_pairs,
+                "selected_pair_count": len(selected_pairs),
+            }
+
+            # Preserve the exact visual operand when it belongs to one of the
+            # selected authenticated pairs. The image bytes/path are still attached
+            # by the existing visual route, but no full 12h memory is forwarded.
+            for pair in selected_pairs:
+                visual = pair.get("visual_attachment")
+                if isinstance(visual, dict) and visual:
+                    dialogue_memory["visual_reference"] = dict(visual)
+                    break
+
+            dialogue_memory["history_lookup"] = False
+            dialogue_memory["current_relation"] = relation
+
+        elif history_lookup_mode:
+            # A history-recall request is the one explicit exception where selected
+            # history must be reconstructed. Keep it bounded and separate from the
+            # ordinary CONTINUE route.
             dialogue_memory = build_dialogue_memory_bridge(
                 self.user_id,
                 query=self.request,
-                limit=15,
-                relation=bridge_relation,
+                limit=8,
+                relation="RECALL",
                 target_sequence_id=_text(
                     dialogue.get("target_sequence_id")
                     or dialogue.get("sequence_id")
@@ -6052,17 +6093,21 @@ class ProcessorScene:
                     or semantic_result.get("task_id")
                 ),
             )
-            dialogue_memory["retrieval_mode"] = "HISTORY_LOOKUP" if history_lookup_mode and relation == "NEW" else dialogue_memory.get("retrieval_mode")
-            dialogue_memory["history_lookup"] = history_lookup_mode
-            dialogue_memory["current_relation"] = relation
+            dialogue_memory["retrieval_mode"] = "HISTORY_LOOKUP"
+            dialogue_memory["history_lookup"] = True
+            dialogue_memory["current_relation"] = "NEW"
+
         else:
             dialogue_memory = {
                 "relation": "NEW",
                 "current_turn_only": True,
+                "selection_source": "INTERPRETATION_PAIR_FIRST",
                 "selected_sequence_id": _text(dialogue.get("sequence_id")),
                 "selected_records": [],
                 "dialogue_pairs": [],
+                "history_lookup": False,
             }
+
 
         continuation_analysis = semantic_result.get("continuation_content_analysis") if isinstance(semantic_result.get("continuation_content_analysis"), dict) else {}
         dialogue_strategy = semantic_result.get("dialogue_strategy") if isinstance(semantic_result.get("dialogue_strategy"), dict) else {}
