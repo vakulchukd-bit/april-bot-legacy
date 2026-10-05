@@ -3940,7 +3940,24 @@ def build_dialogue_memory_bridge(
     max_turns = max(1, min(int(limit or ACTIVE_DIALOGUE_WINDOW_PAIRS), ACTIVE_DIALOGUE_WINDOW_PAIRS))
 
     def compact_turn(item: dict[str, Any]) -> dict[str, Any]:
-        return {
+        # Keep the semantic USER↔APRIL pair compact, but preserve the visual
+        # attachment identity for turns whose result is an image/diagram. The
+        # binary payload is already owned by C_ARTIFACT_CONTRACT; the attachment
+        # lets the single Provider route bind a later text question to that exact
+        # artifact without inventing a second memory channel.
+        attachment = item.get("visual_attachment") if isinstance(item.get("visual_attachment"), dict) else {}
+        compact_attachment = {}
+        if attachment:
+            for key in (
+                "present", "kind", "artifact_id", "block_id", "scene_id", "turn_id",
+                "renderer", "src", "caption", "description", "alt", "prompt",
+                "mime_type", "width", "height", "generation_model", "generation_quality",
+                "asset_path",
+            ):
+                value = attachment.get(key)
+                if value not in (None, "", [], {}):
+                    compact_attachment[key] = value
+        row = {
             "turn": int(item.get("sequence_turn_index") or 0),
             "task_response_number": int(item.get("task_response_number") or 0),
             "task_id": str(item.get("task_id") or ""),
@@ -3949,6 +3966,9 @@ def build_dialogue_memory_bridge(
             "topic": safe_trim_text(item.get("sequence_topic") or "", 180),
             "relation": str(item.get("dialogue_relation") or "").upper(),
         }
+        if compact_attachment:
+            row["visual_attachment"] = compact_attachment
+        return row
 
     recent_sequence_records = sequence_records[-max_turns:]
     recent_task_records = task_records[-max_turns:]
@@ -4152,6 +4172,19 @@ def build_dialogue_memory_bridge(
     ):
         interactive_task_state = deepcopy(selected_sequence_meta.get("active_task") or {})
 
+    # Bind the latest real visual artifact in the authenticated sequence as a
+    # first-class continuation operand. It is derived only from a stored
+    # USER↔APRIL pair and never from a renderer/global scene.
+    visual_reference = {}
+    for candidate in reversed(recent_sequence_records):
+        attachment = candidate.get("visual_attachment") if isinstance(candidate.get("visual_attachment"), dict) else {}
+        if attachment.get("present") or attachment.get("src") or attachment.get("asset_path"):
+            visual_reference = deepcopy(attachment)
+            visual_reference["source_turn"] = int(candidate.get("sequence_turn_index") or 0)
+            visual_reference["source_user_request"] = safe_trim_text(candidate.get("user_request") or "", 500)
+            visual_reference["source_april_answer"] = safe_trim_text(candidate.get("april_answer") or "", 700)
+            break
+
     return {
         "version": "april_dialogue_memory_bridge_v4_12h_sequence_window",
         "window_hours": DIALOGUE_WINDOW_HOURS,
@@ -4168,6 +4201,7 @@ def build_dialogue_memory_bridge(
             if mode in {"CONTINUE", "RECALL"}
             else []
         ),
+        "visual_reference": visual_reference,
         "active_sequence_turns": (
             recent_sequence_records
             if mode in {"CONTINUE", "RECALL"}
@@ -4629,6 +4663,7 @@ def _visual_block_has_payload(block):
         "expression", "groups", "value", "operands", "operation",
         # Media / artifact identity
         "image", "images", "svg", "drawing_elements", "artifact",
+        "asset_path", "image_asset_path",
     )
 
     has_structured_data = any(
@@ -4684,23 +4719,52 @@ def _build_dialogue_visual_attachment(render_blocks, scene_id="", turn_id="", *,
 
         candidates = [
             block.get("src"), block.get("url"), block.get("asset_url"),
-            block.get("image_url"), payload.get("src"), payload.get("url"),
-            payload.get("asset_url"), payload.get("image_url"),
-            artifact.get("src"), artifact.get("url"), artifact_payload.get("src"),
-            artifact_payload.get("url"),
+            block.get("image_url"),
+            payload.get("src"), payload.get("url"), payload.get("asset_url"),
+            payload.get("image_url"),
+            artifact.get("src"), artifact.get("url"),
+            artifact_payload.get("src"), artifact_payload.get("url"),
         ]
         src = next((str(value).strip() for value in candidates if isinstance(value, str) and value.strip()), "")
 
+        # Keep asset_path separately. A GalleryBlock commonly contains both an
+        # HTTP asset URL (for Web) and a local PNG path (for the next multimodal
+        # OpenAI call). Choosing the first candidate must not discard the path.
+        path_candidates = [
+            block.get("asset_path"), block.get("image_asset_path"),
+            payload.get("asset_path"), payload.get("image_asset_path"),
+            artifact.get("asset_path"), artifact.get("image_asset_path"),
+            artifact_payload.get("asset_path"), artifact_payload.get("image_asset_path"),
+        ]
+        asset_path = next(
+            (str(value).strip() for value in path_candidates if isinstance(value, str) and value.strip()),
+            "",
+        )
+
         images = payload.get("images") if isinstance(payload.get("images"), list) else []
-        if not src and images:
+        if images:
             for item in images[:8]:
                 if isinstance(item, dict):
-                    src = next((str(item.get(key)).strip() for key in ("src", "url", "asset_url", "image_url", "asset_path") if item.get(key)), "")
-                    if src:
-                        break
-                elif isinstance(item, str) and item.strip():
+                    if not src:
+                        src = next(
+                            (
+                                str(item.get(key)).strip()
+                                for key in ("src", "url", "asset_url", "image_url")
+                                if isinstance(item.get(key), str) and item.get(key).strip()
+                            ),
+                            "",
+                        )
+                    if not asset_path:
+                        asset_path = next(
+                            (
+                                str(item.get(key)).strip()
+                                for key in ("asset_path", "image_asset_path")
+                                if isinstance(item.get(key), str) and item.get(key).strip()
+                            ),
+                            "",
+                        )
+                elif isinstance(item, str) and item.strip() and not src:
                     src = item.strip()
-                    break
 
         # A visual turn is useful for dialogue recall even when its src is absent
         # (e.g. a structured diagram), so preserve its stable semantic identity.
@@ -4718,6 +4782,7 @@ def _build_dialogue_visual_attachment(render_blocks, scene_id="", turn_id="", *,
                 or ""
             ).strip(),
             "src": src,
+            "asset_path": asset_path,
             "caption": str(block.get("caption") or payload.get("caption") or "").strip()[:800],
             "description": str(block.get("description") or payload.get("description") or "").strip()[:1200],
             "alt": str(block.get("alt") or payload.get("alt") or "").strip()[:800],
@@ -4739,6 +4804,9 @@ def _build_dialogue_visual_attachment(render_blocks, scene_id="", turn_id="", *,
             ).strip(),
             "created_at": created_at if created_at is not None else time.time(),
         }
+        if not attachment.get("asset_path") and src and not re.match(r"^(?:https?|data):", src, re.IGNORECASE):
+            attachment["asset_path"] = src
+
         return {k: v for k, v in attachment.items() if v not in (None, "", [], {})}
     return {}
 
@@ -6209,12 +6277,30 @@ def _clean_pair_from_row(row: Any) -> dict[str, Any] | None:
         turn = int(row.get("turn_index") or row.get("sequence_turn_index") or row.get("turn") or 0)
     except (TypeError, ValueError):
         turn = 0
-    return {
+    clean = {
         "user_text": user,
         "april_text": april,
         "created_at": created,
         "turn_index": turn,
     }
+
+    # Live authenticated dialogue keeps the semantic USER↔APRIL pair together
+    # with the compact visual operand metadata. Binary PNG data never belongs in
+    # memory; the asset path/scene identity is enough for the Provider to attach
+    # the exact image later.
+    for key in (
+        "user_id", "conversation_id", "sequence_id", "dialogue_sequence_id",
+        "task_id", "sequence_turn_index", "task_response_number",
+        "topic", "subtopic", "dialogue_relation", "relation",
+        "visual_scene_id", "scene_id", "visual_attachment",
+        "visual_generation_memory", "memory_semantics", "semantic_state",
+        "visual_summary", "source",
+    ):
+        value = row.get(key)
+        if value not in (None, "", [], {}):
+            clean[key] = deepcopy(value)
+
+    return clean
 
 
 def _clean_pairs_from_state(state_obj: dict[str, Any]) -> list[dict[str, Any]]:
@@ -6551,7 +6637,18 @@ def update_scene_context(
             # empty list, which erased the pair from memory and made Interpretation
             # report "previous dialogue absent" on the very next message.
             pair_created_at = time.time()
-            live_state = None
+            # Build the compact visual operand directly from the canonical
+            # SceneContract supplied to this wrapper. The underlying scene updater
+            # may operate on a detached state snapshot when persist=False; deriving
+            # the attachment here guarantees that the same live USER↔APRIL pair
+            # retains the exact image path for the next HTTP turn.
+            live_visual_attachment = _build_dialogue_visual_attachment(
+                (contract.get("render_blocks") or contract.get("blocks") or [])
+                if isinstance(contract, dict) else [],
+                scene_id=str(contract.get("scene_id") or "") if isinstance(contract, dict) else "",
+                turn_id=str(contract.get("turn_id") or "") if isinstance(contract, dict) else "",
+                created_at=pair_created_at,
+            )
             with _state_lock:
                 live_state = state.get(uid) if isinstance(state.get(uid), dict) else build_default_state()
                 timeline = live_state.setdefault("memory_timeline", {})
@@ -6569,15 +6666,33 @@ def update_scene_context(
                          for item in pairs if isinstance(item, dict)),
                         default=0,
                     ) + 1
-                    pairs.append({
+                    sequence = (
+                        live_state.get("active_dialogue_sequence")
+                        if isinstance(live_state.get("active_dialogue_sequence"), dict)
+                        else {}
+                    )
+                    live_pair = {
                         "user_text": request_text,
                         "april_text": answer_text,
                         "created_at": pair_created_at,
                         "turn_index": next_turn,
+                        "sequence_turn_index": int(sequence.get("turn_count") or next_turn),
+                        "task_response_number": int(sequence.get("task_response_count") or 0),
                         "user_id": uid,
                         "conversation_id": str(live_state.get("conversation_id") or ""),
+                        "sequence_id": str(sequence.get("sequence_id") or ""),
+                        "dialogue_sequence_id": str(sequence.get("sequence_id") or ""),
+                        "task_id": str(sequence.get("task_id") or ""),
+                        "topic": str(sequence.get("topic") or ""),
                         "source": "LIVE_RUNTIME_USER_APRIL_PAIR",
-                    })
+                    }
+                    if live_visual_attachment:
+                        live_pair["visual_attachment"] = deepcopy(live_visual_attachment)
+                        live_pair["visual_scene_id"] = live_visual_attachment.get("scene_id") or ""
+                        live_pair["scene_id"] = live_visual_attachment.get("scene_id") or ""
+                    if isinstance(visual_generation_memory, dict) and visual_generation_memory:
+                        live_pair["visual_generation_memory"] = deepcopy(visual_generation_memory)
+                    pairs.append(live_pair)
                     day0["dialog_pairs"] = pairs[-ACTIVE_DIALOGUE_WINDOW_PAIRS:]
                     live_state["memory_timeline"] = {"day_0": day0}
                     live_state["last_user_turn"] = request_text
@@ -6612,14 +6727,17 @@ def update_scene_context(
                     except Exception:
                         pass
                     if saved and callable(load_dialogue_pairs):
+                        # Durable storage is confirmation only. The live runtime
+                        # remains authoritative for the current request because it
+                        # contains the visual attachment and the full in-process
+                        # USER↔APRIL pair. Rehydrating it from text-only DB rows here
+                        # would silently strip the exact visual operand.
                         persisted_rows = load_dialogue_pairs(uid, limit=0) or []
                         persisted_clean = [p for p in (_clean_pair_from_row(x) for x in persisted_rows) if p]
-                        if persisted_clean:
-                            with _state_lock:
-                                runtime_state = state.get(uid) if isinstance(state.get(uid), dict) else build_default_state()
-                                _clean_runtime_memory_scope(runtime_state, uid, persisted_clean)
-                                runtime_state["dialog"] = runtime_state.get("dialog", [])[-60:]
-                                state[uid] = runtime_state
+                        safe_state_log(
+                            f"PAIR DURABLE CONFIRMED user={uid} pairs={len(persisted_clean)} "
+                            f"runtime_kept=True visual_metadata_preserved=True"
+                        )
                 except Exception as exc:
                     safe_state_log(f"PAIR PERSIST ERROR: {exc}")
             elif uid and request_text and answer_text:
@@ -6637,16 +6755,38 @@ def _clean_sequence_pairs_from_runtime(state_obj: dict[str, Any]) -> list[dict[s
 
 # Pair-only replacement for the old rich memory query engine.
 def _clean_engine_ensure_runtime(self, state_obj):
-    uid = _clean_uid((state_obj or {}).get("user_id")) if isinstance(state_obj, dict) else ""
-    if uid and callable(is_authenticated_user) and is_authenticated_user(uid):
+    """Keep the authenticated live pair window authoritative within a turn.
+
+    The persistent DB is durable storage, not a lossy rehydration source for
+    renderer/visual metadata. When live USER↔APRIL pairs already exist, return
+    them untouched so Interpretation and Provider see the same pair objects that
+    were just committed. Only bootstrap from PostgreSQL when the runtime window
+    is genuinely empty.
+    """
+    runtime = state_obj if isinstance(state_obj, dict) else build_default_state()
+    uid = _clean_uid(runtime.get("user_id"))
+    scope = runtime.get("memory_scope") if isinstance(runtime.get("memory_scope"), dict) else {}
+    authenticated = bool(scope.get("authenticated") or runtime.get("authenticated_user_id"))
+    live_pairs = _clean_pairs_from_state(runtime)
+
+    if uid and authenticated and live_pairs:
+        # Time-based retention remains enforced by the 12-hour cycle logic.
+        safe_state_log(
+            f"LIVE PAIR WINDOW KEPT user={uid} pairs={len(live_pairs)} "
+            f"db_reload=False visual_metadata_preserved=True"
+        )
+        return runtime
+
+    if uid and authenticated and callable(is_authenticated_user) and is_authenticated_user(uid):
         try:
             cleanup_dialogue_memory_utc(uid)
             rows = load_dialogue_pairs(uid, limit=0)
         except Exception:
             rows = []
         rows = [p for p in (_clean_pair_from_row(x) for x in rows) if p]
-        return _clean_runtime_memory_scope(state_obj if isinstance(state_obj, dict) else build_default_state(), uid, rows)
-    return _clean_runtime_memory_scope(state_obj if isinstance(state_obj, dict) else build_default_state(), uid, [])
+        return _clean_runtime_memory_scope(runtime, uid, rows)
+
+    return _clean_runtime_memory_scope(runtime, uid, [])
 
 
 QuantumMemoryEngine.ensure_runtime = _clean_engine_ensure_runtime
@@ -6749,8 +6889,36 @@ def build_dialogue_memory_bridge(
     rows=_clean_sequence_pairs_from_runtime(state_obj)
     rows=rows[-max(1,int(limit or CLEAN_DIALOGUE_WINDOW_PAIRS)):]
     def compact(row):
-        return {"turn":int(row.get("turn_index") or 0),"created_at":float(row.get("created_at") or 0.0),"user":str(row.get("user_text") or ""),"april":str(row.get("april_text") or "")}
+        record = {
+            "turn": int(row.get("turn_index") or row.get("sequence_turn_index") or 0),
+            "created_at": float(row.get("created_at") or 0.0),
+            "user": str(row.get("user_text") or row.get("user_request") or ""),
+            "april": str(row.get("april_text") or row.get("april_answer") or ""),
+        }
+        for key in (
+            "sequence_id", "dialogue_sequence_id", "task_id",
+            "sequence_turn_index", "task_response_number", "topic", "subtopic",
+            "dialogue_relation", "relation", "visual_scene_id", "scene_id",
+        ):
+            value = row.get(key)
+            if value not in (None, "", [], {}):
+                record[key] = value
+        visual = row.get("visual_attachment")
+        if isinstance(visual, dict) and visual:
+            record["visual_attachment"] = deepcopy(visual)
+        if row.get("visual_generation_memory"):
+            record["visual_generation_memory"] = deepcopy(row.get("visual_generation_memory"))
+        return record
     records=[compact(x) for x in rows]
+    visual_reference = {}
+    for record in reversed(records):
+        visual = record.get("visual_attachment")
+        if isinstance(visual, dict) and visual:
+            visual_reference = deepcopy(visual)
+            visual_reference["source_turn"] = int(record.get("turn") or 0)
+            visual_reference["source_user_request"] = str(record.get("user") or "")[:500]
+            visual_reference["source_april_answer"] = str(record.get("april") or "")[:700]
+            break
     seq=state_obj.get("active_dialogue_sequence") if isinstance(state_obj.get("active_dialogue_sequence"),dict) else {}
     mode=str(relation or "AUTO").upper()
     if mode=="AUTO": mode=str((state_obj.get("dialogue_resolution") or {}).get("relation") or ("CONTINUE" if records else "NEW")).upper()
@@ -6770,6 +6938,7 @@ def build_dialogue_memory_bridge(
         "dialogue_pairs":records,
         "selected_records":records,
         "memory_search":[],
+        "visual_reference":visual_reference,
         "history_source":"USER_APRIL_PAIRS",
         "authenticated_only":True,
         "pair_interpretation_authority":"INTERPRETATION",
@@ -6938,6 +7107,9 @@ def build_dialogue_memory_bridge(*args, **kwargs):
     rows=result.get("dialogue_pairs") or result.get("active_sequence_turns") or result.get("relevant_window_turns") or []
     result["dialogue_pairs"]=rows[-ACTIVE_DIALOGUE_WINDOW_PAIRS:]
     result["selected_records"]=result["dialogue_pairs"]
+    # Do not lose the visual operand while normalizing the canonical bridge.
+    if not isinstance(result.get("visual_reference"), dict):
+        result["visual_reference"] = {}
     result["memory_search"]=[]
     result["pair_interpretation_authority"]="INTERPRETATION"
     return result
