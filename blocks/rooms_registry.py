@@ -2667,7 +2667,7 @@ def registry_validate_response(response: MachineResponse):
 
 
 # Canonical presentation guard: provider ASCII can never become a render block.
-_ORIGINAL_ROUTE_MACHINE_REQUEST = route_machine_request
+_ORIGINAL_ROUTE_MACHINE_REQUEST = registry_route_machine_request
 
 async def route_machine_request(*args, **kwargs):
     result = await _ORIGINAL_ROUTE_MACHINE_REQUEST(*args, **kwargs)
