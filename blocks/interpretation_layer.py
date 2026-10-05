@@ -56,6 +56,11 @@ try:
 except Exception:  # pragma: no cover
     hf_pipeline = None
 
+try:
+    from blocks.pair_dialogue_direction_engine import PAIR_DIALOGUE_DIRECTION_ENGINE
+except Exception:  # pragma: no cover
+    PAIR_DIALOGUE_DIRECTION_ENGINE = None
+
 
 # ---------------------------------------------------------------------------
 # Canonical constants
@@ -6115,9 +6120,39 @@ def _live_relation_selector(
     latest_score = float(latest_row.get("score", 0.0) if latest_row else 0.0)
 
     # ONLY NOW, after matching the request against the authenticated pair window,
-    # classify a history-retrieval request. The pair window is therefore always
-    # the evidence base for both CONTINUE and HISTORY_LOOKUP.
-    history_lookup = _live_history_query(current, memory_score)
+    # run the pair-local direction/object engine. It does not route or search memory;
+    # it only determines what the current request is doing with the selected pairs.
+    pair_reasoning = {}
+    if PAIR_DIALOGUE_DIRECTION_ENGINE is not None:
+        try:
+            pair_reasoning = PAIR_DIALOGUE_DIRECTION_ENGINE.analyze(
+                current,
+                window,
+                scored_rows=scored,
+            )
+        except Exception as exc:
+            print("⚠️ APRIL PAIR DIRECTION ENGINE:", exc)
+            pair_reasoning = {}
+
+    pair_history_lookup = bool(
+        pair_reasoning.get("history_lookup")
+        if isinstance(pair_reasoning, dict) else False
+    )
+    legacy_history_lookup = _live_history_query(current, memory_score)
+    pair_direction = str(pair_reasoning.get("direction") or "") if isinstance(pair_reasoning, dict) else ""
+    # A phrase such as "я спрашивал про имя" can contain the word "спрашивал"
+    # without being a memory-reconstruction request. The pair-local direction
+    # engine wins over that broad lexical history signal whenever it has a clear
+    # continuation direction.
+    continuation_directions = {
+        "EXTEND_WITH_EXCLUSIONS", "EXTEND_PREVIOUS_RESULT",
+        "EXPLAIN_OR_JUSTIFY_PREVIOUS", "VERIFY_OR_CORRECT_PREVIOUS",
+        "AFFIRM_PREVIOUS_RESULT",
+    }
+    history_lookup = bool(
+        pair_history_lookup
+        or (legacy_history_lookup and pair_direction not in continuation_directions)
+    )
 
     current_subject, resolved_by_reference = _live_subject_from_pair_window(current, pairs)
     latest_subject = _live_pair_subject(window[-1]) if window else ""
@@ -6178,6 +6213,15 @@ def _live_relation_selector(
         and contextual_discovery_signal >= 0.16
         and request_specificity < 0.24
     )
+
+    # Pair-local direction is stronger than a generic continuation prototype when
+    # it explicitly says that the user is extending, correcting, affirming, or
+    # reconstructing the object carried by selected pairs.
+    pair_object_focus = (pair_reasoning.get("object_focus") or {}) if isinstance(pair_reasoning, dict) else {}
+    pair_selected_indices = [
+        int(x) for x in (pair_reasoning.get("selected_indices") or [])
+        if isinstance(x, int) or str(x).lstrip("-").isdigit()
+    ] if isinstance(pair_reasoning, dict) else []
     semantic_followup = bool(
         bool(best_row)
         and (
@@ -6197,10 +6241,22 @@ def _live_relation_selector(
         relation = "NEW"
         selected_index = -1
         selected_pair = {}
-        context_pairs = window[-8:]
+        # HISTORY_LOOKUP receives only pairs that carry the requested object.
+        # This prevents unrelated recent pairs from crowding out enumeration evidence.
+        if pair_selected_indices:
+            context_pairs = [
+                dict(window[i]) for i in pair_selected_indices
+                if 0 <= i < len(window) and isinstance(window[i], dict)
+            ][-8:]
+        else:
+            context_pairs = window[-8:]
         context_mode = "HISTORY_LOOKUP"
         reference_resolution = {}
-    elif pronoun_followup or same_latest_subject or historical_subject_match or semantic_followup:
+    elif pair_direction in {
+        "EXTEND_WITH_EXCLUSIONS", "EXTEND_PREVIOUS_RESULT",
+        "EXPLAIN_OR_JUSTIFY_PREVIOUS", "VERIFY_OR_CORRECT_PREVIOUS",
+        "AFFIRM_PREVIOUS_RESULT",
+    } or pronoun_followup or same_latest_subject or historical_subject_match or semantic_followup:
         relation = "CONTINUE"
         if pronoun_followup or same_latest_subject:
             selected_index = latest_index
@@ -6214,6 +6270,14 @@ def _live_relation_selector(
         else:
             selected_index = int(best_row["index"] if best_row else latest_index)
             selected_source = best_row
+        # Pair direction may identify a more useful continuation anchor than raw
+        # similarity, especially for "ещё", exclusions, corrections and affirmations.
+        if pair_selected_indices:
+            preferred_index = max(pair_selected_indices)
+            preferred_row = next((row for row in scored if int(row.get("index", -1)) == preferred_index), None)
+            if preferred_row is not None:
+                selected_source = preferred_row
+                selected_index = preferred_index
         selected_pair = dict(selected_source["pair"] if selected_source else window[-1])
         # Keep only the 1..4 pairs that are semantically related to the
         # selected continuation anchor. The full 12h window never crosses into
@@ -6223,6 +6287,14 @@ def _live_relation_selector(
             row for row in scored
             if float(row.get("score", 0.0) or 0.0) >= relation_floor
         ]
+        if pair_selected_indices:
+            pair_index_set = set(pair_selected_indices)
+            directed_rows = [row for row in related_rows if int(row.get("index", -1)) in pair_index_set]
+            if directed_rows:
+                related_rows = directed_rows + [
+                    row for row in related_rows
+                    if int(row.get("index", -1)) not in pair_index_set
+                ]
         related_rows.sort(
             key=lambda row: (float(row.get("score", 0.0) or 0.0), row.get("index", -1)),
             reverse=True,
@@ -6327,6 +6399,16 @@ def _live_relation_selector(
                 else "new_independent_task"
             ),
         },
+        "pair_direction": {
+            "direction": pair_direction,
+            "confidence": float(pair_reasoning.get("direction_confidence", 0.0) or 0.0) if isinstance(pair_reasoning, dict) else 0.0,
+            "object_focus": dict(pair_object_focus) if isinstance(pair_object_focus, dict) else {},
+            "requested_action": dict(pair_reasoning.get("requested_action") or {}) if isinstance(pair_reasoning, dict) else {},
+            "excluded_items": list(pair_reasoning.get("excluded_items") or [])[:8] if isinstance(pair_reasoning, dict) else [],
+            "known_answer_items": list(pair_reasoning.get("known_answer_items") or [])[:12] if isinstance(pair_reasoning, dict) else [],
+            "candidate_unexcluded_items": list(pair_reasoning.get("candidate_unexcluded_items") or [])[:12] if isinstance(pair_reasoning, dict) else [],
+            "relevant_pair_indices": pair_selected_indices[:8],
+        },
         "match": {
             "selected_index": selected_index,
             "best_score": round(best_score, 6),
@@ -6388,6 +6470,7 @@ def _live_relation_selector(
         "best_operation_score": round(best_operation_score, 6),
         "contextual_discovery_signal": round(contextual_discovery_signal, 6),
         "implicit_pair_continuation": implicit_pair_continuation,
+        "pair_direction": pair_reasoning,
         "pair_match_method": "authenticated_12h_pairs_first_semantic_match_then_relation",
         "topic_relation": topic_relation,
         "action_link": action_link,
@@ -6527,7 +6610,7 @@ def _build_pair_first_response_formulation(
         )
 
     result = {
-        "version": "pair_first_response_formulation_v4_compact",
+        "version": "pair_first_response_formulation_v5_directional",
         "relation": relation,
         "context_mode": context_mode,
         "pair_first": True,
@@ -6724,6 +6807,7 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
     result["context_anchor_pair"] = selected_pair if selected_index >= 0 else (
         dict(next((x for x in context_pairs if isinstance(x, dict)), {})) if context_pairs else {}
     )
+    result["pair_direction_engine"] = dict(selected.get("pair_direction") or {}) if isinstance(selected.get("pair_direction"), dict) else {}
     result["pair_first_match"] = {
         "selected_index": selected_index,
         "selected_pair": _compact_pair_for_formulation(selected_pair),
