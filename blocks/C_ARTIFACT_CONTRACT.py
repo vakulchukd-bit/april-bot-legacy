@@ -1163,7 +1163,11 @@ def _artifact_canonical_render_blocks(artifact: BaseArtifact) -> List[Dict[str, 
         "content": content,
         "text": content,
         "payload": structured_payload,
+        # `signal` keeps the compact renderer metadata expected by existing Web
+        # blocks. `render_signal` is the complete canonical signal envelope,
+        # including the lossless payload, and follows the artifact to Web.
         "signal": dict(signal.get("signal") or {}),
+        "render_signal": dict(signal),
         "signal_version": UNIFIED_RENDER_SIGNAL_VERSION,
         "source_room": room_source,
         "artifact_id": getattr(getattr(artifact, "metadata", None), "artifact_id", ""),
