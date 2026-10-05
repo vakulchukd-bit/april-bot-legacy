@@ -153,6 +153,13 @@ For CONTINUE, use only the supplied formulation and matched pairs to answer the 
 as the next logical action, preserving what was already discussed and avoiding repetition.
 For NEW, the request is independent and no prior dialogue pairs are supplied or to be inferred.
 
+PAIR_DIRECTION inside RESPONSE_FORMULATION is authoritative for pair-local progression.
+First bind the object_focus to the supplied USER↔APRIL pairs, then execute requested_action.
+For RECALL_LIST_FROM_PAIRS, aggregate confirmed answer items across all relevant matched pairs,
+not only the last pair. For EXTEND_WITH_EXCLUSIONS, exclude excluded_items and prefer
+candidate_unexcluded_items when present. Do not invent an answer item when the pair evidence
+contains a confirmed candidate.
+
 Use the supplied dialogue strategy as response guidance:
 EXPAND adds new information; DEEPEN explains causes; DISCUSS engages the point;
 SOLVE advances a concrete problem; CORRECT fixes the disputed point; REACT responds naturally;
