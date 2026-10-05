@@ -3918,10 +3918,32 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             wrapped = parsed.get(wrapper_key)
             if isinstance(wrapped, dict) and any(
                 key in wrapped
-                for key in ("answer", "content", "response", "text", "render_blocks", "artifacts", "image", "gallery", "diagram", "graph", "table")
+                for key in ("answer", "content", "response", "text", "render_blocks", "artifacts", "image", "gallery", "diagram", "graph", "table", "formula", "type")
             ):
                 canonical_payload = wrapped
                 break
+
+    # OpenAI's image-generation semantic response is a first-class structured
+    # result, not a human answer and not a concrete image artifact. Normalize
+    # only this provider envelope into the existing image-spec contract so the
+    # current C_APRIL_IMAGES_GENERATOR route receives the exact OpenAI plan.
+    # No second provider call and no semantic re-interpretation are introduced.
+    if isinstance(canonical_payload, dict) and _safe_text(canonical_payload.get("type")).strip().lower() == "image_generation":
+        image_generation_payload = dict(canonical_payload)
+        semantic_prompt = _safe_text(
+            image_generation_payload.get("prompt")
+            or image_generation_payload.get("description")
+            or image_generation_payload.get("visual_prompt")
+            or image_generation_payload.get("image_prompt")
+        ).strip()
+        if semantic_prompt:
+            canonical_payload = dict(canonical_payload)
+            canonical_payload["image"] = {
+                "prompt": semantic_prompt,
+                "description": _safe_text(image_generation_payload.get("description") or semantic_prompt).strip(),
+                "openai_structured_visual_plan_raw": image_generation_payload,
+                "openai_structured_visual_plan_semantic": semantic_prompt,
+            }
 
     source_payload = machine_request_to_dict(source_request) if source_request is not None else {}
     source_constraints = source_payload.get("constraints") if isinstance(source_payload.get("constraints"), dict) else {}
@@ -4008,6 +4030,29 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         )
         if recovered_structured:
             answer = recovered_structured
+            structured_output_recovery_used = True
+
+    # Formula responses are valid structured Provider output even when the
+    # model omits the narrative ``answer`` field. Keep the description in the
+    # normal text channel while the formula itself continues through the
+    # canonical FormulaRenderer block.
+    if not answer and isinstance(canonical_payload.get("formula"), (dict, str)):
+        formula_value = canonical_payload.get("formula")
+        if isinstance(formula_value, dict):
+            answer = _coerce_human_answer(
+                formula_value.get("description")
+                or formula_value.get("explanation")
+                or formula_value.get("caption")
+                or formula_value.get("formula")
+                or formula_value.get("latex")
+            )
+        else:
+            answer = _coerce_human_answer(
+                canonical_payload.get("description")
+                or canonical_payload.get("explanation")
+                or formula_value
+            )
+        if answer:
             structured_output_recovery_used = True
 
     # This is transport-level text emitted by the first OpenAI step. Keep it in
@@ -4262,6 +4307,13 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             "response": visible_response,
             "summary": visible_summary,
             "explanation": _strip_image_technical_fallback(normalize_response_text(canonical_payload.get("explanation") or "")) if image_generation_mode else normalize_response_text(canonical_payload.get("explanation") or ""),
+            # Preserve exact structured Provider payloads at the Executor
+            # boundary. Executor will bridge them into the existing Scene route.
+            "formula": deepcopy(canonical_payload.get("formula")) if "formula" in canonical_payload else None,
+            "graph": deepcopy(canonical_payload.get("graph")) if "graph" in canonical_payload else None,
+            "table": deepcopy(canonical_payload.get("table")) if "table" in canonical_payload else None,
+            "diagram": deepcopy(canonical_payload.get("diagram")) if "diagram" in canonical_payload else None,
+            "image_generation": deepcopy(canonical_payload) if _safe_text(canonical_payload.get("type")).strip().lower() == "image_generation" else None,
             "scene": scene,
             "artifacts": artifacts,
             "render_blocks": blocks,
