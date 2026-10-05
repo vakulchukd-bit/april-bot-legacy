@@ -6543,36 +6543,87 @@ def update_scene_context(
         uid = _clean_uid(user_id)
         request_text = str(current_request or "").strip()
         answer_text = str(answer or "").strip()
-        auth_ok = bool(is_authenticated_user(uid)) if callable(is_authenticated_user) and uid else False
-        if auth_ok and request_text and answer_text:
-            current_rows = []
-            try:
-                current_rows = load_dialogue_pairs(uid, limit=0)
-            except Exception:
-                current_rows = []
-            clean_rows = [p for p in (_clean_pair_from_row(x) for x in current_rows) if p]
-            turn_index = (max((int(p.get("turn_index") or 0) for p in clean_rows), default=0) + 1)
-            try:
-                save_dialogue_pair(
-                    uid,
-                    request_text,
-                    answer_text,
-                    created_at=time.time(),
-                    turn_index=turn_index,
+        if uid and request_text and answer_text:
+            # FIRST COMMIT TO THE LIVE RUNTIME.  The next HTTP turn must be able
+            # to see the just-completed USER↔APRIL pair even when PostgreSQL is
+            # temporarily unavailable or the auth lookup is stale.  Previously
+            # a failed/false DB write was followed by a runtime reload with an
+            # empty list, which erased the pair from memory and made Interpretation
+            # report "previous dialogue absent" on the very next message.
+            pair_created_at = time.time()
+            live_state = None
+            with _state_lock:
+                live_state = state.get(uid) if isinstance(state.get(uid), dict) else build_default_state()
+                timeline = live_state.setdefault("memory_timeline", {})
+                day0 = timeline.setdefault("day_0", build_memory_day())
+                pairs = day0.setdefault("dialog_pairs", [])
+                duplicate = any(
+                    isinstance(item, dict)
+                    and str(item.get("user_text") or item.get("user_request") or "").strip() == request_text
+                    and str(item.get("april_text") or item.get("april_answer") or "").strip() == answer_text
+                    for item in pairs[-8:]
                 )
-                # Keep the interpretation hot-path cache coherent with the durable
-                # pair store immediately after a completed USER↔APRIL commit.
+                if not duplicate:
+                    next_turn = max(
+                        (int(item.get("turn_index") or item.get("sequence_turn_index") or 0)
+                         for item in pairs if isinstance(item, dict)),
+                        default=0,
+                    ) + 1
+                    pairs.append({
+                        "user_text": request_text,
+                        "april_text": answer_text,
+                        "created_at": pair_created_at,
+                        "turn_index": next_turn,
+                        "user_id": uid,
+                        "conversation_id": str(live_state.get("conversation_id") or ""),
+                        "source": "LIVE_RUNTIME_USER_APRIL_PAIR",
+                    })
+                    day0["dialog_pairs"] = pairs[-ACTIVE_DIALOGUE_WINDOW_PAIRS:]
+                    live_state["memory_timeline"] = {"day_0": day0}
+                    live_state["last_user_turn"] = request_text
+                    live_state["last_user_turn_at"] = pair_created_at
+                    live_state["last_april_turn"] = answer_text
+                    live_state["last_april_turn_at"] = pair_created_at
+                    state[uid] = live_state
+
+            # Persist the same pair durably.  Crucially, never overwrite the live
+            # runtime with an empty DB result after a failed write.  Only replace
+            # the runtime archive from PostgreSQL when the write is confirmed and
+            # a successful read actually returns the pair window.
+            auth_ok = bool(is_authenticated_user(uid)) if callable(is_authenticated_user) else True
+            if auth_ok and callable(save_dialogue_pair):
                 try:
-                    from blocks.interpretation_layer import invalidate_pair_cache
-                    invalidate_pair_cache(uid)
-                except Exception:
-                    pass
-                clean_rows = [p for p in (_clean_pair_from_row(x) for x in load_dialogue_pairs(uid, limit=0)) if p]
-                with _state_lock:
-                    _clean_runtime_memory_scope(state.get(uid) if isinstance(state.get(uid), dict) else build_default_state(), uid, clean_rows)
-                    state[uid]["dialog"] = state[uid].get("dialog", [])[-60:]
-            except Exception as exc:
-                safe_state_log(f"PAIR PERSIST ERROR: {exc}")
+                    current_rows = []
+                    if callable(load_dialogue_pairs):
+                        current_rows = load_dialogue_pairs(uid, limit=0) or []
+                    clean_rows = [p for p in (_clean_pair_from_row(x) for x in current_rows) if p]
+                    turn_index = (max((int(p.get("turn_index") or 0) for p in clean_rows), default=0) + 1)
+                    saved = bool(save_dialogue_pair(
+                        uid,
+                        request_text,
+                        answer_text,
+                        created_at=pair_created_at,
+                        turn_index=turn_index,
+                    ))
+                    safe_state_log(f"PAIR PERSIST COMMIT user={uid} saved={saved}")
+                    try:
+                        from blocks.interpretation_layer import invalidate_pair_cache
+                        invalidate_pair_cache(uid)
+                    except Exception:
+                        pass
+                    if saved and callable(load_dialogue_pairs):
+                        persisted_rows = load_dialogue_pairs(uid, limit=0) or []
+                        persisted_clean = [p for p in (_clean_pair_from_row(x) for x in persisted_rows) if p]
+                        if persisted_clean:
+                            with _state_lock:
+                                runtime_state = state.get(uid) if isinstance(state.get(uid), dict) else build_default_state()
+                                _clean_runtime_memory_scope(runtime_state, uid, persisted_clean)
+                                runtime_state["dialog"] = runtime_state.get("dialog", [])[-60:]
+                                state[uid] = runtime_state
+                except Exception as exc:
+                    safe_state_log(f"PAIR PERSIST ERROR: {exc}")
+            elif uid and request_text and answer_text:
+                safe_state_log(f"PAIR PERSIST SKIPPED user={uid} auth={auth_ok} writer={callable(save_dialogue_pair)}")
     if persist:
         persist_state(user_id)
     return result
@@ -6839,7 +6890,7 @@ def get_state(user_id):
         ready = (
             isinstance(obj, dict)
             and int(obj.get("_state_manager_normalized_version") or 0) == 3
-            and bool(scope.get("authenticated"))
+            and str(scope.get("user_id") or uid) == uid
         )
 
     if not ready:
