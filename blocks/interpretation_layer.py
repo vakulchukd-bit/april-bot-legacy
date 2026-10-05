@@ -19,12 +19,9 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, Iterable, List, Sequence
 
-try:
-    from .vru_context_interpreter import VRU_CONTEXT_INTERPRETER, VRU_VERSION
-except Exception:  # pragma: no cover - direct/script execution compatibility
-    from vru_context_interpreter import VRU_CONTEXT_INTERPRETER, VRU_VERSION
+# VRU_SINGLE_FILE_CONTRACT = True
 
 try:
     import numpy as np
@@ -60,6 +57,583 @@ try:
     from transformers import pipeline as hf_pipeline
 except Exception:  # pragma: no cover
     hf_pipeline = None
+
+
+# ============================================================================
+# EMBEDDED VRU — Vector/Reference Understanding for authenticated 12h pairs
+# ============================================================================
+# VRU is kept INSIDE this canonical interpretation layer. No separate module is
+# required at runtime, so deployment cannot fail because of a missing VRU file.
+# Stage: authenticated 12h pair discovery -> VRU semantic fusion -> final
+# CONTINUE/RECALL/NEW definition -> existing formulation/provider route.
+
+VRU_VERSION = "vru_12h_pair_semantic_fusion_v1"
+
+_STOP = {
+    "что", "это", "такое", "такой", "такая", "такие", "кто", "как", "почему",
+    "зачем", "а", "и", "но", "же", "в", "во", "на", "с", "со", "у", "из", "по",
+    "для", "про", "о", "об", "от", "до", "за", "не", "ни", "я", "ты", "мне", "меня",
+    "тебя", "мы", "вы", "они", "он", "она", "оно", "их", "им", "ему", "ей", "его",
+    "ее", "её", "них", "ним", "него", "нее", "неё", "этот", "эта", "эти", "этим",
+    "этом", "так", "теперь", "тогда", "пожалуйста", "просто", "сам", "сама", "самые",
+    "есть", "были", "был", "быть", "можно", "нужно", "хочу", "хотел", "хотела",
+}
+
+_REFERENCE = {
+    "он", "она", "оно", "они", "его", "ее", "её", "ему", "ей", "им", "их", "них",
+    "ним", "него", "неё", "нее", "этому", "этого", "этим", "этот", "эта", "эти",
+    "такой", "такая", "такое", "такие", "из них", "из этих", "из тех",
+}
+
+_CONTINUATION = {
+    "дальше", "далее", "ещё", "еще", "следующее", "следующий", "следующая", "следующие",
+    "продолжай", "продолжи", "продолжить", "добавь", "расширь", "подробнее", "детальнее",
+    "уточни", "поясни", "объясни", "раскрой", "разверни",
+}
+
+_FORMAT_COMMANDS = {
+    "в столбик": "vertical_list",
+    "столбиком": "vertical_list",
+    "списком": "vertical_list",
+    "по пунктам": "numbered_or_bulleted_list",
+    "таблицей": "table",
+    "в таблице": "table",
+}
+
+_LIST_WORDS = {
+    "назови", "назов", "перечисли", "перечислить", "список", "списком", "виды", "породы",
+    "пункты", "столбик", "столбиком", "добавь", "ещё", "еще",
+}
+
+_EXPLICIT_NEW = (
+    r"\bнов(ая|ую)?\s+тем",
+    r"\bдругая\s+тема\b",
+    r"\bперейд(и|ем|ём)\s+(?:к|на)\s+друг",
+    r"\bначн(ем|ём|ать)\s+(?:нов|друг)",
+)
+
+_EXPLICIT_RECALL = (
+    r"\bвспомн",
+    r"\bраньше\b",
+    r"\bдо\s+этого\b",
+    r"\bперед\s+этим\b",
+    r"\bпредыдущ",
+    r"\bчто\s+я\s+спрашивал",
+    r"\bо\s+ч[её]м\s+я(?:\s+(?:тебя|вас|мы))?\s+спрашивал",
+    r"\bо\s+ч[её]м\s+мы\s+говорили",
+    r"\bв\s+истории\b",
+    r"\bв\s+контексте\b",
+)
+
+_REPAIR = (
+    r"\bя\s+просил\b",
+    r"\bя\s+имел\s+в\s+виду\b",
+    r"\bя\s+говорил\b",
+    r"\bне\s+так\b",
+    r"\bне\s+то\b",
+    r"\bты\s+не\s+понял",
+    r"\bты\s+ошиб",
+)
+
+
+@dataclass(frozen=True)
+class VRUPairEvidence:
+    index: int
+    score: float
+    user_score: float
+    answer_score: float
+    chain_score: float
+    format_score: float
+    subject_score: float
+    recency: float
+    pair_subject: str
+    reasons: tuple[str, ...]
+
+
+class VRUContextInterpreter:
+    VERSION = VRU_VERSION
+
+    def _tokens(self, text: Any) -> list[str]:
+        raw = re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", str(text or "").lower())
+        return [self._stem(x) for x in raw if len(x) >= 2]
+
+    def _stem(self, token: str) -> str:
+        t = token.lower().replace("ё", "е").replace("й", "и")
+        # Lightweight conversational morphology. Intentionally conservative.
+        for suffix in (
+            "ами", "ями", "ого", "ему", "ыми", "ими", "ов", "ев", "ей", "ах", "ях", "ам", "ям",
+            "ом", "ем", "ой", "ый", "ий", "ая", "яя", "ое", "ее", "ые", "ие", "ую", "юю",
+            "ыми", "ими", "ить", "ать", "ять", "ить", "ы", "и", "а", "я", "о", "е", "у", "ю",
+        ):
+            if len(t) > 5 and t.endswith(suffix):
+                return t[:-len(suffix)]
+        return t
+
+    def _content(self, text: Any) -> set[str]:
+        return {x for x in self._tokens(text) if x not in _STOP and len(x) >= 3}
+
+    def _overlap(self, a: Any, b: Any) -> float:
+        aa = self._content(a)
+        bb = self._content(b)
+        if not aa or not bb:
+            return 0.0
+        inter = len(aa & bb)
+        union = len(aa | bb)
+        return inter / max(1, union)
+
+    def _contains(self, text: str, words: Iterable[str]) -> bool:
+        low = str(text or "").lower()
+        return any(w in low for w in words)
+
+    def _has_regex(self, text: str, patterns: Iterable[str]) -> bool:
+        low = str(text or "").lower()
+        return any(re.search(p, low) for p in patterns)
+
+    def _format_hint(self, text: str) -> str:
+        low = str(text or "").lower()
+        for phrase, fmt in _FORMAT_COMMANDS.items():
+            if phrase in low:
+                return fmt
+        return ""
+
+    def _pair_text(self, pair: dict[str, Any]) -> tuple[str, str, str]:
+        user = str(pair.get("user") or pair.get("user_request") or pair.get("user_text") or "").strip()
+        answer = str(pair.get("april") or pair.get("april_answer") or pair.get("assistant") or pair.get("answer") or "").strip()
+        combined = f"{user} {answer}".strip()
+        return user, answer, combined
+
+    def _pair_subject(self, pair: dict[str, Any]) -> str:
+        for key in ("active_entity", "resolved_entity", "canonical_topic", "topic", "subtopic"):
+            value = str(pair.get(key) or "").strip()
+            if value:
+                return value[:220]
+        user, answer, _ = self._pair_text(pair)
+        # Prefer concrete noun-rich words from the user, then answer.
+        for source in (user, answer):
+            words = [w for w in self._content(source) if len(w) >= 4]
+            if words:
+                return " ".join(words[:4])[:220]
+        return ""
+
+    def _is_format_only(self, current: str) -> bool:
+        low = current.lower().strip()
+        if self._format_hint(low):
+            content = self._content(low)
+            command_tokens = set(re.findall(r"[a-zа-яёіїєґ]+", low))
+            # Keep this broad for natural short commands: "в столбик" / "покажи списком".
+            meaningful = {x for x in command_tokens if x not in _STOP}
+            return len(meaningful) <= 4 or meaningful.issubset(_LIST_WORDS | {"покажи", "сделай", "дай", "назови"})
+        return False
+
+    def _subject_family(self, current: str, pair_text: str) -> float:
+        # Strong domain anchors that survive inflection/wording changes.
+        pairs = (
+            ({"кот", "кош", "кошач", "домашн", "пород"}, 0.34),
+            ({"лошад", "лошади", "пород"}, 0.30),
+            ({"таблиц", "столбик", "строк", "колон"}, 0.18),
+            ({"код", "функц", "скрипт", "модул"}, 0.18),
+            ({"фото", "изображ", "картин", "сним"}, 0.18),
+        )
+        c = self._content(current)
+        p = self._content(pair_text)
+        if not c or not p:
+            return 0.0
+        score = 0.0
+        for group, weight in pairs:
+            if any(any(tok.startswith(root) for root in group) for tok in c) and any(
+                any(tok.startswith(root) for root in group) for tok in p
+            ):
+                score = max(score, weight)
+        return score
+
+    def _scope_conflict(self, current: str, answer: str) -> bool:
+        low_c = str(current or "").lower()
+        low_a = str(answer or "").lower()
+        domestic_request = ("домашн" in low_c) and ("кот" in low_c or "кош" in low_c or self._is_format_only(low_c))
+        if not domestic_request:
+            return False
+        domestic_markers = ("домашн", "британ", "шотланд", "мейн-кун", "сиам", "персид", "сфинкс", "бенгал", "абиссин", "рэгдолл", "ангор")
+        wild_markers = ("лев", "тигр", "леопард", "ягуар", "гепард", "пума", "рысь", "каракал", "сервал", "оцелот", "манул")
+        domestic_hits = sum(1 for x in domestic_markers if x in low_a)
+        wild_hits = sum(1 for x in wild_markers if x in low_a)
+        return wild_hits >= 2 and domestic_hits == 0
+
+    def _pair_evidence(self, current: str, pairs: list[dict[str, Any]], i: int) -> VRUPairEvidence:
+        pair = pairs[i]
+        user, answer, combined = self._pair_text(pair)
+        latest_distance = len(pairs) - 1 - i
+        recency = 1.0 / (1.0 + 0.18 * max(0, latest_distance))
+
+        user_score = self._overlap(current, user)
+        answer_score = self._overlap(current, answer)
+        pair_score = self._overlap(current, combined)
+        format_hint = self._format_hint(current)
+        format_score = 0.0
+        low_answer = answer.lower()
+        if format_hint == "vertical_list" and ("\n" in answer or answer.count(",") >= 2 or answer.count(";") >= 2):
+            format_score = 0.62
+        elif format_hint == "table" and ("табли" in low_answer or "|" in answer):
+            format_score = 0.62
+
+        reasons: list[str] = []
+        if user_score >= 0.12:
+            reasons.append("USER_MEANING_OVERLAP")
+        if answer_score >= 0.12:
+            reasons.append("APRIL_RESULT_OVERLAP")
+        if format_score:
+            reasons.append("RESULT_FORMAT_MATCH")
+
+        explicit_reference = self._contains(current.lower(), _REFERENCE)
+        continuation = self._contains(current.lower(), _CONTINUATION)
+        repair = self._has_regex(current, _REPAIR)
+        format_only = self._is_format_only(current)
+        if explicit_reference:
+            reasons.append("REFERENCE_FORM")
+        if continuation:
+            reasons.append("CONTINUATION_FORM")
+        if repair:
+            reasons.append("REPAIR_FORM")
+        if format_only:
+            reasons.append("ELLIPTICAL_FORMAT_COMMAND")
+
+        # Chain score: measure whether this pair shares meaning with the nearest
+        # neighboring pairs. The point is to fuse a sequence, not elect a lone row.
+        chain_score = 0.0
+        if i > 0:
+            _, prev_a, _ = self._pair_text(pairs[i - 1])
+            chain_score = max(chain_score, self._overlap(answer, prev_a))
+        if i + 1 < len(pairs):
+            next_u, _, _ = self._pair_text(pairs[i + 1])
+            chain_score = max(chain_score, self._overlap(answer, next_u))
+        if chain_score >= 0.10:
+            reasons.append("PAIR_CHAIN_LINK")
+
+        subject_score = self._subject_family(current, combined)
+        if subject_score:
+            reasons.append("DOMAIN_FAMILY_MATCH")
+
+        conflict = self._scope_conflict(current, answer)
+        if conflict:
+            reasons.append("CURRENT_SCOPE_CONFLICT")
+
+        score = (
+            0.22 * pair_score
+            + 0.16 * user_score
+            + 0.24 * answer_score
+            + 0.14 * chain_score
+            + 0.12 * format_score
+            + 0.08 * subject_score
+            + 0.04 * recency
+            - (0.24 if conflict else 0.0)
+        )
+
+        # Deterministic boosts for conversational ellipsis.
+        if format_only:
+            score += 0.20 * min(1.0, answer_score * 2.4 + format_score)
+        if explicit_reference:
+            score += 0.10
+        if repair:
+            score += 0.10
+        score = max(0.0, min(1.0, score))
+
+        return VRUPairEvidence(
+            index=i,
+            score=score,
+            user_score=user_score,
+            answer_score=answer_score,
+            chain_score=chain_score,
+            format_score=format_score,
+            subject_score=subject_score,
+            recency=recency,
+            pair_subject=self._pair_subject(pair),
+            reasons=tuple(dict.fromkeys(reasons)),
+        )
+
+    def _is_clarification_answer(self, answer: str) -> bool:
+        low = str(answer or "").lower().strip()
+        return bool(
+            re.search(r"\bуточн", low)
+            or re.search(r"\bпришлите\b", low)
+            or re.search(r"\bчто именно\b", low)
+            or re.search(r"\bнужно прислать\b", low)
+        )
+
+    def _scope_pair_indices(self, current: str, pairs: list[dict[str, Any]], ranked: list[VRUPairEvidence]) -> list[int]:
+        low = str(current or "").lower()
+        domestic = "домашн" in low and ("кот" in low or "кош" in low or self._is_format_only(low))
+        if not domestic:
+            return []
+        markers = ("домашн", "британ", "шотланд", "мейн-кун", "сиам", "персид", "сфинкс", "бенгал", "абиссин", "рэгдолл", "ангор")
+        indices = []
+        for e in ranked:
+            if "CURRENT_SCOPE_CONFLICT" in e.reasons:
+                continue
+            _, answer, combined = self._pair_text(pairs[e.index])
+            low_combined = combined.lower()
+            if any(m in low_combined for m in markers):
+                # Exclude clarification-only answers when a substantive domestic
+                # result exists elsewhere in the same 12h window.
+                if self._is_clarification_answer(answer):
+                    continue
+                indices.append(e.index)
+        return sorted(dict.fromkeys(indices))[-6:]
+
+    def analyze(
+        self,
+        current: str,
+        pairs: list[dict[str, Any]],
+        seed: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        current = str(current or "").strip()
+        window = [p for p in (pairs or []) if isinstance(p, dict)][-15:]
+        seed = seed if isinstance(seed, dict) else {}
+
+        if not window:
+            return {
+                "version": self.VERSION,
+                "relation": "NEW",
+                "confidence": 0.92,
+                "selected_indices": [],
+                "context_pairs": [],
+                "anchor_index": -1,
+                "definition": "NEW",
+                "reason": "NO_AUTHENTICATED_12H_PAIRS",
+                "provider_safe": True,
+            }
+
+        evidence = [self._pair_evidence(current, window, i) for i in range(len(window))]
+        ranked = sorted(evidence, key=lambda x: (x.score, x.index), reverse=True)
+
+        explicit_new = self._has_regex(current, _EXPLICIT_NEW)
+        explicit_recall = self._has_regex(current, _EXPLICIT_RECALL)
+        repair = self._has_regex(current, _REPAIR)
+        reference = any(x in current.lower() for x in _REFERENCE)
+        continuation = any(x in current.lower() for x in _CONTINUATION)
+        format_hint = self._format_hint(current)
+        format_only = self._is_format_only(current)
+
+        best = ranked[0]
+        second = ranked[1] if len(ranked) > 1 else None
+        top_cut = max(0.13, best.score * 0.58)
+        connected = [x for x in ranked if x.score >= top_cut]
+        # Do not fuse a pair whose APRIL answer conflicts with an explicitly
+        # established current scope (for example wild cats when the user now
+        # explicitly asks for domestic cats). The pair remains in the 12h memory
+        # window, but is excluded from the semantic context packet.
+        connected = [x for x in connected if "CURRENT_SCOPE_CONFLICT" not in x.reasons]
+
+        # Prefer the latest substantive pair when a format-only command directly
+        # follows a rich result. This is the critical "В столбик" repair.
+        latest = evidence[-1]
+        latest_user, latest_answer, latest_combined = self._pair_text(window[-1])
+        latest_result_anchor = bool(
+            format_only
+            and format_hint == "vertical_list"
+            and "CURRENT_SCOPE_CONFLICT" not in latest.reasons
+            and not self._is_clarification_answer(latest_answer)
+            and len(latest_answer.strip()) >= 40
+            and (
+                "домашн" in latest_user.lower()
+                or any(x in latest_user.lower() for x in ("виды", "породы", "назови", "перечисли", "столбик"))
+            )
+        )
+        direct_latest_result = bool(
+            latest_result_anchor
+            or (
+                format_only
+                and format_hint == "vertical_list"
+                and "CURRENT_SCOPE_CONFLICT" not in latest.reasons
+                and ("\n" in latest_answer or latest.answer_score >= 0.10)
+            )
+        )
+        scope_indices = self._scope_pair_indices(current, window, ranked)
+        if direct_latest_result and latest.score >= 0.0:
+            anchor = latest
+        elif scope_indices:
+            anchor = next((x for x in reversed(evidence) if x.index == scope_indices[-1]), best)
+        elif reference and latest.score >= 0.08 and "CURRENT_SCOPE_CONFLICT" not in latest.reasons:
+            # For anaphoric turns, the immediately preceding user-selected pair
+            # is the preferred discourse anchor even when an older pair has a
+            # slightly higher lexical score. The later pair may contain the
+            # actual narrowed scope (e.g. "из домашних видов").
+            anchor = latest
+        else:
+            non_conflicting = [x for x in ranked if "CURRENT_SCOPE_CONFLICT" not in x.reasons]
+            anchor = non_conflicting[0] if non_conflicting else best
+
+        if explicit_new:
+            relation = "NEW"
+            selected = []
+            anchor_index = -1
+            reason = "EXPLICIT_NEW_TOPIC"
+        elif explicit_recall:
+            selected = [x.index for x in connected[:6] if x.score >= 0.10]
+            if not selected:
+                selected = [best.index]
+            relation = "RECALL"
+            anchor_index = selected[0]
+            reason = "HISTORY_QUERY_OVER_FUSED_PAIRS"
+        else:
+            # A compact command is not evaluated against the current sentence alone.
+            # It inherits the active task from the strongest recent pair/result.
+            semantic_continuation = bool(
+                reference or continuation or repair or format_only
+                or latest.answer_score >= 0.14
+                or best.answer_score >= 0.18
+                or best.chain_score >= 0.14
+            )
+            strong_fused_context = bool(
+                best.score >= 0.20
+                or latest.score >= 0.16
+                or (reference and best.score >= 0.10)
+                or (format_only and latest_result_anchor)
+            )
+
+            if semantic_continuation and strong_fused_context:
+                relation = "CONTINUE"
+                reason = "VRU_FUSED_PAIR_MEANING"
+                if direct_latest_result:
+                    # A pure formatting command directly after a substantive
+                    # result should operate on that result only. This prevents a
+                    # previous wrong/alternative answer in the 12h window from
+                    # leaking into the semantic packet.
+                    selected = [latest.index]
+                else:
+                    selected = sorted(dict.fromkeys(x.index for x in connected[:6]))
+                    # When the current turn explicitly narrows the scope (e.g.
+                    # "домашних котов"), prefer substantive pairs from that scope
+                    # and drop clarification/error-answer rows from the fused context.
+                    if scope_indices:
+                        scoped = [i for i in selected if i in set(scope_indices)]
+                        if scoped:
+                            selected = scoped
+                    # Always keep the current/latest result for an elliptical format command.
+                    if format_only and latest.index not in selected and "CURRENT_SCOPE_CONFLICT" not in latest.reasons:
+                        selected.append(latest.index)
+                    selected = sorted(dict.fromkeys(selected))[-8:]
+                anchor_index = anchor.index
+            elif seed.get("relation") == "CONTINUE" and seed.get("selected_index", -1) >= 0:
+                # Preserve an already-valid decision when VRU does not have enough
+                # evidence to improve it. This keeps compatibility with production.
+                relation = "CONTINUE"
+                reason = "PRESERVE_VALID_PAIR_DECISION"
+                selected = sorted(dict.fromkeys(
+                    [int(seed.get("selected_index", -1))]
+                    + [int(x) for x in (seed.get("context_pairs") or []) if isinstance(x, dict)][:0]
+                ))
+                anchor_index = int(seed.get("selected_index", -1))
+            else:
+                relation = "NEW"
+                selected = []
+                anchor_index = -1
+                reason = "NO_FUSED_DIALOGUE_DEPENDENCY"
+
+        # Build a fused semantic reading from ALL selected pairs, not just one row.
+        context_pairs = [dict(window[i]) for i in selected if 0 <= i < len(window)]
+        fused_user = " ".join(self._pair_text(p)[0] for p in context_pairs).strip()
+        fused_answer = " ".join(self._pair_text(p)[1] for p in context_pairs).strip()
+        fused_subjects = [self._pair_subject(p) for p in context_pairs if self._pair_subject(p)]
+        fused_subject = " / ".join(dict.fromkeys(fused_subjects))[:420]
+
+        # Explicitly recognize the user's current semantic target when they say
+        # "домашних" or "домашних котов". This keeps the active subject from being
+        # polluted by a previous broad "кошачьи" answer.
+        low = current.lower()
+        target_scope = ""
+        if "домашн" in low and ("кот" in low or "кош" in low or format_only):
+            target_scope = "домашние кошки / породы домашних кошек"
+        elif "домашн" in fused_user.lower() or "домашн" in fused_answer.lower():
+            target_scope = "домашние кошки / породы домашних кошек"
+        elif fused_subject:
+            target_scope = fused_subject
+
+        output_format = format_hint or ""
+        action = "answer_current_request"
+        if relation == "CONTINUE" and format_only:
+            action = "format_previous_result"
+        elif relation == "CONTINUE" and reference:
+            action = "develop_referenced_result"
+        elif relation == "RECALL":
+            action = "retrieve_fused_dialogue_memory"
+
+        confidence = best.score
+        if relation == "CONTINUE" and format_only:
+            confidence = max(confidence, 0.88 if latest.answer_score >= 0.10 else 0.78)
+        elif relation == "CONTINUE":
+            confidence = max(confidence, 0.72)
+        elif relation == "RECALL":
+            confidence = max(confidence, 0.82)
+        else:
+            confidence = max(confidence, 0.86)
+
+        margin = best.score - (second.score if second else 0.0)
+
+        return {
+            "version": self.VERSION,
+            "relation": relation,
+            "definition": relation,
+            "confidence": round(min(0.99, max(0.0, confidence)), 6),
+            "reason": reason,
+            "selected_indices": selected,
+            "anchor_index": anchor_index,
+            "context_pairs": context_pairs,
+            "candidate_evidence": [
+                {
+                    "index": x.index,
+                    "score": round(x.score, 6),
+                    "user_score": round(x.user_score, 6),
+                    "answer_score": round(x.answer_score, 6),
+                    "chain_score": round(x.chain_score, 6),
+                    "format_score": round(x.format_score, 6),
+                    "subject_score": round(x.subject_score, 6),
+                    "recency": round(x.recency, 6),
+                    "subject": x.pair_subject,
+                    "reasons": list(x.reasons),
+                }
+                for x in ranked[:8]
+            ],
+            "fused_meaning": {
+                "user_requests": fused_user[:1800],
+                "april_answers": fused_answer[:2400],
+                "subject": fused_subject,
+                "target_scope": target_scope,
+                "pair_count": len(context_pairs),
+            },
+            "dialogue_signals": {
+                "explicit_new": explicit_new,
+                "explicit_recall": explicit_recall,
+                "reference": reference,
+                "continuation": continuation,
+                "repair": repair,
+                "format_only": format_only,
+                "format_hint": format_hint,
+                "latest_result_anchor": direct_latest_result,
+                "best_score": round(best.score, 6),
+                "latest_score": round(latest.score, 6),
+                "margin": round(margin, 6),
+            },
+            "task_definition": {
+                "action": action,
+                "inherits_previous_result": relation == "CONTINUE",
+                "inherits_previous_subject": relation == "CONTINUE" and bool(target_scope),
+                "output_format": output_format,
+                "format_as_vertical_list": output_format == "vertical_list",
+            },
+            "contract": {
+                "stage": "AFTER_12H_PAIR_DISCOVERY_BEFORE_FINAL_RELATION",
+                "source": "STATE_MANAGER_AUTHENTICATED_12H_USER_APRIL_PAIRS",
+                "uses_both_sides_of_pair": True,
+                "uses_multiple_pairs": bool(len(context_pairs) > 1),
+                "single_final_relation": True,
+                "provider_must_not_reselect_context": True,
+                "memory_mutation": False,
+                "routing": False,
+            },
+            "provider_safe": True,
+        }
+
+
+VRU_CONTEXT_INTERPRETER = VRUContextInterpreter()
 
 
 # ============================================================================
