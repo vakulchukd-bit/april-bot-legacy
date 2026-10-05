@@ -19,7 +19,7 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence, Iterable
 
 try:
     import numpy as np
@@ -55,6 +55,8 @@ try:
     from transformers import pipeline as hf_pipeline
 except Exception:  # pragma: no cover
     hf_pipeline = None
+
+PAIR_DIRECTION_ENGINE_VERSION = "2.1-embedded"
 
 # PAIR DIALOGUE ENGINE IS A REQUIRED INTERPRETATION DEPENDENCY.
 # It is embedded in this file so the production route has a single deployable
