@@ -170,313 +170,7 @@ def safe_list(value):
 
 # ---------------------------------------------------------------------------
 # POST-PROVIDER DIALOGUE MEMORY
-# ---------------------------------------------------------------------------
-# Interpretation before OpenAI is provisional context. The completed
-# USER->APRIL pair returned by Provider is the canonical semantic memory source.
-_POST_PROVIDER_IGNORED_NAMES = {
-    "вот", "это", "оба", "обе", "обоих", "однако", "например",
-    "таким", "также", "здесь", "сегодня", "тогда", "для", "при",
-    "русский", "русская", "русские", "советский", "советская",
-    "система", "программа", "пример", "ответ", "сравнение",
-}
-_POST_PROVIDER_NAME_RE = re.compile(
-    r"\b[А-ЯЁ][а-яё-]{2,}(?:\s+[А-ЯЁ][а-яё-]{2,}){1,2}\b"
-)
-_POST_PROVIDER_LATIN_NAME_RE = re.compile(
-    r"\b[A-Z][a-z-]{2,}(?:\s+[A-Z][a-z-]{2,}){1,2}\b"
-)
-_POST_PROVIDER_ENTITY_PATTERNS = (
-    re.compile(r"\bравносторонн(?:ий|его|ему|им|ом|ые|ых|ыми)?\s+треугольник(?:а|у|ом|е|и|ов|ами)?\b", re.IGNORECASE),
-    re.compile(r"\bразносторонн(?:ий|его|ему|им|ом|ые|ых|ыми)?\s+треугольник(?:а|у|ом|е|и|ов|ами)?\b", re.IGNORECASE),
-    re.compile(r"\bравнобедренн(?:ый|ого|ому|ым|ом|ые|ых|ыми)?\s+треугольник(?:а|у|ом|е|и|ов|ами)?\b", re.IGNORECASE),
-    re.compile(r"\bпрямоугольн(?:ый|ого|ому|ым|ом|ые|ых|ыми)?\s+треугольник(?:а|у|ом|е|и|ов|ами)?\b", re.IGNORECASE),
-)
-_POST_PROVIDER_ENTITY_ALIASES = {
-    "равносторонний треугольник": "равносторонний треугольник",
-    "разносторонний треугольник": "разносторонний треугольник",
-    "равнобедренный треугольник": "равнобедренный треугольник",
-    "прямоугольный треугольник": "прямоугольный треугольник",
-}
-_POST_PROVIDER_SUBTOPICS = (
-    ("comparison", ("сравн", "сопостав")),
-    ("image", ("нарисуй", "изобрази", "картинк", "изображени", "рисунк", "портрет")),
-    ("code", ("код", "python", "скрипт", "программ")),
-    ("diagram", ("схем", "блок-схем")),
-    ("graph", ("график", "диаграмм", "кривую", "кривая")),
-    ("table", ("таблиц", "табличк")),
-    ("formula", ("формул", "уравнен")),
-    ("translation", ("переведи", "перевод", "английск", "перевести")),
-    ("analysis", ("анализ", "разбор", "проанализ")),
-)
-
-
-def _post_provider_full_names(*texts):
-    names = []
-    seen = set()
-    for text in texts:
-        value = str(text or "")
-        candidates = list(_POST_PROVIDER_NAME_RE.findall(value)) + list(_POST_PROVIDER_LATIN_NAME_RE.findall(value))
-        for candidate in candidates:
-            normalized = re.sub(r"\s+", " ", candidate).strip(" .,!?:;—-")
-            if not normalized:
-                continue
-            if normalized.split()[0].lower() in _POST_PROVIDER_IGNORED_NAMES:
-                continue
-            key = normalized.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            names.append(normalized)
-    return names
-
-
-def _post_provider_clean_request(text):
-    value = re.sub(r"\s+", " ", str(text or "").strip())
-    if not value:
-        return ""
-    value = re.sub(
-        r"^(?:а\s+)?(?:сравни|мравни|расскажи|скажи|объясни|покажи|нарисуй|изобрази|"
-        r"сгенерируй|создай|сделай|построй|проверь|найди|напиши|выдай|выведи|"
-        r"рассчитай|посчитай|ответь|переведи)\s+",
-        "",
-        value,
-        flags=re.IGNORECASE,
-    )
-    return value.strip(" .,!?:;—-")[:220]
-
-
-_POST_PROVIDER_STOPWORDS = {
-    "а", "и", "или", "но", "да", "же", "ли", "не", "ни", "это", "этот", "эта", "эти", "этого",
-    "этом", "того", "такой", "такие", "так", "тут", "там", "вот", "как", "чем", "что", "кто", "где",
-    "когда", "почему", "зачем", "какой", "какая", "какие", "какое", "каких", "каким", "какими",
-    "перед", "после", "про", "о", "об", "обо", "по", "на", "в", "из", "с", "со", "к", "ко", "для",
-    "мне", "меня", "ты", "вы", "я", "мы", "они", "их", "них", "им", "ими", "его", "ее", "её", "ему",
-    "можешь", "можеш", "можно", "нужно", "надо", "хочу", "хотел", "хотела", "давай", "расскажи", "скажи",
-    "объясни", "покажи", "нарисуй", "изобрази", "создай", "сделай", "сравни", "выдай", "выведи", "напиши",
-    "ответь", "рассчитай", "посчитай", "проверь", "найди", "готово", "готов", "конечно", "правильно", "верно",
-    "он", "она", "оно", "они", "него", "ней", "нему", "ним", "этим", "этот", "эта", "эти",
-    "изображение", "картинка", "картинке", "рисунок", "наполовину", "обычно", "примерно",
-    "круг",  # kept as a valid concept by extractor rules
-}
-
-_POST_PROVIDER_INFLECTIONS = {
-    "овала": "овал", "овалу": "овал", "овале": "овал", "овалом": "овал",
-    "круга": "круг", "кругу": "круг", "круге": "кругом", "кругом": "круг",
-    "треугольника": "треугольник", "треугольнику": "треугольник", "треугольником": "треугольник",
-    "треугольнике": "треугольник", "треугольники": "треугольник", "треугольниками": "треугольник",
-    "треугольников": "треугольник", "треугольниках": "треугольник",
-    "овалами": "овал", "кругами": "круг",
-    "баскетбольного": "баскетбольный", "баскетбольному": "баскетбольный", "баскетбольным": "баскетбольный", "баскетбольном": "баскетбольный",
-    "футбольного": "футбольный", "футбольному": "футбольный", "футбольным": "футбольный", "футбольном": "футбольный",
-    "стакана": "стакан", "стакану": "стакан", "стаканом": "стакан", "стакане": "стакан",
-    "водой": "вода", "воды": "вода", "воде": "вода",
-}
-
-
-def _post_provider_normalize_concept(value: str) -> str:
-    value = re.sub(r"\s+", " ", str(value or "").strip(" .,!?:;—-\"'«»"))
-    if not value:
-        return ""
-    value = re.sub(r"^(?:это|вот|про|о|об|для|между|от|с)\s+", "", value, flags=re.IGNORECASE)
-    words = value.split()
-    if not words:
-        return ""
-    if len(words) <= 3:
-        last = words[-1].lower()
-        if last in _POST_PROVIDER_INFLECTIONS:
-            words[-1] = _POST_PROVIDER_INFLECTIONS[last]
-        value = " ".join(words)
-    if value.lower() in {"чем", "какие", "какая", "какой", "можешь", "можеш", "нарисуй", "объясни", "расскажи"}:
-        return ""
-    return value[:180]
-
-
-def _post_provider_is_concept(value: str) -> bool:
-    norm = _post_provider_normalize_concept(value)
-    if not norm:
-        return False
-    low = norm.casefold()
-    if low in _POST_PROVIDER_STOPWORDS:
-        # Explicitly allow real geometric concepts that overlap the compact stopword set.
-        return low in {"круг"}
-    if re.fullmatch(r"[0-9]+", norm):
-        return False
-    if len(norm) < 2:
-        return False
-    return True
-
-
-def _post_provider_split_concepts(value: str) -> list[str]:
-    value = str(value or "").strip()
-    if not value:
-        return []
-    value = re.sub(r"\s+", " ", value)
-    pieces = re.split(r"\s+(?:и|или|,|/|&|\+|vs\.?|против)\s+", value, flags=re.IGNORECASE)
-    out = []
-    for piece in pieces:
-        norm = _post_provider_normalize_concept(piece)
-        if _post_provider_is_concept(norm):
-            if norm.casefold() not in {x.casefold() for x in out}:
-                out.append(norm)
-    return out[:6]
-
-
-def _post_provider_semantic_subjects(request_text: str, answer_text: str) -> list[str]:
-    """Extract compact canonical subjects without falling back to trigger words.
-
-    This is deliberately a small grammatical layer, not a second interpreter.
-    It prefers explicit comparison operands and the subject phrase established by
-    Provider's completed answer. Pronouns/commands are never subjects.
-    """
-    request = re.sub(r"\s+", " ", str(request_text or "").strip())
-    answer = re.sub(r"\s+", " ", str(answer_text or "").strip())
-    out: list[str] = []
-
-    def add(value: str, *, append_noun: str = "") -> None:
-        value = _post_provider_normalize_concept(value)
-        if append_noun:
-            noun = _post_provider_normalize_concept(append_noun)
-            if noun and value and noun.casefold() not in value.casefold().split():
-                value = f"{value} {noun}"
-        if _post_provider_is_concept(value):
-            if value.casefold() not in {x.casefold() for x in out}:
-                out.append(value)
-
-    # 1. Explicit comparison: preserve the full first operand and resolve an
-    # adjective-only second operand ("баскетбольного") to the same head noun.
-    m = re.search(
-        r"\b(?:чем\s+отличается|чем\s+отличаются|разница\s+между)\s+(.+?)\s+от\s+(.+?)(?:[?.!]|$)",
-        request, flags=re.IGNORECASE,
-    )
-    if m:
-        left = _post_provider_normalize_concept(m.group(1))
-        right_raw = _post_provider_normalize_concept(m.group(2))
-        head = left.split()[-1] if left.split() else ""
-        adjective_like = bool(re.fullmatch(r"[а-яё-]+(?:ый|ий|ой|ая|яя|ое|ее|ые|ие)", right_raw, flags=re.IGNORECASE))
-        add(left)
-        add(right_raw, append_noun=head if adjective_like else "")
-        return out[:6]
-
-    # 2. Provider's answer is authoritative for a completed turn. Capture a
-    # concrete subject phrase at the beginning of the answer, before predicate
-    # verbs/adverbs. This handles "Прозрачный стакан наполовину наполнен..."
-    # and "Футбольный мяч обычно меньше..." without treating "Он" as a subject.
-    subject_patterns = (
-        r"^([А-ЯЁа-яё-]+\s+[А-ЯЁа-яё-]+)\s+(?:обычно|часто|примерно|наполовину|имеет|является|это|предназначен|покрыт|состоит|наполнен|наполнена|наполнено|находится|виден|видна)\b",
-        r"^([А-ЯЁа-яё-]+\s+[А-ЯЁа-яё-]+)\s+(?:[—-]|обычно)\b",
-    )
-    for pattern in subject_patterns:
-        m = re.search(pattern, answer, flags=re.IGNORECASE)
-        if m:
-            phrase = m.group(1)
-            words = phrase.split()
-            if words and words[0].casefold() not in _POST_PROVIDER_STOPWORDS:
-                add(phrase)
-                break
-
-    # 3. Explicit user subject for commands/description requests. Prefer the
-    # first concrete phrase after the command; this is only a fallback when the
-    # Provider answer did not establish one.
-    if not out:
-        cleaned = re.sub(
-            r"^(?:а\s+)?(?:опиши|расскажи|скажи|объясни|покажи|нарисуй|изобрази|создай|сделай|построй|напиши|проверь|найди)\s+(?:мне\s+)?",
-            "", request, flags=re.IGNORECASE,
-        ).strip()
-        cleaned = re.sub(r"^(?:на\s+картинке|в\s+картинке|на\s+изображении)\s+", "", cleaned, flags=re.IGNORECASE)
-        first = re.split(r"\s+(?:чтобы|который|которая|которое|наполовину|примерно|для|на|в|с|со|и|или)\b|[,.!?]", cleaned, maxsplit=1, flags=re.IGNORECASE)[0].strip()
-        words = first.split()
-        if len(words) >= 2 and re.fullmatch(r"[а-яё-]+(?:ый|ий|ой|ая|яя|ое|ее|ые|ие)", words[0], flags=re.IGNORECASE):
-            add(" ".join(words[:2]))
-        elif words:
-            add(words[0])
-
-    return out[:6]
-
-
-def _post_provider_extract_request_concepts(text: str) -> list[str]:
-    value = re.sub(r"\s+", " ", str(text or "").strip())
-    if not value:
-        return []
-    candidates: list[str] = []
-    patterns = (
-        r"\b(?:чем\s+отличается|чем\s+отличаются|разница\s+между)\s+(.+?)\s+от\s+(.+?)(?:[?.!]|$)",
-        r"\b(?:между)\s+(.+?)\s+и\s+(.+?)(?:[?.!]|$)",
-        r"\b(?:сравни|сопоставь)\s+(.+?)(?:[?.!]|$)",
-        r"\b(?:про|об|о)\s+(.+?)(?:[?.!]|$)",
-        r"\b(?:от)\s+(.+?)(?:[?.!]|$)",
-    )
-    for pattern in patterns:
-        for match in re.finditer(pattern, value, flags=re.IGNORECASE):
-            candidates.extend(_post_provider_split_concepts(match.group(1)))
-            if match.lastindex and match.lastindex >= 2:
-                candidates.extend(_post_provider_split_concepts(match.group(2)))
-    # Explicit Latin/proper names, including single-word names.
-    for token in re.findall(r"\b[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{2,}\b", value):
-        if token.casefold() not in _POST_PROVIDER_STOPWORDS and token.casefold() not in {x.casefold() for x in candidates}:
-            candidates.append(token)
-    # Noun-like lower-case concepts in two common patterns.
-    for match in re.finditer(r"\b([а-яё-]{3,})\s+от\s+([а-яё-]{3,})\b", value, flags=re.IGNORECASE):
-        for token in match.groups():
-            norm = _post_provider_normalize_concept(token)
-            if _post_provider_is_concept(norm) and norm.casefold() not in {x.casefold() for x in candidates}:
-                candidates.append(norm)
-    return candidates[:8]
-
-
-def _post_provider_extract_answer_concepts(answer: str) -> list[str]:
-    value = re.sub(r"\s+", " ", str(answer or "").strip())
-    if not value:
-        return []
-    candidates: list[str] = []
-    # Provider answers frequently establish the subject in "X — ...", "X: ...",
-    # or "X имеет/является/это ..." form. Prefer these over surface command words.
-    patterns = (
-        r"(?:^|[.!?]\s+)([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{1,}(?:\s+[A-Za-zА-Яа-яЁё-]{1,}){0,2})\s+[—-]\s",
-        r"(?:^|[.!?]\s+)([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{1,}(?:\s+[A-Za-zА-Яа-яЁё-]{1,}){0,2})\s*:\s",
-        r"\b([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{1,}(?:\s+[A-Za-zА-Яа-яЁё-]{1,}){0,2})\s+(?:имеет|является|это|—)\b",
-    )
-    for pattern in patterns:
-        for match in re.finditer(pattern, value):
-            parts = _post_provider_split_concepts(match.group(1))
-            candidates.extend(parts)
-    # Repeated standalone proper/Latin names.
-    for token in re.findall(r"\b[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{2,}\b", value):
-        if token.casefold() not in _POST_PROVIDER_STOPWORDS and token.casefold() not in {x.casefold() for x in candidates}:
-            candidates.append(token)
-    # High-signal lowercase subjects appearing as the subject of a sentence.
-    for match in re.finditer(r"(?:^|[.!?]\s+)([а-яё][а-яё-]{2,}(?:\s+[а-яё][а-яё-]{2,}){0,2})\s+(?:имеет|является|это|—)\b", value, flags=re.IGNORECASE):
-        candidates.extend(_post_provider_split_concepts(match.group(1)))
-    clean = []
-    for candidate in candidates:
-        norm = _post_provider_normalize_concept(candidate)
-        if not _post_provider_is_concept(norm):
-            continue
-        if norm.casefold() not in {x.casefold() for x in clean}:
-            clean.append(norm)
-    return clean[:8]
-
-
-def _post_provider_full_names(*texts):
-    names = []
-    seen = set()
-    for text in texts:
-        value = str(text or "")
-        candidates = list(_POST_PROVIDER_NAME_RE.findall(value)) + list(_POST_PROVIDER_LATIN_NAME_RE.findall(value))
-        # Also collect single capitalized names, not only 2+ word names.
-        candidates += re.findall(r"\b[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{2,}\b", value)
-        for candidate in candidates:
-            normalized = _post_provider_normalize_concept(candidate)
-            if not normalized:
-                continue
-            if normalized.casefold() in _POST_PROVIDER_IGNORED_NAMES:
-                continue
-            key = normalized.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            names.append(normalized)
-    return names
-
+# Pair memory is persisted directly from USER↔APRIL turns. Entity extraction is removed.
 
 def _derive_post_provider_memory_semantics(
     current_request,
@@ -486,93 +180,32 @@ def _derive_post_provider_memory_semantics(
     relation="NEW",
     render_types=None,
 ):
-    """Build canonical dialogue semantics ONLY after Provider has completed the turn.
-
-    Provider output is the semantic authority for the completed turn. The pre-provider
-    interpretation is retained as audit evidence and never supplies topic/entity identity
-    when the completed result contains enough subject evidence.
-    """
-    provisional = provisional if isinstance(provisional, dict) else {}
-    previous_anchor = previous_anchor if isinstance(previous_anchor, dict) else {}
-    relation = str(relation or "NEW").strip().upper()
-    render_types = [str(x or "").strip().lower() for x in (render_types or []) if str(x or "").strip()]
-    request_text = str(current_request or "").strip()[:1200]
-    answer_text = str(answer or "").strip()[:4000]
-
-    prior_entities = []
-    raw_prior = previous_anchor.get("entities") or previous_anchor.get("active_entities") or []
-    if isinstance(raw_prior, str):
-        prior_entities = _post_provider_split_concepts(raw_prior)
-    elif isinstance(raw_prior, (list, tuple)):
-        prior_entities = [
-            _post_provider_normalize_concept(x) for x in raw_prior
-            if _post_provider_normalize_concept(x)
-        ]
-    prior_active = _post_provider_normalize_concept(previous_anchor.get("active_entity") or "")
-    if prior_active and not prior_entities:
-        prior_entities = _post_provider_split_concepts(prior_active) or [prior_active]
-
-    answer_subjects = _post_provider_semantic_subjects(request_text, answer_text)
-    request_subjects = _post_provider_semantic_subjects(request_text, "")
-    semantic_subjects = answer_subjects or request_subjects
-    answer_concepts = _post_provider_extract_answer_concepts(answer_text)
-    request_concepts = _post_provider_extract_request_concepts(request_text)
-    names = _post_provider_full_names(request_text, answer_text)
-
-    if relation == "NEW":
-        # Completed Provider answer + explicit current request establish the new
-        # canonical subject. Legacy trigger/word extraction is only a fallback.
-        entities = answer_subjects[:6] or request_subjects[:6] or answer_concepts[:6] or request_concepts[:6] or names[:6]
-        topic = " и ".join(entities[:4]) if len(entities) >= 2 else (entities[0] if entities else "")
-        if not topic:
-            topic = _post_provider_clean_request(request_text) or str(
-                provisional.get("topic") or provisional.get("canonical_topic") or ""
-            ).strip()[:220]
-    elif relation == "RECALL":
-        entities = request_subjects[:6] or answer_subjects[:6] or prior_entities[:6] or answer_concepts[:6] or request_concepts[:6] or names[:6]
-        topic = " и ".join(entities[:4]) if len(entities) >= 2 else (entities[0] if entities else "")
-        topic = topic or str(previous_anchor.get("topic") or provisional.get("topic") or "").strip()[:220]
-    else:
-        # CONTINUE is branch-preserving. The previous completed canonical turn
-        # owns the subject; the current short request contributes an action only.
-        entities = request_subjects[:6] or prior_entities[:6] or answer_subjects[:6] or answer_concepts[:6] or request_concepts[:6] or names[:6]
-        topic = str(previous_anchor.get("topic") or "").strip()[:220]
-        if request_subjects:
-            topic = " и ".join(request_subjects[:4]) if len(request_subjects) >= 2 else request_subjects[0]
-        if not topic:
-            topic = " и ".join(entities[:4]) if len(entities) >= 2 else (entities[0] if entities else "")
-        if not topic:
-            topic = str(provisional.get("topic") or provisional.get("canonical_topic") or "").strip()[:220]
-
-    subtopic = ""
-    haystack = f"{request_text} {answer_text}".lower()
-    for label, markers in _POST_PROVIDER_SUBTOPICS:
-        if label in render_types or any(marker in haystack for marker in markers):
-            subtopic = label
-            break
-
-    active_entity = (
-        " и ".join(entities[:4]) if len(entities) >= 2
-        else (entities[0] if entities else prior_active or "")
-    )
+    """Persist one canonical USER↔APRIL pair; no entity engine participates."""
+    relation=str(relation or "NEW").strip().upper()
+    request_text=str(current_request or "").strip()[:1200]
+    answer_text=str(answer or "").strip()[:4000]
+    rtypes=[str(x or "").strip().lower() for x in (render_types or []) if str(x or "").strip()]
+    subtopic=""
+    for label in ("image","gallery","formula","diagram","graph","table","code","link","audio","video","file"):
+        if label in rtypes:
+            subtopic=label; break
     return {
-        "version": "post_provider_dialogue_memory_v2",
-        "source_of_truth": "USER_REQUEST_PLUS_PROVIDER_RESPONSE",
-        "memory_source": "POST_PROVIDER_OPENAI_RESPONSE",
-        "topic": topic or _post_provider_clean_request(request_text),
-        "subtopic": subtopic,
-        "entities": entities[:6],
-        "active_entity": active_entity[:220],
-        "subject_source": "POST_PROVIDER_CANONICAL_TURN" if (entities or topic) else "NONE",
-        "subject_confidence": 1.0 if semantic_subjects else (0.8 if answer_concepts or request_concepts else 0.0),
-        "reference_policy": "CURRENT_CANONICAL_TURN_ONLY",
-        "relation": relation,
-        "user_request": request_text,
-        "april_answer": answer_text,
-        "created_at": time.time(),
-        "expires_after_hours": DIALOGUE_WINDOW_HOURS,
+        "version":"post_provider_pair_memory_v3",
+        "source_of_truth":"USER_REQUEST_PLUS_PROVIDER_RESPONSE",
+        "memory_source":"POST_PROVIDER_OPENAI_RESPONSE",
+        "topic":request_text[:220],
+        "subtopic":subtopic,
+        "entities":[],
+        "active_entity":"",
+        "subject_source":"USER_APRIL_PAIR",
+        "subject_confidence":1.0 if request_text else 0.0,
+        "reference_policy":"PAIR_CONTEXT_ONLY",
+        "relation":relation,
+        "user_request":request_text,
+        "april_answer":answer_text,
+        "created_at":time.time(),
+        "expires_after_hours":DIALOGUE_WINDOW_HOURS,
     }
-
 
 def compact_dialog_message(role, content):
     now = time.time()
@@ -3045,8 +2678,8 @@ def _append_recall_index(state_obj, pair):
         "relation": str(pair.get("dialogue_relation") or pair.get("relation") or "NEW").upper(),
         "topic": safe_trim_text(pair.get("topic") or pair.get("sequence_topic") or "", 220),
         "subtopic": safe_trim_text(pair.get("subtopic") or "", 180),
-        "entities": [safe_trim_text(x, 120) for x in safe_list(pair.get("entities"))[:8] if str(x).strip()],
-        "active_entity": safe_trim_text(pair.get("active_entity") or "", 160),
+        "entities": [],
+        "active_entity": "",
         "user_request": safe_trim_text(pair.get("user_request") or pair.get("user_meaning") or "", 360),
         "answer_summary": safe_trim_text(pair.get("answer_summary") or pair.get("april_meaning") or pair.get("april_answer") or "", 500),
         "source_of_truth": "USER_REQUEST_PLUS_PROVIDER_RESPONSE",
@@ -7011,87 +6644,44 @@ def build_dialogue_memory_bridge(
     target_sequence_id="",
     target_task_id="",
 ):
-    uid = _clean_uid(user_id)
-    state_obj = get_state(uid)
-    auth_ok = bool((state_obj.get("memory_scope") or {}).get("authenticated"))
-    if not auth_ok:
-        return {
-            "version": "dialogue_pairs_v1",
-            "authenticated": False,
-            "relation": "NEW",
-            "window_hours": DIALOGUE_WINDOW_HOURS,
-            "seed_hours": DIALOGUE_SEED_HOURS,
-            "selected_records": [],
-            "dialogue_pairs": [],
-        }
+    """Return only the authenticated 12h USER↔APRIL pair window.
 
-    rows = _clean_sequence_pairs_from_runtime(state_obj)
-    seq = state_obj.get("active_dialogue_sequence") if isinstance(state_obj.get("active_dialogue_sequence"), dict) else {}
-    sequence_id = _clean_text_bridge(target_sequence_id or seq.get("sequence_id"), 100)
-    mode = str(relation or "AUTO").strip().upper()
-    if mode == "AUTO":
-        mode = str((state_obj.get("dialogue_resolution") or {}).get("relation") or "CONTINUE" if rows else "NEW").upper()
-    if mode not in {"NEW", "CONTINUE", "RECALL"}:
-        mode = "NEW"
-
-    selected = rows[-max(1, int(limit or CLEAN_DIALOGUE_WINDOW_PAIRS)):]
-    matches: list[dict[str, Any]] = []
-    if mode == "RECALL":
-        try:
-            search = search_dialogue_memory(uid, query, limit=max(1, int(limit or 8)))
-            matches = [
-                {
-                    "score": float(item.get("score") or 0.0),
-                    "turn_index": int(item.get("turn_index") or 0),
-                    "created_at": float(item.get("created_at") or 0.0),
-                    "user": str(item.get("user") or ""),
-                    "april": str(item.get("april") or ""),
-                }
-                for item in (search.get("matches") or []) if isinstance(item, dict)
-            ]
-        except Exception:
-            matches = []
-        if matches:
-            selected = [
-                {
-                    "user_text": m["user"],
-                    "april_text": m["april"],
-                    "created_at": m["created_at"],
-                    "turn_index": m["turn_index"],
-                }
-                for m in matches
-            ]
-
-    def compact(row: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "turn": int(row.get("turn_index") or 0),
-            "created_at": float(row.get("created_at") or 0.0),
-            "user": str(row.get("user_text") or ""),
-            "april": str(row.get("april_text") or ""),
-        }
-
-    records = [compact(x) for x in selected]
+    Interpretation decides NEW/CONTINUE/RECALL. This bridge never performs a
+    second fuzzy selector and never builds entity/topic indexes.
+    """
+    uid=_clean_uid(user_id)
+    state_obj=get_state(uid)
+    scope=state_obj.get("memory_scope") if isinstance(state_obj,dict) and isinstance(state_obj.get("memory_scope"),dict) else {}
+    authenticated=bool(scope.get("authenticated") or scope.get("user_id"))
+    if not authenticated:
+        return {"version":"dialogue_pairs_v2","authenticated":False,"relation":"NEW","window_hours":DIALOGUE_WINDOW_HOURS,"selected_records":[],"dialogue_pairs":[],"memory_search":[]}
+    rows=_clean_sequence_pairs_from_runtime(state_obj)
+    rows=rows[-max(1,int(limit or CLEAN_DIALOGUE_WINDOW_PAIRS)):]
+    def compact(row):
+        return {"turn":int(row.get("turn_index") or 0),"created_at":float(row.get("created_at") or 0.0),"user":str(row.get("user_text") or ""),"april":str(row.get("april_text") or "")}
+    records=[compact(x) for x in rows]
+    seq=state_obj.get("active_dialogue_sequence") if isinstance(state_obj.get("active_dialogue_sequence"),dict) else {}
+    mode=str(relation or "AUTO").upper()
+    if mode=="AUTO": mode=str((state_obj.get("dialogue_resolution") or {}).get("relation") or ("CONTINUE" if records else "NEW")).upper()
+    if mode not in {"NEW","CONTINUE","RECALL"}: mode="NEW"
     return {
-        "version": "dialogue_pairs_v1",
-        "authenticated": True,
-        "relation": mode,
-        "window_hours": DIALOGUE_WINDOW_HOURS,
-        "seed_hours": DIALOGUE_SEED_HOURS,
-        "sequence_id": sequence_id,
-        "selected_sequence_id": sequence_id,
-        "current_turn_count": len(rows),
-        "active_sequence_turns": records,
-        "relevant_window_turns": records,
-        "dialogue_pairs": records,
-        "selected_records": records,
-        "memory_search": matches if mode == "RECALL" else [],
-        "history_source": "USER_APRIL_PAIRS",
-        "topic_index": [],
-        "entity_index": [],
-        "task_index": [],
-        "authenticated_only": True,
+        "version":"dialogue_pairs_v2",
+        "authenticated":True,
+        "relation":mode,
+        "window_hours":DIALOGUE_WINDOW_HOURS,
+        "seed_hours":DIALOGUE_SEED_HOURS,
+        "sequence_id":_clean_text_bridge(target_sequence_id or seq.get("sequence_id"),100),
+        "selected_sequence_id":_clean_text_bridge(target_sequence_id or seq.get("sequence_id"),100),
+        "current_turn_count":len(records),
+        "active_sequence_turns":records,
+        "relevant_window_turns":records,
+        "dialogue_pairs":records,
+        "selected_records":records,
+        "memory_search":[],
+        "history_source":"USER_APRIL_PAIRS",
+        "authenticated_only":True,
+        "pair_interpretation_authority":"INTERPRETATION",
     }
-
 
 def _clean_text_bridge(value: Any, limit: int = 120) -> str:
     value = str(value or "").strip()
@@ -7159,3 +6749,68 @@ def build_quantum_memory_signal(user_id, query="", limit=8):
         "evidence_only": True,
         "memory_source": "USER_APRIL_PAIRS",
     }
+
+
+# ============================================================================
+# CANONICAL 12H PAIR MEMORY / ENTITY ROUTING REMOVAL
+# ============================================================================
+
+def _purge_entity_routing_fields(obj):
+    if not isinstance(obj, dict): return obj
+    for key in list(obj.keys()):
+        low=str(key).lower()
+        if low in {"entity","entities","active_entity","resolved_entity","entity_definition","entity_context","entity_index","semantic_entity_definition"}:
+            if low == "entities": obj[key]=[]
+            else: obj[key]=""
+            continue
+        value=obj.get(key)
+        if isinstance(value,dict): _purge_entity_routing_fields(value)
+        elif isinstance(value,list):
+            for item in value:
+                if isinstance(item,dict): _purge_entity_routing_fields(item)
+    return obj
+
+_STATE_GET_STATE_ORIGINAL = get_state
+
+def get_state(user_id):
+    obj=_STATE_GET_STATE_ORIGINAL(user_id)
+    uid=str(user_id or "")
+    scope=obj.get("memory_scope") if isinstance(obj,dict) and isinstance(obj.get("memory_scope"),dict) else {}
+    authenticated=bool(scope.get("authenticated") or scope.get("user_id"))
+    if authenticated and uid:
+        timeline=obj.get("memory_timeline") if isinstance(obj.get("memory_timeline"),dict) else {}
+        pair_count=sum(len(day.get("dialog_pairs") or []) for day in timeline.values() if isinstance(day,dict) and isinstance(day.get("dialog_pairs"),list))
+        if pair_count == 0:
+            try:
+                rows=load_dialogue_pairs(uid, limit=0)
+            except Exception:
+                rows=[]
+            if rows:
+                try:
+                    clean=[p for p in (_clean_pair_from_row(x) for x in rows) if p]
+                    obj=_clean_runtime_memory_scope(obj, uid, clean)
+                except Exception:
+                    pass
+    _purge_entity_routing_fields(obj)
+    return obj
+
+# Replace public pair bridge with a pure 12h pair window: no fuzzy entity/topic index.
+_BUILD_DIALOGUE_MEMORY_BRIDGE_ORIGINAL = build_dialogue_memory_bridge
+
+def build_dialogue_memory_bridge(*args, **kwargs):
+    result=_BUILD_DIALOGUE_MEMORY_BRIDGE_ORIGINAL(*args, **kwargs)
+    if not isinstance(result,dict): return result
+    result.pop("entity_index",None)
+    result.pop("topic_index",None)
+    result.pop("task_index",None)
+    result["history_source"]="USER_APRIL_PAIRS"
+    result["window_hours"]=DIALOGUE_WINDOW_HOURS
+    result["authenticated_only"]=True
+    # RECALL/CONTINUE are interpreted from the supplied full pair window, not by a
+    # second fuzzy memory selector.
+    rows=result.get("dialogue_pairs") or result.get("active_sequence_turns") or result.get("relevant_window_turns") or []
+    result["dialogue_pairs"]=rows[-ACTIVE_DIALOGUE_WINDOW_PAIRS:]
+    result["selected_records"]=result["dialogue_pairs"]
+    result["memory_search"]=[]
+    result["pair_interpretation_authority"]="INTERPRETATION"
+    return result
