@@ -355,6 +355,8 @@ class VRUContextInterpreter:
             re.search(r"\bуточн", low)
             or re.search(r"\bпришлите\b", low)
             or re.search(r"\bчто именно\b", low)
+            or re.search(r"\bне\s+совсем\s+понял", low)
+            or re.search(r"\bне\s+понял", low)
             or re.search(r"\bнужно прислать\b", low)
         )
 
@@ -407,8 +409,19 @@ class VRUContextInterpreter:
         explicit_new = self._has_regex(current, _EXPLICIT_NEW)
         explicit_recall = self._has_regex(current, _EXPLICIT_RECALL)
         repair = self._has_regex(current, _REPAIR)
-        reference = any(x in current.lower() for x in _REFERENCE)
-        continuation = any(x in current.lower() for x in _CONTINUATION)
+        low_current = current.lower()
+        # Elliptical questions like "Какое ты неназвал" refer to the immediately
+        # preceding result even without an explicit pronoun. Keep that dependency
+        # inside the active dialogue sequence.
+        omission_reference = bool(
+            re.search(
+                r"\b(?:какое|какая|какие|который|которая|которые|что|кто)\b.{0,80}\bне\s*(?:назвал|назвала|назвали|упомянул|упомянула|упомянули)\b",
+                low_current,
+                re.I,
+            )
+        )
+        reference = any(x in low_current for x in _REFERENCE) or omission_reference
+        continuation = any(x in low_current for x in _CONTINUATION)
         format_hint = self._format_hint(current)
         format_only = self._is_format_only(current)
 
@@ -446,9 +459,21 @@ class VRUContextInterpreter:
                 and ("\n" in latest_answer or latest.answer_score >= 0.10)
             )
         )
+        # A clarification reply is not a semantic result. For reference/omission
+        # questions, anchor to the latest substantive USER↔APRIL pair instead of
+        # the clarification itself. This prevents "какое не назвал" from inheriting
+        # the assistant's own request-for-clarification text.
+        latest_substantive = next(
+            (x for x in reversed(evidence)
+             if "CURRENT_SCOPE_CONFLICT" not in x.reasons
+             and not self._is_clarification_answer(self._pair_text(window[x.index])[1])),
+            None,
+        )
         scope_indices = self._scope_pair_indices(current, window, ranked)
         if direct_latest_result and latest.score >= 0.0:
             anchor = latest
+        elif omission_reference and latest_substantive is not None:
+            anchor = latest_substantive
         elif scope_indices:
             anchor = next((x for x in reversed(evidence) if x.index == scope_indices[-1]), best)
         elif reference and latest.score >= 0.08 and "CURRENT_SCOPE_CONFLICT" not in latest.reasons:
@@ -498,6 +523,10 @@ class VRUContextInterpreter:
                     # previous wrong/alternative answer in the 12h window from
                     # leaking into the semantic packet.
                     selected = [latest.index]
+                elif omission_reference and latest_substantive is not None:
+                    # "Какое ты неназвал" asks for the missing item from the
+                    # immediately established result set, not from our clarification.
+                    selected = [latest_substantive.index]
                 else:
                     selected = sorted(dict.fromkeys(x.index for x in connected[:6]))
                     # When the current turn explicitly narrows the scope (e.g.
@@ -517,11 +546,16 @@ class VRUContextInterpreter:
                 # evidence to improve it. This keeps compatibility with production.
                 relation = "CONTINUE"
                 reason = "PRESERVE_VALID_PAIR_DECISION"
-                selected = sorted(dict.fromkeys(
-                    [int(seed.get("selected_index", -1))]
-                    + [int(x) for x in (seed.get("context_pairs") or []) if isinstance(x, dict)][:0]
-                ))
-                anchor_index = int(seed.get("selected_index", -1))
+                # `context_pairs` contains pair dictionaries, not numeric indices.
+                # The previous expression attempted `int(dict)` and crashed the
+                # entire request. The selected_index is the only index needed here;
+                # the actual pair objects are rebuilt below from `window`.
+                try:
+                    seed_index = int(seed.get("selected_index", -1))
+                except (TypeError, ValueError):
+                    seed_index = -1
+                selected = [seed_index] if 0 <= seed_index < len(window) else []
+                anchor_index = seed_index
             else:
                 relation = "NEW"
                 selected = []
