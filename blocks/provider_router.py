@@ -67,9 +67,12 @@ PROVIDER_MACHINE_SYSTEM_PROMPT = """
 April's internal response provider. Return exactly one MachineResponse JSON object.
 
 The Quantum Processor owns interpretation, dialogue relation, resolved task, representation,
-requested outputs and reference resolution. Treat those fields as authoritative.
-Answer the resolved current request only. For continuation/reference turns use only the
-supplied live dialogue context. For independent turns do not import historical context.
+requested outputs, reference resolution and the selected USER↔APRIL pair context. Treat those
+fields as authoritative. Answer the current request only. For CONTINUE, first bind pronouns,
+ellipsis and omitted subjects to the supplied DIALOGUE_ANCHOR and ACTIVE_DIALOGUE_TRAJECTORY;
+never invent a different person, topic or prior conversation. For NEW_TOPIC_WITH_CONTEXT or
+HISTORY_LOOKUP, use supplied pairs only as background and execute the current request as NEW.
+Never mention or expose internal routing/state fields.
 
 DIALOGUE_DEVELOPMENT is the authoritative semantic trajectory: preserve the active topic,
 goal, relevant result, open work and user-requested future actions. Help a hesitant user with
@@ -1530,6 +1533,8 @@ def _minimal_plan_context(plan: dict[str, Any]) -> dict[str, Any]:
     # Eight compact pairs preserve the conversation thread while keeping the
     # Provider input below the existing hard budget.
     trajectory = by_key.get("ACTIVE_DIALOGUE_TRAJECTORY")
+    if isinstance(trajectory, dict):
+        trajectory = trajectory.get("pairs") or trajectory.get("trajectory") or []
     if isinstance(trajectory, list):
         compact_trajectory = []
         for pair in trajectory[-8:]:
@@ -1913,6 +1918,7 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
                     "previous_user_turn": dialogue_contract.get("previous_user_turn", ""),
                     "previous_april_turn": dialogue_contract.get("previous_april_turn", ""),
                     "selected_memory_operand": selected_operand,
+                    "resolved_referent": dialogue_contract.get("resolved_reference_entity") or dialogue_contract.get("canonical_topic") or "",
                     "sequence_id": dialogue_contract.get("sequence_id", ""),
                 },
             })
