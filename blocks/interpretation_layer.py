@@ -111,9 +111,9 @@ SEMANTIC_TURN_PROTOTYPES = {
     "greeting": "пользователь приветствует ассистента начинает непринужденный разговор; the user is greeting the assistant",
     "question": "пользователь задаёт вопрос просит ответ или разъяснение сколько равен вычисли посчитай значение; the user asks a question requiring an answer or calculation",
     "request": "пользователь просит выполнить задачу сделать действие создать результат; the user asks the assistant to perform a task",
-    "continuation": "пользователь продолжает текущую мысль, задаёт следующий уточняющий вопрос, говорит теперь, а теперь, дальше, на этом, по нему, по ней, просит развить, объяснить дальше, проверить вывод, добавить деталь, продолжить уже начатый результат; the user continues the current reasoning thread with a follow-up, clarification, extension, or refinement",
-    "reformulation": "пользователь переформулирует предыдущий запрос, просит показать это иначе, уточняет формулировку, просит переделать или дополнить уже полученный результат; the user reformulates or refines an existing result",
-    "correction": "пользователь исправляет предыдущий результат, добавляет условие, меняет параметр или уточняет деталь уже обсуждаемой задачи; the user corrects, extends, or changes a detail of the preceding task",
+    "continuation": "пользователь продолжает текущую мысль и предыдущий ответ, задаёт следующий уточняющий вопрос, просит подробнее, детальнее, развёрнуто, продолжи, дальше, ещё, расширь предыдущий ответ, проверь вывод, добавь деталь, развивай уже начатый результат; the user continues the current reasoning thread with a follow-up, clarification, extension, or refinement",
+    "reformulation": "пользователь переформулирует предыдущий запрос, просит показать это иначе, подробнее или другим способом, уточняет формулировку, просит переделать, дополнить или расширить уже полученный результат; the user reformulates or refines an existing result",
+    "correction": "пользователь исправляет предыдущий результат, говорит что ответ неверен, просит исправить, переделать или изменить условие, параметр или деталь уже обсуждаемой задачи; the user corrects, extends, or changes a detail of the preceding task",
     "reference": "пользователь явно ссылается на уже показанное, созданное или сказанное, использует местоимение или указание на объект, этот, эту, это, него, неё, нему, просит изменить добавить отметить в нём или в ней; the user explicitly refers to a previously shown or discussed object",
     "artifact_reference": "пользователь спрашивает о содержимом, свойствах или результате уже созданного или показанного артефакта, что было нарисовано, какие элементы получились, что находится в предыдущем результате, просит перечислить или объяснить уже созданный объект; the user asks about the contents, properties, or result of an artifact that was already created or shown",
     "memory_query": "пользователь просит вспомнить что он ранее спрашивал, какой вопрос задавал, о чем говорили, какой был прошлый вопрос или тема; the user asks to recall what they previously asked or discussed",
@@ -1659,6 +1659,245 @@ class QuantumInterpretationEngine:
             "confidence": confidence,
         }
 
+    def _light_history_context_check(
+        self,
+        current: str,
+        pairs: list[dict[str, str]],
+        *,
+        memory_query_score: float = 0.0,
+        dialogue_scores: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
+        """Second-pass history check before Provider handoff.
+
+        This pass does not classify entities, topics, branches or tasks. It asks one
+        narrow question: does the current request semantically depend on the
+        authenticated USER↔APRIL pair history in the current 12-hour window?
+
+        It is intentionally lightweight: prototype similarity + pair similarity +
+        small lexical affinity. It never replaces the canonical NEW/CONTINUE/RECALL
+        selector; it only verifies a NEW result and prepares a compact pair context.
+        """
+        current = self.normalize(current)
+        pairs = [p for p in (pairs or []) if isinstance(p, dict)]
+        dialogue_scores = dialogue_scores if isinstance(dialogue_scores, dict) else {}
+
+        def content_tokens(value: str) -> list[str]:
+            try:
+                raw = QuantumContextUnderstandingEngine._content_tokens(value)
+            except Exception:
+                raw = re.findall(
+                    r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+",
+                    str(value or "").lower(),
+                )
+            return [x for x in raw if len(x) >= 3]
+
+        def token_affinity(left: str, right: str) -> float:
+            a = set(content_tokens(left))
+            b = set(content_tokens(right))
+            if not a or not b:
+                return 0.0
+            exact = len(a & b) / max(1, len(a | b))
+            # Very small morphology tolerance for Russian/Ukrainian inflections;
+            # it is pair-text similarity only, never entity detection.
+            morph_hits = 0.0
+            for x in a:
+                for y in b:
+                    if x == y:
+                        morph_hits += 1.0
+                        break
+                    common = 0
+                    for ca, cb in zip(x, y):
+                        if ca != cb:
+                            break
+                        common += 1
+                    if common >= 4 and common / max(len(x), len(y)) >= 0.55:
+                        morph_hits += 0.5
+                        break
+            morph = min(1.0, morph_hits / max(1, min(len(a), len(b))))
+            return max(exact, 0.72 * exact + 0.28 * morph)
+
+        recall_prototypes = (
+            "что мы обсуждали раньше в этом диалоге",
+            "что было после предыдущего вопроса в нашем разговоре",
+            "что мы обсуждали после этого вопроса",
+            "поищи в истории нашего разговора",
+            "что я спрашивал раньше",
+            "что было до этого в нашем диалоге",
+            "продолжи с учетом предыдущих сообщений",
+        )
+        continuation_prototypes = (
+            "продолжи предыдущую мысль",
+            "развивай предыдущий ответ",
+            "уточни то что мы только что обсуждали",
+            "переделай предыдущий результат",
+        )
+
+        recall_proto_score = max(
+            (
+                float(self.similarity(current, proto).get("score", 0.0) or 0.0)
+                for proto in recall_prototypes
+            ),
+            default=0.0,
+        )
+        continuation_proto_score = max(
+            (
+                float(self.similarity(current, proto).get("score", 0.0) or 0.0)
+                for proto in continuation_prototypes
+            ),
+            default=0.0,
+        )
+
+        scored: list[dict[str, Any]] = []
+        for index, pair in enumerate(pairs[-15:]):
+            user = self.normalize(
+                pair.get("user")
+                or pair.get("user_text")
+                or pair.get("user_request")
+            )
+            april = self.normalize(
+                pair.get("april")
+                or pair.get("april_text")
+                or pair.get("april_answer")
+                or pair.get("assistant")
+                or pair.get("answer")
+            )
+            if not user and not april:
+                continue
+            combined = f"{user} {april}".strip()
+            pair_semantic = float(
+                self.similarity(current, combined).get("score", 0.0) or 0.0
+            )
+            user_semantic = float(
+                self.similarity(current, user).get("score", 0.0) or 0.0
+            ) if user else 0.0
+            lexical = token_affinity(current, combined)
+            user_lexical = token_affinity(current, user)
+            recency = 1.0 / (1.0 + 0.12 * (len(pairs[-15:]) - 1 - index))
+            # History relation is strongest when the request refers to the pair text,
+            # not merely when it shares generic question words.
+            score = (
+                0.42 * pair_semantic
+                + 0.26 * user_semantic
+                + 0.20 * lexical
+                + 0.08 * user_lexical
+                + 0.04 * recency
+            )
+            scored.append({
+                "index": index,
+                "score": round(float(min(1.0, score)), 6),
+                "pair_semantic": round(pair_semantic, 6),
+                "user_semantic": round(user_semantic, 6),
+                "lexical": round(lexical, 6),
+                "user_lexical": round(user_lexical, 6),
+                "recency": round(recency, 6),
+                "pair": dict(pair),
+            })
+
+        scored.sort(key=lambda x: (float(x["score"]), int(x["index"])), reverse=True)
+        best = scored[0] if scored else {}
+        best_pair_score = float(best.get("score", 0.0) or 0.0)
+        best_index = int(best.get("index", -1) or -1)
+
+        # "Memory query" is a discourse property of the whole request. Pair
+        # similarity only tells us which historical pair should serve as its anchor.
+        # Keep the measured memory-query classifier separate from broad prototype
+        # resemblance. Generic "что такое X" questions often resemble recall
+        # sentences because of shared interrogative grammar.
+        memory_signal = max(
+            float(memory_query_score or 0.0),
+            float(dialogue_scores.get("memory_query", 0.0) or 0.0),
+        )
+        reference_signal = max(
+            float(dialogue_scores.get("reference", 0.0) or 0.0),
+            float(dialogue_scores.get("artifact_reference", 0.0) or 0.0),
+        )
+        followup_signal = max(
+            float(dialogue_scores.get("continuation", 0.0) or 0.0),
+            float(dialogue_scores.get("reformulation", 0.0) or 0.0),
+            float(dialogue_scores.get("correction", 0.0) or 0.0),
+            continuation_proto_score,
+        )
+
+        operation_scores = self._operation_family_scores(current)
+        best_operation = (
+            max(operation_scores.items(), key=lambda item: float(item[1] or 0.0))[0]
+            if operation_scores else "answer"
+        )
+        generic_self_contained = bool(
+            content_tokens(current)
+            and best_operation in {"answer", "explain", "calculate", "list", "retrieve", "compare"}
+            and memory_signal < 0.20
+            and recall_proto_score < 0.44
+            and followup_signal < 0.18
+            and reference_signal < 0.16
+        )
+
+        # Generic question forms ("что такое X") produce background similarity to
+        # memory prototypes. Require a materially stronger history signal so a new
+        # self-contained question remains NEW.
+        history_query = bool(
+            pairs
+            and (
+                memory_signal >= 0.20
+                or (recall_proto_score >= 0.44 and best_pair_score >= 0.14)
+            )
+        )
+        historical_dependency = bool(
+            pairs
+            and not generic_self_contained
+            and (
+                history_query
+                or (
+                    followup_signal >= 0.18
+                    and best_pair_score >= 0.18
+                )
+                or (
+                    reference_signal >= 0.16
+                    and best_pair_score >= 0.16
+                )
+            )
+        )
+
+        # Keep a small contiguous context. CONTINUE needs immediate trajectory;
+        # RECALL needs the anchor and the turns around it. This is what makes the
+        # pre-Provider check useful under the 900-token input budget.
+        bounded_pairs = pairs[-15:]
+        if historical_dependency and bounded_pairs:
+            anchor = max(0, min(best_index, len(bounded_pairs) - 1))
+            if history_query:
+                start = max(0, anchor - 2)
+                end = min(len(bounded_pairs), anchor + 7)
+                context_pairs = bounded_pairs[start:end]
+            else:
+                context_pairs = bounded_pairs[-3:]
+        else:
+            context_pairs = []
+
+        return {
+            "performed": True,
+            "source": "LIGHT_HISTORY_CONTEXT_CHECK",
+            "window_hours": 12,
+            "pair_count": len(pairs),
+            "memory_query_signal": round(float(memory_signal), 6),
+            "recall_prototype_score": round(float(recall_proto_score), 6),
+            "continuation_signal": round(float(followup_signal), 6),
+            "reference_signal": round(float(reference_signal), 6),
+            "best_pair_index": best_index,
+            "best_pair_score": round(float(best_pair_score), 6),
+            "best_pair": dict(best.get("pair") or {}),
+            "history_query": history_query,
+            "historical_dependency": historical_dependency,
+            "context_pairs": [dict(x) for x in context_pairs],
+            "candidate_pairs": [
+                {
+                    "index": int(x["index"]),
+                    "score": float(x["score"]),
+                    "pair": dict(x["pair"]),
+                }
+                for x in scored[:6]
+            ],
+        }
+
     def _select_three_way_dialogue_relation(
         self,
         current: str,
@@ -1668,39 +1907,54 @@ class QuantumInterpretationEngine:
         previous_assistant: str = "",
         previous_user: str = "",
     ) -> dict:
-        """Canonical NEW / CONTINUE / RECALL decision from 12h USER↔APRIL pairs.
+        """Canonical NEW / CONTINUE / RECALL decision from authenticated 12h pairs.
 
-        No entity extraction, entity graph, topic slot or intent engine owns the
-        decision.  The only memory operand is an authenticated pair from the
-        current 12-hour window.  A self-contained new request stays NEW even when
-        its wording resembles an older request.
+        The decision has two internal steps:
+          1) semantic discourse classification;
+          2) a lightweight verification against the actual USER↔APRIL pair window.
+
+        No entity extraction, topic graph, task branch or legacy intent engine can
+        force continuation. The pair window is the only historical source.
         """
         current = self.normalize(current)
         pairs = [p for p in (recent_pairs or []) if isinstance(p, dict)]
         if not current:
-            return {"relation":"NEW","confidence":1.0,"selected_index":-1,"selected_pair":{},"candidates":[],"source":"PAIR_12H_INTERPRETATION_V2"}
+            return {
+                "relation": "NEW",
+                "confidence": 1.0,
+                "selected_index": -1,
+                "selected_pair": {},
+                "candidates": [],
+                "context_pairs": [],
+                "source": "PAIR_12H_INTERPRETATION_V3",
+            }
 
         def content_tokens(value: str) -> list[str]:
             try:
                 raw = QuantumContextUnderstandingEngine._content_tokens(value)
             except Exception:
-                raw = re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", value.lower())
+                raw = re.findall(
+                    r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+",
+                    str(value or "").lower(),
+                )
             return [x for x in raw if len(x) >= 3]
 
         def token_affinity(left: str, right: str) -> float:
-            a = set(content_tokens(left)); b = set(content_tokens(right))
+            a = set(content_tokens(left))
+            b = set(content_tokens(right))
             if not a or not b:
                 return 0.0
             exact = len(a & b) / max(1, len(a | b))
-            morph_hits = 0
+            morph_hits = 0.0
             for x in a:
                 for y in b:
                     if x == y:
-                        morph_hits += 1
+                        morph_hits += 1.0
                         break
                     common = 0
                     for ca, cb in zip(x, y):
-                        if ca != cb: break
+                        if ca != cb:
+                            break
                         common += 1
                     if common >= 4 and common / max(len(x), len(y)) >= 0.55:
                         morph_hits += 0.5
@@ -1708,108 +1962,232 @@ class QuantumInterpretationEngine:
             morph = min(1.0, morph_hits / max(1, min(len(a), len(b))))
             return max(exact, 0.72 * exact + 0.28 * morph)
 
-        # Semantic request-class scores already belong to the one Interpretation
-        # Layer.  They are used only to recognize a memory operation, never an
-        # entity or topic label.
         scores = self._family_scores(current, "dialogue", SEMANTIC_TURN_PROTOTYPES)
         memory_query = float(scores.get("memory_query", 0.0) or 0.0)
-        prototype_recalls = [
-            "вспомни о чем мы говорили раньше какие темы обсуждали предыдущие диалоги",
+        recall_prototypes = (
+            "вспомни о чем мы говорили раньше какие темы обсуждали",
             "какую тему мы не обсуждали найди в предыдущем разговоре",
             "поищи в контексте предыдущего разговора",
-        ]
-        recall_score = max((float(self.similarity(current, p).get("score",0.0) or 0.0) for p in prototype_recalls), default=0.0)
-        is_recall = bool(memory_query >= 0.24 or recall_score >= 0.34)
+            "что мы обсуждали после предыдущего вопроса",
+        )
+        recall_score = max(
+            (
+                float(self.similarity(current, proto).get("score", 0.0) or 0.0)
+                for proto in recall_prototypes
+            ),
+            default=0.0,
+        )
+        is_recall = bool(memory_query >= 0.20 or recall_score >= 0.44)
 
-        # Current task completeness comes from the current semantic measurement.
-        # This is intentionally not derived from named entities.
         rep = self._family_scores(current, "representation", REPRESENTATION_HYPOTHESES)
         op = self._operation_family_scores(current)
-        obj = self._family_scores(current, "object", OBJECT_HYPOTHESES)
         best_rep = max(rep.items(), key=lambda x: float(x[1] or 0.0))[0] if rep else "text"
         best_rep_score = float(rep.get(best_rep, 0.0) or 0.0)
         best_op = max(op.items(), key=lambda x: float(x[1] or 0.0))[0] if op else "answer"
-        best_obj = max(obj.items(), key=lambda x: float(x[1] or 0.0))[0] if obj else "text"
-        visual_operation = best_op in {"build","create","generate","modify","present","transform","redraw","visualize"}
-        visual_complete = bool(visual_operation and best_rep in {"image","gallery","diagram","graph"} and best_rep_score >= 0.035)
+        visual_operation = best_op in {
+            "build", "create", "generate", "modify", "present",
+            "transform", "redraw", "visualize"
+        }
+        visual_complete = bool(
+            visual_operation
+            and best_rep in {"image", "gallery", "diagram", "graph"}
+            and best_rep_score >= 0.035
+        )
 
-        # A request with its own content is NEW unless it asks to operate on prior
-        # dialogue or clearly refers to the latest pair. Generic question words are
-        # not meaningful content and therefore do not become a topic.
-        current_tokens = content_tokens(current)
-        dialogue_followup = max((float(scores.get(k,0.0) or 0.0) for k in (
-            "continuation","reformulation","correction","reference","artifact_reference",
-            "affirmation","rejection")), default=0.0)
-        explanatory_ops = {"answer","explain","list","retrieve","compare","summarize","calculate"}
-        standalone_question = bool(current_tokens and best_op in explanatory_ops and not dialogue_followup >= 0.12)
+        dialogue_followup = max(
+            (
+                float(scores.get(k, 0.0) or 0.0)
+                for k in (
+                    "continuation", "reformulation", "correction",
+                    "reference", "artifact_reference", "affirmation", "rejection"
+                )
+            ),
+            default=0.0,
+        )
+        explanatory_ops = {
+            "answer", "explain", "list", "retrieve", "compare",
+            "summarize", "calculate",
+        }
+        standalone_question = bool(
+            content_tokens(current)
+            and best_op in explanatory_ops
+            and dialogue_followup < 0.12
+        )
         incomplete = bool(
-            not current_tokens
-            or (len(current_tokens) <= 1 and not standalone_question)
+            not content_tokens(current)
+            or (len(content_tokens(current)) <= 1 and not standalone_question)
             or dialogue_followup >= 0.12
         )
         if visual_complete:
             incomplete = False
 
-        scored=[]
-        for i,pair in enumerate(pairs[-15:]):
-            u=self.normalize(pair.get("user") or pair.get("user_text") or pair.get("user_request"))
-            a=self.normalize(pair.get("april") or pair.get("april_text") or pair.get("april_answer") or pair.get("answer"))
-            if not u and not a: continue
-            combined=" ".join(x for x in (u,a) if x)
-            lexical=token_affinity(current, combined)
-            user_lexical=token_affinity(current, u)
-            semantic=float(self.similarity(current, combined).get("score",0.0) or 0.0) if combined else 0.0
-            recency=i/max(1,len(pairs[-15:])-1)
-            score=0.58*lexical + 0.20*user_lexical + 0.14*semantic + 0.08*recency
-            scored.append({"index":i,"score":max(0.0,min(1.0,score)),"lexical":lexical,"user_lexical":user_lexical,"semantic":semantic,"pair":pair})
-        scored.sort(key=lambda x:(x["score"],x["index"]),reverse=True)
-        latest_index=len(pairs[-15:])-1
-        latest=next((x for x in scored if x["index"]==latest_index),None)
-        best=scored[0] if scored else None
-        latest_score=float(latest["score"] if latest else 0.0)
-        best_score=float(best["score"] if best else 0.0)
-        second_score=float(scored[1]["score"] if len(scored)>1 else 0.0)
-        margin=best_score-second_score
+        scored = []
+        window = pairs[-15:]
+        for i, pair in enumerate(window):
+            u = self.normalize(
+                pair.get("user")
+                or pair.get("user_text")
+                or pair.get("user_request")
+            )
+            a = self.normalize(
+                pair.get("april")
+                or pair.get("april_text")
+                or pair.get("april_answer")
+                or pair.get("assistant")
+                or pair.get("answer")
+            )
+            if not u and not a:
+                continue
+            combined = f"{u} {a}".strip()
+            lexical = token_affinity(current, combined)
+            user_lexical = token_affinity(current, u)
+            semantic = (
+                float(self.similarity(current, combined).get("score", 0.0) or 0.0)
+                if combined else 0.0
+            )
+            user_semantic = (
+                float(self.similarity(current, u).get("score", 0.0) or 0.0)
+                if u else 0.0
+            )
+            recency = 1.0 / (1.0 + 0.12 * (len(window) - 1 - i))
+            score = (
+                0.42 * semantic
+                + 0.26 * user_semantic
+                + 0.20 * lexical
+                + 0.08 * user_lexical
+                + 0.04 * recency
+            )
+            scored.append({
+                "index": i,
+                "score": max(0.0, min(1.0, score)),
+                "lexical": lexical,
+                "user_lexical": user_lexical,
+                "semantic": semantic,
+                "user_semantic": user_semantic,
+                "pair": pair,
+            })
+
+        scored.sort(key=lambda x: (x["score"], x["index"]), reverse=True)
+        latest_index = len(window) - 1
+        latest = next((x for x in scored if x["index"] == latest_index), None)
+        best = scored[0] if scored else None
+        latest_score = float(latest["score"] if latest else 0.0)
+        best_score = float(best["score"] if best else 0.0)
+        second_score = float(scored[1]["score"] if len(scored) > 1 else 0.0)
+        margin = best_score - second_score
+
+        light = self._light_history_context_check(
+            current,
+            window,
+            memory_query_score=memory_query,
+            dialogue_scores=scores,
+        )
+
+        # The second pass can upgrade a superficially NEW request to RECALL only
+        # when it has semantic memory intent and a real pair anchor.
+        if not is_recall and light.get("history_query") and light.get("best_pair_score", 0.0) >= 0.12:
+            is_recall = True
 
         if is_recall and scored:
-            relation="RECALL"
-            selected_index=int(best["index"])
-            selected_pair=dict(best["pair"])
-            confidence=max(0.70,min(0.99,max(recall_score,memory_query)))
-        elif not pairs:
-            relation="NEW"; selected_index=-1; selected_pair={}; confidence=0.98
+            anchor_index = int(light.get("best_pair_index", best["index"]) if light.get("best_pair_index", -1) >= 0 else best["index"])
+            selected_score_row = next((x for x in scored if x["index"] == anchor_index), best)
+            relation = "RECALL"
+            selected_index = int(selected_score_row["index"])
+            selected_pair = dict(selected_score_row["pair"])
+            context_pairs = light.get("context_pairs") or window
+            confidence = max(
+                0.70,
+                min(
+                    0.99,
+                    max(
+                        recall_score,
+                        memory_query,
+                        float(light.get("memory_query_signal", 0.0) or 0.0),
+                        float(light.get("best_pair_score", 0.0) or 0.0),
+                    ),
+                ),
+            )
+        elif not window:
+            relation = "NEW"
+            selected_index = -1
+            selected_pair = {}
+            context_pairs = []
+            confidence = 0.98
         elif incomplete and latest is not None:
-            # Continuation is anchored to the most recent completed pair when the
-            # current turn is semantically incomplete.
-            relation="CONTINUE"; selected_index=int(latest["index"]); selected_pair=dict(latest["pair"])
-            confidence=max(0.58,min(0.97,0.58 + 0.35*max(latest_score, dialogue_followup)))
-        elif best is not None and best["index"]==latest_index and best_score >= 0.34 and margin >= 0.08 and best["lexical"] >= 0.18:
-            relation="CONTINUE"; selected_index=int(best["index"]); selected_pair=dict(best["pair"])
-            confidence=max(0.60,min(0.96,best_score))
+            relation = "CONTINUE"
+            selected_index = int(latest["index"])
+            selected_pair = dict(latest["pair"])
+            context_pairs = list(window[-3:])
+            confidence = max(
+                0.62,
+                min(
+                    0.97,
+                    0.58 + 0.35 * max(
+                        latest_score,
+                        dialogue_followup,
+                        float(light.get("continuation_signal", 0.0) or 0.0),
+                    ),
+                ),
+            )
+        elif (
+            best is not None
+            and best["index"] == latest_index
+            and best_score >= 0.34
+            and margin >= 0.08
+            and best["lexical"] >= 0.18
+        ):
+            relation = "CONTINUE"
+            selected_index = int(best["index"])
+            selected_pair = dict(best["pair"])
+            context_pairs = list(window[-3:])
+            confidence = max(0.60, min(0.96, best_score))
+        elif (
+            incomplete
+            and light.get("historical_dependency")
+            and light.get("best_pair_score", 0.0) >= 0.20
+            and float(light.get("continuation_signal", 0.0) or 0.0) >= 0.18
+        ):
+            relation = "CONTINUE"
+            anchor_index = int(light.get("best_pair_index", -1))
+            selected_index = anchor_index if anchor_index >= 0 else latest_index
+            selected_pair = dict(
+                next(
+                    (x["pair"] for x in scored if x["index"] == selected_index),
+                    latest["pair"] if latest else {},
+                )
+            )
+            context_pairs = list(window[-3:])
+            confidence = max(
+                0.60,
+                min(0.95, float(light.get("best_pair_score", 0.0) or 0.0)),
+            )
         else:
-            relation="NEW"; selected_index=-1; selected_pair={}; confidence=max(0.62,1.0-min(best_score,0.38))
+            relation = "NEW"
+            selected_index = -1
+            selected_pair = {}
+            context_pairs = []
+            confidence = max(0.62, 1.0 - min(best_score, 0.38))
 
-        # Keep the complete 12h pair window available to downstream Provider and
-        # SceneContract; the selector itself does not perform fuzzy memory search.
-        window=[dict(p) for p in pairs[-15:]]
         return {
-            "relation":relation,
-            "confidence":round(float(confidence),6),
-            "selected_index":selected_index,
-            "selected_pair":selected_pair,
-            "latest_score":round(latest_score,6),
-            "best_score":round(best_score,6),
-            "second_score":round(second_score,6),
-            "margin":round(margin,6),
-            "dialogue_followup_evidence":round(dialogue_followup,6),
-            "memory_query_score":round(memory_query,6),
-            "implicit_context_dependency":relation=="CONTINUE",
-            "current_self_contained":not incomplete,
-            "memory_window":window,
-            "source":"PAIR_12H_INTERPRETATION_V2",
-            "entity_engine":False,
-            "topic_engine":False,
-            "intent_engine":False,
+            "relation": relation,
+            "confidence": round(float(confidence), 6),
+            "selected_index": selected_index,
+            "selected_pair": selected_pair,
+            "latest_score": round(latest_score, 6),
+            "best_score": round(best_score, 6),
+            "second_score": round(second_score, 6),
+            "margin": round(margin, 6),
+            "dialogue_followup_evidence": round(dialogue_followup, 6),
+            "memory_query_score": round(memory_query, 6),
+            "implicit_context_dependency": relation == "CONTINUE",
+            "current_self_contained": not incomplete,
+            "memory_window": [dict(p) for p in window],
+            "context_pairs": [dict(p) for p in context_pairs][-9:],
+            "history_context_check": light,
+            "source": "PAIR_12H_INTERPRETATION_V3",
+            "entity_engine": False,
+            "topic_engine": False,
+            "intent_engine": False,
         }
 
     def _dialogue_relation_engine(
@@ -5117,9 +5495,12 @@ def _pair_canonical_interpret(self, text, cognition=None, semantic=None, history
     if visual_request and base_rep not in {"image","gallery"} and op in {"build","create","generate","modify","transform","redraw","visualize"}:
         base_rep="image"
 
-    # Historical recall returns the complete pair window to Provider; it is not a
-    # fuzzy-search result set.
+    # Full 12h memory remains available to Interpretation, while Provider receives
+    # only the compact pair trajectory selected by the verified light context check.
     window=[dict(x) for x in selected.get("memory_window") or pairs[-15:]]
+    provider_window=[dict(x) for x in selected.get("context_pairs") or []]
+    if relation in {"CONTINUE", "RECALL"} and not provider_window:
+        provider_window=window[-3:]
     memory_source="AUTHENTICATED_12H_USER_APRIL_PAIRS" if window else "NONE"
 
     result["three_way_relation"]=relation
@@ -5137,9 +5518,12 @@ def _pair_canonical_interpret(self, text, cognition=None, semantic=None, history
         "window_hours":12,
         "pair_count":len(window),
         "pairs":window,
+        "selected_context_pair_count":len(provider_window),
+        "selected_context_pairs":provider_window,
         "source":memory_source,
         "authority":"INTERPRETATION",
     }
+    result["history_context_check"] = selected.get("history_context_check") if isinstance(selected.get("history_context_check"), dict) else {}
 
     # Canonical rendering decision is owned by Interpretation and must survive the
     # Executor projection. This fixes the image route being downgraded to text.
@@ -5195,7 +5579,9 @@ def _pair_canonical_interpret(self, text, cognition=None, semantic=None, history
             "pair_count":len(window),
             "selected_index":selected_index,
             "relation":relation,
+            "selected_context_pairs":provider_window,
         },
+        "history_context_check": selected.get("history_context_check") if isinstance(selected.get("history_context_check"), dict) else {},
     })
     if visual_request:
         vector["visual_generation_request"]=visual_request
@@ -5247,7 +5633,18 @@ def _pair_canonical_interpret(self, text, cognition=None, semantic=None, history
         provider_plan["required_context"].append({
             "key":"ACTIVE_DIALOGUE_TRAJECTORY",
             "priority":0.997,
-            "value":window,
+            "value":provider_window,
+        })
+        provider_plan["required_context"].append({
+            "key":"HISTORY_CONTEXT_CHECK",
+            "priority":0.996,
+            "value":{
+                "source":"LIGHT_HISTORY_CONTEXT_CHECK",
+                "history_dependency":bool(selected.get("history_context_check",{}).get("historical_dependency")),
+                "history_query":bool(selected.get("history_context_check",{}).get("history_query")),
+                "anchor_index":selected_index,
+                "pair_count":len(provider_window),
+            },
         })
     result["provider_context_plan"]=provider_plan
     result["provider_context_authority"]="INTERPRETATION"
