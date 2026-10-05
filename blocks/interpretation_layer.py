@@ -19,7 +19,7 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Iterable
+from typing import Any, Dict, List, Sequence
 
 try:
     import numpy as np
@@ -56,562 +56,562 @@ try:
 except Exception:  # pragma: no cover
     hf_pipeline = None
 
-PAIR_DIRECTION_ENGINE_VERSION = "2.1-embedded"
 
-# PAIR DIALOGUE ENGINE IS A REQUIRED INTERPRETATION DEPENDENCY.
-# It is embedded in this file so the production route has a single deployable
-# interpretation layer and cannot fail because a companion module was omitted.
-# No fallback is permitted: authenticated USER↔APRIL pairs must be resolved first.
+# ============================================================================
+# EMBEDDED PAIR DIALOGUE UNDERSTANDING ENGINE — RICH HUMAN CONTINUATION v2
+# ============================================================================
+# This engine is intentionally embedded in the canonical interpretation layer.
+# The production contract remains: authenticated 12h USER↔APRIL pairs first,
+# then exactly one relation (CONTINUE / RECALL / NEW), then formulation/OpenAI.
+# No provider, renderer, legacy intent branch or fallback may own this decision.
 
-_WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", re.UNICODE)
-
-_OBJECT_ALIASES: dict[str, set[str]] = {
-    "name": {"имя", "имена", "имен", "имени", "имён", "имёна", "именем", "именами"},
-    "season": {"сезон", "сезоны", "сезонов", "сезоне", "пора", "пору", "поры", "времена", "года"},
-    "formula": {"формула", "формулы", "формулу", "уравнение", "уравнения", "выражение", "равенство"},
-    "image": {"изображение", "изображения", "картинка", "картинки", "рисунок", "рисунки", "фото", "фотография"},
-    "car": {"машина", "авто", "автомобиль", "двигатель", "ламбда", "датчик", "тормоза", "колодки"},
-}
-_OBJECT_LABELS = {
-    "name": "имя",
-    "season": "времена года",
-    "formula": "формула",
-    "image": "изображение",
-    "car": "автомобиль",
-}
-
-# Words that steer dialogue but are not the object themselves.
-_CONTROL_WORDS = {
-    "дальше", "еще", "ещё", "другое", "другая", "другой", "другие",
-    "следующий", "следующая", "следующее", "следующие", "продолжи", "продолжить",
-    "назови", "назвать", "называй", "напиши", "скажи", "покажи", "проверь",
-    "проверся", "проверить", "проверка", "теперь", "сейчас", "итак", "начнем",
-    "начинаем", "молодец", "правильно", "верно", "точно", "да", "нет", "не",
-    "потому", "почему", "где", "что", "как", "какой", "какая", "какие", "какое",
-    "меня", "мне", "ты", "тебе", "я", "мы", "вы", "но", "и", "а", "же", "уже",
-    "было", "были", "первый", "номер", "тест", "ответ", "ответы", "ошиб", "ошибка",
-    "неправильно", "неверно", "неповторяйся", "повторяйся",
-}
-
-_CONTINUE_WORDS = {"дальше", "еще", "ещё", "другое", "другая", "другой", "другие", "следующий", "следующая", "следующее", "следующие", "продолжи", "продолжить", "добавь", "добавить"}
-_NEW_TASK_WORDS = {"начнем", "начинаем", "начать", "заново", "новый", "новая", "новое", "новую", "отдельно", "самостоятельно"}
-_AUDIT_PATTERNS = (
-    r"\bтест(?:а|ом|е|у)?\s*(?:№|номер)?\s*\d+\b",
-    r"\bпровер[ьяи]\w*\b",
-    r"\bгде\s+(?:ты\s+)?ошиб",
-    r"\bчто\s+я\s+просил\b",
-    r"\bчто\s+ты\s+называл\b",
-    r"\bв\s+(?:своих|предыдущих)\s+ответах\b",
-)
-_EXCLUSION_RE = re.compile(r"\b(?:кроме|без|за\s+исключением)\s+(.+)$", re.IGNORECASE)
-
-_CLARIFICATION_PATTERNS = (
-    r"^что\s+именно\s+продолжить\??$",
-    r"^что\s+именно\s+продолжить\s*\??$",
-    r"^что\s+именно\??$",
-    r"^уточни(?:те)?\s*$",
-)
-
-_REPETITION_PATTERNS = (
-    r"\bне\s+повторяй(?:ся)?\b",
-    r"\bне\s+повторять\b",
-    r"\bбез\s+повтор(?:а|ений)\b",
-    r"\bне\s+повтори\b",
-)
-
-
-def _words(text: Any) -> list[str]:
-    return [m.lower() for m in _WORD_RE.findall(str(text or ""))]
-
-
-def _normalize_stem(word: str) -> str:
-    w = str(word or "").lower()
-    if len(w) < 4:
-        return w
-    # Small, dependency-free Russian normalization. It is intentionally modest:
-    # the engine must not turn unrelated words into the same concept.
-    suffixes = (
-        "иями", "ями", "ами", "ого", "ему", "ому", "ыми", "ими", "ей", "ов", "ев",
-        "ах", "ях", "ам", "ям", "ом", "ем", "ой", "ий", "ый", "ая", "ое", "ые",
-        "ие", "ия", "ью", "ь", "а", "я", "ы", "и", "у", "ю", "е", "о",
-    )
-    for suffix in suffixes:
-        if len(w) - len(suffix) >= 3 and w.endswith(suffix):
-            return w[:-len(suffix)]
-    return w
-
-
-def _object_keys(text: Any) -> list[str]:
-    low_words = set(_words(text))
-    out: list[str] = []
-    for key, aliases in _OBJECT_ALIASES.items():
-        if low_words & aliases:
-            out.append(key)
-    low = str(text or "").lower()
-    if re.search(r"\bвременн?\w*\s+год", low) or re.search(r"\bпор[ау]\s+год", low):
-        if "season" not in out:
-            out.append("season")
-    return out
-
-
-def _concepts(text: Any) -> set[str]:
-    out: set[str] = set()
-    for w in _words(text):
-        if len(w) < 3 or w in _CONTROL_WORDS:
-            continue
-        s = _normalize_stem(w)
-        if len(s) >= 3:
-            out.add(s)
-    return out
-
-
-def _jaccard(a: Any, b: Any) -> float:
-    left = _concepts(a)
-    right = _concepts(b)
-    if not left or not right:
-        return 0.0
-    return len(left & right) / max(1, len(left | right))
-
-
-def _extract_items(text: Any) -> list[str]:
-    source = str(text or "").strip()
-    if not source:
-        return []
-    items: list[str] = []
-
-    # Quoted answers.
-    for q in re.findall(r"[«\"']([^»\"']{2,80})[»\"']", source):
-        value = q.strip(" .,!?:;—–-")
-        if value:
-            items.append(value)
-
-    # Explicit answer constructions.
-    patterns = (
-        r"(?:имя|назову|назвала|назвал|ответ|вариант)\s*[—–:\-]\s*([А-ЯA-ZЁЇІЄҐ][\wА-Яа-яЁёЇїІіЄєҐґ-]{2,})",
-        r"\b(?:это|будет|выбираю)\s+([А-ЯA-ZЁЇІЄҐ][\wА-Яа-яЁёЇїІіЄєҐґ-]{2,})\b",
-    )
-    for pat in patterns:
-        for m in re.findall(pat, source, flags=re.IGNORECASE):
-            items.append(m)
-
-    # A plain one-token answer is strong evidence.
-    compact = re.sub(r"[^A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_-]+", " ", source).strip().split()
-    if len(compact) == 1 and compact[0][0].isupper() and len(compact[0]) >= 3:
-        items.append(compact[0])
-
-    # Keep capitalized proper-name-like tokens, but not common control words.
-    for token in re.findall(r"(?<![А-ЯA-ZЁЇІЄҐ])([А-ЯA-ZЁЇІЄҐ][А-Яа-яA-Za-zЁёЇїІіЄєҐґ0-9_-]{2,})", source):
-        if token.lower() not in _CONTROL_WORDS:
-            items.append(token)
-
-    dedup: list[str] = []
-    seen: set[str] = set()
-    for x in items:
-        k = x.strip().lower()
-        if k and k not in seen:
-            seen.add(k)
-            dedup.append(x.strip())
-    return dedup[:12]
-
-
-def _item_key(value: str) -> str:
-    raw = re.sub(r"[^A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_-]+", "", str(value or "").lower())
-    if not raw:
-        return ""
-    stem = _normalize_stem(raw)
-    if stem == raw and len(raw) >= 4 and raw.endswith(("а", "я", "ы", "и")):
-        stem = raw[:-1]
-    return stem
-
-
-def _extract_exclusions(text: Any) -> list[str]:
-    source = str(text or "").strip()
-    m = _EXCLUSION_RE.search(source)
-    if not m:
-        return []
-    tail = m.group(1).strip(" .,!?:;—–-()[]{}")
-    parts = re.split(r"\s+(?:и|или)\s+|[,;/]+", tail, flags=re.IGNORECASE)
-    out: list[str] = []
-    for p in parts:
-        v = p.strip(" .,!?:;—–-()[]{}")
-        if len(v) >= 3:
-            out.append(v)
-    return list(dict.fromkeys(out))[:10]
-
-
-def _has_repetition_constraint(text: Any) -> bool:
-    low = str(text or "").lower()
-    return any(re.search(p, low) for p in _REPETITION_PATTERNS)
-
-
-def _is_clarification(text: Any) -> bool:
-    low = re.sub(r"\s+", " ", str(text or "").strip().lower())
-    return any(re.fullmatch(p, low) for p in _CLARIFICATION_PATTERNS)
-
-
-def _looks_like_new_task(text: str) -> bool:
-    low = str(text or "").lower()
-    words = set(_words(low))
-    explicit_test = bool(re.search(r"\bтест(?:ом|а|е|у)?\s*(?:№|номер)?\s*\d+\b", low)) or bool(_extract_test_number(low))
-    explicit_start = bool(words & _NEW_TASK_WORDS) or low.startswith(("итак начнем", "начнем тест", "давай начнем"))
-    return explicit_test or explicit_start
-
-
-def _looks_like_audit(text: str) -> bool:
-    low = str(text or "").lower()
-    return sum(bool(re.search(p, low)) for p in _AUDIT_PATTERNS) >= 2
-
-
-def _extract_test_number(text: str) -> str:
-    low = str(text or "").lower()
-    m = re.search(r"\bтест\s*(?:№|номер)?\s*(\d+)\b", low)
-    if m:
-        return m.group(1)
-    if re.search(r"\bтест(?:ом|а|е|у)?\s+номер\s+один\b|\bтест(?:ом|а|е|у)?\s+один\b", low):
-        return "1"
-    if re.search(r"\bтест(?:ом|а|е|у)?\s+номер\s+два\b|\bтест(?:ом|а|е|у)?\s+два\b", low):
-        return "2"
-    if re.search(r"\bтест(?:ом|а|е|у)?\s+номер\s+три\b|\bтест(?:ом|а|е|у)?\s+три\b", low):
-        return "3"
-    return ""
-
-
-def _find_test_start_index(records: list["PairRecord"], test_number: str = "1") -> int:
-    pattern = re.compile(rf"\bтест\s*(?:№|номер)?\s*{re.escape(str(test_number))}\b", re.IGNORECASE)
-    start = -1
-    for rec in records:
-        if pattern.search(rec.user):
-            start = rec.index
-    return start
-
-
-def _find_latest_test_start_index(records: list["PairRecord"]) -> int:
-    """Return the newest explicit numbered-test boundary in the supplied pair window."""
-    starts: list[int] = []
-    for rec in records:
-        if _extract_test_number(rec.user):
-            starts.append(rec.index)
-    return max(starts) if starts else -1
-
-
-def _direction(current: str) -> tuple[str, float, dict[str, Any]]:
-    low = str(current or "").lower().strip()
-    words = set(_words(low))
-    exclusions = bool(_EXCLUSION_RE.search(low))
-    continuation = bool(words & _CONTINUE_WORDS) or bool(re.search(r"\bи\s+(?:какой|какая|какое|какие|что|кто)\b", low))
-    correction = bool(words & {"неверно", "неправильно", "ошибка", "ошибся", "ошиблась", "исправь", "исправить"})
-    affirmation = bool(words & {"правильно", "молодец", "верно", "точно", "супер"}) and len(words) <= 8
-
-    # An explicit audit of a numbered test is a RECALL operation, not the start
-    # of that test. This must be checked before the generic "test number" NEW
-    # detector; otherwise a request such as "посмотри тест номер два и где ты
-    # ошибся" incorrectly destroys the test context.
-    if _looks_like_audit(low):
-        return "RECALL_FROM_PAIRS", 0.99, {"history_lookup": True, "audit": True, "exclusion": exclusions}
-    if _looks_like_new_task(low):
-        return "ANSWER_CURRENT_REQUEST", 0.99, {"new_task": True, "history_lookup": False, "exclusion": exclusions}
-    if exclusions and (continuation or "имя" in words or "имена" in words):
-        return "EXTEND_WITH_EXCLUSIONS", 0.97, {"history_lookup": False, "exclusion": True}
-    if correction:
-        return "VERIFY_OR_CORRECT_PREVIOUS", 0.93, {"history_lookup": False, "exclusion": exclusions}
-    if affirmation:
-        return "AFFIRM_PREVIOUS_RESULT", 0.90, {"history_lookup": False, "exclusion": exclusions}
-    if continuation:
-        return "EXTEND_PREVIOUS_RESULT", 0.95, {"history_lookup": False, "exclusion": exclusions}
-    if any(x in words for x in {"вспомни", "помнишь", "раньше", "обсуждали", "спрашивал", "спрашивали", "истории", "контексте", "сообщениях"}):
-        return "RECALL_FROM_PAIRS", 0.91, {"history_lookup": True, "audit": False, "exclusion": exclusions}
-    return "ANSWER_CURRENT_REQUEST", 0.70, {"history_lookup": False, "exclusion": exclusions}
-
-
-@dataclass(frozen=True)
-class PairRecord:
-    index: int
-    user: str
-    april: str
-    object_keys: tuple[str, ...]
-    answer_items: tuple[str, ...]
-    external_score: float
-    clarification_answer: bool
-
-
-def _pair_record(index: int, pair: dict[str, Any], external_score: float = 0.0) -> PairRecord:
-    user = str(pair.get("user") or pair.get("user_text") or pair.get("user_request") or "").strip()
-    april = str(pair.get("april") or pair.get("april_text") or pair.get("april_answer") or pair.get("assistant") or pair.get("answer") or "").strip()
-    return PairRecord(
-        index=index,
-        user=user,
-        april=april,
-        object_keys=tuple(_object_keys(user) or _object_keys(f"{user} {april}")),
-        answer_items=tuple(_extract_items(april)),
-        external_score=float(external_score or 0.0),
-        clarification_answer=_is_clarification(april),
-    )
+PAIR_DIRECTION_ENGINE_VERSION = "rich-human-continuation-v2"
 
 
 class PairDialogueDirectionEngine:
-    version = PAIR_DIRECTION_ENGINE_VERSION
+    """Resolve how a current user turn relates to authenticated dialogue pairs.
 
-    def analyze(
-        self,
-        current: str,
-        pairs: Iterable[dict[str, Any]],
-        *,
-        scored_rows: Iterable[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        current = str(current or "").strip()
-        window = [dict(p) for p in list(pairs or []) if isinstance(p, dict)]
-        rows_by_index = {
-            int(row.get("index")): row
-            for row in list(scored_rows or [])
-            if isinstance(row, dict) and str(row.get("index", "")).lstrip("-").isdigit()
+    The engine models several common forms of human continuation that plain
+    cosine/keyword similarity misses: anaphora ("из них", "кто из них"),
+    elliptical continuation ("дальше", "ещё"), list extension with constraints
+    ("не повторяйся", "кроме ..."), correction/repair ("я спрашивал ..."),
+    comparison follow-ups, and explicit historical recall ("перед этим").
+
+    It never routes or calls a provider. It returns one locked three-state
+    decision and the exact pair indices that justify it.
+    """
+
+    VERSION = PAIR_DIRECTION_ENGINE_VERSION
+
+    _NEW_PATTERNS = (
+        r"\bнов(ая|ую)?\s+тем",
+        r"\bдругая\s+тема\b",
+        r"\bперейд(и|ем|ём)\s+(?:к|на)\s+друг",
+        r"\bначн(ем|ём|ать)\s+(?:нов|друг)",
+        r"\bтест\s*(?:номер|№|#)\s*\d+",
+        r"\bначнем\s+тест\b",
+        r"\bначн[её]м\s+тест\b",
+    )
+    _RECALL_PATTERNS = (
+        r"\bвспомн",
+        r"\bпомн(ишь|ю|и)?\b",
+        r"\bя\s+(?:спрашивал|спрашивала|говорил|говорила|писал|писала)\b",
+        r"\bраньше\b",
+        r"\bдо\s+этого\b",
+        r"\bперед\s+этим\b",
+        r"\bпредыдущ(ий|ем|его|ую|ей)\b",
+        r"\bв\s+предыдущ(ем|ем\s+вопросе|ем\s+диалоге)\b",
+        r"\bгде\s+ты\s+(?:ошиб|сбил|не\s+понял)\b",
+        r"\bвернись\b",
+        r"\bнайди\s+в\s+(?:истории|контексте)\b",
+        r"\bчто\s+я\s+спрашивал\b",
+    )
+    _CONTINUATION_PATTERNS = (
+        r"\bдальше\b",
+        r"\bещ[её]\b",
+        r"\bследующ(ее|ий|ую|ая)\b",
+        r"\bпродолж(и|ай|ить|аем|им|ение)\b",
+        r"\bдалее\b",
+        r"\bа\s+(?:теперь|дальше)\b",
+        r"\bещ[её]\s+назов",
+        r"\bназов(?:и|ывай).*\b(?:ещ[её]|дальше|следующ)",
+        r"\bне\s+повторяй(?:ся)?\b",
+        r"\bкроме\b",
+        r"\bдобавь\b",
+        r"\bчто\s+ещ[её]\b",
+        r"\bкакое\s+ещ[её]\b",
+        r"\bкакой\s+ещ[её]\b",
+        r"\bкто\s+из\s+них\b",
+        r"\bчто\s+из\s+них\b",
+        r"\bкакой\s+из\s+них\b",
+        r"\bкто\s+из\s+эт(?:их|ого)\b",
+        r"\bа\s+если\b",
+        r"\bа\s+что\s+(?:насчет|насчёт)\b",
+        r"\bпо\s+этому\b",
+        r"\bподробн(?:ее|ей)\b",
+        r"\bдетальн(?:ее|ей)\b",
+        r"\bрасшир(?:ь|и|ить)\b",
+        r"\bразверни\b",
+        r"\bраскрой\b",
+        r"\bуточни\b",
+        r"\bпоясни\b",
+        r"\bобъясни\b",
+        r"\bрасскажи\s+ещ[её]\b",
+        r"\bчто\s+насчет\s+этого\b",
+        r"\bа\s+кто\b",
+        r"\bа\s+почему\b",
+        r"\bа\s+зачем\b",
+        r"\bнасколько\b",
+    )
+    _REPAIR_PATTERNS = (
+        r"\bне\s+так\b",
+        r"\bне\s+то\b",
+        r"\bты\s+(?:ошибся|ошибаешься|не\s+понял|не\s+поняла)\b",
+        r"\bя\s+спрашивал\b",
+        r"\bя\s+имел\s+в\s+виду\b",
+        r"\bя\s+говорил\b",
+        r"\bя\s+именно\s+про\b",
+        r"\bсбил(ся|ась)\b",
+        r"\bсош[её]л\s+с\s+контекста\b",
+        r"\bне\s+тупи\b",
+    )
+    _ANAPHORA = {
+        "из них", "из этих", "из этого", "из тех", "кто из них", "что из них",
+        "какой из них", "какая из них", "какое из них", "который из них",
+        "которая из них", "которые из них", "их", "них", "этому", "этого",
+        "этим", "этот", "эта", "эти", "это", "такой", "такая", "такое", "такие",
+        "дальше", "ещё", "еще", "следующее", "следующий",
+    }
+    _LIST_INTENT = (
+        r"\b(?:назов|назови|называй|перечисл|дай)\b",
+        r"\b(?:тр[её]х|три|несколько|ещ[её])\b",
+    )
+    _EXCLUSION_PATTERNS = (
+        r"\bне\s+повторяй(?:ся)?\b",
+        r"\bкроме\b",
+        r"\bбез\b",
+        r"\bне\s+включай\b",
+        r"\bуже\s+был(?:и|о)?\b",
+    )
+
+    @staticmethod
+    def _norm(value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+    @staticmethod
+    def _tokens(value: Any) -> list[str]:
+        return re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", str(value or "").lower())
+
+    @staticmethod
+    def _semantic_token(token: str) -> str:
+        """Tolerant morphological key for conversational matching.
+
+        It normalizes common Russian case endings and a frequent ``щ/ш`` typo
+        without changing the original pair text sent downstream.
+        """
+        t = str(token or "").lower().replace("ё", "е").replace("щ", "ш")
+        if len(t) <= 4:
+            return t
+        endings = (
+            "иями", "ями", "ами", "ого", "ему", "ому", "ами", "иях",
+            "иях", "ах", "ях", "ов", "ев", "ей", "ем", "ам", "ям",
+            "ом", "ой", "ою", "ую", "ую", "ия", "ие", "ий", "ая",
+            "ое", "ые", "ым", "им", "ых", "их", "ую", "юю", "ы",
+            "и", "а", "я", "у", "ю", "е", "о", "ь",
+        )
+        for ending in endings:
+            if len(t) - len(ending) >= 4 and t.endswith(ending):
+                return t[:-len(ending)]
+        return t
+
+    @classmethod
+    def _content_tokens(cls, value: Any) -> set[str]:
+        stop = {
+            "что","это","как","кто","когда","где","куда","почему","зачем",
+            "ты","вы","мне","тебе","меня","тебя","я","мы","и","а","но",
+            "из","них","этих","этого","этот","эта","эти","уже","перед","этим",
+            "для","про","о","об","по","на","в","с","со","к","за","же",
+            "тест","номер","назови","называй","назвать","знаешь","знаеш","знать",
+            "знаю","три","трое","трёх","трех","пожалуйста","любое","любые",
+            "именно","вопрос","вопроса","вопросом","спросил","спрашивал","спрашивала",
+        }
+        return {t for t in cls._tokens(value) if len(t) >= 3 and t not in stop}
+
+    @classmethod
+    def _affinity(cls, left: Any, right: Any) -> float:
+        raw_a = cls._content_tokens(left)
+        raw_b = cls._content_tokens(right)
+        if not raw_a or not raw_b:
+            return 0.0
+        a = {cls._semantic_token(x) for x in raw_a}
+        b = {cls._semantic_token(x) for x in raw_b}
+        a.discard(""); b.discard("")
+        exact = len(a & b) / max(1, len(a | b))
+        morph_hits = 0.0
+        for x in a:
+            best = 0.0
+            for y in b:
+                if x == y:
+                    best = 1.0
+                    break
+                common = 0
+                for ca, cb in zip(x, y):
+                    if ca != cb:
+                        break
+                    common += 1
+                if common >= 4:
+                    best = max(best, common / max(len(x), len(y)))
+            morph_hits += best
+        morph = morph_hits / max(1, len(a))
+        # Directional overlap helps short topical phrases such as
+        # "подробнее о хищниках" match an earlier answer about "хищников".
+        directional = len(a & b) / max(1, min(len(a), len(b)))
+        return max(
+            exact,
+            min(1.0, 0.55 * exact + 0.30 * morph + 0.15 * directional),
+        )
+
+    @classmethod
+    def _has_any(cls, text: str, patterns: tuple[str, ...]) -> bool:
+        low = cls._norm(text)
+        return any(re.search(p, low, re.I) for p in patterns)
+
+    @classmethod
+    def _has_anaphora(cls, text: str) -> bool:
+        low = cls._norm(text)
+        # "перед этим / до этого / в предыдущем вопросе" is historical recall,
+        # not an anaphoric reference to the immediately preceding pair.
+        if re.search(r"\b(?:перед\s+этим|до\s+этого|перед\s+этим\s+вопросом|в\s+предыдущем\s+вопросе)\b", low):
+            return False
+        if re.search(r"\b(?:кто|что|какой|какая|какое|какие)\s+из\s+них\b", low):
+            return True
+        if re.search(r"\b(?:из\s+них|из\s+этих|из\s+тех)\b", low):
+            return True
+        return any(re.search(rf"\b{re.escape(x)}\b", low) for x in cls._ANAPHORA if x not in {"этим", "этого"})
+
+    @classmethod
+    def _has_exclusion(cls, text: str) -> bool:
+        return cls._has_any(text, cls._EXCLUSION_PATTERNS)
+
+    @classmethod
+    def _explicit_new(cls, text: str) -> bool:
+        return cls._has_any(text, cls._NEW_PATTERNS)
+
+    @classmethod
+    def _explicit_recall(cls, text: str) -> bool:
+        return cls._has_any(text, cls._RECALL_PATTERNS)
+
+    @classmethod
+    def _explicit_repair(cls, text: str) -> bool:
+        return cls._has_any(text, cls._REPAIR_PATTERNS)
+
+    @classmethod
+    def _explicit_continuation(cls, text: str) -> bool:
+        return cls._has_any(text, cls._CONTINUATION_PATTERNS)
+
+    @classmethod
+    def _pair_text(cls, pair: dict[str, Any]) -> tuple[str, str, str]:
+        user = cls._norm(pair.get("user") or pair.get("user_text") or pair.get("user_request"))
+        april = cls._norm(pair.get("april") or pair.get("april_text") or pair.get("april_answer") or pair.get("assistant") or pair.get("answer"))
+        return user, april, f"{user} {april}".strip()
+
+    @classmethod
+    def _pair_subject(cls, pair: dict[str, Any]) -> str:
+        explicit = pair.get("topic") or pair.get("canonical_topic") or pair.get("subtopic")
+        if explicit:
+            return cls._norm(explicit)
+        user, april, _ = cls._pair_text(pair)
+        # Prefer user request content. For list-like answers include answer too.
+        return " ".join(sorted(cls._content_tokens(f"{user} {april}"), key=lambda x: (-len(x), x))[:6])
+
+    @classmethod
+    def _is_clarification_pair(cls, pair: dict[str, Any]) -> bool:
+        _, april, _ = cls._pair_text(pair)
+        if not april:
+            return False
+        return bool(re.search(
+            r"^(?:уточните|уточни|скажите|напомни|пришли|непонятно|кого именно|что именно|\s*мне неясно)",
+            april,
+            re.I,
+        ))
+
+    @classmethod
+    def _contains_reference_answer_set(cls, pair: dict[str, Any]) -> bool:
+        _, april, _ = cls._pair_text(pair)
+        if not april:
+            return False
+        # Assistant clarification/questions are not antecedent result sets.
+        clarification = re.search(
+            r"^(?:уточните|уточни|скажите|напомни|пришли|непонятно|кого именно|что именно)",
+            april,
+            re.I,
+        )
+        if clarification:
+            return False
+        has_items = len(re.findall(r",|;|\bи\b|\bили\b", april)) >= 1
+        has_name_or_entity = bool(re.search(r"[A-Za-zА-Яа-яЁё]{3,}", april))
+        return has_items and has_name_or_entity
+
+    @classmethod
+    def _collect_exclusions(cls, text: str) -> set[str]:
+        low = cls._norm(text)
+        result: set[str] = set()
+        for m in re.finditer(r"\b(?:кроме|без)\s+([^.;!?]+)", low, re.I):
+            result |= cls._content_tokens(m.group(1))
+        if cls._has_exclusion(low):
+            # Capture explicit names after "не повторяйся" only when present in
+            # the current turn; generic exclusions are represented by a flag.
+            result |= set(re.findall(r"[А-Яа-яЁёA-Za-z]{4,}", m.group(1))) if False else set()
+        return result
+
+    @classmethod
+    def _select_by_object(cls, current: str, window: list[dict[str, Any]], rows: list[dict[str, Any]]) -> list[int]:
+        current_tokens = cls._content_tokens(current)
+        if not current_tokens:
+            return []
+        ranked: list[tuple[float, int]] = []
+        for row in rows:
+            pair = row.get("pair") if isinstance(row.get("pair"), dict) else {}
+            _, _, combined = cls._pair_text(pair)
+            topic = cls._pair_subject(pair)
+            score = max(cls._affinity(current, combined), 0.9 * cls._affinity(current, topic))
+            # Small morphology/substring boost for misspelled Russian nouns such as
+            # "хишниках" vs "хищников".
+            score = max(score, cls._affinity(" ".join(current_tokens), combined))
+            ranked.append((score, int(row.get("index", -1))))
+        ranked.sort(reverse=True)
+        return [i for score, i in ranked if i >= 0 and score >= 0.16][:6]
+
+    @classmethod
+    def _find_historical_topic_pair(cls, current: str, window: list[dict[str, Any]], rows: list[dict[str, Any]]) -> list[int]:
+        current_tokens = cls._content_tokens(current)
+        if not current_tokens:
+            return []
+        ranked: list[tuple[float, int]] = []
+        # For recall/repair, topical evidence in the USER side is weighted more
+        # heavily than recency because the user is intentionally reaching back.
+        for row in rows:
+            pair = row.get("pair") if isinstance(row.get("pair"), dict) else {}
+            user, april, combined = cls._pair_text(pair)
+            user_score = cls._affinity(current, user)
+            answer_score = cls._affinity(current, april)
+            topic_score = cls._affinity(current, cls._pair_subject(pair))
+            score = 0.54 * user_score + 0.26 * answer_score + 0.20 * topic_score
+            ranked.append((score, int(row.get("index", -1))))
+        ranked.sort(reverse=True)
+        return [i for score, i in ranked if i >= 0 and score >= 0.12][:6]
+
+    def analyze(self, current: str, pairs: list[dict[str, Any]], scored_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        current = self._norm(current)
+        window = [p for p in (pairs or []) if isinstance(p, dict)][-15:]
+        rows = [r for r in (scored_rows or []) if isinstance(r, dict)]
+        rows_by_index = {int(r.get("index", -1)): r for r in rows if str(r.get("index", "")).lstrip("-").isdigit()}
+        if not rows:
+            rows = [{"index": i, "score": self._affinity(current, self._pair_text(p)[2]), "pair": p} for i, p in enumerate(window)]
+            rows_by_index = {int(r["index"]): r for r in rows}
+
+        latest = len(window) - 1
+        anaphora = self._has_anaphora(current)
+        exclusion = self._has_exclusion(current)
+        explicit_new = self._explicit_new(current)
+        explicit_recall = self._explicit_recall(current)
+        explicit_repair = self._explicit_repair(current)
+        explicit_continuation = self._explicit_continuation(current)
+        list_intent = self._has_any(current, self._LIST_INTENT)
+
+        # Human discourse strengths. They are intentionally not just keyword
+        # switches: they identify discourse functions that are later combined with
+        # real pair evidence.
+        discourse_signals = {
+            "anaphoric_reference": anaphora,
+            "elliptical_continuation": explicit_continuation,
+            "constraint_extension": exclusion,
+            "repair_or_correction": explicit_repair,
+            "historical_recall": explicit_recall,
+            "explicit_new_topic": explicit_new,
+            "list_continuation": bool(list_intent and (explicit_continuation or exclusion or anaphora)),
         }
 
-        direction, confidence, flags = _direction(current)
-        current_objects = _object_keys(current)
-        exclusions = _extract_exclusions(current)
-        explicit_items = exclusions or _extract_items(current)
-        repetition_constraint = _has_repetition_constraint(current)
-
-        records = [
-            _pair_record(i, pair, float((rows_by_index.get(i) or {}).get("score", 0.0) or 0.0))
-            for i, pair in enumerate(window)
-        ]
-
-        # 1) Determine object. Explicit nouns always outrank a generic continuity cue.
-        object_key = current_objects[0] if current_objects else ""
-        object_source = "CURRENT_REQUEST" if object_key else ""
-
-        # For ellipses, scan backwards for the latest concrete object. A clarification
-        # response such as "Что именно продолжить?" is not an object anchor.
-        if not object_key and direction in {"EXTEND_PREVIOUS_RESULT", "EXTEND_WITH_EXCLUSIONS", "VERIFY_OR_CORRECT_PREVIOUS", "AFFIRM_PREVIOUS_RESULT"}:
-            for rec in reversed(records):
-                if rec.clarification_answer:
-                    continue
-                if rec.object_keys:
-                    object_key = rec.object_keys[0]
-                    object_source = "LATEST_CONCRETE_PAIR"
-                    break
-
-        # New-test start must not inherit stale topic from old pairs.
-        if flags.get("new_task"):
-            object_source = "CURRENT_REQUEST" if object_key else "UNKNOWN"
-
-        object_label = _OBJECT_LABELS.get(object_key, object_key)
-
-        # A concrete object in the current request plus a recent concrete pair means
-        # an implicit continuation even when the user omits "дальше/ещё". This is
-        # essential for instructions such as "Называй имя но не повторяйся".
-        if (
-            direction == "ANSWER_CURRENT_REQUEST"
-            and not flags.get("new_task")
-            and not flags.get("audit")
-            and object_key
-        ):
-            for rec in reversed(records):
-                if rec.clarification_answer:
-                    continue
-                if object_key in rec.object_keys and (rec.answer_items or rec.user):
-                    direction = "EXTEND_PREVIOUS_RESULT"
-                    confidence = max(float(confidence), 0.94)
-                    flags["implicit_object_continuation"] = True
-                    break
-
-        # Test 1 is a hard local sequence boundary. Older matching names/formulas
-        # outside the test must never become evidence for the new test.
-        test_start_index = -1
-        explicit_test_number = _extract_test_number(current)
-        # Once a numbered test has started in the authenticated pair window, its
-        # boundary remains valid for later continuation turns without re-stating
-        # the test number. This keeps stale names from older dialogue branches out.
-        if explicit_test_number:
-            test_start_index = _find_test_start_index(records, explicit_test_number)
-        else:
-            # Continue inside the newest numbered test, never inside an older test.
-            # This is essential after TEST 2 starts: "Ещё называй" must continue
-            # TEST 2, not jump back to TEST 1 merely because an older pair is a
-            # stronger lexical/semantic match.
-            test_start_index = _find_latest_test_start_index(records)
-
-        # 2) Build object chain. For continuation/list/audit, collect all evidence-bearing
-        # pairs for this object; for a fresh task, do not leak stale pairs downstream.
-        chain: list[PairRecord] = []
-        boundary = test_start_index if test_start_index >= 0 else -1
-        for rec in records:
-            if boundary >= 0 and rec.index < boundary:
-                continue
-            if not object_key:
-                continue
-            if object_key in rec.object_keys:
-                chain.append(rec)
-                continue
-            # Fallback: a pair without an explicit object may still be an answer pair
-            # immediately following a known object pair.
-            if rec.answer_items and direction in {"EXTEND_PREVIOUS_RESULT", "EXTEND_WITH_EXCLUSIONS", "RECALL_FROM_PAIRS"}:
-                prev_obj = records[rec.index - 1].object_keys[0] if rec.index > 0 and rec.index - 1 < len(records) and records[rec.index - 1].object_keys else ""
-                if prev_obj == object_key:
-                    chain.append(rec)
-
-        # 3) Pull remembered answers from the same chain, respecting clarification pairs.
-        known_items: list[str] = []
-        item_source_indices: dict[str, list[int]] = {}
-        for rec in chain:
-            for item in rec.answer_items:
-                key = _item_key(item)
-                if not key:
-                    continue
-                if key not in { _item_key(x) for x in known_items }:
-                    known_items.append(item)
-                item_source_indices.setdefault(key, []).append(rec.index)
-
-        excluded_keys = {_item_key(x) for x in exclusions}
-        candidate_unexcluded = [x for x in known_items if _item_key(x) not in excluded_keys]
-        excluded_known = [x for x in known_items if _item_key(x) in excluded_keys]
-
-        # If the user said "не повторяйся", all previously confirmed answer items
-        # in the same object chain are constraints for subsequent turns.
-        non_repeat_items = list(known_items) if repetition_constraint or direction in {"EXTEND_PREVIOUS_RESULT", "EXTEND_WITH_EXCLUSIONS"} else []
-
-        # 4) Find the best concrete continuation anchor. Skip clarification/error
-        # answers. Prefer the latest meaningful pair in the same object chain.
-        meaningful_chain = [rec for rec in chain if not rec.clarification_answer and rec.answer_items]
-        anchor_rec = meaningful_chain[-1] if meaningful_chain else (chain[-1] if chain else None)
-
-        # Current request may explicitly mention a prior item; anchor the pair that
-        # produced that item instead of a random lexical match.
-        mentioned_keys = {_item_key(x) for x in explicit_items if _item_key(x)}
-        if mentioned_keys:
-            for rec in reversed(chain):
-                produced = {_item_key(x) for x in rec.answer_items}
-                if produced & mentioned_keys:
-                    anchor_rec = rec
-                    break
-
-        # 5) Related pair indices are sequence-aware rather than a top-N semantic dump.
-        if flags.get("new_task"):
+        # Explicit new-topic markers win before historical similarity. A new test
+        # is not a continuation merely because the word "тест" appeared before.
+        if explicit_new:
+            relation = "NEW"
             selected_indices: list[int] = []
-        elif flags.get("audit") and test_start_index >= 0:
-            selected_indices = [rec.index for rec in records if rec.index >= test_start_index]
-        elif direction == "RECALL_FROM_PAIRS":
-            selected_indices = [rec.index for rec in chain]
-        elif anchor_rec is not None:
-            # Keep the chain evidence plus the latest meaningful anchor. This prevents a
-            # stale high-similarity pair elsewhere in the 12h window from stealing context.
-            selected_indices = [rec.index for rec in chain[-8:]]
-            if anchor_rec.index not in selected_indices:
-                selected_indices.append(anchor_rec.index)
+            anchor_index = -1
+            reason = "EXPLICIT_NEW_TEST_OR_TOPIC"
         else:
-            # Last-resort pair similarity only if we truly have no semantic chain.
-            fallback = sorted(rows_by_index.values(), key=lambda r: (float(r.get("score", 0.0) or 0.0), int(r.get("index", -1))), reverse=True)
-            selected_indices = [int(x["index"]) for x in fallback[:2] if int(x.get("index", -1)) >= 0]
+            # First resolve the likely pair sequence. For recall/repair the user
+            # is deliberately reaching backward; for anaphora/ellipsis the latest
+            # compatible antecedent is preferred.
+            if explicit_recall:
+                selected_indices = self._find_historical_topic_pair(current, window, rows)
+                reason = "EXPLICIT_HISTORICAL_REFERENCE"
+            else:
+                selected_indices = self._select_by_object(current, window, rows)
+                reason = "SEMANTIC_PAIR_MATCH"
 
-        selected_indices = sorted(dict.fromkeys(i for i in selected_indices if 0 <= i < len(window)))
-        anchor_index = anchor_rec.index if anchor_rec is not None else -1
-        if flags.get("audit") and test_start_index >= 0 and selected_indices:
-            anchor_index = selected_indices[-1]
+            if anaphora:
+                # "из них" requires a real antecedent from the dialogue, not the
+                # assistant's later clarification question. Prefer the most recent
+                # substantive USER↔APRIL result set and use it as the sole anchor.
+                antecedent = None
+                for i in range(latest, -1, -1):
+                    pair = window[i]
+                    if self._is_clarification_pair(pair):
+                        continue
+                    if self._contains_reference_answer_set(pair):
+                        antecedent = i
+                        break
+                if antecedent is not None:
+                    selected_indices = [antecedent]
+                    reason = "ANAPHORIC_ANTECEDENT_FROM_PAIR"
+                elif window:
+                    substantive = [
+                        i for i in range(latest, -1, -1)
+                        if not self._is_clarification_pair(window[i])
+                    ]
+                    if substantive:
+                        selected_indices = [substantive[0]]
+                        reason = "ANAPHORIC_ANTECEDENT_LATEST_SUBSTANTIVE_PAIR"
 
-        # 6) Determine relation/context expected by the existing interpretation selector.
-        if flags.get("new_task"):
-            relation_hint = "NEW"
-            context_mode_hint = "NEW_TOPIC_ISOLATED"
-            history_lookup = False
-        elif direction == "RECALL_FROM_PAIRS":
-            # RECALL is a first-class dialogue state. It must not be downgraded
-            # to NEW, otherwise Interpretation loses the exact pair context.
-            relation_hint = "RECALL"
-            context_mode_hint = "HISTORY_LOOKUP"
-            history_lookup = True
-        elif direction in {"EXTEND_PREVIOUS_RESULT", "EXTEND_WITH_EXCLUSIONS", "VERIFY_OR_CORRECT_PREVIOUS", "AFFIRM_PREVIOUS_RESULT"}:
-            relation_hint = "CONTINUE"
-            context_mode_hint = "LIVE_CONTINUATION"
-            history_lookup = False
-        else:
-            relation_hint = "NEW"
-            context_mode_hint = "NEW_TOPIC_ISOLATED"
-            history_lookup = False
+            if explicit_repair and not explicit_recall:
+                # Repair often says what the earlier topic was without an explicit
+                # "before/earlier" word. If the current turn mentions a concrete
+                # topic that exists in the pair window, keep that trajectory.
+                repair_hits = self._find_historical_topic_pair(current, window, rows)
+                if repair_hits:
+                    selected_indices = sorted(set(repair_hits[:4] + selected_indices[-2:]))
+                    reason = "REPAIR_FROM_DIALOGUE_TOPIC"
 
-        # 7) Per-pair relevance is human-readable evidence for the Provider handoff.
-        relevant_pairs: list[dict[str, Any]] = []
-        for rec in chain[-10:]:
-            object_affinity = 1.0 if object_key and object_key in rec.object_keys else 0.0
-            answer_signal = 1.0 if rec.answer_items else 0.0
-            recency = 1.0 / (1.0 + 0.10 * max(0, len(window) - 1 - rec.index))
-            relevance = 0.62 * object_affinity + 0.26 * answer_signal + 0.12 * recency
-            if rec.index == anchor_index:
-                relevance = min(1.0, relevance + 0.10)
-            relevant_pairs.append({
-                "index": rec.index,
-                "object_key": rec.object_keys[0] if rec.object_keys else "",
-                "object": _OBJECT_LABELS.get(rec.object_keys[0], rec.object_keys[0]) if rec.object_keys else "",
-                "user": rec.user[:700],
-                "april": rec.april[:1100],
-                "answer_items": list(rec.answer_items),
-                "clarification_answer": rec.clarification_answer,
-                "relevance": round(relevance, 6),
-                "external_score": round(rec.external_score, 6),
-            })
+            # If no direct match was found but the turn is clearly an elliptical
+            # continuation, the nearest non-empty pair is the contextual anchor.
+            if not selected_indices and (explicit_continuation or anaphora or exclusion) and window:
+                selected_indices = [latest]
+                reason = "ELLIPTICAL_CONTINUATION_LATEST_PAIR"
+
+            # The latest pair may be an assistant clarification that lost the real
+            # object. If the user explicitly names that object, prefer the older
+            # pair that contains it rather than the clarification itself.
+            if selected_indices and explicit_repair:
+                object_hits = self._find_historical_topic_pair(current, window, rows)
+                if object_hits:
+                    selected_indices = sorted(set(object_hits[:4] + selected_indices[-2:]))
+
+            # Relation classification uses discourse semantics + pair evidence.
+            # A new self-contained request is NEW even if an unrelated pair exists.
+            direct_pair = [rows_by_index.get(i, {}) for i in selected_indices]
+            best_pair_score = max((float(x.get("score", 0.0) or 0.0) for x in direct_pair), default=0.0)
+            has_real_pair = bool(selected_indices)
+
+            topical_followup = bool(
+                has_real_pair
+                and (
+                    explicit_continuation
+                    or anaphora
+                    or exclusion
+                    or explicit_repair
+                )
+            )
+            if explicit_recall and has_real_pair:
+                relation = "RECALL"
+            elif topical_followup:
+                relation = "CONTINUE"
+            elif has_real_pair:
+                # A concrete current request can remain NEW even when it resembles
+                # a previous topic. Require strong pair evidence plus discourse
+                # dependency to call it continuation.
+                latest_pair_score = float(rows_by_index.get(latest, {}).get("score", 0.0) or 0.0)
+                if latest_pair_score >= 0.34 and self._affinity(current, self._pair_text(window[latest])[2]) >= 0.18:
+                    relation = "CONTINUE"
+                else:
+                    relation = "NEW"
+                    selected_indices = []
+            else:
+                relation = "NEW"
+
+            if relation == "CONTINUE" and not selected_indices and window:
+                selected_indices = [latest]
+
+            # A topical follow-up may score weakly lexically (Russian inflection,
+            # spelling variation, short request), but still carries a human
+            # continuation act such as "подробнее о хищниках". Recover the best
+            # historical topical pair before allowing NEW.
+            if (
+                relation == "NEW"
+                and window
+                and (explicit_continuation or explicit_repair or anaphora)
+            ):
+                recovery = self._find_historical_topic_pair(current, window, rows)
+                if recovery:
+                    relation = "CONTINUE" if not explicit_recall else "RECALL"
+                    selected_indices = recovery[:6]
+
+            if selected_indices:
+                # Keep a compact contiguous trajectory around the anchor for list
+                # continuation, while preserving explicitly matched older pairs.
+                anchor_index = selected_indices[-1]
+                if explicit_recall:
+                    anchor_index = selected_indices[0]
+                elif anaphora:
+                    anchor_index = max(selected_indices)
+                selected_indices = sorted(set(i for i in selected_indices if 0 <= i < len(window)))[-8:]
+            else:
+                anchor_index = -1
+                best_pair_score = 0.0
+
+        if relation == "NEW":
+            selected_indices = []
+            anchor_index = -1
+
+        context_pairs = [dict(window[i]) for i in selected_indices if 0 <= i < len(window)]
+        object_focus = {}
+        if anchor_index >= 0 and anchor_index < len(window):
+            pair = window[anchor_index]
+            object_focus = {
+                "label": self._pair_subject(pair),
+                "key": self._pair_subject(pair),
+                "source": "PAIR_DIALOGUE_ANTECEDENT",
+            }
+
+        exclusions = sorted(self._collect_exclusions(current))
+        direction = (
+            "EXTEND_WITH_EXCLUSIONS" if exclusion and relation == "CONTINUE" else
+            "EXPLAIN_OR_JUSTIFY_PREVIOUS" if explicit_repair and relation == "CONTINUE" else
+            "RECALL_RELEVANT_PAIRS" if relation == "RECALL" else
+            "EXTEND_PREVIOUS_RESULT" if relation == "CONTINUE" else
+            "ANSWER_CURRENT_REQUEST"
+        )
+
+        confidence_base = 0.52
+        if anaphora and context_pairs:
+            confidence_base += 0.30
+        if explicit_continuation and context_pairs:
+            confidence_base += 0.15
+        if explicit_recall and context_pairs:
+            confidence_base += 0.20
+        if explicit_repair and context_pairs:
+            confidence_base += 0.15
+        confidence_base += min(0.18, best_pair_score * 0.30 if context_pairs else 0.0)
+        if explicit_new:
+            confidence_base = 0.98
+        confidence = max(0.60 if relation != "NEW" else 0.88, min(0.99, confidence_base))
 
         return {
-            "version": self.version,
+            "version": self.VERSION,
+            "relation_hint": relation,
+            "relation": relation,
+            "confidence": round(confidence, 6),
             "direction": direction,
-            "direction_confidence": round(float(confidence), 6),
-            "relation_hint": relation_hint,
-            "context_mode_hint": context_mode_hint,
-            "history_lookup": history_lookup,
-            "object_focus": {
-                "key": object_key,
-                "label": object_label,
-                "source": object_source or "UNKNOWN",
-                "confidence": round(0.99 if current_objects else 0.93 if object_key else 0.0, 6),
-            },
-            "requested_action": {
-                "extend": direction in {"EXTEND_PREVIOUS_RESULT", "EXTEND_WITH_EXCLUSIONS"},
-                "recall": direction == "RECALL_FROM_PAIRS",
-                "verify": direction == "VERIFY_OR_CORRECT_PREVIOUS",
-                "affirm": direction == "AFFIRM_PREVIOUS_RESULT",
-                "audit": bool(flags.get("audit")),
-                "new_task": bool(flags.get("new_task")),
-                "implicit_object_continuation": bool(flags.get("implicit_object_continuation")),
-                "avoid_repetition": repetition_constraint or direction in {"EXTEND_PREVIOUS_RESULT", "EXTEND_WITH_EXCLUSIONS"},
-            },
-            "mentioned_items": explicit_items[:10],
-            "excluded_items": exclusions[:10],
-            "known_answer_items": known_items[:20],
-            "excluded_known_answer_items": excluded_known[:20],
-            "candidate_unexcluded_items": candidate_unexcluded[:20],
-            "non_repeat_items": non_repeat_items[:20],
-            "item_source_indices": {k: v for k, v in list(item_source_indices.items())[:20]},
-            "anchor_index": anchor_index,
+            "reason": reason,
             "selected_indices": selected_indices,
-            "relevant_pair_indices": selected_indices,
-            "relevant_pairs": relevant_pairs,
-            "pair_count": len(window),
+            "anchor_index": anchor_index,
+            "history_lookup": relation == "RECALL",
+            "requested_action": {
+                "new_task": relation == "NEW",
+                "continue_result": relation == "CONTINUE",
+                "recall_history": relation == "RECALL",
+                "list_continuation": discourse_signals["list_continuation"],
+                "exclude_repeated_items": exclusion,
+            },
+            "object_focus": object_focus,
+            "excluded_items": exclusions,
+            "discourse_signals": discourse_signals,
+            "context_pairs": context_pairs,
             "test_sequence": {
-                "number": _extract_test_number(current),
-                "start_index": test_start_index,
-                "indices": selected_indices if flags.get("audit") else [],
-                "audit": bool(flags.get("audit")),
+                "start_index": selected_indices[0] if selected_indices else -1,
+                "end_index": selected_indices[-1] if selected_indices else -1,
             },
-            "sequence_analysis": {
-                "object_chain_indices": [rec.index for rec in chain],
-                "meaningful_chain_indices": [rec.index for rec in meaningful_chain],
-                "clarification_indices_skipped": [rec.index for rec in chain if rec.clarification_answer],
-                "anchor_index": anchor_index,
-                "chain_length": len(chain),
-                "continuation_survives_clarification": bool(direction in {"EXTEND_PREVIOUS_RESULT", "EXTEND_WITH_EXCLUSIONS"} and anchor_rec is not None),
-                "constraint_propagation": bool(repetition_constraint or direction in {"EXTEND_PREVIOUS_RESULT", "EXTEND_WITH_EXCLUSIONS"}),
-                "test_sequence_start_index": test_start_index,
-                "test_sequence_indices": selected_indices if flags.get("audit") else [],
+            "semantic_contract": {
+                "pair_source": "STATE_MANAGER_AUTHENTICATED_12H_USER_APRIL_PAIRS",
+                "decision_owner": "PAIR_DIALOGUE_DIRECTION_ENGINE",
+                "single_relation": True,
+                "provider_ready_only_after_relation": True,
+                "no_fallback": True,
             },
-            "current_request": current,
-            "source": "AUTHENTICATED_12H_USER_APRIL_PAIRS",
-            "evidence_only": True,
         }
 
 
 PAIR_DIALOGUE_DIRECTION_ENGINE = PairDialogueDirectionEngine()
-
-PAIR_DIALOGUE_DIRECTION_ENGINE = PairDialogueDirectionEngine()
-
 
 
 # ---------------------------------------------------------------------------
@@ -624,7 +624,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v18_12h_live_dialogue_v8_three_state_pair_engine_embedded"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v18_12h_live_dialogue_v7_three_state_locked"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
