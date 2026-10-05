@@ -6140,6 +6140,11 @@ def _live_relation_selector(
     )
     legacy_history_lookup = _live_history_query(current, memory_score)
     pair_direction = str(pair_reasoning.get("direction") or "") if isinstance(pair_reasoning, dict) else ""
+    pair_new_task = bool(
+        isinstance(pair_reasoning, dict)
+        and isinstance(pair_reasoning.get("requested_action"), dict)
+        and pair_reasoning.get("requested_action", {}).get("new_task")
+    )
     # A phrase such as "я спрашивал про имя" can contain the word "спрашивал"
     # without being a memory-reconstruction request. The pair-local direction
     # engine wins over that broad lexical history signal whenever it has a clear
@@ -6209,7 +6214,8 @@ def _live_relation_selector(
     # small, but the semantic dialogue act plus a real authenticated pair window
     # is sufficient to keep the request on the same trajectory.
     implicit_pair_continuation = bool(
-        bool(best_row)
+        not pair_new_task
+        and bool(best_row)
         and contextual_discovery_signal >= 0.16
         and request_specificity < 0.24
     )
@@ -6223,7 +6229,8 @@ def _live_relation_selector(
         if isinstance(x, int) or str(x).lstrip("-").isdigit()
     ] if isinstance(pair_reasoning, dict) else []
     semantic_followup = bool(
-        bool(best_row)
+        not pair_new_task
+        and bool(best_row)
         and (
             current_reference
             or elliptical_followup and best_score >= 0.08
@@ -6237,7 +6244,14 @@ def _live_relation_selector(
     # Only two production relations exist: CONTINUE and NEW. HISTORY_LOOKUP is a
     # NEW task with history as background. Crucially, this decision happens only
     # after the authenticated pair window has been matched.
-    if history_lookup:
+    if pair_new_task:
+        relation = "NEW"
+        selected_index = -1
+        selected_pair = {}
+        context_pairs = []
+        context_mode = "NEW_TOPIC_ISOLATED"
+        reference_resolution = {}
+    elif history_lookup:
         relation = "NEW"
         selected_index = -1
         selected_pair = {}
