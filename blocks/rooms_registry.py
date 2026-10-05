@@ -2171,11 +2171,10 @@ def _provider_markdown_graph_block(provider_response: Optional[MachineResponse])
 
 
 def _provider_structured_block(provider_response: Optional[MachineResponse], kind: str) -> dict[str, Any]:
-    """Return the provider block already carrying the requested structure.
+    """Return an already-structured provider block.
 
-    The Room Register never decides what the user meant. It only preserves
-    structured provider blocks that match the representation authorized by
-    Interpretation. Text-only diagram output is not converted into a diagram block.
+    Plain ASCII drawings are not a canonical representation and are never
+    promoted into a SceneContract block.
     """
     if provider_response is None:
         return {}
@@ -2183,19 +2182,16 @@ def _provider_structured_block(provider_response: Optional[MachineResponse], kin
     for raw in list(getattr(provider_response, "render_blocks", []) or []):
         if not isinstance(raw, dict):
             continue
-        raw_kind = str(
-            raw.get("type") or raw.get("artifact_type") or raw.get("representation") or ""
-        ).strip().lower()
+        raw_kind = str(raw.get("type") or raw.get("artifact_type") or raw.get("representation") or "").strip().lower()
+        payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+        if raw_kind in {"ascii", "ascii_schematic", "text_ascii"} or payload.get("ascii") or payload.get("ascii_preview"):
+            continue
         if raw_kind == wanted:
             return dict(raw)
-
     if wanted == "graph":
         graph_block = _provider_markdown_graph_block(provider_response)
-        if graph_block:
-            return graph_block
-
+        return graph_block or {}
     return {}
-
 
 def _registry_artifact_render_blocks(response: MachineResponse) -> list[dict[str, Any]]:
     """Project every BaseArtifact returned by a room into SceneContract blocks."""
@@ -2668,3 +2664,23 @@ def registry_validate_response(response: MachineResponse):
 
     registry_trace("validation_complete", **diagnostics)
     return response
+
+
+# Canonical presentation guard: provider ASCII can never become a render block.
+_ORIGINAL_ROUTE_MACHINE_REQUEST = route_machine_request
+
+async def route_machine_request(*args, **kwargs):
+    result = await _ORIGINAL_ROUTE_MACHINE_REQUEST(*args, **kwargs)
+    try:
+        blocks = [dict(b) for b in (getattr(result, "render_blocks", []) or []) if isinstance(b, dict)]
+        cleaned=[]
+        for b in blocks:
+            kind=str(b.get("type") or b.get("artifact_type") or b.get("representation") or "").lower()
+            payload=b.get("payload") if isinstance(b.get("payload"),dict) else {}
+            if kind in {"ascii","ascii_schematic","text_ascii"} or payload.get("ascii") or payload.get("ascii_preview"):
+                continue
+            cleaned.append(b)
+        result.render_blocks=cleaned
+    except Exception:
+        pass
+    return result
