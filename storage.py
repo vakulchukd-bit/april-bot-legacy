@@ -32,7 +32,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import Json, RealDictCursor
 from rapidfuzz import fuzz
 
 from blocks.tariffs_config import (
@@ -74,7 +74,7 @@ _USERS_COLUMNS = (
 _ALLOWED_TABLE_COLUMNS = {
     "users": set(_USERS_COLUMNS),
     "payments": {"id", "user_id", "plan", "amount", "created_at"},
-    "dialogue_memory": {"id", "user_id", "created_at", "turn_index", "user_text", "april_text", "pair_hash"},
+    "dialogue_memory": {"id", "user_id", "created_at", "turn_index", "user_text", "april_text", "pair_hash", "structured_response"},
 }
 
 
@@ -270,6 +270,7 @@ def init_db() -> None:
                         turn_index INTEGER NOT NULL,
                         user_text TEXT NOT NULL,
                         april_text TEXT NOT NULL,
+                        structured_response JSONB,
                         pair_hash TEXT NOT NULL UNIQUE
                     )
                     """
@@ -280,6 +281,7 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS turn_index INTEGER DEFAULT 0")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS user_text TEXT")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS april_text TEXT")
+                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS structured_response JSONB")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS pair_hash TEXT")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_memory_user_created ON dialogue_memory(user_id, created_at DESC)")
 
@@ -411,6 +413,7 @@ def save_dialogue_pair(
     *,
     created_at: float | int | datetime | None = None,
     turn_index: int = 0,
+    structured_response: dict[str, Any] | None = None,
 ) -> bool:
     """Persist one authenticated USER↔APRIL pair and nothing else."""
     uid = str(user_id)
@@ -447,11 +450,11 @@ def save_dialogue_pair(
                 cur.execute(
                     """
                     INSERT INTO dialogue_memory
-                        (user_id, created_at, turn_index, user_text, april_text, pair_hash)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                        (user_id, created_at, turn_index, user_text, april_text, structured_response, pair_hash)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (pair_hash) DO NOTHING
                     """,
-                    (uid, dt, int(turn_index or 0), user_value, april_value, pair_hash),
+                    (uid, dt, int(turn_index or 0), user_value, april_value, Json(structured_response) if isinstance(structured_response, dict) else None, pair_hash),
                 )
                 return True
     except psycopg2.errors.UndefinedTable:
@@ -475,7 +478,7 @@ def load_dialogue_pairs(user_id: Any, *, limit: int = 0, timestamp: float | int 
                     return []
                 cur.execute(
                     """
-                    SELECT id, user_id, created_at, turn_index, user_text, april_text
+                    SELECT id, user_id, created_at, turn_index, user_text, april_text, structured_response
                     FROM dialogue_memory
                     WHERE user_id = %s
                       AND created_at >= %s
