@@ -32,7 +32,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import psycopg2
-from psycopg2.extras import Json, RealDictCursor
+from psycopg2.extras import RealDictCursor
 from rapidfuzz import fuzz
 
 from blocks.tariffs_config import (
@@ -74,7 +74,7 @@ _USERS_COLUMNS = (
 _ALLOWED_TABLE_COLUMNS = {
     "users": set(_USERS_COLUMNS),
     "payments": {"id", "user_id", "plan", "amount", "created_at"},
-    "dialogue_memory": {"id", "user_id", "created_at", "turn_index", "user_text", "april_text", "pair_hash", "structured_response"},
+    "dialogue_memory": {"id", "user_id", "created_at", "turn_index", "user_text", "april_text", "pair_hash"},
 }
 
 
@@ -153,27 +153,6 @@ def _is_authenticated_row(row: Any) -> bool:
     )
 
 
-def _canonical_user_id(cur, user_id: Any) -> str | None:
-    """Resolve either the DB user_id or the public April ID to DB user_id.
-
-    The Web client identifies an authenticated user by ``april_id``. Older
-    installations may have a different internal ``users.user_id``. Dialogue
-    memory has a foreign key to ``users.user_id``, so every persistent-memory
-    query must normalize the identifier before touching ``dialogue_memory``.
-    """
-    value = str(user_id or "").strip()
-    if not value:
-        return None
-    cur.execute(
-        "SELECT user_id, april_id, email, provider FROM users WHERE user_id = %s OR april_id = %s LIMIT 1",
-        (value, value),
-    )
-    row = cur.fetchone()
-    if not _is_authenticated_row(row):
-        return None
-    return str(row.get("user_id") or "").strip()
-
-
 def is_authenticated_user(user_id: Any) -> bool:
     """Only a registered auth-backed row may own persistent dialogue memory."""
     conn = get_conn()
@@ -183,7 +162,15 @@ def is_authenticated_user(user_id: Any) -> bool:
     try:
         with conn:
             with conn.cursor() as cur:
-                return _canonical_user_id(cur, uid) is not None
+                cur.execute(
+                    """
+                    SELECT user_id, email, provider
+                    FROM users
+                    WHERE user_id = %s
+                    """,
+                    (uid,),
+                )
+                return _is_authenticated_row(cur.fetchone())
     except Exception:
         return False
     finally:
@@ -270,7 +257,6 @@ def init_db() -> None:
                         turn_index INTEGER NOT NULL,
                         user_text TEXT NOT NULL,
                         april_text TEXT NOT NULL,
-                        structured_response JSONB,
                         pair_hash TEXT NOT NULL UNIQUE
                     )
                     """
@@ -281,7 +267,6 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS turn_index INTEGER DEFAULT 0")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS user_text TEXT")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS april_text TEXT")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS structured_response JSONB")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS pair_hash TEXT")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_memory_user_created ON dialogue_memory(user_id, created_at DESC)")
 
@@ -382,8 +367,8 @@ def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | i
                 if user_id is None:
                     cur.execute("DELETE FROM dialogue_memory WHERE created_at < %s", (cutoff,))
                 else:
-                    uid = _canonical_user_id(cur, user_id)
-                    if not uid:
+                    uid = str(user_id)
+                    if not _is_authenticated_cursor(cur, uid):
                         return 0
                     cur.execute(
                         "DELETE FROM dialogue_memory WHERE user_id = %s AND created_at < %s",
@@ -397,8 +382,11 @@ def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | i
 
 
 def _is_authenticated_cursor(cur, uid: str) -> bool:
-    """Compatibility helper using the same user_id/April-ID normalization."""
-    return _canonical_user_id(cur, uid) is not None
+    cur.execute(
+        "SELECT user_id, email, provider FROM users WHERE user_id = %s",
+        (uid,),
+    )
+    return _is_authenticated_row(cur.fetchone())
 
 
 def _pair_hash(uid: str, created_ts: float, turn_index: int, user_text: str, april_text: str) -> str:
@@ -413,7 +401,6 @@ def save_dialogue_pair(
     *,
     created_at: float | int | datetime | None = None,
     turn_index: int = 0,
-    structured_response: dict[str, Any] | None = None,
 ) -> bool:
     """Persist one authenticated USER↔APRIL pair and nothing else."""
     uid = str(user_id)
@@ -437,8 +424,7 @@ def save_dialogue_pair(
     try:
         with conn:
             with conn.cursor() as cur:
-                uid = _canonical_user_id(cur, uid)
-                if not uid:
+                if not _is_authenticated_cursor(cur, uid):
                     return False
                 # Clean before insert so the database never accumulates stale memory.
                 seed_start, _ = dialogue_window_bounds(dt)
@@ -450,11 +436,11 @@ def save_dialogue_pair(
                 cur.execute(
                     """
                     INSERT INTO dialogue_memory
-                        (user_id, created_at, turn_index, user_text, april_text, structured_response, pair_hash)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        (user_id, created_at, turn_index, user_text, april_text, pair_hash)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (pair_hash) DO NOTHING
                     """,
-                    (uid, dt, int(turn_index or 0), user_value, april_value, Json(structured_response) if isinstance(structured_response, dict) else None, pair_hash),
+                    (uid, dt, int(turn_index or 0), user_value, april_value, pair_hash),
                 )
                 return True
     except psycopg2.errors.UndefinedTable:
@@ -473,12 +459,11 @@ def load_dialogue_pairs(user_id: Any, *, limit: int = 0, timestamp: float | int 
     try:
         with conn:
             with conn.cursor() as cur:
-                uid = _canonical_user_id(cur, uid)
-                if not uid:
+                if not _is_authenticated_cursor(cur, uid):
                     return []
                 cur.execute(
                     """
-                    SELECT id, user_id, created_at, turn_index, user_text, april_text, structured_response
+                    SELECT id, user_id, created_at, turn_index, user_text, april_text
                     FROM dialogue_memory
                     WHERE user_id = %s
                       AND created_at >= %s
