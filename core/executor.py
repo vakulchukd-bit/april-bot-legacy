@@ -6098,6 +6098,47 @@ class ProcessorScene:
             and bool(intent.get("render_authorized"))
         )
 
+        # A visual artifact created earlier in the same authenticated 12-hour
+        # dialogue is a real dialogue operand, not merely UI state. Keep its
+        # renderer-neutral attachment alongside the semantic pair trajectory so
+        # a follow-up such as "какими цветами он разукрашен" can reach the same
+        # Provider/OpenAI route with the exact image.
+        visual_reference_context = {}
+        if relation == "CONTINUE" and isinstance(dialogue_memory.get("visual_reference"), dict):
+            visual_reference_context = _compact(
+                {
+                    **dialogue_memory.get("visual_reference"),
+                    "mode": "DIALOGUE_VISUAL_REFERENCE",
+                    "dialogue_relation": relation,
+                    "authenticated_user_id": self.user_id,
+                    "sequence_id": _text(dialogue_memory.get("selected_sequence_id") or dialogue.get("sequence_id")),
+                },
+                max_depth=5,
+                max_items=20,
+            )
+
+        # The visual reference is an operand selected from the authenticated
+        # pair memory. Keep only compact metadata in the textual provider plan;
+        # the actual image bytes/URL are attached separately by Provider in the
+        # same OpenAI request.
+        if visual_reference_context and isinstance(provider_context_plan, dict):
+            required = provider_context_plan.setdefault("required_context", [])
+            if not any(
+                isinstance(item, dict) and _text(item.get("key")).upper() == "VISUAL_REFERENCE"
+                for item in required
+            ):
+                required.append({
+                    "key": "VISUAL_REFERENCE",
+                    "priority": 0.995,
+                    "value": {
+                        "mode": "inspect_attached_visual_operand",
+                        "scene_id": visual_reference_context.get("scene_id"),
+                        "artifact_id": visual_reference_context.get("artifact_id"),
+                        "source_turn": visual_reference_context.get("source_turn"),
+                        "description": visual_reference_context.get("description") or "",
+                    },
+                })
+
         # The active visual scene is the canonical fallback operand when
         # Interpretation identified an artifact continuation but did not attach
         # a separate target_artifact object.  This keeps the operand inside the
@@ -6231,6 +6272,7 @@ class ProcessorScene:
             "interpretation_relation_audit": interpretation_relation_audit,
             "current_user_request": self.request,
             "visual_generation_request": visual_generation_request,
+            "visual_reference_context": visual_reference_context,
             "semantic_request": _text(
                 semantic_result.get("semantic_request")
                 or _as_dict(semantic_result.get("semantic_understanding")).get("provider", {}).get("semantic_request")
@@ -6283,6 +6325,9 @@ class ProcessorScene:
             "active_sequence_turn_count": int(
                 dialogue_memory.get("active_sequence_turn_count", 0) or 0
             ),
+            "authenticated_dialogue_pair_count": len(
+                dialogue_memory.get("dialogue_pairs") or dialogue_memory.get("active_sequence_turns") or []
+            ),
             "dialogue_window_memory": _compact(
                 dialogue_memory if relation in {"CONTINUE", "RECALL"} and not artifact_context_only else {
                     "window_hours": 12,
@@ -6328,6 +6373,12 @@ class ProcessorScene:
             "active_sequence_turn_count": int(
                 dialogue_memory.get("active_sequence_turn_count", 0) or 0
             ),
+            "authenticated_pair_trajectory": _compact(
+                dialogue_memory.get("dialogue_pairs") or [],
+                max_depth=3,
+                max_items=5,
+            ) if relation in {"CONTINUE", "RECALL"} else [],
+            "visual_reference_context": visual_reference_context,
             "task_memory": _compact(dialogue.get("task_memory") or {}),
             "task_relation": _compact(dialogue.get("task_relation") or {}),
             "task_transition": _compact(dialogue.get("task_transition") or {}),
@@ -6360,6 +6411,7 @@ class ProcessorScene:
             "resolved_reference": _compact(dialogue.get("resolved_reference")),
             "selected_memory_index": dialogue.get("selected_memory_index", -1),
             "selected_memory_operand": _compact(dialogue.get("selected_memory_operand") or {}),
+            "visual_reference_context": visual_reference_context,
             "trajectory": _compact(dialogue.get("trajectory") or {}),
             "selected_artifact": _compact(selected_artifact, max_depth=5, max_items=6) if artifact_context_only else {},
             "active_dialogue_sequence": _compact(
@@ -6419,6 +6471,7 @@ class ProcessorScene:
             "pending_task": _compact(pending_task) if pending_task else {},
             "last_artifact_type": _state_artifact_type(self.state) if relation == "CONTINUE" and render_mode == "ARTIFACT_CONTINUATION" else "",
             "selected_artifact": _compact(selected_artifact, max_depth=5, max_items=6) if artifact_context_only else {},
+            "visual_reference_context": visual_reference_context,
             "dialogue_sequence": _compact(
                 dialogue_memory.get("active_sequence") or {}
             ) if relation in {"CONTINUE", "RECALL"} and not artifact_context_only else {},
@@ -6499,7 +6552,14 @@ class ProcessorScene:
                 "conversation_id": dialogue_memory.get("conversation_id"),
             },
             memory=memory_packet,
-            visual_context=artifact_visual_context,
+            visual_context=(
+                visual_reference_context
+                if visual_reference_context and not artifact_visual_context
+                else {
+                    **(visual_reference_context or {}),
+                    **(artifact_visual_context or {}),
+                }
+            ),
             requested_outputs=requested_outputs,
             required_artifacts=required_artifacts,
             required_competencies=[intent["operation"], representation],
