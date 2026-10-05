@@ -66,7 +66,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v16_12h_pair_dialogue_visual_v3"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v17_12h_live_dialogue_v4"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
@@ -5667,4 +5667,536 @@ def _pair_canonical_interpret(self, text, cognition=None, semantic=None, history
     ]
     return result
 
-QuantumInterpretationEngine.interpret=_pair_canonical_interpret
+
+# ============================================================================
+# FINAL LIVE DIALOGUE OVERRIDE — 2026-10-05
+# ============================================================================
+# Production relation model is deliberately two-state:
+#   CONTINUE = continue the active conversational task/thread
+#   NEW      = new task/topic execution
+# Context is a second axis and may be carried into NEW without turning the new
+# task into the old one. There is no RECALL dialogue relation anymore.
+
+LIVE_DIALOGUE_ENGINE_VERSION = "live_pair_context_v4"
+_LIVE_SUBJECT_STOP = {
+    "что", "это", "такое", "такой", "такая", "такие", "кто", "как", "почему", "зачем",
+    "а", "и", "но", "же", "в", "во", "на", "с", "со", "у", "из", "по", "для", "про", "о", "об",
+    "расскажи", "рассказать", "объясни", "объяснить", "скажи", "сделай", "сделать", "дай", "покажи",
+    "нарисуй", "создай", "создать", "построй", "построить", "проверь", "найди", "напиши", "укажи",
+    "назови", "опиши", "рассчитай", "посчитай", "вычисли", "определи", "изобрази", "покажите",
+    "годы", "год", "деятельности", "деятельность", "биография", "история", "описание", "рисунок",
+    "картинка", "картинке", "изображение", "выглядит", "выглядел", "выглядела", "занимался", "занималась",
+    "плохим", "плохое", "плохая", "плохой", "чем", "какой", "какая", "какие", "где", "когда", "зачем",
+}
+_LIVE_REFERENCE_WORDS = {
+    "он", "она", "они", "его", "ее", "её", "их", "ему", "ей", "им", "ним", "него", "неё", "ее", "нем", "нём",
+    "этом", "этот", "эта", "это", "эти", "тот", "та", "то", "те", "того", "ту", "тем", "таким", "такую", "такое",
+}
+_LIVE_HISTORY_WORDS = {
+    "вспомни", "вспомнить", "помнишь", "помни", "говорили", "обсуждали", "спрашивал", "спрашивали",
+    "раньше", "прежде", "предыдущем", "предыдущий", "истории", "контексте", "диалоге", "сообщениях",
+    "после", "до", "назад",
+}
+
+
+def _live_token_affinity(left: str, right: str) -> float:
+    a = set(QuantumInterpretationEngine._tokens(left)) - _LIVE_SUBJECT_STOP
+    b = set(QuantumInterpretationEngine._tokens(right)) - _LIVE_SUBJECT_STOP
+    a = {x for x in a if len(x) >= 3}
+    b = {x for x in b if len(x) >= 3}
+    if not a or not b:
+        return 0.0
+    exact = len(a & b) / max(1, len(a | b))
+    morph = 0.0
+    used = set()
+    for x in a:
+        for y in b:
+            if y in used:
+                continue
+            if x == y:
+                morph += 1.0
+                used.add(y)
+                break
+            common = 0
+            for ca, cb in zip(x, y):
+                if ca != cb:
+                    break
+                common += 1
+            if common >= 4 and common / max(len(x), len(y)) >= 0.55:
+                morph += 0.5
+                used.add(y)
+                break
+    morph = min(1.0, morph / max(1, min(len(a), len(b))))
+    return max(exact, 0.72 * exact + 0.28 * morph)
+
+
+def _live_extract_subject(text: str) -> str:
+    source = QuantumInterpretationEngine.normalize(text)
+    if not source:
+        return ""
+    low = source.lower()
+    patterns = (
+        r"(?:что\s+такое|что\s+это|кто\s+такой|кто\s+такая|кто\s+это)\s+(.+)$",
+        r"(?:годы\s+деятельности|биография|история|расскажи\s+(?:о|об|про))\s+(.+)$",
+        r"(?:о|об|про)\s+(.+)$",
+    )
+    candidate = ""
+    for pattern in patterns:
+        m = re.search(pattern, low, flags=re.I)
+        if m:
+            candidate = m.group(1).strip(" .,!?:;\"'«»()[]{}")
+            break
+    if not candidate:
+        candidate = low
+    tokens = re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", candidate.lower())
+    meaningful = [t for t in tokens if len(t) >= 3 and t not in _LIVE_SUBJECT_STOP]
+    if not meaningful:
+        return ""
+    # Prefer the last 1–4 meaningful words. This preserves short multi-word names
+    # while avoiding command/question scaffolding.
+    return " ".join(meaningful[-4:])[:220]
+
+
+def _live_pair_subject(pair: dict[str, Any]) -> str:
+    if not isinstance(pair, dict):
+        return ""
+    for key in ("active_entity", "resolved_entity", "topic", "canonical_topic"):
+        value = str(pair.get(key) or "").strip()
+        if value and value.lower() not in _LIVE_SUBJECT_STOP:
+            subject = _live_extract_subject(value)
+            if subject:
+                return subject
+            if len(value.split()) <= 4:
+                return value[:220]
+    user = str(pair.get("user") or pair.get("user_text") or pair.get("user_request") or "")
+    subject = _live_extract_subject(user)
+    if subject:
+        return subject
+    april = str(pair.get("april") or pair.get("assistant") or pair.get("april_answer") or "")
+    tokens = [x for x in re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", april.lower()) if len(x) >= 4 and x not in _LIVE_SUBJECT_STOP]
+    return tokens[0][:220] if tokens else ""
+
+
+def _live_history_query(current: str, memory_score: float) -> bool:
+    low = current.lower()
+    word_hits = len(set(re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", low)) & _LIVE_HISTORY_WORDS)
+    # Semantic score is used only to recognize that the user is talking about
+    # history; it does not create a third dialogue relation.
+    return bool(word_hits >= 1 and memory_score >= 0.12)
+
+
+def _live_reference_present(current: str) -> bool:
+    tokens = set(re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", current.lower()))
+    # "такое/это" in forms like "что такое X" / "что это X" are question
+    # scaffolding, not antecedent references. Strong personal/object pronouns
+    # remain true references; demonstratives count when used outside these forms.
+    strong = tokens & {
+        "он", "она", "они", "его", "ее", "её", "их", "ему", "ей", "им",
+        "ним", "него", "неё", "нем", "нём",
+    }
+    if strong:
+        return True
+    low = str(current or "").strip().lower()
+    if re.search(r"\bчто\s+(?:такое|это)\b", low):
+        return False
+    return bool(tokens & {"это", "этом", "этот", "эта", "эти", "тот", "та", "то", "те", "того", "ту", "тем", "таким", "такую", "такое"})
+
+
+def _live_subject_from_pair_window(current: str, pairs: list[dict[str, Any]]):
+    latest = pairs[-1] if pairs else {}
+    latest_subject = _live_pair_subject(latest)
+    current_subject = _live_extract_subject(current)
+    ref_present = _live_reference_present(current)
+
+    # A bare/elliptical current request with a reference word inherits the last
+    # subject from the authenticated pair window. This is the actual antecedent
+    # resolution required for phrases like "Нарисуй его...".
+    if ref_present and latest_subject:
+        return latest_subject, True
+    return current_subject, False
+
+
+def _live_relation_selector(
+    self,
+    current: str,
+    recent_pairs: list[dict[str, str]],
+    *,
+    active_topic: str = "",
+    previous_assistant: str = "",
+    previous_user: str = "",
+) -> dict[str, Any]:
+    current = self.normalize(current)
+    pairs = [p for p in (recent_pairs or []) if isinstance(p, dict)]
+    if not current or not pairs:
+        return {
+            "relation": "NEW", "confidence": 0.98, "selected_index": -1,
+            "selected_pair": {}, "context_pairs": [], "memory_window": pairs[-15:],
+            "context_mode": "NEW_TOPIC_ISOLATED", "context_anchor_index": -1,
+            "history_lookup": False, "reference_to_previous": False,
+            "reference_resolution": {}, "topic_relation": "NEW_TOPIC",
+            "source": LIVE_DIALOGUE_ENGINE_VERSION,
+        }
+
+    scores = self._family_scores(current, "dialogue", SEMANTIC_TURN_PROTOTYPES)
+    memory_score = float(scores.get("memory_query", 0.0) or 0.0)
+    history_lookup = _live_history_query(current, memory_score)
+    continuation_score = max(
+        float(scores.get(k, 0.0) or 0.0)
+        for k in ("continuation", "reformulation", "correction", "reference", "artifact_reference", "affirmation", "rejection")
+    )
+
+    window = pairs[-15:]
+    scored = []
+    for i, pair in enumerate(window):
+        user = self.normalize(pair.get("user") or pair.get("user_text") or pair.get("user_request"))
+        april = self.normalize(pair.get("april") or pair.get("april_text") or pair.get("april_answer") or pair.get("assistant") or pair.get("answer"))
+        if not user and not april:
+            continue
+        combined = f"{user} {april}".strip()
+        semantic_user = float(self.similarity(current, user).get("score", 0.0) or 0.0) if user else 0.0
+        semantic_pair = float(self.similarity(current, combined).get("score", 0.0) or 0.0) if combined else 0.0
+        lexical_user = _live_token_affinity(current, user)
+        lexical_pair = _live_token_affinity(current, combined)
+        subject = _live_pair_subject(pair)
+        subject_score = _live_token_affinity(_live_extract_subject(current), subject) if _live_extract_subject(current) and subject else 0.0
+        recency = 1.0 / (1.0 + 0.12 * (len(window) - 1 - i))
+        score = (
+            0.44 * semantic_pair
+            + 0.20 * semantic_user
+            + 0.18 * lexical_pair
+            + 0.10 * lexical_user
+            + 0.06 * subject_score
+            + 0.02 * recency
+        )
+        scored.append({
+            "index": i, "score": max(0.0, min(1.0, score)),
+            "semantic_pair": semantic_pair, "semantic_user": semantic_user,
+            "lexical_pair": lexical_pair, "lexical_user": lexical_user,
+            "subject_score": subject_score, "recency": recency,
+            "subject": subject, "pair": pair,
+        })
+
+    scored.sort(key=lambda x: (x["score"], x["index"]), reverse=True)
+    latest_index = len(window) - 1
+    latest_row = next((x for x in scored if x["index"] == latest_index), None)
+    best_row = scored[0] if scored else None
+    best_score = float(best_row.get("score", 0.0) if best_row else 0.0)
+    latest_score = float(latest_row.get("score", 0.0) if latest_row else 0.0)
+
+    current_subject, resolved_by_reference = _live_subject_from_pair_window(current, pairs)
+    latest_subject = _live_pair_subject(window[-1]) if window else ""
+    same_subject = bool(
+        current_subject and latest_subject and
+        _live_token_affinity(current_subject, latest_subject) >= 0.34
+    )
+    pronoun_followup = bool(resolved_by_reference and latest_subject)
+    subjectless_followup = bool(
+        not current_subject and
+        (continuation_score >= 0.12 or _live_reference_present(current))
+    )
+
+    # CONTINUE means the current turn belongs to the live task/thread. A self-
+    # contained new subject remains NEW even when it is semantically adjacent.
+    if pronoun_followup or same_subject or subjectless_followup:
+        relation = "CONTINUE"
+        selected_index = latest_index if pronoun_followup or same_subject else int(best_row["index"] if best_row else latest_index)
+        selected_pair = dict(next((x["pair"] for x in scored if x["index"] == selected_index), window[-1]))
+        context_pairs = window[-3:]
+        context_mode = "LIVE_CONTINUATION"
+        reference_resolution = {
+            "resolved": True,
+            "source": "AUTHENTICATED_12H_PAIR",
+            "entity": latest_subject,
+            "current_subject": current_subject,
+        } if pronoun_followup else {}
+    elif history_lookup:
+        relation = "NEW"
+        selected_index = int(best_row["index"] if best_row else -1)
+        selected_pair = dict(best_row["pair"] if best_row else {})
+        context_pairs = window[-8:]
+        context_mode = "HISTORY_LOOKUP"
+        reference_resolution = {}
+    else:
+        relation = "NEW"
+        selected_index = -1
+        selected_pair = {}
+        # A new task may still be semantically close to the live dialogue. Carry
+        # the recent pair context as background, but explicitly mark it as
+        # background-only so the Provider cannot continue the previous task.
+        related = bool(best_row and best_score >= 0.24)
+        context_pairs = window[-3:] if related else []
+        context_mode = "NEW_TOPIC_WITH_CONTEXT" if related else "NEW_TOPIC_ISOLATED"
+        reference_resolution = {}
+
+    confidence = 0.97 if relation == "CONTINUE" and pronoun_followup else max(0.62, min(0.98, best_score if relation == "CONTINUE" else 1.0 - min(best_score, 0.35)))
+    topic_relation = "CONTINUE_TOPIC" if relation == "CONTINUE" else ("RELATED_NEW_TOPIC" if context_mode == "NEW_TOPIC_WITH_CONTEXT" else "NEW_TOPIC")
+    return {
+        "relation": relation,
+        "confidence": round(float(confidence), 6),
+        "selected_index": selected_index,
+        "selected_pair": selected_pair,
+        "context_pairs": [dict(x) for x in context_pairs],
+        "memory_window": [dict(x) for x in window],
+        "context_mode": context_mode,
+        "context_anchor_index": int(best_row["index"] if best_row else -1),
+        "history_lookup": history_lookup,
+        "reference_to_previous": bool(relation == "CONTINUE" and selected_index >= 0),
+        "reference_resolution": reference_resolution,
+        "current_subject": current_subject,
+        "latest_subject": latest_subject,
+        "latest_score": round(latest_score, 6),
+        "best_score": round(best_score, 6),
+        "continuation_evidence": round(float(continuation_score), 6),
+        "memory_query_score": round(memory_score, 6),
+        "topic_relation": topic_relation,
+        "source": LIVE_DIALOGUE_ENGINE_VERSION,
+        "entity_engine": False,
+        "intent_engine": False,
+    }
+
+
+# Replace only the canonical selector used by the existing engine. The old
+# implementation stays import-compatible but cannot own the production decision.
+QuantumInterpretationEngine._select_three_way_dialogue_relation = _live_relation_selector
+
+_PAIR_INTERPRET_ORIGINAL_LIVE = _PAIR_INTERPRET_ORIGINAL
+
+
+def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, history=None, state=None):
+    state_obj = state if isinstance(state, dict) else {}
+    pairs = _pair_window_from_state(state_obj, history=history, limit=15)
+    result = _PAIR_INTERPRET_ORIGINAL_LIVE(
+        self, text, cognition=cognition, semantic=semantic, history=history, state=state_obj
+    )
+    if not isinstance(result, dict):
+        raise RuntimeError("INTERPRETATION_RETURNED_NO_PACKET")
+
+    current = self.normalize(text)
+    selected = self._select_three_way_dialogue_relation(current, pairs)
+    relation = str(selected.get("relation") or "NEW").upper()
+    if relation not in {"CONTINUE", "NEW"}:
+        relation = "NEW"
+    selected_pair = dict(selected.get("selected_pair") or {})
+    raw_selected_index = selected.get("selected_index", -1)
+    selected_index = int(raw_selected_index if raw_selected_index is not None else -1) if relation == "CONTINUE" else -1
+    context_pairs = [dict(x) for x in (selected.get("context_pairs") or [])]
+    context_mode = str(selected.get("context_mode") or ("LIVE_CONTINUATION" if relation == "CONTINUE" else "NEW_TOPIC_ISOLATED"))
+    reference_resolution = dict(selected.get("reference_resolution") or {})
+    resolved_reference_entity = str(reference_resolution.get("entity") or "").strip()
+    history_lookup = bool(selected.get("history_lookup"))
+
+    # Preserve the exact raw request. The resolved context is carried alongside it
+    # rather than mutating the user's sentence.
+    semantic_task = result.get("semantic_task") if isinstance(result.get("semantic_task"), dict) else {}
+    operation = str(semantic_task.get("operation") or result.get("operation") or "answer").lower()
+    if history_lookup:
+        operation = "history_lookup"
+        semantic_task["operation"] = operation
+        semantic_task["goal"] = "understand_dialogue_context"
+        result["operation"] = operation
+        result["goal"] = "understand_dialogue_context"
+        result["history_lookup"] = True
+        result["history_lookup_scope"] = "authenticated_12h_pairs"
+
+    # Keep the current task subject authoritative for NEW; for CONTINUE + pronoun
+    # resolution use the antecedent from the pair window.
+    current_subject = str(selected.get("current_subject") or "").strip()
+    canonical_topic = current_subject or (resolved_reference_entity if relation == "CONTINUE" else "")
+    if relation == "CONTINUE" and resolved_reference_entity:
+        result["resolved_reference_entity"] = resolved_reference_entity
+        result["reference_resolution"] = reference_resolution
+        result["resolved_request"] = current
+    elif history_lookup:
+        result["resolved_request"] = current
+    else:
+        result["resolved_request"] = current
+
+    result["semantic_task"] = semantic_task
+    result["three_way_relation"] = relation
+    result["two_way_relation"] = relation
+    result["relation"] = relation
+    result["dialogue_relation"] = relation
+    result["continuation"] = bool(relation == "CONTINUE")
+    result["reference_to_previous"] = bool(relation == "CONTINUE" and selected_index >= 0)
+    result["context_dependency"] = (
+        "continuation" if relation == "CONTINUE"
+        else "history_lookup" if history_lookup
+        else "new_with_context" if context_mode == "NEW_TOPIC_WITH_CONTEXT"
+        else "independent"
+    )
+    result["context_mode"] = context_mode
+    raw_context_anchor = selected.get("context_anchor_index", -1)
+    result["context_anchor_index"] = int(raw_context_anchor if raw_context_anchor is not None else -1)
+    result["selected_memory_index"] = selected_index
+    result["selected_memory_operand"] = selected_pair
+    result["selected_memory_record"] = selected_pair
+    result["dialogue_memory_window"] = [dict(x) for x in (selected.get("memory_window") or pairs[-15:])]
+    result["dialogue_context_pairs"] = context_pairs
+    result["dialogue_memory_source"] = "AUTHENTICATED_12H_USER_APRIL_PAIRS" if pairs else "NONE"
+    result["context_anchor_pair"] = selected_pair if selected_index >= 0 else (
+        dict(next((x for x in context_pairs if isinstance(x, dict)), {})) if context_pairs else {}
+    )
+    result["authenticated_dialogue_memory"] = {
+        "window_hours": 12,
+        "pair_count": len(result["dialogue_memory_window"]),
+        "pairs": result["dialogue_memory_window"],
+        "context_mode": context_mode,
+        "context_pairs": context_pairs,
+        "selected_context_pair_count": len(context_pairs),
+        "source": result["dialogue_memory_source"],
+        "authority": "INTERPRETATION",
+    }
+
+    if canonical_topic:
+        result["canonical_topic"] = canonical_topic[:220]
+        result["active_topic"] = canonical_topic[:220]
+    if resolved_reference_entity:
+        result["active_entity"] = resolved_reference_entity[:220]
+        result["resolved_entity"] = resolved_reference_entity[:220]
+    result["reference_entity"] = resolved_reference_entity
+
+    # Provider handoff: CONTINUE uses active dialogue context; NEW may carry recent
+    # background context, but the provider must execute the current task as NEW.
+    base_rep = str(
+        result.get("production_representation")
+        or semantic_task.get("representation")
+        or result.get("requested_representation")
+        or "text"
+    ).lower()
+    visual_request = str(
+        result.get("visual_generation_request")
+        or semantic_task.get("visual_generation_request")
+        or ""
+    ).strip()
+    result["representation"] = base_rep
+    result["requested_representation"] = base_rep
+    result["production_representation"] = base_rep
+    result["production_representation_locked"] = True
+    result["requested_outputs"] = [base_rep]
+    result["required_representations"] = [base_rep]
+    result["visual_generation_request"] = visual_request
+
+    provider_plan = {
+        "version": "april_provider_handoff_pair_12h_v3_live_context",
+        "relation": relation,
+        "context_mode": context_mode,
+        "current_user_request": current,
+        "resolved_request": current,
+        "resolved_reference_entity": resolved_reference_entity,
+        "current_request_authoritative": True,
+        "context_selection_done_before_provider": True,
+        "provider_must_not_reselect_context": True,
+        "hard_budget_tokens": 900,
+        "soft_target_tokens": 820,
+        "provider_continuation_contract": "PAIR_FIRST_12H_LIVE_V3",
+        "new_topic_minimal_context": context_mode == "NEW_TOPIC_ISOLATED",
+        "context_background_only": context_mode in {"NEW_TOPIC_WITH_CONTEXT", "HISTORY_LOOKUP"},
+        "history_lookup": history_lookup,
+        "required_context": [
+            {"key": "SEMANTIC_CORE", "priority": 1.0, "value": {
+                "topic": canonical_topic,
+                "operation": operation,
+                "representation": base_rep,
+                "turn_relation": relation,
+                "context_mode": context_mode,
+                "resolved_reference_entity": resolved_reference_entity,
+                "resolved_request": current,
+            }},
+            {"key": "OUTPUT_CONTRACT", "priority": 0.99, "value": {
+                "representation": base_rep,
+                "requested_outputs": [base_rep],
+                "visual_generation_request": visual_request,
+                "no_text_fallback_for_image": base_rep in {"image", "gallery"},
+                "ascii_allowed": False,
+            }},
+        ],
+        "optional_context": [],
+        "excluded_context": ["GLOBAL_TOPIC_INDEX", "ENTITY_INDEX", "LEGACY_INTENT_ENGINE", "UNBOUNDED_HISTORY", "RECALL_BRANCH_SWITCH"],
+    }
+    if context_mode != "NEW_TOPIC_ISOLATED" and context_pairs:
+        provider_plan["required_context"].append({
+            "key": "ACTIVE_DIALOGUE_TRAJECTORY" if relation == "CONTINUE" else "CONTEXT_BACKGROUND",
+            "priority": 0.998 if relation == "CONTINUE" else 0.93,
+            "value": {
+                "background_only": relation == "NEW",
+                "pairs": context_pairs,
+                "anchor_index": int((selected.get("context_anchor_index", -1) if selected.get("context_anchor_index", -1) is not None else -1)),
+                "history_lookup": history_lookup,
+            },
+        })
+    if relation == "CONTINUE" and selected_pair:
+        provider_plan["required_context"].append({
+            "key": "DIALOGUE_ANCHOR",
+            "priority": 0.997,
+            "value": {
+                "selected_memory_index": selected_index,
+                "selected_memory_operand": selected_pair,
+                "pair_window_hours": 12,
+                "reference_resolution": reference_resolution,
+                "history_source": "AUTHENTICATED_12H_USER_APRIL_PAIRS",
+            },
+        })
+    if history_lookup:
+        provider_plan["required_context"].append({
+            "key": "HISTORY_CONTEXT_CHECK",
+            "priority": 0.996,
+            "value": {
+                "mode": "HISTORY_LOOKUP",
+                "anchor_index": int((selected.get("context_anchor_index", -1) if selected.get("context_anchor_index", -1) is not None else -1)),
+                "pair_count": len(context_pairs),
+            },
+        })
+
+    result["provider_context_plan"] = provider_plan
+    result["provider_context_authority"] = "INTERPRETATION"
+    result["provider_must_not_reselect_context"] = True
+    result["dialogue_contract"] = {
+        **(result.get("dialogue_contract") if isinstance(result.get("dialogue_contract"), dict) else {}),
+        "version": "dialogue_pair_contract_v2_live_two_state",
+        "relation": relation,
+        "three_way_relation": relation,
+        "two_way_relation": relation,
+        "continuation": relation == "CONTINUE",
+        "reference_to_previous": relation == "CONTINUE" and selected_index >= 0,
+        "context_dependency": result["context_dependency"],
+        "context_mode": context_mode,
+        "context_pairs": context_pairs,
+        "selected_memory_index": selected_index,
+        "selected_memory_operand": selected_pair,
+        "resolved_reference_entity": resolved_reference_entity,
+        "history_lookup": history_lookup,
+        "canonical": True,
+        "entities": [],
+        "active_entity": resolved_reference_entity,
+        "resolved_entity": resolved_reference_entity,
+        "entity_understanding": {},
+    }
+    result["dialogue_vector"] = {
+        **(result.get("dialogue_vector") if isinstance(result.get("dialogue_vector"), dict) else {}),
+        "relation": relation,
+        "three_way_relation": relation,
+        "two_way_relation": relation,
+        "selected_memory_index": selected_index,
+        "selected_memory_operand": selected_pair,
+        "memory_window": result["dialogue_memory_window"],
+        "context_mode": context_mode,
+        "context_anchor_index": int((selected.get("context_anchor_index", -1) if selected.get("context_anchor_index", -1) is not None else -1)),
+        "selected_context_pairs": context_pairs,
+        "resolved_request": current,
+        "resolved_reference_entity": resolved_reference_entity,
+        "active_entity": resolved_reference_entity,
+        "canonical_topic": canonical_topic,
+        "history_lookup": history_lookup,
+        "trajectory": {
+            "window_hours": 12,
+            "pair_count": len(context_pairs),
+            "relation": relation,
+            "context_mode": context_mode,
+            "selected_context_pairs": context_pairs,
+        },
+    }
+    return result
+
+
+QuantumInterpretationEngine.interpret = _pair_canonical_interpret_live
+
