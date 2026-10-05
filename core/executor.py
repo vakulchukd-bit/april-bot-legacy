@@ -6956,9 +6956,19 @@ class ProcessorScene:
             # composite scene. Only reject an unplanned structured block.
             if kind not in expected and kind not in {"text", "markdown"}:
                 provider_plan = {str(x).lower() for x in (raw.get("scene_plan") or [])} if isinstance(raw.get("scene_plan"), list) else set()
+                conversation_plan = request.conversation.get("provider_scene_plan") if isinstance(request.conversation, dict) else []
+                if isinstance(conversation_plan, list):
+                    provider_plan.update(str(x).lower() for x in conversation_plan)
                 scene_plan = request.conversation.get("scene_blueprint") if isinstance(request.conversation.get("scene_blueprint"), dict) else {}
                 blueprint_reps = {str(x).lower() for x in (scene_plan.get("representations") or [])}
-                if kind not in provider_plan and kind not in blueprint_reps:
+                # A block carrying an authorized C-room identity has already
+                # crossed C-ARTIFACT and must never be dropped at SceneContract.
+                room_authorized = bool(
+                    raw.get("source_room")
+                    or raw.get("room_source")
+                    or raw.get("canonical_provider_payload") and raw.get("scene_contract")
+                )
+                if kind not in provider_plan and kind not in blueprint_reps and not room_authorized:
                     continue
 
             canonical_payload = canonical_payload_for_block(block)
@@ -7805,6 +7815,46 @@ async def _route_structured_outputs_through_room_registry(
     if representation and representation not in {"text", "markdown", "image", "gallery"} and representation not in requested:
         requested.insert(0, representation)
 
+    # The final Provider response is also part of the canonical scene plan.
+    # Route every structured representation that was actually emitted through
+    # the same C-ARTIFACT -> Room Register path before SceneContract.
+    for raw_block in list(getattr(response, "render_blocks", []) or []):
+        if not isinstance(raw_block, dict):
+            continue
+        kind = _text(
+            raw_block.get("type")
+            or raw_block.get("artifact_type")
+            or raw_block.get("representation")
+        ).lower()
+        if kind == "markdown":
+            kind = "text"
+        if kind and kind not in requested:
+            requested.append(kind)
+
+    for raw_artifact in list(getattr(response, "artifacts_payload", []) or []):
+        if not isinstance(raw_artifact, dict):
+            continue
+        kind = _text(
+            raw_artifact.get("type")
+            or raw_artifact.get("artifact_type")
+            or raw_artifact.get("kind")
+            or raw_artifact.get("representation")
+        ).lower()
+        if kind == "markdown":
+            kind = "text"
+        if kind and kind not in requested:
+            requested.append(kind)
+
+    provider_plan = list(
+        (getattr(request, "conversation", {}) or {}).get("provider_scene_plan") or []
+    ) if isinstance(getattr(request, "conversation", {}), dict) else []
+    for value in provider_plan:
+        kind = _text(value).lower()
+        if kind == "markdown":
+            kind = "text"
+        if kind and kind not in requested:
+            requested.append(kind)
+
     non_image = [
         kind for kind in requested
         if kind in {"formula", "graph", "table", "diagram", "code", "link"}
@@ -7915,6 +7965,51 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
         machine_preview,
         request.dialogue_contract if isinstance(request.dialogue_contract, dict) else {},
     )
+
+    # Provider may legally return a composite scene (for example text + table +
+    # graph + formula) even when Interpretation started from one primary
+    # representation. Extend the SAME MachineRequest output plan with the
+    # concrete structured types actually emitted by this provider turn. This is
+    # transport authorization only; it does not reinterpret user intent.
+    provider_scene_types: list[str] = []
+    raw_plan = machine_preview.get("scene_plan")
+    if isinstance(raw_plan, list):
+        provider_scene_types.extend(str(x or "").strip().lower() for x in raw_plan)
+    for raw_block in list(machine_preview.get("render_blocks") or []):
+        if isinstance(raw_block, dict):
+            kind = str(
+                raw_block.get("type")
+                or raw_block.get("artifact_type")
+                or raw_block.get("representation")
+                or ""
+            ).strip().lower()
+            if kind:
+                provider_scene_types.append(kind)
+    for raw_artifact in list(machine_preview.get("artifacts") or []):
+        if isinstance(raw_artifact, dict):
+            kind = str(
+                raw_artifact.get("type")
+                or raw_artifact.get("artifact_type")
+                or raw_artifact.get("kind")
+                or raw_artifact.get("representation")
+                or ""
+            ).strip().lower()
+            if kind:
+                provider_scene_types.append(kind)
+
+    output_plan = list(request.requested_outputs or [])
+    allowed_provider_types = {
+        "text", "markdown", "formula", "graph", "table", "diagram",
+        "code", "link", "gallery", "image",
+    }
+    for kind in provider_scene_types:
+        if kind == "markdown":
+            kind = "text"
+        if kind in allowed_provider_types and kind not in output_plan:
+            output_plan.append(kind)
+    request.requested_outputs = output_plan
+    if isinstance(request.conversation, dict):
+        request.conversation["provider_scene_plan"] = [x for x in output_plan if x != "text"]
     preview_response = MachineResponse(
         answer=_text(machine_preview.get("answer")),
         content=_text(machine_preview.get("content")),
