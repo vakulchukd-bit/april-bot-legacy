@@ -66,7 +66,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v17_12h_live_dialogue_v4"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v18_12h_live_dialogue_v5"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
@@ -2622,55 +2622,13 @@ class QuantumInterpretationEngine:
                 direct_rows.sort(key=lambda x: (float(x.get("created_at") or 0.0), int(x.get("turn_index") or 0)))
                 return direct_rows[-max(1, int(limit or 15)): ]
 
-        # The bridge is the canonical persistence boundary. This keeps the
-        # interpretation layer connected to the same 12h pair store that records
-        # the conversation after each completed turn.
+        # The durable pair store is the persistence boundary. Do not require a
+        # transient runtime snapshot or an ``authenticated`` flag on a bridge.
+        # This is the critical connection that was missing after HTTP turn reloads.
         if uid:
-            try:
-                from blocks.state_manager import build_dialogue_memory_bridge
-                bridge = build_dialogue_memory_bridge(
-                    uid,
-                    query="",
-                    limit=max(1, int(limit or 15)),
-                    relation="AUTO",
-                    target_sequence_id=str(
-                        (state.get("active_dialogue_sequence") or {}).get("sequence_id")
-                        if isinstance(state.get("active_dialogue_sequence"), dict)
-                        else ""
-                    ),
-                )
-                if isinstance(bridge, dict) and bridge.get("authenticated"):
-                    rows = bridge.get("dialogue_pairs") or bridge.get("active_sequence_turns") or bridge.get("relevant_window_turns")
-                    if isinstance(rows, list):
-                        out = []
-                        for raw in rows[-max(1, int(limit or 15)):]:
-                            if not isinstance(raw, dict):
-                                continue
-                            user = cls.normalize(raw.get("user") or raw.get("user_text") or raw.get("user_request"))
-                            april = cls.normalize(raw.get("april") or raw.get("april_text") or raw.get("april_answer") or raw.get("answer"))
-                            if not user or not april:
-                                continue
-                            try:
-                                turn_index = int(raw.get("turn") or raw.get("turn_index") or 0)
-                            except Exception:
-                                turn_index = 0
-                            try:
-                                created_at = float(raw.get("created_at") or 0.0)
-                            except Exception:
-                                created_at = 0.0
-                            out.append({
-                                "user": user[:1200],
-                                "april": april[:1800],
-                                "result": april[:1800],
-                                "turn_index": turn_index,
-                                "created_at": created_at,
-                                "source": "STATE_MANAGER_AUTHENTICATED_12H_PAIRS",
-                                "history_source": "USER_APRIL_PAIRS",
-                            })
-                        if out:
-                            return out[-max(1, int(limit or 15)):]
-            except Exception as exc:
-                print("⚠️ APRIL 12H MEMORY BRIDGE:", exc)
+            persisted = _load_persistent_pair_window(uid, limit=limit)
+            if persisted:
+                return persisted[-max(1, int(limit or 15)):]
 
         scope = state.get("memory_scope") if isinstance(state.get("memory_scope"), dict) else {}
         if not scope.get("authenticated") and not uid:
@@ -3123,6 +3081,12 @@ class QuantumInterpretationEngine:
         )
         if canonical_pairs:
             history = self._pairs_to_history(canonical_pairs)
+        else:
+            scope = state.get("memory_scope") if isinstance(state.get("memory_scope"), dict) else {}
+            # Authenticated dialogue must never fall back to an unrelated/stale
+            # runtime history when the canonical pair store is empty.
+            if str(state.get("user_id") or "").strip() or scope.get("user_id") or scope.get("authenticated"):
+                history = []
         last_a,last_u,reply_to=self._history(history)
         if canonical_pairs:
             last_pair = canonical_pairs[-1]
@@ -5419,17 +5383,29 @@ _PAIR_INTERPRET_ORIGINAL = QuantumInterpretationEngine.interpret
 
 def _pair_window_from_state(state_obj, history=None, limit=15):
     rows=[]
+    authenticated=False
+    uid=""
     if isinstance(state_obj, dict):
+        scope = state_obj.get("memory_scope") if isinstance(state_obj.get("memory_scope"), dict) else {}
+        uid = str(
+            state_obj.get("user_id")
+            or scope.get("user_id")
+            or state_obj.get("authenticated_user_id")
+            or ""
+        ).strip()
+        authenticated = bool(scope.get("authenticated"))
         try:
-            rows = QuantumInterpretationEngine._state_dialogue_pairs(
-                state_obj,
-                user_id=str(state_obj.get("user_id") or (state_obj.get("memory_scope") or {}).get("user_id") or ""),
-                limit=limit,
-            )
+            rows = QuantumInterpretationEngine._state_dialogue_pairs(state_obj, user_id=uid, limit=limit)
         except Exception:
             rows=[]
     if rows:
         return rows[-limit:]
+
+    # Authenticated live dialogue is pair-only. A legacy request/response history
+    # must never become an antecedent when the canonical pair window is empty.
+    if authenticated or uid:
+        return []
+
     out=[]
     for item in (history or []):
         if not isinstance(item, dict): continue
@@ -5677,7 +5653,70 @@ def _pair_canonical_interpret(self, text, cognition=None, semantic=None, history
 # Context is a second axis and may be carried into NEW without turning the new
 # task into the old one. There is no RECALL dialogue relation anymore.
 
-LIVE_DIALOGUE_ENGINE_VERSION = "live_pair_context_v4"
+LIVE_DIALOGUE_ENGINE_VERSION = "live_pair_context_v5"
+
+# Persistent 12h USER↔APRIL pair cache.
+# The runtime snapshot may be recreated between HTTP turns, while the durable pair
+# store remains available. Cache only the immutable pair window for a very short
+# interval so multiple interpretation passes in one request do not repeat DB I/O.
+_PAIR_CACHE_TTL_SECONDS = 1.5
+_PAIR_CACHE_LOCK = threading.RLock()
+_PAIR_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+
+
+def _load_persistent_pair_window(user_id: str, limit: int = 15) -> list[dict[str, Any]]:
+    uid = str(user_id or "").strip()
+    max_items = max(1, int(limit or 15))
+    if not uid:
+        return []
+
+    now = time.time()
+    with _PAIR_CACHE_LOCK:
+        cached = _PAIR_CACHE.get(uid)
+        if cached and (now - cached[0]) <= _PAIR_CACHE_TTL_SECONDS:
+            return [dict(x) for x in cached[1][-max_items:]]
+
+    rows: list[dict[str, Any]] = []
+    try:
+        # This is the same canonical durable store used by StateManager. Do not
+        # route through topic/entity indexes and do not ask the Provider to search.
+        from storage import load_dialogue_pairs
+        raw_rows = load_dialogue_pairs(uid, limit=max_items)
+        for raw in raw_rows or []:
+            if not isinstance(raw, dict):
+                continue
+            user = str(raw.get("user_text") or raw.get("user") or raw.get("user_request") or "").strip()
+            april = str(raw.get("april_text") or raw.get("april") or raw.get("april_answer") or raw.get("assistant") or "").strip()
+            if not user or not april:
+                continue
+            rows.append({
+                "user": user[:1200],
+                "april": april[:1800],
+                "result": april[:1800],
+                "turn_index": int(raw.get("turn_index") or raw.get("sequence_turn_index") or raw.get("turn") or 0),
+                "created_at": float(raw.get("created_at") or raw.get("timestamp") or 0.0),
+                "source": "STORAGE_AUTHENTICATED_12H_USER_APRIL_PAIRS",
+                "history_source": "USER_APRIL_PAIRS",
+            })
+    except Exception as exc:
+        print("⚠️ APRIL PERSISTENT PAIR LOAD:", exc)
+        rows = []
+
+    rows.sort(key=lambda x: (float(x.get("created_at") or 0.0), int(x.get("turn_index") or 0)))
+    rows = rows[-max_items:]
+    with _PAIR_CACHE_LOCK:
+        _PAIR_CACHE[uid] = (now, [dict(x) for x in rows])
+    return [dict(x) for x in rows]
+
+
+def invalidate_pair_cache(user_id: str = "") -> None:
+    uid = str(user_id or "").strip()
+    with _PAIR_CACHE_LOCK:
+        if uid:
+            _PAIR_CACHE.pop(uid, None)
+        else:
+            _PAIR_CACHE.clear()
+
 _LIVE_SUBJECT_STOP = {
     "что", "это", "такое", "такой", "такая", "такие", "кто", "как", "почему", "зачем",
     "а", "и", "но", "же", "в", "во", "на", "с", "со", "у", "из", "по", "для", "про", "о", "об",
@@ -5816,6 +5855,34 @@ def _live_subject_from_pair_window(current: str, pairs: list[dict[str, Any]]):
     return current_subject, False
 
 
+def _batch_live_similarity(self, current: str, candidates: list[str]) -> list[float]:
+    """Batch semantic measurements for the live pair selector."""
+    if not candidates:
+        return []
+    clean = [self.normalize(x) for x in candidates]
+    if self._semantic_encoder is not None:
+        try:
+            vectors = self._semantic_encoder.encode(
+                [self.normalize(current)] + clean,
+                normalize_embeddings=True,
+            )
+            q = vectors[0]
+            return [
+                max(0.0, min(1.0, float(q @ vectors[i + 1])))
+                for i in range(len(clean))
+            ]
+        except Exception:
+            pass
+    if self._vectorizer is not None and cosine_similarity is not None:
+        try:
+            matrix = self._vectorizer.transform([self.normalize(current)] + clean)
+            values = cosine_similarity(matrix[0:1], matrix[1:]).ravel()
+            return [max(0.0, min(1.0, float(x))) for x in values]
+        except Exception:
+            pass
+    return [_live_token_affinity(current, x) for x in clean]
+
+
 def _live_relation_selector(
     self,
     current: str,
@@ -5847,14 +5914,29 @@ def _live_relation_selector(
 
     window = pairs[-15:]
     scored = []
+    prepared = []
     for i, pair in enumerate(window):
         user = self.normalize(pair.get("user") or pair.get("user_text") or pair.get("user_request"))
         april = self.normalize(pair.get("april") or pair.get("april_text") or pair.get("april_answer") or pair.get("assistant") or pair.get("answer"))
         if not user and not april:
             continue
         combined = f"{user} {april}".strip()
-        semantic_user = float(self.similarity(current, user).get("score", 0.0) or 0.0) if user else 0.0
-        semantic_pair = float(self.similarity(current, combined).get("score", 0.0) or 0.0) if combined else 0.0
+        prepared.append((i, pair, user, april, combined))
+
+    # One vectorizer/model pass for the whole pair window instead of two similarity
+    # calls per pair. This is materially cheaper on every live turn.
+    semantic_targets = [item[4] for item in prepared] + [item[2] for item in prepared]
+    batch_scores = []
+    if semantic_targets:
+        try:
+            batch_scores = _batch_live_similarity(self, current, semantic_targets)
+        except Exception:
+            batch_scores = [0.0] * len(semantic_targets)
+
+    half = len(prepared)
+    for pos, (i, pair, user, april, combined) in enumerate(prepared):
+        semantic_pair = float(batch_scores[pos] if pos < len(batch_scores) else 0.0)
+        semantic_user = float(batch_scores[half + pos] if half + pos < len(batch_scores) else 0.0)
         lexical_user = _live_token_affinity(current, user)
         lexical_pair = _live_token_affinity(current, combined)
         subject = _live_pair_subject(pair)
@@ -5885,7 +5967,22 @@ def _live_relation_selector(
 
     current_subject, resolved_by_reference = _live_subject_from_pair_window(current, pairs)
     latest_subject = _live_pair_subject(window[-1]) if window else ""
-    same_subject = bool(
+
+    # Check the complete live pair window for a matching semantic subject. This
+    # allows a user to return to a topic discussed a few turns earlier without
+    # resurrecting a separate task registry branch.
+    historical_subject_rows = []
+    if current_subject:
+        for row in scored:
+            subject = str(row.get("subject") or "")
+            if subject:
+                subject_score = _live_token_affinity(current_subject, subject)
+                if subject_score >= 0.44:
+                    historical_subject_rows.append((subject_score, row))
+    historical_subject_rows.sort(key=lambda x: (x[0], x[1]["index"]), reverse=True)
+    historical_subject_match = historical_subject_rows[0][1] if historical_subject_rows else None
+
+    same_latest_subject = bool(
         current_subject and latest_subject and
         _live_token_affinity(current_subject, latest_subject) >= 0.34
     )
@@ -5894,25 +5991,56 @@ def _live_relation_selector(
         not current_subject and
         (continuation_score >= 0.12 or _live_reference_present(current))
     )
+    semantic_followup = bool(
+        best_row
+        and best_score >= 0.28
+        and (
+            continuation_score >= 0.12
+            or not _live_extract_subject(current)
+            or historical_subject_match
+        )
+    )
 
-    # CONTINUE means the current turn belongs to the live task/thread. A self-
-    # contained new subject remains NEW even when it is semantically adjacent.
-    if pronoun_followup or same_subject or subjectless_followup:
+    # Only two production relations exist: CONTINUE and NEW.
+    # NEW_TOPIC_WITH_CONTEXT means the new task may use recent pairs as
+    # background, but it never changes the relation to CONTINUE.
+    if pronoun_followup or same_latest_subject or historical_subject_match or subjectless_followup or semantic_followup:
         relation = "CONTINUE"
-        selected_index = latest_index if pronoun_followup or same_subject else int(best_row["index"] if best_row else latest_index)
-        selected_pair = dict(next((x["pair"] for x in scored if x["index"] == selected_index), window[-1]))
+        if pronoun_followup or same_latest_subject:
+            selected_index = latest_index
+            selected_source = next((x for x in scored if x["index"] == latest_index), None)
+        elif historical_subject_match:
+            selected_index = int(historical_subject_match["index"])
+            selected_source = historical_subject_match
+        else:
+            selected_index = int(best_row["index"] if best_row else latest_index)
+            selected_source = best_row
+        selected_pair = dict(selected_source["pair"] if selected_source else window[-1])
+        # Preserve the immediate conversation trajectory plus the selected anchor.
         context_pairs = window[-3:]
+        if selected_pair and not any(
+            str(x.get("user") or "") == str(selected_pair.get("user") or "")
+            and str(x.get("april") or "") == str(selected_pair.get("april") or "")
+            for x in context_pairs
+        ):
+            context_pairs = (context_pairs + [selected_pair])[-4:]
         context_mode = "LIVE_CONTINUATION"
+        resolved_entity = latest_subject if pronoun_followup else (
+            _live_pair_subject(selected_pair) if historical_subject_match or selected_pair else current_subject
+        )
         reference_resolution = {
             "resolved": True,
             "source": "AUTHENTICATED_12H_PAIR",
-            "entity": latest_subject,
+            "entity": resolved_entity,
             "current_subject": current_subject,
-        } if pronoun_followup else {}
+            "selected_index": selected_index,
+        } if (pronoun_followup or historical_subject_match) else {}
     elif history_lookup:
+        # Historical inspection is a NEW task that uses selected history as
+        # background. There is no RECALL relation anymore.
         relation = "NEW"
-        selected_index = int(best_row["index"] if best_row else -1)
-        selected_pair = dict(best_row["pair"] if best_row else {})
+        selected_index = -1
+        selected_pair = {}
         context_pairs = window[-8:]
         context_mode = "HISTORY_LOOKUP"
         reference_resolution = {}
@@ -5920,9 +6048,6 @@ def _live_relation_selector(
         relation = "NEW"
         selected_index = -1
         selected_pair = {}
-        # A new task may still be semantically close to the live dialogue. Carry
-        # the recent pair context as background, but explicitly mark it as
-        # background-only so the Provider cannot continue the previous task.
         related = bool(best_row and best_score >= 0.24)
         context_pairs = window[-3:] if related else []
         context_mode = "NEW_TOPIC_WITH_CONTEXT" if related else "NEW_TOPIC_ISOLATED"
@@ -5965,8 +6090,11 @@ _PAIR_INTERPRET_ORIGINAL_LIVE = _PAIR_INTERPRET_ORIGINAL
 def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, history=None, state=None):
     state_obj = state if isinstance(state, dict) else {}
     pairs = _pair_window_from_state(state_obj, history=history, limit=15)
+    authenticated_scope = state_obj.get("memory_scope") if isinstance(state_obj.get("memory_scope"), dict) else {}
+    authenticated = bool(authenticated_scope.get("authenticated") or state_obj.get("authenticated_user_id"))
+    effective_history = None if authenticated else history
     result = _PAIR_INTERPRET_ORIGINAL_LIVE(
-        self, text, cognition=cognition, semantic=semantic, history=history, state=state_obj
+        self, text, cognition=cognition, semantic=semantic, history=effective_history, state=state_obj
     )
     if not isinstance(result, dict):
         raise RuntimeError("INTERPRETATION_RETURNED_NO_PACKET")
@@ -6001,7 +6129,22 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
     # Keep the current task subject authoritative for NEW; for CONTINUE + pronoun
     # resolution use the antecedent from the pair window.
     current_subject = str(selected.get("current_subject") or "").strip()
-    canonical_topic = current_subject or (resolved_reference_entity if relation == "CONTINUE" else "")
+    if relation == "CONTINUE":
+        canonical_topic = (
+            resolved_reference_entity
+            or current_subject
+            or _live_pair_subject(selected_pair)
+            or " ".join(
+                str(x).strip()
+                for x in (
+                    selected_pair.get("user") or "",
+                    selected_pair.get("topic") or "",
+                )
+                if str(x).strip()
+            )[:220]
+        )
+    else:
+        canonical_topic = current_subject
     if relation == "CONTINUE" and resolved_reference_entity:
         result["resolved_reference_entity"] = resolved_reference_entity
         result["reference_resolution"] = reference_resolution
@@ -6030,6 +6173,7 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
     result["selected_memory_index"] = selected_index
     result["selected_memory_operand"] = selected_pair
     result["selected_memory_record"] = selected_pair
+    result["selected_context_pairs"] = context_pairs
     result["dialogue_memory_window"] = [dict(x) for x in (selected.get("memory_window") or pairs[-15:])]
     result["dialogue_context_pairs"] = context_pairs
     result["dialogue_memory_source"] = "AUTHENTICATED_12H_USER_APRIL_PAIRS" if pairs else "NONE"
@@ -6101,6 +6245,7 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
                 "context_mode": context_mode,
                 "resolved_reference_entity": resolved_reference_entity,
                 "resolved_request": current,
+                "dialogue_anchor": canonical_topic,
             }},
             {"key": "OUTPUT_CONTRACT", "priority": 0.99, "value": {
                 "representation": base_rep,
@@ -6111,7 +6256,7 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
             }},
         ],
         "optional_context": [],
-        "excluded_context": ["GLOBAL_TOPIC_INDEX", "ENTITY_INDEX", "LEGACY_INTENT_ENGINE", "UNBOUNDED_HISTORY", "RECALL_BRANCH_SWITCH"],
+        "excluded_context": ["GLOBAL_TOPIC_INDEX", "ENTITY_INDEX", "LEGACY_INTENT_ENGINE", "UNBOUNDED_HISTORY"],
     }
     if context_mode != "NEW_TOPIC_ISOLATED" and context_pairs:
         provider_plan["required_context"].append({
@@ -6131,6 +6276,9 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
             "value": {
                 "selected_memory_index": selected_index,
                 "selected_memory_operand": selected_pair,
+                "anchor_user": selected_pair.get("user") or selected_pair.get("user_request") or "",
+                "anchor_april": selected_pair.get("april") or selected_pair.get("april_answer") or "",
+                "resolved_referent": resolved_reference_entity or canonical_topic,
                 "pair_window_hours": 12,
                 "reference_resolution": reference_resolution,
                 "history_source": "AUTHENTICATED_12H_USER_APRIL_PAIRS",
@@ -6152,7 +6300,7 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
     result["provider_must_not_reselect_context"] = True
     result["dialogue_contract"] = {
         **(result.get("dialogue_contract") if isinstance(result.get("dialogue_contract"), dict) else {}),
-        "version": "dialogue_pair_contract_v2_live_two_state",
+        "version": "dialogue_pair_contract_v3_live_two_state",
         "relation": relation,
         "three_way_relation": relation,
         "two_way_relation": relation,
