@@ -16,6 +16,7 @@ import os
 import re
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
@@ -2168,6 +2169,15 @@ class QuantumInterpretationEngine:
             context_pairs = []
             confidence = max(0.62, 1.0 - min(best_score, 0.38))
 
+        # A CONTINUE decision must always carry an actual USER↔APRIL operand.
+        # Never emit CONTINUE with selected_memory_index=-1: that creates the
+        # exact "I cannot see the previous dialogue" failure at Provider level.
+        if relation == "CONTINUE" and window and not selected_pair:
+            selected_index = latest_index
+            selected_pair = dict(window[-1])
+            context_pairs = list(window[-3:])
+            confidence = max(float(confidence or 0.0), 0.66)
+
         return {
             "relation": relation,
             "confidence": round(float(confidence), 6),
@@ -2611,13 +2621,25 @@ class QuantumInterpretationEngine:
                         created_at = 0.0
                     if created_at and created_at < cutoff:
                         continue
-                    direct_rows.append({
+                    row = {
                         "user": user[:1200], "april": april[:1800], "result": april[:1800],
                         "turn_index": int(raw.get("turn_index") or raw.get("sequence_turn_index") or raw.get("turn") or 0),
                         "created_at": created_at,
                         "source": "STATE_MANAGER_AUTHENTICATED_12H_PAIRS",
                         "history_source": "USER_APRIL_PAIRS",
-                    })
+                    }
+                    # Preserve the compact visual operand and semantic identity
+                    # carried by the same USER↔APRIL pair. No binary data is copied.
+                    for key in (
+                        "visual_attachment", "visual_generation_memory", "visual_scene_id",
+                        "scene_id", "conversation_id", "sequence_id", "dialogue_sequence_id",
+                        "task_id", "sequence_turn_index", "topic", "subtopic",
+                        "dialogue_relation", "relation", "semantic_state", "memory_semantics",
+                    ):
+                        value = raw.get(key)
+                        if value not in (None, "", [], {}):
+                            row[key] = deepcopy(value)
+                    direct_rows.append(row)
             if direct_rows:
                 direct_rows.sort(key=lambda x: (float(x.get("created_at") or 0.0), int(x.get("turn_index") or 0)))
                 return direct_rows[-max(1, int(limit or 15)): ]
@@ -2669,7 +2691,7 @@ class QuantumInterpretationEngine:
                 if sig in seen:
                     continue
                 seen.add(sig)
-                out.append({
+                row = {
                     "user": user[:1200],
                     "april": april[:1800],
                     "result": april[:1800],
@@ -2677,7 +2699,17 @@ class QuantumInterpretationEngine:
                     "created_at": created_at,
                     "source": "STATE_MANAGER_AUTHENTICATED_12H_PAIRS",
                     "history_source": "USER_APRIL_PAIRS",
-                })
+                }
+                for key in (
+                    "visual_attachment", "visual_generation_memory", "visual_scene_id",
+                    "scene_id", "conversation_id", "sequence_id", "dialogue_sequence_id",
+                    "task_id", "sequence_turn_index", "topic", "subtopic",
+                    "dialogue_relation", "relation", "semantic_state", "memory_semantics",
+                ):
+                    value = raw.get(key)
+                    if value not in (None, "", [], {}):
+                        row[key] = deepcopy(value)
+                out.append(row)
         out.sort(key=lambda x: (float(x.get("created_at") or 0.0), int(x.get("turn_index") or 0)))
         return out[-max(1, int(limit or 15)):]
 
@@ -3070,23 +3102,63 @@ class QuantumInterpretationEngine:
         semantic=semantic if isinstance(semantic,dict) else {}
         state=state if isinstance(state,dict) else {}
         history=history if isinstance(history,list) else []
-        canonical_pairs = self._state_dialogue_pairs(
-            state,
-            user_id=str(
+        # Canonical hot-path: always hydrate the interpreter from the authenticated
+        # StateManager 12-hour USER↔APRIL pair bridge first. The HTTP/session layer
+        # may provide an empty or partial history; that must never become the
+        # dialogue source of truth.
+        memory_history = _state_manager_dialogue_history(state, history, limit=15)
+        if memory_history:
+            history = memory_history
+
+        canonical_pairs = []
+        pending_user = ""
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").lower()
+            content = self.normalize(item.get("content") or item.get("text") or item.get("answer"))
+            if role in {"user", "human"}:
+                pending_user = content
+            elif role in {"assistant", "april", "bot"} and pending_user and content:
+                canonical_pairs.append({
+                    "user": pending_user,
+                    "april": content,
+                    "result": content,
+                    "turn_index": item.get("turn_id") or 0,
+                    "created_at": item.get("timestamp") or 0,
+                })
+                pending_user = ""
+        canonical_pairs = canonical_pairs[-15:]
+
+        # Last-resort authenticated bridge: obtain the exact compact pair window
+        # directly from StateManager when the projected role history is empty.
+        if not canonical_pairs:
+            uid = str(
                 state.get("user_id")
                 or (state.get("memory_scope") or {}).get("user_id")
                 or ""
-            ),
-            limit=15,
-        )
-        if canonical_pairs:
-            history = self._pairs_to_history(canonical_pairs)
-        else:
-            scope = state.get("memory_scope") if isinstance(state.get("memory_scope"), dict) else {}
-            # Authenticated dialogue must never fall back to an unrelated/stale
-            # runtime history when the canonical pair store is empty.
-            if str(state.get("user_id") or "").strip() or scope.get("user_id") or scope.get("authenticated"):
-                history = []
+            ).strip()
+            if uid:
+                try:
+                    from blocks.state_manager import build_dialogue_memory_bridge
+                    bridge = build_dialogue_memory_bridge(uid, query="", limit=15, relation="CONTINUE")
+                    bridge_pairs = bridge.get("dialogue_pairs") or bridge.get("active_sequence_turns") or []
+                    canonical_pairs = [
+                        {
+                            "user": self.normalize(row.get("user") or row.get("user_request")),
+                            "april": self.normalize(row.get("april") or row.get("april_answer") or row.get("assistant")),
+                            "result": self.normalize(row.get("april") or row.get("april_answer") or row.get("assistant")),
+                            "turn_index": row.get("turn") or row.get("turn_index") or 0,
+                            "created_at": row.get("created_at") or 0,
+                        }
+                        for row in bridge_pairs
+                        if isinstance(row, dict)
+                        and self.normalize(row.get("user") or row.get("user_request"))
+                        and self.normalize(row.get("april") or row.get("april_answer") or row.get("assistant"))
+                    ][-15:]
+                except Exception:
+                    canonical_pairs = []
+
         last_a,last_u,reply_to=self._history(history)
         if canonical_pairs:
             last_pair = canonical_pairs[-1]
@@ -3120,6 +3192,9 @@ class QuantumInterpretationEngine:
         except Exception:
             pass
         recent_dialogue_pairs = list(canonical_pairs[-15:]) if canonical_pairs else self._recent_dialogue_pairs(history, limit=15)
+        # Never allow a partial HTTP history to override the authenticated pair
+        # window once StateManager supplied it.
+        recent_dialogue_pairs = [p for p in recent_dialogue_pairs if isinstance(p, dict) and (p.get("user") or p.get("april"))][-15:]
         visual_generation_context = self._find_visual_generation_context(recent_dialogue_pairs)
         dialogue_packet = self.dialogue(
             text,
@@ -4636,8 +4711,9 @@ def _build_provider_context_plan(
     """Freeze the Interpretation-owned Provider context before transport.
 
     The Provider never selects a branch or searches memory. This plan contains the
-    already-resolved semantic decision and only the bounded evidence needed to answer
-    a continuation/recall turn. NEW turns intentionally carry no historical dialogue.
+    already-resolved semantic decision and the bounded authenticated pair evidence
+    needed to formulate the next answer. CONTINUE uses the active pair trajectory;
+    NEW may receive only compact related background and must remain a new task.
     """
     relation = str(
         dialogue_vector.get("three_way_relation")
@@ -4712,6 +4788,8 @@ def _build_provider_context_plan(
         ],
     }
 
+    bounded_history = [x for x in (history_window or []) if isinstance(x, dict)][-15:]
+
     if relation in {"CONTINUE", "RECALL"}:
         selected_operand = dialogue_vector.get("selected_memory_operand")
         anchor = {
@@ -4727,13 +4805,22 @@ def _build_provider_context_plan(
             "value": anchor,
         })
 
-        bounded_history = [x for x in (history_window or []) if isinstance(x, dict)][-15:]
         if bounded_history:
             plan["required_context"].append({
                 "key": "ACTIVE_DIALOGUE_TRAJECTORY",
                 "priority": 0.997,
-                "value": bounded_history,
+                "value": bounded_history[-8:],
             })
+
+        plan["required_context"].append({
+            "key": "RESPONSE_FORMULATION",
+            "priority": 0.996,
+            "value": (
+                "HISTORY_RECALL"
+                if relation == "RECALL"
+                else "CONTINUE_FROM_AUTHENTICATED_PAIRS"
+            ),
+        })
 
         if history_task_context.get("required"):
             plan["required_context"].append({
@@ -4741,6 +4828,20 @@ def _build_provider_context_plan(
                 "priority": 0.99,
                 "value": history_task_context,
             })
+    elif relation == "NEW" and bounded_history:
+        # A new request stays a new request, but the Provider receives a compact
+        # semantic relation to the immediately relevant dialogue pairs when such
+        # context exists. It must not turn this into continuation.
+        plan["required_context"].append({
+            "key": "RELATED_DIALOGUE_BACKGROUND",
+            "priority": 0.91,
+            "value": bounded_history[-3:],
+        })
+        plan["required_context"].append({
+            "key": "RESPONSE_FORMULATION",
+            "priority": 0.90,
+            "value": "NEW_TASK_WITH_DIALOGUE_RELATION_CONTEXT",
+        })
 
     return plan
 
@@ -6240,6 +6341,40 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
 
     # Provider handoff: CONTINUE uses active dialogue context; NEW may carry recent
     # background context, but the provider must execute the current task as NEW.
+    # The interpretation layer owns the semantic bridge: pairs are selected first,
+    # then a compact formulation tells OpenAI how the current turn develops from
+    # those exact USER↔APRIL pairs.
+    def _provider_pair(pair):
+        if not isinstance(pair, dict):
+            return {}
+        out = {
+            "turn": pair.get("turn"),
+            "user": str(pair.get("user") or pair.get("user_text") or pair.get("user_request") or "").strip()[:260],
+            "april": str(pair.get("april") or pair.get("april_text") or pair.get("april_answer") or "").strip()[:420],
+            "topic": str(pair.get("topic") or "").strip()[:180],
+            "relation": str(pair.get("relation") or pair.get("dialogue_relation") or "").upper(),
+        }
+        visual = pair.get("visual_attachment")
+        if isinstance(visual, dict) and visual:
+            # Keep the exact visual identity/path in the authenticated pair bridge.
+            out["visual_attachment"] = {
+                key: visual.get(key)
+                for key in (
+                    "present", "kind", "artifact_id", "block_id", "scene_id",
+                    "turn_id", "renderer", "src", "asset_path", "mime_type",
+                    "description", "prompt", "width", "height",
+                    "generation_model", "generation_quality",
+                )
+                if visual.get(key) not in (None, "", [], {})
+            }
+        return {k: v for k, v in out.items() if v not in (None, "", [], {})}
+
+    provider_context_pairs = [
+        _provider_pair(x) for x in context_pairs[-8:]
+        if isinstance(x, dict)
+    ]
+    provider_selected_pair = _provider_pair(selected_pair) if selected_pair else {}
+
     base_rep = str(
         result.get("production_representation")
         or semantic_task.get("representation")
@@ -6251,6 +6386,32 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         or semantic_task.get("visual_generation_request")
         or ""
     ).strip()
+
+    # A visual continuation inherits the previous generation meaning when the
+    # current turn asks to modify/redraw/create from the existing visual object.
+    # This is a semantic continuation of the authenticated pair, not a trigger
+    # shortcut; the exact prior image is separately attached by Executor/Provider.
+    previous_visual_prompt = ""
+    previous_visual = selected_pair.get("visual_attachment") if isinstance(selected_pair, dict) else {}
+    if isinstance(previous_visual, dict):
+        previous_visual_prompt = str(
+            previous_visual.get("prompt")
+            or previous_visual.get("description")
+            or ""
+        ).strip()
+    visual_ops = {
+        "build", "create", "generate", "modify", "transform", "redraw",
+        "edit", "visualize", "change", "recolor", "update",
+    }
+    if (
+        relation == "CONTINUE"
+        and not visual_request
+        and previous_visual_prompt
+        and operation in visual_ops
+    ):
+        visual_request = previous_visual_prompt
+        result["visual_generation_request"] = previous_visual_prompt
+
     result["representation"] = base_rep
     result["requested_representation"] = base_rep
     result["production_representation"] = base_rep
@@ -6272,6 +6433,8 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         "hard_budget_tokens": 900,
         "soft_target_tokens": 820,
         "provider_continuation_contract": "PAIR_FIRST_12H_LIVE_V3",
+        "pair_history_authority": "AUTHENTICATED_USER_APRIL_12H",
+        "pair_history_count": len(provider_context_pairs),
         "new_topic_minimal_context": context_mode == "NEW_TOPIC_ISOLATED",
         "context_background_only": context_mode in {"NEW_TOPIC_WITH_CONTEXT", "HISTORY_LOOKUP"},
         "history_lookup": history_lookup,
@@ -6303,7 +6466,7 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
             "priority": 0.998 if relation == "CONTINUE" else 0.93,
             "value": {
                 "background_only": relation == "NEW",
-                "pairs": context_pairs,
+                "pairs": provider_context_pairs,
                 "anchor_index": int((selected.get("context_anchor_index", -1) if selected.get("context_anchor_index", -1) is not None else -1)),
                 "history_lookup": history_lookup,
             },
@@ -6314,15 +6477,48 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
             "priority": 0.997,
             "value": {
                 "selected_memory_index": selected_index,
-                "selected_memory_operand": selected_pair,
-                "anchor_user": selected_pair.get("user") or selected_pair.get("user_request") or "",
-                "anchor_april": selected_pair.get("april") or selected_pair.get("april_answer") or "",
+                "selected_memory_operand": provider_selected_pair,
+                "anchor_user": provider_selected_pair.get("user") or "",
+                "anchor_april": provider_selected_pair.get("april") or "",
                 "resolved_referent": resolved_reference_entity or canonical_topic,
                 "pair_window_hours": 12,
                 "reference_resolution": reference_resolution,
                 "history_source": "AUTHENTICATED_12H_USER_APRIL_PAIRS",
             },
         })
+    provider_plan["required_context"].append({
+        "key": "RESPONSE_FORMULATION",
+        "priority": 0.996 if relation == "CONTINUE" else 0.90,
+        "value": {
+            "mode": (
+                "CONTINUE_FROM_AUTHENTICATED_PAIRS"
+                if relation == "CONTINUE"
+                else "HISTORY_RECALL_FROM_AUTHENTICATED_PAIRS"
+                if history_lookup
+                else "NEW_TASK_WITH_RELATED_DIALOGUE_BACKGROUND"
+                if context_mode == "NEW_TOPIC_WITH_CONTEXT"
+                else "NEW_TASK_INDEPENDENT"
+            ),
+            "current_request": current,
+            "instruction": (
+                "Formulate the answer as the natural next turn of the same dialogue. "
+                "Use the supplied USER↔APRIL pairs as the factual conversational history; "
+                "preserve the established subject, referents, decisions and visual operands. "
+                "Do not restart the conversation, do not claim the context is missing when pairs are supplied, "
+                "and do not manufacture a template answer."
+                if relation == "CONTINUE"
+                else
+                "Answer the current request using the supplied authenticated 12-hour pairs only as "
+                "background/history evidence. For HISTORY_LOOKUP, summarize what those actual pairs show. "
+                "For NEW_TOPIC_WITH_CONTEXT, start a genuinely new task while using the related pair "
+                "background to understand what the user is moving from or avoiding."
+                if context_mode in {"HISTORY_LOOKUP", "NEW_TOPIC_WITH_CONTEXT"}
+                else
+                "Answer the current request as an independent new task."
+            ),
+            "pair_count": len(provider_context_pairs),
+        },
+    })
     if history_lookup:
         provider_plan["required_context"].append({
             "key": "HISTORY_CONTEXT_CHECK",
