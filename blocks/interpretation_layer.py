@@ -5817,11 +5817,42 @@ def _live_pair_subject(pair: dict[str, Any]) -> str:
 
 
 def _live_history_query(current: str, memory_score: float) -> bool:
-    low = current.lower()
-    word_hits = len(set(re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", low)) & _LIVE_HISTORY_WORDS)
-    # Semantic score is used only to recognize that the user is talking about
-    # history; it does not create a third dialogue relation.
-    return bool(word_hits >= 1 and memory_score >= 0.12)
+    """Recognize a request to inspect the authenticated dialogue itself.
+
+    This is semantic-first: lexical history terms are only a small supporting
+    signal. The previous implementation required both a trigger-word hit and a
+    fairly high prototype score, so natural phrases such as "Найди в диалоге
+    прошлом" were incorrectly treated as a standalone NEW request.
+    """
+    text = str(current or "").strip()
+    if not text:
+        return False
+    low = text.lower()
+    word_hits = len(
+        set(re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", low)) & _LIVE_HISTORY_WORDS
+    )
+    semantic_prototypes = (
+        "вспомни о чем мы говорили раньше",
+        "найди в предыдущем диалоге что мы обсуждали",
+        "поищи в истории нашего разговора",
+        "покажи темы которые мы уже обсуждали",
+        "найди предыдущие сообщения и контекст разговора",
+    )
+    semantic_score = max(
+        (float(self_score) for self_score in (
+            QUANTUM_INTERPRETATION_ENGINE.similarity(text, proto).get("score", 0.0)
+            for proto in semantic_prototypes
+        )),
+        default=0.0,
+    )
+    # Explicit semantic resemblance is sufficient on its own. A lower lexical
+    # + memory signal is also accepted because the user may phrase the request
+    # elliptically (e.g. "в прошлом диалоге").
+    return bool(
+        semantic_score >= 0.34
+        or (word_hits >= 1 and float(memory_score or 0.0) >= 0.08)
+        or (word_hits >= 2 and float(memory_score or 0.0) >= 0.04)
+    )
 
 
 def _live_reference_present(current: str) -> bool:
@@ -6002,9 +6033,17 @@ def _live_relation_selector(
     )
 
     # Only two production relations exist: CONTINUE and NEW.
-    # NEW_TOPIC_WITH_CONTEXT means the new task may use recent pairs as
-    # background, but it never changes the relation to CONTINUE.
-    if pronoun_followup or same_latest_subject or historical_subject_match or subjectless_followup or semantic_followup:
+    # A HISTORY_LOOKUP is a NEW task whose context mode is HISTORY_LOOKUP; it
+    # must not be mistaken for continuation merely because it resembles the
+    # latest pair.
+    if history_lookup:
+        relation = "NEW"
+        selected_index = -1
+        selected_pair = {}
+        context_pairs = window[-8:]
+        context_mode = "HISTORY_LOOKUP"
+        reference_resolution = {}
+    elif pronoun_followup or same_latest_subject or historical_subject_match or subjectless_followup or semantic_followup:
         relation = "CONTINUE"
         if pronoun_followup or same_latest_subject:
             selected_index = latest_index
