@@ -56,10 +56,9 @@ try:
 except Exception:  # pragma: no cover
     hf_pipeline = None
 
-try:
-    from blocks.pair_dialogue_direction_engine import PAIR_DIALOGUE_DIRECTION_ENGINE
-except Exception:  # pragma: no cover
-    PAIR_DIALOGUE_DIRECTION_ENGINE = None
+# PAIR DIALOGUE ENGINE IS A REQUIRED INTERPRETATION DEPENDENCY.
+# No fallback is permitted: authenticated USER↔APRIL pairs must be resolved first.
+from blocks.pair_dialogue_direction_engine import PAIR_DIALOGUE_DIRECTION_ENGINE
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +71,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v18_12h_live_dialogue_v5"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v18_12h_live_dialogue_v7_three_state_locked"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
@@ -4766,7 +4765,9 @@ def _build_provider_context_plan(
         "current_user_request": current_request,
         "current_request_authoritative": True,
         "context_selection_done_before_provider": True,
+        "pair_direction_decision_final": True,
         "provider_must_not_reselect_context": True,
+        "provider_must_not_bypass_pair_interpretation": True,
         "provider_continuation_contract": "Use only the Interpretation-selected dialogue operand/trajectory for CONTINUE or RECALL.",
         "hard_budget_tokens": 900,
         "soft_target_tokens": 820,
@@ -5768,13 +5769,18 @@ def _pair_canonical_interpret(self, text, cognition=None, semantic=None, history
 # ============================================================================
 # FINAL LIVE DIALOGUE OVERRIDE — 2026-10-05
 # ============================================================================
-# Production relation model is deliberately two-state:
-#   CONTINUE = continue the active conversational task/thread
-#   NEW      = new task/topic execution
-# Context is a second axis and may be carried into NEW without turning the new
-# task into the old one. There is no RECALL dialogue relation anymore.
+# PRODUCTION RULE — DO NOT BYPASS:
+#   StateManager / authenticated 12h USER↔APRIL pairs
+#       -> PairDialogueDirectionEngine
+#       -> exactly ONE relation: CONTINUE / RECALL / NEW
+#       -> structural request
+#       -> Provider/OpenAI
+#
+# RECALL is a first-class relation. It must never be converted to NEW.
+# If the pair engine cannot establish a relation to selected pairs, the result is NEW.
+# Provider/OpenAI is not allowed to re-select dialogue context.
 
-LIVE_DIALOGUE_ENGINE_VERSION = "live_pair_context_v5"
+LIVE_DIALOGUE_ENGINE_VERSION = "live_pair_context_v7_three_state_pair_locked"
 
 # Persistent 12h USER↔APRIL pair cache.
 # The runtime snapshot may be recreated between HTTP turns, while the durable pair
@@ -5820,8 +5826,10 @@ def _load_persistent_pair_window(user_id: str, limit: int = 15) -> list[dict[str
                 "history_source": "USER_APRIL_PAIRS",
             })
     except Exception as exc:
-        print("⚠️ APRIL PERSISTENT PAIR LOAD:", exc)
-        rows = []
+        # A StateManager/storage failure is not evidence of a NEW dialogue.
+        # Never fall through to another context source here: that would bypass
+        # the mandatory authenticated 12h USER↔APRIL pair boundary.
+        raise RuntimeError(f"STATE_MANAGER_12H_PAIR_LOAD_FAILED: {exc}") from exc
 
     rows.sort(key=lambda x: (float(x.get("created_at") or 0.0), int(x.get("turn_index") or 0)))
     rows = rows[-max_items:]
@@ -6119,45 +6127,43 @@ def _live_relation_selector(
     best_score = float(best_row.get("score", 0.0) if best_row else 0.0)
     latest_score = float(latest_row.get("score", 0.0) if latest_row else 0.0)
 
-    # ONLY NOW, after matching the request against the authenticated pair window,
-    # run the pair-local direction/object engine. It does not route or search memory;
-    # it only determines what the current request is doing with the selected pairs.
-    pair_reasoning = {}
-    if PAIR_DIALOGUE_DIRECTION_ENGINE is not None:
-        try:
-            pair_reasoning = PAIR_DIALOGUE_DIRECTION_ENGINE.analyze(
-                current,
-                window,
-                scored_rows=scored,
-            )
-        except Exception as exc:
-            print("⚠️ APRIL PAIR DIRECTION ENGINE:", exc)
-            pair_reasoning = {}
+    # HARD PAIR-CHAIN GATE. This is the only place where authenticated pair
+    # evidence is converted into a dialogue direction for downstream processing.
+    # No legacy history selector and no fallback selector may override it.
+    if PAIR_DIALOGUE_DIRECTION_ENGINE is None:
+        raise RuntimeError("PAIR_DIALOGUE_DIRECTION_ENGINE_REQUIRED_NO_FALLBACK")
+    try:
+        pair_reasoning = PAIR_DIALOGUE_DIRECTION_ENGINE.analyze(
+            current,
+            window,
+            scored_rows=scored,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"PAIR_DIALOGUE_DIRECTION_ENGINE_FAILED: {exc}") from exc
+    if not isinstance(pair_reasoning, dict) or not pair_reasoning.get("version"):
+        raise RuntimeError("PAIR_DIALOGUE_DIRECTION_ENGINE_NO_DECISION")
 
-    pair_history_lookup = bool(
-        pair_reasoning.get("history_lookup")
-        if isinstance(pair_reasoning, dict) else False
-    )
-    legacy_history_lookup = _live_history_query(current, memory_score)
-    pair_direction = str(pair_reasoning.get("direction") or "") if isinstance(pair_reasoning, dict) else ""
+    pair_history_lookup = bool(pair_reasoning.get("history_lookup"))
+    pair_direction = str(pair_reasoning.get("direction") or "ANSWER_CURRENT_REQUEST")
     pair_new_task = bool(
-        isinstance(pair_reasoning, dict)
-        and isinstance(pair_reasoning.get("requested_action"), dict)
+        isinstance(pair_reasoning.get("requested_action"), dict)
         and pair_reasoning.get("requested_action", {}).get("new_task")
     )
-    # A phrase such as "я спрашивал про имя" can contain the word "спрашивал"
-    # without being a memory-reconstruction request. The pair-local direction
-    # engine wins over that broad lexical history signal whenever it has a clear
-    # continuation direction.
     continuation_directions = {
         "EXTEND_WITH_EXCLUSIONS", "EXTEND_PREVIOUS_RESULT",
         "EXPLAIN_OR_JUSTIFY_PREVIOUS", "VERIFY_OR_CORRECT_PREVIOUS",
         "AFFIRM_PREVIOUS_RESULT",
     }
-    history_lookup = bool(
-        pair_history_lookup
-        or (legacy_history_lookup and pair_direction not in continuation_directions)
-    )
+    pair_selected_indices = []
+    for value in (pair_reasoning.get("selected_indices") or []):
+        try:
+            index = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < len(window):
+            pair_selected_indices.append(index)
+    pair_selected_indices = sorted(dict.fromkeys(pair_selected_indices))
+    history_lookup = pair_history_lookup
 
     current_subject, resolved_by_reference = _live_subject_from_pair_window(current, pairs)
     latest_subject = _live_pair_subject(window[-1]) if window else ""
@@ -6241,117 +6247,82 @@ def _live_relation_selector(
         )
     )
 
-    # Only two production relations exist: CONTINUE and NEW. HISTORY_LOOKUP is a
-    # NEW task with history as background. Crucially, this decision happens only
-    # after the authenticated pair window has been matched.
-    if pair_new_task:
+    # FINAL THREE-STATE DECISION.
+    # The PairDialogueDirectionEngine is the sole owner of relation selection.
+    # Nothing below may reinterpret, downgrade, or replace its decision.
+    relation_hint = str(pair_reasoning.get("relation_hint") or "").upper().strip()
+    if relation_hint not in {"CONTINUE", "RECALL", "NEW"}:
+        raise RuntimeError(f"PAIR_DIALOGUE_DIRECTION_ENGINE_INVALID_RELATION: {relation_hint!r}")
+
+    pair_selected_indices = []
+    for value in (pair_reasoning.get("selected_indices") or []):
+        try:
+            index = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < len(window):
+            pair_selected_indices.append(index)
+    pair_selected_indices = sorted(dict.fromkeys(pair_selected_indices))
+
+    # No selected pair = no established dialogue link. The only legal state is NEW.
+    if relation_hint in {"CONTINUE", "RECALL"} and not pair_selected_indices:
         relation = "NEW"
+    else:
+        relation = relation_hint
+
+    if relation == "NEW":
         selected_index = -1
         selected_pair = {}
         context_pairs = []
         context_mode = "NEW_TOPIC_ISOLATED"
         reference_resolution = {}
-    elif history_lookup:
-        relation = "NEW"
+        history_lookup = False
+    elif relation == "RECALL":
         selected_index = -1
         selected_pair = {}
-        # HISTORY_LOOKUP receives only pairs that carry the requested object.
-        # This prevents unrelated recent pairs from crowding out enumeration evidence.
-        if pair_selected_indices:
-            context_pairs = [
-                dict(window[i]) for i in pair_selected_indices
-                if 0 <= i < len(window) and isinstance(window[i], dict)
-            ][-8:]
-        else:
-            context_pairs = window[-8:]
+        context_pairs = [dict(window[i]) for i in pair_selected_indices][-8:]
         context_mode = "HISTORY_LOOKUP"
+        history_lookup = True
         reference_resolution = {}
-    elif pair_direction in {
-        "EXTEND_WITH_EXCLUSIONS", "EXTEND_PREVIOUS_RESULT",
-        "EXPLAIN_OR_JUSTIFY_PREVIOUS", "VERIFY_OR_CORRECT_PREVIOUS",
-        "AFFIRM_PREVIOUS_RESULT",
-    } or pronoun_followup or same_latest_subject or historical_subject_match or semantic_followup:
-        relation = "CONTINUE"
-        if pronoun_followup or same_latest_subject:
-            selected_index = latest_index
-            selected_source = next((x for x in scored if x["index"] == latest_index), None) or best_row
-        elif historical_subject_match:
-            selected_index = int(historical_subject_match["index"])
-            selected_source = historical_subject_match
-        elif implicit_pair_continuation and latest_row is not None:
-            selected_index = int(latest_row["index"])
-            selected_source = latest_row
+    else:  # CONTINUE
+        anchor_index = int(pair_reasoning.get("anchor_index", -1) or -1)
+        if anchor_index not in pair_selected_indices:
+            anchor_index = pair_selected_indices[-1]
+        selected_index = anchor_index
+        selected_pair = dict(window[selected_index])
+
+        # Continue only inside the sequence selected by PairDialogueDirectionEngine.
+        test_sequence = pair_reasoning.get("test_sequence")
+        test_sequence = test_sequence if isinstance(test_sequence, dict) else {}
+        try:
+            boundary = int(test_sequence.get("start_index", -1) or -1)
+        except (TypeError, ValueError):
+            boundary = -1
+        if boundary >= 0:
+            contiguous = [
+                i for i in range(boundary, selected_index + 1)
+                if 0 <= i < len(window)
+            ]
+            selected_indices = sorted(dict.fromkeys(contiguous[-6:] + pair_selected_indices[-6:]))
         else:
-            selected_index = int(best_row["index"] if best_row else latest_index)
-            selected_source = best_row
-        # Pair direction may identify a more useful continuation anchor than raw
-        # similarity, especially for "ещё", exclusions, corrections and affirmations.
-        if pair_selected_indices:
-            preferred_index = max(pair_selected_indices)
-            preferred_row = next((row for row in scored if int(row.get("index", -1)) == preferred_index), None)
-            if preferred_row is not None:
-                selected_source = preferred_row
-                selected_index = preferred_index
-        selected_pair = dict(selected_source["pair"] if selected_source else window[-1])
-        # Keep only the 1..4 pairs that are semantically related to the
-        # selected continuation anchor. The full 12h window never crosses into
-        # the Provider route.
-        relation_floor = max(0.10, best_score * 0.55)
-        related_rows = [
-            row for row in scored
-            if float(row.get("score", 0.0) or 0.0) >= relation_floor
-        ]
-        if pair_selected_indices:
-            pair_index_set = set(pair_selected_indices)
-            directed_rows = [row for row in related_rows if int(row.get("index", -1)) in pair_index_set]
-            if directed_rows:
-                related_rows = directed_rows + [
-                    row for row in related_rows
-                    if int(row.get("index", -1)) not in pair_index_set
-                ]
-        related_rows.sort(
-            key=lambda row: (float(row.get("score", 0.0) or 0.0), row.get("index", -1)),
-            reverse=True,
-        )
-        selected_rows = related_rows[:4]
-        if selected_source and not any(
-            row.get("index") == selected_source.get("index")
-            for row in selected_rows
-        ):
-            selected_rows = [selected_source] + selected_rows[:3]
-        selected_rows = sorted(
-            selected_rows[:4],
-            key=lambda row: row.get("index", -1),
-        )
-        context_pairs = [
-            dict(row["pair"])
-            for row in selected_rows
-            if isinstance(row.get("pair"), dict)
-        ]
-        if selected_pair and not context_pairs:
-            context_pairs = [selected_pair]
+            selected_indices = pair_selected_indices[-6:]
+        context_pairs = [dict(window[i]) for i in selected_indices][-6:]
         context_mode = "LIVE_CONTINUATION"
-        resolved_entity = (
-            latest_subject if pronoun_followup else
-            _live_pair_subject(selected_pair) if selected_pair else current_subject
-        )
+        object_focus = pair_reasoning.get("object_focus")
+        object_focus = object_focus if isinstance(object_focus, dict) else {}
+        resolved_entity = str(object_focus.get("label") or object_focus.get("key") or "").strip()
         reference_resolution = {
             "resolved": True,
-            "source": "AUTHENTICATED_12H_PAIR_MATCH",
+            "source": "PAIR_DIALOGUE_DIRECTION_ENGINE",
             "entity": resolved_entity,
-            "current_subject": current_subject,
             "selected_index": selected_index,
             "match_score": best_score,
-        } if (pronoun_followup or historical_subject_match or current_reference) else {}
-    else:
-        relation = "NEW"
-        selected_index = -1
-        selected_pair = {}
-        # NEW means a clean new task. The pair window was used only to decide
-        # that no continuation applies; no old pair is forwarded downstream.
-        context_pairs = []
-        context_mode = "NEW_TOPIC_ISOLATED"
-        reference_resolution = {}
+        } if resolved_entity else {}
+
+    # Expose the exact three-state decision for every downstream layer.
+    pair_reasoning["final_relation"] = relation
+    pair_reasoning["relation_locked"] = True
+    pair_reasoning["provider_context_locked"] = True
 
     # Semantic action linkage describes what the current request does relative to
     # the matched pair. This is passed to OpenAI as formulation data, not rendered
@@ -6485,7 +6456,7 @@ def _live_relation_selector(
         "contextual_discovery_signal": round(contextual_discovery_signal, 6),
         "implicit_pair_continuation": implicit_pair_continuation,
         "pair_direction": pair_reasoning,
-        "pair_match_method": "authenticated_12h_pairs_first_semantic_match_then_relation",
+        "pair_match_method": "STATE_MANAGER_12H_PAIRS_THEN_PAIR_DIALOGUE_DIRECTION_ENGINE",
         "topic_relation": topic_relation,
         "action_link": action_link,
         "response_formulation": response_formulation,
@@ -6624,7 +6595,7 @@ def _build_pair_first_response_formulation(
         )
 
     result = {
-        "version": "pair_first_response_formulation_v5_directional",
+        "version": "pair_first_response_formulation_v6_pair_chain_locked",
         "relation": relation,
         "context_mode": context_mode,
         "pair_first": True,
@@ -6693,8 +6664,8 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         },
     )
     relation = str(selected.get("relation") or "NEW").upper()
-    if relation not in {"CONTINUE", "NEW"}:
-        relation = "NEW"
+    if relation not in {"CONTINUE", "RECALL", "NEW"}:
+        raise RuntimeError(f"INVALID_THREE_WAY_RELATION: {relation!r}")
     selected_pair = dict(selected.get("selected_pair") or {})
     raw_selected_index = selected.get("selected_index", -1)
     selected_index = int(raw_selected_index if raw_selected_index is not None else -1) if relation == "CONTINUE" else -1
@@ -6743,8 +6714,8 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
     if not isinstance(result, dict):
         raise RuntimeError("INTERPRETATION_RETURNED_NO_PACKET")
     relation = str(selected.get("relation") or "NEW").upper()
-    if relation not in {"CONTINUE", "NEW"}:
-        relation = "NEW"
+    if relation not in {"CONTINUE", "RECALL", "NEW"}:
+        raise RuntimeError(f"INVALID_THREE_WAY_RELATION: {relation!r}")
     selected_pair = dict(selected.get("selected_pair") or {})
     raw_selected_index = selected.get("selected_index", -1)
     selected_index = int(raw_selected_index if raw_selected_index is not None else -1) if relation == "CONTINUE" else -1
@@ -6801,11 +6772,10 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
     result["relation"] = relation
     result["dialogue_relation"] = relation
     result["continuation"] = bool(relation == "CONTINUE")
-    result["reference_to_previous"] = bool(relation == "CONTINUE" and selected_index >= 0)
+    result["reference_to_previous"] = bool(relation in {"CONTINUE", "RECALL"} and (selected_index >= 0 or bool(context_pairs)))
     result["context_dependency"] = (
         "continuation" if relation == "CONTINUE"
-        else "history_lookup" if history_lookup
-        else "new_with_context" if context_mode == "NEW_TOPIC_WITH_CONTEXT"
+        else "recall" if relation == "RECALL"
         else "independent"
     )
     result["context_mode"] = context_mode
