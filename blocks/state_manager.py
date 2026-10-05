@@ -180,31 +180,61 @@ def _derive_post_provider_memory_semantics(
     relation="NEW",
     render_types=None,
 ):
-    """Persist one canonical USER↔APRIL pair; no entity engine participates."""
-    relation=str(relation or "NEW").strip().upper()
-    request_text=str(current_request or "").strip()[:1200]
-    answer_text=str(answer or "").strip()[:4000]
-    rtypes=[str(x or "").strip().lower() for x in (render_types or []) if str(x or "").strip()]
-    subtopic=""
-    for label in ("image","gallery","formula","diagram","graph","table","code","link","audio","video","file"):
-        if label in rtypes:
-            subtopic=label; break
+    """Build canonical semantic metadata for one authenticated USER↔APRIL pair.
+
+    The stored pair always keeps the exact USER request and APRIL answer. Optional
+    interpretation metadata (resolved request/topic/reference/context) is stored
+    beside them so a later turn can understand pronouns without inventing text.
+    """
+    provisional = provisional if isinstance(provisional, dict) else {}
+    relation = str(relation or "NEW").strip().upper()
+    if relation == "RECALL" or relation not in {"CONTINUE", "NEW"}:
+        relation = "NEW"
+    request_text = str(current_request or "").strip()[:1200]
+    answer_text = str(answer or "").strip()[:4000]
+    rtypes = [str(x or "").strip().lower() for x in (render_types or []) if str(x or "").strip()]
+    subtopic = next((label for label in ("image","gallery","formula","diagram","graph","table","code","link","audio","video","file") if label in rtypes), "")
+    topic = str(
+        provisional.get("canonical_topic")
+        or provisional.get("active_topic")
+        or provisional.get("topic")
+        or ""
+    ).strip()[:220]
+    if not topic:
+        topic = request_text[:220]
+    active_entity = str(
+        provisional.get("resolved_reference_entity")
+        or provisional.get("active_entity")
+        or provisional.get("resolved_entity")
+        or ""
+    ).strip()[:220]
+    resolved_request = str(provisional.get("resolved_request") or request_text).strip()[:1200]
+    context_mode = str(provisional.get("context_mode") or ("LIVE_CONTINUATION" if relation == "CONTINUE" else "NEW_TOPIC_ISOLATED"))
     return {
-        "version":"post_provider_pair_memory_v3",
-        "source_of_truth":"USER_REQUEST_PLUS_PROVIDER_RESPONSE",
-        "memory_source":"POST_PROVIDER_OPENAI_RESPONSE",
-        "topic":request_text[:220],
-        "subtopic":subtopic,
-        "entities":[],
-        "active_entity":"",
-        "subject_source":"USER_APRIL_PAIR",
-        "subject_confidence":1.0 if request_text else 0.0,
-        "reference_policy":"PAIR_CONTEXT_ONLY",
-        "relation":relation,
-        "user_request":request_text,
-        "april_answer":answer_text,
-        "created_at":time.time(),
-        "expires_after_hours":DIALOGUE_WINDOW_HOURS,
+        "version": "post_provider_pair_memory_v4_live_context",
+        "source_of_truth": "USER_REQUEST_PLUS_PROVIDER_RESPONSE",
+        "memory_source": "POST_PROVIDER_OPENAI_RESPONSE",
+        "topic": topic,
+        "canonical_topic": topic,
+        "subtopic": subtopic,
+        "entities": [],
+        "active_entity": active_entity,
+        "resolved_reference_entity": active_entity,
+        "resolved_request": resolved_request,
+        "subject_source": "INTERPRETATION_PAIR_CONTEXT",
+        "subject_confidence": 0.98 if active_entity else 0.55 if topic else 0.0,
+        "reference_policy": "AUTHENTICATED_12H_PAIR_CONTEXT",
+        "relation": relation,
+        "context_mode": context_mode,
+        "context_dependency": (
+            "continuation" if relation == "CONTINUE"
+            else "new_with_context" if context_mode in {"NEW_TOPIC_WITH_CONTEXT", "HISTORY_LOOKUP"}
+            else "independent"
+        ),
+        "user_request": request_text,
+        "april_answer": answer_text,
+        "created_at": time.time(),
+        "expires_after_hours": DIALOGUE_WINDOW_HOURS,
     }
 
 def compact_dialog_message(role, content):
@@ -1433,7 +1463,7 @@ class QuantumMemoryEngine:
         previous_canonical = canonical_turn.get("memory_semantics") if isinstance(canonical_turn.get("memory_semantics"), dict) else canonical_turn
         canonical_semantics = current_canonical or previous_canonical
         relation = str(relation or "NEW").strip().upper()
-        if relation not in {"NEW", "CONTINUE", "RECALL"}:
+        if relation == "RECALL" or relation not in {"NEW", "CONTINUE"}:
             relation = "NEW"
         selected_operand = selected_operand if isinstance(selected_operand, dict) else {}
         presentation_only = bool(dv.get("presentation_only"))
@@ -1705,7 +1735,7 @@ class QuantumMemoryEngine:
             "dialogue_rules": deepcopy(rules),
             "task_registry": deepcopy(sequence_tasks),
             "relation": relation,
-            "restored": relation == "RECALL",
+            "restored": False,
             "active_entity": str(canonical_semantics.get("active_entity") or dv.get("active_entity") or current.get("active_entity") or "")[:220],
             "branch_label": branch_label,
             "branch_type": str(dv.get("branch_type") or target_task.get("branch_type") or "topic") if target_task else str(dv.get("branch_type") or "topic"),
@@ -2213,15 +2243,19 @@ class QuantumMemoryEngine:
             or ("continuation" if authoritative_relation == "CONTINUE" else "recall" if authoritative_relation == "RECALL" else "independent" if authoritative_relation == "NEW" else "")
         ).strip().lower()
 
-        if authoritative_relation in {"CONTINUE", "RECALL"}:
-            continuation = authoritative_relation == "CONTINUE"
+        if authoritative_relation == "RECALL":
+            authoritative_relation = "NEW"
+            if dependency == "recall":
+                dependency = "history_lookup"
+        if authoritative_relation == "CONTINUE":
+            continuation = True
 
         return {
             "continuation": continuation,
             "context_dependency": dependency,
             "relation": authoritative_relation or ("CONTINUE" if continuation else "NEW"),
-            "new_topic": (authoritative_relation == "NEW") or (dependency in {"new_topic", "independent"} and not continuation),
-            "recall": authoritative_relation == "RECALL",
+            "new_topic": authoritative_relation == "NEW",
+            "recall": False,
         }
 
     # ---------- unified writes ----------
@@ -2662,43 +2696,14 @@ def get_state(user_id):
 
 
 def _append_recall_index(state_obj, pair):
-    """Keep a compact 12h recall index while full dialogue is limited to the last 3 turns."""
-    if not isinstance(state_obj, dict) or not isinstance(pair, dict):
-        return
-    now = time.time()
-    idx = state_obj.get("dialogue_recall_index")
-    if not isinstance(idx, list):
-        idx = []
-    item = {
-        "user_id": str(pair.get("user_id") or state_obj.get("user_id") or ""),
-        "conversation_id": str(pair.get("conversation_id") or state_obj.get("conversation_id") or ""),
-        "created_at": float(pair.get("created_at") or now),
-        "sequence_id": str(pair.get("sequence_id") or ""),
-        "sequence_turn_index": int(pair.get("sequence_turn_index") or 0),
-        "relation": str(pair.get("dialogue_relation") or pair.get("relation") or "NEW").upper(),
-        "topic": safe_trim_text(pair.get("topic") or pair.get("sequence_topic") or "", 220),
-        "subtopic": safe_trim_text(pair.get("subtopic") or "", 180),
-        "entities": [],
-        "active_entity": "",
-        "user_request": safe_trim_text(pair.get("user_request") or pair.get("user_meaning") or "", 360),
-        "answer_summary": safe_trim_text(pair.get("answer_summary") or pair.get("april_meaning") or pair.get("april_answer") or "", 500),
-        "source_of_truth": "USER_REQUEST_PLUS_PROVIDER_RESPONSE",
-        "memory_source": "POST_PROVIDER_OPENAI_RESPONSE",
-    }
-    fingerprint = (item["conversation_id"], item["sequence_turn_index"], item["user_request"])
-    idx = [x for x in idx if not (isinstance(x, dict) and (str(x.get("conversation_id") or ""), int(x.get("sequence_turn_index") or 0), str(x.get("user_request") or "")) == fingerprint)]
-    idx.append(item)
-    cutoff = now - DIALOGUE_WINDOW_SECONDS
-    idx = [x for x in idx if isinstance(x, dict) and float(x.get("created_at") or 0.0) >= cutoff]
-    idx.sort(key=lambda x: float(x.get("created_at") or 0.0))
-    state_obj["dialogue_recall_index"] = idx[-RECALL_INDEX_LIMIT:]
-    state_obj["dialogue_recall_policy"] = {
-        "active_window_pairs": ACTIVE_DIALOGUE_WINDOW_PAIRS,
-        "recall_index_hours": DIALOGUE_WINDOW_HOURS,
-        "recall_index_max": RECALL_INDEX_LIMIT,
-        "full_archive_is_recall_only": False,
-    }
-
+    """Compatibility no-op: live dialogue uses the authenticated pair window directly."""
+    if isinstance(state_obj, dict):
+        state_obj["dialogue_recall_index"] = []
+        state_obj["dialogue_recall_policy"] = {
+            "enabled": False,
+            "reason": "TWO_STATE_LIVE_DIALOGUE",
+            "window_hours": DIALOGUE_WINDOW_HOURS,
+        }
 
 def _repair_latest_canonical_dialogue_memory(state_obj):
     """Cheap maintenance: repair only the last 3 completed turns and current task mirrors."""
@@ -2904,15 +2909,7 @@ def _cleanup_hot_content(state_obj, now=None):
     day0 = timeline.get("day_0") if isinstance(timeline.get("day_0"), dict) else {}
     if day0:
         pairs = [x for x in day0.get("dialog_pairs", []) if isinstance(x, dict)]
-        # Before deleting legacy/full turns, preserve only compact recall facts for the
-        # still-valid 12h window. This migrates old state once, without carrying full answers.
-        for pair in pairs:
-            try:
-                pts = float(pair.get("created_at") or pair.get("timestamp") or 0.0)
-            except (TypeError, ValueError):
-                pts = 0.0
-            if pts and now - pts < DIALOGUE_WINDOW_SECONDS:
-                _append_recall_index(state_obj, pair)
+        state_obj["dialogue_recall_index"] = []
         # Keep all unexpired USER↔APRIL pairs in the 12h archive. Interpretation
         # selects the latest 15 as its dynamic working window; nothing older is
         # deleted merely because it left that window.
@@ -4987,11 +4984,19 @@ def update_scene_context(
         if isinstance(dialogue_resolution, dict) and dialogue_resolution.get("authoritative")
         else continuity.get("relation") or ""
     ).strip().upper()
-    if resolved_relation not in {"CONTINUE", "RECALL", "NEW"}:
+    if resolved_relation == "RECALL":
+        # Migrate stale pre-v4 state. RECALL is no longer a dialogue relation.
+        # Historical requests are NEW turns with context_mode=HISTORY_LOOKUP.
+        resolved_relation = "NEW"
+    elif resolved_relation not in {"CONTINUE", "NEW"}:
         resolved_relation = "CONTINUE" if continuity.get("continuation") else "NEW"
-    context_mode = str(continuity.get("context_dependency") or "").strip().lower()
+    context_mode = str(
+        (dialogue_resolution.get("context_mode") if isinstance(dialogue_resolution, dict) else "")
+        or continuity.get("context_dependency")
+        or ""
+    ).strip().lower()
     is_continuation = resolved_relation == "CONTINUE"
-    is_recall = resolved_relation == "RECALL"
+    is_recall = False
 
     current_scene = state_obj.get("current_visual_scene")
     if not isinstance(current_scene, dict):
@@ -5041,7 +5046,7 @@ def update_scene_context(
     post_provider_semantics = _derive_post_provider_memory_semantics(
         current_request_text,
         answer_text,
-        provisional={},
+        provisional=dialogue_vector,
         previous_anchor=previous_anchor,
         relation=resolved_relation,
         render_types=block_types or presentation_types,
@@ -5778,12 +5783,14 @@ def update_dialog_context(user_id, semantic_result):
         or semantic_result.get("dialogue_relation")
     )
     relation = str(raw_relation or "").strip().upper()
-    if relation not in {"CONTINUE", "RECALL", "NEW"}:
+    if relation == "RECALL":
+        relation = "NEW"
+    if relation not in {"CONTINUE", "NEW"}:
         # Compatibility inputs from older semantic contracts.
         if bool(contract.get("continuation", semantic_result.get("continuation", False))):
             relation = "CONTINUE"
         elif bool(contract.get("reference_to_previous", False)):
-            relation = "RECALL"
+            relation = "CONTINUE"
         else:
             relation = "NEW"
 
@@ -5794,7 +5801,15 @@ def update_dialog_context(user_id, semantic_result):
     # StateManager sequence advance after the Provider answer.
     active_sequence = state_obj.get("active_dialogue_sequence") if isinstance(state_obj.get("active_dialogue_sequence"), dict) else {}
     validation_sequence = deepcopy(active_sequence)
+    # RECALL is a retired compatibility value. It never owns routing.
     if relation == "RECALL":
+        relation = "NEW"
+    if relation == "NEW" and str(
+        dialogue_vector.get("context_mode") or contract.get("context_mode") or semantic_result.get("context_mode") or ""
+    ).upper() == "HISTORY_LOOKUP":
+        state_obj["dialogue_history_lookup"] = True
+    target_sequence_id = ""
+    if relation == "CONTINUE":
         target_sequence_id = str(
             dialogue_vector.get("target_sequence_id")
             or contract.get("target_sequence_id")
@@ -5966,6 +5981,13 @@ def update_dialog_context(user_id, semantic_result):
         "development_state": development_state,
         "source_scene_id": development_state["source_scene_id"],
         "resolved_request": resolved_request,
+        "context_mode": str(dialogue_vector.get("context_mode") or "NEW_TOPIC_ISOLATED"),
+        "context_dependency": str(
+            dialogue_vector.get("context_dependency")
+            or ("continuation" if relation == "CONTINUE" else "independent")
+        ),
+        "history_lookup": bool(dialogue_vector.get("history_lookup")),
+        "resolved_reference_entity": str(dialogue_vector.get("resolved_reference_entity") or ""),
         "confidence": float(
             dialogue_vector.get("three_way_confidence")
             or contract.get("three_way_confidence")
@@ -5999,10 +6021,10 @@ def update_dialog_context(user_id, semantic_result):
         or semantic_result.get("current_request")
         or "",
         "continuation": relation == "CONTINUE",
-        "reference_to_previous": relation == "RECALL",
+        "reference_to_previous": relation == "CONTINUE" and selected_index >= 0,
         "context_dependency": (
             "continuation" if relation == "CONTINUE"
-            else "recall" if relation == "RECALL"
+            else "new_with_context" if str(dialogue_vector.get("context_mode") or "") in {"NEW_TOPIC_WITH_CONTEXT", "HISTORY_LOOKUP"}
             else "independent"
         ),
         "active_topic": topic or semantic_result.get("active_topic"),
@@ -6019,6 +6041,10 @@ def update_dialog_context(user_id, semantic_result):
         "memory_slider": deepcopy(memory_slider),
         "development_state": deepcopy(development_state),
         "resolved_request": resolved_request,
+        "context_mode": str(dialogue_vector.get("context_mode") or "NEW_TOPIC_ISOLATED"),
+        "history_lookup": bool(dialogue_vector.get("history_lookup")),
+        "resolved_reference_entity": str(dialogue_vector.get("resolved_reference_entity") or ""),
+        "context_pairs": deepcopy(dialogue_vector.get("selected_context_pairs") or dialogue_vector.get("context_pairs") or []),
         "interactive_task_state": deepcopy(interactive_task_state),
     })
 
@@ -6663,7 +6689,8 @@ def build_dialogue_memory_bridge(
     seq=state_obj.get("active_dialogue_sequence") if isinstance(state_obj.get("active_dialogue_sequence"),dict) else {}
     mode=str(relation or "AUTO").upper()
     if mode=="AUTO": mode=str((state_obj.get("dialogue_resolution") or {}).get("relation") or ("CONTINUE" if records else "NEW")).upper()
-    if mode not in {"NEW","CONTINUE","RECALL"}: mode="NEW"
+    if mode == "RECALL": mode="NEW"
+    if mode not in {"NEW","CONTINUE"}: mode="NEW"
     return {
         "version":"dialogue_pairs_v2",
         "authenticated":True,
@@ -6756,18 +6783,26 @@ def build_quantum_memory_signal(user_id, query="", limit=8):
 # ============================================================================
 
 def _purge_entity_routing_fields(obj):
-    if not isinstance(obj, dict): return obj
+    """Remove legacy fuzzy routing indexes without deleting semantic pair metadata.
+
+    active_entity/entities/resolved_entity are useful semantic evidence inside an
+    authenticated USER↔APRIL pair (for pronoun resolution). The deprecated entity
+    index/engine is disabled, but the pair's resolved subject remains durable.
+    """
+    if not isinstance(obj, dict):
+        return obj
     for key in list(obj.keys()):
-        low=str(key).lower()
-        if low in {"entity","entities","active_entity","resolved_entity","entity_definition","entity_context","entity_index","semantic_entity_definition"}:
-            if low == "entities": obj[key]=[]
-            else: obj[key]=""
+        low = str(key).lower()
+        if low in {"entity_index"}:
+            obj.pop(key, None)
             continue
-        value=obj.get(key)
-        if isinstance(value,dict): _purge_entity_routing_fields(value)
-        elif isinstance(value,list):
+        value = obj.get(key)
+        if isinstance(value, dict):
+            _purge_entity_routing_fields(value)
+        elif isinstance(value, list):
             for item in value:
-                if isinstance(item,dict): _purge_entity_routing_fields(item)
+                if isinstance(item, dict):
+                    _purge_entity_routing_fields(item)
     return obj
 
 _STATE_GET_STATE_ORIGINAL = get_state
@@ -6800,14 +6835,16 @@ _BUILD_DIALOGUE_MEMORY_BRIDGE_ORIGINAL = build_dialogue_memory_bridge
 def build_dialogue_memory_bridge(*args, **kwargs):
     result=_BUILD_DIALOGUE_MEMORY_BRIDGE_ORIGINAL(*args, **kwargs)
     if not isinstance(result,dict): return result
+    if str(result.get("relation") or "").upper() == "RECALL":
+        result["relation"] = "NEW"
     result.pop("entity_index",None)
     result.pop("topic_index",None)
     result.pop("task_index",None)
     result["history_source"]="USER_APRIL_PAIRS"
     result["window_hours"]=DIALOGUE_WINDOW_HOURS
     result["authenticated_only"]=True
-    # RECALL/CONTINUE are interpreted from the supplied full pair window, not by a
-    # second fuzzy memory selector.
+    # CONTINUE/NEW are interpreted from the supplied full pair window; the bridge
+    # never selects a historical branch and exposes only live authenticated pairs.
     rows=result.get("dialogue_pairs") or result.get("active_sequence_turns") or result.get("relevant_window_turns") or []
     result["dialogue_pairs"]=rows[-ACTIVE_DIALOGUE_WINDOW_PAIRS:]
     result["selected_records"]=result["dialogue_pairs"]
