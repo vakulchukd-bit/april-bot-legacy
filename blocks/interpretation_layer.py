@@ -22,6 +22,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 try:
+    from .vru_context_interpreter import VRU_CONTEXT_INTERPRETER, VRU_VERSION
+except Exception:  # pragma: no cover - direct/script execution compatibility
+    from vru_context_interpreter import VRU_CONTEXT_INTERPRETER, VRU_VERSION
+
+try:
     import numpy as np
 except Exception:  # pragma: no cover
     np = None
@@ -6722,7 +6727,7 @@ def _pair_canonical_interpret(self, text, cognition=None, semantic=None, history
 # If the pair engine cannot establish a relation to selected pairs, the result is NEW.
 # Provider/OpenAI is not allowed to re-select dialogue context.
 
-LIVE_DIALOGUE_ENGINE_VERSION = "live_pair_context_v7_three_state_pair_locked"
+LIVE_DIALOGUE_ENGINE_VERSION = "live_pair_context_v8_three_state_pair_locked_vru"
 
 # Persistent 12h USER↔APRIL pair cache.
 # The runtime snapshot may be recreated between HTTP turns, while the durable pair
@@ -7598,6 +7603,60 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
     pairs = _pair_window_from_state(state_obj, history=history, limit=15)
     current = self.normalize(text)
     selected = self._select_three_way_dialogue_relation(current, pairs)
+
+    # ------------------------------------------------------------------
+    # VRU SEMANTIC FUSION BOUNDARY
+    # Candidate pairs have now been found. VRU performs a second internal
+    # interpretation over the meaning of BOTH sides of the candidate pairs
+    # (USER request + APRIL answer) before the three-state result is allowed
+    # to reach the provider. This is not a fallback and does not route.
+    # ------------------------------------------------------------------
+    try:
+        vru = VRU_CONTEXT_INTERPRETER.analyze(
+            current,
+            pairs,
+            seed=selected if isinstance(selected, dict) else {},
+        )
+    except Exception as exc:
+        raise RuntimeError(f"VRU_CONTEXT_INTERPRETATION_FAILED: {exc}") from exc
+
+    if not isinstance(vru, dict) or not vru.get("version"):
+        raise RuntimeError("VRU_CONTEXT_INTERPRETATION_NO_DECISION")
+
+    # VRU is the semantic refinement layer. It may strengthen or preserve a
+    # pair-first decision, but never invents an external context source.
+    vru_relation = str(vru.get("relation") or "NEW").upper()
+    if vru_relation not in {"CONTINUE", "RECALL", "NEW"}:
+        raise RuntimeError(f"VRU_INVALID_RELATION: {vru_relation!r}")
+
+    if vru_relation != str(selected.get("relation") or "NEW").upper() or vru.get("selected_indices"):
+        merged = dict(selected)
+        merged["relation"] = vru_relation
+        merged["relation_hint"] = vru_relation
+        merged["selected_indices"] = list(vru.get("selected_indices") or [])
+        merged["anchor_index"] = int(vru.get("anchor_index", -1) or -1)
+        merged["context_pairs"] = [dict(x) for x in (vru.get("context_pairs") or []) if isinstance(x, dict)]
+        merged["context_mode"] = (
+            "LIVE_CONTINUATION" if vru_relation == "CONTINUE"
+            else "HISTORY_LOOKUP" if vru_relation == "RECALL"
+            else "NEW_TOPIC_ISOLATED"
+        )
+        merged["history_lookup"] = vru_relation == "RECALL"
+        if vru_relation == "CONTINUE" and merged["anchor_index"] >= 0 and merged["anchor_index"] < len(pairs):
+            merged["selected_index"] = merged["anchor_index"]
+            merged["selected_pair"] = dict(pairs[merged["anchor_index"]])
+        elif vru_relation == "RECALL":
+            merged["selected_index"] = -1
+            merged["selected_pair"] = {}
+        else:
+            merged["selected_index"] = -1
+            merged["selected_pair"] = {}
+        merged["vru_semantic_fusion"] = vru
+        selected = merged
+    else:
+        selected = dict(selected)
+        selected["vru_semantic_fusion"] = vru
+
     print(
         "🧭 APRIL PAIR-FIRST DECISION:",
         {
@@ -7608,6 +7667,9 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
             "best_score": float(selected.get("best_score") or 0.0),
             "relation_after_match": str(selected.get("relation") or "NEW").upper(),
             "context_mode": str(selected.get("context_mode") or ""),
+            "vru_version": VRU_VERSION,
+            "vru_relation": str((selected.get("vru_semantic_fusion") or {}).get("relation") or "NEW").upper(),
+            "vru_pair_count": len((selected.get("vru_semantic_fusion") or {}).get("context_pairs") or []),
         },
     )
     relation = str(selected.get("relation") or "NEW").upper()
@@ -7655,6 +7717,24 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         "context_mode": context_mode,
         "response_formulation": dict(response_formulation),
     }
+    # Rebuild the provider formulation from the VRU-refined pair chain.
+    # The provider therefore receives the meaning synthesized from the selected
+    # USER↔APRIL pairs, not the pre-VRU single-pair interpretation.
+    if isinstance(vru, dict):
+        response_formulation = _build_pair_first_response_formulation(
+            current,
+            dict(selected.get("selected_pair") or {}),
+            int(selected.get("selected_index", -1) or -1),
+            str(selected.get("relation") or "NEW").upper(),
+            str(selected.get("context_mode") or "NEW_TOPIC_ISOLATED"),
+            matched_pairs=[dict(x) for x in (selected.get("context_pairs") or []) if isinstance(x, dict)],
+        )
+        response_formulation["vru_semantic_fusion_version"] = VRU_VERSION
+        response_formulation["vru_fused_meaning"] = dict(vru.get("fused_meaning") or {})
+        response_formulation["vru_task_definition"] = dict(vru.get("task_definition") or {})
+        response_formulation["vru_definition"] = str(vru.get("definition") or selected.get("relation") or "NEW").upper()
+        response_formulation["vru_candidate_pair_count"] = len(vru.get("candidate_evidence") or [])
+
     result = _PAIR_INTERPRET_ORIGINAL_LIVE(
         self, text, cognition=cognition, semantic=semantic, history=effective_history, state=analysis_state
     )
@@ -7739,6 +7819,14 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         dict(next((x for x in context_pairs if isinstance(x, dict)), {})) if context_pairs else {}
     )
     result["pair_direction_engine"] = dict(selected.get("pair_direction") or {}) if isinstance(selected.get("pair_direction"), dict) else {}
+    result["vru_semantic_fusion"] = dict(selected.get("vru_semantic_fusion") or {})
+    result["vru_definition"] = {
+        "version": VRU_VERSION,
+        "relation": str((selected.get("vru_semantic_fusion") or {}).get("relation") or relation).upper(),
+        "fused_meaning": (selected.get("vru_semantic_fusion") or {}).get("fused_meaning") or {},
+        "task_definition": (selected.get("vru_semantic_fusion") or {}).get("task_definition") or {},
+        "candidate_evidence": (selected.get("vru_semantic_fusion") or {}).get("candidate_evidence") or [],
+    }
     result["pair_first_match"] = {
         "selected_index": selected_index,
         "selected_pair": _compact_pair_for_formulation(selected_pair),
@@ -7770,6 +7858,22 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         result["active_entity"] = resolved_reference_entity[:220]
         result["resolved_entity"] = resolved_reference_entity[:220]
     result["reference_entity"] = resolved_reference_entity
+
+    vru_fused_meaning = (selected.get("vru_semantic_fusion") or {}).get("fused_meaning")
+    if isinstance(vru_fused_meaning, dict):
+        vru_target_scope = str(vru_fused_meaning.get("target_scope") or "").strip()
+        if vru_target_scope and relation == "CONTINUE":
+            # The semantic fusion layer owns the recovered subject for elliptical
+            # turns. Do not replace it with a lexical tail extracted from one answer.
+            canonical_topic = vru_target_scope[:220]
+            result["canonical_topic"] = canonical_topic
+            result["active_topic"] = canonical_topic
+            result["vru_target_scope"] = canonical_topic
+            resolved_reference_entity = canonical_topic
+            result["resolved_reference_entity"] = canonical_topic
+            result["active_entity"] = canonical_topic
+            result["resolved_entity"] = canonical_topic
+            result["reference_entity"] = canonical_topic
 
     # Provider handoff: CONTINUE uses active dialogue context; NEW may carry recent
     # background context, but the provider must execute the current task as NEW.
@@ -7813,6 +7917,23 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         or result.get("requested_representation")
         or "text"
     ).lower()
+
+    vru_task_definition = (selected.get("vru_semantic_fusion") or {}).get("task_definition")
+    if isinstance(vru_task_definition, dict) and vru_task_definition.get("format_as_vertical_list"):
+        # "В столбик" following a list result is a formatting instruction, not
+        # a request to create a table. Keep the answer as text and carry the
+        # vertical-list contract explicitly.
+        base_rep = "text"
+        result["output_format_hint"] = "vertical_list"
+        result["semantic_task"] = {
+            **semantic_task,
+            "representation": "text",
+            "operation": "format_previous_result",
+            "goal": "preserve_previous_content_change_format",
+        }
+        semantic_task = result["semantic_task"]
+        operation = "format_previous_result"
+
     visual_request = str(
         result.get("visual_generation_request")
         or semantic_task.get("visual_generation_request")
@@ -7877,6 +7998,8 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         ),
         "provider_continuation_contract": "STRUCTURED_REQUEST_FROM_SELECTED_PAIRS",
         "pair_history_authority": "INTERPRETATION_ONLY",
+        "vru_semantic_fusion_version": VRU_VERSION,
+        "vru_semantic_fusion_completed": True,
         "pair_history_count": len(provider_formulation_pairs),
         "new_topic_minimal_context": relation == "NEW",
         "context_background_only": False,
