@@ -2726,10 +2726,11 @@ def _unwrap_model_answer(value: Any) -> str:
     """Extract a human answer from both flat and nested model envelopes."""
     if isinstance(value, dict):
         # Canonical provider payloads can occasionally arrive wrapped as
-        # {"machine_response": {...}}, {"result": {...}} or similar.
+        # {"machine_response": {...}}, {"MachineResponse": {...}},
+        # {"result": {...}} or similar.
         for key in (
             "answer", "content", "response", "summary", "final_text", "text",
-            "machine_response", "result", "data", "output",
+            "machine_response", "MachineResponse", "result", "data", "output",
         ):
             candidate = value.get(key)
             if isinstance(candidate, str) and candidate.strip():
@@ -2756,7 +2757,7 @@ def _unwrap_model_answer(value: Any) -> str:
     if isinstance(obj, dict):
         for key in (
             "answer", "content", "response", "summary", "final_text", "text",
-            "machine_response", "result", "data", "output",
+            "machine_response", "MachineResponse", "result", "data", "output",
         ):
             candidate = obj.get(key)
             if isinstance(candidate, str) and candidate.strip():
@@ -2809,10 +2810,34 @@ def _coerce_human_answer(value: Any) -> str:
         return text
     if isinstance(value, (int, float, bool)):
         return str(value)
+    if isinstance(value, (list, tuple, set)):
+        # Structured MachineResponse payloads may carry visible text as a list
+        # of content objects (for example table rows). Recover only human-facing
+        # text fields; never stringify the whole machine envelope.
+        pieces: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            if isinstance(item, dict):
+                candidate = ""
+                for key in (
+                    "text", "answer", "response", "summary", "message",
+                    "title", "content",
+                ):
+                    if key in item:
+                        candidate = _coerce_human_answer(item.get(key))
+                        if candidate:
+                            break
+            else:
+                candidate = _coerce_human_answer(item)
+            candidate = normalize_response_text(candidate) if candidate else ""
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                pieces.append(candidate)
+        return "\n".join(pieces)[:12000]
     if isinstance(value, dict):
         for key in (
             "answer", "content", "response", "final_text", "text", "value",
-            "result", "data", "output", "message", "summary",
+            "result", "data", "output", "message", "summary", "MachineResponse",
         ):
             if key in value:
                 nested = _coerce_human_answer(value.get(key))
@@ -3921,11 +3946,16 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
     # canonical contract. This is a transport repair, not a semantic rewrite.
     canonical_payload = parsed
     if isinstance(parsed, dict):
-        for wrapper_key in ("machine_response", "result", "data", "output"):
-            wrapped = parsed.get(wrapper_key)
+        # OpenAI/Provider structured responses have appeared with both
+        # snake_case and PascalCase wrapper names. Unwrap only known provider
+        # envelopes; the inner MachineResponse becomes the canonical payload.
+        for wrapper_key, wrapped in parsed.items():
+            normalized_wrapper = str(wrapper_key or "").strip().casefold().replace("_", "")
+            if normalized_wrapper not in {"machineresponse", "result", "data", "output"}:
+                continue
             if isinstance(wrapped, dict) and any(
                 key in wrapped
-                for key in ("answer", "content", "response", "text", "render_blocks", "artifacts", "image", "gallery", "diagram", "graph", "table")
+                for key in ("answer", "content", "response", "text", "render_blocks", "artifacts", "image", "gallery", "diagram", "graph", "table", "outputs")
             ):
                 canonical_payload = wrapped
                 break
