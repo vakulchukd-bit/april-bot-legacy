@@ -524,7 +524,7 @@ WEB_RENDERER_REGISTRY_VERSION = "3.1"
 WEB_RENDERER_REGISTRY = {
     "text": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "answer"]},
     "markdown": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "markdown"]},
-    "formula": {"renderer": "FormulaRenderer", "viewer": "FormulaRenderer", "fallback_renderer": "", "payload_keys": ["formula", "equation", "expression", "math", "content"], "mode": "force_math"},
+    "formula": {"renderer": "FormulaRenderer", "viewer": "FormulaRenderer", "fallback_renderer": "", "payload_keys": ["formula", "formulas", "latex", "latex_formulas", "equation", "expression", "math", "markdown", "content"], "mode": "force_math"},
     "graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["series", "x_axis", "data_table", "points"]},
     "table": {"renderer": "TableBlock", "viewer": "TableBlock", "fallback_renderer": "", "payload_keys": ["rows", "columns", "headers", "data", "values", "items"]},
     "diagram": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["elements", "svg", "geometry", "points"], "specialized_renderers": ["SvgBlock", "ArithmeticDiagram"]},
@@ -533,7 +533,7 @@ WEB_RENDERER_REGISTRY = {
     "scene": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["elements", "svg", "images", "objects"]},
     "visual_context": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["images", "elements", "svg", "context"]},
     "code": {"renderer": "CodeBlock", "viewer": "CodeBlock", "fallback_renderer": "", "payload_keys": ["code", "content", "language"]},
-    "link": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "", "payload_keys": ["url", "href", "title", "description"]},
+    "link": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "", "payload_keys": ["url", "href", "title", "description", "links", "markdown", "preview"]},
     "file": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "", "payload_keys": ["url", "href", "path", "name"]},
     "audio": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["url", "src", "path", "content"]},
     "video": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["url", "src", "path", "content"]},
@@ -2113,6 +2113,11 @@ def _canonical_visual_payload_for_dedupe(block: Dict[str, Any]) -> Any:
         return {"sources": [src]} if src else {"sources": []}
 
     if block_type == "formula":
+        formulas = payload.get("formulas") or payload.get("latex_formulas")
+        if isinstance(formulas, list):
+            normalized = [str(item.get("latex") if isinstance(item, dict) else item).strip() for item in formulas if str(item.get("latex") if isinstance(item, dict) else item).strip()]
+            if normalized:
+                return {"formulas": normalized}
         return {
             "formula": str(
                 payload.get("formula") or payload.get("latex") or payload.get("equation")
@@ -2135,6 +2140,16 @@ def _canonical_visual_payload_for_dedupe(block: Dict[str, Any]) -> Any:
         return payload
 
     if block_type in {"link", "file"}:
+        links = payload.get("links")
+        if isinstance(links, list) and links:
+            urls = []
+            for item in links:
+                if isinstance(item, dict):
+                    value = str(item.get("url") or item.get("href") or "").strip()
+                    if value:
+                        urls.append(value.split("#", 1)[0].rstrip("/").lower())
+            if urls:
+                return {"urls": sorted(set(urls))}
         url = str(block.get("url") or block.get("href") or payload.get("url") or payload.get("href") or "").strip()
         return {"url": url.split("#", 1)[0].rstrip("/").lower()} if url else payload
 
