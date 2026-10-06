@@ -8856,6 +8856,14 @@ def _two_state_pair_from_row(raw):
         "source": "STATE_MANAGER_AUTHENTICATED_12H_USER_APRIL_PAIRS",
         "history_source": "USER_APRIL_PAIRS",
     }
+    row_user_id = str(
+        raw.get("user_id")
+        or raw.get("authenticated_user_id")
+        or raw.get("memory_user_id")
+        or ""
+    ).strip()
+    if row_user_id:
+        pair["user_id"] = row_user_id
     for key in (
         "conversation_id",
         "sequence_id",
@@ -8951,6 +8959,11 @@ def _full_authenticated_12h_pairs(state_obj, history=None):
         pair = _two_state_pair_from_row(raw)
         if not pair:
             continue
+        if uid:
+            row_uid = str(pair.get("user_id") or uid).strip()
+            if row_uid and row_uid != uid:
+                continue
+            pair["user_id"] = uid
         sig = (
             pair.get("user"),
             pair.get("april"),
@@ -9046,6 +9059,67 @@ def _two_state_history_overview_query(current):
 
 
 
+_TWO_STATE_TOPIC_NUMBER_WORDS = {
+    "ноль": 0,
+    "один": 1, "одна": 1, "первый": 1, "первая": 1,
+    "два": 2, "две": 2, "второй": 2, "вторая": 2,
+    "три": 3, "третий": 3, "третья": 3,
+    "четыре": 4, "четвертый": 4, "четвертая": 4,
+    "пять": 5, "пятый": 5, "пятая": 5,
+    "шесть": 6, "шестой": 6, "шестая": 6,
+    "семь": 7, "седьмой": 7, "седьмая": 7,
+    "восемь": 8, "восьмой": 8, "восьмая": 8,
+    "девять": 9, "девятый": 9, "девятая": 9,
+    "десять": 10, "десятый": 10, "десятая": 10,
+    "одиннадцать": 11, "одиннадцатый": 11, "одиннадцатая": 11,
+    "двенадцать": 12, "двенадцатый": 12, "двенадцатая": 12,
+    "тринадцать": 13, "тринадцатый": 13, "тринадцатая": 13,
+    "четырнадцать": 14, "четырнадцатый": 14, "четырнадцатая": 14,
+    "пятнадцать": 15, "пятнадцатый": 15, "пятнадцатая": 15,
+    "шестнадцать": 16, "шестнадцатый": 16, "шестнадцатая": 16,
+    "семнадцать": 17, "семнадцатый": 17, "семнадцатая": 17,
+    "восемнадцать": 18, "восемнадцатый": 18, "восемнадцатая": 18,
+    "девятнадцать": 19, "девятнадцатый": 19, "девятнадцатая": 19,
+    "двадцать": 20, "двадцатый": 20, "двадцатая": 20,
+}
+
+
+def _two_state_topic_reference_number(current):
+    """Read an explicit topic ordinal such as 'тему 14' or 'тема четырнадцать'."""
+    low = re.sub(r"\s+", " ", str(current or "").strip().lower())
+    if not low:
+        return None
+
+    match = re.search(r"\b(?:тему|тема|теме|урок|урока|уроку|уроке|тест|теста|тесте)\s*(?:номер|№|#)?\s*(\d{1,3})\b", low, re.I)
+    if match:
+        return int(match.group(1))
+
+    match = re.search(r"\b(\d{1,3})\s+(?:тему|тема|теме|урок|урока|уроку|уроке|тест|теста|тесте)\b", low, re.I)
+    if match:
+        return int(match.group(1))
+
+    for word, number in sorted(_TWO_STATE_TOPIC_NUMBER_WORDS.items(), key=lambda item: -len(item[0])):
+        if re.search(rf"\b(?:тему|тема|теме)\s+(?:№|#)?\s*{re.escape(word)}\b", low, re.I):
+            return number
+        if re.search(rf"\b{re.escape(word)}\s+(?:тему|тема|теме)\b", low, re.I):
+            return number
+    return None
+
+
+def _two_state_topic_id_from_pair(pair):
+    """Return an explicit lesson/topic/test number stored in a dialogue pair."""
+    if not isinstance(pair, dict):
+        return None
+    for value in (
+        pair.get("user"), pair.get("user_text"), pair.get("user_request"),
+        pair.get("sequence_topic"), pair.get("topic"), pair.get("canonical_topic"),
+    ):
+        number = _two_state_topic_reference_number(value)
+        if number is not None:
+            return number
+    return None
+
+
 def _two_state_history_operation(current):
     """Determine the user's operation over dialogue history without creating a new route.
 
@@ -9056,6 +9130,19 @@ def _two_state_history_operation(current):
     low = re.sub(r"\s+", " ", str(current or "").strip().lower())
     if not low:
         return "NONE"
+
+    # A numbered topic becomes a history lookup only when the user is actually
+    # asking to remember/find/show it. A source turn such as "Урок номер 14 ..."
+    # is ordinary dialogue content and must remain searchable evidence.
+    topic_reference = _two_state_topic_reference_number(low)
+    topic_history_cue = re.search(
+        r"\b(?:помн|вспомн|найд|покаж|вывед|вернись|обсуждал|говорил|"
+        r"что\s+было|какая\s+была|какой\s+был)\w*\b",
+        low,
+        re.I,
+    )
+    if topic_reference is not None and topic_history_cue:
+        return "FIND_DIALOGUE"
 
     # A later turn may refer to a dialogue already found. Keep this ahead of the
     # generic FIND patterns so "покажи тот диалог" means OPEN, not a fresh search.
@@ -9102,6 +9189,8 @@ def _two_state_history_search_query(current):
     text = re.sub(r"\s+", " ", str(current or "").strip())
     low = text.lower()
     if not text:
+        return ""
+    if _two_state_topic_reference_number(text) is not None:
         return ""
 
     removals = (
@@ -9161,6 +9250,7 @@ def _two_state_history_search_cluster(current, window, *, preferred_query=""):
         directional = len(aa & bb) / max(1, min(len(aa), len(bb)))
         return max(exact, 0.70 * exact + 0.30 * directional)
 
+    topic_reference_number = _two_state_topic_reference_number(query)
     ranked = []
     for i, pair in substantive:
         user, answer, topic = pair_text(pair)
@@ -9173,6 +9263,12 @@ def _two_state_history_search_cluster(current, window, *, preferred_query=""):
             score = max(score, float(_two_state_morph_affinity(query, f"{user} {answer} {topic}") or 0.0) * 0.72)
         except Exception:
             pass
+        pair_number = _two_state_topic_id_from_pair(pair)
+        if topic_reference_number is not None and pair_number == topic_reference_number:
+            # Exact numbered topic identity is stronger than any lexical/semantic
+            # similarity. This prevents topic 14 from being hijacked by a recent
+            # but unrelated topic such as Gagarin.
+            score = max(score, 0.995)
         ranked.append((score, i))
     ranked.sort(reverse=True)
     if not ranked:
@@ -9186,10 +9282,7 @@ def _two_state_history_search_cluster(current, window, *, preferred_query=""):
     anchor = pairs[anchor_index]
     anchor_user, anchor_answer, anchor_topic = pair_text(anchor)
     anchor_sequence = str(anchor.get("dialogue_sequence_id") or anchor.get("sequence_id") or anchor.get("task_id") or "").strip()
-    anchor_test = None
-    m = re.search(r"\bтест(?:е|а|ом|у)?\s*(?:номер|№|#)?\s*(\d{1,2})\b", f"{anchor_user} {anchor_topic}", re.I)
-    if m:
-        anchor_test = int(m.group(1))
+    anchor_test = _two_state_topic_id_from_pair(anchor)
 
     selected_indices = []
     for score, i in ranked:
@@ -9197,13 +9290,82 @@ def _two_state_history_search_cluster(current, window, *, preferred_query=""):
         user, answer, topic = pair_text(pair)
         seq = str(pair.get("dialogue_sequence_id") or pair.get("sequence_id") or pair.get("task_id") or "").strip()
         same_sequence = bool(anchor_sequence and seq and anchor_sequence == seq)
-        same_test = bool(anchor_test is not None and re.search(rf"\bтест(?:е|а|ом|у)?\s*(?:номер|№|#)?\s*{anchor_test}\b", f"{user} {topic}", re.I))
+        pair_number = _two_state_topic_id_from_pair(pair)
+        same_test = bool(anchor_test is not None and pair_number == anchor_test)
         anchor_affinity = token_score(f"{anchor_topic} {anchor_user} {anchor_answer}", f"{topic} {user} {answer}")
-        chain_link = same_sequence or same_test or anchor_affinity >= 0.28 or (i == anchor_index)
+        # For numbered-topic lookup, sequence identity and the same topic/test id
+        # are the primary chain boundaries. Semantic affinity is support, not a
+        # reason to jump into another numbered topic.
+        if topic_reference_number is not None and _two_state_topic_id_from_pair(anchor) == topic_reference_number:
+            # Once the exact numbered source is found, a modest semantic link is
+            # enough to retain the immediately related turns of that same dialogue.
+            # This is still much stricter than a global similarity search and cannot
+            # replace the exact numbered anchor.
+            chain_link = same_sequence or same_test or anchor_affinity >= 0.10 or (i == anchor_index)
+        else:
+            chain_link = same_sequence or same_test or anchor_affinity >= 0.28 or (i == anchor_index)
         if chain_link:
             selected_indices.append(i)
 
-    selected_indices = sorted(dict.fromkeys(selected_indices))
+    # The exact numbered/source pair is only the ENTRY POINT. A real dialogue
+    # sequence may not repeat its topic number on every turn, and older DB rows may
+    # not carry a sequence_id at all. Once an exact source is found, expand through
+    # adjacent substantive USER↔APRIL turns while the conversation remains
+    # semantically connected. This lets the full internal interpretation logic see
+    # the actual development of topic 14 instead of a single isolated row.
+    substantive_indices = [i for i, _pair in substantive]
+    selected_set = set(selected_indices)
+    anchor_pos = substantive_indices.index(anchor_index) if anchor_index in substantive_indices else -1
+    if anchor_pos >= 0:
+        def _chain_pair_score(left_index, right_index):
+            left = pairs[left_index]
+            right = pairs[right_index]
+            lu, la, lt = pair_text(left)
+            ru, ra, rt = pair_text(right)
+            return token_score(f"{lt} {lu} {la}", f"{rt} {ru} {ra}")
+
+        # Deterministic branch membership from explicit sequence/test metadata.
+        # This path is allowed to bridge otherwise weak lexical links.
+        for idx in substantive_indices:
+            if idx == anchor_index:
+                continue
+            pair = pairs[idx]
+            seq = str(pair.get("dialogue_sequence_id") or pair.get("sequence_id") or pair.get("task_id") or "").strip()
+            pair_number = _two_state_topic_id_from_pair(pair)
+            if (anchor_sequence and seq and anchor_sequence == seq) or (anchor_test is not None and pair_number == anchor_test):
+                selected_set.add(idx)
+
+        # Expand left/right only through the contiguous substantive trajectory.
+        # A semantic break stops expansion, preventing a later unrelated topic
+        # (e.g. the Gagarin discussion) from being pulled into topic 14.
+        for step in (-1, 1):
+            pos = anchor_pos
+            previous_index = anchor_index
+            while True:
+                pos += step
+                if pos < 0 or pos >= len(substantive_indices):
+                    break
+                candidate_index = substantive_indices[pos]
+                pair = pairs[candidate_index]
+                seq = str(pair.get("dialogue_sequence_id") or pair.get("sequence_id") or pair.get("task_id") or "").strip()
+                pair_number = _two_state_topic_id_from_pair(pair)
+                explicit_branch = bool(
+                    (anchor_sequence and seq and anchor_sequence == seq)
+                    or (anchor_test is not None and pair_number == anchor_test)
+                )
+                affinity_anchor = _chain_pair_score(anchor_index, candidate_index)
+                affinity_previous = _chain_pair_score(previous_index, candidate_index) if previous_index != anchor_index else affinity_anchor
+                turn_a = int(pairs[previous_index].get("turn_index") or pairs[previous_index].get("sequence_turn_index") or 0)
+                turn_b = int(pair.get("turn_index") or pair.get("sequence_turn_index") or 0)
+                consecutive_turn = bool(turn_a and turn_b and abs(turn_b - turn_a) <= 1)
+                connected = explicit_branch or affinity_anchor >= 0.14 or affinity_previous >= 0.18 or (consecutive_turn and affinity_previous >= 0.08)
+                if not connected:
+                    break
+                selected_set.add(candidate_index)
+                previous_index = candidate_index
+
+        selected_indices = sorted(selected_set)
+
     if anchor_index not in selected_indices:
         selected_indices.append(anchor_index)
         selected_indices.sort()
@@ -9221,6 +9383,8 @@ def _two_state_history_search_cluster(current, window, *, preferred_query=""):
         "pair_count": len(selected_indices),
         "sequence_id": anchor_sequence,
         "test_id": anchor_test,
+        "topic_number": topic_reference_number,
+        "authenticated_user_id": str(anchor.get("user_id") or "").strip(),
         "topic": (last_topic or anchor_topic or pair_subject(anchor))[:320],
         "started_with": re.sub(r"\s+", " ", str(first_user or first_answer).strip())[:320],
         "stopped_at": re.sub(r"\s+", " ", str(f"{last_user} → {last_answer}" if last_user and last_answer else last_user or last_answer).strip())[:360],
@@ -9232,14 +9396,29 @@ def _two_state_history_search_cluster(current, window, *, preferred_query=""):
 
 
 def _two_state_previous_history_search_query(window):
-    """Recover the last concrete history-search target for follow-up phrases like 'в нём'."""
+    """Recover the last concrete text history target."""
+    target = _two_state_previous_history_search_target(window)
+    return str(target.get("query") or "")
+
+
+def _two_state_previous_history_search_target(window):
+    """Recover the last concrete history target, including a numbered topic."""
     for pair in reversed([p for p in (window or []) if isinstance(p, dict)]):
         user = str(pair.get("user") or pair.get("user_text") or pair.get("user_request") or "").strip()
-        if _two_state_history_operation(user) in {"FIND_DIALOGUE", "OPEN_DIALOGUE"}:
-            query = _two_state_history_search_query(user)
-            if query:
-                return query
-    return ""
+        operation = _two_state_history_operation(user)
+        if operation not in {"FIND_DIALOGUE", "OPEN_DIALOGUE"}:
+            continue
+        topic_number = _two_state_topic_reference_number(user)
+        query = _two_state_history_search_query(user)
+        if topic_number is not None or query:
+            return {
+                "query": query,
+                "topic_number": topic_number,
+                "operation": operation,
+                "source_pair": dict(pair),
+            }
+    return {}
+
 
 def _two_state_reference_query(current):
     low = str(current or "").lower()
@@ -9414,6 +9593,14 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
     pairs = [p for p in (pairs or []) if isinstance(p, dict)]
     active_topic = self.normalize(active_topic)
 
+    owner_ids = {
+        str(p.get("user_id") or "").strip()
+        for p in pairs
+        if str(p.get("user_id") or "").strip()
+    }
+    authenticated_user_id = next(iter(owner_ids)) if len(owner_ids) == 1 else ""
+
+
     def _clean(text):
         value = self.normalize(text)
         replacements = {
@@ -9509,17 +9696,20 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
 
     def _extract_test_id(text):
         low = _clean(text)
-        # "тестномер10" / "тест номер 10" / "тест № 10"
-        match = re.search(r"\bтест(?:е|а|ом|у)?\s*(?:номер|№|#)?\s*(\d{1,2})\b", low, re.I)
-        if match:
-            return int(match.group(1))
-        match = re.search(r"\bтестномер\s*(\d{1,2})\b", low, re.I)
-        if match:
-            return int(match.group(1))
+        # Accept the same numeric identity across test/lesson/topic wording so
+        # "Урок номер 14" and "тему 14" resolve to the same authenticated branch.
+        numbered_forms = (
+            r"\b(?:тест|урок|урока|уроку|уроке|тема|тему|теме)\s*(?:номер|№|#)?\s*(\d{1,3})\b",
+            r"\b(?:тестномер|урокномер)\s*(\d{1,3})\b",
+        )
+        for pattern in numbered_forms:
+            match = re.search(pattern, low, re.I)
+            if match:
+                return int(match.group(1))
         for word, number in sorted(_test_words.items(), key=lambda item: -len(item[0])):
-            if re.search(rf"\bтест(?:е|а|ом|у)?\s+(?:номер|№|#)\s+{re.escape(word)}\b", low, re.I):
+            if re.search(rf"\b(?:тест|урок|тема)(?:е|а|ом|у)?\s+(?:номер|№|#)\s+{re.escape(word)}\b", low, re.I):
                 return number
-            if re.search(rf"\bтест(?:е|а|ом|у)?\s+{re.escape(word)}\b", low, re.I):
+            if re.search(rf"\b(?:тест|урок|тема)(?:е|а|ом|у)?\s+{re.escape(word)}\b", low, re.I):
                 return number
         return None
 
@@ -9693,7 +9883,7 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
                     best_score = score
                     best_cluster = cluster
 
-            if best_cluster is not None and best_score >= 0.50:
+            if best_cluster is not None and best_score >= 0.58:
                 best_cluster["indices"].append(index)
                 best_cluster["pairs"].append(pair)
                 best_cluster["first_index"] = min(best_cluster["first_index"], index)
@@ -9709,12 +9899,12 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
                     "pairs": [pair],
                 })
 
+        # Global topic numbering is by recency: 1 = newest. Keep every topic
+        # internally, while the user-facing overview shows only the newest ten.
         clusters.sort(key=lambda c: (c["last_index"], c["root_index"]), reverse=True)
-        selected = clusters[:15]
-        selected.sort(key=lambda c: c["first_index"])
 
-        topics = []
-        for number, cluster in enumerate(selected, start=1):
+        topics_all = []
+        for number, cluster in enumerate(clusters, start=1):
             ordered = sorted(
                 cluster["pairs"],
                 key=lambda p: (
@@ -9744,8 +9934,9 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             if last_user and last_answer:
                 stopped = f"{last_user[:145]} → {last_answer[:120]}"
 
-            topics.append({
+            topics_all.append({
                 "number": number,
+                "global_number": number,
                 "topic": label,
                 "pair_count": len(ordered),
                 "start_index": cluster["first_index"],
@@ -9755,7 +9946,8 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
                 "source_pair_indices": sorted(set(cluster["indices"])),
             })
 
-        total_topics = len(clusters)
+        topics = topics_all[:10]
+        total_topics = len(topics_all)
         shown = len(topics)
         remaining = max(0, total_topics - shown)
 
@@ -9786,6 +9978,8 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             "topics_shown": shown,
             "remaining_topics_in_context": remaining,
             "topics": topics,
+            "topics_all": topics_all,
+            "visible_topic_limit": 10,
             "text": "\n".join(output)[:3400],
             "source": "FULL_12H_DIALOGUE_SEMANTIC_TOPIC_OVERVIEW",
         }
@@ -10114,6 +10308,7 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         or re.search(r"\bпоследн(?:ие|их)\s+\d+\s+тем", low_current, re.I)
         or re.search(r"\bкакие\s+темы\b.*\b(?:обсуждали|говорили)\b", low_current, re.I)
     )
+    topic_reference_number = _two_state_topic_reference_number(current)
     history_operation = _two_state_history_operation(current)
     history_intent = bool(
         history_operation != "NONE"
@@ -10381,7 +10576,7 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         selected_indices.append(anchor_index)
     selected_indices = sorted(dict.fromkeys(selected_indices))
 
-    if not test_id and (reference_query or followup_query):
+    if history_operation == "NONE" and not test_id and (reference_query or followup_query):
         branch_candidates = [
             i for i in selected_indices
             if rows_by_index[i]["substantive"]
@@ -10543,23 +10738,58 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             selected_indices = sorted(dict.fromkeys(topic_roots))
             anchor_index = selected_indices[-1] if selected_indices else -1
         elif history_operation in {"FIND_DIALOGUE", "OPEN_DIALOGUE"}:
+            previous_target = _two_state_previous_history_search_target(pairs)
             history_search_query = _two_state_history_search_query(current)
+            selected_topic_number = topic_reference_number
+
             if history_operation == "OPEN_DIALOGUE":
-                history_search_query = _two_state_previous_history_search_query(pairs) or history_search_query
-            selected_dialogue = _two_state_history_search_cluster(
-                current, pairs, preferred_query=history_search_query
-            )
-            history_overview = {
-                "scope_hours": 12,
-                "operation": history_operation,
-                "selected_dialogue": dict(selected_dialogue or {}),
-                "topics": [],
-                "text": (
-                    "Найден конкретный диалог: "
-                    + str(selected_dialogue.get("topic") or selected_dialogue.get("search_query") or "")
-                ) if selected_dialogue else "",
-                "source": "FULL_12H_SEMANTIC_DIALOGUE_SEARCH",
-            }
+                if previous_target.get("topic_number") is not None:
+                    selected_topic_number = previous_target.get("topic_number")
+                history_search_query = str(previous_target.get("query") or history_search_query)
+
+            if selected_topic_number is not None:
+                # The number is a source topic/test/lesson identity, not an ordinal
+                # position in the visible overview. Search the full authenticated
+                # 12h pair set and let exact numbered identity win.
+                exact_query = f"тема {int(selected_topic_number)}"
+                selected_dialogue = _two_state_history_search_cluster(
+                    current, pairs, preferred_query=exact_query
+                )
+                history_overview = {
+                    "scope_hours": 12,
+                    "available_pairs": len(pairs),
+                    "operation": history_operation,
+                    "selected_dialogue": dict(selected_dialogue or {}),
+                    "topic_number": int(selected_topic_number),
+                    "topics": [],
+                    "topics_all": [],
+                    "text": (
+                        f"Найдена тема {int(selected_topic_number)}: "
+                        f"{selected_dialogue.get('topic') or 'без названия'}"
+                    ) if selected_dialogue else (
+                        f"Тема {int(selected_topic_number)} не найдена "
+                        "в полном доступном 12-часовом контексте."
+                    ),
+                    "source": "FULL_12H_NUMBERED_TOPIC_SEARCH",
+                }
+            else:
+                selected_dialogue = _two_state_history_search_cluster(
+                    current, pairs, preferred_query=history_search_query
+                )
+                history_overview = {
+                    "scope_hours": 12,
+                    "operation": history_operation,
+                    "selected_dialogue": dict(selected_dialogue or {}),
+                    "topics": [],
+                    "text": (
+                        "Найден конкретный диалог: "
+                        + str(selected_dialogue.get("topic") or selected_dialogue.get("search_query") or "")
+                    ) if selected_dialogue else "",
+                    "source": "FULL_12H_SEMANTIC_DIALOGUE_SEARCH",
+                }
+                if selected_dialogue:
+                    selected_dialogue["authenticated_user_id"] = authenticated_user_id
+
             if selected_dialogue:
                 selected_indices = list(selected_dialogue.get("pair_indices") or [])
                 anchor_index = int(selected_dialogue.get("anchor_index", -1))
@@ -10567,21 +10797,47 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
                 selected_indices = []
                 anchor_index = -1
         elif history_operation == "SUMMARIZE_DIALOGUE":
-            history_search_query = _two_state_previous_history_search_query(pairs)
-            selected_dialogue = _two_state_history_search_cluster(
-                history_search_query or current,
-                pairs,
-                preferred_query=history_search_query,
-            )
-            history_overview = {
-                "scope_hours": 12,
-                "operation": history_operation,
-                "selected_dialogue": dict(selected_dialogue or {}),
-                "topics": [],
-                "text": "",
-                "source": "FULL_12H_DIALOGUE_REUSE_OF_PREVIOUS_HISTORY_TARGET",
-            }
+            previous_target = _two_state_previous_history_search_target(pairs)
+            history_search_query = str(previous_target.get("query") or "")
+            topic_reference_number = previous_target.get("topic_number")
+            all_topics = []
+            if topic_reference_number is not None:
+                history_search_query = f"тема {int(topic_reference_number)}"
+                selected_dialogue = _two_state_history_search_cluster(
+                    current,
+                    pairs,
+                    preferred_query=history_search_query,
+                )
+                history_overview = {
+                    "scope_hours": 12,
+                    "available_pairs": len(pairs),
+                    "operation": history_operation,
+                    "selected_dialogue": dict(selected_dialogue or {}),
+                    "topic_number": int(topic_reference_number),
+                    "topics": [],
+                    "topics_all": [],
+                    "text": (
+                        f"Сводка темы {int(topic_reference_number)}: "
+                        f"{selected_dialogue.get('topic') or 'тема не найдена'}."
+                    ) if selected_dialogue else "",
+                    "source": "FULL_12H_NUMBERED_TOPIC_REUSE",
+                }
+            else:
+                selected_dialogue = _two_state_history_search_cluster(
+                    history_search_query or current,
+                    pairs,
+                    preferred_query=history_search_query,
+                )
+                history_overview = {
+                    "scope_hours": 12,
+                    "operation": history_operation,
+                    "selected_dialogue": dict(selected_dialogue or {}),
+                    "topics": [],
+                    "text": "",
+                    "source": "FULL_12H_DIALOGUE_REUSE_OF_PREVIOUS_HISTORY_TARGET",
+                }
             if selected_dialogue:
+                selected_dialogue["authenticated_user_id"] = authenticated_user_id
                 selected_indices = list(selected_dialogue.get("pair_indices") or [])
                 anchor_index = int(selected_dialogue.get("anchor_index", -1))
             else:
@@ -10602,6 +10858,8 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         if anchor_index >= 0 and anchor_index < len(pairs):
             anchor_pair = dict(pairs[anchor_index])
             anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
+            anchor_test_id = _test_id_from_pair(anchor_pair)
+            anchor_subject = _pair_subject(anchor_pair)
 
     if locked_relation == "NEW":
         return {
@@ -10693,7 +10951,7 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             pair["_semantic_role"] = "SEMANTIC_SUPPORT"
         enriched_context.append(pair)
 
-    if history_intent and history_overview:
+    if history_operation == "OVERVIEW" and history_overview:
         semantic_discussion = str(history_overview.get("text") or "").strip()
     else:
         semantic_discussion = _two_state_build_discussion_digest(
@@ -10761,6 +11019,8 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         "history_intent": history_intent,
         "history_operation": history_operation,
         "history_search_query": history_search_query,
+        "topic_reference_number": topic_reference_number,
+        "authenticated_user_id": authenticated_user_id,
         "selected_dialogue": selected_dialogue,
         "history_overview_intent": history_overview_intent,
         "history_overview": history_overview,
@@ -11056,6 +11316,16 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
 
     # 1) COMPLETE 12H retrieval.
     pairs = _full_authenticated_12h_pairs(state_obj, history=history)
+    authenticated_user_id = str(
+        state_obj.get("authenticated_user_id")
+        or state_obj.get("user_id")
+        or ""
+    ).strip()
+    if authenticated_user_id:
+        pairs = [
+            p for p in pairs
+            if str(p.get("user_id") or authenticated_user_id).strip() == authenticated_user_id
+        ]
 
     # 2) Semantic decision from the entire 12h set. Exactly CONTINUE or NEW.
     selected = _two_state_semantic_selector(
@@ -11221,6 +11491,13 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
     result["history_lookup_scope"] = ""
     result["history_operation"] = str(selected.get("history_operation") or "NONE")
     result["history_search_query"] = str(selected.get("history_search_query") or "")
+    result["topic_reference_number"] = selected.get("topic_reference_number")
+    result["authenticated_user_id"] = str(
+        selected.get("authenticated_user_id")
+        or state_obj.get("authenticated_user_id")
+        or state_obj.get("user_id")
+        or ""
+    ).strip()
     result["selected_dialogue"] = (
         dict(selected.get("selected_dialogue") or {})
         if isinstance(selected.get("selected_dialogue"), dict)
@@ -11269,6 +11546,8 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
         "no_third_relation": True,
         "history_operation": str(selected.get("history_operation") or "NONE"),
         "history_search_query": str(selected.get("history_search_query") or ""),
+        "topic_reference_number": selected.get("topic_reference_number"),
+        "authenticated_user_id": result["authenticated_user_id"],
         "selected_dialogue": dict(selected.get("selected_dialogue") or {}) if isinstance(selected.get("selected_dialogue"), dict) else {},
     }
     result["semantic_chain"] = context_pairs if relation == "CONTINUE" else []
@@ -11300,6 +11579,7 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
         "operation": final_semantic_operation,
         "history_operation": str(selected.get("history_operation") or "NONE"),
         "history_search_query": str(selected.get("history_search_query") or ""),
+        "topic_reference_number": selected.get("topic_reference_number"),
         "representation": representation,
         "relation": relation,
         "context_dependency": result["context_dependency"],
@@ -11382,6 +11662,8 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
         "history_lookup": False,
         "history_operation": str(selected.get("history_operation") or "NONE"),
         "history_search_query": str(selected.get("history_search_query") or ""),
+        "topic_reference_number": selected.get("topic_reference_number"),
+        "authenticated_user_id": result["authenticated_user_id"],
         "selected_dialogue": dict(selected.get("selected_dialogue") or {}) if isinstance(selected.get("selected_dialogue"), dict) else {},
         "required_context": [
             {
@@ -11461,6 +11743,8 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
         "history_lookup": bool(selected.get("history_overview")),
         "history_operation": str(selected.get("history_operation") or "NONE"),
         "history_search_query": str(selected.get("history_search_query") or ""),
+        "topic_reference_number": selected.get("topic_reference_number"),
+        "authenticated_user_id": result["authenticated_user_id"],
         "selected_dialogue": dict(selected.get("selected_dialogue") or {}) if isinstance(selected.get("selected_dialogue"), dict) else {},
         "history_overview": bool(selected.get("history_overview")),
         "canonical": True,
