@@ -794,39 +794,34 @@ class ImageGenerateRoom(Room):
             else:
                 image_spec = dict(image_spec)
 
-            # The Provider signal is a same-turn execution handoff, not historical
-            # visual memory. A stale/mismatched signal is never allowed to carry its
-            # old subject into C_APRIL_IMAGES_GENERATOR. The same canonical generator
-            # then receives the current request instead.
-            if image_spec and signal_valid:
-                signal_prompt = str(provider_signal.get("prompt") or "").strip()
-                if signal_prompt:
-                    image_spec["prompt"] = signal_prompt
-                image_spec["generator_signal"] = "C_APRIL_IMAGES_GENERATOR"
-                image_spec["request_anchor"] = request_anchor
-            elif not signal_valid:
-                image_spec = None
-
-            # A valid same-turn signal authorizes the Provider's concise English
-            # Turbo prompt. If the signal is missing/stale, the same canonical
-            # generator receives the current request and no historical prompt.
-            spec_prompt = str(image_spec.get("prompt") or "").strip() if image_spec else ""
+            # Provider/OpenAI semantic image content and the user's request anchor
+            # are separate operands. Keep both. The semantic prompt is the content
+            # to draw; request_anchor is only the exact user trigger for dialogue
+            # continuity. Never replace one with the other.
+            spec_prompt = str(
+                image_spec.get("openai_structured_visual_plan_semantic")
+                or image_spec.get("prompt")
+                or ""
+            ).strip() if image_spec else ""
             signal_prompt = str(provider_signal.get("prompt") or "").strip()
-            if visual_generation_request:
-                prompt = visual_generation_request
-            elif signal_valid and signal_prompt:
+
+            if signal_valid and signal_prompt:
                 prompt = signal_prompt
+                prompt_source = "provider_signal_semantic_plan"
+            elif spec_prompt:
+                prompt = spec_prompt
+                prompt_source = "provider_spec_semantic_plan"
+            elif visual_generation_request:
+                prompt = visual_generation_request
+                prompt_source = "interpreted_visual_request_fallback"
             else:
-                prompt = request_anchor or spec_prompt or semantic_request
-                if image_spec and prompt and not spec_prompt:
-                    image_spec["prompt"] = prompt
+                prompt = request_anchor or semantic_request
+                prompt_source = "current_request_fallback"
 
             if image_spec:
                 image_spec["generator_signal"] = "C_APRIL_IMAGES_GENERATOR"
                 image_spec["request_anchor"] = request_anchor
-                if visual_generation_request:
-                    image_spec["prompt"] = visual_generation_request
-                    image_spec["openai_structured_visual_plan_semantic"] = visual_generation_request
+                # Deliberately do not overwrite image_spec["prompt"] here.
 
             print(
                 "🧭 IMAGE GENERATION HANDOFF",
@@ -835,7 +830,7 @@ class ImageGenerateRoom(Room):
                     "route": signal_route or "none",
                     "execute": signal_execute,
                     "request_anchor_match": signal_valid,
-                    "prompt_source": "provider_signal_turbo" if signal_valid and image_spec and spec_prompt else "current_request",
+                    "prompt_source": prompt_source,
                     "target": "C_APRIL_IMAGES_GENERATOR",
                 },
             )
@@ -1610,8 +1605,6 @@ ROOMS = [
 
     SafeScienceRoom(),
 
-    ImageEditRoom(),
-
     ImageGenerateRoom(),
 
     MATHEMATICS_ROOM,
@@ -2006,15 +1999,10 @@ def _registry_route_targets(
                 "build", "generate", "create", "visualize", "modify", "transform", "redraw", "edit"
             }:
                 if kind == "image" or visual_mode in {"image_generation", "image"}:
-                    active_image = bool(
-                        isinstance(state, dict)
-                        and (
-                            state.get("image_current")
-                            or state.get("image_context")
-                            or state.get("active_visual_scene")
-                        )
-                    )
-                    room_name = "image_edit" if operation in {"modify", "transform", "redraw", "edit"} and active_image else "image_generate"
+                    # Editing is intentionally disabled in the current engine.
+                    # Edit-like wording still creates a NEW image until a dedicated
+                    # Images 2.0 edit route is implemented.
+                    room_name = "image_generate"
             if not room_name:
                 room_name = "gallery"
         else:
@@ -2589,7 +2577,7 @@ PARENT_ROOM_GROUPS = {
         "graph","formula","table","diagram","code","link"
     ],
     "visual": [
-        "image_generate","image_edit"
+        "image_generate"
     ],
     "dialog": [
         "text","guidance"
