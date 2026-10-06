@@ -5217,7 +5217,33 @@ def _bridge_provider_artifacts(machine_response: dict) -> dict:
         ("diagram", "diagram"),
         ("image", "image"),
         ("gallery", "gallery"),
+        ("code", "code"),
+        ("link", "link"),
     )
+
+    # Provider may legally emit a canonical structured envelope such as
+    # {"representation":"graph","graph_type":"bar","data":[...]}
+    # instead of nesting the payload under {"graph": {...}}.  Promote that
+    # already-declared representation without reinterpreting the request.
+    declared_representation = _text(
+        machine_response.get("representation")
+        or machine_response.get("artifact_type")
+        or machine_response.get("type")
+    ).lower()
+    declared_value = None
+    if declared_representation in {kind for _, kind in top_level_structured}:
+        payload_keys_excluded = {
+            "response", "answer", "content", "summary", "explanation", "message",
+            "representation", "type", "artifact_type", "confidence", "metadata",
+            "render_blocks", "artifacts", "artifacts_payload", "scene", "scene_plan",
+            "render_priority", "routing_decision", "diagnostics", "quality",
+        }
+        declared_value = {
+            key: value
+            for key, value in machine_response.items()
+            if key not in payload_keys_excluded and value not in (None, "", [], {})
+        }
+        declared_value["representation"] = declared_representation
     existing_candidate_types = {
         _text(item.get("type") or item.get("artifact_type") or item.get("representation")).lower()
         for item in existing
@@ -5230,6 +5256,10 @@ def _bridge_provider_artifacts(machine_response: dict) -> dict:
     )
     for source_key, canonical_kind in top_level_structured:
         value = machine_response.get(source_key)
+        if value in (None, "", [], {}):
+            if source_key != canonical_kind or declared_representation != canonical_kind:
+                continue
+            value = declared_value
         if value in (None, "", [], {}):
             continue
         if canonical_kind in existing_candidate_types:
@@ -7745,6 +7775,55 @@ def _merge_room_route_into_response(target: MachineResponse, routed: MachineResp
     # The room result is the authoritative C-ARTIFACT projection. Replace the
     # provider's provisional block of the same semantic type instead of showing
     # the same graph/table/formula/code twice.
+    # Formula artifacts use the same visible text block as Markdown/KaTeX.
+    # The C-FORMULA-ROOM artifact remains canonical, but its presentation payload
+    # is folded into the existing text block so the user does not receive a second
+    # glued FormulaRenderer card.
+    formula_blocks = [
+        b for b in routed_blocks
+        if isinstance(b, dict)
+        and _text(b.get("type") or b.get("artifact_type")).lower() == "formula"
+    ]
+    text_target = next(
+        (
+            b for b in existing_blocks
+            if isinstance(b, dict)
+            and _text(b.get("type") or b.get("artifact_type") or b.get("representation")).lower() in {"text", "markdown"}
+        ),
+        None,
+    )
+    if text_target is not None and formula_blocks:
+        formula_parts: list[str] = []
+        for formula_block in formula_blocks:
+            payload = formula_block.get("payload") if isinstance(formula_block.get("payload"), dict) else {}
+            markdown = _text(payload.get("markdown"))
+            formulas = payload.get("formulas") or payload.get("latex_formulas") or []
+            if markdown:
+                formula_parts.append(markdown.strip())
+            elif isinstance(formulas, list):
+                for item in formulas:
+                    value = item.get("latex") if isinstance(item, dict) else item
+                    value = _text(value).strip()
+                    if value:
+                        formula_parts.append(f"$$\n{value}\n$$")
+            else:
+                value = _text(payload.get("formula") or payload.get("latex") or payload.get("equation") or payload.get("expression"))
+                if value:
+                    formula_parts.append(f"$$\n{value.strip()}\n$$")
+        if formula_parts:
+            current_content = _text(text_target.get("content") or text_target.get("data") or text_target.get("answer"))
+            additions = [part for part in formula_parts if part and part not in current_content]
+            if additions:
+                text_target["content"] = (current_content.rstrip() + "\n\n" + "\n\n".join(additions)).strip()
+            text_target.setdefault("signal", {})
+            if isinstance(text_target.get("signal"), dict):
+                text_target["signal"].update({
+                    "presentation_transport": "Markdown+KaTeX",
+                    "formula_in_text_block": True,
+                    "renderer_authority": "SCENE_CONTRACT",
+                })
+        routed_blocks = [b for b in routed_blocks if b not in formula_blocks]
+
     routed_types = {
         _text(b.get("type") or b.get("artifact_type")).lower()
         for b in routed_blocks
