@@ -80,9 +80,10 @@ class FormulaRoom(Room):
                     values.append(candidate)
         elif payload not in (None, ""):
             values.append(payload)
-        if text and not values:
-            values.append(text)
-
+        # Never infer a formula from the current user sentence.  FormulaRoom only
+        # materializes formulas that were explicitly carried by the canonical provider
+        # payload.  This prevents an ordinary text answer such as "Напиши формулу..."
+        # from becoming a second synthetic FormulaRenderer block.
         result: List[str] = []
         for value in values:
             if isinstance(value, dict):
