@@ -9038,6 +9038,10 @@ def _two_state_history_overview_query(current):
         r"\bнапомни\s+(?:наш|о\s+нашем|про\s+наш)\s+(?:диалог|разговор|общени)\w*\b",
         r"\bчто\s+было\s+(?:в|за)\s+(?:нашем\s+)?(?:диалоге|общении|разговоре)\b",
         r"\b(?:что|какие)\s+(?:мы\s+)?(?:обсуждали|говорили)\b",
+        r"\b(?:вспомни|вспомнить|помнишь|помни)\b.{0,90}\b(?:тем(?:ы|а)?|вопрос(?:ы|ов)?|обсуждени|диалог|разговор)\w*\b",
+        r"\b(?:назови|покажи|выведи|перечисли)\b.{0,100}\bтем(?:ы|а)?\b.{0,100}\b(?:общались|обсуждали|говорили)\b",
+        r"\b(?:остальн(?:ые|ых)|друг(?:ие|их))\s+тем(?:ы|ах)\b",
+        r"\b(?:назови|покажи|выведи|перечисли)\b.{0,80}\b\d{1,3}\s+тем\b.{0,100}\b(?:общались|обсуждали|говорили)\b",
     )
     if any(re.search(pattern, low, re.I) for pattern in direct_patterns):
         return True
@@ -9056,6 +9060,26 @@ def _two_state_history_overview_query(current):
     ))
     return scope and dialogue_words
 
+
+def _two_state_history_exclusion_terms(current):
+    """Extract topics the user explicitly excludes from a broad history overview."""
+    low = re.sub(r"\s+", " ", str(current or "").strip().lower())
+    if not low:
+        return []
+    terms = []
+    patterns = (
+        r"\bкроме\s+(.+)$",
+        r"\bза\s+исключением\s+(.+)$",
+        r"\bне\s+считая\s+(.+)$",
+    )
+    for pattern in patterns:
+        m=re.search(pattern,low,re.I)
+        if not m: continue
+        tail=re.split(r"\s+(?:пожалуйста|помни|вспомни|покажи|назови|перечисли)\b",m.group(1),maxsplit=1,flags=re.I)[0]
+        tail=re.sub(r"[?.!,;:]+.*$","",tail).strip()
+        tail=re.sub(r"^(?:тему|тема|темы|тем)\s+(?:про|о|об)\s+","",tail).strip()
+        if tail: terms.append(tail[:160])
+    return list(dict.fromkeys(terms))
 
 
 
@@ -9120,6 +9144,42 @@ def _two_state_topic_id_from_pair(pair):
     return None
 
 
+
+def _two_state_specific_history_target(current):
+    """Extract a concrete topic/entity from a targeted memory/continuation request."""
+    text = re.sub(r"\s+", " ", str(current or "").strip())
+    if not text or _two_state_topic_reference_number(text) is not None:
+        return ""
+    candidates = []
+    patterns = (
+        r"\b(?:тему|тема|теме)\s+(?:про|о|об)\s+([a-zа-яёіїєґ0-9][^?.!,;]*?)(?=\s+(?:ты|вы|мы)\s+(?:вспомн|помн|обсуждал|говорил)|\s*$)",
+        r"\b(?:про|о|об)\s+([a-zа-яёіїєґ0-9][^?.!,;]*?)\s+(?:мы|ты|вы)\s+(?:обсуждал|говорил|вспомн|помн)\w*\b",
+        r"^\s*(?:а\s+|ну\s+)?([a-zа-яёіїєґ0-9][^?.!,;]*?)\s+мы\s+обсуждал\w*\b",
+        r"\b(?:продолж(?:и|им|ить)?|верн(?:ись|ёмся|емся)|вернись)\b.{0,90}?\b(?:про|о|об)\s+([a-zа-яёіїєґ0-9][^?.!,;]*)\s*$",
+        r"\b(?:о\s+ч[её]м|что)\s+(?:мы\s+)?(?:говорили|обсуждали)\s+(?:про|о|об)\s+([a-zа-яёіїєґ0-9][^?.!,;]*)\s*$",
+    )
+    for pattern in patterns:
+        m=re.search(pattern,text,re.I)
+        if m: candidates.append(m.group(1))
+    if not candidates: return ""
+    target=max(candidates,key=len)
+    target=re.sub(r"\s+"," ",target).strip(" ,:;.-?!\n\t")
+    target=re.sub(r"\b(?:если\s+да|то\s+какие|что\s+именно|ты\s+называл(?:а|и)?|ты\s+говорил(?:а|и)?)\b.*$","",target,flags=re.I).strip(" ,:;.-?!\n\t")
+    target=re.sub(r"^(?:тему|тема|теме)\s+","",target,flags=re.I).strip()
+    return target[:240] if len(target)>=2 else ""
+
+
+def _two_state_is_memory_negative_pair(pair):
+    """Do not treat a persisted 'not found' memory answer as topic evidence."""
+    if not isinstance(pair,dict): return False
+    answer=str(pair.get("april") or pair.get("april_answer") or pair.get("assistant") or pair.get("answer") or "").strip()
+    low=re.sub(r"\s+"," ",answer.lower())
+    return bool(low and re.search(
+        r"\b(?:не\s+наш(?:[её]л|лось)|не\s+найден(?:о|а|ы)|нет\s+подтвержд\w+|"
+        r"не\s+могу\s+достоверно\s+вспомнить|не\s+буду\s+выдумывать)\b",
+        low,re.I))
+
+
 def _two_state_history_operation(current):
     """Determine the user's operation over dialogue history without creating a new route.
 
@@ -9136,7 +9196,8 @@ def _two_state_history_operation(current):
     # is ordinary dialogue content and must remain searchable evidence.
     topic_reference = _two_state_topic_reference_number(low)
     topic_history_cue = re.search(
-        r"\b(?:помн|вспомн|найд|покаж|вывед|вернись|обсуждал|говорил|"
+        r"\b(?:помн|вспомн|найд|покаж|вывед|вернись|вернемся|вернёмся|"
+        r"продолж(?:и|им|ить)?|обсуждал|говорил|"
         r"что\s+было|какая\s+была|какой\s+был)\w*\b",
         low,
         re.I,
@@ -9153,6 +9214,11 @@ def _two_state_history_operation(current):
     )
     if any(re.search(pattern, low, re.I) for pattern in open_patterns):
         return "OPEN_DIALOGUE"
+
+    # Concrete topic targets are always exact history searches.
+    specific_target = _two_state_specific_history_target(low)
+    if specific_target:
+        return "FIND_DIALOGUE"
 
     # A concrete history target has priority over the broad overview intent.
     find_patterns = (
@@ -9193,6 +9259,10 @@ def _two_state_history_search_query(current):
     if _two_state_topic_reference_number(text) is not None:
         return ""
 
+    specific_target = _two_state_specific_history_target(text)
+    if specific_target:
+        return specific_target[:500]
+
     removals = (
         r"\b(?:пожалуйста\s+)?найди(?:те)?\b",
         r"\b(?:пожалуйста\s+)?покажи(?:те)?\b",
@@ -9220,6 +9290,7 @@ def _two_state_history_search_cluster(current, window, *, preferred_query=""):
         (i, p) for i, p in enumerate(pairs)
         if p
         and not _two_state_is_clarification(p)
+        and not _two_state_is_memory_negative_pair(p)
         and _two_state_history_operation(
             str(p.get("user") or p.get("user_text") or p.get("user_request") or "")
         ) == "NONE"
@@ -9248,10 +9319,56 @@ def _two_state_history_search_cluster(current, window, *, preferred_query=""):
             return 0.0
         exact = len(aa & bb) / max(1, len(aa | bb))
         directional = len(aa & bb) / max(1, min(len(aa), len(bb)))
-        return max(exact, 0.70 * exact + 0.30 * directional)
+        base = max(exact, 0.70 * exact + 0.30 * directional)
+        # Targeted memory search tolerates ordinary typos, but only after a
+        # concrete token in the requested target is actually evidenced in the pair.
+        if _rapidfuzz is not None:
+            try:
+                fuzzy = max(
+                    float(_rapidfuzz.token_set_ratio(str(a), str(b))) / 100.0,
+                    float(_rapidfuzz.partial_ratio(str(a), str(b))) / 100.0,
+                )
+                base = max(base, 0.45 * fuzzy)
+            except Exception:
+                pass
+        return min(1.0, base)
+
+    def target_token_hit(query_text, pair_text_value):
+        q_tokens = [
+            token for token in _two_state_tokens(query_text)
+            if len(token) >= 3 and token not in {
+                "тему", "тема", "теме", "диалог", "разговор", "история",
+                "что", "это", "мы", "ты", "который", "какой", "какие",
+            }
+        ]
+        p_tokens = list(_two_state_tokens(pair_text_value))
+        if not q_tokens or not p_tokens:
+            return 0.0
+        best = 0.0
+        for q in q_tokens:
+            if q in p_tokens:
+                best = max(best, 1.0)
+                continue
+            if _rapidfuzz is not None:
+                try:
+                    local_best = max(
+                        float(_rapidfuzz.ratio(q, candidate)) / 100.0
+                        for candidate in p_tokens
+                    )
+                except Exception:
+                    local_best = 0.0
+            else:
+                from difflib import SequenceMatcher
+                local_best = max(
+                    float(SequenceMatcher(None, q, candidate).ratio())
+                    for candidate in p_tokens
+                )
+            best = max(best, local_best)
+        return min(1.0, best)
 
     topic_reference_number = _two_state_topic_reference_number(query)
     ranked = []
+    concrete_target_query = str(query or "").strip()
     for i, pair in substantive:
         user, answer, topic = pair_text(pair)
         score = (
@@ -9259,6 +9376,15 @@ def _two_state_history_search_cluster(current, window, *, preferred_query=""):
             + 0.26 * token_score(query, answer)
             + 0.20 * token_score(query, topic)
         )
+        target_hit = target_token_hit(
+            concrete_target_query,
+            f"{user} {answer} {topic}",
+        ) if topic_reference_number is None else 1.0
+        if topic_reference_number is None:
+            # A concrete history lookup is evidence-bound: semantic similarity alone
+            # cannot authenticate a topic. At least one requested target token must
+            # appear exactly or with strong character-level similarity in the source pair.
+            score = min(score, 0.0) if target_hit < 0.55 else max(score, 0.58 * target_hit)
         try:
             score = max(score, float(_two_state_morph_affinity(query, f"{user} {answer} {topic}") or 0.0) * 0.72)
         except Exception:
@@ -9283,6 +9409,11 @@ def _two_state_history_search_cluster(current, window, *, preferred_query=""):
     anchor_user, anchor_answer, anchor_topic = pair_text(anchor)
     anchor_sequence = str(anchor.get("dialogue_sequence_id") or anchor.get("sequence_id") or anchor.get("task_id") or "").strip()
     anchor_test = _two_state_topic_id_from_pair(anchor)
+    target_hits_by_index = {}
+    if topic_reference_number is None:
+        for idx, pair in substantive:
+            pu, pa, pt = pair_text(pair)
+            target_hits_by_index[idx] = target_token_hit(query, f"{pu} {pa} {pt}")
 
     selected_indices = []
     for score, i in ranked:
@@ -9297,13 +9428,18 @@ def _two_state_history_search_cluster(current, window, *, preferred_query=""):
         # are the primary chain boundaries. Semantic affinity is support, not a
         # reason to jump into another numbered topic.
         if topic_reference_number is not None and _two_state_topic_id_from_pair(anchor) == topic_reference_number:
-            # Once the exact numbered source is found, a modest semantic link is
-            # enough to retain the immediately related turns of that same dialogue.
-            # This is still much stricter than a global similarity search and cannot
-            # replace the exact numbered anchor.
-            chain_link = same_sequence or same_test or anchor_affinity >= 0.10 or (i == anchor_index)
+            # Numbered-topic lookup is identity-bound. Do not pull an adjacent
+            # topic merely because its text is semantically similar. Only the
+            # same authenticated sequence/test branch may expand the result.
+            chain_link = same_sequence or same_test or (i == anchor_index)
         else:
-            chain_link = same_sequence or same_test or anchor_affinity >= 0.28 or (i == anchor_index)
+            target_hit = float(target_hits_by_index.get(i, 0.0) or 0.0)
+            chain_link = (
+                same_sequence
+                or same_test
+                or i == anchor_index
+                or (anchor_affinity >= 0.30 and target_hit >= 0.55)
+            )
         if chain_link:
             selected_indices.append(i)
 
@@ -9358,7 +9494,18 @@ def _two_state_history_search_cluster(current, window, *, preferred_query=""):
                 turn_a = int(pairs[previous_index].get("turn_index") or pairs[previous_index].get("sequence_turn_index") or 0)
                 turn_b = int(pair.get("turn_index") or pair.get("sequence_turn_index") or 0)
                 consecutive_turn = bool(turn_a and turn_b and abs(turn_b - turn_a) <= 1)
-                connected = explicit_branch or affinity_anchor >= 0.14 or affinity_previous >= 0.18 or (consecutive_turn and affinity_previous >= 0.08)
+                if topic_reference_number is not None:
+                    # Exact topic-number searches stop at the authenticated numbered
+                    # branch unless sequence/test metadata proves membership.
+                    connected = explicit_branch
+                else:
+                    # Named-topic history can cross turn boundaries only through an
+                    # authenticated sequence/test, or through the same concrete target.
+                    candidate_target_hit = float(target_hits_by_index.get(candidate_index, 0.0) or 0.0)
+                    connected = (
+                        explicit_branch
+                        or candidate_target_hit >= 0.55 and (affinity_anchor >= 0.22 or affinity_previous >= 0.22)
+                    )
                 if not connected:
                     break
                 selected_set.add(candidate_index)
@@ -9811,6 +9958,7 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             (user or april or topic)
             and not _is_clarification(pair)
             and not _is_transport_fallback(pair)
+            and not _two_state_is_memory_negative_pair(pair)
         )
 
     def _is_history_overview_pair(pair):
@@ -9819,7 +9967,7 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         user, _, _ = _pair_text(pair)
         return _two_state_history_overview_query(user) or _two_state_discussion_query(user)
 
-    def _build_history_overview(window):
+    def _build_history_overview(window, exclude_terms=None):
         """Summarize the complete 12h dialogue into 10-15 semantic topic roots.
 
         The current history query is deliberately absent from the ranking. Roots are
@@ -9946,14 +10094,33 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
                 "source_pair_indices": sorted(set(cluster["indices"])),
             })
 
-        topics = topics_all[:10]
+        exclusions = [str(x or "").strip().lower() for x in (exclude_terms or []) if str(x or "").strip()]
+        excluded_topic_numbers = []
+        filtered_topics_all = []
+        for item in topics_all:
+            haystack = " ".join([
+                str(item.get("topic") or ""),
+                str(item.get("started_with") or ""),
+                str(item.get("stopped_at") or ""),
+            ]).lower()
+            if exclusions and any(
+                _topic_affinity(term, haystack) >= 0.34
+                or set(term.split()) & _two_state_tokens(haystack)
+                for term in exclusions
+            ):
+                excluded_topic_numbers.append(int(item.get("global_number") or item.get("number") or 0))
+                continue
+            filtered_topics_all.append(item)
+
+        topics = filtered_topics_all[:10]
         total_topics = len(topics_all)
+        filtered_total = len(filtered_topics_all)
         shown = len(topics)
         remaining = max(0, total_topics - shown)
 
         output = [
             "ОБЗОР ДИАЛОГА ЗА ДОСТУПНЫЕ 12 ЧАСОВ:",
-            f"Показаны {shown} основных тем из {total_topics} смысловых тем.",
+            f"Показаны {shown} основных тем из {filtered_total} доступных после исключений; всего в памяти {total_topics}.",
         ]
         if remaining:
             output.append(
@@ -9979,6 +10146,9 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             "remaining_topics_in_context": remaining,
             "topics": topics,
             "topics_all": topics_all,
+            "filtered_topic_count": filtered_total,
+            "excluded_topic_numbers": excluded_topic_numbers,
+            "excluded_topics": list(exclude_terms or []),
             "visible_topic_limit": 10,
             "text": "\n".join(output)[:3400],
             "source": "FULL_12H_DIALOGUE_SEMANTIC_TOPIC_OVERVIEW",
@@ -10339,6 +10509,12 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         )
     )
 
+    # Default history evidence state is created before any early NEW return.
+    # Concrete targeted requests may overwrite it later in the locked-decision stage.
+    targeted_history_match = {}
+    targeted_history_query = ""
+    targeted_history_status = "NONE"
+
     clarification_bridge = None
     if pairs and _is_clarification(pairs[-1]):
         candidates = []
@@ -10528,8 +10704,16 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             "decision_basis": "ALL_LAYERS_NEW",
             "relation_locked": True,
             "history_intent": history_intent,
+            "history_operation": history_operation,
+            "history_search_query": str(targeted_history_query or ""),
+            "history_evidence_status": targeted_history_status,
+            "history_evidence_query": targeted_history_query,
+            "history_evidence_source": "AUTHENTICATED_12H_USER_APRIL_PAIRS",
+            "history_evidence_match_score": float((targeted_history_match or {}).get("match_score") or 0.0),
+            "history_overview": {},
+            "selected_dialogue": {},
             "resolved_referent": {},
-            "semantic_operation": "answer",
+            "semantic_operation": "find_dialogue_sequence" if targeted_history_status == "NOT_FOUND" else "answer",
             "candidate_count": len(rows),
             "candidate_scores": rows,
         }
@@ -10639,6 +10823,26 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
     decision_basis = "ALL_LAYERS_NEW"
     relation_lock = False
 
+    targeted_history_match = {}
+    targeted_history_query = ""
+    targeted_history_status = "NONE"
+    if not explicit_new_task and history_operation in {"FIND_DIALOGUE", "OPEN_DIALOGUE"}:
+        targeted_history_query = _two_state_history_search_query(current)
+        targeted_history_match = _two_state_history_search_cluster(
+            current,
+            pairs,
+            preferred_query=targeted_history_query,
+        ) or {}
+        if targeted_history_match:
+            target_score = float(targeted_history_match.get("match_score") or 0.0)
+            min_score = 0.995 if topic_reference_number is not None else 0.22
+            if target_score >= min_score:
+                targeted_history_status = "FOUND"
+            else:
+                targeted_history_match = {}
+        if not targeted_history_match:
+            targeted_history_status = "NOT_FOUND"
+
     if explicit_new_task:
         relation = "NEW"
         decision_basis = "HARD_NEW_CURRENT_INTENT"
@@ -10675,7 +10879,30 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         )
         result_item_link = bool(best_answer_item_row and best_answer_item_score >= 0.48)
 
-        if history_link:
+        if targeted_history_status == "FOUND":
+            relation = "CONTINUE"
+            decision_basis = "TARGETED_HISTORY_MATCH_AUTHENTIC_12H"
+            relation_lock = True
+        elif targeted_history_status == "NOT_FOUND":
+            relation = "NEW"
+            decision_basis = "TARGETED_HISTORY_NOT_FOUND_AUTHENTIC_12H"
+            relation_lock = True
+            selected_indices = []
+            anchor_index = -1
+            anchor_pair = {}
+        elif history_operation == "OVERVIEW":
+            if substantive_rows:
+                relation = "CONTINUE"
+                decision_basis = "HISTORY_OVERVIEW_FULL_12H"
+                relation_lock = True
+            else:
+                relation = "NEW"
+                decision_basis = "HISTORY_OVERVIEW_NO_AUTHENTICATED_PAIRS"
+                relation_lock = True
+                selected_indices = []
+                anchor_index = -1
+                anchor_pair = {}
+        elif history_link:
             relation = "CONTINUE"
             decision_basis = "HISTORY_OVERRIDES_WEAK_NEW"
             relation_lock = True
@@ -10723,7 +10950,10 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         # SUMMARIZE_DIALOGUE reuses the previous concrete history target when the
         # user says things like "что в нём обсуждали".
         if history_operation == "OVERVIEW":
-            history_overview = _build_history_overview(pairs)
+            history_overview = _build_history_overview(
+                pairs,
+                exclude_terms=_two_state_history_exclusion_terms(current),
+            )
             topic_roots = [
                 int(item["last_index"])
                 for item in (history_overview.get("topics") or [])
@@ -10739,7 +10969,7 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             anchor_index = selected_indices[-1] if selected_indices else -1
         elif history_operation in {"FIND_DIALOGUE", "OPEN_DIALOGUE"}:
             previous_target = _two_state_previous_history_search_target(pairs)
-            history_search_query = _two_state_history_search_query(current)
+            history_search_query = targeted_history_query or _two_state_history_search_query(current)
             selected_topic_number = topic_reference_number
 
             if history_operation == "OPEN_DIALOGUE":
@@ -10773,9 +11003,14 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
                     "source": "FULL_12H_NUMBERED_TOPIC_SEARCH",
                 }
             else:
-                selected_dialogue = _two_state_history_search_cluster(
-                    current, pairs, preferred_query=history_search_query
-                )
+                if targeted_history_status == "NOT_FOUND":
+                    selected_dialogue = {}
+                else:
+                    selected_dialogue = dict(targeted_history_match or {})
+                    if not selected_dialogue:
+                        selected_dialogue = _two_state_history_search_cluster(
+                            current, pairs, preferred_query=history_search_query
+                        )
                 history_overview = {
                     "scope_hours": 12,
                     "operation": history_operation,
@@ -10874,8 +11109,17 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             "reason": decision_basis,
             "context_mode": "NEW_TOPIC_ISOLATED",
             "semantic_discussion": "",
+            "history_intent": history_intent,
+            "history_operation": history_operation,
+            "history_search_query": history_search_query,
+            "history_evidence_status": targeted_history_status,
+            "history_evidence_query": targeted_history_query,
+            "history_evidence_source": "AUTHENTICATED_12H_USER_APRIL_PAIRS",
+            "history_evidence_match_score": float((targeted_history_match or {}).get("match_score") or 0.0),
+            "history_overview": dict(history_overview or {}),
+            "selected_dialogue": dict(selected_dialogue or {}),
             "resolved_referent": {},
-            "semantic_operation": "answer",
+            "semantic_operation": "find_dialogue_sequence" if targeted_history_status == "NOT_FOUND" else "answer",
             "candidate_count": len(rows),
             "candidate_scores": rows,
             "decision_basis": decision_basis,
@@ -10978,6 +11222,8 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         safe_selected_pair = {}
         anchor_signal = 0.0
         context_pairs = []
+        if history_operation in {"FIND_DIALOGUE", "OPEN_DIALOGUE"} and targeted_history_status == "NOT_FOUND":
+            decision_basis = "TARGETED_HISTORY_NOT_FOUND_AUTHENTIC_12H"
 
     return {
         "relation": locked_relation,
@@ -11019,6 +11265,10 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         "history_intent": history_intent,
         "history_operation": history_operation,
         "history_search_query": history_search_query,
+        "history_evidence_status": targeted_history_status,
+        "history_evidence_query": targeted_history_query,
+        "history_evidence_source": "AUTHENTICATED_12H_USER_APRIL_PAIRS",
+        "history_evidence_match_score": float((targeted_history_match or {}).get("match_score") or 0.0),
         "topic_reference_number": topic_reference_number,
         "authenticated_user_id": authenticated_user_id,
         "selected_dialogue": selected_dialogue,
@@ -11123,6 +11373,7 @@ def _two_state_structured_request(
     resolved_referent=None,
     semantic_operation="",
     history_overview=None,
+    history_evidence=None,
 ):
     """Build the single structured request handed to Provider/OpenAI.
 
@@ -11152,6 +11403,11 @@ def _two_state_structured_request(
         if isinstance(history_overview, dict)
         else {}
     )
+    history_evidence = (
+        dict(history_evidence)
+        if isinstance(history_evidence, dict)
+        else {}
+    )
 
     # Only semantically selected pairs cross the provider boundary. This is a
     # transport compaction, not a memory-window limit: the selector already scanned
@@ -11160,7 +11416,9 @@ def _two_state_structured_request(
     history_operation = str(history_overview.get("operation") or "") if history_overview else ""
     selected_dialogue = history_overview.get("selected_dialogue") if isinstance(history_overview.get("selected_dialogue"), dict) else {}
 
-    if history_overview and history_operation in {"FIND_DIALOGUE", "OPEN_DIALOGUE", "SUMMARIZE_DIALOGUE"} and selected_dialogue:
+    if history_evidence.get("status") == "NOT_FOUND":
+        provider_pairs = []
+    elif history_overview and history_operation in {"FIND_DIALOGUE", "OPEN_DIALOGUE", "SUMMARIZE_DIALOGUE"} and selected_dialogue:
         # Concrete history search: pass the actual matched dialogue sequence. The
         # complete 12h scan already happened; this is only transport compaction.
         for pair in (selected_dialogue.get("pairs") or []):
@@ -11258,17 +11516,19 @@ def _two_state_structured_request(
         "matched_pair_count": len(provider_pairs) if relation == "CONTINUE" else 0,
         "semantic_chain": provider_pairs if relation == "CONTINUE" else [],
         "semantic_discussion": str(semantic_discussion or "").strip(),
-        "history_overview": (
-            history_overview
-            if relation == "CONTINUE" and history_overview
-            else {}
-        ),
+        "history_overview": history_overview if history_overview else {},
+        "history_evidence": history_evidence,
         "resolved_referent": resolved_referent if relation == "CONTINUE" else {},
         "semantic_task": task,
         "semantic_operation": operation,
         "canonical_topic": str(canonical_topic or "").strip(),
         "instruction": (
-            (
+            "Конкретная историческая тема не подтверждена в полном аутентифицированном "
+            "12-часовом USER↔APRIL контексте. Скажи прямо, что соответствующая тема/пара "
+            "не найдена. НЕ выдумывай прошлый разговор, НЕ используй последнюю попавшуюся "
+            "тему и НЕ подменяй отсутствие исторической записи общими знаниями."
+            if history_evidence.get("status") == "NOT_FOUND"
+            else (
                 (
                     "Найден конкретный диалог по смысловому запросу пользователя. "
                     "Используй только выбранную dialogue sequence и её исходные USER↔APRIL пары; "
@@ -11297,8 +11557,14 @@ def _two_state_structured_request(
             )
             if relation == "CONTINUE"
             else
-            "Это новая самостоятельная задача. Не наследуй старую тему или старые "
-            "результаты. Ответь только на текущий пользовательский запрос."
+            "Это новая самостоятельная задача. "
+            + (
+                "При этом пользователь запросил поиск конкретной темы в прошлой переписке. "
+                "Поиск уже выполнен интерпретацией; используй статус HISTORY_EVIDENCE_GATE "
+                "и не выполняй повторный поиск."
+                if history_evidence.get("status") == "NOT_FOUND"
+                else "Не наследуй старую тему или старые результаты. Ответь только на текущий пользовательский запрос."
+            )
         ),
         "provider_must_not_reselect_context": True,
         "provider_must_not_bypass_pair_interpretation": True,
@@ -11471,6 +11737,14 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
         resolved_referent=selected.get("resolved_referent") or {},
         semantic_operation=selected.get("semantic_operation") or operation,
         history_overview=selected.get("history_overview") or {},
+        history_evidence={
+            "status": str(selected.get("history_evidence_status") or "NONE"),
+            "query": str(selected.get("history_evidence_query") or selected.get("history_search_query") or ""),
+            "source": str(selected.get("history_evidence_source") or "AUTHENTICATED_12H_USER_APRIL_PAIRS"),
+            "match_score": float(selected.get("history_evidence_match_score") or 0.0),
+            "authenticated_user_id": str(selected.get("authenticated_user_id") or authenticated_user_id or ""),
+            "targeted": str(selected.get("history_evidence_status") or "NONE") in {"FOUND", "NOT_FOUND"},
+        },
     )
 
     # Build a clean production packet while retaining compatibility keys expected by
@@ -11491,6 +11765,14 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
     result["history_lookup_scope"] = ""
     result["history_operation"] = str(selected.get("history_operation") or "NONE")
     result["history_search_query"] = str(selected.get("history_search_query") or "")
+    result["history_evidence"] = {
+        "status": str(selected.get("history_evidence_status") or "NONE"),
+        "query": str(selected.get("history_evidence_query") or selected.get("history_search_query") or ""),
+        "source": str(selected.get("history_evidence_source") or "AUTHENTICATED_12H_USER_APRIL_PAIRS"),
+        "match_score": float(selected.get("history_evidence_match_score") or 0.0),
+        "targeted": str(selected.get("history_evidence_status") or "NONE") in {"FOUND", "NOT_FOUND"},
+        "authenticated_user_id": str(selected.get("authenticated_user_id") or "").strip(),
+    }
     result["topic_reference_number"] = selected.get("topic_reference_number")
     result["authenticated_user_id"] = str(
         selected.get("authenticated_user_id")
@@ -11660,6 +11942,7 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
         "hard_budget_tokens": 900,
         "soft_target_tokens": 800,
         "history_lookup": False,
+        "history_evidence": dict(result.get("history_evidence") or {}),
         "history_operation": str(selected.get("history_operation") or "NONE"),
         "history_search_query": str(selected.get("history_search_query") or ""),
         "topic_reference_number": selected.get("topic_reference_number"),
@@ -11697,6 +11980,11 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
                     if selected.get("history_overview")
                     else {}
                 ),
+            },
+            {
+                "key": "HISTORY_EVIDENCE_GATE",
+                "priority": 1.001 if result.get("history_evidence", {}).get("targeted") else 0.0,
+                "value": dict(result.get("history_evidence") or {}),
             },
             {
                 "key": "OUTPUT_CONTRACT",
@@ -11741,6 +12029,7 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
         "selected_context_pairs": result["selected_context_pairs"],
         "dialogue_memory_window": result["dialogue_memory_window"],
         "history_lookup": bool(selected.get("history_overview")),
+        "history_evidence": dict(result.get("history_evidence") or {}),
         "history_operation": str(selected.get("history_operation") or "NONE"),
         "history_search_query": str(selected.get("history_search_query") or ""),
         "topic_reference_number": selected.get("topic_reference_number"),
