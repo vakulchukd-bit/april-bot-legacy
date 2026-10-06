@@ -4049,11 +4049,17 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
 
     # This is transport-level text emitted by the first OpenAI step. Keep it in
     # IMAGE PROMPT TRACE: OPENAI RAW OUTPUT, but never allow it into the visible
-    # provider answer or downstream image-generation content.
+    # provider answer or downstream image-generation content. For image generation
+    # a human-facing answer is still required, so synthesize it only when Provider
+    # did not return actual human text.
+    provider_original_answer = answer
+    provider_original_content = _coerce_human_answer(canonical_payload.get("content"))
     if image_generation_mode:
         sanitized_answer = _strip_image_technical_fallback(answer)
         if sanitized_answer != answer:
             answer = sanitized_answer
+        if not answer:
+            answer = "Готово — вот изображение по твоему запросу."
 
     if not answer and visual_mode == "image_generation":
         candidate_metadata = dict(canonical_payload.get("metadata") or {}) if isinstance(canonical_payload.get("metadata"), dict) else {}
@@ -4146,6 +4152,19 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         candidate_spec = metadata.get("image_generation_spec")
         if not isinstance(candidate_spec, dict):
             candidate_spec = canonical_payload.get("image_generation_spec")
+        if not isinstance(candidate_spec, (dict, str)):
+            direct_image = canonical_payload.get("image")
+            if isinstance(direct_image, (dict, str)):
+                candidate_spec = direct_image
+        if not isinstance(candidate_spec, (dict, str)):
+            # OpenAI can return the same-turn image plan as the top-level object:
+            # {"type":"image_generation","prompt":"..."}. Preserve it as the
+            # semantic generation plan instead of replacing it with request text.
+            if isinstance(canonical_payload, dict) and (
+                _safe_text(canonical_payload.get("type")).strip().lower() == "image_generation"
+                or _image_prompt_from_provider_payload(canonical_payload)
+            ):
+                candidate_spec = canonical_payload
 
         provider_signal = None
         candidate_metadata = canonical_payload.get("metadata")
@@ -4168,15 +4187,16 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             and signal_prompt
         )
 
+        spec_source = candidate_spec
+        if spec_source is None and provider_signal_valid and signal_prompt:
+            spec_source = provider_signal
+        if spec_source is None and fallback_image_prompt:
+            spec_source = {"prompt": fallback_image_prompt}
+
         normalized_spec = _build_image_generation_spec_from_provider(
-            candidate_spec if isinstance(candidate_spec, dict) else canonical_payload.get("image"),
+            spec_source,
             fallback_prompt=fallback_image_prompt,
         )
-        if normalized_spec is None and fallback_image_prompt:
-            normalized_spec = _build_image_generation_spec_from_provider(
-                canonical_payload.get("image") if isinstance(canonical_payload.get("image"), (dict, str)) else {"prompt": fallback_image_prompt},
-                fallback_prompt=fallback_image_prompt,
-            )
         if normalized_spec:
             semantic_generation_prompt = _safe_text(
                 normalized_spec.get("openai_structured_visual_plan_semantic")
@@ -4217,6 +4237,10 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             metadata["image_generation_execution"] = "C_APRIL_IMAGES_GENERATOR"
             metadata["provider_image_render_ignored"] = True
             metadata["provider_pixels_disallowed"] = True
+            metadata["provider_original_answer"] = provider_original_answer
+            metadata["image_generation_human_answer_source"] = (
+                "provider" if provider_original_answer else "local_success_message"
+            )
 
             metadata["image_generation_signal"] = {
                 "schema": PROVIDER_IMAGE_GENERATION_SIGNAL_VERSION,
@@ -4280,6 +4304,7 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         "render_blocks_source": "luna",
         "requested_outputs": list(source_payload.get("requested_outputs") or []),
         "response_budget": source_payload.get("response_output_tokens"),
+        "provider_original_answer": provider_original_answer,
     })
 
     visible_response = _strip_image_technical_fallback(_unwrap_model_answer(canonical_payload.get("response") or answer)) if image_generation_mode else _unwrap_model_answer(canonical_payload.get("response") or answer)
@@ -4308,8 +4333,8 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             "provider": "openai",
             "provider_contract": "fiber_v6_quantum",
             "transport_contract": "scene_first",
-            "provider_original_answer": answer,
-            "provider_original_content": content,
+            "provider_original_answer": provider_original_answer,
+            "provider_original_content": provider_original_content,
             "metadata": metadata,
         },
         "processor_input": machine_request_to_dict(source_request) if source_request is not None else {},
