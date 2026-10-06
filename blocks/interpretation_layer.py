@@ -8809,7 +8809,7 @@ QuantumInterpretationEngine.interpret = _pair_canonical_interpret_live
 # the final runtime authority assigned at the bottom of this file.
 # ============================================================================
 
-TWO_STATE_DIALOGUE_ENGINE_VERSION = "two_state_full_12h_semantic_chain_v4_nested_continuum"
+TWO_STATE_DIALOGUE_ENGINE_VERSION = "two_state_full_12h_semantic_chain_v3_monotonic_relation_lock"
 _TWO_STATE_12H_SECONDS = 12 * 60 * 60
 
 
@@ -9150,369 +9150,6 @@ def _two_state_light_12h_similarity(current, pairs):
             ))), 6),
         })
     return out
-
-
-
-def _two_state_inner_continuum(
-    current,
-    pairs,
-    rows,
-    anchor_index,
-    *,
-    active_topic="",
-    max_depth=6,
-):
-    """Resolve the *continuation inside an already found 12h continuum*.
-
-    The outer selector searches the complete authenticated 12h window. This pass
-    deliberately does not search outside that result: it takes the chosen outer
-    anchor and checks whether the current turn is semantically connected to the
-    sequential dialogue branch around that anchor.
-
-    Important contract:
-      - ``found=True`` means the current turn continues the selected chain.
-      - ``found=False`` means there is no reliable inner continuation; callers may
-        treat the turn as NEW rather than forcing a weak historical match.
-      - No provider/model call is made here. Only already-computed row evidence,
-        lightweight morphology, sequence metadata and discourse form are used.
-      - The final runtime relation remains exactly CONTINUE or NEW.
-    """
-    window = [p for p in (pairs or []) if isinstance(p, dict)]
-    try:
-        _anchor_input = int(anchor_index)
-    except (TypeError, ValueError):
-        _anchor_input = -1
-    if not window or not isinstance(rows, list) or not (0 <= _anchor_input < len(window)):
-        return {
-            "found": False,
-            "anchor_index": -1,
-            "selected_indices": [],
-            "score": 0.0,
-            "reason": "NO_OUTER_CONTINUUM_ANCHOR",
-            "depth": 0,
-            "scope": "OUTER_SELECTED_CHAIN",
-        }
-
-    try:
-        anchor_index = int(anchor_index)
-    except (TypeError, ValueError):
-        anchor_index = -1
-    if anchor_index < 0 or anchor_index >= len(window):
-        return {
-            "found": False,
-            "anchor_index": -1,
-            "selected_indices": [],
-            "score": 0.0,
-            "reason": "INVALID_OUTER_CONTINUUM_ANCHOR",
-            "depth": 0,
-            "scope": "OUTER_SELECTED_CHAIN",
-        }
-
-    rows_by_index = {
-        int(row.get("index")): row
-        for row in rows
-        if isinstance(row, dict) and str(row.get("index", "")).lstrip("-").isdigit()
-    }
-
-    def _clean(value):
-        return re.sub(r"\s+", " ", str(value or "").strip().lower())
-
-    def _pair_text(pair):
-        user = _clean(pair.get("user") or pair.get("user_text") or pair.get("user_request"))
-        april = _clean(pair.get("april") or pair.get("april_answer") or pair.get("assistant") or pair.get("answer"))
-        topic = _clean(pair.get("sequence_topic") or pair.get("topic") or pair.get("canonical_topic"))
-        return user, april, topic
-
-    def _pair_identity(pair):
-        return str(
-            pair.get("dialogue_sequence_id")
-            or pair.get("sequence_id")
-            or pair.get("conversation_id")
-            or ""
-        ).strip()
-
-    def _pair_task(pair):
-        return str(pair.get("task_id") or "").strip()
-
-    def _pair_turn(pair, fallback):
-        value = pair.get("sequence_turn_index")
-        if value in (None, ""):
-            value = pair.get("turn_index")
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return int(fallback)
-
-    def _substantive(pair):
-        user, april, topic = _pair_text(pair)
-        if not (user or april or topic):
-            return False
-        answer = april
-        return not bool(re.match(
-            r"^(?:не\s+совсем\s+понял|не\s+понял|не\s+поняла|уточни|уточните|"
-            r"что\s+именно|пришлите|нужно\s+прислать|не\s+удалось\s+сформировать\s+ответ)\b",
-            answer,
-            re.I,
-        ))
-
-    def _has_reference_or_followup(text):
-        low = _clean(text)
-        reference = bool(
-            re.search(
-                r"\b(?:кто|что|какой|какая|какие|какое)\s+из\s+(?:них|этих|тех|перечисленных|названных)\b",
-                low,
-                re.I,
-            )
-            or re.search(r"\b(?:из\s+них|из\s+этих|из\s+тех|их|его|ему|ей|им|ним|них|него|неё|нее|ней|этот|эта|эти|этого|этому|этим|такой|такие)\b", low, re.I)
-        )
-        followup = bool(
-            re.search(
-                r"\b(?:дальше|далее|ещ[её]|продолж(?:и|ай|ить|им)|добав(?:ь|ить)|"
-                r"подробнее|детальнее|уточни|поясни|объясни|раскрой|выдели|выбери|"
-                r"отбери|исправь|не\s+повторяй|кроме)\w*\b",
-                low,
-                re.I,
-            )
-            or re.search(
-                r"\bа\s+(?:кто|что|какой|какая|какие|какое|сколько|почему|зачем)\b",
-                low,
-                re.I,
-            )
-        )
-        return reference, followup
-
-    anchor_pair = window[anchor_index]
-    anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
-    anchor_identity = _pair_identity(anchor_pair)
-    anchor_task = _pair_task(anchor_pair)
-    anchor_turn = _pair_turn(anchor_pair, anchor_index)
-
-    reference_form, followup_form = _has_reference_or_followup(current)
-    current_tokens = set(
-        token for token in re.findall(r"[A-Za-zА-Яа-яЁёЇїІіЄєҐґ0-9_]+", _clean(current))
-        if len(token) >= 3
-    )
-    generic_tokens = {
-        "какой", "какая", "какие", "какое", "кто", "что", "как", "сколько",
-        "самый", "самые", "назови", "назов", "расскажи", "покажи", "дай",
-        "выдели", "выбери", "отбери", "еще", "ещё", "дальше", "далее",
-        "из", "них", "этих", "тех", "про", "о", "об", "теперь",
-    }
-    specificity = len(current_tokens - generic_tokens)
-
-    # Build only the local branch around the outer anchor. Same sequence/task is
-    # the strongest continuity evidence; neighboring turns supply the sequential
-    # structure even when the wording changes substantially.
-    branch = []
-    for i, pair in enumerate(window):
-        if not _substantive(pair):
-            continue
-        identity = _pair_identity(pair)
-        task_id = _pair_task(pair)
-        same_identity = bool(anchor_identity and identity and identity == anchor_identity)
-        same_task = bool(anchor_task and task_id and task_id == anchor_task)
-        distance = abs(_pair_turn(pair, i) - anchor_turn)
-        nearby = distance <= max(1, int(max_depth))
-        if i == anchor_index or same_identity or same_task or nearby:
-            branch.append(i)
-
-    # Prefer an actually sequential branch over a pile of semantically similar
-    # historical rows. Keep a compact chronological neighborhood around the anchor.
-    branch = sorted(dict.fromkeys(branch), key=lambda i: (_pair_turn(window[i], i), i))
-    if len(branch) > max_depth:
-        # The anchor stays in the branch; choose the nearest turns around it.
-        branch = sorted(
-            branch,
-            key=lambda i: (abs(_pair_turn(window[i], i) - anchor_turn), -_pair_turn(window[i], i), i),
-        )[:max_depth]
-        branch = sorted(branch, key=lambda i: (_pair_turn(window[i], i), i))
-
-    candidate_scores = []
-    for i in branch:
-        pair = window[i]
-        row = rows_by_index.get(i, {})
-        user, april, topic = _pair_text(pair)
-        pair_text = f"{topic} {user} {april}".strip()
-        current_link = max(
-            float(row.get("topic_affinity", 0.0) or 0.0),
-            float(row.get("answer_topic_affinity", 0.0) or 0.0),
-            float(row.get("user_topic_affinity", 0.0) or 0.0),
-            _two_state_morph_affinity(current, pair_text),
-        )
-        anchor_link = _two_state_morph_affinity(
-            f"{anchor_topic} {anchor_user} {anchor_answer}",
-            pair_text,
-        )
-        same_identity = bool(anchor_identity and _pair_identity(pair) == anchor_identity)
-        same_task = bool(anchor_task and _pair_task(pair) == anchor_task)
-        distance = abs(_pair_turn(pair, i) - anchor_turn)
-        adjacency = 1.0 / (1.0 + min(distance, 12))
-        sequence_support = 0.0
-        if same_identity:
-            sequence_support = max(sequence_support, 1.0)
-        elif same_task:
-            sequence_support = max(sequence_support, 0.90)
-        elif distance <= 1:
-            sequence_support = max(sequence_support, 0.82)
-        elif distance <= 3:
-            sequence_support = max(sequence_support, 0.60)
-        active_support = (
-            _two_state_morph_affinity(
-                active_topic,
-                pair_text,
-            ) if active_topic else 0.0
-        )
-        score = (
-            0.48 * current_link
-            + 0.18 * anchor_link
-            + 0.16 * sequence_support
-            + 0.08 * adjacency
-            + 0.10 * active_support
-        )
-        candidate_scores.append({
-            "index": i,
-            "score": round(max(0.0, min(1.0, score)), 6),
-            "current_link": round(current_link, 6),
-            "anchor_link": round(anchor_link, 6),
-            "sequence_support": round(sequence_support, 6),
-            "adjacency": round(adjacency, 6),
-            "active_support": round(active_support, 6),
-            "distance": distance,
-            "same_dialogue_sequence": same_identity,
-            "same_task": same_task,
-        })
-
-    candidate_scores.sort(key=lambda item: (item["score"], item["current_link"], -item["distance"], item["index"]), reverse=True)
-    best = candidate_scores[0] if candidate_scores else None
-    if not best:
-        return {
-            "found": False,
-            "anchor_index": anchor_index,
-            "selected_indices": [anchor_index],
-            "score": 0.0,
-            "reason": "NO_INNER_CHAIN_CANDIDATES",
-            "depth": 1,
-            "scope": "OUTER_SELECTED_CHAIN",
-            "candidate_scores": [],
-        }
-
-    best_current_link = float(best.get("current_link", 0.0) or 0.0)
-    best_score = float(best.get("score", 0.0) or 0.0)
-    best_distance = int(best.get("distance", 99) or 99)
-
-    # Self-contained requests require stronger semantic agreement than a simple
-    # same-topic hit. Conversational ellipsis/reference can rely more on sequential
-    # chain evidence because the discourse act itself says "continue this".
-    same_task = bool(best.get("same_task"))
-    same_sequence_neighbor = bool(
-        best.get("same_dialogue_sequence")
-        and best_distance <= 1
-    )
-    strong_direct = bool(
-        best_current_link >= 0.205
-        and (
-            reference_form
-            or followup_form
-            or same_task
-            or (best_current_link >= 0.28 and (best.get("anchor_link", 0.0) or 0.0) >= 0.22)
-            or (best_current_link >= 0.30 and same_sequence_neighbor)
-        )
-    )
-    reference_chain = bool(
-        reference_form
-        and (
-            bool(best.get("same_dialogue_sequence"))
-            or bool(best.get("same_task"))
-            or best_distance <= 1
-        )
-        and best_score >= 0.30
-    )
-    strong_followup = bool(
-        reference_chain
-        or (
-            followup_form
-            and best_current_link >= 0.095
-            and (
-                bool(best.get("same_dialogue_sequence"))
-                or bool(best.get("same_task"))
-                or best_distance <= 2
-            )
-        )
-    )
-    short_named_followup = bool(
-        specificity <= 2
-        and best_current_link >= 0.125
-        and (
-            bool(best.get("same_dialogue_sequence"))
-            or bool(best.get("same_task"))
-            or best_distance <= 2
-        )
-    )
-
-    found = bool(strong_direct or strong_followup or short_named_followup)
-    reason = (
-        "INNER_CONTINUUM_DIRECT_SEMANTIC_LINK" if strong_direct else
-        "INNER_CONTINUUM_DISCOURSE_LINK" if strong_followup else
-        "INNER_CONTINUUM_SHORT_NAMED_LINK" if short_named_followup else
-        "INNER_CONTINUUM_NOT_FOUND"
-    )
-
-    if found:
-        best_index = int(best["index"])
-        # Include only a short sequential chain ending at the best semantic anchor.
-        # This is the key prompt optimization: the provider gets the useful local
-        # continuation, not every vaguely similar 12h pair.
-        chain_candidates = [
-            i for i in branch
-            if abs(_pair_turn(window[i], i) - _pair_turn(window[best_index], best_index)) <= max_depth
-        ]
-        chain_candidates = sorted(
-            dict.fromkeys(chain_candidates),
-            key=lambda i: (_pair_turn(window[i], i), i),
-        )
-        substantive_chain = [i for i in chain_candidates if _substantive(window[i])]
-        if best_index not in substantive_chain:
-            substantive_chain.append(best_index)
-        selected = sorted(dict.fromkeys(substantive_chain))[-max_depth:]
-        if anchor_index not in selected and _substantive(window[anchor_index]):
-            selected.append(anchor_index)
-            selected = sorted(dict.fromkeys(selected))[-max_depth:]
-        return {
-            "found": True,
-            "anchor_index": best_index,
-            "selected_indices": selected,
-            "score": round(best_score, 6),
-            "current_link": round(best_current_link, 6),
-            "reason": reason,
-            "depth": len(selected),
-            "scope": "OUTER_SELECTED_CHAIN",
-            "outer_anchor_index": anchor_index,
-            "candidate_scores": candidate_scores[:8],
-            "forms": {
-                "reference": reference_form,
-                "followup": followup_form,
-                "specificity": specificity,
-            },
-        }
-
-    return {
-        "found": False,
-        "anchor_index": anchor_index,
-        "selected_indices": [],
-        "score": round(best_score, 6),
-        "current_link": round(best_current_link, 6),
-        "reason": reason,
-        "depth": 0,
-        "scope": "OUTER_SELECTED_CHAIN",
-        "resolution": "NEW_WITHIN_OUTER_CONTINUUM",
-        "outer_anchor_index": anchor_index,
-        "candidate_scores": candidate_scores[:8],
-        "forms": {
-            "reference": reference_form,
-            "followup": followup_form,
-            "specificity": specificity,
-        },
-    }
 
 
 def _two_state_semantic_selector(self, current, pairs, active_topic=""):
@@ -10361,70 +9998,6 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             anchor_subject = _pair_subject(anchor_pair)
 
     # ------------------------------------------------------------------
-    # NESTED CONTINUUM PASS
-    #
-    # The complete 12h scan above answers: "Is there any historical pair that
-    # resembles this request?". It is deliberately not sufficient by itself.
-    # Once an outer anchor exists, resolve a second, local question:
-    # "Does this request actually continue the sequential dialogue branch around
-    # that anchor?". A weak/accidental outer match becomes NEW rather than forcing
-    # a continuation. This is the requested CONTINUE-inside-CONTINUE layer.
-    #
-    # No extra provider/model call is introduced. Existing row evidence is reused,
-    # so the response path stays balanced and the provider prompt can become shorter
-    # because only the local semantic chain is forwarded.
-    # ------------------------------------------------------------------
-    inner_continuum = {
-        "found": False,
-        "anchor_index": anchor_index,
-        "selected_indices": [],
-        "score": 0.0,
-        "reason": "INNER_CONTINUUM_NOT_RUN",
-        "depth": 0,
-        "scope": "OUTER_SELECTED_CHAIN",
-    }
-    if anchor_index >= 0 and anchor_index < len(pairs):
-        try:
-            inner_continuum = _two_state_inner_continuum(
-                current,
-                pairs,
-                rows,
-                anchor_index,
-                active_topic=active_topic,
-                max_depth=6,
-            )
-        except Exception as exc:
-            # The inner pass is an interpretation enrichment layer, not a reason to
-            # break the working route. Preserve the outer result when this optional
-            # refinement cannot be computed.
-            inner_continuum = {
-                "found": False,
-                "anchor_index": anchor_index,
-                "selected_indices": [anchor_index] if anchor_index >= 0 else [],
-                "score": 0.0,
-                "reason": "INNER_CONTINUUM_ERROR_PRESERVE_OUTER",
-                "depth": 1 if anchor_index >= 0 else 0,
-                "scope": "OUTER_SELECTED_CHAIN",
-                "error": type(exc).__name__,
-            }
-
-    # If an outer match exists but no inner continuation exists, do not let a
-    # historical resemblance become CONTINUE. The current turn starts a new task.
-    # This is still the canonical two-state decision: CONTINUE or NEW.
-    inner_continuum_error = str(inner_continuum.get("reason") or "") == "INNER_CONTINUUM_ERROR_PRESERVE_OUTER"
-    inner_continuum_failed_after_outer_match = bool(
-        not explicit_new_task
-        and anchor_index >= 0
-        and not bool(inner_continuum.get("found"))
-        and not inner_continuum_error
-        and not history_intent
-    )
-    if inner_continuum_failed_after_outer_match:
-        anchor_index = -1
-        anchor_pair = {}
-        selected_indices = []
-
-    # ------------------------------------------------------------------
     # MONOTONIC TWO-SIGNAL DECISION
     #
     # Priority is strict:
@@ -10448,10 +10021,6 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         anchor_pair = {}
     else:
         history_link = bool(history_intent and substantive_rows)
-        # If the optional nested pass itself failed, preserve the already valid
-        # outer continuum instead of converting a transient refinement error into
-        # NEW. Only a clean "not found" result is allowed to demote the turn.
-        inner_link = bool(inner_continuum.get("found") or inner_continuum_error)
         semantic_followup = bool(
             re.search(
                 r"\b(?:дальше|далее|ещ[её]|продолж(?:и|ай|ить|им)|добав(?:ь|ить)|"
@@ -10483,11 +10052,7 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             relation = "CONTINUE"
             decision_basis = "HISTORY_OVERRIDES_WEAK_NEW"
             relation_lock = True
-        elif inner_continuum_error and anchor_index >= 0:
-            relation = "CONTINUE"
-            decision_basis = "PRESERVE_OUTER_CONTINUUM_ON_INNER_ERROR"
-            relation_lock = True
-        elif result_item_link and inner_link:
+        elif result_item_link:
             relation = "CONTINUE"
             decision_basis = "PREVIOUS_RESULT_ITEM_LINK"
             relation_lock = True
@@ -10495,7 +10060,7 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             anchor_pair = dict(pairs[anchor_index])
             anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
             selected_indices = [anchor_index]
-        elif named_object_link and inner_link:
+        elif named_object_link:
             relation = "CONTINUE"
             decision_basis = "NAMED_OBJECT_CONTINUATION_LINK"
             relation_lock = True
@@ -10503,21 +10068,17 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             anchor_pair = dict(pairs[anchor_index])
             anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
             selected_indices = [anchor_index]
-        elif discourse_link and inner_link and (anchor_index >= 0 or pairs):
+        elif discourse_link and (anchor_index >= 0 or pairs):
             relation = "CONTINUE"
             decision_basis = "DISCOURSE_DEPENDENCY_WITH_12H_EVIDENCE"
             relation_lock = True
-        elif anchor_semantic_link and inner_link:
+        elif anchor_semantic_link:
             relation = "CONTINUE"
             decision_basis = "DIRECT_SEMANTIC_12H_LINK"
             relation_lock = True
         else:
             relation = "NEW"
-            decision_basis = (
-                "INNER_CONTINUUM_NOT_FOUND_AFTER_12H_MATCH"
-                if inner_continuum_failed_after_outer_match
-                else "ALL_LAYERS_NEW"
-            )
+            decision_basis = "ALL_LAYERS_NEW"
             relation_lock = True
             selected_indices = []
             anchor_index = -1
@@ -10573,45 +10134,7 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             "candidate_scores": rows,
             "decision_basis": decision_basis,
             "relation_locked": True,
-            "inner_continuum": inner_continuum,
-            "nested_continuum": {
-                "version": "nested_continuum_v1",
-                "outer_anchor_index": int(
-                    inner_continuum.get("outer_anchor_index", -1)
-                    if inner_continuum.get("outer_anchor_index", -1) is not None
-                    else -1
-                ),
-                "inner_found": bool(inner_continuum.get("found")),
-                "inner_anchor_index": int(inner_continuum.get("anchor_index", -1) if inner_continuum.get("anchor_index", -1) is not None else -1),
-                "inner_depth": int(inner_continuum.get("depth", 0) or 0),
-                "inner_score": float(inner_continuum.get("score", 0.0) or 0.0),
-                "reason": str(inner_continuum.get("reason") or ""),
-                "scope": "OUTER_SELECTED_CHAIN",
-                "relation_resolution": "CONTINUE_INSIDE_CONTINUE_OR_NEW",
-            },
         }
-
-    if (
-        locked_relation == "CONTINUE"
-        and bool(inner_continuum.get("found"))
-        and not history_intent
-    ):
-        inner_selected = [
-            int(x) for x in (inner_continuum.get("selected_indices") or [])
-            if str(x).lstrip("-").isdigit() and 0 <= int(x) < len(pairs)
-        ]
-        if inner_selected:
-            selected_indices = sorted(dict.fromkeys(inner_selected))
-            _inner_anchor_raw = inner_continuum.get("anchor_index", anchor_index)
-            try:
-                anchor_index = int(_inner_anchor_raw)
-            except (TypeError, ValueError):
-                anchor_index = int(anchor_index)
-            if 0 <= anchor_index < len(pairs):
-                anchor_pair = dict(pairs[anchor_index])
-                anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
-                anchor_test_id = _test_id_from_pair(anchor_pair)
-                anchor_subject = _pair_subject(anchor_pair)
 
     # Semantic operation for the structured request.
     # A clarification answer inherits the unresolved operation from the
@@ -10729,18 +10252,6 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         "history_intent": history_intent,
         "decision_basis": decision_basis,
         "relation_locked": relation_lock,
-        "inner_continuum": inner_continuum,
-        "nested_continuum": {
-            "version": "nested_continuum_v1",
-            "outer_anchor_index": int(inner_continuum.get("outer_anchor_index", anchor_index) if inner_continuum.get("outer_anchor_index", anchor_index) is not None else (anchor_index if anchor_index is not None else -1)),
-            "inner_found": bool(inner_continuum.get("found")),
-            "inner_anchor_index": int(inner_continuum.get("anchor_index", -1) if inner_continuum.get("anchor_index", -1) is not None else -1),
-            "inner_depth": int(inner_continuum.get("depth", 0) or 0),
-            "inner_score": float(inner_continuum.get("score", 0.0) or 0.0),
-            "reason": str(inner_continuum.get("reason") or ""),
-            "scope": "OUTER_SELECTED_CHAIN",
-            "relation_resolution": "CONTINUE_INSIDE_CONTINUE_OR_NEW",
-        },
         "best_answer_item_score": round(best_answer_item_score, 6),
         "test_id": anchor_test_id,
     }
@@ -11148,8 +10659,6 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
         "best_score": float(selected.get("best_score") or 0.0),
         "selection_scope": "FULL_12H",
         "no_third_relation": True,
-        "nested_continuum": dict(selected.get("nested_continuum") or {}),
-        "inner_continuum": dict(selected.get("inner_continuum") or {}),
     }
     result["semantic_chain"] = context_pairs if relation == "CONTINUE" else []
     result["semantic_discussion"] = semantic_discussion
@@ -11352,14 +10861,6 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
         "canonical_topic": canonical_topic,
         "history_lookup": False,
         "selection_scope": "FULL_12H",
-        "nested_continuum": {
-            "found": bool((selected.get("inner_continuum") or {}).get("found")),
-            "outer_anchor_index": int((selected.get("nested_continuum") or {}).get("outer_anchor_index", -1) or -1),
-            "inner_anchor_index": int((selected.get("nested_continuum") or {}).get("inner_anchor_index", -1) or -1),
-            "depth": int((selected.get("nested_continuum") or {}).get("inner_depth", 0) or 0),
-            "score": float((selected.get("nested_continuum") or {}).get("inner_score", 0.0) or 0.0),
-            "reason": str((selected.get("nested_continuum") or {}).get("reason") or ""),
-        },
         "trajectory": {
             "window_hours": 12,
             "pair_count": len(pairs),
