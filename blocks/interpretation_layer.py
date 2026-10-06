@@ -11159,10 +11159,26 @@ def _two_state_structured_request(
     provider_pairs = []
     history_operation = str(history_overview.get("operation") or "") if history_overview else ""
     selected_dialogue = history_overview.get("selected_dialogue") if isinstance(history_overview.get("selected_dialogue"), dict) else {}
+    history_dialogue_selected = bool(
+        selected_dialogue
+        and history_operation in {"FIND_DIALOGUE", "OPEN_DIALOGUE", "SUMMARIZE_DIALOGUE"}
+        and isinstance(selected_dialogue.get("pairs"), list)
+        and selected_dialogue.get("pairs")
+    )
+    # OVERVIEW is a separate presentation stage of the same history route: it
+    # must reach Provider as an explicit topic cascade. It is NOT a concrete
+    # dialogue search and must never be reduced to the latest selected pair.
+    history_overview_selected = bool(
+        history_overview
+        and history_operation == "OVERVIEW"
+        and isinstance(history_overview.get("topics"), list)
+        and history_overview.get("topics")
+    )
 
-    if history_overview and history_operation in {"FIND_DIALOGUE", "OPEN_DIALOGUE", "SUMMARIZE_DIALOGUE"} and selected_dialogue:
-        # Concrete history search: pass the actual matched dialogue sequence. The
-        # complete 12h scan already happened; this is only transport compaction.
+    if history_dialogue_selected:
+        # Concrete history display: the semantic search is already finished here.
+        # Pass only the exact USER↔APRIL sequence that was selected. OpenAI must
+        # replay this material, not reinterpret the historical topic.
         for pair in (selected_dialogue.get("pairs") or []):
             if not isinstance(pair, dict):
                 continue
@@ -11255,37 +11271,62 @@ def _two_state_structured_request(
         "selected_memory_operand": (
             dict(selected_pair or {}) if relation == "CONTINUE" else {}
         ),
-        "matched_pair_count": len(provider_pairs) if relation == "CONTINUE" else 0,
-        "semantic_chain": provider_pairs if relation == "CONTINUE" else [],
+        "matched_pair_count": len(provider_pairs) if history_dialogue_selected or history_overview_selected or relation == "CONTINUE" else 0,
+        "semantic_chain": provider_pairs if history_dialogue_selected or history_overview_selected or relation == "CONTINUE" else [],
         "semantic_discussion": str(semantic_discussion or "").strip(),
         "history_overview": (
             history_overview
-            if relation == "CONTINUE" and history_overview
+            if history_dialogue_selected or history_overview_selected or (relation == "CONTINUE" and history_overview)
             else {}
         ),
         "resolved_referent": resolved_referent if relation == "CONTINUE" else {},
         "semantic_task": task,
         "semantic_operation": operation,
         "canonical_topic": str(canonical_topic or "").strip(),
+        "history_display": {
+            "enabled": history_dialogue_selected or history_overview_selected,
+            "mode": (
+                "HISTORY_DIALOGUE_REPLAY" if history_dialogue_selected
+                else "HISTORY_TOPIC_OVERVIEW" if history_overview_selected
+                else ""
+            ),
+            "operation": history_operation if (history_dialogue_selected or history_overview_selected) else "",
+            "topic": str(selected_dialogue.get("topic") or "")[:320] if history_dialogue_selected else "",
+            "topic_number": selected_dialogue.get("topic_number") if history_dialogue_selected else None,
+            "sequence_id": str(
+                selected_dialogue.get("sequence_id")
+                or selected_dialogue.get("dialogue_sequence_id")
+                or ""
+            )[:160] if history_dialogue_selected else "",
+            "pair_count": len(provider_pairs) if (history_dialogue_selected or history_overview_selected) else 0,
+            "topic_count": len(provider_pairs) if history_overview_selected else 0,
+            "display_policy": (
+                "REPLAY_EXACT_USER_APRIL_SEQUENCE"
+                if history_dialogue_selected
+                else "SHOW_TOPIC_CASCADE_ONLY"
+                if history_overview_selected
+                else ""
+            ),
+        },
         "instruction": (
             (
                 (
-                    "Найден конкретный диалог по смысловому запросу пользователя. "
-                    "Используй только выбранную dialogue sequence и её исходные USER↔APRIL пары; "
-                    "не заменяй её другой похожей темой. Покажи, о чём был этот разговор, "
-                    "что обсуждали и на чём остановились. "
-                    if (history_overview.get("operation") in {"FIND_DIALOGUE", "OPEN_DIALOGUE"} and history_overview.get("selected_dialogue"))
-                    else "Нужно суммировать ранее найденный диалог. Используй выбранную dialogue sequence и её исходные USER↔APRIL пары; не переходи на другую тему. "
-                    if (history_overview.get("operation") == "SUMMARIZE_DIALOGUE" and history_overview.get("selected_dialogue"))
+                    "Это найденный прошлый диалог пользователя. "
+                    "Это только поднятый из истории USER↔APRIL диалог, а не новая задача. "
+                    "Воспроизведи переданные пары USER и APRIL по порядку, без нового анализа, "
+                    "без расширения темы, без повторного решения исходной задачи и без выдуманных деталей. "
+                    "Не заменяй найденный диалог похожей темой. "
+                    "После воспроизведения одной короткой фразой укажи, на каком месте разговор остановился "
+                    "и что именно пользователь может продолжить следующим запросом."
+                    if history_dialogue_selected
                     else
-                    "Пользователь просит вспомнить или показать наш диалог. Используй "
-                    "обзор полного доступного 12-часового USER↔APRIL контекста: покажи "
-                    "примерно 10-15 основных тем, кратко опиши, что обсуждали и на чём "
-                    "остановились. Укажи, что остальные темы не потеряны и остаются "
-                    "в 12-часовом контексте. Не отвечай «не помню» и не проси назвать "
-                    "тему, если соответствующие пары есть. Для последующего уточнения "
-                    "вернись к исходным парам выбранной темы, объясни предыдущий результат "
-                    "и предложи продолжить."
+                    "Пользователь просит общий обзор нашего прошлого общения. Это только индекс "
+                    "прошлых тем, а не запрос на подробный пересказ. Покажи переданные темы "
+                    "каскадом в порядке от новых к старым, кратко: название темы и 1 короткая "
+                    "фраза о том, что обсуждали. Не развивай темы, не отвечай заново на старые "
+                    "вопросы, не придумывай детали и не выбирай одну тему вместо остальных. "
+                    "После списка достаточно одной короткой фразы: пользователь может назвать "
+                    "номер/тему, и тогда будет поднят именно этот диалог для продолжения."
                 )
                 if history_overview
                 else
@@ -11295,10 +11336,34 @@ def _two_state_structured_request(
                 "указан в resolved_referent: не заменяй его другим объектом и не проси "
                 "пользователя повторно сообщить контекст. Ответь именно на текущий запрос."
             )
-            if relation == "CONTINUE"
+            if (history_dialogue_selected or history_overview_selected or history_overview)
             else
-            "Это новая самостоятельная задача. Не наследуй старую тему или старые "
-            "результаты. Ответь только на текущий пользовательский запрос."
+            (
+                "Это новая самостоятельная задача. Не наследуй старую тему или старые "
+                "результаты. Ответь только на текущий пользовательский запрос."
+                if relation != "CONTINUE"
+                else
+                "Это продолжение существующей смысловой цепочки. Используй переданные "
+                "USER↔APRIL пары только как уже установленный контекст и ответь именно на текущий запрос."
+            )
+        ),
+        "response_contract": (
+            {
+                "mode": "HISTORY_DIALOGUE_REPLAY",
+                "source": "SELECTED_AUTHENTICATED_12H_SEQUENCE",
+                "only_use_transmitted_pairs": True,
+                "preserve_pair_order": True,
+                "no_new_topic_interpretation": True,
+                "no_topic_expansion": True,
+                "no_reanswer_of_old_question": True,
+                "no_fabricated_details": True,
+                "continuation_hint": "SHORT",
+            }
+            if history_dialogue_selected
+            else {
+                "mode": "NORMAL_SEMANTIC_RESPONSE",
+                "source": "CURRENT_REQUEST_PLUS_LOCKED_CONTEXT",
+            }
         ),
         "provider_must_not_reselect_context": True,
         "provider_must_not_bypass_pair_interpretation": True,
