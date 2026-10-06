@@ -4470,42 +4470,17 @@ class QuantumInterpretationEngine:
         best_goal_score=float(goal.get(best_goal,0.0))
 
         # Canonical image task: an action that constructs/presents a visual object
-        # must be authorized by the CURRENT turn. Matrix similarity alone can be a
-        # false visual match for ordinary conversational requests.
+        # must route to the image renderer even when the representation matrix
+        # under-scores the single word "image". This is a task-vector decision
+        # (operation + object + visual action), not a lexical trigger.
         image_rep_score = float(rep.get("image", 0.0) or 0.0)
         image_obj_score = float(obj.get("image", 0.0) or 0.0)
-        low_text = self.normalize(text).lower()
-        visual_build_language = bool(re.search(
-            r"\b(?:нарисуй|нарисовать|рисуй|создай|создать|сгенерируй|сгенерировать|"
-            r"изобрази|изобразить|визуализируй|визуализировать)\b",
-            low_text,
-            re.I,
-        ))
-        visual_modify_language = bool(re.search(
-            r"\b(?:измени|изменить|переделай|переделать|перерисуй|перерисовать|"
-            r"отредактируй|редактируй|добавь|убери|замени|построй|построить)\b",
-            low_text,
-            re.I,
-        ))
-        visual_object_language = bool(re.search(
-            r"\b(?:изображен(?:ие|ия|ию|ии|ием|иях)|картин(?:а|у|е|ы|ой)|фото|"
-            r"фотограф(?:ия|ию|ии|ией)|рисунок|иллюстрац(?:ия|ию|ии)|схем(?:а|у|е|ы)|"
-            r"диаграмм(?:а|у|е|ы)|график(?:а|у|е|и)|галере(?:я|ю|е|и))\b",
-            low_text,
-            re.I,
-        ))
-        current_turn_visual_authorized = bool(
-            visual_build_language
-            or (visual_modify_language and visual_object_language)
-            or (re.search(r"\bсделай\b", low_text, re.I) and visual_object_language)
-        )
         if (
             features.get("visual_action") is True
-            and current_turn_visual_authorized
             and image_obj_score >= 0.035
             and image_rep_score >= 0.035
         ):
-            return "image", "semantic_visual_image_task_current_turn_verified", True
+            return "image", "semantic_visual_image_task", True
 
         compatible_ops={
             "graph":{"build","modify","present","calculate","analyze","list","explain"},
@@ -4529,12 +4504,8 @@ class QuantumInterpretationEngine:
         # Strong structural interpretation for a self-contained visual construction.
         # This is intentionally a task-vector rule: operation + object/constraint
         # evidence must agree before a structured representation is locked.
-        if (
-            features.get("visual_construction")
-            and current_turn_visual_authorized
-            and not self._negated_representation_labels(text)
-        ):
-            return "diagram", "semantic_visual_construction_current_turn_verified", True
+        if features.get("visual_construction") and not self._negated_representation_labels(text):
+            return "diagram", "semantic_visual_construction", True
 
         if best_rep != "text" and aligned:
             rep_margin = best_rep_score - second_rep_score
@@ -5051,41 +5022,6 @@ class QuantumInterpretationEngine:
         # continuation turns. A memory/reference question does not generate an
         # image just because an older turn contained an image request.
         current_operation = str(p.get("best_operation") or "").lower()
-        # Verify visual continuation from the CURRENT wording. Previous visual
-        # scenes are context only and cannot authorize a new image by themselves.
-        current_visual_build_language = bool(re.search(
-            r"\b(?:нарисуй|нарисовать|рисуй|создай|создать|сгенерируй|сгенерировать|"
-            r"изобрази|изобразить|визуализируй|визуализировать)\b",
-            str(text or "").lower(), re.I
-        ))
-        current_visual_modify_language = bool(re.search(
-            r"\b(?:измени|изменить|переделай|переделать|перерисуй|перерисовать|"
-            r"отредактируй|редактируй|добавь|убери|замени|построй|построить|продолжи)\b",
-            str(text or "").lower(), re.I
-        ))
-        current_visual_object_language = bool(re.search(
-            r"\b(?:изображен(?:ие|ия|ию|ии|ием|иях)|картин(?:а|у|е|ы|ой)|фото|"
-            r"фотограф(?:ия|ию|ии|ией)|рисунок|иллюстрац(?:ия|ию|ии)|схем(?:а|у|е|ы)|"
-            r"диаграмм(?:а|у|е|ы)|график(?:а|у|е|и)|галере(?:я|ю|е|и))\b",
-            str(text or "").lower(), re.I
-        ))
-        current_visual_continuation_authorized = bool(
-            current_visual_build_language
-            or (current_visual_modify_language and current_visual_object_language)
-        )
-        current_dialogue_repair_language = bool(re.search(
-            r"\b(?:прич[её]м\s+тут|при\s+ч[её]м\s+тут|при\s+ч[её]м|"
-            r"ты\s+не\s+понял|не\s+так|не\s+то)\b",
-            str(text or "").lower(), re.I
-        ))
-        current_explanatory_language = bool(re.search(
-            r"\b(?:объясни|поясни|расскажи|почему)\b",
-            str(text or "").lower(), re.I
-        ))
-        current_textual_correction = bool(
-            current_dialogue_repair_language
-            or (current_explanatory_language and not current_visual_build_language)
-        )
         current_image_representation_evidence = float(
             p.get("representation_scores", {}).get("image", 0.0) or 0.0
         )
@@ -5168,15 +5104,7 @@ class QuantumInterpretationEngine:
                 "reference_to_previous": True,
             })
 
-        # Ordinary conversational correction/explanation stays textual even when
-        # a previous scene was an image. Only the current turn can authorize visual output.
-        if current_textual_correction and not current_visual_continuation_authorized:
-            production = "text"
-            source = "CURRENT_TURN_TEXTUAL_CORRECTION_OR_EXPLANATION"
-            locked = True
-            visual_generation_request = ""
-
-        if explicit_visual_task and current_visual_continuation_authorized:
+        if explicit_visual_task:
             # A complete request supplies its own immutable visual operand. Only an
             # incomplete follow-up inherits the operand from 12h pair memory.
             if current_self_contained:
@@ -5244,13 +5172,7 @@ class QuantumInterpretationEngine:
         # A semantically resolved continuation of a visual scene keeps the same
         # output representation. The previous structured artifact is evidence of
         # the object being modified; no lexical renderer trigger is used.
-        if (
-            continuation
-            and production == "text"
-            and current_visual_continuation_authorized
-            and not current_textual_correction
-            and isinstance(previous_scene, dict)
-        ):
+        if continuation and production == "text" and isinstance(previous_scene, dict):
             prior_types = [
                 _clean_representation(x)
                 for x in (previous_scene.get("render_block_types") or [])
@@ -5311,7 +5233,7 @@ class QuantumInterpretationEngine:
                         block.get("type") or block.get("artifact_type") or block.get("representation")
                     ) for block in (previous_scene.get("render_blocks") or []) if isinstance(block, dict)]
                 prior_structured = [x for x in prior_types if x in STRUCTURED_REPRESENTATIONS]
-                if prior_structured and current_visual_continuation_authorized and not current_textual_correction:
+                if prior_structured:
                     production = prior_structured[0]
                     source = "reference_reuse_existing_representation"
                     locked = True
@@ -7564,10 +7486,6 @@ _LIVE_SUBJECT_STOP = {
     "годы", "год", "деятельности", "деятельность", "биография", "история", "описание", "рисунок",
     "картинка", "картинке", "изображение", "выглядит", "выглядел", "выглядела", "занимался", "занималась",
     "плохим", "плохое", "плохая", "плохой", "чем", "какой", "какая", "какие", "где", "когда", "зачем",
-    # Quantitative/question scaffolding: do not let a result verb or interrogative
-    # become the canonical subject when a live numeric chain is selected.
-    "сколько", "всего", "итого", "количество", "число", "получится", "получиться",
-    "прибавить", "добавить", "получаем", "получилось",
 }
 _LIVE_REFERENCE_WORDS = {
     "он", "она", "они", "его", "ее", "её", "их", "ему", "ей", "им", "ним", "него", "неё", "ее", "нем", "нём",
@@ -9112,9 +9030,6 @@ def _two_state_history_overview_query(current):
         return False
 
     direct_patterns = (
-        # Broad overview: enumerate prior topics without selecting one dialogue.
-        r"\b(?:назов|назови|перечисли|перечислить|дай|покажи|выведи)\w*\b.{0,100}\b(?:\d+\s+)?тем\w*\b.{0,120}\b(?:котор(?:ых|ые)\s+мы\s+общал(?:и|ись)|мы\s+общал(?:и|ись)|обсуждал(?:и|ось)|говорил(?:и|ось)|разбирал(?:и|ось))\b",
-        r"\b(?:назов|назови|перечисли|дай)\w*\b.{0,80}\bтем\w*\b.{0,80}\b(?:общал(?:и|ись)|обсуждал(?:и|ось)|говорил(?:и|ось))\b",
         r"\bчто\s+(?:мы|я\s+и\s+ты)\s+(?:обсуждали|говорили|разбирали)\b",
         r"\bо\s+ч[её]м\s+(?:мы\s+)?(?:говорили|обсуждали|разговаривали)\b",
         r"\bчто\s+ты\s+(?:помнишь|помни)\b.*\b(?:общени|диалог|разговор|истори)\w*\b",
@@ -9123,10 +9038,6 @@ def _two_state_history_overview_query(current):
         r"\bнапомни\s+(?:наш|о\s+нашем|про\s+наш)\s+(?:диалог|разговор|общени)\w*\b",
         r"\bчто\s+было\s+(?:в|за)\s+(?:нашем\s+)?(?:диалоге|общении|разговоре)\b",
         r"\b(?:что|какие)\s+(?:мы\s+)?(?:обсуждали|говорили)\b",
-        r"\bкакие\s+тем(?:ы|а)\b(?:\s+мы)?\s+(?:обсуждали|обсуждалис[ья]|говорили|разбирали)\b",
-        r"\b(?:напомни|расскажи)\b.{0,60}\b(?:наше|нашем|наших)\s+общени(?:е|я|и)\b",
-        r"\b(?:напомни|расскажи)\b.{0,60}\b(?:о\s+нашем\s+общении|про\s+наше\s+общение)\b",
-        r"\b(?:о\s+ч[её]м|какие\s+темы)\b.{0,100}\b(?:мы\s+)?(?:сегодня|раньше|недавно)\b",
     )
     if any(re.search(pattern, low, re.I) for pattern in direct_patterns):
         return True
@@ -10075,19 +9986,14 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
 
     def _pair_subject(pair):
         user, april, topic = _pair_text(pair)
-        # Metadata is useful only while it is semantically supported by the actual
-        # USER↔APRIL text. Persisted topic slots can become stale after a task switch;
-        # never let such metadata overwrite the subject carried by the pair itself.
-        pair_content = f"{user} {april}".strip()
+        # Metadata is useful, but user+answer remain the source of truth when
+        # metadata became stale in earlier turns.
         candidates = [topic, pair.get("active_entity"), pair.get("resolved_entity")]
         for value in candidates:
             subject = _clean(str(value or ""))
-            if not subject or not len(_content(subject)) >= 1:
-                continue
-            support = _topic_affinity(subject, pair_content) if pair_content else 0.0
-            if support >= 0.16:
+            if subject and len(_content(subject)) >= 1:
                 return subject
-        return _clean(pair_content)
+        return _clean(f"{user} {april}")
 
     def _specificity(text):
         tokens = _content(text)
@@ -10477,63 +10383,6 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
     # the latest substantive ROOT of that test, never to a later clarification.
     anchor_index = -1
     anchor_reason = ""
-
-    # Narrow quantitative-chain repair. A short total/count question immediately
-    # after a substantive numerical result is a continuation of that live result
-    # chain, not a request to resurrect an older numeric answer from the 12h window.
-    # This is deliberately structural: current turn asks for a count/total, the
-    # previous user turn was also quantitative, and the previous APRIL answer
-    # contains an explicit numeric result. HISTORY operations are excluded.
-    immediate_numeric_anchor = -1
-    immediate_numeric_chain = []
-    if not history_intent and pairs:
-        current_count_question = bool(
-            re.search(
-                r"\b(?:сколько|количество|числ(?:о|а)|всего|итого|в\s+сумме|получится)\b",
-                low_current,
-                re.I,
-            )
-            and re.search(r"\?*$", low_current) is not None
-        )
-        if current_count_question:
-            previous_candidates = [
-                row for row in reversed(substantive_rows)
-                if int(row.get("index", -1)) < len(pairs)
-                and not _is_history_overview_pair(row.get("pair") or {})
-            ]
-            if previous_candidates:
-                previous_row = previous_candidates[0]
-                previous_index = int(previous_row.get("index", -1))
-                previous_pair = previous_row.get("pair") if isinstance(previous_row.get("pair"), dict) else {}
-                previous_user, previous_answer, _ = _pair_text(previous_pair)
-                previous_quantitative = bool(
-                    re.search(
-                        r"\b(?:сколько|количество|числ(?:о|а)|всего|итого|получится|прибав|добав|сумм)\w*\b",
-                        previous_user,
-                        re.I,
-                    )
-                )
-                previous_numeric_result = bool(re.search(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?(?!\w)", previous_answer))
-                if previous_quantitative and previous_numeric_result:
-                    immediate_numeric_anchor = previous_index
-                    immediate_numeric_chain = [previous_index]
-                    # Keep one immediately preceding quantitative result when it
-                    # exists. It gives the provider the operands/result chain (for
-                    # example 10 on the hands + the immediately following 4 limbs)
-                    # without reopening an unrelated older topic.
-                    for prior_row in reversed(substantive_rows):
-                        prior_index = int(prior_row.get("index", -1))
-                        if prior_index >= previous_index:
-                            continue
-                        prior_pair = prior_row.get("pair") if isinstance(prior_row.get("pair"), dict) else {}
-                        prior_user, prior_answer, _ = _pair_text(prior_pair)
-                        if (
-                            prior_index == previous_index - 1
-                            and re.search(r"\b(?:сколько|количество|числ(?:о|а)|всего|итого|получится|прибав|добав|сумм)\w*\b", prior_user, re.I)
-                            and re.search(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?(?!\w)", prior_answer)
-                        ):
-                            immediate_numeric_chain.insert(0, prior_index)
-                        break
     if clarification_bridge is not None:
         anchor_index = int(clarification_bridge["root_pair_index"])
         anchor_reason = "CLARIFICATION_BRIDGE_TO_12H_ROOT"
@@ -10555,10 +10404,6 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             if same_test:
                 anchor_index = max(same_test)
                 anchor_reason = "TEST_ID_PAIR_MATCH"
-
-    if immediate_numeric_anchor >= 0 and anchor_index < 0:
-        anchor_index = immediate_numeric_anchor
-        anchor_reason = "IMMEDIATE_NUMERIC_RESULT_CONTINUATION"
 
     # Canonical relation rule #3: concrete anaphora binds to the best substantive
     # result that can actually serve as its antecedent. The latest pair is used
@@ -10697,41 +10542,31 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
     # Chain discovery is semantic, not "last N pairs". We collect every
     # substantive pair belonging to the anchor's discourse branch or sharing its
     # subject strongly with the current request/anchor.
-    if immediate_numeric_anchor >= 0 and history_operation == "NONE":
-        # The immediate numerical chain is already the resolved operand set. Do
-        # not let an older result-item linker reintroduce unrelated answers.
-        selected_indices = list(immediate_numeric_chain) or [immediate_numeric_anchor]
-    else:
-        selected_indices = []
+    selected_indices = []
     current_topic_score = rows_by_index[anchor_index]["topic_affinity"]
-    if immediate_numeric_anchor >= 0 and history_operation == "NONE":
-        # Immediate numerical chain is authoritative for this turn; skip broad
-        # 12h relevance expansion below.
-        pass
-    else:
-        for i, row in enumerate(rows):
-            if not row["substantive"]:
-                continue
-            pair = row["pair"]
-            pair_tid = row["test_id"]
-            user, april, topic = _pair_text(pair)
-            same_test_branch = (
-                anchor_test_id is not None
-                and pair_tid == anchor_test_id
-            )
-            pair_to_anchor = _topic_affinity(f"{anchor_subject} {anchor_user} {anchor_answer}",
-                                              f"{_pair_subject(pair)} {user} {april}")
-            pair_to_current = row["topic_affinity"]
-            current_to_answer = row["answer_topic_affinity"]
-            relevant = (
-                i == anchor_index
-                or same_test_branch
-                or pair_to_anchor >= 0.28
-                or pair_to_current >= 0.20
-                or current_to_answer >= 0.28
-            )
-            if relevant:
-                selected_indices.append(i)
+    for i, row in enumerate(rows):
+        if not row["substantive"]:
+            continue
+        pair = row["pair"]
+        pair_tid = row["test_id"]
+        user, april, topic = _pair_text(pair)
+        same_test_branch = (
+            anchor_test_id is not None
+            and pair_tid == anchor_test_id
+        )
+        pair_to_anchor = _topic_affinity(f"{anchor_subject} {anchor_user} {anchor_answer}",
+                                          f"{_pair_subject(pair)} {user} {april}")
+        pair_to_current = row["topic_affinity"]
+        current_to_answer = row["answer_topic_affinity"]
+        relevant = (
+            i == anchor_index
+            or same_test_branch
+            or pair_to_anchor >= 0.28
+            or pair_to_current >= 0.20
+            or current_to_answer >= 0.28
+        )
+        if relevant:
+            selected_indices.append(i)
 
     # For anaphoric/reference turns, the antecedent must remain the first semantic
     # operand in the SAME active branch, even if an older row has a higher generic
@@ -10844,14 +10679,6 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             relation = "CONTINUE"
             decision_basis = "HISTORY_OVERRIDES_WEAK_NEW"
             relation_lock = True
-        elif immediate_numeric_anchor >= 0:
-            relation = "CONTINUE"
-            decision_basis = "IMMEDIATE_NUMERIC_RESULT_CONTINUATION"
-            relation_lock = True
-            anchor_index = immediate_numeric_anchor
-            anchor_pair = dict(pairs[anchor_index])
-            anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
-            selected_indices = list(immediate_numeric_chain) or [anchor_index]
         elif result_item_link:
             relation = "CONTINUE"
             decision_basis = "PREVIOUS_RESULT_ITEM_LINK"
@@ -11332,26 +11159,10 @@ def _two_state_structured_request(
     provider_pairs = []
     history_operation = str(history_overview.get("operation") or "") if history_overview else ""
     selected_dialogue = history_overview.get("selected_dialogue") if isinstance(history_overview.get("selected_dialogue"), dict) else {}
-    history_dialogue_selected = bool(
-        selected_dialogue
-        and history_operation in {"FIND_DIALOGUE", "OPEN_DIALOGUE", "SUMMARIZE_DIALOGUE"}
-        and isinstance(selected_dialogue.get("pairs"), list)
-        and selected_dialogue.get("pairs")
-    )
-    # OVERVIEW is a separate presentation stage of the same history route: it
-    # must reach Provider as an explicit topic cascade. It is NOT a concrete
-    # dialogue search and must never be reduced to the latest selected pair.
-    history_overview_selected = bool(
-        history_overview
-        and history_operation == "OVERVIEW"
-        and isinstance(history_overview.get("topics"), list)
-        and history_overview.get("topics")
-    )
 
-    if history_dialogue_selected:
-        # Concrete history display: the semantic search is already finished here.
-        # Pass only the exact USER↔APRIL sequence that was selected. OpenAI must
-        # replay this material, not reinterpret the historical topic.
+    if history_overview and history_operation in {"FIND_DIALOGUE", "OPEN_DIALOGUE", "SUMMARIZE_DIALOGUE"} and selected_dialogue:
+        # Concrete history search: pass the actual matched dialogue sequence. The
+        # complete 12h scan already happened; this is only transport compaction.
         for pair in (selected_dialogue.get("pairs") or []):
             if not isinstance(pair, dict):
                 continue
@@ -11444,62 +11255,37 @@ def _two_state_structured_request(
         "selected_memory_operand": (
             dict(selected_pair or {}) if relation == "CONTINUE" else {}
         ),
-        "matched_pair_count": len(provider_pairs) if history_dialogue_selected or history_overview_selected or relation == "CONTINUE" else 0,
-        "semantic_chain": provider_pairs if history_dialogue_selected or history_overview_selected or relation == "CONTINUE" else [],
+        "matched_pair_count": len(provider_pairs) if relation == "CONTINUE" else 0,
+        "semantic_chain": provider_pairs if relation == "CONTINUE" else [],
         "semantic_discussion": str(semantic_discussion or "").strip(),
         "history_overview": (
             history_overview
-            if history_dialogue_selected or history_overview_selected or (relation == "CONTINUE" and history_overview)
+            if relation == "CONTINUE" and history_overview
             else {}
         ),
         "resolved_referent": resolved_referent if relation == "CONTINUE" else {},
         "semantic_task": task,
         "semantic_operation": operation,
         "canonical_topic": str(canonical_topic or "").strip(),
-        "history_display": {
-            "enabled": history_dialogue_selected or history_overview_selected,
-            "mode": (
-                "HISTORY_DIALOGUE_REPLAY" if history_dialogue_selected
-                else "HISTORY_TOPIC_OVERVIEW" if history_overview_selected
-                else ""
-            ),
-            "operation": history_operation if (history_dialogue_selected or history_overview_selected) else "",
-            "topic": str(selected_dialogue.get("topic") or "")[:320] if history_dialogue_selected else "",
-            "topic_number": selected_dialogue.get("topic_number") if history_dialogue_selected else None,
-            "sequence_id": str(
-                selected_dialogue.get("sequence_id")
-                or selected_dialogue.get("dialogue_sequence_id")
-                or ""
-            )[:160] if history_dialogue_selected else "",
-            "pair_count": len(provider_pairs) if (history_dialogue_selected or history_overview_selected) else 0,
-            "topic_count": len(provider_pairs) if history_overview_selected else 0,
-            "display_policy": (
-                "REPLAY_EXACT_USER_APRIL_SEQUENCE"
-                if history_dialogue_selected
-                else "SHOW_TOPIC_CASCADE_ONLY"
-                if history_overview_selected
-                else ""
-            ),
-        },
         "instruction": (
             (
                 (
-                    "Это найденный прошлый диалог пользователя. "
-                    "Это только поднятый из истории USER↔APRIL диалог, а не новая задача. "
-                    "Воспроизведи переданные пары USER и APRIL по порядку, без нового анализа, "
-                    "без расширения темы, без повторного решения исходной задачи и без выдуманных деталей. "
-                    "Не заменяй найденный диалог похожей темой. "
-                    "После воспроизведения одной короткой фразой укажи, на каком месте разговор остановился "
-                    "и что именно пользователь может продолжить следующим запросом."
-                    if history_dialogue_selected
+                    "Найден конкретный диалог по смысловому запросу пользователя. "
+                    "Используй только выбранную dialogue sequence и её исходные USER↔APRIL пары; "
+                    "не заменяй её другой похожей темой. Покажи, о чём был этот разговор, "
+                    "что обсуждали и на чём остановились. "
+                    if (history_overview.get("operation") in {"FIND_DIALOGUE", "OPEN_DIALOGUE"} and history_overview.get("selected_dialogue"))
+                    else "Нужно суммировать ранее найденный диалог. Используй выбранную dialogue sequence и её исходные USER↔APRIL пары; не переходи на другую тему. "
+                    if (history_overview.get("operation") == "SUMMARIZE_DIALOGUE" and history_overview.get("selected_dialogue"))
                     else
-                    "Пользователь просит общий обзор нашего прошлого общения. Это только индекс "
-                    "прошлых тем, а не запрос на подробный пересказ. Покажи переданные темы "
-                    "каскадом в порядке от новых к старым, кратко: название темы и 1 короткая "
-                    "фраза о том, что обсуждали. Не развивай темы, не отвечай заново на старые "
-                    "вопросы, не придумывай детали и не выбирай одну тему вместо остальных. "
-                    "После списка достаточно одной короткой фразы: пользователь может назвать "
-                    "номер/тему, и тогда будет поднят именно этот диалог для продолжения."
+                    "Пользователь просит вспомнить или показать наш диалог. Используй "
+                    "обзор полного доступного 12-часового USER↔APRIL контекста: покажи "
+                    "примерно 10-15 основных тем, кратко опиши, что обсуждали и на чём "
+                    "остановились. Укажи, что остальные темы не потеряны и остаются "
+                    "в 12-часовом контексте. Не отвечай «не помню» и не проси назвать "
+                    "тему, если соответствующие пары есть. Для последующего уточнения "
+                    "вернись к исходным парам выбранной темы, объясни предыдущий результат "
+                    "и предложи продолжить."
                 )
                 if history_overview
                 else
@@ -11509,34 +11295,10 @@ def _two_state_structured_request(
                 "указан в resolved_referent: не заменяй его другим объектом и не проси "
                 "пользователя повторно сообщить контекст. Ответь именно на текущий запрос."
             )
-            if (history_dialogue_selected or history_overview_selected or history_overview)
+            if relation == "CONTINUE"
             else
-            (
-                "Это новая самостоятельная задача. Не наследуй старую тему или старые "
-                "результаты. Ответь только на текущий пользовательский запрос."
-                if relation != "CONTINUE"
-                else
-                "Это продолжение существующей смысловой цепочки. Используй переданные "
-                "USER↔APRIL пары только как уже установленный контекст и ответь именно на текущий запрос."
-            )
-        ),
-        "response_contract": (
-            {
-                "mode": "HISTORY_DIALOGUE_REPLAY",
-                "source": "SELECTED_AUTHENTICATED_12H_SEQUENCE",
-                "only_use_transmitted_pairs": True,
-                "preserve_pair_order": True,
-                "no_new_topic_interpretation": True,
-                "no_topic_expansion": True,
-                "no_reanswer_of_old_question": True,
-                "no_fabricated_details": True,
-                "continuation_hint": "SHORT",
-            }
-            if history_dialogue_selected
-            else {
-                "mode": "NORMAL_SEMANTIC_RESPONSE",
-                "source": "CURRENT_REQUEST_PLUS_LOCKED_CONTEXT",
-            }
+            "Это новая самостоятельная задача. Не наследуй старую тему или старые "
+            "результаты. Ответь только на текущий пользовательский запрос."
         ),
         "provider_must_not_reselect_context": True,
         "provider_must_not_bypass_pair_interpretation": True,
@@ -11679,43 +11441,15 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
     # stale global entity/topic slot.
     canonical_topic = ""
     if relation == "CONTINUE":
-        selected_user = str(
-            selected_pair.get("user")
-            or selected_pair.get("user_text")
-            or selected_pair.get("user_request")
-            or ""
-        ).strip()
-        selected_april = str(
-            selected_pair.get("april")
-            or selected_pair.get("april_text")
-            or selected_pair.get("april_answer")
-            or selected_pair.get("assistant")
-            or ""
-        ).strip()
-        selected_pair_content = f"{selected_user} {selected_april}".strip()
-        metadata_topic = str(
-            selected_pair.get("topic")
+        canonical_topic = str(
+            _live_pair_subject(selected_pair)
             or selected_pair.get("sequence_topic")
+            or selected_pair.get("topic")
             or selected_pair.get("canonical_topic")
             or ""
         ).strip()
-        # Do not trust a stale persisted topic: it must agree with the actual
-        # selected USER↔APRIL pair before it becomes the canonical topic.
-        metadata_supported = bool(
-            metadata_topic
-            and selected_pair_content
-            and _live_token_affinity(metadata_topic, selected_pair_content) >= 0.16
-        )
-        if metadata_supported:
-            canonical_topic = metadata_topic
-        else:
-            canonical_topic = _live_extract_subject(selected_user)
-            if not canonical_topic:
-                canonical_topic = _live_extract_subject(selected_april)
         if not canonical_topic and context_pairs:
-            canonical_topic = _live_extract_subject(
-                str(context_pairs[-1].get("user") or context_pairs[-1].get("user_text") or "")
-            )
+            canonical_topic = _live_pair_subject(context_pairs[-1])
     if relation == "NEW":
         canonical_topic = _live_extract_subject(current)
 
