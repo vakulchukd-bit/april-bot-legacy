@@ -37,17 +37,12 @@ class FormulaRoom(Room):
         print("FORMULA ROOM HANDLE START")
 
         payload = context.get("formula_payload") or context.get("payload") or {}
-        formula = (
-            payload.get("formula")
-            or payload.get("latex")
-            or payload.get("equation")
-            or payload.get("expression")
-            or payload.get("content")
-            if isinstance(payload, dict) else str(payload or text)
-        )
+        formulas = self._extract_formulas(payload, text)
+        formula = formulas[0] if formulas else ""
 
         artifact = self.process({
             "formula": str(formula or ""),
+            "formulas": formulas,
             "goal": context.get("goal"),
             "purpose": context.get("purpose"),
             "active_scene": context.get("active_scene"),
@@ -58,9 +53,59 @@ class FormulaRoom(Room):
             "continuation": context.get("continuation", False),
             "block_id": context.get("block_id"),
             "render_id": context.get("render_id"),
+            "markdown": context.get("markdown"),
+            "katex": True,
         })
 
         return artifact
+
+
+    # =================================================
+    # CANONICAL FORMULA LIST
+    # =================================================
+
+    def _extract_formulas(self, payload: Any, text: Any = "") -> List[str]:
+        """Extract all explicitly supplied formulas without semantic rewriting."""
+        values: List[Any] = []
+        if isinstance(payload, dict):
+            for key in ("formulas", "formulae", "equations", "expressions"):
+                candidate = payload.get(key)
+                if isinstance(candidate, list):
+                    values.extend(candidate)
+                elif isinstance(candidate, str) and candidate.strip():
+                    values.append(candidate)
+            for key in ("formula", "latex", "equation", "expression", "content"):
+                candidate = payload.get(key)
+                if candidate not in (None, "", []):
+                    values.append(candidate)
+        elif payload not in (None, ""):
+            values.append(payload)
+        if text and not values:
+            values.append(text)
+
+        result: List[str] = []
+        for value in values:
+            if isinstance(value, dict):
+                value = value.get("latex") or value.get("tex") or value.get("formula") or value.get("equation") or value.get("expression") or value.get("value")
+            value = str(value or "").strip()
+            if value and value not in result:
+                result.append(value)
+        return result
+
+    def build_markdown(self, formulas: List[str]) -> str:
+        """Build one canonical Markdown transport containing all formulas."""
+        blocks = []
+        for formula in formulas:
+            value = str(formula or "").strip()
+            if not value:
+                continue
+            if value.startswith("$$") and value.endswith("$$"):
+                blocks.append(value)
+            elif value.startswith("\\[") and value.endswith("\\]"):
+                blocks.append(value)
+            else:
+                blocks.append(f"$$\n{value}\n$$")
+        return "\n\n".join(blocks)
 
     # =================================================
     # WORK ORDER
@@ -70,6 +115,10 @@ class FormulaRoom(Room):
         self,
         task: Dict[str, Any]
     ) -> Dict[str, Any]:
+
+        formulas = task.get("formulas")
+        if not isinstance(formulas, list):
+            formulas = self._extract_formulas({"formula": task.get("formula")})
 
         return {
 
@@ -83,7 +132,16 @@ class FormulaRoom(Room):
                 task.get("active_scene"),
 
             "formula":
-                task.get("formula")
+                task.get("formula"),
+
+            "formulas":
+                formulas,
+
+            "markdown":
+                task.get("markdown") or self.build_markdown(formulas),
+
+            "katex":
+                True
         }
 
     # =================================================
@@ -206,12 +264,15 @@ class FormulaRoom(Room):
 
     def build_artifact(
         self,
-        formula: str
+        formula: str,
+        formulas: List[str] | None = None,
+        markdown: str = "",
     ):
 
-        variables = self.extract_variables(
-            formula
-        )
+        formulas = [str(x).strip() for x in (formulas or [formula]) if str(x).strip()]
+        variables = sorted({v for item in formulas for v in self.extract_variables(item)})
+        formula = formulas[0] if formulas else formula
+        markdown = markdown or self.build_markdown(formulas)
 
         artifact = create_artifact(
 
@@ -223,22 +284,24 @@ class FormulaRoom(Room):
 
             data={
 
-                "formula":
+                "formula": formula,
+
+                "latex": self.build_latex(formula),
+
+                "formulas": formulas,
+
+                "latex_formulas": [self.build_latex(item) for item in formulas],
+
+                "markdown": markdown,
+
+                "katex": True,
+
+                "variables": variables,
+
+                "explanation": self.build_explanation(
                     formula,
-
-                "latex":
-                    self.build_latex(
-                        formula
-                    ),
-
-                "variables":
-                    variables,
-
-                "explanation":
-                    self.build_explanation(
-                        formula,
-                        variables
-                    )
+                    variables
+                )
             }
         )
 
@@ -262,19 +325,18 @@ class FormulaRoom(Room):
             task
         )
 
-        formula = work_order.get(
-            "formula",
-            ""
-        )
+        formulas = work_order.get("formulas") or self._extract_formulas({"formula": work_order.get("formula")})
+        if not formulas:
+            return None
 
-        if not self.validate_formula(
-            formula
-        ):
-
+        formula = formulas[0]
+        if not self.validate_formula(formula):
             return None
 
         return self.build_artifact(
-            formula
+            formula,
+            formulas=formulas,
+            markdown=work_order.get("markdown") or self.build_markdown(formulas),
         )
 
 
