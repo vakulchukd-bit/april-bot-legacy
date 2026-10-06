@@ -158,6 +158,18 @@ def _structured_payload(task: Dict[str, Any]) -> Dict[str, Any]:
             "markers", "reference_lines", "regions",
             "visual_elements", "matrix", "fn", "equation",
             "expression", "function", "grid", "style", "metadata",
+            "chart_type", "graph_type", "plot_type", "visualization", "kind",
+            "datasets", "traces", "curves", "data", "data_table", "table",
+            "categories", "x_labels", "y_labels", "axes", "domain",
+            "time_axis", "time_granularity", "time_unit", "period", "date_range",
+            "x_field", "y_field", "y_fields", "series_field", "series_fields", "metrics", "group_by", "dimension",
+            "z", "z_values", "size", "sizes", "color", "colors",
+            "open", "high", "low", "close", "volume", "lower", "upper",
+            "q1", "median", "q3", "whisker_low", "whisker_high",
+            "nodes", "edges", "links", "vertices", "matrix", "timeline",
+            "periods", "events", "funnel", "waterfall", "bins", "ranges",
+            "error", "errors", "error_low", "error_high", "values_3d",
+            "camera", "z_axis", "semantic", "interpretation", "data_semantics",
         )
         if key in task
     }
@@ -175,15 +187,33 @@ def _normalize_series(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         else:
             continue
 
-        points = _list(series.get("points"))
+        points = _list(series.get("points") or series.get("data") or series.get("values"))
         if points:
             normalized_points = []
-            for point in points:
-                if isinstance(point, dict):
-                    x = point.get("x")
-                    y = _number(point.get("y"))
-                    if y is not None and x is not None:
-                        normalized_points.append({"x": x, "y": y})
+            for point_index, point in enumerate(points):
+                if isinstance(point, (list, tuple)):
+                    x = point[0] if len(point) > 0 else point_index
+                    y = _number(point[1]) if len(point) > 1 else None
+                    extra = {}
+                elif isinstance(point, dict):
+                    x = (point.get("x") if point.get("x") is not None else
+                         point.get("time") if point.get("time") is not None else
+                         point.get("date") if point.get("date") is not None else
+                         point.get("label") if point.get("label") is not None else point_index)
+                    y = _number(point.get("y") if point.get("y") is not None else point.get("value"))
+                    extra = {key: deepcopy(point[key]) for key in (
+                        "z", "size", "open", "high", "low", "close", "volume",
+                        "lower", "upper", "q1", "median", "q3",
+                        "whisker_low", "whisker_high", "error", "error_low", "error_high",
+                        "label", "category", "group", "color",
+                    ) if key in point}
+                else:
+                    x = point_index
+                    y = _number(point)
+                    extra = {}
+                if y is not None and x is not None:
+                    item = {"x": x, "y": y, **extra}
+                    normalized_points.append(item)
             if normalized_points:
                 series["points"] = normalized_points
 
@@ -191,10 +221,19 @@ def _normalize_series(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         y_values = _list(series.get("y") or series.get("y_values"))
         if x_values and y_values:
             pairs = []
-            for x_value, y_value in zip(x_values, y_values):
+            for point_index, (x_value, y_value) in enumerate(zip(x_values, y_values)):
                 numeric_y = _number(y_value)
                 if numeric_y is not None:
-                    pairs.append({"x": x_value, "y": numeric_y})
+                    point = {"x": x_value, "y": numeric_y}
+                    for extra_key in (
+                        "z", "size", "open", "high", "low", "close", "volume",
+                        "lower", "upper", "q1", "median", "q3",
+                        "whisker_low", "whisker_high", "error", "error_low", "error_high",
+                    ):
+                        extra_values = _list(series.get(extra_key))
+                        if point_index < len(extra_values):
+                            point[extra_key] = deepcopy(extra_values[point_index])
+                    pairs.append(point)
             if pairs:
                 series["points"] = pairs
                 series["x"] = [p["x"] for p in pairs]
@@ -224,6 +263,10 @@ def _normalize_series(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "y": [p["y"] for p in pairs],
             }]
 
+    tabular_series = _normalize_tabular_series(payload)
+    if tabular_series:
+        return tabular_series
+
     function_value = (
         payload.get("fn")
         or payload.get("equation")
@@ -240,6 +283,52 @@ def _normalize_series(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return []
 
 
+def _normalize_tabular_series(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Convert structured table rows into graph series without reading natural language."""
+    rows = payload.get("data_table") or payload.get("table") or payload.get("data")
+    if not isinstance(rows, list) or not rows or not all(isinstance(row, dict) for row in rows):
+        return []
+
+    x_field = _text(payload.get("x_field") or payload.get("dimension") or "")
+    if not x_field:
+        for candidate in ("x", "time", "date", "datetime", "period", "label", "category"):
+            if any(candidate in row for row in rows):
+                x_field = candidate
+                break
+    if not x_field:
+        x_field = next(iter(rows[0].keys()), "x")
+
+    requested = payload.get("y_fields") or payload.get("series_fields") or payload.get("metrics")
+    if isinstance(requested, str):
+        requested = [requested]
+    if not isinstance(requested, list) or not requested:
+        excluded = {x_field, "label", "category", "time", "date", "datetime", "period"}
+        requested = [
+            key for key in rows[0].keys()
+            if key not in excluded and any(_number(row.get(key)) is not None for row in rows)
+        ]
+
+    result: List[Dict[str, Any]] = []
+    for field_name in requested:
+        field = _text(field_name)
+        if not field:
+            continue
+        points = []
+        for index, row in enumerate(rows):
+            x = row.get(x_field, index)
+            y = _number(row.get(field))
+            if y is None:
+                continue
+            point = {"x": x, "y": y}
+            for extra_key in ("z", "size", "open", "high", "low", "close", "volume", "lower", "upper", "q1", "median", "q3", "whisker_low", "whisker_high", "error", "error_low", "error_high"):
+                if extra_key in row:
+                    point[extra_key] = deepcopy(row[extra_key])
+            points.append(point)
+        if points:
+            result.append({"label": field, "type": "points", "points": points, "x": [p["x"] for p in points], "y": [p["y"] for p in points]})
+    return result
+
+
 def _normalize_axis(value: Any, fallback_title: str) -> Dict[str, Any]:
     if isinstance(value, dict):
         axis = deepcopy(value)
@@ -254,7 +343,14 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
     identity = _identity(task)
 
     series = _normalize_series(payload)
-    if not series:
+    structural_data_present = any([
+        bool(_list(payload.get("matrix") or payload.get("z") or payload.get("values"))),
+        bool(_list(payload.get("nodes") or payload.get("vertices"))),
+        bool(_list(payload.get("edges") or payload.get("links") or payload.get("connections"))),
+        bool(_list(_obj(payload.get("timeline")).get("periods") or payload.get("periods"))),
+        bool(_list(_obj(payload.get("timeline")).get("events") or payload.get("events"))),
+    ])
+    if not series and not structural_data_present:
         raise ValueError(
             "C_GRAPH_ROOM requires structured graph data; "
             "the room does not invent a graph from user text."
@@ -264,9 +360,27 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
         payload.get("representation")
         or payload.get("chart_type")
         or payload.get("graph_type")
+        or payload.get("visualization")
+        or payload.get("plot_type")
         or ("function" if any(s.get("fn") for s in series) else "line"),
         "line",
-    ).lower()
+    ).lower().replace("-", "_").replace(" ", "_")
+    representation_aliases = {
+        "line_chart": "line", "linechart": "line", "curve": "line",
+        "column": "bar", "column_chart": "bar", "horizontal_bar": "bar_horizontal",
+        "scatterplot": "scatter", "scatter_plot": "scatter", "bubble_chart": "bubble",
+        "area_chart": "area", "piechart": "pie", "donut": "donut",
+        "heat_map": "heatmap", "matrix": "heatmap", "xy": "scatter",
+        "step_chart": "step", "error_bar": "errorbar", "box_plot": "boxplot",
+        "violin_plot": "violin", "candlestick_chart": "candlestick",
+        "ohlc_chart": "ohlc", "waterfall_chart": "waterfall",
+        "funnel_chart": "funnel", "radar_chart": "radar",
+        "gantt_chart": "gantt", "sankey_chart": "sankey",
+        "treemap_chart": "treemap", "network_graph": "network",
+        "3d": "surface3d", "3d_surface": "surface3d", "surface_3d": "surface3d",
+        "3d_scatter": "scatter3d", "polar_chart": "polar",
+    }
+    representation = representation_aliases.get(representation, representation)
 
     title = _text(payload.get("title") or task.get("title"), "Graph")
     description = _text(
@@ -324,6 +438,36 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
         "scene_id": identity["scene_id"],
         "turn_id": identity["turn_id"],
     }
+    semantic = _obj(task.get("semantic"))
+    interpretation = _obj(task.get("interpretation") or semantic.get("interpretation"))
+    data_semantics = _obj(
+        payload.get("data_semantics")
+        or payload.get("interpretation")
+        or semantic.get("graph_intent")
+        or semantic.get("data_semantics")
+    )
+    canonical["data_semantics"] = {
+        **data_semantics,
+        "representation": representation,
+        "x_dimension": _text(payload.get("x_field") or payload.get("dimension") or data_semantics.get("x_dimension")),
+        "y_dimensions": deepcopy(payload.get("y_fields") or payload.get("series_fields") or data_semantics.get("y_dimensions") or []),
+        "time_granularity": _text(payload.get("time_granularity") or data_semantics.get("time_granularity")),
+        "time_unit": _text(payload.get("time_unit") or data_semantics.get("time_unit")),
+        "period": deepcopy(payload.get("period") or payload.get("date_range") or data_semantics.get("period") or {}),
+    }
+    if interpretation:
+        canonical["interpretation"] = {
+            "operation": interpretation.get("operation"),
+            "goal": interpretation.get("goal"),
+            "resolved_request": interpretation.get("resolved_request") or interpretation.get("semantic_request"),
+        }
+    canonical["supported_representations"] = [
+        "line", "bar", "bar_horizontal", "area", "scatter", "bubble", "step",
+        "pie", "donut", "histogram", "heatmap", "radar", "waterfall", "funnel",
+        "boxplot", "violin", "errorbar", "candlestick", "ohlc", "timeline", "gantt",
+        "network", "sankey", "treemap", "polar", "surface3d", "scatter3d", "contour",
+        "function",
+    ]
     return canonical
 
 
