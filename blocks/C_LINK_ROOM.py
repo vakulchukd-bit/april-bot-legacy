@@ -45,11 +45,13 @@ class LinkRoom(Room):
         )
         title = payload.get("title", "") if isinstance(payload, dict) else ""
         description = payload.get("description", "") if isinstance(payload, dict) else ""
+        links = payload.get("links") if isinstance(payload, dict) else None
 
         artifact = self.process({
             "url": str(url or ""),
             "title": str(title or url or ""),
             "description": str(description or ""),
+            "links": links if isinstance(links, list) else [],
             "goal": context.get("goal"),
             "purpose": context.get("purpose"),
         })
@@ -64,6 +66,10 @@ class LinkRoom(Room):
         self,
         task: Dict[str, Any]
     ) -> Dict[str, Any]:
+
+        links = task.get("links") if isinstance(task.get("links"), list) else []
+        if not links and task.get("url"):
+            links = [{"url": task.get("url"), "title": task.get("title", ""), "description": task.get("description", "")}]
 
         return {
 
@@ -80,7 +86,10 @@ class LinkRoom(Room):
                 task.get("title", ""),
 
             "description":
-                task.get("description", "")
+                task.get("description", ""),
+
+            "links":
+                links,
         }
 
     # =================================================
@@ -141,7 +150,8 @@ class LinkRoom(Room):
         self,
         title: str,
         url: str,
-        description: str
+        description: str,
+        links: list | None = None,
     ):
 
         artifact = create_artifact(
@@ -160,8 +170,15 @@ class LinkRoom(Room):
                 "url":
                     url,
 
-                "description":
-                    description,
+                "description": description,
+
+                "links": links or [{"url": url, "title": title, "description": description}],
+
+                "markdown": "\n".join(
+                    f"- [{item.get('title') or item.get('url')}]({item.get('url')})"
+                    for item in (links or [{"url": url, "title": title, "description": description}])
+                    if isinstance(item, dict) and str(item.get("url") or "").startswith(("http://", "https://"))
+                ),
 
                 "preview":
                     self.build_preview(
@@ -210,10 +227,8 @@ class LinkRoom(Room):
 
             url,
 
-            work_order.get(
-                "description",
-                ""
-            )
+            work_order.get("description", ""),
+            links=work_order.get("links") or [],
         )
 
 
