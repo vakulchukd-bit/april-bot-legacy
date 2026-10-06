@@ -9466,6 +9466,56 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
     rows_by_index = {row["index"]: row for row in rows}
     substantive_rows = [row for row in rows if row["substantive"]]
 
+    # Lightweight result-item linker. A short request can target an item from a
+    # previous answer even when whole-pair similarity is weak.
+    def _answer_item_link_score(current_text, row):
+        if not row.get("substantive"):
+            return 0.0
+        pair = row.get("pair") if isinstance(row.get("pair"), dict) else {}
+        answer = str(
+            pair.get("april") or pair.get("april_answer")
+            or pair.get("assistant") or pair.get("answer") or ""
+        ).strip()
+        if not answer:
+            return 0.0
+
+        items = re.findall(
+            r"(?:^|\n)\s*(?:[-•*]|\d{1,2}[.)])\s*([^\n]{3,180})",
+            answer,
+            re.M,
+        )
+        candidates = items or [answer]
+        best = max((_topic_affinity(current_text, item) for item in candidates), default=0.0)
+
+        # Named-item hit for short turns such as "про рено" / "расскажи про
+        # легковые". Generic dialogue words are not allowed to qualify.
+        answer_low = _clean(answer)
+        answer_match_text = answer_low
+        for latin, cyrillic in {
+            "renault": "рено", "peugeot": "пежо", "citroen": "ситроен",
+            "citroën": "ситроен", "bugatti": "бугатти", "alpine": "альпин",
+            "mercedes": "мерседес", "volkswagen": "фольксваген",
+        }.items():
+            answer_match_text = re.sub(rf"(?<!\w){re.escape(latin)}(?!\w)", cyrillic, answer_match_text, flags=re.I)
+        for token in _content(current_text):
+            if len(token) < 4:
+                continue
+            if token in {"вопрос", "ответ", "диалог", "история", "помнить"}:
+                continue
+            if re.search(rf"(?<!\w){re.escape(token)}(?:\w*)", answer_match_text, re.I):
+                best = max(best, 0.74)
+        return max(0.0, min(1.0, best))
+
+    answer_item_rows = []
+    for row in rows:
+        item_score = _answer_item_link_score(current, row)
+        row["answer_item_link"] = round(item_score, 6)
+        if item_score >= 0.48:
+            answer_item_rows.append((item_score, row))
+    answer_item_rows.sort(key=lambda x: (x[0], x[1]["index"]), reverse=True)
+    best_answer_item_row = answer_item_rows[0][1] if answer_item_rows else None
+    best_answer_item_score = float(answer_item_rows[0][0]) if answer_item_rows else 0.0
+
     test_id = _extract_test_id(current)
     starts_new_test = _looks_like_test_start(current, test_id)
 
@@ -9504,6 +9554,9 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
     test_reference = test_id is not None and not starts_new_test
     specificity = _specificity(current)
 
+    # HISTORY is a semantic mode, not a third relation. It can rescue a weak
+    # NEW classification when the user explicitly asks for remembered
+    # dialogue/pairs/questions/answers.
     history_summary_query = bool(
         re.search(
             r"\b(?:напомни|назови|покажи|перечисли|какие)\b.*\b(?:последн(?:ие|их)|тем(?:ы|а)|обсуждали|говорили)\b",
@@ -9512,6 +9565,32 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         )
         or re.search(r"\bпоследн(?:ие|их)\s+\d+\s+тем", low_current, re.I)
         or re.search(r"\bкакие\s+темы\b.*\b(?:обсуждали|говорили)\b", low_current, re.I)
+    )
+    history_intent = bool(
+        history_summary_query
+        or re.search(
+            r"\b(?:весь|вся|полный|полные)\s+(?:диалог|истори|пары|вопрос(?:ы)?|ответ(?:ы)?)\b",
+            low_current,
+            re.I,
+        )
+        or re.search(
+            r"\b(?:покажи|выведи|перечисли|назови|напомни)\b.*"
+            r"\b(?:диалог|истори|помниш|помнишь|вопрос(?:ы|ов)?\s+и\s+ответ(?:ы|ов)?|"
+            r"запрос(?:ы|ов)?\s+и\s+ответ(?:ы|ов)?)\b",
+            low_current,
+            re.I,
+        )
+        or re.search(
+            r"\b(?:покажи|выведи)\b.*\b(?:пары\s+запросов\s+и\s+ответов|полные\s+пары)\b",
+            low_current,
+            re.I,
+        )
+        or re.search(
+            r"\b(?:что|какие)\b.*\b(?:вопрос(?:ы|ов)?|запрос(?:ы|ов)?|ответ(?:ы|ов)?|диалог)\b.*"
+            r"\b(?:помниш|помнишь|вспомниш|вспомнишь|помню|в\s+истори|в\s+диалоге)\b",
+            low_current,
+            re.I,
+        )
     )
 
     clarification_bridge = None
@@ -9669,6 +9748,13 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
                     anchor_index = strongest
                     anchor_reason = "DIRECT_SEMANTIC_PAIR_MATCH"
 
+    if history_intent and substantive_rows and anchor_index < 0:
+        anchor_index = max(int(row.get("index", -1)) for row in substantive_rows)
+        anchor_reason = "HISTORY_QUERY_FULL_12H_WINDOW"
+    elif best_answer_item_row is not None and best_answer_item_score >= 0.48 and anchor_index < 0:
+        anchor_index = int(best_answer_item_row["index"])
+        anchor_reason = "PREVIOUS_RESULT_ITEM_LINK"
+
     if anchor_index < 0:
         return {
             "relation": "NEW",
@@ -9679,9 +9765,12 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             "context_pairs": [],
             "memory_window": pairs,
             "best_score": max((row["score"] for row in rows), default=0.0),
-            "reason": "NO_SEMANTIC_LINK_IN_FULL_12H_DIALOGUE",
+            "reason": decision_basis if "decision_basis" in locals() else "NO_SEMANTIC_LINK_IN_FULL_12H_DIALOGUE",
             "context_mode": "NEW_TOPIC_ISOLATED",
             "semantic_discussion": "",
+            "decision_basis": "ALL_LAYERS_NEW",
+            "relation_locked": True,
+            "history_intent": history_intent,
             "resolved_referent": {},
             "semantic_operation": "answer",
             "candidate_count": len(rows),
@@ -9778,34 +9867,89 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
             anchor_subject = _pair_subject(anchor_pair)
 
-    # Relation: only two canonical states.
-    # NEW requires absence of a valid semantic/discourse anchor.
-    # Once a real anchor has been found and the turn is elliptical/reference/follow-up,
-    # the request is a continuation.
-    relation = "CONTINUE"
-    if history_summary_query:
-        relation = "CONTINUE"
-        # Selection of multiple roots is performed below.
-    elif clarification_bridge is not None:
-        relation = "CONTINUE"
-        anchor_index = int(clarification_bridge["root_pair_index"])
-        anchor_pair = dict(pairs[anchor_index])
-        anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
-    elif not test_reference and not reference_query and not followup_query and not short_topic_followup:
-        # A self-contained current request is still NEW unless it is strongly tied to
-        # a concrete prior subject and does not introduce an explicit new task.
-        direct_link = (
-            rows_by_index[anchor_index]["topic_affinity"] >= 0.28
-            or rows_by_index[anchor_index]["answer_topic_affinity"] >= 0.32
-            or _topic_affinity(current, anchor_topic) >= 0.34
+    # ------------------------------------------------------------------
+    # MONOTONIC TWO-SIGNAL DECISION
+    #
+    # Layers contribute evidence; they do not overwrite each other:
+    #   HARD current-turn intent > history intent > discourse dependency >
+    #   authenticated 12h semantic evidence > generic similarity.
+    #
+    # A later weak semantic/topic result may refine the selected pair, but it
+    # cannot downgrade a validated CONTINUE to NEW. NEW is legal only when
+    # every applicable evidence layer remains NEW.
+    # ------------------------------------------------------------------
+    relation = "NEW"
+    decision_basis = "ALL_LAYERS_NEW"
+    relation_lock = False
+
+    if starts_new_test:
+        relation = "NEW"
+        decision_basis = "EXPLICIT_NEW_TASK"
+        relation_lock = True
+        selected_indices = []
+        anchor_index = -1
+        anchor_pair = {}
+    else:
+        history_link = bool(history_intent and substantive_rows)
+        semantic_followup = bool(
+            re.search(
+                r"\b(?:дальше|далее|ещ[её]|продолж(?:и|ай|ить|им)|добав(?:ь|ить)|"
+                r"подробнее|детальнее|уточни|поясни|объясни|раскрой|выдели|выбери|"
+                r"отбери|исправь|не\s+повторяй|кроме|из\s+них)\b",
+                low_current,
+                re.I,
+            )
         )
-        relation = "CONTINUE" if direct_link else "NEW"
-        if relation == "NEW":
+        discourse_link = bool(
+            reference_query
+            or semantic_followup
+            or short_topic_followup
+            or test_reference
+            or clarification_bridge is not None
+        )
+        anchor_row = rows_by_index.get(anchor_index, {})
+        anchor_semantic_link = bool(
+            anchor_index >= 0
+            and (
+                float(anchor_row.get("topic_affinity", 0.0) or 0.0) >= 0.16
+                or float(anchor_row.get("answer_topic_affinity", 0.0) or 0.0) >= 0.16
+                or _topic_affinity(current, anchor_topic) >= 0.20
+            )
+        )
+        result_item_link = bool(best_answer_item_row and best_answer_item_score >= 0.48)
+
+        # Two-key stability rule:
+        #   NEW + NEW -> NEW
+        #   any validated CONTINUE/HISTORY link -> CONTINUE
+        if history_link:
+            relation = "CONTINUE"
+            decision_basis = "HISTORY_OVERRIDES_WEAK_NEW"
+            relation_lock = True
+        elif result_item_link:
+            relation = "CONTINUE"
+            decision_basis = "PREVIOUS_RESULT_ITEM_LINK"
+            relation_lock = True
+            anchor_index = int(best_answer_item_row["index"])
+            anchor_pair = dict(pairs[anchor_index])
+            anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
+            selected_indices = [anchor_index]
+        elif discourse_link and (anchor_index >= 0 or pairs):
+            relation = "CONTINUE"
+            decision_basis = "DISCOURSE_DEPENDENCY_WITH_12H_EVIDENCE"
+            relation_lock = True
+        elif anchor_semantic_link:
+            relation = "CONTINUE"
+            decision_basis = "DIRECT_SEMANTIC_12H_LINK"
+            relation_lock = True
+        else:
+            relation = "NEW"
+            decision_basis = "ALL_LAYERS_NEW"
+            relation_lock = True
             selected_indices = []
             anchor_index = -1
             anchor_pair = {}
 
-    if history_summary_query:
+    if history_intent:
         # Return up to 10 distinct topic roots from the COMPLETE 12h window.
         topic_roots = []
         candidates = [
@@ -9875,7 +10019,7 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         semantic_operation = "correct_previous_interpretation"
     elif re.search(r"\b(?:в\s+столбик|списком|по\s+пунктам)\b", low_current, re.I):
         semantic_operation = "reformat_previous_result"
-    elif history_summary_query:
+    elif history_intent:
         semantic_operation = "summarize_12h_topics"
     elif re.search(r"\b(?:кто|что|какой|какая|какие|какое)\b", low_current, re.I) and reference_query:
         semantic_operation = "answer_about_referenced_items"
@@ -9942,13 +10086,17 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         "memory_window": pairs,
         "best_score": max((row["score"] for row in rows), default=0.0),
         "reason": (
-            "TEST_ID_ROOT_SEMANTIC_CHAIN"
-            if test_id is not None
-            else "REFERENCE_TO_ACTIVE_SEMANTIC_CHAIN"
-            if reference_query
-            else "SEMANTIC_CHAIN_CONTINUATION"
+            decision_basis
+            if decision_basis != "ALL_LAYERS_NEW"
+            else (
+                "TEST_ID_ROOT_SEMANTIC_CHAIN"
+                if test_id is not None
+                else "REFERENCE_TO_ACTIVE_SEMANTIC_CHAIN"
+                if reference_query
+                else "SEMANTIC_CHAIN_CONTINUATION"
+            )
         ),
-        "context_mode": "LIVE_CONTINUATION",
+        "context_mode": "HISTORY_LOOKUP" if history_intent else "LIVE_CONTINUATION",
         "semantic_discussion": semantic_discussion,
         "resolved_referent": resolved_referent,
         "semantic_operation": semantic_operation,
@@ -9962,6 +10110,10 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         },
         "clarification_bridge": clarification_bridge or {},
         "history_summary_query": history_summary_query,
+        "history_intent": history_intent,
+        "decision_basis": decision_basis,
+        "relation_locked": relation_lock,
+        "best_answer_item_score": round(best_answer_item_score, 6),
         "test_id": anchor_test_id,
     }
 
@@ -10289,10 +10441,15 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
     if relation == "NEW":
         canonical_topic = _live_extract_subject(current)
 
+    selected_context_mode = str(
+        selected.get("context_mode")
+        or ("LIVE_CONTINUATION" if relation == "CONTINUE" else "NEW_TOPIC_ISOLATED")
+    )
+
     structured_request = _two_state_structured_request(
         current=current,
         relation=relation,
-        context_mode="LIVE_CONTINUATION" if relation == "CONTINUE" else "NEW_TOPIC_ISOLATED",
+        context_mode=selected_context_mode,
         semantic_task=semantic_task,
         context_pairs=context_pairs,
         semantic_discussion=semantic_discussion,
@@ -10313,7 +10470,7 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
     result["continuation"] = relation == "CONTINUE"
     result["reference_to_previous"] = relation == "CONTINUE" and selected_index >= 0
     result["context_dependency"] = "continuation" if relation == "CONTINUE" else "independent"
-    result["context_mode"] = "LIVE_CONTINUATION" if relation == "CONTINUE" else "NEW_TOPIC_ISOLATED"
+    result["context_mode"] = selected_context_mode
     result["history_lookup"] = False
     result["history_lookup_scope"] = ""
     result["selected_memory_index"] = selected_index if relation == "CONTINUE" else -1
@@ -10360,7 +10517,12 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
     }
     result["semantic_chain"] = context_pairs if relation == "CONTINUE" else []
     result["semantic_discussion"] = semantic_discussion
-    result["semantic_selection_reason"] = str(selected.get("reason") or "")
+    result["semantic_selection_reason"] = str(
+        selected.get("decision_basis")
+        or selected.get("reason")
+        or ""
+    )
+    result["relation_lock"] = bool(selected.get("relation_locked", relation == "CONTINUE"))
 
     semantic_task.update({
         "operation": str(selected.get("semantic_operation") or operation),
