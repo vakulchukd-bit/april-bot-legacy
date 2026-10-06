@@ -8745,7 +8745,7 @@ QuantumInterpretationEngine.interpret = _pair_canonical_interpret_live
 # the final runtime authority assigned at the bottom of this file.
 # ============================================================================
 
-TWO_STATE_DIALOGUE_ENGINE_VERSION = "two_state_full_12h_semantic_chain_v2_discourse_chain"
+TWO_STATE_DIALOGUE_ENGINE_VERSION = "two_state_full_12h_semantic_chain_v3_monotonic_relation_lock"
 _TWO_STATE_12H_SECONDS = 12 * 60 * 60
 
 
@@ -9519,9 +9519,19 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
     test_id = _extract_test_id(current)
     starts_new_test = _looks_like_test_start(current, test_id)
 
-    # Canonical relation rule #1: starting a numbered test starts a new task.
-    # Merely mentioning that number later is a continuation/lookup.
-    if starts_new_test:
+    # Canonical relation rule #1: explicit new-task intent is a HARD barrier.
+    # Old memory may never reopen a request the user explicitly started as new.
+    explicit_new_task = bool(
+        starts_new_test
+        or re.search(
+            r"\b(?:нов(?:ая|ую|ое)?\s+тема|другая\s+тема|"
+            r"перейд(?:и|ем|ём)\s+(?:к|на)\s+друг(?:ую|ой)?\s+тем|"
+            r"начн(?:е|ё)м\s+(?:нов(?:ую|ую)?|друг(?:ую)?))\b",
+            _clean(current),
+            re.I,
+        )
+    )
+    if explicit_new_task:
         return {
             "relation": "NEW",
             "confidence": 0.99,
@@ -9531,7 +9541,7 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             "context_pairs": [],
             "memory_window": pairs,
             "best_score": max((row["score"] for row in rows), default=0.0),
-            "reason": "EXPLICIT_NEW_TEST_TASK",
+            "reason": "EXPLICIT_NEW_TASK",
             "context_mode": "NEW_TOPIC_ISOLATED",
             "semantic_discussion": "",
             "resolved_referent": {},
@@ -9539,6 +9549,8 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             "candidate_count": len(rows),
             "candidate_scores": rows,
             "test_id": test_id,
+            "decision_basis": "HARD_NEW_CURRENT_INTENT",
+            "relation_locked": True,
         }
 
     low_current = _clean(current)
@@ -9553,6 +9565,42 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
     # continuation/reference to an already established test branch.
     test_reference = test_id is not None and not starts_new_test
     specificity = _specificity(current)
+
+    # Short named-object turns are semantic continuations even when lexical
+    # overlap with the full prior answer is weak (for example: "Рено" or
+    # "уговорил рено так рено"). This is object evidence, not a raw similarity
+    # threshold, and it is evaluated only inside the authenticated 12h window.
+    named_object_link = False
+    named_object_index = -1
+    current_named_tokens = [
+        token for token in _content(current)
+        if len(token) >= 4
+        and token not in {"вопрос", "ответ", "диалог", "история", "помнить"}
+    ]
+    if current_named_tokens and specificity <= 4:
+        for row in reversed(substantive_rows):
+            idx = int(row.get("index", -1))
+            if idx < 0:
+                continue
+            pair = pairs[idx]
+            subject_text = (
+                f"{_pair_subject(pair)} {_pair_text(pair)[0]} {_pair_text(pair)[1]}"
+            )
+            subject_tokens = _semantic_set(subject_text)
+            for current_token in current_named_tokens:
+                if current_token in subject_tokens:
+                    named_object_link = True
+                    named_object_index = idx
+                    break
+                if any(
+                    _topic_affinity(current_token, candidate) >= 0.72
+                    for candidate in subject_tokens
+                ):
+                    named_object_link = True
+                    named_object_index = idx
+                    break
+            if named_object_link:
+                break
 
     # HISTORY is a semantic mode, not a third relation. It can rescue a weak
     # NEW classification when the user explicitly asks for remembered
@@ -9870,21 +9918,21 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
     # ------------------------------------------------------------------
     # MONOTONIC TWO-SIGNAL DECISION
     #
-    # Layers contribute evidence; they do not overwrite each other:
-    #   HARD current-turn intent > history intent > discourse dependency >
-    #   authenticated 12h semantic evidence > generic similarity.
-    #
-    # A later weak semantic/topic result may refine the selected pair, but it
-    # cannot downgrade a validated CONTINUE to NEW. NEW is legal only when
-    # every applicable evidence layer remains NEW.
+    # Priority is strict:
+    #   HARD NEW -> NEW
+    #   HISTORY / RESULT / OBJECT / DISCOURSE -> CONTINUE
+    #   semantic similarity -> evidence only
+    #   otherwise -> NEW
+    # After this point relation is LOCKED. Later enrichment may select/support
+    # pairs, but it must never recompute CONTINUE/NEW.
     # ------------------------------------------------------------------
     relation = "NEW"
     decision_basis = "ALL_LAYERS_NEW"
     relation_lock = False
 
-    if starts_new_test:
+    if explicit_new_task:
         relation = "NEW"
-        decision_basis = "EXPLICIT_NEW_TASK"
+        decision_basis = "HARD_NEW_CURRENT_INTENT"
         relation_lock = True
         selected_indices = []
         anchor_index = -1
@@ -9918,9 +9966,6 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         )
         result_item_link = bool(best_answer_item_row and best_answer_item_score >= 0.48)
 
-        # Two-key stability rule:
-        #   NEW + NEW -> NEW
-        #   any validated CONTINUE/HISTORY link -> CONTINUE
         if history_link:
             relation = "CONTINUE"
             decision_basis = "HISTORY_OVERRIDES_WEAK_NEW"
@@ -9930,6 +9975,14 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             decision_basis = "PREVIOUS_RESULT_ITEM_LINK"
             relation_lock = True
             anchor_index = int(best_answer_item_row["index"])
+            anchor_pair = dict(pairs[anchor_index])
+            anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
+            selected_indices = [anchor_index]
+        elif named_object_link:
+            relation = "CONTINUE"
+            decision_basis = "NAMED_OBJECT_CONTINUATION_LINK"
+            relation_lock = True
+            anchor_index = named_object_index
             anchor_pair = dict(pairs[anchor_index])
             anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
             selected_indices = [anchor_index]
@@ -9948,6 +10001,8 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             selected_indices = []
             anchor_index = -1
             anchor_pair = {}
+
+    locked_relation = relation
 
     if history_intent:
         # Return up to 10 distinct topic roots from the COMPLETE 12h window.
@@ -9978,7 +10033,7 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             anchor_pair = dict(pairs[anchor_index])
             anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
 
-    if relation == "NEW":
+    if locked_relation == "NEW":
         return {
             "relation": "NEW",
             "confidence": max(0.78, min(0.99, 1.0 - max((row["score"] for row in rows), default=0.0) * 0.20)),
@@ -9988,13 +10043,15 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             "context_pairs": [],
             "memory_window": pairs,
             "best_score": max((row["score"] for row in rows), default=0.0),
-            "reason": "NO_DIALOGUE_DEPENDENCY",
+            "reason": decision_basis,
             "context_mode": "NEW_TOPIC_ISOLATED",
             "semantic_discussion": "",
             "resolved_referent": {},
             "semantic_operation": "answer",
             "candidate_count": len(rows),
             "candidate_scores": rows,
+            "decision_basis": decision_basis,
+            "relation_locked": True,
         }
 
     # Semantic operation for the structured request.
@@ -10070,7 +10127,7 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
     )
 
     return {
-        "relation": "CONTINUE",
+        "relation": locked_relation,
         "confidence": max(
             0.72,
             min(0.99, 0.62 + 0.26 * max(
@@ -10334,8 +10391,14 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
         ),
     )
     relation = str(selected.get("relation") or "NEW").upper()
+    relation_is_locked = bool(selected.get("relation_locked"))
     if relation not in {"CONTINUE", "NEW"}:
         relation = "NEW"
+        relation_is_locked = True
+    # The semantic selector owns relation. Task parsing below may enrich the
+    # request, but it cannot overwrite the locked relation.
+    if relation_is_locked:
+        relation = str(selected.get("relation") or relation).upper()
 
     context_pairs = [
         dict(x) for x in (selected.get("context_pairs") or [])
@@ -10522,7 +10585,10 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
         or selected.get("reason")
         or ""
     )
-    result["relation_lock"] = bool(selected.get("relation_locked", relation == "CONTINUE"))
+    result["relation_lock"] = True
+    result["relation_lock_stage"] = "AFTER_12H_SEMANTIC_RELATION_BEFORE_STRUCTURED_REQUEST"
+    result["relation_lock_owner"] = "TWO_STATE_SEMANTIC_SELECTOR"
+    result["relation_lock_reason"] = str(selected.get("decision_basis") or selected.get("reason") or "")
 
     semantic_task.update({
         "operation": str(selected.get("semantic_operation") or operation),
