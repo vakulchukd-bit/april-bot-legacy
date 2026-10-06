@@ -35,6 +35,13 @@ except Exception:  # pragma: no cover
     TfidfVectorizer = None
     cosine_similarity = None
 
+# Optional lightweight fuzzy matcher. It is an evidence source only and never
+# owns the CONTINUE/NEW decision.
+try:
+    from rapidfuzz import fuzz as _rapidfuzz
+except Exception:  # pragma: no cover
+    _rapidfuzz = None
+
 try:
     import spacy
 except Exception:  # pragma: no cover
@@ -8950,12 +8957,23 @@ def _two_state_is_clarification(pair):
         or pair.get("answer")
         or ""
     ).strip()
-    return bool(re.match(
+    if re.match(
         r"^(?:не\s+совсем\s+понял|не\s+понял|не\s+поняла|уточни|уточните|"
         r"что\s+именно|скажите|пришлите|нужно\s+прислать)\b",
         answer,
         re.I,
-    ))
+    ):
+        return True
+    return bool(
+        re.search(r"\b(?:чего|какой|какая|какое|какие|кто|что)\s+именно\b", answer, re.I)
+        or re.search(r"\bо\s+како(?:й|м)\s+", answer, re.I)
+        or re.search(r"\bкто\s+или\s+что\b", answer, re.I)
+        or (
+            "?" in answer
+            and re.search(r"\b(?:стоимость|цена|классификаци|самые\s+опасные|популярн)\b", answer, re.I)
+        )
+    )
+
 
 
 def _two_state_morph_affinity(left, right):
@@ -8982,6 +9000,92 @@ def _two_state_morph_affinity(left, right):
     morph = hits / max(1, min(len(a), len(b)))
     directional = len(a & b) / max(1, min(len(a), len(b)))
     return max(exact, min(1.0, 0.55 * exact + 0.30 * morph + 0.15 * directional))
+
+
+def _two_state_light_12h_similarity(current, pairs):
+    """Compute cheap semantic evidence across the complete 12h pair window.
+
+    Uses one TF-IDF character n-gram pass plus RapidFuzz. No transformer/NLI model
+    is loaded here. The selector remains the sole authority for CONTINUE/NEW.
+    """
+    window = [p for p in (pairs or []) if isinstance(p, dict)]
+    if not window:
+        return []
+
+    def _norm(value):
+        return re.sub(r"\\s+", " ", str(value or "").strip().lower())
+
+    def _pair_text(pair):
+        user = _norm(pair.get("user") or pair.get("user_text") or pair.get("user_request"))
+        answer = _norm(pair.get("april") or pair.get("april_answer") or pair.get("assistant") or pair.get("answer"))
+        topic = _norm(pair.get("sequence_topic") or pair.get("topic") or pair.get("canonical_topic"))
+        return user, answer, topic
+
+    current_n = _norm(current)
+    prepared = []
+    for pair in window:
+        user, answer, topic = _pair_text(pair)
+        prepared.append({
+            "pair": f"{user} {topic} {answer}".strip(),
+            "user": user,
+            "answer": answer,
+            "topic": topic,
+        })
+
+    tfidf_scores = [0.0] * len(prepared)
+    if TfidfVectorizer is not None and cosine_similarity is not None:
+        try:
+            docs = [current_n] + [x["pair"] for x in prepared]
+            vectorizer = TfidfVectorizer(
+                analyzer="char_wb",
+                ngram_range=(3, 5),
+                lowercase=True,
+                sublinear_tf=True,
+                min_df=1,
+            )
+            matrix = vectorizer.fit_transform(docs)
+            values = cosine_similarity(matrix[0:1], matrix[1:]).ravel()
+            tfidf_scores = [max(0.0, min(1.0, float(v))) for v in values]
+        except Exception:
+            pass
+
+    def _fuzzy_pair(a, b):
+        if not a or not b:
+            return 0.0, 0.0
+        if _rapidfuzz is not None:
+            try:
+                token = float(_rapidfuzz.token_set_ratio(a, b)) / 100.0
+                partial = float(_rapidfuzz.partial_ratio(a, b)) / 100.0
+                return token, partial
+            except Exception:
+                pass
+        from difflib import SequenceMatcher
+        ratio = float(SequenceMatcher(None, a, b).ratio())
+        return ratio, ratio
+
+    out = []
+    for i, item in enumerate(prepared):
+        user_f, user_partial = _fuzzy_pair(current_n, item["user"])
+        answer_f, answer_partial = _fuzzy_pair(current_n, item["answer"])
+        topic_f, topic_partial = _fuzzy_pair(current_n, item["topic"])
+        short_turn = len(current_n.split()) <= 3
+        answer_signal = max(answer_f, answer_partial) if short_turn else answer_f
+        topic_signal = max(topic_f, topic_partial) if short_turn else topic_f
+        out.append({
+            "tfidf": round(tfidf_scores[i], 6),
+            "user_fuzzy": round(user_f, 6),
+            "answer_fuzzy": round(answer_signal, 6),
+            "topic_fuzzy": round(topic_signal, 6),
+            "partial_answer_fuzzy": round(answer_partial, 6),
+            "partial_topic_fuzzy": round(topic_partial, 6),
+            "score": round(max(0.0, min(1.0, (
+                0.50 * tfidf_scores[i]
+                + 0.18 * user_f
+                + 0.20 * answer_signal
+                + 0.12 * topic_signal
+            ))), 6),
+        })
+    return out
 
 
 def _two_state_semantic_selector(self, current, pairs, active_topic=""):
@@ -9039,7 +9143,9 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         "доллар", "доллара", "долларов", "доллары",
     }
     _reference_forms = {
-        "из них", "из этих", "из тех", "кто из них", "что из них",
+        "из них", "из этих", "из тех", "из популярных", "из перечисленных",
+        "из названных", "из указанных", "из выбранных", "из последних",
+        "кто из них", "что из них",
         "какой из них", "какая из них", "какие из них", "какое из них",
         "их", "его", "ее", "её", "ему", "ей", "им", "ними", "ним",
         "них", "него", "неё", "ней", "этом", "этого", "этим",
@@ -9276,6 +9382,14 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         }
 
     # Primary semantic pass: evaluate every pair in the full 12h window.
+    # Lightweight local semantic enrichment runs once over the same COMPLETE
+    # 12h window. Heavy models remain outside this hot path.
+    light_12h = []
+    try:
+        light_12h = _two_state_light_12h_similarity(current, pairs)
+    except Exception:
+        light_12h = []
+
     combined_targets = []
     for pair in pairs:
         user, april, topic = _pair_text(pair)
@@ -9300,6 +9414,9 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         sem_answer = float(batch[base + 2] if base + 2 < len(batch) else 0.0)
         sem_topic = float(batch[base + 3] if base + 3 < len(batch) else 0.0)
 
+        light = light_12h[i] if i < len(light_12h) else {}
+        light_score = float(light.get("score", 0.0) or 0.0)
+
         topical = _topic_affinity(current, f"{topic} {user} {april}")
         user_topic = _topic_affinity(current, user)
         answer_topic = _topic_affinity(current, april)
@@ -9309,14 +9426,15 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         clarification_penalty = 0.35 if _is_clarification(pair) else 0.0
 
         score = (
-            0.36 * topical
-            + 0.20 * user_topic
-            + 0.14 * answer_topic
-            + 0.08 * sem_pair
-            + 0.05 * sem_user
-            + 0.04 * sem_answer
-            + 0.03 * sem_topic
+            0.33 * topical
+            + 0.18 * user_topic
+            + 0.13 * answer_topic
+            + 0.07 * sem_pair
+            + 0.04 * sem_user
+            + 0.03 * sem_answer
+            + 0.02 * sem_topic
             + 0.05 * active_topic_score
+            + 0.05 * light_score
             + 0.05 * recency
             - clarification_penalty
         )
@@ -9327,6 +9445,13 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             "semantic_user": sem_user,
             "semantic_answer": sem_answer,
             "semantic_topic": sem_topic,
+            "light_semantic_score": light_score,
+            "light_tfidf": float(light.get("tfidf", 0.0) or 0.0),
+            "light_user_fuzzy": float(light.get("user_fuzzy", 0.0) or 0.0),
+            "light_answer_fuzzy": float(light.get("answer_fuzzy", 0.0) or 0.0),
+            "light_topic_fuzzy": float(light.get("topic_fuzzy", 0.0) or 0.0),
+            "light_partial_answer_fuzzy": float(light.get("partial_answer_fuzzy", 0.0) or 0.0),
+            "light_partial_topic_fuzzy": float(light.get("partial_topic_fuzzy", 0.0) or 0.0),
             "topic_affinity": topical,
             "user_topic_affinity": user_topic,
             "answer_topic_affinity": answer_topic,
@@ -9379,11 +9504,53 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
     test_reference = test_id is not None and not starts_new_test
     specificity = _specificity(current)
 
+    history_summary_query = bool(
+        re.search(
+            r"\b(?:напомни|назови|покажи|перечисли|какие)\b.*\b(?:последн(?:ие|их)|тем(?:ы|а)|обсуждали|говорили)\b",
+            low_current,
+            re.I,
+        )
+        or re.search(r"\bпоследн(?:ие|их)\s+\d+\s+тем", low_current, re.I)
+        or re.search(r"\bкакие\s+темы\b.*\b(?:обсуждали|говорили)\b", low_current, re.I)
+    )
+
+    clarification_bridge = None
+    if pairs and _is_clarification(pairs[-1]):
+        candidates = []
+        for i, pair in enumerate(pairs[:-1]):
+            if not _is_substantive(pair):
+                continue
+            row = rows_by_index.get(i, {})
+            light = light_12h[i] if i < len(light_12h) else {}
+            bridge_score = (
+                0.45 * float(row.get("score", 0.0) or 0.0)
+                + 0.35 * float(light.get("score", 0.0) or 0.0)
+                + 0.12 * float(light.get("partial_answer_fuzzy", 0.0) or 0.0)
+                + 0.05 * float(light.get("partial_topic_fuzzy", 0.0) or 0.0)
+                + 0.03 * float(row.get("recency", 0.0) or 0.0)
+            )
+            candidates.append((bridge_score, i))
+        if candidates:
+            candidates.sort(reverse=True)
+            bridge_score, bridge_index = candidates[0]
+            if bridge_score >= 0.13:
+                clarification_bridge = {
+                    "clarification_pair_index": len(pairs) - 1,
+                    "clarification_request": _pair_text(pairs[-1])[0],
+                    "clarification_answer": current,
+                    "root_pair_index": bridge_index,
+                    "root_pair": dict(pairs[bridge_index]),
+                    "score": round(float(bridge_score), 6),
+                }
+
     # Canonical relation rule #2: an explicit test-number reference resolves to
     # the latest substantive ROOT of that test, never to a later clarification.
     anchor_index = -1
     anchor_reason = ""
-    if test_id is not None:
+    if clarification_bridge is not None:
+        anchor_index = int(clarification_bridge["root_pair_index"])
+        anchor_reason = "CLARIFICATION_BRIDGE_TO_12H_ROOT"
+    elif test_id is not None:
         test_roots = [
             i for i, pair in enumerate(pairs)
             if _test_id_from_pair(pair) == test_id
@@ -9616,7 +9783,15 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
     # Once a real anchor has been found and the turn is elliptical/reference/follow-up,
     # the request is a continuation.
     relation = "CONTINUE"
-    if not test_reference and not reference_query and not followup_query and not short_topic_followup:
+    if history_summary_query:
+        relation = "CONTINUE"
+        # Selection of multiple roots is performed below.
+    elif clarification_bridge is not None:
+        relation = "CONTINUE"
+        anchor_index = int(clarification_bridge["root_pair_index"])
+        anchor_pair = dict(pairs[anchor_index])
+        anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
+    elif not test_reference and not reference_query and not followup_query and not short_topic_followup:
         # A self-contained current request is still NEW unless it is strongly tied to
         # a concrete prior subject and does not introduce an explicit new task.
         direct_link = (
@@ -9629,6 +9804,35 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             selected_indices = []
             anchor_index = -1
             anchor_pair = {}
+
+    if history_summary_query:
+        # Return up to 10 distinct topic roots from the COMPLETE 12h window.
+        topic_roots = []
+        candidates = [
+            r for r in rows
+            if r.get("substantive") and not _is_clarification(r.get("pair") or {})
+        ]
+        candidates.sort(key=lambda r: int(r.get("index", -1)), reverse=True)
+        for row in candidates:
+            idx = int(row.get("index", -1))
+            subject = _pair_subject(pairs[idx])
+            if not subject:
+                continue
+            if all(_topic_affinity(subject, _pair_subject(pairs[k])) < 0.52 for k in topic_roots):
+                topic_roots.append(idx)
+            if len(topic_roots) >= 10:
+                break
+        topic_roots.sort()
+        if not topic_roots and pairs:
+            topic_roots = [next(
+                (i for i in range(len(pairs)-1, -1, -1) if _is_substantive(pairs[i])),
+                len(pairs)-1,
+            )]
+        selected_indices = topic_roots
+        anchor_index = selected_indices[-1] if selected_indices else -1
+        if anchor_index >= 0:
+            anchor_pair = dict(pairs[anchor_index])
+            anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
 
     if relation == "NEW":
         return {
@@ -9650,14 +9854,20 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         }
 
     # Semantic operation for the structured request.
+    # A clarification answer inherits the unresolved operation from the
+    # clarification request instead of becoming a one-word standalone task.
+    operation_source = low_current
+    if clarification_bridge is not None:
+        operation_source = _clean(clarification_bridge.get("clarification_request") or current)
+
     if test_id is not None and re.search(
         r"\b(?:о\s+ч[её]м\s+я\s+(?:тебя\s+)?спраш|что\s+я\s+(?:тебя\s+)?спраш|"
         r"просмотри\b.*\bтест(?:е|а|ом)?\b|посмотри\b.*\bтест(?:е|а|ом)?\b)",
-        low_current,
+        operation_source,
         re.I,
     ):
         semantic_operation = "retrieve_original_test_request"
-    elif re.search(r"\b(?:стоимость|цена|цены|сколько\s+стоит|доллар)\w*", low_current, re.I):
+    elif re.search(r"\b(?:стоимость|цена|цены|сколько\s+стоит|доллар|дорог(?:ой|ая|ие|их)|дешев(?:ый|ая|ые|ых))\w*", operation_source, re.I):
         semantic_operation = "estimate_cost_of_referenced_items"
     elif re.search(r"\b(?:выдели|выбери|отбери)\b", low_current, re.I):
         semantic_operation = "filter_referenced_result"
@@ -9665,6 +9875,8 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         semantic_operation = "correct_previous_interpretation"
     elif re.search(r"\b(?:в\s+столбик|списком|по\s+пунктам)\b", low_current, re.I):
         semantic_operation = "reformat_previous_result"
+    elif history_summary_query:
+        semantic_operation = "summarize_12h_topics"
     elif re.search(r"\b(?:кто|что|какой|какая|какие|какое)\b", low_current, re.I) and reference_query:
         semantic_operation = "answer_about_referenced_items"
     elif re.search(r"\b(?:назови|назов|перечисли)\b", low_current, re.I):
@@ -9676,6 +9888,7 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         "test_id": anchor_test_id,
         "pair_index": anchor_index,
         "subject": anchor_subject[:320],
+        "clarification_bridge": clarification_bridge or {},
         "user_request": anchor_user[:700],
         "april_result": anchor_answer[:1200],
         "answer_set": bool(_two_state_answer_set(anchor_pair)),
@@ -9741,6 +9954,14 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         "semantic_operation": semantic_operation,
         "candidate_count": len(rows),
         "candidate_scores": rows,
+        "light_semantic_engine": {
+            "enabled": True,
+            "library": "scikit-learn TFIDF + RapidFuzz",
+            "scope": "FULL_12H",
+            "heavy_models_disabled": True,
+        },
+        "clarification_bridge": clarification_bridge or {},
+        "history_summary_query": history_summary_query,
         "test_id": anchor_test_id,
     }
 
