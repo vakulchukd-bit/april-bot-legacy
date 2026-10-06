@@ -4975,9 +4975,33 @@ class QuantumInterpretationEngine:
         if context_structured and not explicit:
             best_context_rep = context_structured[0]
             best_context_score = float(object_scores.get(best_context_rep, 0.0) or 0.0)
-            if best_context_score >= 0.08 and (
-                production == "text"
-                or best_context_rep != production
+            representation_scores = (
+                p.get("representation_scores")
+                if isinstance(p.get("representation_scores"), dict)
+                else {}
+            )
+            best_current_rep = str(p.get("best_representation") or "text").lower()
+            current_rep_score = float(
+                representation_scores.get(best_context_rep, 0.0) or 0.0
+            )
+            # A continuation must not be promoted to table/diagram/etc. from a
+            # noisy object matrix alone. The current turn has to agree on the same
+            # representation semantically. This keeps ordinary conversational
+            # statements textual while preserving real structured requests such as
+            # "сравни их в таблице" where representation+object evidence is strong.
+            context_representation_agreement = bool(
+                best_current_rep == best_context_rep
+                and current_rep_score >= 0.08
+                and best_context_score >= 0.08
+            )
+            structured_context_allowed = bool(
+                selected_relation != "CONTINUE"
+                or context_representation_agreement
+            )
+            if (
+                structured_context_allowed
+                and best_context_score >= 0.08
+                and (production == "text" or best_context_rep != production)
             ):
                 production = best_context_rep
                 source = "context_task_matrix_resolution"
@@ -9296,9 +9320,27 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             )
         )
 
+    def _is_transport_fallback(pair):
+        # A previous Provider transport failure may already have been persisted
+        # in the 12h USER↔APRIL window. Keep the row available for diagnostics,
+        # but do not treat the synthetic failure sentence as a semantic result.
+        _, april, _ = _pair_text(pair)
+        low = _clean(april)
+        return bool(
+            re.match(
+                r"^не\s+удалось\s+сформировать\s+ответ\s+на\s+запрос\s*:",
+                low,
+                re.I,
+            )
+        )
+
     def _is_substantive(pair):
         user, april, topic = _pair_text(pair)
-        return bool((user or april or topic) and not _is_clarification(pair))
+        return bool(
+            (user or april or topic)
+            and not _is_clarification(pair)
+            and not _is_transport_fallback(pair)
+        )
 
     def _pair_subject(pair):
         user, april, topic = _pair_text(pair)
