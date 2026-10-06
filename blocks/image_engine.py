@@ -13,7 +13,6 @@ from pathlib import Path
 # Image creation is owned directly by C_APRIL_IMAGES_GENERATOR.
 from blocks.C_APRIL_IMAGES_GENERATOR import (
     generate_from_spec,
-    edit_image_result,
 )
 from blocks.C_ARTIFACT_CONTRACT import _artifact_canonical_render_blocks
 
@@ -332,24 +331,31 @@ async def generate(
 
         signal_prompt = str(provider_signal.get("prompt") or "").strip()
 
-        # The canonical same-turn request is the immutable anti-substitution anchor.
-        # A valid Provider signal may supply the visual generation prompt for GPT Image 2; if its
-        # signal is missing or stale, discard that prompt and use only this turn's request.
-        if visual_generation_request:
-            clean_spec["prompt"] = visual_generation_request
-            clean_spec["openai_structured_visual_plan_semantic"] = visual_generation_request
-            prompt_source = "interpretation_visual_generation_request"
-        elif signal_valid and signal_prompt:
+        # request_anchor is the immutable user trigger. The actual semantic image
+        # prompt comes from Provider/OpenAI and must never be overwritten by that
+        # trigger. User/Interpretation text is only a final compatibility fallback.
+        spec_semantic_prompt = str(
+            clean_spec.get("openai_structured_visual_plan_semantic")
+            or clean_spec.get("prompt")
+            or ""
+        ).strip()
+        if signal_valid and signal_prompt:
             clean_spec["prompt"] = signal_prompt
-            prompt_source = "provider_signal_gpt_image_2"
+            prompt_source = "provider_signal_semantic_plan"
+        elif spec_semantic_prompt:
+            clean_spec["prompt"] = spec_semantic_prompt
+            prompt_source = "provider_spec_semantic_plan"
+        elif visual_generation_request:
+            clean_spec["prompt"] = visual_generation_request
+            prompt_source = "interpreted_visual_request_fallback"
         elif current_request:
             clean_spec["prompt"] = current_request
-            prompt_source = "current_request"
-        elif not str(clean_spec.get("prompt") or "").strip():
+            prompt_source = "current_request_fallback"
+        elif str(prompt or "").strip():
             clean_spec["prompt"] = str(prompt or "").strip()
-            prompt_source = "room_prompt"
+            prompt_source = "room_prompt_fallback"
         else:
-            prompt_source = "spec_prompt"
+            prompt_source = "empty_prompt"
         clean_spec["generator_signal"] = "C_APRIL_IMAGES_GENERATOR"
         clean_spec["request_anchor"] = current_request
         clean_spec["flow_id"] = flow_id
@@ -687,75 +693,26 @@ async def generate(
         }
 
 
-# ===== EDIT =====
+# ===== EDIT (DISABLED) =====
 async def edit(
     user_id,
     image_bytes,
     prompt,
-    state
+    state,
+    **kwargs,
 ):
-    try:
-        print("🧠 ENGINE: C_APRIL_IMAGES_GENERATOR edit route active")
+    """Compatibility shim: editing is disabled in the current image engine.
 
-        if not image_bytes:
-            return {
-                "type": "error",
-                "data": "⚠️ Не найдено исходное изображение для редактирования",
-            }
-
-        result = await edit_image_result(
-            image_bytes,
-            prompt,
-            quality="high",
-        )
-
-        if not result.get("success") or not result.get("image_bytes"):
-            return {
-                "type": "error",
-                "data": "⚠️ Не удалось изменить изображение",
-            }
-
-        img = result["image_bytes"]
-        state["image_current"] = img
-
-        path = save_temp_image(img)
-        if path:
-            now = time.time()
-            state["image_context"] = {
-                "type": "edited",
-                "path": path,
-                "hint": prompt,
-                "created_at": now,
-                "expires_at": now + 7 * 24 * 60 * 60,
-            }
-
-        set_last_entity(
-            user_id,
-            {
-                "type": "image",
-                "data": img,
-                "source": "C_APRIL_IMAGES_GENERATOR/edit",
-                "artifact": result.get("artifact"),
-                "contract": result.get("contract"),
-            },
-        )
-
-        return {
-            "type": "image",
-            "data": img,
-            "artifact": result.get("artifact"),
-            "contract": result.get("contract"),
-            "render_signal": (result.get("artifact") or {}).get("render_signal"),
-            "image_engine": "April Images Generation",
-            "artifact_route": "C_ARTIFACT_CONTRACT",
-        }
-
-    except Exception as e:
-        print("ENGINE EDIT ERROR:", e)
-        return {
-            "type": "error",
-            "data": "⚠️ Ошибка редактирования",
-        }
+    Active visual requests create a new image only. This callable remains present
+    so the future Images 2.0 edit route can be added without changing imports.
+    """
+    _ = (user_id, image_bytes, prompt, state, kwargs)
+    return {
+        "type": "error",
+        "data": "Редактирование изображений пока отключено.",
+        "error": "IMAGE_EDIT_DISABLED",
+        "image_generation_status": "not_requested",
+    }
 
 
 # ===== ANALYZE =====
