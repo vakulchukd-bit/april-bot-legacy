@@ -8665,7 +8665,7 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         else []
     )
     provider_plan = {
-        "version": "april_provider_handoff_structured_request_v4",
+        "version": "april_provider_handoff_structured_request_v5_markdown_katex_scene",
         "relation": relation,
         "context_mode": context_mode,
         "current_user_request": current,
@@ -8716,6 +8716,22 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
                     "visual_generation_request": visual_request,
                     "no_text_fallback_for_image": base_rep in {"image", "gallery"},
                     "ascii_allowed": False,
+                },
+            },
+            {
+                "key": "PRESENTATION_CONTRACT",
+                "priority": 0.98,
+                "value": {
+                    "text_transport": "Markdown",
+                    "math_transport": "KaTeX",
+                    "formula_in_text_block": True,
+                    "multiple_formulas": "one_markdown_math_block_per_formula",
+                    "formula_delimiters": "$$...$$",
+                    "structured_transport": "canonical_payload",
+                    "renderer_signal_source": "OUTPUT_CONTRACT",
+                    "renderer_signal_must_match_representation": True,
+                    "fallback_only_on_structured_render_failure": True,
+                    "fallback_channels": ["image", "link"],
                 },
             },
         ],
