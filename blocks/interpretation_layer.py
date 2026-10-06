@@ -2928,23 +2928,27 @@ class QuantumInterpretationEngine:
             "memory", "visual_context",
         }
 
-        # Representation hypotheses are evidence, not authorization.  A weak
-        # char-matrix resemblance (for example a dog breed question matching the
-        # generic image prototype) must not launch a visual route.  Visuality is
-        # considered meaningful only when the measured representation/object signal
-        # is strong enough and the measured operation is actually a production verb.
-        visual_rep = bool(
-            best_rep in {"diagram", "image", "gallery", "graph"}
-            and best_rep_score >= 0.035
+        # Representation hypotheses are evidence, not authorization.  The winning
+        # prototype does not have to be ``image``: natural drawing requests can
+        # leave TEXT slightly above IMAGE while the independent image
+        # representation/object evidence is already strong enough.
+        image_rep_score = float(rep_scores.get("image", 0.0) or 0.0)
+        image_obj_score = float(obj_scores.get("image", 0.0) or 0.0)
+        production_operation_scores = {
+            name: float(op_scores.get(name, 0.0) or 0.0)
+            for name in (
+                "build", "create", "generate", "present",
+                "modify", "transform", "redraw",
+            )
+        }
+        visual_operation_name, visual_operation_score = max(
+            production_operation_scores.items(),
+            key=lambda item: item[1],
+            default=("", 0.0),
         )
-        visual_object = bool(
-            best_obj in {"diagram", "image", "gallery", "graph"}
-            and best_obj_score >= 0.040
-        )
-        visual_operation = bool(
-            best_op in {"build", "modify", "present"}
-            and best_op_score >= 0.080
-        )
+        visual_rep = bool(image_rep_score >= 0.035)
+        visual_object = bool(image_obj_score >= 0.035)
+        visual_operation = bool(visual_operation_score >= 0.055)
         visual_goal = bool(
             best_goal in {"visualize", "transform", "present"}
             and best_goal_score >= 0.060
@@ -3022,6 +3026,10 @@ class QuantumInterpretationEngine:
 
         return {
             "visual_action": bool(visual_operation and (visual_rep or visual_object)),
+            "visual_generation_operation": visual_operation_name,
+            "visual_generation_operation_score": visual_operation_score,
+            "image_representation_score": image_rep_score,
+            "image_object_score": image_obj_score,
             "explain_action": bool(best_op == "explain"),
             "geometry_object": bool(
                 best_obj == "diagram"
@@ -4468,10 +4476,9 @@ class QuantumInterpretationEngine:
         image_rep_score = float(rep.get("image", 0.0) or 0.0)
         image_obj_score = float(obj.get("image", 0.0) or 0.0)
         if (
-            best_op in {"build", "modify", "present"}
-            and features.get("visual_action") is True
-            and (best_obj == "image" or image_obj_score >= 0.035)
-            and (best_rep == "image" or image_rep_score >= 0.035)
+            features.get("visual_action") is True
+            and image_obj_score >= 0.035
+            and image_rep_score >= 0.035
         ):
             return "image", "semantic_visual_image_task", True
 
@@ -5015,11 +5022,30 @@ class QuantumInterpretationEngine:
         # continuation turns. A memory/reference question does not generate an
         # image just because an older turn contained an image request.
         current_operation = str(p.get("best_operation") or "").lower()
-        current_image_evidence = max(
-            float(p.get("representation_scores", {}).get("image", 0.0) or 0.0),
-            float(p.get("object_scores", {}).get("image", 0.0) or 0.0),
+        current_image_representation_evidence = float(
+            p.get("representation_scores", {}).get("image", 0.0) or 0.0
         )
-        current_visual_action = bool((p.get("request_features") or {}).get("visual_action"))
+        current_image_object_evidence = float(
+            p.get("object_scores", {}).get("image", 0.0) or 0.0
+        )
+        current_image_evidence = max(
+            current_image_representation_evidence,
+            current_image_object_evidence,
+        )
+        _request_features = p.get("request_features") if isinstance(p.get("request_features"), dict) else {}
+        _operation_scores = p.get("operation_scores") if isinstance(p.get("operation_scores"), dict) else {}
+        current_visual_operation_score = max(
+            float(_operation_scores.get(name, 0.0) or 0.0)
+            for name in ("build", "create", "generate", "present", "modify", "transform", "redraw")
+        )
+        current_visual_action = bool(
+            _request_features.get("visual_action")
+            or (
+                current_visual_operation_score >= 0.055
+                and current_image_representation_evidence >= 0.035
+                and current_image_object_evidence >= 0.035
+            )
+        )
         current_dialogue_scores = p.get("dialogue_scores") if isinstance(p.get("dialogue_scores"), dict) else {}
         current_memory_query = float(current_dialogue_scores.get("memory_query", 0.0) or 0.0)
         reference_scores = {
@@ -5047,13 +5073,19 @@ class QuantumInterpretationEngine:
         )
         explicit_visual_task = (
             not visual_reference_lock
-            and current_memory_query < 0.04
-            and current_operation in {"build", "create", "generate", "modify", "present", "transform", "redraw", "visualize"}
             and current_visual_action
-            and current_image_evidence >= 0.035
+            and current_image_object_evidence >= 0.035
+            and current_image_representation_evidence >= 0.035
         )
         visual_generation_request = ""
-        current_self_contained = bool((p.get("request_features") or {}).get("self_contained"))
+        current_self_contained = bool(
+            _request_features.get("self_contained")
+            or (
+                current_visual_action
+                and current_image_representation_evidence >= 0.035
+                and current_image_object_evidence >= 0.035
+            )
+        )
         # A reference/recollection turn must never inherit the previous visual
         # renderer merely because the current text contains a visual verb/object.
         # The 12h pair dialogue remains available as context, but output stays text.
@@ -5296,6 +5328,14 @@ class QuantumInterpretationEngine:
         ascii_schema_advisory = False
         semantic_task_object = p["best_object"]
         semantic_task_goal = p["best_goal"]
+        semantic_task_operation = p["best_operation"]
+        if production == "image" and bool((p.get("request_features") or {}).get("visual_action")):
+            # Current image route is creation only. Do not emit an edit operation
+            # until the dedicated Images 2.0 editing route is implemented.
+            semantic_task_operation = "build"
+            semantic_task_object = "image"
+            if semantic_task_goal in {"understand", "transform"}:
+                semantic_task_goal = "visualize"
         # The resolved production representation is authoritative for the provider
         # handoff. Weak cross-prototype scores must not leak a stale visual object or
         # visual goal into a text turn and make the Provider emit an image-only JSON.
@@ -5305,7 +5345,7 @@ class QuantumInterpretationEngine:
             if semantic_task_goal in {"visualize", "transform", "present"}:
                 semantic_task_goal = "understand"
         semantic_task={
-            "operation":p["best_operation"],"object":semantic_task_object,"goal":semantic_task_goal,
+            "operation":semantic_task_operation,"object":semantic_task_object,"goal":semantic_task_goal,
             "representation":production,
             "visual_schema":visual_schema,
             "visual_schema_confidence":visual_schema_confidence,
@@ -10632,8 +10672,16 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
     result["relation_lock_owner"] = "TWO_STATE_SEMANTIC_SELECTOR"
     result["relation_lock_reason"] = str(selected.get("decision_basis") or selected.get("reason") or "")
 
+    final_semantic_operation = str(selected.get("semantic_operation") or operation or "answer").lower()
+    # The current visual engine is creation-only. Once a visual generation request
+    # has been semantically established, keep the downstream task as BUILD even if
+    # the pair selector proposed a generic/legacy operation such as ``answer`` or
+    # an edit-like operation. This does not alter the 12h relation decision.
+    if visual_request:
+        representation = "image"
+        final_semantic_operation = "build"
     semantic_task.update({
-        "operation": str(selected.get("semantic_operation") or operation),
+        "operation": final_semantic_operation,
         "representation": representation,
         "relation": relation,
         "context_dependency": result["context_dependency"],
