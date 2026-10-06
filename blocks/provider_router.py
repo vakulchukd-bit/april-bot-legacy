@@ -1687,6 +1687,41 @@ def _build_provider_user_text_from_plan(
         if output_small:
             mandatory.append(_json_piece("OUTPUT_CONTRACT", output_small, depth=2, items=6, keys=10))
 
+    presentation_contract = by_key.get("PRESENTATION_CONTRACT")
+    if isinstance(presentation_contract, dict):
+        keep = (
+            "text_transport", "math_transport", "formula_in_text_block",
+            "multiple_formulas", "formula_delimiters", "structured_transport",
+            "renderer_signal_source", "renderer_signal_must_match_representation",
+            "fallback_only_on_structured_render_failure", "fallback_channels",
+        )
+        presentation_small = {
+            key: presentation_contract.get(key)
+            for key in keep
+            if presentation_contract.get(key) not in (None, "", [], {})
+        }
+        if presentation_small:
+            mandatory.append(_json_piece("PRESENTATION_CONTRACT", presentation_small, depth=2, items=8, keys=12))
+
+    structured_response_contract = {
+        "representation": _safe_text(output_contract.get("representation") if isinstance(output_contract, dict) else "") or _safe_text(plan.get("representation")) or "text",
+        "request_signal_equals_render_signal": True,
+        "text": {
+            "transport": "Markdown",
+            "math": "KaTeX",
+            "formulas_in_text_block": True,
+        },
+        "structured": {
+            "transport": "canonical_payload",
+            "route": "C_ARTIFACT→ROOM_REGISTER→SCENE_CONTRACT→WEB",
+        },
+        "render_fallback": {
+            "only_on_failure": True,
+            "channels": ["image", "link"],
+        },
+    }
+    mandatory.append(_json_piece("STRUCTURED_RESPONSE_CONTRACT", structured_response_contract, depth=3, items=8, keys=14))
+
     if any(_safe_text(x).strip().lower() == "image_generation" for x in requested):
         mandatory.extend([
             "IMAGE_GENERATION_HANDOFF: emit metadata.image_generation_signal in the same response; route=C_APRIL_IMAGES_GENERATOR, execute=true, request_anchor=REQUEST exactly, prompt_source=OPENAI_STRUCTURED_VISUAL_PLAN, target_model=gpt-image-2, single_route=true.",
@@ -3800,10 +3835,33 @@ def _promote_top_level_visual_outputs(
     metadata: dict[str, Any] = {}
     specs: list[dict[str, Any]] = []
 
+    declared_representation = _safe_text(
+        payload.get("representation")
+        or payload.get("artifact_type")
+        or payload.get("type")
+    ).lower()
+    declared_payload = None
+    if declared_representation in _TOP_LEVEL_VISUAL_TYPES:
+        excluded = {
+            "response", "answer", "content", "summary", "explanation", "message",
+            "representation", "artifact_type", "type", "confidence", "metadata",
+            "render_blocks", "artifacts", "artifacts_payload", "scene", "scene_plan",
+            "render_priority", "routing_decision", "diagnostics", "quality",
+        }
+        declared_payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in excluded and value not in (None, "", [], {})
+        }
+        declared_payload["representation"] = declared_representation
+
     for kind in _TOP_LEVEL_VISUAL_TYPES:
-        if kind not in payload:
+        if kind in payload:
+            value = payload.get(kind)
+        elif declared_representation == kind:
+            value = declared_payload
+        else:
             continue
-        value = payload.get(kind)
         block = _top_level_visual_block(kind, value)
         if block and not (image_generation_mode and kind in {"image", "gallery"}):
             blocks.append(block)
