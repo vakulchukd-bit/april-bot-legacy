@@ -20,8 +20,8 @@ _client:OpenAI|None=None
 SYSTEM_PROMPT=r"""
 You are April's internal response provider. Work ONLY in English internally.
 
-Interpretation has already determined the semantic relation and the exact context.
-Do not reselect memory, invent another topic, or reinterpret NEW as CONTINUE.
+The processor has already selected the semantic relation and context.
+Do not search memory or create a second route.
 
 For CONTINUE:
 - use the selected dialogue chain as the active semantic subject;
@@ -34,7 +34,7 @@ For NEW_TOPIC:
 
 Return JSON only:
 {
-  "answer": "complete human-readable answer in English",
+  "answer": "complete human-readable answer in the requested display language",
   "content": "same answer or concise equivalent",
   "summary": "one-sentence summary",
   "render_blocks": [
@@ -90,34 +90,38 @@ def _json_load(raw:str)->dict[str,Any]:
 
 def _request_key(req:MachineRequest)->str:
     raw=json.dumps({
-        "user_id":req.user_id,
-        "text":req.text,
-        "relation":req.dialogue_contract.get("relation"),
-        "chain":req.dialogue_contract.get("dialogue_chain"),
-    },ensure_ascii=False,sort_keys=True,default=str)
+        "user_id": req.fiber.identity.user_id,
+        "conversation": req.conversation,
+        "intent": req.intent,
+        "text": req.conversation.get("current_request") or req.goal,
+        "memory": req.memory,
+        "routing": req.routing,
+        "constraints": req.constraints,
+    }, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
 def _build_input(req:MachineRequest)->list[dict[str,str]]:
-    plan=req.provider_context_plan or {}
-    relation=plan.get("relation") or req.dialogue_contract.get("relation") or "NEW"
-    chain=plan.get("dialogue_chain") or []
-    context_lines=[]
+    plan = getattr(req, "provider_context_plan", None)
+    if not isinstance(plan, dict):
+        plan = dict(req.memory or {})
+    relation = str(plan.get("relation") or req.intent.get("dialogue_relation") or "NEW")
+    chain = plan.get("dialogue_chain") or []
+    context_lines = []
     for item in chain[-4:]:
         context_lines.append(
             f"PAIR {item.get('position')}: USER={item.get('user_en','')} | APRIL={item.get('april_en','')}"
         )
-    context="\n".join(context_lines) if context_lines else "(no previous dialogue pair selected)"
-    user_text=(
-        "RELATION: "+str(relation)+"\n"
-        "CONTEXT_MODE: "+str(plan.get("context_mode") or "")+"\n"
-        "CURRENT_REQUEST_EN: "+_text(plan.get("resolved_request_en") or req.text)+"\n"
-        "SELECTED_DIALOGUE_CHAIN:\n"+context+"\n"
-        "RETURN_LANGUAGE: ENGLISH\n"
+    context = "\n".join(context_lines) if context_lines else "(no previous dialogue pair selected)"
+    language = _text(req.constraints.get("provider_output_language") or "en")
+    user_text = (
+        "RELATION: " + relation + "\n"
+        "CURRENT_REQUEST: " + _text(req.conversation.get("current_request") or req.goal) + "\n"
+        "SELECTED_DIALOGUE_CHAIN:\n" + context + "\n"
+        "RETURN_LANGUAGE: " + language + "\n"
         "OUTPUT_CONTRACT: answer + content + summary + render_blocks"
     )
-    return [{"role":"system","content":SYSTEM_PROMPT},{"role":"user","content":user_text}]
-
+    return [{"role":"system","content":SYSTEM_PROMPT}, {"role":"user","content":user_text}]
 
 def _normalize(data:dict[str,Any])->dict[str,Any]:
     answer=_text(data.get("answer") or data.get("content") or data.get("response"))
