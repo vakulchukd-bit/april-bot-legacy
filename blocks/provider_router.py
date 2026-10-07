@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any
 import asyncio, hashlib, json, os, re, time
 
-from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, normalize_render_blocks
+from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse
 
 MODEL=os.getenv("APRIL_OPENAI_MODEL","gpt-5.6-luna")
 MAX_OUTPUT_TOKENS=min(8000,max(256,int(os.getenv("APRIL_MAX_OUTPUT_TOKENS","2400") or 2400)))
@@ -262,6 +262,50 @@ def _build_input(req:MachineRequest)->list[dict[str,str]]:
         "OUTPUT_CONTRACT: answer + content + summary + render_blocks"
     )
     return [{"role":"system","content":SYSTEM_PROMPT}, {"role":"user","content":user_text}]
+
+def normalize_render_blocks(value: Any, answer: str) -> list[dict[str, Any]]:
+    """Normalize provider render blocks using the render contract already present in April.
+
+    C_ARTIFACT_CONTRACT.py in this build does not expose a public
+    normalize_render_blocks() function. Keep normalization local to the provider
+    so the provider does not alter the existing artifact contract.
+    """
+    raw = value if isinstance(value, list) else []
+    result: list[dict[str, Any]] = []
+    renderer_map = {
+        "text": ("MessageTextBlock", "MessageTextBlock"),
+        "markdown": ("MessageTextBlock", "MessageTextBlock"),
+        "code": ("CodeBlock", "CodeBlock"),
+        "link": ("LinkCard", "LinkCard"),
+        "formula": ("FormulaRenderer", "FormulaRenderer"),
+        "graph": ("GraphBlock", "GraphBlock"),
+        "table": ("TableBlock", "TableBlock"),
+        "diagram": ("DiagramRenderer", "DiagramRenderer"),
+        "image": ("GalleryBlock", "GalleryBlock"),
+        "gallery": ("GalleryBlock", "GalleryBlock"),
+    }
+    for block in raw:
+        if not isinstance(block, dict):
+            continue
+        item = dict(block)
+        block_type = str(item.get("type") or "text").strip().lower()
+        renderer, viewer = renderer_map.get(block_type, (None, None))
+        if renderer:
+            item.setdefault("renderer", renderer)
+            item.setdefault("viewer", viewer)
+        item.setdefault("type", block_type)
+        # Keep provider payload unchanged; only add the contract's renderer identity.
+        result.append(item)
+
+    if not result:
+        result.append({
+            "type": "text",
+            "renderer": "MessageTextBlock",
+            "viewer": "MessageTextBlock",
+            "content": answer,
+        })
+    return result
+
 
 def _normalize(data:dict[str,Any])->dict[str,Any]:
     answer=_text(data.get("answer") or data.get("content") or data.get("response"))
