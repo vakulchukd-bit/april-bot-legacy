@@ -83,20 +83,16 @@ Keep all structured and visual output inside the same current SceneContract resp
 
 Return compact JSON with:
 answer, content, summary, scene, artifacts, render_blocks, scene_plan, render_priority,
-confidence, metadata.
+confidence, metadata. For every structured render, metadata.render_explanation should describe
+what was built/drawn/written and why it satisfies the current request. This explanation is
+semantic metadata, not a substitute for the structured payload.
 
 The `answer` field is mandatory and MUST contain the actual human-visible answer.
 Never return an empty object, an empty answer, or `{}`. For a simple text/math request,
 put the direct answer in `answer` and mirror it in `content` and a text render block.
 If structured output is requested, keep its render block structured and complete:
 type, renderer, viewer, payload, scene_contract=true.
-Preserve every requested representation and never invent an unrequested semantic representation.
-For ordinary text answers, use the canonical Rich Response presentation: Markdown is allowed
-and preferred when it improves readability. Preserve useful headings, bold/italic emphasis,
-lists, numbered steps, links, external image embeds, formulas, tables and code fences in the
-`answer` text instead of flattening them. Rich presentation is formatting, not an instruction to
-add images or links that the user did not ask for. Keep one coherent answer; use only the elements
-that materially help the current request.
+Preserve every requested representation and never invent an unrequested one.
 For `image_generation`, return one semantic generation handoff only:
 `metadata.image_generation_spec` and `metadata.image_generation_signal`.
 The current user request is the immutable generation trigger/anchor. It selects the image route
@@ -153,18 +149,13 @@ in isolation and do not invent an antecedent.
 RELATION is deliberately two-state: CONTINUE or NEW.
 RESPONSE_FORMULATION is the authoritative semantic formulation of the next turn.
 Interpretation has already searched the authenticated 12-hour USER↔APRIL memory and selected
-only the 1..4 pairs relevant to a CONTINUE request. Those selected pairs are embedded inside
-RESPONSE_FORMULATION. Do not search, reselect, reconstruct, or request the rest of memory.
-For CONTINUE, use only the supplied formulation and matched pairs to answer the current request
-as the next logical action, preserving what was already discussed and avoiding repetition.
+a sequential trajectory of the most relevant authenticated pairs for a CONTINUE/RECALL request.
+RESPONSE_FORMULATION contains the matched anchor plus the ordered development trajectory.
+Do not search, reselect, reconstruct, or request the rest of memory.
+For CONTINUE, treat the ordered pairs as a dialogue trajectory: previous user request → April result →
+next user request → April result, then formulate the current answer as the next logical step.
+Do not let an older pair overwrite explicit facts in the current request.
 For NEW, the request is independent and no prior dialogue pairs are supplied or to be inferred.
-
-PAIR_DIRECTION inside RESPONSE_FORMULATION is authoritative for pair-local progression.
-First bind the object_focus to the supplied USER↔APRIL pairs, then execute requested_action.
-For RECALL_LIST_FROM_PAIRS, aggregate confirmed answer items across all relevant matched pairs,
-not only the last pair. For EXTEND_WITH_EXCLUSIONS, exclude excluded_items and prefer
-candidate_unexcluded_items when present. Do not invent an answer item when the pair evidence
-contains a confirmed candidate.
 
 Use the supplied dialogue strategy as response guidance:
 EXPAND adds new information; DEEPEN explains causes; DISCUSS engages the point;
@@ -292,8 +283,8 @@ def _compact_value(value: Any, *, depth: int = 0, max_depth: int = 3,
 # ============================================================
 
 ADAPTIVE_PROVIDER_PACKER_VERSION = "adaptive_semantic_provider_packer_v1"
-ADAPTIVE_PROVIDER_TARGET_TOKENS = 840
-ADAPTIVE_PROVIDER_SAFETY_MARGIN_TOKENS = 60
+ADAPTIVE_PROVIDER_TARGET_TOKENS = 1600
+ADAPTIVE_PROVIDER_SAFETY_MARGIN_TOKENS = 120
 
 
 def _semantic_excerpt(value: Any, limit: int = 320) -> str:
@@ -456,7 +447,7 @@ def _build_visual_reference_digest(payload: dict[str, Any], dialogue: dict[str, 
         digest["types"] = list(dict.fromkeys([_safe_text(x) for x in block_types if _safe_text(x)]))[:4]
 
     # Keep a selected artifact descriptor, but never copy image bytes / SVG / full
-    # shape arrays into the 900-token provider envelope.
+    # shape arrays into the 1800-token provider envelope.
     selected = dialogue.get("selected_artifact") if isinstance(dialogue.get("selected_artifact"), dict) else {}
     if not selected and isinstance(payload.get("selected_artifact"), dict):
         selected = payload.get("selected_artifact")
@@ -501,23 +492,18 @@ def _shrink_packet_piece(piece: str, limit: int) -> str:
 
 
 def _adaptive_target_budget(*, mode: str, task_active: bool, continuation: bool) -> int:
-    """Choose an adaptive semantic target inside the 1800-token hard ceiling.
-
-    The larger ceiling is reserved for dialogue continuity and structured
-    presentation. Simple turns still use a smaller packet so the provider does
-    not pay the maximum context cost unnecessarily.
-    """
+    """Choose a floating semantic target inside the 1800-token provider budget."""
     normalized = _safe_text(mode).lower()
-    target = 1100
-    if continuation:
-        target += 300
+    target = 1600
     if task_active:
-        target += 150
-    if normalized in {"diagram", "graph", "table", "formula", "code"}:
-        target += 100
+        target -= 50
+    if continuation:
+        target -= 60
+    if normalized in {"image_generation", "diagram", "graph", "table", "formula", "code"}:
+        target -= 20
     if normalized in {"image_generation", "diagram"} and task_active:
-        target += 50
-    return max(1000, min(1700, target))
+        target -= 40
+    return max(1100, min(1650, target))
 
 
 def _adaptive_pack(
@@ -546,9 +532,9 @@ def _adaptive_pack(
     if total(selected) > target_budget:
         prompt = (
             "April provider. Return one compact MachineResponse JSON object. "
-            "Quantum Processor is authoritative for current request, dialogue relation, "
+            "Quantum Processor is authoritative for current request, dialogue trajectory, "
             "task state and requested outputs. Answer the current request directly. "
-            "Preserve requested structured output. Never expose internal state."
+            "Preserve structured scene data and renderer contract. Never expose internal state."
         )
 
     # Every optional tier carries a compression ladder. Each item is selected at the
@@ -951,7 +937,7 @@ def _derive_complexity(payload: dict[str, Any]) -> str:
 def _derive_output_tokens(payload: dict[str, Any], requested: Any = None) -> int:
     """Return the single April response ceiling.
 
-    Input remains separately limited to 900 tokens. Output is intentionally
+    Input remains separately limited to 1800 tokens. Output is intentionally
     independent of representation/renderer/complexity: the model may produce
     any amount required by the current answer up to 8000 tokens, and the whole
     provider result is forwarded to SceneContract and AprilWeb.
@@ -1010,21 +996,15 @@ def _canonical_requested_outputs(payload: dict[str, Any]) -> list[str]:
 def _strip_duplicate_structured_text(answer: str, requested_outputs: list[str]) -> str:
     """Keep the visible answer aligned with the canonical output plan.
 
-    Rich text is the canonical presentation for ordinary text turns. Markdown
-    headings, emphasis, lists, links, images, formulas and tables are therefore
-    preserved for MessageTextBlock/MarkdownBlock to render. A dedicated TableBlock
-    still owns an explicitly requested table representation, so only that duplicate
-    table syntax is removed from the narrative channel.
+    For text-only turns, structured markdown emitted by the model is not a
+    second presentation channel; it is removed so the Web renderer can own
+    representation. For explicit table output, the dedicated TableBlock owns
+    the table and the prose copy is removed as before.
     """
     if not answer:
         return answer
     text_only = list(requested_outputs or []) == ["text"]
-    # Ordinary text turns are now Rich Response turns. Do not flatten Markdown
-    # into plain text: the existing Web Markdown renderer is the intended final
-    # presentation layer.
-    if text_only:
-        return answer
-    if "table" not in requested_outputs:
+    if not text_only and "table" not in requested_outputs:
         return answer
 
     lines = answer.splitlines()
@@ -1635,7 +1615,7 @@ def _build_provider_user_text_from_plan(
 ) -> tuple[str, dict[str, Any]]:
     """Serialize only the compact Interpretation-authored structured request.
 
-    Interpretation performs the 12h pair search, selects the related 1..4 pairs,
+    Interpretation performs the 12h pair search, selects the related a sequential trajectory of selected pairs,
     decides CONTINUE/NEW and builds RESPONSE_FORMULATION. Provider never receives
     the full dialogue window and never searches memory.
     """
@@ -1703,41 +1683,6 @@ def _build_provider_user_text_from_plan(
         }
         if output_small:
             mandatory.append(_json_piece("OUTPUT_CONTRACT", output_small, depth=2, items=6, keys=10))
-
-    presentation_contract = by_key.get("PRESENTATION_CONTRACT")
-    if isinstance(presentation_contract, dict):
-        keep = (
-            "text_transport", "math_transport", "formula_in_text_block",
-            "multiple_formulas", "formula_delimiters", "structured_transport",
-            "renderer_signal_source", "renderer_signal_must_match_representation",
-            "fallback_only_on_structured_render_failure", "fallback_channels",
-        )
-        presentation_small = {
-            key: presentation_contract.get(key)
-            for key in keep
-            if presentation_contract.get(key) not in (None, "", [], {})
-        }
-        if presentation_small:
-            mandatory.append(_json_piece("PRESENTATION_CONTRACT", presentation_small, depth=2, items=8, keys=12))
-
-    structured_response_contract = {
-        "representation": _safe_text(output_contract.get("representation") if isinstance(output_contract, dict) else "") or _safe_text(plan.get("representation")) or "text",
-        "request_signal_equals_render_signal": True,
-        "text": {
-            "transport": "Markdown",
-            "math": "KaTeX",
-            "formulas_in_text_block": True,
-        },
-        "structured": {
-            "transport": "canonical_payload",
-            "route": "C_ARTIFACT→ROOM_REGISTER→SCENE_CONTRACT→WEB",
-        },
-        "render_fallback": {
-            "only_on_failure": True,
-            "channels": ["image", "link"],
-        },
-    }
-    mandatory.append(_json_piece("STRUCTURED_RESPONSE_CONTRACT", structured_response_contract, depth=3, items=8, keys=14))
 
     if any(_safe_text(x).strip().lower() == "image_generation" for x in requested):
         mandatory.extend([
@@ -1893,7 +1838,7 @@ def _provider_system_prompt_for_payload(payload: dict[str, Any]) -> str:
 def _find_visual_reference_payload(value: Any, *, _depth: int = 0) -> dict[str, Any]:
     """Find one authenticated visual attachment for a continuation turn.
 
-    The binary image never belongs in the textual 900-token memory packet. This
+    The binary image never belongs in the textual provider memory packet. This
     helper only locates the already-stored renderer asset so it can be attached
     as an ``input_image`` to the same Provider/OpenAI request.
     """
@@ -1992,7 +1937,7 @@ def _build_openai_image_content(payload: dict[str, Any]) -> tuple[list[dict[str,
 
 
 def normalize_provider_input(machine_request: Any) -> list[dict]:
-    """Build the OpenAI packet with adaptive semantic compression inside 900 tokens."""
+    """Build the OpenAI packet with adaptive semantic compression inside 1800 tokens."""
     payload = machine_request_to_dict(machine_request)
     system_prompt = _provider_system_prompt_for_payload(payload)
 
@@ -2012,7 +1957,7 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         )
 
     # New canonical path: Interpretation has already selected context semantically.
-    # Provider only serializes and compresses the plan to <= 900 total input tokens.
+    # Provider only serializes and compresses the plan to <= 1800 total input tokens.
     provider_plan = _provider_context_plan(payload)
     dialogue_contract = _dialogue_contract(payload)
 
@@ -2055,7 +2000,7 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             "context_selection_done_before_provider": True,
             "provider_must_not_reselect_context": True,
             "hard_budget_tokens": INPUT_TOKEN_BUDGET,
-            "soft_target_tokens": min(1100, INPUT_TOKEN_BUDGET),
+            "soft_target_tokens": min(1600, INPUT_TOKEN_BUDGET),
             "new_topic_minimal_context": relation == "NEW",
             "required_context": [
                 {
@@ -2283,15 +2228,15 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
         )
     elif effective_mode == "diagram":
         mandatory.append(
-            "MODE_RULE: return one complete diagram with explicit nodes/edges or vector shapes; no duplicates."
+            "MODE_RULE: return one complete diagram with explicit nodes/edges or vector shapes, title and description; no duplicates."
         )
     elif effective_mode == "graph":
         mandatory.append(
-            "MODE_RULE: return one complete graph payload with labels, values and axes."
+            "MODE_RULE: return one complete graph payload with title, description, series, ordered points, x_axis, y_axis, labels and values. If only endpoints plus a period are given, derive a sensible monotonic sequence covering that period; preserve the exact endpoints. Do not return SVG/ASCII as the graph payload."
         )
     elif effective_mode == "table":
         mandatory.append(
-            "MODE_RULE: return one complete table payload with columns and rows."
+            "MODE_RULE: return one complete table payload with title, description, columns and rows."
         )
 
     if workspace:
@@ -2494,14 +2439,6 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             "requested": output_modes[:4],
             "authorized": render_authorized,
             "structured_required": structured_outputs_requested,
-            "presentation_mode": "RICH_RESPONSE",
-            "content_format": "MARKDOWN",
-            "preserve_structure": True,
-            "preserve_links": True,
-            "preserve_embedded_media": True,
-            "preserve_math": True,
-            "preserve_sections": True,
-            "renderer_authority": "SCENE_CONTRACT",
         }
         optional.append(("output_contract", _json_piece(
             "RENDER_CONTRACT", output_contract, depth=2, items=4, keys=6
@@ -2523,7 +2460,7 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
                 )))
 
     # Floating semantic target: leave more room for task/visual continuation while
-    # preserving the hard 900-token ceiling.
+    # preserving the hard 1800-token ceiling.
     target_budget = _adaptive_target_budget(
         mode=effective_mode,
         task_active=task_is_active,
@@ -2559,9 +2496,6 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
                 "authorized": render_authorized,
                 "render_mode": workspace_contract.get("render_mode") if isinstance(workspace, dict) and isinstance(workspace.get("output_contract"), dict) else _safe_text(interpretation_control.get("render_mode") or "TEXT_ONLY"),
                 "structured_required": structured_outputs_requested,
-                "presentation_mode": "RICH_RESPONSE",
-                "content_format": "MARKDOWN",
-                "renderer_authority": "SCENE_CONTRACT",
             }, ensure_ascii=False, separators=(",", ":"))
         )
         estimated_total = _estimate_input_tokens(system_prompt) + _estimate_input_tokens(user_text)
@@ -2789,11 +2723,10 @@ def _unwrap_model_answer(value: Any) -> str:
     """Extract a human answer from both flat and nested model envelopes."""
     if isinstance(value, dict):
         # Canonical provider payloads can occasionally arrive wrapped as
-        # {"machine_response": {...}}, {"MachineResponse": {...}},
-        # {"result": {...}} or similar.
+        # {"machine_response": {...}}, {"result": {...}} or similar.
         for key in (
             "answer", "content", "response", "summary", "final_text", "text",
-            "machine_response", "MachineResponse", "result", "data", "output",
+            "machine_response", "result", "data", "output",
         ):
             candidate = value.get(key)
             if isinstance(candidate, str) and candidate.strip():
@@ -2820,7 +2753,7 @@ def _unwrap_model_answer(value: Any) -> str:
     if isinstance(obj, dict):
         for key in (
             "answer", "content", "response", "summary", "final_text", "text",
-            "machine_response", "MachineResponse", "result", "data", "output",
+            "machine_response", "result", "data", "output",
         ):
             candidate = obj.get(key)
             if isinstance(candidate, str) and candidate.strip():
@@ -2873,34 +2806,10 @@ def _coerce_human_answer(value: Any) -> str:
         return text
     if isinstance(value, (int, float, bool)):
         return str(value)
-    if isinstance(value, (list, tuple, set)):
-        # Structured MachineResponse payloads may carry visible text as a list
-        # of content objects (for example table rows). Recover only human-facing
-        # text fields; never stringify the whole machine envelope.
-        pieces: list[str] = []
-        seen: set[str] = set()
-        for item in value:
-            if isinstance(item, dict):
-                candidate = ""
-                for key in (
-                    "text", "answer", "response", "summary", "message",
-                    "title", "content",
-                ):
-                    if key in item:
-                        candidate = _coerce_human_answer(item.get(key))
-                        if candidate:
-                            break
-            else:
-                candidate = _coerce_human_answer(item)
-            candidate = normalize_response_text(candidate) if candidate else ""
-            if candidate and candidate not in seen:
-                seen.add(candidate)
-                pieces.append(candidate)
-        return "\n".join(pieces)[:12000]
     if isinstance(value, dict):
         for key in (
             "answer", "content", "response", "final_text", "text", "value",
-            "result", "data", "output", "message", "summary", "MachineResponse",
+            "result", "data", "output", "message", "summary",
         ):
             if key in value:
                 nested = _coerce_human_answer(value.get(key))
@@ -3863,33 +3772,10 @@ def _promote_top_level_visual_outputs(
     metadata: dict[str, Any] = {}
     specs: list[dict[str, Any]] = []
 
-    declared_representation = _safe_text(
-        payload.get("representation")
-        or payload.get("artifact_type")
-        or payload.get("type")
-    ).lower()
-    declared_payload = None
-    if declared_representation in _TOP_LEVEL_VISUAL_TYPES:
-        excluded = {
-            "response", "answer", "content", "summary", "explanation", "message",
-            "representation", "artifact_type", "type", "confidence", "metadata",
-            "render_blocks", "artifacts", "artifacts_payload", "scene", "scene_plan",
-            "render_priority", "routing_decision", "diagnostics", "quality",
-        }
-        declared_payload = {
-            key: value
-            for key, value in payload.items()
-            if key not in excluded and value not in (None, "", [], {})
-        }
-        declared_payload["representation"] = declared_representation
-
     for kind in _TOP_LEVEL_VISUAL_TYPES:
-        if kind in payload:
-            value = payload.get(kind)
-        elif declared_representation == kind:
-            value = declared_payload
-        else:
+        if kind not in payload:
             continue
+        value = payload.get(kind)
         block = _top_level_visual_block(kind, value)
         if block and not (image_generation_mode and kind in {"image", "gallery"}):
             blocks.append(block)
@@ -4022,6 +3908,50 @@ def _recover_human_answer_from_structured_outputs(payload: Any, *, text_only: bo
     return ", ".join(dict.fromkeys(candidates))[:1200] if text_only else candidates[0][:1200]
 
 
+def _is_generic_failure_answer(value: Any) -> bool:
+    """Return True for transport/error prose that must not mask a successful artifact."""
+    text = re.sub(r"\s+", " ", _safe_text(value)).strip().casefold()
+    if not text:
+        return False
+    prefixes = (
+        "не удалось сформировать ответ на запрос:",
+        "не удалось сформировать ответ",
+        "не удалось обработать запрос:",
+        "не удалось обработать запрос",
+        "ошибка при формировании ответа:",
+        "error while generating response:",
+    )
+    return any(text.startswith(prefix) for prefix in prefixes)
+
+
+def _structured_success_answer(payload: dict[str, Any], blocks: list[dict[str, Any]], *, image_mode: bool = False) -> str:
+    """Create visible human text only when a structured artifact already succeeded."""
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    explanation = _safe_text(metadata.get("render_explanation") or "").strip()
+    if explanation:
+        return explanation[:1200]
+    summary = _safe_text(payload.get("summary") or "").strip()
+    if summary and not _is_generic_failure_answer(summary):
+        return summary[:1200]
+    kinds = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = _safe_text(block.get("type") or block.get("artifact_type") or "").lower()
+        if kind and kind not in kinds and kind != "text":
+            kinds.append(kind)
+    if image_mode or any(k in {"image", "gallery"} for k in kinds):
+        return "Готово — изображение подготовлено."
+    if kinds:
+        labels = {
+            "graph": "график", "table": "таблица", "diagram": "диаграмма",
+            "formula": "формула", "code": "код", "link": "ссылка",
+        }
+        names = [labels.get(k, k) for k in kinds]
+        return "Готово — сформирован " + ", ".join(names) + "."
+    return ""
+
+
 def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[str, Any]:
     if isinstance(raw_text, dict) and raw_text.get("type") == "provider_response":
         return raw_text
@@ -4032,16 +3962,11 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
     # canonical contract. This is a transport repair, not a semantic rewrite.
     canonical_payload = parsed
     if isinstance(parsed, dict):
-        # OpenAI/Provider structured responses have appeared with both
-        # snake_case and PascalCase wrapper names. Unwrap only known provider
-        # envelopes; the inner MachineResponse becomes the canonical payload.
-        for wrapper_key, wrapped in parsed.items():
-            normalized_wrapper = str(wrapper_key or "").strip().casefold().replace("_", "")
-            if normalized_wrapper not in {"machineresponse", "result", "data", "output"}:
-                continue
+        for wrapper_key in ("machine_response", "result", "data", "output"):
+            wrapped = parsed.get(wrapper_key)
             if isinstance(wrapped, dict) and any(
                 key in wrapped
-                for key in ("answer", "content", "response", "text", "render_blocks", "artifacts", "image", "gallery", "diagram", "graph", "table", "outputs")
+                for key in ("answer", "content", "response", "text", "render_blocks", "artifacts", "image", "gallery", "diagram", "graph", "table")
             ):
                 canonical_payload = wrapped
                 break
@@ -4135,17 +4060,11 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
 
     # This is transport-level text emitted by the first OpenAI step. Keep it in
     # IMAGE PROMPT TRACE: OPENAI RAW OUTPUT, but never allow it into the visible
-    # provider answer or downstream image-generation content. For image generation
-    # a human-facing answer is still required, so synthesize it only when Provider
-    # did not return actual human text.
-    provider_original_answer = answer
-    provider_original_content = _coerce_human_answer(canonical_payload.get("content"))
+    # provider answer or downstream image-generation content.
     if image_generation_mode:
         sanitized_answer = _strip_image_technical_fallback(answer)
         if sanitized_answer != answer:
             answer = sanitized_answer
-        if not answer:
-            answer = "Готово — вот изображение по твоему запросу."
 
     if not answer and visual_mode == "image_generation":
         candidate_metadata = dict(canonical_payload.get("metadata") or {}) if isinstance(canonical_payload.get("metadata"), dict) else {}
@@ -4178,6 +4097,18 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
 
     if top_level_visual_blocks:
         blocks.extend(top_level_visual_blocks)
+
+    # A structured artifact is a successful execution signal. Never let generic
+    # provider failure prose mask a graph/table/diagram/image that already exists.
+    if _is_generic_failure_answer(answer) and any(
+        isinstance(block, dict)
+        and _safe_text(block.get("type") or block.get("artifact_type") or "").lower() not in {"", "text", "markdown"}
+        for block in blocks
+    ):
+        repaired = _structured_success_answer(canonical_payload, blocks, image_mode=image_generation_mode)
+        if repaired:
+            answer = repaired
+
     if image_generation_mode:
         blocks = [
             block for block in blocks
@@ -4198,6 +4129,12 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
 
     raw_metadata = canonical_payload.get("metadata")
     metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+    if "render_explanation" not in metadata and any(
+        isinstance(block, dict)
+        and _safe_text(block.get("type") or block.get("artifact_type") or "").lower() not in {"", "text", "markdown"}
+        for block in blocks
+    ):
+        metadata["render_explanation"] = answer[:1200]
     if top_level_visual_metadata:
         if top_level_visual_metadata.get("image_generation_specs"):
             existing_specs = metadata.get("image_generation_specs")
@@ -4238,19 +4175,6 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         candidate_spec = metadata.get("image_generation_spec")
         if not isinstance(candidate_spec, dict):
             candidate_spec = canonical_payload.get("image_generation_spec")
-        if not isinstance(candidate_spec, (dict, str)):
-            direct_image = canonical_payload.get("image")
-            if isinstance(direct_image, (dict, str)):
-                candidate_spec = direct_image
-        if not isinstance(candidate_spec, (dict, str)):
-            # OpenAI can return the same-turn image plan as the top-level object:
-            # {"type":"image_generation","prompt":"..."}. Preserve it as the
-            # semantic generation plan instead of replacing it with request text.
-            if isinstance(canonical_payload, dict) and (
-                _safe_text(canonical_payload.get("type")).strip().lower() == "image_generation"
-                or _image_prompt_from_provider_payload(canonical_payload)
-            ):
-                candidate_spec = canonical_payload
 
         provider_signal = None
         candidate_metadata = canonical_payload.get("metadata")
@@ -4273,16 +4197,15 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             and signal_prompt
         )
 
-        spec_source = candidate_spec
-        if spec_source is None and provider_signal_valid and signal_prompt:
-            spec_source = provider_signal
-        if spec_source is None and fallback_image_prompt:
-            spec_source = {"prompt": fallback_image_prompt}
-
         normalized_spec = _build_image_generation_spec_from_provider(
-            spec_source,
+            candidate_spec if isinstance(candidate_spec, dict) else canonical_payload.get("image"),
             fallback_prompt=fallback_image_prompt,
         )
+        if normalized_spec is None and fallback_image_prompt:
+            normalized_spec = _build_image_generation_spec_from_provider(
+                canonical_payload.get("image") if isinstance(canonical_payload.get("image"), (dict, str)) else {"prompt": fallback_image_prompt},
+                fallback_prompt=fallback_image_prompt,
+            )
         if normalized_spec:
             semantic_generation_prompt = _safe_text(
                 normalized_spec.get("openai_structured_visual_plan_semantic")
@@ -4323,10 +4246,6 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             metadata["image_generation_execution"] = "C_APRIL_IMAGES_GENERATOR"
             metadata["provider_image_render_ignored"] = True
             metadata["provider_pixels_disallowed"] = True
-            metadata["provider_original_answer"] = provider_original_answer
-            metadata["image_generation_human_answer_source"] = (
-                "provider" if provider_original_answer else "local_success_message"
-            )
 
             metadata["image_generation_signal"] = {
                 "schema": PROVIDER_IMAGE_GENERATION_SIGNAL_VERSION,
@@ -4390,7 +4309,6 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         "render_blocks_source": "luna",
         "requested_outputs": list(source_payload.get("requested_outputs") or []),
         "response_budget": source_payload.get("response_output_tokens"),
-        "provider_original_answer": provider_original_answer,
     })
 
     visible_response = _strip_image_technical_fallback(_unwrap_model_answer(canonical_payload.get("response") or answer)) if image_generation_mode else _unwrap_model_answer(canonical_payload.get("response") or answer)
@@ -4419,8 +4337,8 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             "provider": "openai",
             "provider_contract": "fiber_v6_quantum",
             "transport_contract": "scene_first",
-            "provider_original_answer": provider_original_answer,
-            "provider_original_content": provider_original_content,
+            "provider_original_answer": answer,
+            "provider_original_content": content,
             "metadata": metadata,
         },
         "processor_input": machine_request_to_dict(source_request) if source_request is not None else {},
