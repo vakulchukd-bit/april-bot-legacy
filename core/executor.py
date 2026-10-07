@@ -3115,11 +3115,19 @@ def _df_render_plan(text: str, relation: str, semantic: dict[str, Any], render_p
     authorized = bool(requested)
     mode = requested[0] if requested else "TEXT_ONLY"
     return {
-        "version": "render_plan_v1",
+        "version": "render_plan_v2_rich_response",
         "authorized": authorized,
         "requested_outputs": ["text"] + [x for x in requested if x != "text"],
         "representation": semantic.get("representation") or "text",
         "mode": mode,
+        "presentation_mode": "RICH_RESPONSE",
+        "content_format": "MARKDOWN",
+        "preserve_structure": True,
+        "preserve_links": True,
+        "preserve_embedded_media": True,
+        "preserve_math": True,
+        "preserve_sections": True,
+        "renderer_authority": "SCENE_CONTRACT",
         "artifact_reference": bool(authorized and render_probe.get("visual_reference") and relation == "CONTINUE"),
         "single_route": True,
         "renderer": {
@@ -3220,8 +3228,8 @@ def _df_provider_plan(
         "context_selection_done_before_provider": True,
         "provider_must_not_reselect_context": True,
         "provider_continuation_contract": "Use SEMANTIC_CONTINUATION_CHAIN as the ordered semantic input when relation=CONTINUE/RECALL.",
-        "hard_budget_tokens": 900,
-        "soft_target_tokens": 820,
+        "hard_budget_tokens": 1800,
+        "soft_target_tokens": 1100,
         "new_topic_minimal_context": relation == "NEW",
         "required_context": [
             {
@@ -3251,6 +3259,14 @@ def _df_provider_plan(
                     "requested_outputs": render_plan.get("requested_outputs"),
                     "render_authorized": render_plan.get("authorized"),
                     "render_mode": render_plan.get("mode"),
+                    "presentation_mode": render_plan.get("presentation_mode") or "RICH_RESPONSE",
+                    "content_format": render_plan.get("content_format") or "MARKDOWN",
+                    "preserve_structure": True,
+                    "preserve_links": True,
+                    "preserve_embedded_media": True,
+                    "preserve_math": True,
+                    "preserve_sections": True,
+                    "renderer_authority": "SCENE_CONTRACT",
                 },
             },
             {
@@ -5217,7 +5233,33 @@ def _bridge_provider_artifacts(machine_response: dict) -> dict:
         ("diagram", "diagram"),
         ("image", "image"),
         ("gallery", "gallery"),
+        ("code", "code"),
+        ("link", "link"),
     )
+
+    # Provider may legally emit a canonical structured envelope such as
+    # {"representation":"graph","graph_type":"bar","data":[...]}
+    # instead of nesting the payload under {"graph": {...}}.  Promote that
+    # already-declared representation without reinterpreting the request.
+    declared_representation = _text(
+        machine_response.get("representation")
+        or machine_response.get("artifact_type")
+        or machine_response.get("type")
+    ).lower()
+    declared_value = None
+    if declared_representation in {kind for _, kind in top_level_structured}:
+        payload_keys_excluded = {
+            "response", "answer", "content", "summary", "explanation", "message",
+            "representation", "type", "artifact_type", "confidence", "metadata",
+            "render_blocks", "artifacts", "artifacts_payload", "scene", "scene_plan",
+            "render_priority", "routing_decision", "diagnostics", "quality",
+        }
+        declared_value = {
+            key: value
+            for key, value in machine_response.items()
+            if key not in payload_keys_excluded and value not in (None, "", [], {})
+        }
+        declared_value["representation"] = declared_representation
     existing_candidate_types = {
         _text(item.get("type") or item.get("artifact_type") or item.get("representation")).lower()
         for item in existing
@@ -5230,6 +5272,10 @@ def _bridge_provider_artifacts(machine_response: dict) -> dict:
     )
     for source_key, canonical_kind in top_level_structured:
         value = machine_response.get(source_key)
+        if value in (None, "", [], {}):
+            if source_key != canonical_kind or declared_representation != canonical_kind:
+                continue
+            value = declared_value
         if value in (None, "", [], {}):
             continue
         if canonical_kind in existing_candidate_types:
@@ -5697,15 +5743,11 @@ class SequentialInterpretation:
         operation = _text(semantic_result.get("operation") or (semantic_result.get("semantic_task") or {}).get("operation") or "answer")
         goal = _text(semantic_result.get("goal") or (semantic_result.get("semantic_task") or {}).get("goal") or "answer")
         visual_generation_request = _text(semantic_result.get("visual_generation_request") or "")
-        visual_generation_route = _text(semantic_result.get("visual_generation_route") or "")
-        visual_generation_tier = _text(semantic_result.get("visual_generation_tier") or "")
         requested = [_text(x).lower() for x in (semantic_result.get("requested_outputs") or [representation]) if _text(x).strip()]
         if representation in {"image","gallery"}:
             requested=[representation]
         attrs={
-            "visual_production_mode": visual_generation_route or ("image_generation" if representation in {"image","gallery"} else representation),
-            "visual_generation_route": visual_generation_route,
-            "visual_generation_tier": visual_generation_tier,
+            "visual_production_mode":"image_generation" if representation in {"image","gallery"} else representation,
             "artifact_reference":bool(render_plan.get("artifact_reference")),
             "dialogue_relation":_text(dialogue.get("relation") or semantic_result.get("relation") or "NEW"),
             "sequence_id":_text(dialogue.get("sequence_id") or ""),
@@ -6633,8 +6675,8 @@ class ProcessorScene:
             },
             constraints={
                 "one_provider_call": True,
-                "provider_input_token_budget": 900,
-                "provider_hard_input_budget": provider_context_plan.get("hard_budget_tokens", 900),
+                "provider_input_token_budget": 1800,
+                "provider_hard_input_budget": provider_context_plan.get("hard_budget_tokens", 1800),
                 "provider_soft_input_target": provider_context_plan.get("soft_target_tokens"),
                 "provider_context_plan": _compact(provider_context_plan, max_depth=7, max_items=14),
                 "provider_context_authority": "INTERPRETATION",
@@ -6647,8 +6689,6 @@ class ProcessorScene:
                         "dialogue_sequence_id": _text(dialogue.get("sequence_id")),
                     },
                     "visual_production_mode": visual_mode,
-                    "visual_generation_route": _text(semantic_result.get("visual_generation_route") or ""),
-                    "visual_generation_tier": _text(semantic_result.get("visual_generation_tier") or ""),
                     "semantic_request": _text(
                         semantic_result.get("semantic_request")
                         or _as_dict(semantic_result.get("semantic_understanding")).get("provider", {}).get("semantic_request")
@@ -6671,8 +6711,6 @@ class ProcessorScene:
                 "representation_plan": {
                     "representation": representation,
                     "visual_production_mode": visual_mode,
-                    "visual_generation_route": _text(semantic_result.get("visual_generation_route") or ""),
-                    "visual_generation_tier": _text(semantic_result.get("visual_generation_tier") or ""),
                     "renderer": _RENDERER_REGISTRY.get(representation, "MessageTextBlock"),
                     "requested_outputs": list(requested_outputs),
                     "authorized": bool(intent.get("render_authorized")),
@@ -6874,6 +6912,14 @@ class ProcessorScene:
             "provider_calls": 1,
             "fast_path": True,
             "web_signal_source": "SCENE_CONTRACT",
+            "presentation_mode": "RICH_RESPONSE",
+            "content_format": "MARKDOWN",
+            "renderer_authority": "SCENE_CONTRACT",
+            "preserve_structure": True,
+            "preserve_links": True,
+            "preserve_embedded_media": True,
+            "preserve_math": True,
+            "preserve_sections": True,
             "user_id": self.user_id,
             "conversation_id": _text(request.memory.get("authenticated_user_scope", {}).get("conversation_id")),
             "dialogue_sequence_id": _text(request.dialogue_contract.get("sequence_id")),
@@ -6918,6 +6964,16 @@ class ProcessorScene:
             "operation": request.intent.get("operation"),
             "goal": request.intent.get("goal"),
             "resolved_request": request.intent.get("resolved_request"),
+        }
+        contract.metadata["presentation_contract"] = {
+            "mode": "RICH_RESPONSE",
+            "content_format": "MARKDOWN",
+            "preserve_structure": True,
+            "preserve_links": True,
+            "preserve_embedded_media": True,
+            "preserve_math": True,
+            "preserve_sections": True,
+            "renderer_authority": "SCENE_CONTRACT",
         }
         contract.metadata["web_delivery"] = {
             "version": "scene_contract_v3_1",
@@ -6964,9 +7020,19 @@ class ProcessorScene:
             # composite scene. Only reject an unplanned structured block.
             if kind not in expected and kind not in {"text", "markdown"}:
                 provider_plan = {str(x).lower() for x in (raw.get("scene_plan") or [])} if isinstance(raw.get("scene_plan"), list) else set()
+                conversation_plan = request.conversation.get("provider_scene_plan") if isinstance(request.conversation, dict) else []
+                if isinstance(conversation_plan, list):
+                    provider_plan.update(str(x).lower() for x in conversation_plan)
                 scene_plan = request.conversation.get("scene_blueprint") if isinstance(request.conversation.get("scene_blueprint"), dict) else {}
                 blueprint_reps = {str(x).lower() for x in (scene_plan.get("representations") or [])}
-                if kind not in provider_plan and kind not in blueprint_reps:
+                # A block carrying an authorized C-room identity has already
+                # crossed C-ARTIFACT and must never be dropped at SceneContract.
+                room_authorized = bool(
+                    raw.get("source_room")
+                    or raw.get("room_source")
+                    or raw.get("canonical_provider_payload") and raw.get("scene_contract")
+                )
+                if kind not in provider_plan and kind not in blueprint_reps and not room_authorized:
                     continue
 
             canonical_payload = canonical_payload_for_block(block)
@@ -7743,6 +7809,55 @@ def _merge_room_route_into_response(target: MachineResponse, routed: MachineResp
     # The room result is the authoritative C-ARTIFACT projection. Replace the
     # provider's provisional block of the same semantic type instead of showing
     # the same graph/table/formula/code twice.
+    # Formula artifacts use the same visible text block as Markdown/KaTeX.
+    # The C-FORMULA-ROOM artifact remains canonical, but its presentation payload
+    # is folded into the existing text block so the user does not receive a second
+    # glued FormulaRenderer card.
+    formula_blocks = [
+        b for b in routed_blocks
+        if isinstance(b, dict)
+        and _text(b.get("type") or b.get("artifact_type")).lower() == "formula"
+    ]
+    text_target = next(
+        (
+            b for b in existing_blocks
+            if isinstance(b, dict)
+            and _text(b.get("type") or b.get("artifact_type") or b.get("representation")).lower() in {"text", "markdown"}
+        ),
+        None,
+    )
+    if text_target is not None and formula_blocks:
+        formula_parts: list[str] = []
+        for formula_block in formula_blocks:
+            payload = formula_block.get("payload") if isinstance(formula_block.get("payload"), dict) else {}
+            markdown = _text(payload.get("markdown"))
+            formulas = payload.get("formulas") or payload.get("latex_formulas") or []
+            if markdown:
+                formula_parts.append(markdown.strip())
+            elif isinstance(formulas, list):
+                for item in formulas:
+                    value = item.get("latex") if isinstance(item, dict) else item
+                    value = _text(value).strip()
+                    if value:
+                        formula_parts.append(f"$$\n{value}\n$$")
+            else:
+                value = _text(payload.get("formula") or payload.get("latex") or payload.get("equation") or payload.get("expression"))
+                if value:
+                    formula_parts.append(f"$$\n{value.strip()}\n$$")
+        if formula_parts:
+            current_content = _text(text_target.get("content") or text_target.get("data") or text_target.get("answer"))
+            additions = [part for part in formula_parts if part and part not in current_content]
+            if additions:
+                text_target["content"] = (current_content.rstrip() + "\n\n" + "\n\n".join(additions)).strip()
+            text_target.setdefault("signal", {})
+            if isinstance(text_target.get("signal"), dict):
+                text_target["signal"].update({
+                    "presentation_transport": "Markdown+KaTeX",
+                    "formula_in_text_block": True,
+                    "renderer_authority": "SCENE_CONTRACT",
+                })
+        routed_blocks = [b for b in routed_blocks if b not in formula_blocks]
+
     routed_types = {
         _text(b.get("type") or b.get("artifact_type")).lower()
         for b in routed_blocks
@@ -7812,6 +7927,46 @@ async def _route_structured_outputs_through_room_registry(
     representation = _text((getattr(request, "intent", {}) or {}).get("type")).lower()
     if representation and representation not in {"text", "markdown", "image", "gallery"} and representation not in requested:
         requested.insert(0, representation)
+
+    # The final Provider response is also part of the canonical scene plan.
+    # Route every structured representation that was actually emitted through
+    # the same C-ARTIFACT -> Room Register path before SceneContract.
+    for raw_block in list(getattr(response, "render_blocks", []) or []):
+        if not isinstance(raw_block, dict):
+            continue
+        kind = _text(
+            raw_block.get("type")
+            or raw_block.get("artifact_type")
+            or raw_block.get("representation")
+        ).lower()
+        if kind == "markdown":
+            kind = "text"
+        if kind and kind not in requested:
+            requested.append(kind)
+
+    for raw_artifact in list(getattr(response, "artifacts_payload", []) or []):
+        if not isinstance(raw_artifact, dict):
+            continue
+        kind = _text(
+            raw_artifact.get("type")
+            or raw_artifact.get("artifact_type")
+            or raw_artifact.get("kind")
+            or raw_artifact.get("representation")
+        ).lower()
+        if kind == "markdown":
+            kind = "text"
+        if kind and kind not in requested:
+            requested.append(kind)
+
+    provider_plan = list(
+        (getattr(request, "conversation", {}) or {}).get("provider_scene_plan") or []
+    ) if isinstance(getattr(request, "conversation", {}), dict) else []
+    for value in provider_plan:
+        kind = _text(value).lower()
+        if kind == "markdown":
+            kind = "text"
+        if kind and kind not in requested:
+            requested.append(kind)
 
     non_image = [
         kind for kind in requested
@@ -7923,6 +8078,51 @@ async def execute(user_id, chat_id=None, text="", run_with_activity: Optional[Ca
         machine_preview,
         request.dialogue_contract if isinstance(request.dialogue_contract, dict) else {},
     )
+
+    # Provider may legally return a composite scene (for example text + table +
+    # graph + formula) even when Interpretation started from one primary
+    # representation. Extend the SAME MachineRequest output plan with the
+    # concrete structured types actually emitted by this provider turn. This is
+    # transport authorization only; it does not reinterpret user intent.
+    provider_scene_types: list[str] = []
+    raw_plan = machine_preview.get("scene_plan")
+    if isinstance(raw_plan, list):
+        provider_scene_types.extend(str(x or "").strip().lower() for x in raw_plan)
+    for raw_block in list(machine_preview.get("render_blocks") or []):
+        if isinstance(raw_block, dict):
+            kind = str(
+                raw_block.get("type")
+                or raw_block.get("artifact_type")
+                or raw_block.get("representation")
+                or ""
+            ).strip().lower()
+            if kind:
+                provider_scene_types.append(kind)
+    for raw_artifact in list(machine_preview.get("artifacts") or []):
+        if isinstance(raw_artifact, dict):
+            kind = str(
+                raw_artifact.get("type")
+                or raw_artifact.get("artifact_type")
+                or raw_artifact.get("kind")
+                or raw_artifact.get("representation")
+                or ""
+            ).strip().lower()
+            if kind:
+                provider_scene_types.append(kind)
+
+    output_plan = list(request.requested_outputs or [])
+    allowed_provider_types = {
+        "text", "markdown", "formula", "graph", "table", "diagram",
+        "code", "link", "gallery", "image",
+    }
+    for kind in provider_scene_types:
+        if kind == "markdown":
+            kind = "text"
+        if kind in allowed_provider_types and kind not in output_plan:
+            output_plan.append(kind)
+    request.requested_outputs = output_plan
+    if isinstance(request.conversation, dict):
+        request.conversation["provider_scene_plan"] = [x for x in output_plan if x != "text"]
     preview_response = MachineResponse(
         answer=_text(machine_preview.get("answer")),
         content=_text(machine_preview.get("content")),
