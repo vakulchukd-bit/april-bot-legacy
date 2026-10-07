@@ -3115,11 +3115,19 @@ def _df_render_plan(text: str, relation: str, semantic: dict[str, Any], render_p
     authorized = bool(requested)
     mode = requested[0] if requested else "TEXT_ONLY"
     return {
-        "version": "render_plan_v1",
+        "version": "render_plan_v2_rich_response",
         "authorized": authorized,
         "requested_outputs": ["text"] + [x for x in requested if x != "text"],
         "representation": semantic.get("representation") or "text",
         "mode": mode,
+        "presentation_mode": "RICH_RESPONSE",
+        "content_format": "MARKDOWN",
+        "preserve_structure": True,
+        "preserve_links": True,
+        "preserve_embedded_media": True,
+        "preserve_math": True,
+        "preserve_sections": True,
+        "renderer_authority": "SCENE_CONTRACT",
         "artifact_reference": bool(authorized and render_probe.get("visual_reference") and relation == "CONTINUE"),
         "single_route": True,
         "renderer": {
@@ -3220,8 +3228,8 @@ def _df_provider_plan(
         "context_selection_done_before_provider": True,
         "provider_must_not_reselect_context": True,
         "provider_continuation_contract": "Use SEMANTIC_CONTINUATION_CHAIN as the ordered semantic input when relation=CONTINUE/RECALL.",
-        "hard_budget_tokens": 900,
-        "soft_target_tokens": 820,
+        "hard_budget_tokens": 1800,
+        "soft_target_tokens": 1100,
         "new_topic_minimal_context": relation == "NEW",
         "required_context": [
             {
@@ -3251,6 +3259,14 @@ def _df_provider_plan(
                     "requested_outputs": render_plan.get("requested_outputs"),
                     "render_authorized": render_plan.get("authorized"),
                     "render_mode": render_plan.get("mode"),
+                    "presentation_mode": render_plan.get("presentation_mode") or "RICH_RESPONSE",
+                    "content_format": render_plan.get("content_format") or "MARKDOWN",
+                    "preserve_structure": True,
+                    "preserve_links": True,
+                    "preserve_embedded_media": True,
+                    "preserve_math": True,
+                    "preserve_sections": True,
+                    "renderer_authority": "SCENE_CONTRACT",
                 },
             },
             {
@@ -6659,8 +6675,8 @@ class ProcessorScene:
             },
             constraints={
                 "one_provider_call": True,
-                "provider_input_token_budget": 900,
-                "provider_hard_input_budget": provider_context_plan.get("hard_budget_tokens", 900),
+                "provider_input_token_budget": 1800,
+                "provider_hard_input_budget": provider_context_plan.get("hard_budget_tokens", 1800),
                 "provider_soft_input_target": provider_context_plan.get("soft_target_tokens"),
                 "provider_context_plan": _compact(provider_context_plan, max_depth=7, max_items=14),
                 "provider_context_authority": "INTERPRETATION",
@@ -6896,6 +6912,14 @@ class ProcessorScene:
             "provider_calls": 1,
             "fast_path": True,
             "web_signal_source": "SCENE_CONTRACT",
+            "presentation_mode": "RICH_RESPONSE",
+            "content_format": "MARKDOWN",
+            "renderer_authority": "SCENE_CONTRACT",
+            "preserve_structure": True,
+            "preserve_links": True,
+            "preserve_embedded_media": True,
+            "preserve_math": True,
+            "preserve_sections": True,
             "user_id": self.user_id,
             "conversation_id": _text(request.memory.get("authenticated_user_scope", {}).get("conversation_id")),
             "dialogue_sequence_id": _text(request.dialogue_contract.get("sequence_id")),
@@ -6940,6 +6964,16 @@ class ProcessorScene:
             "operation": request.intent.get("operation"),
             "goal": request.intent.get("goal"),
             "resolved_request": request.intent.get("resolved_request"),
+        }
+        contract.metadata["presentation_contract"] = {
+            "mode": "RICH_RESPONSE",
+            "content_format": "MARKDOWN",
+            "preserve_structure": True,
+            "preserve_links": True,
+            "preserve_embedded_media": True,
+            "preserve_math": True,
+            "preserve_sections": True,
+            "renderer_authority": "SCENE_CONTRACT",
         }
         contract.metadata["web_delivery"] = {
             "version": "scene_contract_v3_1",
