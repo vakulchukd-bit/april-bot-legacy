@@ -4,24 +4,22 @@ aiohttp
 requests
 pillow
 pytz
-numpy
-matplotlib
-sympy
-psycopg2-binary
 flask
 flask-cors
 beautifulsoup4
 google-genai>=1.16.1
 
-# Biology
-biopython
+# Core math/science rooms
+numpy
+sympy
 
-# Chemistry
-pubchempy
-periodictable
-# rdkit  # enable later if deployment environment supports it
+# Core semantic engine
+rapidfuzz
+pydantic
+jsonschema
+diskcache
 
-# Code
+# Code room
 pygments
 tree-sitter
 tree-sitter-python
@@ -29,61 +27,10 @@ tree-sitter-javascript
 tree-sitter-typescript
 gitpython
 lizard
-# IT Room Stage 3
 tree-sitter-c
 tree-sitter-cpp
 tree-sitter-rust
 tree-sitter-go
 
-# Diagram
-networkx
-graphviz
-pydot
-
-# =========================================================
-# APRIL LOCAL NANO VISUAL SCANNER + NANO PRINTER
-# Runtime libraries used by blocks/image_system.py
-# =========================================================
-opencv-python-headless
-pytesseract
-scikit-image
-shapely
-imageio
-pandas
-
-# Pillow / NumPy / SciPy / Matplotlib / SymPy / NetworkX
-# are already listed below and are also used by the Nano engines.
-# Tesseract executable is a SYSTEM package, not a Python package:
-# Debian/Ubuntu: tesseract-ocr tesseract-ocr-rus tesseract-ocr-ukr tesseract-ocr-eng
-
-# === Semantic Interpretation Stack ===
-sentence-transformers
-transformers
-tokenizers
-
-# Vector Memory
-faiss-cpu
-chromadb
-
-# NLP
-stanza
-spacy
-nltk
-
-# Ontology / Knowledge Graph
-owlready2
-networkit
-
-scikit-learn
-# Semantic Analysis
-rapidfuzz
-pydantic
-jsonschema
-diskcache
-scipy
-
-# Future Semantic Libraries
-langdetect
-rank-bm25
-orjson
-https://github.com/explosion/spacy-models/releases/download/xx_ent_wiki_sm-3.8.0/xx_ent_wiki_sm-3.8.0-py3-none-any.whl
+# Database / web
+psycopg2-binary
