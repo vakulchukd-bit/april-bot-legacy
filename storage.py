@@ -35,15 +35,15 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from rapidfuzz import fuzz
 
-from blocks.tariffs_config import (
-    ADMIN_ID,
-    FREE_MESSAGES_LIMIT,
-    FREE_IMAGES_LIMIT,
-    LITE_PRICE,
-    PREMIUM_PRICE,
-    LITE_DAYS,
-    PREMIUM_DAYS,
-)
+# These values belong to the existing storage contract; the ZIP does not contain
+# a separate tariffs_config module, so storage must not import a missing file.
+ADMIN_ID = os.getenv("APRIL_ADMIN_ID", "")
+FREE_MESSAGES_LIMIT = int(os.getenv("APRIL_FREE_MESSAGES_LIMIT", "20"))
+FREE_IMAGES_LIMIT = int(os.getenv("APRIL_FREE_IMAGES_LIMIT", "5"))
+LITE_PRICE = int(os.getenv("APRIL_LITE_PRICE", "12"))
+PREMIUM_PRICE = int(os.getenv("APRIL_PREMIUM_PRICE", "69"))
+LITE_DAYS = int(os.getenv("APRIL_LITE_DAYS", "5"))
+PREMIUM_DAYS = int(os.getenv("APRIL_PREMIUM_DAYS", "30"))
 
 FILE_PATH = "data/subscriptions.json"
 
@@ -74,7 +74,7 @@ _USERS_COLUMNS = (
 _ALLOWED_TABLE_COLUMNS = {
     "users": set(_USERS_COLUMNS),
     "payments": {"id", "user_id", "plan", "amount", "created_at"},
-    "dialogue_memory": {"id", "user_id", "created_at", "turn_index", "user_text", "april_text", "pair_hash"},
+    "dialogue_memory": {"id", "user_id", "created_at", "turn_index", "user_text", "april_text", "user_text_en", "april_text_en", "language", "relation", "pair_hash"},
 }
 
 
@@ -257,6 +257,10 @@ def init_db() -> None:
                         turn_index INTEGER NOT NULL,
                         user_text TEXT NOT NULL,
                         april_text TEXT NOT NULL,
+                        user_text_en TEXT,
+                        april_text_en TEXT,
+                        language TEXT NOT NULL DEFAULT 'en',
+                        relation TEXT NOT NULL DEFAULT 'NEW',
                         pair_hash TEXT NOT NULL UNIQUE
                     )
                     """
@@ -267,6 +271,10 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS turn_index INTEGER DEFAULT 0")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS user_text TEXT")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS april_text TEXT")
+                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS user_text_en TEXT")
+                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS april_text_en TEXT")
+                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'en'")
+                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS relation TEXT DEFAULT 'NEW'")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS pair_hash TEXT")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_memory_user_created ON dialogue_memory(user_id, created_at DESC)")
 
@@ -401,6 +409,10 @@ def save_dialogue_pair(
     *,
     created_at: float | int | datetime | None = None,
     turn_index: int = 0,
+    user_en: str = "",
+    april_en: str = "",
+    language: str = "en",
+    relation: str = "NEW",
 ) -> bool:
     """Persist one authenticated USER↔APRIL pair and nothing else."""
     uid = str(user_id)
@@ -436,11 +448,11 @@ def save_dialogue_pair(
                 cur.execute(
                     """
                     INSERT INTO dialogue_memory
-                        (user_id, created_at, turn_index, user_text, april_text, pair_hash)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                        (user_id, created_at, turn_index, user_text, april_text, user_text_en, april_text_en, language, relation, pair_hash)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (pair_hash) DO NOTHING
                     """,
-                    (uid, dt, int(turn_index or 0), user_value, april_value, pair_hash),
+                    (uid, dt, int(turn_index or 0), user_value, april_value, str(user_en or user_value), str(april_en or april_value), str(language or "en"), str(relation or "NEW"), pair_hash),
                 )
                 return True
     except psycopg2.errors.UndefinedTable:
@@ -463,7 +475,8 @@ def load_dialogue_pairs(user_id: Any, *, limit: int = 0, timestamp: float | int 
                     return []
                 cur.execute(
                     """
-                    SELECT id, user_id, created_at, turn_index, user_text, april_text
+                    SELECT id, user_id, created_at, turn_index, user_text, april_text,
+                           user_text_en, april_text_en, language, relation
                     FROM dialogue_memory
                     WHERE user_id = %s
                       AND created_at >= %s
