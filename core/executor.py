@@ -33,8 +33,9 @@ from blocks.state_manager import (
     continue_topic,
     set_language,
     set_relation,
+    append_pair,
+    get_dialogue_pairs,
 )
-from storage import init_db, load_dialogue_pairs, save_dialogue_pair
 
 
 PROCESSOR_VERSION = "april_processor_12h_canonical_v3"
@@ -300,17 +301,12 @@ async def execute(
     if not request_text:
         raise ValueError("EMPTY_REQUEST")
 
-    try:
-        init_db()
-    except Exception:
-        # Storage functions already fail safely when the database is unavailable.
-        pass
-
+    # The live 12-hour dialogue belongs only to State Manager.
+    # No PostgreSQL/storage module participates in the canonical chat route.
     language = _detect_language(original_text or request_text, display_language)
-    rows = load_dialogue_pairs(uid, limit=0)
-    state = hydrate(uid, rows)
+    state = hydrate(uid)
     set_language(uid, language)
-    pairs = state.get("dialogue_pairs") or []
+    pairs = get_dialogue_pairs(uid)
 
     interpretation = _interpret(
         request_text,
@@ -414,23 +410,20 @@ async def execute(
         translation,
     )
 
-    saved = False
-    try:
-        saved = bool(
-            save_dialogue_pair(
-                uid,
-                original_text or request_text,
-                answer,
-                user_text_en=internal_request_en,
-                april_text_en=internal_answer_en,
-                language=language,
-                relation=relation,
-                turn_index=int(sequence.get("turn_index") or 0),
-            )
-        )
-    finally:
-        if saved:
-            hydrate(uid, load_dialogue_pairs(uid, limit=0))
+    append_pair(
+        uid,
+        {
+            "created_at": time.time(),
+            "turn_index": int(sequence.get("turn_index") or 0),
+            "user_text": original_text or request_text,
+            "april_text": answer,
+            "user_text_en": internal_request_en,
+            "april_text_en": internal_answer_en,
+            "language": language,
+            "relation": relation,
+        },
+    )
+    saved = True
 
     set_relation(
         uid,
