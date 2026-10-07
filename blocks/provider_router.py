@@ -33,7 +33,7 @@ OPENAI_BALANCED_MODEL = APRIL_QUANTUM_PROVIDER_MODEL
 OPENAI_FAST_MODEL = APRIL_QUANTUM_PROVIDER_MODEL
 OPENAI_PREMIUM_MODEL = APRIL_QUANTUM_PROVIDER_MODEL
 
-INPUT_TOKEN_BUDGET = 900
+INPUT_TOKEN_BUDGET = 1800
 MIN_OUTPUT_TOKENS = 1
 MAX_OUTPUT_TOKENS = 8000
 
@@ -90,7 +90,13 @@ Never return an empty object, an empty answer, or `{}`. For a simple text/math r
 put the direct answer in `answer` and mirror it in `content` and a text render block.
 If structured output is requested, keep its render block structured and complete:
 type, renderer, viewer, payload, scene_contract=true.
-Preserve every requested representation and never invent an unrequested one.
+Preserve every requested representation and never invent an unrequested semantic representation.
+For ordinary text answers, use the canonical Rich Response presentation: Markdown is allowed
+and preferred when it improves readability. Preserve useful headings, bold/italic emphasis,
+lists, numbered steps, links, external image embeds, formulas, tables and code fences in the
+`answer` text instead of flattening them. Rich presentation is formatting, not an instruction to
+add images or links that the user did not ask for. Keep one coherent answer; use only the elements
+that materially help the current request.
 For `image_generation`, return one semantic generation handoff only:
 `metadata.image_generation_spec` and `metadata.image_generation_signal`.
 The current user request is the immutable generation trigger/anchor. It selects the image route
@@ -495,18 +501,23 @@ def _shrink_packet_piece(piece: str, limit: int) -> str:
 
 
 def _adaptive_target_budget(*, mode: str, task_active: bool, continuation: bool) -> int:
-    """Choose a floating soft target while preserving the hard 900 invariant."""
+    """Choose an adaptive semantic target inside the 1800-token hard ceiling.
+
+    The larger ceiling is reserved for dialogue continuity and structured
+    presentation. Simple turns still use a smaller packet so the provider does
+    not pay the maximum context cost unnecessarily.
+    """
     normalized = _safe_text(mode).lower()
-    target = 850
-    if task_active:
-        target -= 25
+    target = 1100
     if continuation:
-        target -= 10
-    if normalized in {"image_generation", "diagram", "graph", "table", "formula", "code"}:
-        target -= 20
+        target += 300
+    if task_active:
+        target += 150
+    if normalized in {"diagram", "graph", "table", "formula", "code"}:
+        target += 100
     if normalized in {"image_generation", "diagram"} and task_active:
-        target -= 15
-    return max(760, min(860, target))
+        target += 50
+    return max(1000, min(1700, target))
 
 
 def _adaptive_pack(
@@ -999,15 +1010,21 @@ def _canonical_requested_outputs(payload: dict[str, Any]) -> list[str]:
 def _strip_duplicate_structured_text(answer: str, requested_outputs: list[str]) -> str:
     """Keep the visible answer aligned with the canonical output plan.
 
-    For text-only turns, structured markdown emitted by the model is not a
-    second presentation channel; it is removed so the Web renderer can own
-    representation. For explicit table output, the dedicated TableBlock owns
-    the table and the prose copy is removed as before.
+    Rich text is the canonical presentation for ordinary text turns. Markdown
+    headings, emphasis, lists, links, images, formulas and tables are therefore
+    preserved for MessageTextBlock/MarkdownBlock to render. A dedicated TableBlock
+    still owns an explicitly requested table representation, so only that duplicate
+    table syntax is removed from the narrative channel.
     """
     if not answer:
         return answer
     text_only = list(requested_outputs or []) == ["text"]
-    if not text_only and "table" not in requested_outputs:
+    # Ordinary text turns are now Rich Response turns. Do not flatten Markdown
+    # into plain text: the existing Web Markdown renderer is the intended final
+    # presentation layer.
+    if text_only:
+        return answer
+    if "table" not in requested_outputs:
         return answer
 
     lines = answer.splitlines()
@@ -2038,7 +2055,7 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             "context_selection_done_before_provider": True,
             "provider_must_not_reselect_context": True,
             "hard_budget_tokens": INPUT_TOKEN_BUDGET,
-            "soft_target_tokens": min(820, INPUT_TOKEN_BUDGET),
+            "soft_target_tokens": min(1100, INPUT_TOKEN_BUDGET),
             "new_topic_minimal_context": relation == "NEW",
             "required_context": [
                 {
@@ -2477,6 +2494,14 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
             "requested": output_modes[:4],
             "authorized": render_authorized,
             "structured_required": structured_outputs_requested,
+            "presentation_mode": "RICH_RESPONSE",
+            "content_format": "MARKDOWN",
+            "preserve_structure": True,
+            "preserve_links": True,
+            "preserve_embedded_media": True,
+            "preserve_math": True,
+            "preserve_sections": True,
+            "renderer_authority": "SCENE_CONTRACT",
         }
         optional.append(("output_contract", _json_piece(
             "RENDER_CONTRACT", output_contract, depth=2, items=4, keys=6
@@ -2534,6 +2559,9 @@ def normalize_provider_input(machine_request: Any) -> list[dict]:
                 "authorized": render_authorized,
                 "render_mode": workspace_contract.get("render_mode") if isinstance(workspace, dict) and isinstance(workspace.get("output_contract"), dict) else _safe_text(interpretation_control.get("render_mode") or "TEXT_ONLY"),
                 "structured_required": structured_outputs_requested,
+                "presentation_mode": "RICH_RESPONSE",
+                "content_format": "MARKDOWN",
+                "renderer_authority": "SCENE_CONTRACT",
             }, ensure_ascii=False, separators=(",", ":"))
         )
         estimated_total = _estimate_input_tokens(system_prompt) + _estimate_input_tokens(user_text)
