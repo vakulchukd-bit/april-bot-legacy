@@ -452,7 +452,7 @@ def save_dialogue_pair(
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (pair_hash) DO NOTHING
                     """,
-                    (uid, dt, int(turn_index or 0), user_value, april_value, str(user_en or user_value), str(april_en or april_value), str(language or "en"), str(relation or "NEW"), pair_hash),
+                    (uid, dt, int(turn_index or 0), user_value, april_value, str(user_en or ""), str(april_en or ""), str(language or "en"), str(relation or "NEW"), pair_hash),
                 )
                 return True
     except psycopg2.errors.UndefinedTable:
