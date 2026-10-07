@@ -6,7 +6,6 @@ NEW/CONTINUE, never searches memory, and never selects another context.
 from __future__ import annotations
 from typing import Any
 import asyncio, hashlib, json, os, re, time
-from openai import OpenAI
 
 from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse, normalize_render_blocks
 
@@ -15,7 +14,7 @@ MAX_OUTPUT_TOKENS=min(8000,max(256,int(os.getenv("APRIL_MAX_OUTPUT_TOKENS","2400
 INPUT_TOKEN_TARGET=900
 _cache:dict[str,tuple[float,dict[str,Any]]]={}
 _inflight:set[str]=set()
-_client:OpenAI|None=None
+_client: _OpenAICompat | None = None
 
 SYSTEM_PROMPT=r"""
 You are April's internal response provider. Work ONLY in English internally.
@@ -53,12 +52,153 @@ Never return an empty answer.
 """
 
 
-def _client_get()->OpenAI:
+class _ResponseResult:
+    def __init__(self, payload: dict[str, Any]):
+        self._payload = payload
+        self.output_text = self._extract_output_text(payload)
+        self.usage = _Usage(payload.get("usage") or {})
+
+    @staticmethod
+    def _extract_output_text(payload: dict[str, Any]) -> str:
+        direct = payload.get("output_text")
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
+        chunks: list[str] = []
+        for item in payload.get("output") or []:
+            if not isinstance(item, dict):
+                continue
+            for content in item.get("content") or []:
+                if not isinstance(content, dict):
+                    continue
+                value = content.get("text")
+                if isinstance(value, str) and value.strip():
+                    chunks.append(value)
+        return "\n".join(chunks).strip()
+
+
+class _Usage:
+    def __init__(self, data: dict[str, Any]):
+        self.input_tokens = int(data.get("input_tokens", 0) or 0)
+        self.output_tokens = int(data.get("output_tokens", 0) or 0)
+        self.total_tokens = int(data.get("total_tokens", 0) or 0)
+
+
+class _ResponsesCompat:
+    def __init__(self, client: "_OpenAICompat"):
+        self._client = client
+
+    def create(self, *, model: str, input: Any, max_output_tokens: int) -> _ResponseResult:
+        payload = {
+            "model": model,
+            "input": input,
+            "max_output_tokens": max_output_tokens,
+        }
+        return _ResponseResult(self._client._post_json("/v1/responses", payload))
+
+
+class _TranscriptionsCompat:
+    def __init__(self, client: "_OpenAICompat"):
+        self._client = client
+
+    def create(self, *, model: str, file: Any) -> Any:
+        data = file.read()
+        name = os.path.basename(getattr(file, "name", "audio.bin")) or "audio.bin"
+        content_type = "application/octet-stream"
+        payload = self._client._post_multipart(
+            "/v1/audio/transcriptions",
+            fields={"model": model},
+            file_field=("file", name, content_type, data),
+        )
+        return type("TranscriptionResult", (), {"text": payload.get("text", "")})()
+
+
+class _AudioCompat:
+    def __init__(self, client: "_OpenAICompat"):
+        self.transcriptions = _TranscriptionsCompat(client)
+
+
+class _OpenAICompat:
+    """Small stdlib-only OpenAI HTTP client.
+
+    This keeps April independent from the external `openai` Python package while
+    preserving the two calls currently used by provider_router.py.
+    """
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.responses = _ResponsesCompat(self)
+        self.audio = _AudioCompat(self)
+
+    def _request(self, path: str, body: bytes, content_type: str) -> dict[str, Any]:
+        from urllib.error import HTTPError, URLError
+        from urllib.request import Request, urlopen
+
+        req = Request(
+            "https://api.openai.com" + path,
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": content_type,
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urlopen(req, timeout=120) as response:
+                raw = response.read().decode("utf-8")
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"OPENAI_HTTP_{exc.code}: {detail[:1000]}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"OPENAI_NETWORK_ERROR: {exc.reason}") from exc
+        try:
+            payload = json.loads(raw)
+        except Exception as exc:
+            raise RuntimeError("OPENAI_INVALID_JSON_RESPONSE") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("OPENAI_INVALID_RESPONSE")
+        if payload.get("error"):
+            raise RuntimeError(f"OPENAI_API_ERROR: {payload['error']}")
+        return payload
+
+    def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request(path, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json")
+
+    def _post_multipart(
+        self,
+        path: str,
+        *,
+        fields: dict[str, str],
+        file_field: tuple[str, str, str, bytes],
+    ) -> dict[str, Any]:
+        import uuid
+        boundary = "----AprilBoundary" + uuid.uuid4().hex
+        chunks: list[bytes] = []
+        for key, value in fields.items():
+            chunks.extend([
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode(),
+                str(value).encode("utf-8"),
+                b"\r\n",
+            ])
+        field_name, filename, content_type, data = file_field
+        chunks.extend([
+            f"--{boundary}\r\n".encode(),
+            f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'.encode(),
+            f"Content-Type: {content_type}\r\n\r\n".encode(),
+            data,
+            b"\r\n",
+            f"--{boundary}--\r\n".encode(),
+        ])
+        return self._request(path, b"".join(chunks), f"multipart/form-data; boundary={boundary}")
+
+
+def _client_get() -> _OpenAICompat:
     global _client
     if _client is None:
-        key=os.getenv("OPENAI_API_KEY")
-        if not key: raise RuntimeError("OPENAI_API_KEY_NOT_CONFIGURED")
-        _client=OpenAI(api_key=key)
+        key = os.getenv("OPENAI_API_KEY")
+        if not key:
+            raise RuntimeError("OPENAI_API_KEY_NOT_CONFIGURED")
+        _client = _OpenAICompat(key)
     return _client
 
 
