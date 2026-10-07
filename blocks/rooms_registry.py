@@ -66,25 +66,29 @@ from blocks.C_ARTIFACT_CONTRACT import (
 # 🔥 IMAGE
 # =====================================================
 
-from blocks.image_engine import (
-    generate as image_generate
-)
+# Image/science modules are intentionally lazy-loaded.  The hot path only needs
+# the registry contract; image and science engines are imported when their room
+# is actually executed. This preserves the old call signatures.
 
-from blocks.image_engine import (
-    edit as image_edit_engine,
-)
+def image_generate(*args, **kwargs):
+    from blocks.image_engine import generate
+    return generate(*args, **kwargs)
 
-from blocks.image_system import (
-    analyze_image
-)
 
-# =====================================================
-# 🔥 SCIENCE
-# =====================================================
+def image_edit_engine(*args, **kwargs):
+    from blocks.image_engine import edit
+    return edit(*args, **kwargs)
 
-from blocks.science_room import (
-    ScienceRoom
-)
+
+async def analyze_image(*args, **kwargs):
+    from blocks.image_system import analyze_image as _analyze_image
+    return await _analyze_image(*args, **kwargs)
+
+
+class _LazyScienceRoom:
+    def __new__(cls, *args, **kwargs):
+        from blocks.science_room import ScienceRoom
+        return ScienceRoom(*args, **kwargs)
 
 import time
 import re
@@ -94,29 +98,41 @@ from copy import deepcopy
 # 🔥 C ROOMS
 # =====================================================
 
-from blocks.C_MATHEMATICS_ROOM import ROOM as MATHEMATICS_ROOM
-from blocks.C_TRIGONOMETRY_ROOM import ROOM as TRIGONOMETRY_ROOM
-from blocks.C_PHYSICS_ROOM import ROOM as PHYSICS_ROOM
-from blocks.C_CHEMISTRY_ROOM import ROOM as CHEMISTRY_ROOM
-from blocks.C_BIOLOGY_ROOM import ROOM as BIOLOGY_ROOM
-from blocks.C_LITERATURE_ROOM import ROOM as LITERATURE_ROOM
-from blocks.C_WEB_ROOM import ROOM as WEB_ROOM
-from blocks.C_UTC_ROOM import ROOM as UTC_ROOM
-from blocks.C_ENGINEERING_ROOM import ROOM as ENGINEERING_ROOM
-from blocks.C_POLITICS_ROOM import ROOM as POLITICS_ROOM
-from blocks.C_NEWS_ROOM import ROOM as NEWS_ROOM
-from blocks.C_SOCIAL_ROOM import ROOM as SOCIAL_ROOM
-from blocks.C_IT_ROOM import ROOM as IT_ROOM
+class _LazyRoom:
+    """Compatibility proxy: same global name, deferred module import."""
+    __slots__ = ("_module", "_name", "_room")
+    def __init__(self, module, name="ROOM"):
+        self._module, self._name, self._room = module, name, None
+    def _load(self):
+        if self._room is None:
+            import importlib
+            self._room = getattr(importlib.import_module(self._module), self._name)
+        return self._room
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+    def __call__(self, *args, **kwargs):
+        return self._load()(*args, **kwargs)
 
-# Canonical structured render rooms. These replace the legacy inline rooms
-# below for graph/formula/table/diagram/function/link/gallery execution.
-from blocks.C_GRAPH_ROOM import ROOM as C_GRAPH_ROOM
-from blocks.C_FORMULA_ROOM import ROOM as C_FORMULA_ROOM
-from blocks.C_TABLE_ROOM import ROOM as C_TABLE_ROOM
-from blocks.C_DIAGRAM_ROOM import ROOM as C_DIAGRAM_ROOM
-from blocks.C_FUNCTION_ROOM import ROOM as C_FUNCTION_ROOM
-from blocks.C_LINK_ROOM import ROOM as C_LINK_ROOM
-from blocks.C_GALLERY_ROOM import ROOM as C_GALLERY_ROOM
+MATHEMATICS_ROOM = _LazyRoom("blocks.C_MATHEMATICS_ROOM")
+TRIGONOMETRY_ROOM = _LazyRoom("blocks.C_TRIGONOMETRY_ROOM")
+PHYSICS_ROOM = _LazyRoom("blocks.C_PHYSICS_ROOM")
+CHEMISTRY_ROOM = _LazyRoom("blocks.C_CHEMISTRY_ROOM")
+BIOLOGY_ROOM = _LazyRoom("blocks.C_BIOLOGY_ROOM")
+LITERATURE_ROOM = _LazyRoom("blocks.C_LITERATURE_ROOM")
+WEB_ROOM = _LazyRoom("blocks.C_WEB_ROOM")
+UTC_ROOM = _LazyRoom("blocks.C_UTC_ROOM")
+ENGINEERING_ROOM = _LazyRoom("blocks.C_ENGINEERING_ROOM")
+POLITICS_ROOM = _LazyRoom("blocks.C_POLITICS_ROOM")
+NEWS_ROOM = _LazyRoom("blocks.C_NEWS_ROOM")
+SOCIAL_ROOM = _LazyRoom("blocks.C_SOCIAL_ROOM")
+IT_ROOM = _LazyRoom("blocks.C_IT_ROOM")
+C_GRAPH_ROOM = _LazyRoom("blocks.C_GRAPH_ROOM")
+C_FORMULA_ROOM = _LazyRoom("blocks.C_FORMULA_ROOM")
+C_TABLE_ROOM = _LazyRoom("blocks.C_TABLE_ROOM")
+C_DIAGRAM_ROOM = _LazyRoom("blocks.C_DIAGRAM_ROOM")
+C_FUNCTION_ROOM = _LazyRoom("blocks.C_FUNCTION_ROOM")
+C_LINK_ROOM = _LazyRoom("blocks.C_LINK_ROOM")
+C_GALLERY_ROOM = _LazyRoom("blocks.C_GALLERY_ROOM")
 
 
 # =====================================================
@@ -1010,7 +1026,7 @@ class ImageEditRoom(Room):
 # 🔥 SCIENCE
 # =====================================================
 
-class SafeScienceRoom(ScienceRoom):
+class SafeScienceRoom(_LazyScienceRoom):
 
     name = "science"
 
