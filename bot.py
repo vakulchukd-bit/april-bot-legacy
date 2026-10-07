@@ -2,16 +2,18 @@
 
 Canonical route:
     WebReal Web
-        -> /api/v1/chat
-        -> bot.py
+        -> /api/chat
+        -> bot.py (bot.ru translation boundary)
         -> core.executor
-        -> provider_router (English internal semantic layer)
-        -> SceneContract
-        -> bot.py
+        -> State Manager (rolling 12h dialogue)
+        -> C_ARTIFACT_CONTRACT (MachineRequest)
+        -> provider_router -> OpenAI
+        -> core.executor -> C_ARTIFACT_CONTRACT (SceneContract)
+        -> bot.py (bot.ru output boundary)
         -> WebReal Web
 
-There is one POST chat route. No Flask, legacy route aliases, or second transport
-are required by the current bot build.
+Only the existing bot.py gateway is used; no botru.py, Flask route, legacy alias,
+or restored compatibility module is introduced.
 """
 from __future__ import annotations
 
@@ -29,6 +31,7 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "10000"))
 MAX_BODY_BYTES = int(os.getenv("APRIL_MAX_HTTP_BODY_BYTES", "1048576"))
 CANONICAL_CHAT_ROUTE = "/api/v1/chat"
+WEB_GATEWAY_ROUTE = "/api/chat"
 CANONICAL_ROUTE_VERSION = "april_webreal_botru_scene_v1"
 
 
@@ -74,11 +77,15 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
             "scene_contract": scene,
             "render_blocks": blocks,
             "route": [
-                "WebReal Web",
-                "bot.py",
+                "WebReal Web /api/chat",
+                "bot.py (bot.ru IN)",
                 "core.executor",
-                "provider_router",
-                "SceneContract",
+                "State Manager 12h",
+                "C_ARTIFACT_CONTRACT REQUEST",
+                "provider_router -> OpenAI",
+                "core.executor",
+                "C_ARTIFACT_CONTRACT SceneContract",
+                "bot.py (bot.ru OUT)",
                 "WebReal Web",
             ],
         },
