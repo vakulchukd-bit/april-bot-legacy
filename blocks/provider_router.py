@@ -22,7 +22,7 @@ from blocks.presentation_formatter import canonical_payload_for_block, validate_
 # APRIL PROVIDER — CANONICAL LUNA ROUTE
 # ============================================================
 
-APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_3_5_visual_plan_complement_v2"
+APRIL_QUANTUM_PROVIDER_VERSION = "provider_quantum_luna_3_5_visual_plan_complement_v3_render_transport_safe"
 APRIL_QUANTUM_PROVIDER_MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-5.6-luna")
 APRIL_QUANTUM_PROVIDER_SINGLE_CALL = True
 APRIL_QUANTUM_PROVIDER_NO_MODEL_ESCALATION = True
@@ -3659,6 +3659,17 @@ def _build_image_generation_spec_from_provider(
         "seed": seed,
     }
 
+def _extract_fenced_code(value: Any) -> tuple[str, str]:
+    """Extract one fenced source-code payload without rewriting its contents."""
+    text = _safe_text(value)
+    match = re.search(r"```([A-Za-z0-9_+#.-]*)\s*\n([\s\S]*?)```", text)
+    if not match:
+        return "", ""
+    language = _safe_text(match.group(1)).strip().lower() or "text"
+    code = match.group(2).strip("\n\r")
+    return language, code
+
+
 def _top_level_visual_block(kind: str, value: Any) -> dict[str, Any] | None:
     """Promote one concrete provider visual into a canonical semantic block."""
     kind = _safe_text(kind).lower()
@@ -4142,6 +4153,31 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
     if top_level_visual_blocks:
         blocks.extend(top_level_visual_blocks)
 
+    # Code is structured output too. When OpenAI returns the code in the
+    # response/content channel, promote the exact fenced source into CodeBlock
+    # without editing its bytes. The narrative channel is handled separately.
+    if "code" in source_outputs and not any(
+        isinstance(block, dict) and _safe_text(block.get("type") or block.get("artifact_type")).lower() == "code"
+        for block in blocks
+    ):
+        code_language = _safe_text(canonical_payload.get("language") or "").strip().lower()
+        code_value = canonical_payload.get("code") or canonical_payload.get("source")
+        code_text = _safe_text(code_value)
+        if not code_text:
+            code_language, code_text = _extract_fenced_code(answer)
+        if code_text:
+            blocks.append({
+                "type": "code",
+                "artifact_type": "code",
+                "renderer": "CodeBlock",
+                "viewer": "CodeBlock",
+                "payload": {"language": code_language or "text", "code": code_text},
+                "scene_contract": True,
+                "human_visible": True,
+                "provider_payload": True,
+                "canonical_provider_payload": True,
+            })
+
     # A structured artifact is a successful execution signal. Never let generic
     # provider failure prose mask a graph/table/diagram/image that already exists.
     if _is_generic_failure_answer(answer) and any(
@@ -4450,6 +4486,15 @@ def provider_finalize_for_executor(contract: dict) -> dict:
 
     # Remove duplicated full structured representations from the narrative channel.
     answer = _strip_duplicate_structured_text(answer, requested_outputs)
+
+    if "code" in requested_outputs:
+        # The exact source is transported by CodeBlock. Keep the visible text channel
+        # human-readable instead of printing the whole program inside MessageTextBlock.
+        _code_lang, _code_body = _extract_fenced_code(answer)
+        if _code_body:
+            answer = re.sub(r"```[A-Za-z0-9_+#.-]*\s*\n[\s\S]*?```", "", answer, count=1).strip()
+            if not answer:
+                answer = "Код подготовлен."
 
     constraints = payload.get("constraints", {}) if isinstance(payload.get("constraints"), dict) else {}
     metadata = constraints.get("metadata", {}) if isinstance(constraints.get("metadata"), dict) else {}
