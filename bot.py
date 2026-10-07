@@ -1,18 +1,17 @@
-"""APRIL HTTP gateway — dependency-light production entrypoint.
+"""APRIL canonical WebReal Web gateway.
 
-This file intentionally does not import Flask.  The previous deployment crashed
-before April started because Railway launched app.py and Python reported
-ModuleNotFoundError: flask.  The current April ZIP already contains bot.py, so
-this gateway keeps the API routes in bot.py and uses Python's standard library
-HTTP server.
+Canonical route:
+    WebReal Web
+        -> /api/v1/chat
+        -> bot.py
+        -> core.executor
+        -> provider_router (English internal semantic layer)
+        -> SceneContract
+        -> bot.py
+        -> WebReal Web
 
-API:
-  POST /chat
-  POST /api/v1/chat
-
-JSON body:
-  {"user_id":"...", "text":"...", "language":"...", "flow_id":"...",
-   "conversation_id":"..."}
+There is one POST chat route. No Flask, legacy route aliases, or second transport
+are required by the current bot build.
 """
 from __future__ import annotations
 
@@ -29,6 +28,8 @@ from core.executor import execute
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "10000"))
 MAX_BODY_BYTES = int(os.getenv("APRIL_MAX_HTTP_BODY_BYTES", "1048576"))
+CANONICAL_CHAT_ROUTE = "/api/v1/chat"
+CANONICAL_ROUTE_VERSION = "april_webreal_botru_scene_v1"
 
 
 def _text(value: Any) -> str:
@@ -38,15 +39,28 @@ def _text(value: Any) -> str:
 def _payload(result: dict[str, Any]) -> dict[str, Any]:
     scene = result.get("scene_contract") or {}
     blocks = result.get("render_blocks") or scene.get("render_blocks") or []
+    answer = _text(result.get("answer") or result.get("content"))
+    if not answer:
+        raise RuntimeError("CANONICAL_ANSWER_MISSING")
+
     return {
         "success": True,
-        "canonical_route": "/api/v1/chat",
+        "canonical_route": CANONICAL_CHAT_ROUTE,
+        "route_version": CANONICAL_ROUTE_VERSION,
         "single_route": True,
         "internal_language": "en",
         "display_language": result.get("display_language", "en"),
+        "translation": result.get(
+            "translation",
+            {
+                "input_language": result.get("display_language", "en"),
+                "internal_language": "en",
+                "mode": "provider_internal",
+            },
+        ),
         "type": "text",
-        "content": result.get("content", ""),
-        "answer": result.get("answer", ""),
+        "content": result.get("content") or answer,
+        "answer": answer,
         "summary": result.get("summary", ""),
         "blocks": blocks,
         "render_blocks": blocks,
@@ -54,11 +68,19 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
         "flow_id": result.get("flow_id"),
         "provider_context_authority": "PROCESSOR",
         "web_delivery": {
-            "version": "april_web_scene_signal_v1",
+            "version": CANONICAL_ROUTE_VERSION,
             "transport": "SceneContract",
             "single_visible_stream": True,
             "scene_contract": scene,
             "render_blocks": blocks,
+            "route": [
+                "WebReal Web",
+                "bot.py",
+                "core.executor",
+                "provider_router",
+                "SceneContract",
+                "WebReal Web",
+            ],
         },
     }
 
@@ -67,12 +89,13 @@ def _error(message: str, status: int = 500) -> tuple[int, dict[str, Any]]:
     return status, {
         "success": False,
         "error": _text(message) or "INTERNAL_ERROR",
+        "canonical_route": CANONICAL_CHAT_ROUTE,
     }
 
 
 def _handle_payload(data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     uid = _text(data.get("user_id"))
-    text = _text(data.get("text") or data.get("message"))
+    text = _text(data.get("text") or data.get("message") or data.get("content"))
 
     if not uid:
         return _error("user_id required", 400)
@@ -89,7 +112,7 @@ def _handle_payload(data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
                 display_language=_text(
                     data.get("language")
                     or data.get("display_language")
-                    or "en"
+                    or "auto"
                 ),
             )
         )
@@ -103,7 +126,7 @@ def _handle_payload(data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
 
 class AprilHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "AprilGateway/1.0"
+    server_version = "AprilGateway/2.0"
 
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(
@@ -132,24 +155,26 @@ class AprilHandler(BaseHTTPRequestHandler):
         self._send_json(204, {})
 
     def do_GET(self) -> None:
-        # Railway health checks commonly use GET /.
         self._send_json(
             200,
             {
                 "success": True,
                 "service": "april-bot",
                 "status": "ok",
+                "canonical_route": CANONICAL_CHAT_ROUTE,
+                "route_version": CANONICAL_ROUTE_VERSION,
             },
         )
 
     def do_POST(self) -> None:
-        if self.path not in {"/chat", "/api/v1/chat"}:
+        if self.path != CANONICAL_CHAT_ROUTE:
             self._send_json(
                 404,
                 {
                     "success": False,
                     "error": "NOT_FOUND",
                     "route": self.path,
+                    "canonical_route": CANONICAL_CHAT_ROUTE,
                 },
             )
             return
@@ -163,6 +188,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                     {
                         "success": False,
                         "error": "REQUEST_BODY_TOO_LARGE",
+                        "canonical_route": CANONICAL_CHAT_ROUTE,
                     },
                 )
                 return
@@ -176,6 +202,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                     {
                         "success": False,
                         "error": "INVALID_JSON",
+                        "canonical_route": CANONICAL_CHAT_ROUTE,
                     },
                 )
                 return
@@ -186,6 +213,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                     {
                         "success": False,
                         "error": "JSON_OBJECT_REQUIRED",
+                        "canonical_route": CANONICAL_CHAT_ROUTE,
                     },
                 )
                 return
@@ -195,10 +223,16 @@ class AprilHandler(BaseHTTPRequestHandler):
 
         except Exception as exc:
             traceback.print_exc()
-            self._send_json(500, {"success": False, "error": str(exc)})
+            self._send_json(
+                500,
+                {
+                    "success": False,
+                    "error": str(exc),
+                    "canonical_route": CANONICAL_CHAT_ROUTE,
+                },
+            )
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        # Keep Railway logs useful without Flask's access-log formatting.
         print(f"[APRIL] {self.address_string()} - {fmt % args}", flush=True)
 
 
@@ -208,7 +242,11 @@ def create_server() -> ThreadingHTTPServer:
 
 def main() -> None:
     server = create_server()
-    print(f"[APRIL] HTTP gateway listening on {HOST}:{PORT}", flush=True)
+    print(
+        f"[APRIL] HTTP gateway listening on {HOST}:{PORT}; "
+        f"canonical route={CANONICAL_CHAT_ROUTE}",
+        flush=True,
+    )
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
