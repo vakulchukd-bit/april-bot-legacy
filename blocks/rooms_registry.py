@@ -1985,6 +1985,8 @@ def _registry_route_targets(
         for kind in requested:
             if kind not in {"text", "markdown"}:
                 ordered.append(kind)
+        if kind not in {"text", "markdown"}:
+            ordered.append(kind)
 
     targets: list[str] = []
     seen: set[str] = set()
