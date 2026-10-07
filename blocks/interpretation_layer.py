@@ -890,6 +890,8 @@ class QuantumContextUnderstandingEngine:
                 continue
             role = str(item.get("role") or "").lower()
             content = self._compact(item.get("content") or item.get("text") or item.get("answer"), 1200)
+            if role in {"assistant", "april", "bot"} and not _is_semantic_dialogue_answer(content):
+                continue
             if role in {"user", "human"}:
                 pending_user = content
             elif role in {"assistant", "april", "bot"} and pending_user:
@@ -1556,6 +1558,9 @@ class QuantumInterpretationEngine:
                 continue
             if role in {"assistant", "april", "bot"}:
                 answer = cls.normalize(item.get("content") or item.get("answer") or item.get("text") or item.get("summary"))
+                if answer and not _is_semantic_dialogue_answer(answer):
+                    pending_user = ""
+                    continue
                 if pending_user and answer:
                     pairs.append({
                         "user": pending_user[:700],
@@ -5805,6 +5810,20 @@ _PAIR_CACHE_TTL_SECONDS = 1.5
 _PAIR_CACHE_LOCK = threading.RLock()
 _PAIR_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
+_TECHNICAL_FALLBACK_PREFIXES = (
+    "не удалось сформировать ответ",
+    "не удалось обработать запрос",
+    "ошибка при формировании ответа",
+    "error while generating response",
+)
+
+def _is_semantic_dialogue_answer(text: Any) -> bool:
+    """Return False for transport/provider failure prose stored as an answer."""
+    value = re.sub(r"\s+", " ", str(text or "")).strip().casefold()
+    if not value:
+        return False
+    return not any(value.startswith(prefix) for prefix in _TECHNICAL_FALLBACK_PREFIXES)
+
 
 def _load_persistent_pair_window(user_id: str, limit: int = 15) -> list[dict[str, Any]]:
     uid = str(user_id or "").strip()
@@ -5830,6 +5849,9 @@ def _load_persistent_pair_window(user_id: str, limit: int = 15) -> list[dict[str
             user = str(raw.get("user_text") or raw.get("user") or raw.get("user_request") or "").strip()
             april = str(raw.get("april_text") or raw.get("april") or raw.get("april_answer") or raw.get("assistant") or "").strip()
             if not user or not april:
+                continue
+            if not _is_semantic_dialogue_answer(april):
+                # Transport errors are not USER↔APRIL semantic facts.
                 continue
             rows.append({
                 "user": user[:1200],
@@ -6094,6 +6116,8 @@ def _live_relation_selector(
         user = self.normalize(pair.get("user") or pair.get("user_text") or pair.get("user_request"))
         april = self.normalize(pair.get("april") or pair.get("april_text") or pair.get("april_answer") or pair.get("assistant") or pair.get("answer"))
         if not user and not april:
+            continue
+        if april and not _is_semantic_dialogue_answer(april):
             continue
         combined = f"{user} {april}".strip()
         prepared.append((i, pair, user, april, combined))
@@ -6440,6 +6464,80 @@ def _live_relation_selector(
 QuantumInterpretationEngine._select_three_way_dialogue_relation = _live_relation_selector
 
 _PAIR_INTERPRET_ORIGINAL_LIVE = _PAIR_INTERPRET_ORIGINAL
+
+
+def _resolve_multi_render_outputs(
+    text: str,
+    *,
+    profile: dict[str, Any],
+    task_understanding: dict[str, Any] | None,
+    production: str,
+    explicit: list[str] | None,
+) -> list[str]:
+    """Preserve every semantically supported render requested by the current turn.
+
+    Renderer order never decides intent. Explicit outputs, the context task matrix,
+    and strong representation/object agreement are merged into one canonical plan.
+    """
+    profile = profile if isinstance(profile, dict) else {}
+    task_understanding = task_understanding if isinstance(task_understanding, dict) else {}
+    rep_scores = profile.get("representation_scores") if isinstance(profile.get("representation_scores"), dict) else {}
+    obj_scores = profile.get("object_scores") if isinstance(profile.get("object_scores"), dict) else {}
+    op = str(profile.get("best_operation") or "").lower()
+
+    compatible_ops = {
+        "graph": {"build","modify","present","calculate","analyze","compare","list","explain"},
+        "table": {"build","modify","present","compare","list","explain","analyze"},
+        "diagram": {"build","modify","present","explain","analyze"},
+        "formula": {"build","modify","present","calculate","explain","answer"},
+        "image": {"build","create","generate","modify","present"},
+        "gallery": {"build","present","compare","list"},
+        "code": {"build","modify","present","explain","analyze"},
+        "link": {"retrieve","present","answer","list","explain"},
+        "file": {"retrieve","present","analyze","read"},
+        "audio": {"retrieve","present","analyze","read"},
+        "video": {"build","present","analyze","read"},
+        "action": {"build","modify","present"},
+        "scene": {"build","modify","present"},
+    }
+
+    values = []
+    values.extend(explicit or [])
+    task_outputs = task_understanding.get("requested_outputs") or []
+    if isinstance(task_outputs, str):
+        task_outputs = [task_outputs]
+    values.extend(task_outputs)
+
+    result: list[str] = []
+
+    def add(value: Any) -> None:
+        label = _clean_representation(value)
+        if label and label not in result:
+            result.append(label)
+
+    for value in values:
+        add(value)
+
+    # Strong independent evidence can authorize additional renderers; this is the
+    # multi-render path that prevents "first renderer wins".
+    for label, raw_score in sorted(
+        rep_scores.items(),
+        key=lambda item: float(item[1] or 0.0),
+        reverse=True,
+    ):
+        label = _clean_representation(label)
+        if not label or label == "text":
+            continue
+        rep_score = float(raw_score or 0.0)
+        obj_score = float(obj_scores.get(label, 0.0) or 0.0)
+        if label in compatible_ops and op in compatible_ops[label] and rep_score >= 0.16 and obj_score >= 0.07:
+            add(label)
+
+    add(production)
+
+    if any(item != "text" for item in result):
+        result.insert(0, "text")
+    return result or ["text"]
 
 
 def _pair_role_history(pairs):
@@ -6819,6 +6917,7 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         _provider_pair(x) for x in context_pairs[-8:]
         if isinstance(x, dict)
     ]
+
     provider_selected_pair = _provider_pair(selected_pair) if selected_pair else {}
 
     base_rep = str(
@@ -6858,13 +6957,36 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         visual_request = previous_visual_prompt
         result["visual_generation_request"] = previous_visual_prompt
 
+    render_outputs = _resolve_multi_render_outputs(
+        current,
+        profile=result.get("semantic_profile") if isinstance(result.get("semantic_profile"), dict) else result,
+        task_understanding=result.get("task_understanding") if isinstance(result.get("task_understanding"), dict) else {},
+        production=base_rep,
+        explicit=result.get("requested_representations") or [],
+    )
+
     result["representation"] = base_rep
     result["requested_representation"] = base_rep
     result["production_representation"] = base_rep
     result["production_representation_locked"] = True
-    result["requested_outputs"] = [base_rep]
-    result["required_representations"] = [base_rep]
+    result["requested_outputs"] = list(render_outputs)
+    result["required_representations"] = [x for x in render_outputs if x != "text"]
+    result["requested_representations"] = list(render_outputs)
     result["visual_generation_request"] = visual_request
+
+    render_contract_outputs = list(render_outputs)
+    render_contract_requirements = {
+        output: render_requirements.get(
+            output,
+            {
+                "must_return": ["answer"],
+                "renderer": "MessageTextBlock",
+                "no_text_fallback": False,
+            },
+        )
+        for output in render_contract_outputs
+        if output != "text"
+    }
 
     # Structured scene contract: interpretation explains the job to the provider,
     # while the current user request remains the immutable semantic anchor.
@@ -6907,7 +7029,18 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
     })
 
     # The trajectory is compacted here, not selected again by Provider.
-    trajectory = [_compact_pair_for_formulation(x) for x in context_pairs[-8:] if isinstance(x, dict)]
+    trajectory = [
+        _compact_pair_for_formulation(x)
+        for x in sorted(
+            [dict(x) for x in context_pairs[-8:] if isinstance(x, dict)],
+            key=lambda item: int(
+                item.get("turn")
+                or item.get("turn_index")
+                or item.get("sequence_turn_index")
+                or 0
+            ),
+        )
+    ]
 
     # Provider boundary: only the structured semantic request crosses.
     # The authenticated 12h memory remains an Interpretation-side search space.
@@ -6927,10 +7060,16 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         "context_selection_done_before_provider": True,
         "provider_must_not_reselect_context": True,
         "hard_budget_tokens": 1800,
-        "soft_target_tokens": (
-            1500 if len(current) > 1800
-            else 1250 if len(current) > 900
-            else 1000
+        "soft_target_tokens": max(
+            1000,
+            min(
+                1600,
+                980
+                + 120 * max(0, len(render_outputs) - 1)
+                + 120 * (1 if relation == "CONTINUE" else 0)
+                + 120 * (1 if len(context_pairs) >= 3 else 0)
+                + 140 * (1 if len(current) > 700 else 0),
+            ),
         ),
         "provider_continuation_contract": "STRUCTURED_REQUEST_FROM_SELECTED_PAIRS",
         "pair_history_authority": "INTERPRETATION_ONLY",
@@ -6962,12 +7101,13 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
                 "priority": 0.99,
                 "value": {
                     "representation": base_rep,
-                    "requested_outputs": [base_rep],
+                    "requested_outputs": render_contract_outputs,
+                    "required_representations": [x for x in render_contract_outputs if x != "text"],
                     "visual_generation_request": visual_request,
-                    "no_text_fallback_for_image": base_rep in {"image", "gallery"},
+                    "no_text_fallback_for_image": "image" in render_contract_outputs or "gallery" in render_contract_outputs,
                     "ascii_allowed": False,
-                    "structured_scene_required": base_rep != "text",
-                    "render_requirements": render_requirements,
+                    "structured_scene_required": any(x != "text" for x in render_contract_outputs),
+                    "render_requirements": render_contract_requirements,
                 },
             },
             {
@@ -7002,6 +7142,8 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         },
     )
     result["provider_context_plan"] = provider_plan
+    result["render_outputs"] = list(render_outputs)
+    result["render_contract_outputs"] = list(render_outputs)
     result["provider_context_authority"] = "INTERPRETATION"
     result["provider_must_not_reselect_context"] = True
     result["provider_dialogue_trajectory"] = trajectory
