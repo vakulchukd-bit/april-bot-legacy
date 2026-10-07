@@ -47,6 +47,18 @@ def _uid(user_id: Any) -> str:
     return value
 
 
+def _prune(state: dict[str, Any], now: float | None = None) -> None:
+    stamp = float(now if now is not None else time.time())
+    cutoff = stamp - DIALOGUE_WINDOW_SECONDS
+    pairs = [
+        deepcopy(row)
+        for row in (state.get("dialogue_pairs") or [])
+        if isinstance(row, dict) and float(row.get("created_at") or 0) >= cutoff
+    ]
+    pairs.sort(key=lambda x: (float(x.get("created_at") or 0), int(x.get("turn_index") or 0)))
+    state["dialogue_pairs"] = pairs
+
+
 def get_state(user_id: Any) -> dict[str, Any]:
     uid = _uid(user_id)
     with _LOCK:
@@ -54,25 +66,21 @@ def get_state(user_id: Any) -> dict[str, Any]:
         if state is None:
             state = _new_state(uid)
             _STATES[uid] = state
+        _prune(state)
+        state["updated_at"] = time.time()
         return state
 
 
 def hydrate(user_id: Any, rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Replace the in-memory 12h window from processor-loaded DB rows."""
+    """Enforce the live rolling 12-hour window; rows are optional compatibility input."""
     state = get_state(user_id)
-    now = time.time()
-    clean: list[dict[str, Any]] = []
-    for row in rows or []:
-        if not isinstance(row, dict):
-            continue
-        created = float(row.get("created_at") or now)
-        if now - created <= DIALOGUE_WINDOW_SECONDS:
-            clean.append(deepcopy(row))
-    clean.sort(key=lambda x: (float(x.get("created_at") or 0), int(x.get("turn_index") or 0)))
+    if rows is not None:
+        with _LOCK:
+            state["dialogue_pairs"] = [deepcopy(row) for row in rows if isinstance(row, dict)]
     with _LOCK:
-        state["dialogue_pairs"] = clean
-        state["last_activity"] = now
-        state["updated_at"] = now
+        _prune(state)
+        state["last_activity"] = time.time()
+        state["updated_at"] = state["last_activity"]
         return state
 
 
