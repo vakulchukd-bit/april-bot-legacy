@@ -67,7 +67,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v18_12h_live_dialogue_v5"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v18_12h_live_dialogue_v6_render_transport_repair"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
@@ -220,7 +220,7 @@ STRUCTURED_REPRESENTATIONS = tuple(x for x in REPRESENTATION_UNIVERSE if x != "t
 
 OPERATION_HYPOTHESES = {
     "answer": "ответить объяснить рассказать сообщить дать информацию назвать называть название наименование",
-    "build": "создать построить сформировать нарисовать начертить изобразить результат",
+    "build": "создать построить сформировать нарисовать начертить изобразить написать напиши написать код реализовать реализуй программный код скрипт результат; create build write implement source code script",
     "present": "показать отобразить продемонстрировать вывести представить результат",
 
     "compare": "сравнить сопоставить различия сходства",
@@ -300,7 +300,7 @@ class QuantumContextUnderstandingEngine:
     by the canonical interpretation engine.
     """
 
-    VERSION = "QUANTUM_CONTEXT_UNDERSTANDING_V4_FAST_HOTPATH"
+    VERSION = "QUANTUM_CONTEXT_UNDERSTANDING_V4_FAST_HOTPATH_RENDER_SAFE"
     TOPIC_WINDOW = 12
     ENTITY_WINDOW = 8
     NLI_ENABLED = (
@@ -505,6 +505,10 @@ class QuantumContextUnderstandingEngine:
         audio_signal = bool(re.search(r"\b(?:аудио|голос|audio|voice|sound)\b", source_text, re.I))
         video_signal = bool(re.search(r"\b(?:видео|ролик|video)\b", source_text, re.I))
         file_signal = bool(re.search(r"\b(?:файл|документ|attachment|file|pdf|docx?)\b", source_text, re.I))
+        code_request_signal = bool(re.search(
+            r"\b(?:код|программ(?:а|ный|ирование|ировать)|скрипт|python|питон|пайто(?:н|нчик)|пейтон)\b",
+            source_text, re.I,
+        ))
 
         for src in sources:
             keys = {str(k).lower(): v for k, v in src.items()}
@@ -597,6 +601,12 @@ class QuantumContextUnderstandingEngine:
         best = op_rank[0][0] if op_rank else "answer"
         flags = modality.get("flags", {})
 
+        # A direct source-code request is a build task even when generic verbs
+        # such as "для приложения" make the calculate prototype score higher.
+        code_score = max(float(objects.get("code", 0.0) or 0.0), float(reps.get("code", 0.0) or 0.0))
+        if flags.get("code") and code_score >= 0.08:
+            best = "build"
+
         # Explicit arithmetic structure is strong CALCULATE evidence even when
         # natural-language wording pulls another operation prototype upward.
         if flags.get("number") and re.search(
@@ -638,7 +648,8 @@ class QuantumContextUnderstandingEngine:
         for label, obj_score in objects.items():
             if label not in cls.OUTPUT_UNIVERSE or label == "text":
                 continue
-            if best in compatible.get(label, set()) and obj_score >= 0.08:
+            rep_score = float(reps.get(label, 0.0) or 0.0)
+            if best in compatible.get(label, set()) and (obj_score >= 0.08) and (label == best or rep_score >= 0.10):
                 compatible_object_candidates.append((label, obj_score))
         compatible_object_candidates.sort(key=lambda item: item[1], reverse=True)
         for label, _ in compatible_object_candidates[:4]:
@@ -649,7 +660,7 @@ class QuantumContextUnderstandingEngine:
         for label, rep_score in sorted(reps.items(), key=lambda item: item[1], reverse=True):
             if label == "text" or label not in cls.OUTPUT_UNIVERSE:
                 continue
-            if rep_score < 0.10:
+            if rep_score < 0.16:
                 continue
             if best in compatible.get(label, set()) or label in {
                 "formula" if flags.get("formula") else "",
@@ -2897,74 +2908,75 @@ class QuantumInterpretationEngine:
         best_obj_score=float(obj.get(best_obj,0.0))
         best_op=op_rank[0][0] if op_rank else "answer"
         best_op_score=float(op.get(best_op,0.0))
+        goal_rank=rank(goal)
         best_goal=goal_rank[0][0] if goal_rank else "understand"
-        best_goal_score=float(goal.get(best_goal,0.0))
 
-        # Canonical image task: an action that constructs/presents a visual object
-        # must route to the image renderer even when the representation matrix
-        # under-scores the single word "image". This is a task-vector decision
-        # (operation + object + visual action), not a lexical trigger.
-        image_rep_score = float(rep.get("image", 0.0) or 0.0)
-        image_obj_score = float(obj.get("image", 0.0) or 0.0)
-        if (
-            best_op in {"build", "modify", "present"}
-            and features.get("visual_action") is True
-            and (best_obj == "image" or image_obj_score >= 0.035)
-            and (best_rep == "image" or image_rep_score >= 0.035)
-        ):
-            return "image", "semantic_visual_image_task", True
+        # Direct code requests must not be classified as calculation/text merely
+        # because the surrounding sentence contains generic application wording.
+        code_score=max(float(rep.get("code",0.0) or 0.0), float(obj.get("code",0.0) or 0.0))
+        code_request_text = bool(re.search(
+            r"\b(?:код|программ(?:а|ный|ирование|ировать)|скрипт|python|питон|пайтон|пейтон)\b",
+            str(text or ""), re.I,
+        ))
+        if code_request_text and code_score >= 0.03:
+            return "code","semantic_source_code_task",True
+        if features.get("code_request") or (features.get("code") and code_score >= 0.08):
+            return "code","semantic_source_code_task",True
 
+        # Strong structured representations get precedence over generic image or
+        # geometric heuristics.  This is semantic task resolution, not keyword routing.
         compatible_ops={
-            "graph":{"build","modify","present","calculate","analyze","list","explain"},
-            "diagram":{"build","modify","present","explain"},
-            "table":{"build","modify","present","compare","list","explain"},
+            "graph":{"build","modify","present","calculate","analyze","list","explain","compare"},
+            "diagram":{"build","modify","present","explain","analyze"},
+            "table":{"build","modify","present","compare","list","explain","analyze"},
             "formula":{"build","modify","present","calculate","explain","answer"},
             "link":{"retrieve","present","answer","explain","list"},
-            "code":{"build","modify","present","explain","list"},
-            "image":{"build","modify","present"},
-            "gallery":{"build","present"},
-            "file":{"retrieve","present"},
-            "audio":{"build","present"},
-            "video":{"build","present"},
+            "code":{"build","modify","present","explain","list","analyze"},
+            "image":{"build","modify","present","create"},
+            "gallery":{"build","present","compare","list"},
+            "file":{"retrieve","present","analyze","read"},
+            "audio":{"build","present","analyze","read"},
+            "video":{"build","present","analyze","read"},
             "action":{"build","modify","present"},
             "scene":{"build","modify","present"},
             "memory":{"retrieve","answer","present"},
             "visual_context":{"answer","analyze","explain"},
         }
-        aligned = best_op in compatible_ops.get(best_rep,set())
 
-        # Strong structural interpretation for a self-contained visual construction.
-        # This is intentionally a task-vector rule: operation + object/constraint
-        # evidence must agree before a structured representation is locked.
+        image_rep_score=float(rep.get("image",0.0) or 0.0)
+        image_obj_score=float(obj.get("image",0.0) or 0.0)
+        visual_action=bool(features.get("visual_action") or features.get("visual_construction"))
+
+        # Explicit image-generation tasks retain the image route.
+        if (
+            best_op in {"build","modify","present","create"}
+            and visual_action
+            and (best_obj=="image" or image_obj_score>=0.035)
+            and (best_rep=="image" or image_rep_score>=0.035)
+        ):
+            return "image","semantic_visual_image_task",True
+
+        # Prefer a clearly supported structured representation before falling back
+        # to the broad geometric-image detector.
+        structured_ranked=[]
+        for label, score in rep_rank:
+            if label=="text" or label not in compatible_ops:
+                continue
+            score=float(score or 0.0)
+            object_score=float(obj.get(label,0.0) or 0.0)
+            aligned=best_op in compatible_ops[label]
+            if score>=0.035 and aligned and (object_score>=0.05 or label==best_obj):
+                structured_ranked.append((label,score,object_score))
+        if structured_ranked:
+            label,score,object_score=structured_ranked[0]
+            margin=score-float(rep.get("text",0.0) or 0.0)
+            if score>=0.10 or object_score>=0.08 or margin>=0.015:
+                return label,"task_object_goal_resolution",True
+
+        # Geometric construction remains a diagram when the task has explicit shape
+        # construction semantics and no stronger structured representation won.
         if features.get("visual_construction") and not self._negated_representation_labels(text):
-            return "diagram", "semantic_visual_construction", True
-
-        if best_rep != "text" and aligned:
-            rep_margin = best_rep_score - second_rep_score
-            object_agreement = best_obj == best_rep and best_obj_score >= 0.05
-            representation_clear = (
-                best_rep_score >= 0.10 and
-                (rep_margin >= 0.015 or best_rep_score >= 0.22)
-            )
-            if representation_clear and (object_agreement or best_rep_score >= 0.16):
-                return best_rep,"task_object_goal_resolution",True
-
-            production_ops = {"build", "modify", "present"}
-            production_signal = max(float(op.get(name,0.0) or 0.0) for name in production_ops)
-            production_goal = max(float(goal.get(name,0.0) or 0.0) for name in {"visualize","transform","present","organize"})
-            object_alignment = best_obj == best_rep and best_obj_score >= 0.10
-            representation_dominance = best_rep_score >= max(0.09, float(rep.get("text",0.0) or 0.0) + 0.025)
-            structured_task = (
-                best_rep != "text"
-                and object_alignment
-                and representation_dominance
-                and (production_signal >= 0.055 or (aligned and best_op_score >= 0.08))
-                and (production_goal >= 0.035 or best_rep_score >= 0.14)
-            )
-            if structured_task:
-                return best_rep,"semantic_task_vector_resolution",True
-            if aligned and best_rep_score >= 0.10 and best_op_score >= 0.08:
-                return best_rep,"operation_representation_resolution",True
+            return "diagram","semantic_visual_construction",True
 
         return "text","unresolved",False
 
@@ -6474,40 +6486,13 @@ def _resolve_multi_render_outputs(
     production: str,
     explicit: list[str] | None,
 ) -> list[str]:
-    """Preserve every semantically supported render requested by the current turn.
+    """Build one multi-render plan from the current turn plus explicit semantic segments.
 
-    Renderer order never decides intent. Explicit outputs, the context task matrix,
-    and strong representation/object agreement are merged into one canonical plan.
+    Each current-turn clause is measured independently by the same semantic matrix.
+    No second OpenAI call and no second dialogue search are introduced.
     """
     profile = profile if isinstance(profile, dict) else {}
     task_understanding = task_understanding if isinstance(task_understanding, dict) else {}
-    rep_scores = profile.get("representation_scores") if isinstance(profile.get("representation_scores"), dict) else {}
-    obj_scores = profile.get("object_scores") if isinstance(profile.get("object_scores"), dict) else {}
-    op = str(profile.get("best_operation") or "").lower()
-
-    compatible_ops = {
-        "graph": {"build","modify","present","calculate","analyze","compare","list","explain"},
-        "table": {"build","modify","present","compare","list","explain","analyze"},
-        "diagram": {"build","modify","present","explain","analyze"},
-        "formula": {"build","modify","present","calculate","explain","answer"},
-        "image": {"build","create","generate","modify","present"},
-        "gallery": {"build","present","compare","list"},
-        "code": {"build","modify","present","explain","analyze"},
-        "link": {"retrieve","present","answer","list","explain"},
-        "file": {"retrieve","present","analyze","read"},
-        "audio": {"retrieve","present","analyze","read"},
-        "video": {"build","present","analyze","read"},
-        "action": {"build","modify","present"},
-        "scene": {"build","modify","present"},
-    }
-
-    values = []
-    values.extend(explicit or [])
-    task_outputs = task_understanding.get("requested_outputs") or []
-    if isinstance(task_outputs, str):
-        task_outputs = [task_outputs]
-    values.extend(task_outputs)
-
     result: list[str] = []
 
     def add(value: Any) -> None:
@@ -6515,28 +6500,77 @@ def _resolve_multi_render_outputs(
         if label and label not in result:
             result.append(label)
 
-    for value in values:
+    for value in explicit or []:
         add(value)
-
-    # Strong independent evidence can authorize additional renderers; this is the
-    # multi-render path that prevents "first renderer wins".
-    for label, raw_score in sorted(
-        rep_scores.items(),
-        key=lambda item: float(item[1] or 0.0),
-        reverse=True,
-    ):
-        label = _clean_representation(label)
-        if not label or label == "text":
-            continue
-        rep_score = float(raw_score or 0.0)
-        obj_score = float(obj_scores.get(label, 0.0) or 0.0)
-        if label in compatible_ops and op in compatible_ops[label] and rep_score >= 0.16 and obj_score >= 0.07:
-            add(label)
-
+    for value in (task_understanding.get("requested_outputs") or []):
+        add(value)
     add(production)
 
-    if any(item != "text" for item in result):
-        result.insert(0, "text")
+    # Analyse each semantically separable clause of THIS turn.  This prevents the
+    # first renderer from swallowing later requested representations.
+    segments = []
+    try:
+        segments = QuantumContextUnderstandingEngine._request_segments(text)
+    except Exception:
+        segments = []
+    if len(segments) >= 2:
+        for segment in segments[:16]:
+            segment_text = str(segment.get("text") or "").strip()
+            if not segment_text or segment_text.casefold() == str(text).strip().casefold():
+                continue
+            try:
+                measured = QUANTUM_INTERPRETATION_ENGINE.measure(segment_text)
+            except Exception:
+                measured = {}
+            seg_rep = measured.get("representation_scores") if isinstance(measured.get("representation_scores"), dict) else {}
+            seg_obj = measured.get("object_scores") if isinstance(measured.get("object_scores"), dict) else {}
+            seg_op = str(measured.get("best_operation") or measured.get("operation") or "").lower()
+            # The segment gets one representation when its object/representation
+            # evidence is strong enough. A code clause is explicitly supported.
+            best = sorted(seg_rep.items(), key=lambda kv: float(kv[1] or 0.0), reverse=True)
+            for label, raw_score in best:
+                label = _clean_representation(label)
+                score = float(raw_score or 0.0)
+                obj_score = float(seg_obj.get(label, 0.0) or 0.0)
+                if label == "text" or (score < 0.035 and obj_score < 0.05):
+                    continue
+                if label == "code" and re.search(r"\b(?:код|python|питон|пайто(?:н|нчик)|пейтон|программ)\b", segment_text, re.I):
+                    add("code")
+                    break
+                if obj_score >= 0.05 and label in {
+                    "graph","table","diagram","formula","image","gallery","code","link","file","audio","video","action","scene"
+                }:
+                    add(label)
+                    break
+
+    # Strong same-turn matrix evidence can add another render, but only when it is
+    # materially supported; weak cross-talk cannot create a renderer.
+    rep_scores = profile.get("representation_scores") if isinstance(profile.get("representation_scores"), dict) else {}
+    obj_scores = profile.get("object_scores") if isinstance(profile.get("object_scores"), dict) else {}
+    best_operation = str(profile.get("best_operation") or "").lower()
+    compat = {
+        "graph":{"build","modify","present","calculate","analyze","compare","list","explain"},
+        "table":{"build","modify","present","compare","list","explain","analyze"},
+        "diagram":{"build","modify","present","explain","analyze"},
+        "formula":{"build","modify","present","calculate","explain","answer"},
+        "image":{"build","create","generate","modify","present"},
+        "gallery":{"build","present","compare","list"},
+        "code":{"build","modify","present","explain","analyze"},
+        "link":{"retrieve","present","answer","list","explain"},
+    }
+    for label, raw_score in sorted(rep_scores.items(), key=lambda kv: float(kv[1] or 0.0), reverse=True):
+        label = _clean_representation(label)
+        score = float(raw_score or 0.0)
+        if label in {"", "text"} or label not in compat or score < 0.16:
+            continue
+        if best_operation in compat[label] and float(obj_scores.get(label, 0.0) or 0.0) >= 0.07:
+            add(label)
+
+    if any(x != "text" for x in result):
+        # Text is a companion channel for the scene; it is not allowed to replace
+        # any of the requested structured renderers.
+        if "text" not in result:
+            result.insert(0, "text")
     return result or ["text"]
 
 
@@ -6825,6 +6859,16 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
     else:
         result["resolved_request"] = current
 
+    # Preserve a semantic code-task flag for the production resolver.  This is
+    # derived from the matrix/modality evidence, not from renderer choice.
+    semantic_profile_now = result.get("semantic_profile") if isinstance(result.get("semantic_profile"), dict) else {}
+    request_feature_flags = semantic_profile_now.get("request_features") if isinstance(semantic_profile_now.get("request_features"), dict) else {}
+    request_feature_flags["code_request"] = bool(
+        re.search(r"\b(?:код|программ(?:а|ный|ирование|ировать)|скрипт|python|питон|пайто(?:н|нчик)|пейтон)\b", current, re.I)
+    )
+    semantic_profile_now["request_features"] = request_feature_flags
+    result["semantic_profile"] = semantic_profile_now
+
     result["semantic_task"] = semantic_task
     result["three_way_relation"] = relation
     result["two_way_relation"] = relation
@@ -6964,6 +7008,10 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         production=base_rep,
         explicit=result.get("requested_representations") or [],
     )
+    if base_rep == "text":
+        nontext_outputs = [x for x in render_outputs if x != "text"]
+        if nontext_outputs:
+            base_rep = nontext_outputs[0]
 
     result["representation"] = base_rep
     result["requested_representation"] = base_rep
@@ -6973,20 +7021,6 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
     result["required_representations"] = [x for x in render_outputs if x != "text"]
     result["requested_representations"] = list(render_outputs)
     result["visual_generation_request"] = visual_request
-
-    render_contract_outputs = list(render_outputs)
-    render_contract_requirements = {
-        output: render_requirements.get(
-            output,
-            {
-                "must_return": ["answer"],
-                "renderer": "MessageTextBlock",
-                "no_text_fallback": False,
-            },
-        )
-        for output in render_contract_outputs
-        if output != "text"
-    }
 
     # Structured scene contract: interpretation explains the job to the provider,
     # while the current user request remains the immutable semantic anchor.
@@ -7022,11 +7056,34 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
             "renderer": "C_APRIL_IMAGES_GENERATOR",
             "no_text_fallback": True,
         },
-    }.get(base_rep, {
-        "must_return": ["answer"],
-        "renderer": "MessageTextBlock",
-        "no_text_fallback": False,
-    })
+        "code": {
+            "must_return": ["language", "code"],
+            "renderer": "CodeBlock",
+            "no_text_fallback": True,
+        },
+        "link": {
+            "must_return": ["url"],
+            "renderer": "LinkCard",
+            "no_text_fallback": True,
+        },
+    }
+
+    render_contract_outputs = list(render_outputs)
+
+    # Render-contract requirements are derived only after the full requirement
+    # registry exists. This removes the UnboundLocalError seen before OpenAI.
+    render_contract_requirements = {
+        output: render_requirements.get(
+            output,
+            {
+                "must_return": ["answer"],
+                "renderer": "MessageTextBlock",
+                "no_text_fallback": False,
+            },
+        )
+        for output in render_contract_outputs
+        if output != "text"
+    }
 
     # The trajectory is compacted here, not selected again by Provider.
     trajectory = [
