@@ -67,7 +67,7 @@ RESPONSE_COMPLEXITY_HIGH = "HIGH"
 
 DECISION_OWNER = "QUANTUM_PROCESSOR"
 TRANSPORT_NAME = "transport_state"
-INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v18_12h_live_dialogue_v6_render_transport_repair"
+INTERPRETATION_ENGINE_VERSION = "quantum_interpretation_engine_v18_12h_live_dialogue_v5"
 print("🧠 APRIL INTERPRETATION BUILD:", INTERPRETATION_ENGINE_VERSION)
 
 SEMANTIC_MODEL_NAME = os.getenv(
@@ -220,7 +220,7 @@ STRUCTURED_REPRESENTATIONS = tuple(x for x in REPRESENTATION_UNIVERSE if x != "t
 
 OPERATION_HYPOTHESES = {
     "answer": "ответить объяснить рассказать сообщить дать информацию назвать называть название наименование",
-    "build": "создать построить сформировать нарисовать начертить изобразить написать напиши написать код реализовать реализуй программный код скрипт результат; create build write implement source code script",
+    "build": "создать построить сформировать нарисовать начертить изобразить результат",
     "present": "показать отобразить продемонстрировать вывести представить результат",
 
     "compare": "сравнить сопоставить различия сходства",
@@ -280,6 +280,80 @@ def _clean_representation(value: Any) -> str:
     return value if value in REPRESENTATION_UNIVERSE else ""
 
 
+def _visual_generation_route_policy(
+    text: str,
+    *,
+    visual_action: bool,
+    current_self_contained: bool,
+    previous_scene: dict | None = None,
+    inherited_representation: str = "",
+) -> dict[str, Any]:
+    """Choose visual complexity only after Interpretation has established visual intent.
+
+    This is deliberately not a keyword trigger.  The request must already be a
+    semantic visual production task.  A bare ``нарисуй <object>`` gets the light
+    structured/diagram route; explicit image/photo/realism/detail requirements,
+    or continuation of an existing Image/Gallery scene, retain the full image
+    route.
+    """
+    normalized = str(text or "").strip().lower()
+    if not visual_action:
+        return {"route": "none", "tier": "none", "reason": "no_visual_intent"}
+
+    explicit_image = bool(re.search(
+        r"(?:картинк\w*|изображен\w*|фото\w*|фотограф\w*|picture\b|image\b|photo\b)",
+        normalized,
+        flags=re.IGNORECASE,
+    ))
+    explicit_realism = bool(re.search(
+        r"(?:фотореалист|реалистичн|как\s+(?:жив|на\s+фото)|\bреальн(?:ый|ая|ое|ую)\b|\bдетальн(?:о|ый|ая|ое|ую)\b|\bкинематограф|cinematic|photoreal|hyperreal|high[ -]?detail|3d)",
+        normalized,
+        flags=re.IGNORECASE,
+    ))
+    explicit_diagram = bool(re.search(
+        r"(?:схем\w*|диаграмм\w*|черт[её]ж\w*|блок[- ]?схем\w*|flowchart\b|schematic\b)",
+        normalized,
+        flags=re.IGNORECASE,
+    ))
+
+    prior_types = []
+    if isinstance(previous_scene, dict):
+        prior_types = [
+            _clean_representation(x)
+            for x in (previous_scene.get("render_block_types") or [])
+            if _clean_representation(x)
+        ]
+        if not prior_types:
+            prior_types = [
+                _clean_representation(
+                    block.get("type") or block.get("artifact_type") or block.get("representation")
+                )
+                for block in (previous_scene.get("render_blocks") or [])
+                if isinstance(block, dict)
+            ]
+    inherited_image = inherited_representation in {"image", "gallery"} or any(
+        item in {"image", "gallery"} for item in prior_types
+    )
+
+    if explicit_diagram and not (explicit_image or explicit_realism):
+        return {"route": "diagram", "tier": "light", "reason": "explicit_structured_visual"}
+    if explicit_image or explicit_realism or inherited_image:
+        return {
+            "route": "image_generation",
+            "tier": "complex",
+            "reason": (
+                "explicit_image_request" if explicit_image
+                else "explicit_realism_or_detail" if explicit_realism
+                else "continuation_of_image_scene"
+            ),
+        }
+
+    # Interpretation has already established the visual task.  Without an
+    # independent signal requiring a full image model, use the lightweight
+    # structured route.
+    return {"route": "diagram", "tier": "light", "reason": "visual_intent_without_image_2_signal"}
+
+
 class QuantumContextUnderstandingEngine:
     """
     Context-first semantic fusion layer.
@@ -300,7 +374,7 @@ class QuantumContextUnderstandingEngine:
     by the canonical interpretation engine.
     """
 
-    VERSION = "QUANTUM_CONTEXT_UNDERSTANDING_V4_FAST_HOTPATH_RENDER_SAFE"
+    VERSION = "QUANTUM_CONTEXT_UNDERSTANDING_V4_FAST_HOTPATH"
     TOPIC_WINDOW = 12
     ENTITY_WINDOW = 8
     NLI_ENABLED = (
@@ -505,10 +579,6 @@ class QuantumContextUnderstandingEngine:
         audio_signal = bool(re.search(r"\b(?:аудио|голос|audio|voice|sound)\b", source_text, re.I))
         video_signal = bool(re.search(r"\b(?:видео|ролик|video)\b", source_text, re.I))
         file_signal = bool(re.search(r"\b(?:файл|документ|attachment|file|pdf|docx?)\b", source_text, re.I))
-        code_request_signal = bool(re.search(
-            r"\b(?:код|программ(?:а|ный|ирование|ировать)|скрипт|python|питон|пайто(?:н|нчик)|пейтон)\b",
-            source_text, re.I,
-        ))
 
         for src in sources:
             keys = {str(k).lower(): v for k, v in src.items()}
@@ -601,12 +671,6 @@ class QuantumContextUnderstandingEngine:
         best = op_rank[0][0] if op_rank else "answer"
         flags = modality.get("flags", {})
 
-        # A direct source-code request is a build task even when generic verbs
-        # such as "для приложения" make the calculate prototype score higher.
-        code_score = max(float(objects.get("code", 0.0) or 0.0), float(reps.get("code", 0.0) or 0.0))
-        if flags.get("code") and code_score >= 0.08:
-            best = "build"
-
         # Explicit arithmetic structure is strong CALCULATE evidence even when
         # natural-language wording pulls another operation prototype upward.
         if flags.get("number") and re.search(
@@ -648,8 +712,7 @@ class QuantumContextUnderstandingEngine:
         for label, obj_score in objects.items():
             if label not in cls.OUTPUT_UNIVERSE or label == "text":
                 continue
-            rep_score = float(reps.get(label, 0.0) or 0.0)
-            if best in compatible.get(label, set()) and (obj_score >= 0.08) and (label == best or rep_score >= 0.10):
+            if best in compatible.get(label, set()) and obj_score >= 0.08:
                 compatible_object_candidates.append((label, obj_score))
         compatible_object_candidates.sort(key=lambda item: item[1], reverse=True)
         for label, _ in compatible_object_candidates[:4]:
@@ -660,7 +723,7 @@ class QuantumContextUnderstandingEngine:
         for label, rep_score in sorted(reps.items(), key=lambda item: item[1], reverse=True):
             if label == "text" or label not in cls.OUTPUT_UNIVERSE:
                 continue
-            if rep_score < 0.16:
+            if rep_score < 0.10:
                 continue
             if best in compatible.get(label, set()) or label in {
                 "formula" if flags.get("formula") else "",
@@ -901,8 +964,6 @@ class QuantumContextUnderstandingEngine:
                 continue
             role = str(item.get("role") or "").lower()
             content = self._compact(item.get("content") or item.get("text") or item.get("answer"), 1200)
-            if role in {"assistant", "april", "bot"} and not _is_semantic_dialogue_answer(content):
-                continue
             if role in {"user", "human"}:
                 pending_user = content
             elif role in {"assistant", "april", "bot"} and pending_user:
@@ -1569,9 +1630,6 @@ class QuantumInterpretationEngine:
                 continue
             if role in {"assistant", "april", "bot"}:
                 answer = cls.normalize(item.get("content") or item.get("answer") or item.get("text") or item.get("summary"))
-                if answer and not _is_semantic_dialogue_answer(answer):
-                    pending_user = ""
-                    continue
                 if pending_user and answer:
                     pairs.append({
                         "user": pending_user[:700],
@@ -2908,75 +2966,74 @@ class QuantumInterpretationEngine:
         best_obj_score=float(obj.get(best_obj,0.0))
         best_op=op_rank[0][0] if op_rank else "answer"
         best_op_score=float(op.get(best_op,0.0))
-        goal_rank=rank(goal)
         best_goal=goal_rank[0][0] if goal_rank else "understand"
+        best_goal_score=float(goal.get(best_goal,0.0))
 
-        # Direct code requests must not be classified as calculation/text merely
-        # because the surrounding sentence contains generic application wording.
-        code_score=max(float(rep.get("code",0.0) or 0.0), float(obj.get("code",0.0) or 0.0))
-        code_request_text = bool(re.search(
-            r"\b(?:код|программ(?:а|ный|ирование|ировать)|скрипт|python|питон|пайтон|пейтон)\b",
-            str(text or ""), re.I,
-        ))
-        if code_request_text and code_score >= 0.03:
-            return "code","semantic_source_code_task",True
-        if features.get("code_request") or (features.get("code") and code_score >= 0.08):
-            return "code","semantic_source_code_task",True
+        # Canonical image task: an action that constructs/presents a visual object
+        # must route to the image renderer even when the representation matrix
+        # under-scores the single word "image". This is a task-vector decision
+        # (operation + object + visual action), not a lexical trigger.
+        image_rep_score = float(rep.get("image", 0.0) or 0.0)
+        image_obj_score = float(obj.get("image", 0.0) or 0.0)
+        if (
+            best_op in {"build", "modify", "present"}
+            and features.get("visual_action") is True
+            and (best_obj == "image" or image_obj_score >= 0.035)
+            and (best_rep == "image" or image_rep_score >= 0.035)
+        ):
+            return "image", "semantic_visual_image_task", True
 
-        # Strong structured representations get precedence over generic image or
-        # geometric heuristics.  This is semantic task resolution, not keyword routing.
         compatible_ops={
-            "graph":{"build","modify","present","calculate","analyze","list","explain","compare"},
-            "diagram":{"build","modify","present","explain","analyze"},
-            "table":{"build","modify","present","compare","list","explain","analyze"},
+            "graph":{"build","modify","present","calculate","analyze","list","explain"},
+            "diagram":{"build","modify","present","explain"},
+            "table":{"build","modify","present","compare","list","explain"},
             "formula":{"build","modify","present","calculate","explain","answer"},
             "link":{"retrieve","present","answer","explain","list"},
-            "code":{"build","modify","present","explain","list","analyze"},
-            "image":{"build","modify","present","create"},
-            "gallery":{"build","present","compare","list"},
-            "file":{"retrieve","present","analyze","read"},
-            "audio":{"build","present","analyze","read"},
-            "video":{"build","present","analyze","read"},
+            "code":{"build","modify","present","explain","list"},
+            "image":{"build","modify","present"},
+            "gallery":{"build","present"},
+            "file":{"retrieve","present"},
+            "audio":{"build","present"},
+            "video":{"build","present"},
             "action":{"build","modify","present"},
             "scene":{"build","modify","present"},
             "memory":{"retrieve","answer","present"},
             "visual_context":{"answer","analyze","explain"},
         }
+        aligned = best_op in compatible_ops.get(best_rep,set())
 
-        image_rep_score=float(rep.get("image",0.0) or 0.0)
-        image_obj_score=float(obj.get("image",0.0) or 0.0)
-        visual_action=bool(features.get("visual_action") or features.get("visual_construction"))
-
-        # Explicit image-generation tasks retain the image route.
-        if (
-            best_op in {"build","modify","present","create"}
-            and visual_action
-            and (best_obj=="image" or image_obj_score>=0.035)
-            and (best_rep=="image" or image_rep_score>=0.035)
-        ):
-            return "image","semantic_visual_image_task",True
-
-        # Prefer a clearly supported structured representation before falling back
-        # to the broad geometric-image detector.
-        structured_ranked=[]
-        for label, score in rep_rank:
-            if label=="text" or label not in compatible_ops:
-                continue
-            score=float(score or 0.0)
-            object_score=float(obj.get(label,0.0) or 0.0)
-            aligned=best_op in compatible_ops[label]
-            if score>=0.035 and aligned and (object_score>=0.05 or label==best_obj):
-                structured_ranked.append((label,score,object_score))
-        if structured_ranked:
-            label,score,object_score=structured_ranked[0]
-            margin=score-float(rep.get("text",0.0) or 0.0)
-            if score>=0.10 or object_score>=0.08 or margin>=0.015:
-                return label,"task_object_goal_resolution",True
-
-        # Geometric construction remains a diagram when the task has explicit shape
-        # construction semantics and no stronger structured representation won.
+        # Strong structural interpretation for a self-contained visual construction.
+        # This is intentionally a task-vector rule: operation + object/constraint
+        # evidence must agree before a structured representation is locked.
         if features.get("visual_construction") and not self._negated_representation_labels(text):
-            return "diagram","semantic_visual_construction",True
+            return "diagram", "semantic_visual_construction", True
+
+        if best_rep != "text" and aligned:
+            rep_margin = best_rep_score - second_rep_score
+            object_agreement = best_obj == best_rep and best_obj_score >= 0.05
+            representation_clear = (
+                best_rep_score >= 0.10 and
+                (rep_margin >= 0.015 or best_rep_score >= 0.22)
+            )
+            if representation_clear and (object_agreement or best_rep_score >= 0.16):
+                return best_rep,"task_object_goal_resolution",True
+
+            production_ops = {"build", "modify", "present"}
+            production_signal = max(float(op.get(name,0.0) or 0.0) for name in production_ops)
+            production_goal = max(float(goal.get(name,0.0) or 0.0) for name in {"visualize","transform","present","organize"})
+            object_alignment = best_obj == best_rep and best_obj_score >= 0.10
+            representation_dominance = best_rep_score >= max(0.09, float(rep.get("text",0.0) or 0.0) + 0.025)
+            structured_task = (
+                best_rep != "text"
+                and object_alignment
+                and representation_dominance
+                and (production_signal >= 0.055 or (aligned and best_op_score >= 0.08))
+                and (production_goal >= 0.035 or best_rep_score >= 0.14)
+            )
+            if structured_task:
+                return best_rep,"semantic_task_vector_resolution",True
+            if aligned and best_rep_score >= 0.10 and best_op_score >= 0.08:
+                return best_rep,"operation_representation_resolution",True
 
         return "text","unresolved",False
 
@@ -3510,7 +3567,25 @@ class QuantumInterpretationEngine:
                 dialogue_vector["visual_context_source"] = "STATE_MANAGER_AUTHENTICATED_12H_PAIRS"
                 dialogue_vector["visual_context_turn_index"] = visual_generation_context.get("turn_index", -1)
             if visual_generation_request:
-                production = "image"
+                inherited_representation = ""
+                if isinstance(visual_generation_context, dict):
+                    try:
+                        inherited_profile = self.measure(visual_generation_context.get("user") or "")
+                        inherited_representation = str(
+                            inherited_profile.get("best_representation")
+                            or inherited_profile.get("best_object")
+                            or ""
+                        ).lower()
+                    except Exception:
+                        inherited_representation = ""
+                visual_route = _visual_generation_route_policy(
+                    text,
+                    visual_action=current_visual_action,
+                    current_self_contained=current_self_contained,
+                    previous_scene=previous_scene,
+                    inherited_representation=inherited_representation,
+                )
+                production = visual_route["route"]
                 source = (
                     "STATE_MANAGER_AUTHENTICATED_12H_PAIRS"
                     if not current_self_contained
@@ -3518,6 +3593,9 @@ class QuantumInterpretationEngine:
                 )
                 locked = True
                 dialogue_vector["visual_generation_request"] = visual_generation_request
+                dialogue_vector["visual_generation_route"] = visual_route["route"]
+                dialogue_vector["visual_generation_tier"] = visual_route["tier"]
+                dialogue_vector["visual_generation_route_reason"] = visual_route["reason"]
             if visual_generation_request and not current_self_contained:
                 dialogue_vector.update({
                     "three_way_relation": "CONTINUE",
@@ -3739,6 +3817,9 @@ class QuantumInterpretationEngine:
             "ascii_schema_advisory": False,
             "ascii_schema_score": 0.0,
             "visual_generation_request": visual_generation_request,
+            "visual_generation_route": dialogue_vector.get("visual_generation_route") or ("image_generation" if production in {"image", "gallery"} else "diagram" if production == "diagram" else "none"),
+            "visual_generation_tier": dialogue_vector.get("visual_generation_tier") or ("complex" if production in {"image", "gallery"} else "light" if production == "diagram" else "none"),
+            "visual_generation_route_reason": dialogue_vector.get("visual_generation_route_reason") or "",
             "visual_generation_source": (
                 "STATE_MANAGER_AUTHENTICATED_12H_PAIRS"
                 if visual_generation_request and not current_self_contained
@@ -3797,6 +3878,9 @@ class QuantumInterpretationEngine:
             },
             "semantic_task":semantic_task,
             "visual_generation_request": visual_generation_request,
+            "visual_generation_route": dialogue_vector.get("visual_generation_route") or ("image_generation" if production in {"image", "gallery"} else "diagram" if production == "diagram" else "none"),
+            "visual_generation_tier": dialogue_vector.get("visual_generation_tier") or ("complex" if production in {"image", "gallery"} else "light" if production == "diagram" else "none"),
+            "visual_generation_route_reason": dialogue_vector.get("visual_generation_route_reason") or "",
             "visual_generation_source": (
                 "STATE_MANAGER_AUTHENTICATED_12H_PAIRS"
                 if visual_generation_request and not current_self_contained
@@ -4780,8 +4864,8 @@ def _build_provider_context_plan(
         "context_selection_done_before_provider": True,
         "provider_must_not_reselect_context": True,
         "provider_continuation_contract": "Use only the Interpretation-selected dialogue operand/trajectory for CONTINUE or RECALL.",
-        "hard_budget_tokens": 1800,
-        "soft_target_tokens": 1600,
+        "hard_budget_tokens": 900,
+        "soft_target_tokens": 820,
         "new_topic_minimal_context": relation == "NEW",
         "required_context": [
             {"key": "SEMANTIC_CORE", "priority": 1.0, "value": semantic_core},
@@ -5586,32 +5670,6 @@ def _pair_canonical_interpret(self, text, cognition=None, semantic=None, history
             or ""
         ).strip()
     op=str(semantic_task.get("operation") or result.get("operation") or "").lower()
-    # Visual construction is determined from the current request + resolved representation,
-    # not inherited from a previous pair. This prevents stale operations such as
-    # "estimate_cost_of_referenced_items" from hijacking a graph/image request.
-    current_lower = current.lower()
-    if base_rep == "graph":
-        if re.search(r"\b(построй|построить|создай|создать|сделай|сделать|покажи|показать|нарисуй|нарисовать)\b", current_lower):
-            op = "build_graph"
-            semantic_task["goal"] = "visualize_requested_data"
-            semantic_task["object"] = "graph"
-    elif base_rep == "table":
-        if re.search(r"\b(покажи|показать|сделай|сделать|создай|создать|выведи|вывести)\b", current_lower):
-            op = "build_table"
-            semantic_task["goal"] = "organize_requested_data"
-            semantic_task["object"] = "table"
-    elif base_rep in {"image", "gallery"}:
-        if re.search(r"\b(нарисуй|нарисовать|создай|создать|сгенерируй|сгенерировать|покажи|показать|сделай|сделать)\b", current_lower):
-            op = "generate_image" if base_rep == "image" else "generate_gallery"
-            semantic_task["goal"] = "create_requested_visual"
-            semantic_task["object"] = base_rep
-    elif base_rep == "diagram":
-        if re.search(r"\b(нарисуй|нарисовать|построй|построить|создай|создать|покажи|показать)\b", current_lower):
-            op = "build_diagram"
-            semantic_task["goal"] = "visualize_structure"
-            semantic_task["object"] = "diagram"
-    semantic_task["operation"] = op
-    result["operation"] = op
     object_scores = semantic_task.get("object_scores") if isinstance(semantic_task.get("object_scores"),dict) else {}
     base_rep_score = float(object_scores.get(base_rep,0.0) or 0.0)
     # Ordinary explanatory questions are text unless the structured representation
@@ -5732,8 +5790,8 @@ def _pair_canonical_interpret(self, text, cognition=None, semantic=None, history
         "current_request_authoritative":True,
         "context_selection_done_before_provider":True,
         "provider_must_not_reselect_context":True,
-        "hard_budget_tokens":1800,
-        "soft_target_tokens":1600,
+        "hard_budget_tokens":900,
+        "soft_target_tokens":820,
         "provider_continuation_contract":"PAIR_FIRST_12H",
         "required_context":[
             {"key":"SEMANTIC_CORE","priority":1.0,"value":{
@@ -5822,20 +5880,6 @@ _PAIR_CACHE_TTL_SECONDS = 1.5
 _PAIR_CACHE_LOCK = threading.RLock()
 _PAIR_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
-_TECHNICAL_FALLBACK_PREFIXES = (
-    "не удалось сформировать ответ",
-    "не удалось обработать запрос",
-    "ошибка при формировании ответа",
-    "error while generating response",
-)
-
-def _is_semantic_dialogue_answer(text: Any) -> bool:
-    """Return False for transport/provider failure prose stored as an answer."""
-    value = re.sub(r"\s+", " ", str(text or "")).strip().casefold()
-    if not value:
-        return False
-    return not any(value.startswith(prefix) for prefix in _TECHNICAL_FALLBACK_PREFIXES)
-
 
 def _load_persistent_pair_window(user_id: str, limit: int = 15) -> list[dict[str, Any]]:
     uid = str(user_id or "").strip()
@@ -5861,9 +5905,6 @@ def _load_persistent_pair_window(user_id: str, limit: int = 15) -> list[dict[str
             user = str(raw.get("user_text") or raw.get("user") or raw.get("user_request") or "").strip()
             april = str(raw.get("april_text") or raw.get("april") or raw.get("april_answer") or raw.get("assistant") or "").strip()
             if not user or not april:
-                continue
-            if not _is_semantic_dialogue_answer(april):
-                # Transport errors are not USER↔APRIL semantic facts.
                 continue
             rows.append({
                 "user": user[:1200],
@@ -6129,8 +6170,6 @@ def _live_relation_selector(
         april = self.normalize(pair.get("april") or pair.get("april_text") or pair.get("april_answer") or pair.get("assistant") or pair.get("answer"))
         if not user and not april:
             continue
-        if april and not _is_semantic_dialogue_answer(april):
-            continue
         combined = f"{user} {april}".strip()
         prepared.append((i, pair, user, april, combined))
 
@@ -6277,7 +6316,7 @@ def _live_relation_selector(
             selected_index = int(best_row["index"] if best_row else latest_index)
             selected_source = best_row
         selected_pair = dict(selected_source["pair"] if selected_source else window[-1])
-        # Keep only the sequential selected pairs that are semantically related to the
+        # Keep only the 1..4 pairs that are semantically related to the
         # selected continuation anchor. The full 12h window never crosses into
         # the Provider route.
         relation_floor = max(0.10, best_score * 0.55)
@@ -6409,13 +6448,10 @@ def _live_relation_selector(
                 "topic": str(x.get("topic") or x.get("canonical_topic") or "").strip()[:180],
             }
             for x in (context_pairs or []) if isinstance(x, dict)
-        ][-8:],
+        ][-4:],
         "current_request": current[:2400],
-        "trajectory_rule": (
-            "Использовать пары строго как последовательную доказательную цепочку: ранняя постановка → ответ APRIL → уточнение/изменение → следующий ответ APRIL. Последняя пара не отменяет более ранние факты, если текущий запрос явно их сохраняет."
-        ),
         "development": (
-            "Продолжить смысловую траекторию выбранных пар: предыдущие вопросы → реальные ответы APRIL → текущий запрос."
+            "Продолжить смысловую траекторию выбранной пары: предыдущий вопрос → реальный ответ APRIL → текущий запрос."
             if relation == "CONTINUE" else
             "Начать новую задачу, используя найденную связанную историю только для понимания перехода пользователя."
             if context_mode == "NEW_TOPIC_WITH_CONTEXT" else
@@ -6476,102 +6512,6 @@ def _live_relation_selector(
 QuantumInterpretationEngine._select_three_way_dialogue_relation = _live_relation_selector
 
 _PAIR_INTERPRET_ORIGINAL_LIVE = _PAIR_INTERPRET_ORIGINAL
-
-
-def _resolve_multi_render_outputs(
-    text: str,
-    *,
-    profile: dict[str, Any],
-    task_understanding: dict[str, Any] | None,
-    production: str,
-    explicit: list[str] | None,
-) -> list[str]:
-    """Build one multi-render plan from the current turn plus explicit semantic segments.
-
-    Each current-turn clause is measured independently by the same semantic matrix.
-    No second OpenAI call and no second dialogue search are introduced.
-    """
-    profile = profile if isinstance(profile, dict) else {}
-    task_understanding = task_understanding if isinstance(task_understanding, dict) else {}
-    result: list[str] = []
-
-    def add(value: Any) -> None:
-        label = _clean_representation(value)
-        if label and label not in result:
-            result.append(label)
-
-    for value in explicit or []:
-        add(value)
-    for value in (task_understanding.get("requested_outputs") or []):
-        add(value)
-    add(production)
-
-    # Analyse each semantically separable clause of THIS turn.  This prevents the
-    # first renderer from swallowing later requested representations.
-    segments = []
-    try:
-        segments = QuantumContextUnderstandingEngine._request_segments(text)
-    except Exception:
-        segments = []
-    if len(segments) >= 2:
-        for segment in segments[:16]:
-            segment_text = str(segment.get("text") or "").strip()
-            if not segment_text or segment_text.casefold() == str(text).strip().casefold():
-                continue
-            try:
-                measured = QUANTUM_INTERPRETATION_ENGINE.measure(segment_text)
-            except Exception:
-                measured = {}
-            seg_rep = measured.get("representation_scores") if isinstance(measured.get("representation_scores"), dict) else {}
-            seg_obj = measured.get("object_scores") if isinstance(measured.get("object_scores"), dict) else {}
-            seg_op = str(measured.get("best_operation") or measured.get("operation") or "").lower()
-            # The segment gets one representation when its object/representation
-            # evidence is strong enough. A code clause is explicitly supported.
-            best = sorted(seg_rep.items(), key=lambda kv: float(kv[1] or 0.0), reverse=True)
-            for label, raw_score in best:
-                label = _clean_representation(label)
-                score = float(raw_score or 0.0)
-                obj_score = float(seg_obj.get(label, 0.0) or 0.0)
-                if label == "text" or (score < 0.035 and obj_score < 0.05):
-                    continue
-                if label == "code" and re.search(r"\b(?:код|python|питон|пайто(?:н|нчик)|пейтон|программ)\b", segment_text, re.I):
-                    add("code")
-                    break
-                if obj_score >= 0.05 and label in {
-                    "graph","table","diagram","formula","image","gallery","code","link","file","audio","video","action","scene"
-                }:
-                    add(label)
-                    break
-
-    # Strong same-turn matrix evidence can add another render, but only when it is
-    # materially supported; weak cross-talk cannot create a renderer.
-    rep_scores = profile.get("representation_scores") if isinstance(profile.get("representation_scores"), dict) else {}
-    obj_scores = profile.get("object_scores") if isinstance(profile.get("object_scores"), dict) else {}
-    best_operation = str(profile.get("best_operation") or "").lower()
-    compat = {
-        "graph":{"build","modify","present","calculate","analyze","compare","list","explain"},
-        "table":{"build","modify","present","compare","list","explain","analyze"},
-        "diagram":{"build","modify","present","explain","analyze"},
-        "formula":{"build","modify","present","calculate","explain","answer"},
-        "image":{"build","create","generate","modify","present"},
-        "gallery":{"build","present","compare","list"},
-        "code":{"build","modify","present","explain","analyze"},
-        "link":{"retrieve","present","answer","list","explain"},
-    }
-    for label, raw_score in sorted(rep_scores.items(), key=lambda kv: float(kv[1] or 0.0), reverse=True):
-        label = _clean_representation(label)
-        score = float(raw_score or 0.0)
-        if label in {"", "text"} or label not in compat or score < 0.16:
-            continue
-        if best_operation in compat[label] and float(obj_scores.get(label, 0.0) or 0.0) >= 0.07:
-            add(label)
-
-    if any(x != "text" for x in result):
-        # Text is a companion channel for the scene; it is not allowed to replace
-        # any of the requested structured renderers.
-        if "text" not in result:
-            result.insert(0, "text")
-    return result or ["text"]
 
 
 def _pair_role_history(pairs):
@@ -6859,16 +6799,6 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
     else:
         result["resolved_request"] = current
 
-    # Preserve a semantic code-task flag for the production resolver.  This is
-    # derived from the matrix/modality evidence, not from renderer choice.
-    semantic_profile_now = result.get("semantic_profile") if isinstance(result.get("semantic_profile"), dict) else {}
-    request_feature_flags = semantic_profile_now.get("request_features") if isinstance(semantic_profile_now.get("request_features"), dict) else {}
-    request_feature_flags["code_request"] = bool(
-        re.search(r"\b(?:код|программ(?:а|ный|ирование|ировать)|скрипт|python|питон|пайто(?:н|нчик)|пейтон)\b", current, re.I)
-    )
-    semantic_profile_now["request_features"] = request_feature_flags
-    result["semantic_profile"] = semantic_profile_now
-
     result["semantic_task"] = semantic_task
     result["three_way_relation"] = relation
     result["two_way_relation"] = relation
@@ -6902,7 +6832,7 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         "latest_score": float(selected.get("latest_score") or 0.0),
         "best_score": float(selected.get("best_score") or 0.0),
         "context_anchor_index": int(selected.get("context_anchor_index", -1) or -1),
-        "matched_context_pairs": [_compact_pair_for_formulation(x) for x in context_pairs[-8:]],
+        "matched_context_pairs": [_compact_pair_for_formulation(x) for x in context_pairs[-4:]],
         "source": "AUTHENTICATED_12H_USER_APRIL_PAIRS",
     }
     result["response_formulation"] = dict(response_formulation)
@@ -6961,7 +6891,6 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         _provider_pair(x) for x in context_pairs[-8:]
         if isinstance(x, dict)
     ]
-
     provider_selected_pair = _provider_pair(selected_pair) if selected_pair else {}
 
     base_rep = str(
@@ -7001,108 +6930,18 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         visual_request = previous_visual_prompt
         result["visual_generation_request"] = previous_visual_prompt
 
-    render_outputs = _resolve_multi_render_outputs(
-        current,
-        profile=result.get("semantic_profile") if isinstance(result.get("semantic_profile"), dict) else result,
-        task_understanding=result.get("task_understanding") if isinstance(result.get("task_understanding"), dict) else {},
-        production=base_rep,
-        explicit=result.get("requested_representations") or [],
-    )
-    if base_rep == "text":
-        nontext_outputs = [x for x in render_outputs if x != "text"]
-        if nontext_outputs:
-            base_rep = nontext_outputs[0]
-
     result["representation"] = base_rep
     result["requested_representation"] = base_rep
     result["production_representation"] = base_rep
     result["production_representation_locked"] = True
-    result["requested_outputs"] = list(render_outputs)
-    result["required_representations"] = [x for x in render_outputs if x != "text"]
-    result["requested_representations"] = list(render_outputs)
+    result["requested_outputs"] = [base_rep]
+    result["required_representations"] = [base_rep]
     result["visual_generation_request"] = visual_request
 
-    # Structured scene contract: interpretation explains the job to the provider,
-    # while the current user request remains the immutable semantic anchor.
-    render_requirements = {
-        "graph": {
-            "must_return": ["title", "description", "series", "x_axis", "y_axis", "points"],
-            "point_policy": "preserve_explicit_values; if endpoints+period only, create ordered points covering the period",
-            "renderer": "GraphBlock",
-            "no_text_fallback": True,
-        },
-        "table": {
-            "must_return": ["title", "description", "columns", "rows"],
-            "renderer": "TableBlock",
-            "no_text_fallback": True,
-        },
-        "diagram": {
-            "must_return": ["title", "description", "nodes", "edges"],
-            "renderer": "DiagramRenderer",
-            "no_text_fallback": True,
-        },
-        "formula": {
-            "must_return": ["formula", "description"],
-            "renderer": "FormulaBlock",
-            "no_text_fallback": True,
-        },
-        "image": {
-            "must_return": ["image_generation_spec", "image_generation_signal"],
-            "renderer": "C_APRIL_IMAGES_GENERATOR",
-            "no_text_fallback": True,
-        },
-        "gallery": {
-            "must_return": ["image_generation_spec", "image_generation_signal"],
-            "renderer": "C_APRIL_IMAGES_GENERATOR",
-            "no_text_fallback": True,
-        },
-        "code": {
-            "must_return": ["language", "code"],
-            "renderer": "CodeBlock",
-            "no_text_fallback": True,
-        },
-        "link": {
-            "must_return": ["url"],
-            "renderer": "LinkCard",
-            "no_text_fallback": True,
-        },
-    }
-
-    render_contract_outputs = list(render_outputs)
-
-    # Render-contract requirements are derived only after the full requirement
-    # registry exists. This removes the UnboundLocalError seen before OpenAI.
-    render_contract_requirements = {
-        output: render_requirements.get(
-            output,
-            {
-                "must_return": ["answer"],
-                "renderer": "MessageTextBlock",
-                "no_text_fallback": False,
-            },
-        )
-        for output in render_contract_outputs
-        if output != "text"
-    }
-
-    # The trajectory is compacted here, not selected again by Provider.
-    trajectory = [
-        _compact_pair_for_formulation(x)
-        for x in sorted(
-            [dict(x) for x in context_pairs[-8:] if isinstance(x, dict)],
-            key=lambda item: int(
-                item.get("turn")
-                or item.get("turn_index")
-                or item.get("sequence_turn_index")
-                or 0
-            ),
-        )
-    ]
-
-    # Provider boundary: only the structured semantic request crosses.
+    # Provider boundary: only the compact structured request crosses.
     # The authenticated 12h memory remains an Interpretation-side search space.
     provider_formulation_pairs = (
-        [dict(x) for x in context_pairs[-8:]]
+        [dict(x) for x in context_pairs[-4:]]
         if relation == "CONTINUE" or history_lookup
         else []
     )
@@ -7116,17 +6955,11 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         "current_request_authoritative": True,
         "context_selection_done_before_provider": True,
         "provider_must_not_reselect_context": True,
-        "hard_budget_tokens": 1800,
-        "soft_target_tokens": max(
-            1000,
-            min(
-                1600,
-                980
-                + 120 * max(0, len(render_outputs) - 1)
-                + 120 * (1 if relation == "CONTINUE" else 0)
-                + 120 * (1 if len(context_pairs) >= 3 else 0)
-                + 140 * (1 if len(current) > 700 else 0),
-            ),
+        "hard_budget_tokens": 900,
+        "soft_target_tokens": (
+            800 if len(current) > 1800
+            else 570 if len(current) > 900
+            else 300
         ),
         "provider_continuation_contract": "STRUCTURED_REQUEST_FROM_SELECTED_PAIRS",
         "pair_history_authority": "INTERPRETATION_ONLY",
@@ -7158,22 +6991,10 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
                 "priority": 0.99,
                 "value": {
                     "representation": base_rep,
-                    "requested_outputs": render_contract_outputs,
-                    "required_representations": [x for x in render_contract_outputs if x != "text"],
+                    "requested_outputs": [base_rep],
                     "visual_generation_request": visual_request,
-                    "no_text_fallback_for_image": "image" in render_contract_outputs or "gallery" in render_contract_outputs,
+                    "no_text_fallback_for_image": base_rep in {"image", "gallery"},
                     "ascii_allowed": False,
-                    "structured_scene_required": any(x != "text" for x in render_contract_outputs),
-                    "render_requirements": render_contract_requirements,
-                },
-            },
-            {
-                "key": "DIALOGUE_TRAJECTORY",
-                "priority": 0.98,
-                "value": {
-                    "ordered_pairs": trajectory,
-                    "anchor_pair": _compact_pair_for_formulation(selected_pair),
-                    "trajectory_rule": "Treat ordered pairs as one continuous dialogue evidence chain; current request wins on explicit facts.",
                 },
             },
         ],
@@ -7199,12 +7020,8 @@ def _pair_canonical_interpret_live(self, text, cognition=None, semantic=None, hi
         },
     )
     result["provider_context_plan"] = provider_plan
-    result["render_outputs"] = list(render_outputs)
-    result["render_contract_outputs"] = list(render_outputs)
     result["provider_context_authority"] = "INTERPRETATION"
     result["provider_must_not_reselect_context"] = True
-    result["provider_dialogue_trajectory"] = trajectory
-    result["render_requirements"] = render_requirements
     result["dialogue_contract"] = {
         **(result.get("dialogue_contract") if isinstance(result.get("dialogue_contract"), dict) else {}),
         "version": "dialogue_pair_contract_v3_live_two_state",
