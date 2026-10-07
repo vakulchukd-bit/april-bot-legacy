@@ -10219,6 +10219,12 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             _clean(current),
             re.I,
         )
+        or re.search(
+            r"\b(?:сделай|напиши|создай)\s+(?:нов(?:ую|ый|ое)\s+|друг(?:ую|ой|ое)\s+)"
+            r"(?:верси\w*|текст|поэм\w*|вариант)\b",
+            _clean(current),
+            re.I,
+        )
     )
     if explicit_new_task:
         return {
@@ -10625,19 +10631,187 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
             anchor_subject = _pair_subject(anchor_pair)
 
     # ------------------------------------------------------------------
-    # MONOTONIC TWO-SIGNAL DECISION
+    # INTENT-AWARE SEMANTIC RELATION DECISION
     #
-    # Priority is strict:
+    # The 12h window is an evidence search, not a keyword switch.  A pair is a
+    # valid continuation anchor only when the *current task* is compatible with
+    # the candidate pair: topic/entity meaning + operation family + discourse
+    # dependency.  A shared noun alone (for example "лето" inside a list of
+    # seasons) must not reopen an unrelated branch.
+    #
+    # Priority:
     #   HARD NEW -> NEW
-    #   HISTORY / RESULT / OBJECT / DISCOURSE -> CONTINUE
-    #   semantic similarity -> evidence only
-    #   otherwise -> NEW
-    # After this point relation is LOCKED. Later enrichment may select/support
-    # pairs, but it must never recompute CONTINUE/NEW.
+    #   explicit/implicit follow-up or unresolved clarification -> CONTINUE
+    #   otherwise require semantic task compatibility -> CONTINUE
+    #   no compatible task -> NEW
     # ------------------------------------------------------------------
     relation = "NEW"
     decision_basis = "ALL_LAYERS_NEW"
     relation_lock = False
+
+    def _intent_family(value: str) -> str:
+        low = _clean(value)
+        families = (
+            ("edit", r"\b(?:улучш|исправ|передел|перепиш|редакт|доработ|добав|расшир|сократ|измени|обнов)\w*\b"),
+            ("code", r"\b(?:код|python|питон|скрипт|программ|функци|модул)\w*\b"),
+            ("link", r"\b(?:ссылк|сайт|телеграм|инстаграм|инстограм|ютуб|вайбер|ватсап|whatsapp)\w*\b"),
+            ("visual", r"\b(?:рисуй|нарис|картин|изображ|фото|фотограф|снимк|визуализ)\w*\b"),
+            ("poetry", r"\b(?:поэм|стих|стихотвор|рифм|строф)\w*\b"),
+            ("math", r"\b(?:реши|вычисл|формул|уравнен|процент|математ|график)\w*\b"),
+            ("list", r"\b(?:назов|перечисл|какие|какой|какая|какое|виды|пород|список)\w*\b"),
+            ("explain", r"\b(?:объясни|поясни|расскаж|подробн|что такое|почему|зачем)\b"),
+        )
+        for family, pattern in families:
+            if re.search(pattern, low, re.I):
+                return family
+        return "general"
+
+    def _named_targets(value: str) -> set[str]:
+        low = _clean(value)
+        aliases = {
+            "инстаграм": "instagram", "инстограм": "instagram", "instagram": "instagram",
+            "опенай": "openai", "openai": "openai",
+            "телеграм": "telegram", "telegram": "telegram",
+            "ютуб": "youtube", "youtube": "youtube",
+            "вайбер": "viber", "viber": "viber",
+            "ватсап": "whatsapp", "whatsapp": "whatsapp",
+            "дискорд": "discord", "discord": "discord",
+            "гитхаб": "github", "github": "github",
+            "диб": "dibhub", "dibhub": "dibhub",
+        }
+        found = set()
+        for token, canonical in aliases.items():
+            if re.search(rf"\b{re.escape(token)}\b", low, re.I):
+                found.add(canonical)
+        return found
+
+    def _task_compatibility(current_text: str, row: dict) -> tuple[float, list[str]]:
+        pair = row.get("pair") if isinstance(row.get("pair"), dict) else {}
+        user, answer, topic = _pair_text(pair)
+        family = _intent_family(current_text)
+        pair_family = _intent_family(f"{user} {answer} {topic}")
+        topic_score = max(
+            float(row.get("topic_affinity", 0.0) or 0.0),
+            float(row.get("answer_topic_affinity", 0.0) or 0.0),
+            float(row.get("user_topic_affinity", 0.0) or 0.0),
+        )
+        lexical_score = float(row.get("score", 0.0) or 0.0)
+        semantic_score = max(
+            float(row.get("semantic_pair", 0.0) or 0.0),
+            float(row.get("light_semantic_score", 0.0) or 0.0),
+        )
+        target_current = _named_targets(current_text)
+        target_pair = _named_targets(f"{user} {answer} {topic}")
+        target_conflict = bool(target_current and target_pair and target_current.isdisjoint(target_pair))
+
+        reasons = []
+        score = 0.42 * topic_score + 0.24 * lexical_score + 0.18 * semantic_score
+        if family == pair_family and family != "general":
+            score += 0.16
+            reasons.append("OPERATION_FAMILY_MATCH")
+        elif family == "edit" and pair_family in {"poetry", "code", "visual", "general"}:
+            score += 0.10
+            reasons.append("TRANSFORMATION_COMPATIBLE")
+        elif family in {"link", "visual"} and pair_family == family:
+            score += 0.06
+        elif family != "general" and pair_family != "general":
+            score -= 0.12
+            reasons.append("OPERATION_FAMILY_CONFLICT")
+
+        if target_conflict:
+            score -= 0.30
+            reasons.append("EXPLICIT_TARGET_CONFLICT")
+        elif target_current and target_current & target_pair:
+            score += 0.14
+            reasons.append("EXPLICIT_TARGET_MATCH")
+
+        if _is_clarification(pair):
+            # A clarification is a bridge, not the substantive result.
+            score -= 0.10
+            reasons.append("CLARIFICATION_PAIR")
+
+        return max(0.0, min(1.0, score)), reasons
+
+    # Re-rank the full 12h window using semantic task compatibility.  The existing
+    # vector/fuzzy engines remain useful evidence, but no single object-token link
+    # is allowed to force CONTINUE.
+    semantic_candidates = []
+    for row in substantive_rows:
+        compat, compat_reasons = _task_compatibility(current, row)
+        idx = int(row.get("index", -1))
+        recency = float(row.get("recency", 0.0) or 0.0)
+        final_score = min(1.0, compat + 0.04 * recency)
+        semantic_candidates.append((final_score, idx, compat_reasons))
+
+    semantic_candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    best_semantic = semantic_candidates[0] if semantic_candidates else (0.0, -1, [])
+
+    # A transformation request ("улучши поэму", "исправь код", "переделай
+    # картинку") needs a dedicated semantic anchor. Whole-pair ranking can be
+    # dragged toward an older related topic, so find the best compatible result
+    # directly from the 12h evidence before deciding relation.
+    current_family_hint = _intent_family(current)
+    transform_candidate = None
+    if current_family_hint == "edit":
+        transform_candidates = []
+        for row in substantive_rows:
+            pair = row.get("pair") if isinstance(row.get("pair"), dict) else {}
+            user, answer, topic = _pair_text(pair)
+            pair_family = _intent_family(f"{user} {answer} {topic}")
+            if pair_family not in {"poetry", "code", "visual", "general", "edit"}:
+                continue
+            topic_signal = max(
+                float(row.get("topic_affinity", 0.0) or 0.0),
+                float(row.get("answer_topic_affinity", 0.0) or 0.0),
+                float(row.get("user_topic_affinity", 0.0) or 0.0),
+            )
+            if topic_signal < 0.10:
+                continue
+            transform_candidates.append((
+                0.60 * topic_signal
+                + 0.25 * float(row.get("score", 0.0) or 0.0)
+                + 0.15 * float(row.get("recency", 0.0) or 0.0),
+                int(row.get("index", -1)),
+            ))
+        if transform_candidates:
+            transform_candidates.sort(reverse=True)
+            transform_candidate = transform_candidates[0]
+
+    semantic_followup = bool(
+        re.search(
+            r"\b(?:дальше|далее|ещ[её]|продолж(?:и|ай|ить|им)|добав(?:ь|ить)|"
+            r"подробнее|детальнее|уточни|поясни|объясни|раскрой|выдели|выбери|"
+            r"отбери|исправь|улучш|передел|перепиш|не\s+повторяй|кроме|из\s+них)\b",
+            low_current,
+            re.I,
+        )
+    )
+    transform_followup = bool(
+        re.search(r"\b(?:улучш|исправ|передел|перепиш|редакт|доработ|добав|расшир)\w*\b", low_current, re.I)
+    )
+    discourse_link = bool(
+        reference_query
+        or semantic_followup
+        or short_topic_followup
+        or test_reference
+        or clarification_bridge is not None
+    )
+
+    # Repeating an earlier complete request is a new invocation by default.
+    # It must not self-anchor to its own previous pair merely because the words
+    # are identical. A real discourse marker ("продолжи", "улучши", "это", ...)
+    # is allowed to override this rule.
+    current_normalized = _clean(current)
+    exact_previous_repeat = any(
+        current_normalized == _clean(_pair_text(row.get("pair") or {})[0])
+        for row in substantive_rows
+        if isinstance(row.get("pair"), dict)
+    )
+    explicit_discourse_dependency = bool(
+        reference_query or semantic_followup or short_topic_followup
+        or test_reference or clarification_bridge is not None
+        or transform_followup
+    )
 
     if explicit_new_task:
         relation = "NEW"
@@ -10647,69 +10821,154 @@ def _two_state_semantic_selector(self, current, pairs, active_topic=""):
         anchor_index = -1
         anchor_pair = {}
     else:
-        history_link = bool(history_intent and substantive_rows)
-        semantic_followup = bool(
-            re.search(
-                r"\b(?:дальше|далее|ещ[её]|продолж(?:и|ай|ить|им)|добав(?:ь|ить)|"
-                r"подробнее|детальнее|уточни|поясни|объясни|раскрой|выдели|выбери|"
-                r"отбери|исправь|не\s+повторяй|кроме|из\s+них)\b",
-                low_current,
-                re.I,
-            )
-        )
-        discourse_link = bool(
-            reference_query
-            or semantic_followup
-            or short_topic_followup
-            or test_reference
-            or clarification_bridge is not None
-        )
-        anchor_row = rows_by_index.get(anchor_index, {})
-        anchor_semantic_link = bool(
-            anchor_index >= 0
-            and (
-                float(anchor_row.get("topic_affinity", 0.0) or 0.0) >= 0.16
-                or float(anchor_row.get("answer_topic_affinity", 0.0) or 0.0) >= 0.16
-                or _topic_affinity(current, anchor_topic) >= 0.20
-            )
-        )
-        result_item_link = bool(best_answer_item_row and best_answer_item_score >= 0.48)
+        best_score, best_index, best_reasons = best_semantic
+        if transform_candidate is not None:
+            transform_score, transform_index = transform_candidate
+            if transform_score >= max(0.15, best_score * 0.72):
+                best_score = transform_score
+                best_index = transform_index
+                best_reasons = ["TRANSFORMATION_TARGET_SEMANTIC_MATCH"]
+        best_row = rows_by_index.get(best_index, {})
+        best_pair = pairs[best_index] if 0 <= best_index < len(pairs) else {}
+        best_user, best_answer, best_topic = _pair_text(best_pair)
+        best_family = _intent_family(f"{best_user} {best_answer} {best_topic}")
+        current_family = _intent_family(current)
+        current_targets = _named_targets(current)
+        best_targets = _named_targets(f"{best_user} {best_answer} {best_topic}")
+        target_match = bool(current_targets & best_targets)
+        target_conflict = bool(current_targets and best_targets and current_targets.isdisjoint(best_targets))
 
-        if history_link:
+        # Strong continuation paths: actual discourse dependency, transformation,
+        # explicit reference, or a short elliptical command with a compatible task.
+        best_topic_signal = max(
+            float(best_row.get("topic_affinity", 0.0) or 0.0),
+            float(best_row.get("answer_topic_affinity", 0.0) or 0.0),
+            float(best_row.get("user_topic_affinity", 0.0) or 0.0),
+        )
+        strong_followup = bool(
+            discourse_link
+            and best_index >= 0
+            and (
+                best_score >= 0.28
+                or (transform_followup and best_score >= 0.15 and best_topic_signal >= 0.10)
+                or (short_topic_followup and best_score >= 0.20)
+                or (clarification_bridge is not None and best_score >= 0.18)
+            )
+        )
+        # A self-contained request without a follow-up dependency needs stronger
+        # semantic proof. This is what prevents "Напиши поэму лето" from inheriting
+        # an old "времена года" list merely because "лето" appears in it.
+        strong_new_candidate = bool(
+            best_index >= 0
+            and current_family != "general"
+            and current_family != best_family
+            and not transform_followup
+            and not reference_query
+            and not semantic_followup
+            and not short_topic_followup
+        )
+
+        if transform_candidate is not None and transform_followup and best_index >= 0 and not target_conflict:
             relation = "CONTINUE"
-            decision_basis = "HISTORY_OVERRIDES_WEAK_NEW"
+            decision_basis = "TRANSFORMATION_TARGET_RESOLVED_IN_12H"
             relation_lock = True
-        elif result_item_link:
-            relation = "CONTINUE"
-            decision_basis = "PREVIOUS_RESULT_ITEM_LINK"
-            relation_lock = True
-            anchor_index = int(best_answer_item_row["index"])
-            anchor_pair = dict(pairs[anchor_index])
-            anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
-            selected_indices = [anchor_index]
-        elif named_object_link:
-            relation = "CONTINUE"
-            decision_basis = "NAMED_OBJECT_CONTINUATION_LINK"
-            relation_lock = True
-            anchor_index = named_object_index
-            anchor_pair = dict(pairs[anchor_index])
-            anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
-            selected_indices = [anchor_index]
-        elif discourse_link and (anchor_index >= 0 or pairs):
-            relation = "CONTINUE"
-            decision_basis = "DISCOURSE_DEPENDENCY_WITH_12H_EVIDENCE"
-            relation_lock = True
-        elif anchor_semantic_link:
-            relation = "CONTINUE"
-            decision_basis = "DIRECT_SEMANTIC_12H_LINK"
-            relation_lock = True
-        else:
+            anchor_index = best_index
+            anchor_pair = dict(best_pair)
+            selected_indices = [best_index]
+        elif exact_previous_repeat and not explicit_discourse_dependency:
             relation = "NEW"
-            decision_basis = "ALL_LAYERS_NEW"
+            decision_basis = "EXACT_REQUEST_REPEAT_IS_NEW_INVOCATION"
             relation_lock = True
             selected_indices = []
             anchor_index = -1
             anchor_pair = {}
+        elif target_conflict and not discourse_link:
+            relation = "NEW"
+            decision_basis = "EXPLICIT_CURRENT_TARGET_DIFFERS_FROM_FOUND_12H_TARGET"
+            relation_lock = True
+            selected_indices = []
+            anchor_index = -1
+            anchor_pair = {}
+        elif strong_new_candidate:
+            relation = "NEW"
+            decision_basis = "SEMANTIC_TASK_FAMILY_CONFLICT"
+            relation_lock = True
+            selected_indices = []
+            anchor_index = -1
+            anchor_pair = {}
+        elif strong_followup:
+            relation = "CONTINUE"
+            decision_basis = "SEMANTIC_FOLLOWUP_WITH_12H_COMPATIBLE_TASK"
+            relation_lock = True
+            anchor_index = best_index
+            anchor_pair = dict(best_pair)
+            selected_indices = [best_index]
+        elif (
+            best_index >= 0
+            and best_score >= 0.38
+            and not target_conflict
+            and (
+                target_match
+                or current_family == best_family
+                or best_score >= 0.54
+            )
+        ):
+            relation = "CONTINUE"
+            decision_basis = "HIGH_SEMANTIC_TASK_COMPATIBILITY"
+            relation_lock = True
+            anchor_index = best_index
+            anchor_pair = dict(best_pair)
+            selected_indices = [best_index]
+        else:
+            relation = "NEW"
+            decision_basis = "NO_COMPATIBLE_SEMANTIC_TASK_IN_12H"
+            relation_lock = True
+            selected_indices = []
+            anchor_index = -1
+            anchor_pair = {}
+
+    # Once the relation is decided, collect only semantically compatible support
+    # pairs from the same 12h search. Do not send unrelated "similar words" to OpenAI.
+    if relation == "CONTINUE" and anchor_index >= 0:
+        anchor_pair = dict(pairs[anchor_index])
+        anchor_user, anchor_answer, anchor_topic = _pair_text(anchor_pair)
+        anchor_family = _intent_family(f"{anchor_user} {anchor_answer} {anchor_topic}")
+        support = []
+        for row in substantive_rows:
+            idx = int(row.get("index", -1))
+            if idx < 0 or idx == anchor_index:
+                continue
+            pair = pairs[idx]
+            user, answer, topic = _pair_text(pair)
+            pair_family = _intent_family(f"{user} {answer} {topic}")
+            topic_score = max(
+                float(row.get("topic_affinity", 0.0) or 0.0),
+                float(row.get("answer_topic_affinity", 0.0) or 0.0),
+                float(row.get("user_topic_affinity", 0.0) or 0.0),
+            )
+            pair_to_anchor = _topic_affinity(
+                f"{anchor_topic} {anchor_user} {anchor_answer}",
+                f"{topic} {user} {answer}",
+            )
+            current_support = max(
+                topic_score,
+                float(row.get("score", 0.0) or 0.0) * 0.80,
+            )
+            family_ok = (
+                pair_family == anchor_family
+                or anchor_family == "general"
+                or pair_family == "general"
+                or pair_to_anchor >= 0.28
+            )
+            if family_ok and (pair_to_anchor >= 0.18 or current_support >= 0.24):
+                support.append((current_support + 0.10 * pair_to_anchor, idx))
+        support.sort(reverse=True)
+        selected_indices = sorted(dict.fromkeys([anchor_index] + [idx for _, idx in support[:5]]))
+
+        # Keep the selected anchor at the front of the semantic chain, followed by
+        # supporting pairs in dialogue order.
+        ordered = [anchor_index] + [i for i in selected_indices if i != anchor_index]
+        selected_indices = ordered
 
     locked_relation = relation
 
@@ -11556,12 +11815,14 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
         ).strip()
         if not canonical_topic and context_pairs:
             canonical_topic = _live_pair_subject(context_pairs[-1])
-    if relation == "NEW":
-        # Last semantic decision point: restore CONTINUE only when the authenticated
-        # 12h pair evidence proves a natural continuation. Explicit new-topic intent
-        # remains authoritative. This runs before provider/scene formulation.
+    if relation == "NEW" and not relation_is_locked:
+        # Defensive compatibility guard. The canonical semantic selector normally
+        # locks the relation before this point, so a locked NEW must never be
+        # reopened by a legacy similarity guard. This preserves the single
+        # Interpretation-owned NEW/CONTINUE decision and avoids duplicate trigger
+        # logic in the lower layer.
         _guard_relation, _guard_index, _guard_pair, _guard_reason = _semantic_dialogue_continuation_guard(
-            current, pairs, relation, explicit_new=bool(explicit_new_task)
+            current, pairs, relation, explicit_new=False
         )
         if _guard_relation == "CONTINUE":
             relation = "CONTINUE"
