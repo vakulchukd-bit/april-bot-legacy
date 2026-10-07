@@ -4469,14 +4469,70 @@ class QuantumInterpretationEngine:
         best_goal=goal_rank[0][0] if goal_rank else "understand"
         best_goal_score=float(goal.get(best_goal,0.0))
 
-        # Canonical image task: an action that constructs/presents a visual object
-        # must route to the image renderer even when the representation matrix
-        # under-scores the single word "image". This is a task-vector decision
-        # (operation + object + visual action), not a lexical trigger.
+        # Semantic representation is authoritative.  The visual-presentation
+        # layer may decide *how* an already-resolved representation is shown,
+        # but it must never promote a weak image score over a stronger graph,
+        # table, diagram, formula, or other semantic object.
         image_rep_score = float(rep.get("image", 0.0) or 0.0)
         image_obj_score = float(obj.get("image", 0.0) or 0.0)
+
+        semantic_best_representation = str(
+            features.get("semantic_best_representation") or best_rep
+        ).lower()
+        semantic_best_object = str(
+            features.get("semantic_best_object") or best_obj
+        ).lower()
+
+        # Preserve a real content representation when the word "image/picture"
+        # is acting as a presentation request ("show the table/graph/diagram
+        # as an image").  This is intentionally generic: it relies on the
+        # measured representation/object families instead of phrase triggers.
+        non_image_candidates = (
+            label for label in (
+                "graph", "table", "diagram", "formula", "code", "link",
+                "audio", "video", "file", "action", "scene",
+            )
+            if label in rep or label in obj
+        )
+        content_candidates = sorted(
+            (
+                (
+                    label,
+                    float(rep.get(label, 0.0) or 0.0),
+                    float(obj.get(label, 0.0) or 0.0),
+                )
+                for label in non_image_candidates
+            ),
+            key=lambda item: (
+                item[1] + item[2],
+                item[2],
+                item[1],
+            ),
+            reverse=True,
+        )
+        if (
+            best_rep == "image"
+            and best_op in {"build", "create", "generate", "present", "modify"}
+            and content_candidates
+        ):
+            content_label, content_rep_score, content_obj_score = content_candidates[0]
+            content_support = content_rep_score + content_obj_score
+            image_margin = image_rep_score - content_rep_score
+            if (
+                content_obj_score >= 0.040
+                and content_support >= 0.070
+                and image_margin <= 0.140
+            ):
+                return content_label, "semantic_content_preserved_image_presentation", True
+
+        # Actual image generation is authorized only when the semantic matrices
+        # agree that the current task itself is an image.  A graph/table/diagram
+        # request therefore cannot be stolen by the image renderer merely because
+        # visual-action evidence happens to be present.
         if (
             features.get("visual_action") is True
+            and semantic_best_representation == "image"
+            and semantic_best_object == "image"
             and image_obj_score >= 0.035
             and image_rep_score >= 0.035
         ):
@@ -4501,10 +4557,16 @@ class QuantumInterpretationEngine:
         }
         aligned = best_op in compatible_ops.get(best_rep,set())
 
-        # Strong structural interpretation for a self-contained visual construction.
-        # This is intentionally a task-vector rule: operation + object/constraint
-        # evidence must agree before a structured representation is locked.
-        if features.get("visual_construction") and not self._negated_representation_labels(text):
+        # Strong structural interpretation for a self-contained visual
+        # construction.  Only a semantically diagram-like request may enter
+        # this route.  A graph/chart is not a diagram merely because both are
+        # visual constructions.
+        if (
+            features.get("visual_construction")
+            and best_rep == "diagram"
+            and best_obj == "diagram"
+            and not self._negated_representation_labels(text)
+        ):
             return "diagram", "semantic_visual_construction", True
 
         if best_rep != "text" and aligned:
@@ -5005,9 +5067,22 @@ class QuantumInterpretationEngine:
                 selected_relation != "CONTINUE"
                 or context_representation_agreement
             )
+            # Context-task output is repair evidence, not a second semantic
+            # authority. It may fill an unresolved production slot, or confirm the
+            # same representation already selected by current-turn semantics. It
+            # must never replace a locked graph/table/diagram with IMAGE merely
+            # because the context layer describes the requested presentation.
+            context_can_repair_production = bool(
+                production == "text"
+                or (
+                    not locked
+                    and best_context_rep == str(p.get("best_representation") or "").lower()
+                )
+            )
             if (
                 structured_context_allowed
                 and best_context_score >= 0.08
+                and context_can_repair_production
                 and (production == "text" or best_context_rep != production)
             ):
                 production = best_context_rep
@@ -5071,19 +5146,28 @@ class QuantumInterpretationEngine:
             reference_scores["memory_query"] >= 0.160
             or explicit_visual_reference
         )
+        # Image generation is a renderer-stage decision only after the semantic
+        # representation itself resolved to IMAGE.  Generic visual-action evidence
+        # is not sufficient to override graph/table/diagram semantics.
+        semantic_image_task = bool(
+            str(p.get("best_representation") or "").lower() == "image"
+            and str(p.get("best_object") or "").lower() == "image"
+            and current_image_object_evidence >= 0.035
+            and current_image_representation_evidence >= 0.035
+        )
         explicit_visual_task = (
             not visual_reference_lock
             and current_visual_action
-            and current_image_object_evidence >= 0.035
-            and current_image_representation_evidence >= 0.035
+            and semantic_image_task
+            and production in {"image", "gallery"}
         )
         visual_generation_request = ""
         current_self_contained = bool(
             _request_features.get("self_contained")
+            or semantic_image_task
             or (
                 current_visual_action
-                and current_image_representation_evidence >= 0.035
-                and current_image_object_evidence >= 0.035
+                and semantic_image_task
             )
         )
         # A reference/recollection turn must never inherit the previous visual
@@ -5152,12 +5236,31 @@ class QuantumInterpretationEngine:
             obj = str(p.get("best_object") or "").lower()
             goal = str(p.get("best_goal") or "").lower()
             obj_score = float(p.get("object_scores", {}).get(production, 0.0) or 0.0)
+            production_rep_score = float(
+                p.get("representation_scores", {}).get(production, 0.0) or 0.0
+            )
+            # When the user explicitly asks for a structured result "as an image",
+            # the object matrix may correctly score IMAGE because it describes the
+            # presentation modality. Do not mistake that modality for the semantic
+            # content object. A strongly resolved GRAPH/TABLE/DIAGRAM therefore
+            # remains renderable even when object==image.
+            image_presentation_support = bool(
+                production not in {"image", "gallery"}
+                and obj == "image"
+                and current_image_representation_evidence >= 0.080
+                and production_rep_score >= 0.100
+            )
             current_visual_intent = (
                 locked
                 or (
                     op in {"build", "modify", "present", "explain"}
-                    and obj == production
-                    and obj_score >= 0.10
+                    and (
+                        (
+                            obj == production
+                            and obj_score >= 0.10
+                        )
+                        or image_presentation_support
+                    )
                     and goal in {"visualize", "transform", "present", "organize"}
                 )
             )
@@ -7216,13 +7319,16 @@ def _pair_canonical_interpret(self, text, cognition=None, semantic=None, history
         visual_request=pair_visual_prompt
     if relation=="CONTINUE" and not visual_request and pair_visual_prompt and op in {"modify","transform","redraw","edit","build","generate","create","visualize"}:
         visual_request=pair_visual_prompt
-    if visual_request:
-        if base_rep in {"text",""} and op in {"build","create","generate","modify","transform","redraw","visualize","present"}:
-            base_rep="image"
-        if base_rep=="text" and relation=="CONTINUE" and pair_visual_prompt:
-            base_rep="image"
-    if visual_request and base_rep not in {"image","gallery"} and op in {"build","create","generate","modify","transform","redraw","visualize"}:
-        base_rep="image"
+    if visual_request and base_rep in {"text",""} and op in {
+        "build", "create", "generate", "modify", "transform",
+        "redraw", "visualize", "present",
+    }:
+        # Visual generation requests may establish IMAGE only when the semantic
+        # parser left the representation unresolved.  They must never replace an
+        # already-resolved graph/table/diagram/etc.
+        base_rep = "image"
+    if visual_request and base_rep == "text" and relation == "CONTINUE" and pair_visual_prompt:
+        base_rep = "image"
 
     # Full 12h memory remains available to Interpretation, while Provider receives
     # only the compact pair trajectory selected by the verified light context check.
@@ -11585,10 +11691,10 @@ def _pair_canonical_interpret_two_state(self, text, cognition=None, semantic=Non
 
     final_semantic_operation = str(selected.get("semantic_operation") or operation or "answer").lower()
     # The current visual engine is creation-only. Once a visual generation request
-    # has been semantically established, keep the downstream task as BUILD even if
-    # the pair selector proposed a generic/legacy operation such as ``answer`` or
-    # an edit-like operation. This does not alter the 12h relation decision.
-    if visual_request:
+    # has been semantically established *as an IMAGE task*, keep the downstream
+    # task as BUILD even if the pair selector proposed a generic/legacy operation.
+    # Do not let the existence of a visual prompt mutate graph/table/diagram/etc.
+    if visual_request and representation in {"image", "gallery"}:
         representation = "image"
         final_semantic_operation = "build"
     semantic_task.update({
