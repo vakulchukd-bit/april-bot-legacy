@@ -2209,11 +2209,6 @@ def _scene_blueprint_blocks(blueprint: Dict[str, Any], *, scene_id: str, turn_id
 
 def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
     """Produce one ordered, identity-bound render stream for the scene."""
-    try:
-        from blocks.presentation_formatter import ensure_scene_text_block
-    except Exception:
-        ensure_scene_text_block = None
-
     blueprint = dict(scene.scene_blueprint or {})
     blocks = list(scene.blocks or [])
     if not blocks and blueprint:
@@ -2249,16 +2244,7 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
 
     # The answer is a single normal text node in the same scene, not a fallback.
     answer = _scene_text(scene)
-    if ensure_scene_text_block is not None:
-        blocks = ensure_scene_text_block(
-            blocks,
-            answer,
-            scene_id=scene.scene_id,
-            turn_id=scene.turn_id,
-            flow_id=scene.flow_id,
-            blueprint=blueprint,
-        )
-    elif answer and not any(_scene_block_type(b) in {"text", "markdown", "formula"} and _scene_text(b) for b in blocks if isinstance(b, dict)):
+    if answer and not any(_scene_block_type(b) in {"text", "markdown", "formula"} and _scene_text(b) for b in blocks if isinstance(b, dict)):
         blocks.insert(0, {
             "type": "text",
             "artifact_type": "text",
@@ -2559,31 +2545,24 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
 
     # Presentation is generated once for the canonical scene, never once per
     # renderer. This keeps all renderers in one visual stream.
-    try:
-        from blocks.presentation_formatter import build_presentation_contract, attach_presentation_signals
-        presentation = build_presentation_contract(
-            scene_id=scene.scene_id,
-            turn_id=scene.turn_id,
-            flow_id=scene.flow_id,
-            topic_group=scene.topic_group,
-            continuation=scene.continuation,
-            layout_mode="flow",
-            user_id=contract.user_id,
-            conversation_id=contract.conversation_id,
-            dialogue_sequence_id=contract.dialogue_sequence_id,
-            sequence_turn_index=contract.sequence_turn_index,
-        )
-        contract.render_blocks = attach_presentation_signals(contract.render_blocks, scene_presentation=presentation)
-        contract.blocks = list(contract.render_blocks)
-    except Exception:
-        presentation = {
-            "version": "presentation_unavailable",
-            "engine": "McDowell",
-            "math_engine": "KaTeX",
-            "single_response": True,
-            "single_signal": True,
-            "layout": {"mode": "flow", "container": "adaptive_full_width", "frames": False, "cards": False},
-        }
+    # Presentation metadata is kept inside the existing SceneContract.
+    # No external presentation_formatter module is required by the current ZIP.
+    presentation = {
+        "version": "scene_presentation_v1",
+        "engine": "McDowell",
+        "math_engine": "KaTeX",
+        "single_response": True,
+        "single_signal": True,
+        "layout": {
+            "mode": "flow",
+            "container": "adaptive_full_width",
+            "frames": False,
+            "cards": False,
+        },
+        "scene_id": scene.scene_id,
+        "turn_id": scene.turn_id,
+        "flow_id": scene.flow_id,
+    }
     contract.metadata["presentation"] = presentation
     contract.metadata["renderer_instances"] = list(dict.fromkeys(
         str(block.get("renderer") or "MessageTextBlock") for block in contract.render_blocks if isinstance(block, dict)
