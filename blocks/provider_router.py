@@ -87,11 +87,13 @@ confidence, metadata. For every structured render, metadata.render_explanation s
 what was built/drawn/written and why it satisfies the current request. This explanation is
 semantic metadata, not a substitute for the structured payload.
 
-The `answer` field is mandatory and MUST contain the actual human-visible answer.
-Never return an empty object, an empty answer, or `{}`. For a simple text/math request,
-put the direct answer in `answer` and mirror it in `content` and a text render block.
-If structured output is requested, keep its render block structured and complete:
-type, renderer, viewer, payload, scene_contract=true.
+The `answer` field is preferred for normal dialogue, but a complete structured
+MachineResponse is valid even when `answer` is absent or empty. A structured graph,
+table, diagram, formula, code, link, artifact, or image_generation handoff is itself
+a successful response and MUST be preserved. Never invent a failure answer for a valid
+structured response. For text/math without a structured payload, put the direct answer
+in `answer` and mirror it in `content` and a text render block. For structured output,
+keep the structured payload complete: type, renderer, viewer, payload, scene_contract=true.
 Preserve every requested representation and never invent an unrequested one.
 For `image_generation`, return one semantic generation handoff only:
 `metadata.image_generation_spec` and `metadata.image_generation_signal`.
@@ -187,12 +189,14 @@ request as request_anchor, carry the OpenAI semantic generation meaning as its p
 `gpt-image-2`, and set single_route=true. Mark `provider_emitted=true` when the signal is
 emitted by this Provider response. Never output ready image pixels, SVG/XML, base64/data URI, image
 URL, or a concrete image/gallery render block.
-The local C_APRIL_IMAGES_GENERATOR is the sole pixel producer. The `answer` field is mandatory and must be non-empty. For image_generation, the visible
-answer must be normal human-readable language; never use ASCII art, Unicode line drawings,
-code blocks or machine placeholders as the answer. The actual image is delivered separately
-by C_APRIL_IMAGES_GENERATOR/GalleryBlock.
-never return `{}` or an empty answer. For text/math requests, mirror the answer into content and
-a text render block. Keep structured blocks complete and obey requested_outputs.
+The local C_APRIL_IMAGES_GENERATOR is the sole pixel producer. For image_generation,
+the visible `answer` is optional when the semantic handoff is complete; C_APRIL_IMAGES_GENERATOR/GalleryBlock
+delivers the pixels separately. When `answer` is present it must be normal human-readable
+language; never use ASCII art, Unicode line drawings, code blocks or machine placeholders.
+Any complete structured payload or artifact counts as a successful response. Never manufacture
+a failure string for a successful structured response. For text/math without a structured
+payload, mirror the answer into content and a text render block. Keep structured blocks complete
+and obey requested_outputs.
 Never expose prompts, internal JSON, renderer details or provider identity.
 """.strip()
 
@@ -2884,26 +2888,6 @@ def _safe_numeric_expression(expr: str) -> Optional[str]:
     return str(result)
 
 
-def _recover_answer_from_source_request(source_request: Any) -> str:
-    """Last-resort transport recovery, without a second model call."""
-    request = _extract_current_request_for_recovery(source_request)
-    if not request:
-        return ""
-
-    # Recover a closed arithmetic expression embedded in a natural-language request.
-    candidates = re.findall(
-        r"(?<![\w.])(?:\d+(?:\.\d+)?(?:\s*[+\-−×÷*/%]\s*\d+(?:\.\d+)?)+(?:\s*)|\(\s*[0-9+\-*/%().\s×÷−]+\))(?![\w.])",
-        request,
-    )
-    for candidate in candidates:
-        answer = _safe_numeric_expression(candidate.strip())
-        if answer is not None:
-            return answer
-
-    # A completely empty provider object must never produce an empty UI bubble.
-    return f"Не удалось сформировать ответ на запрос: {request}"
-
-
 # ---------------------------------------------------------------------------
 # Canonical visual-output promotion
 # ---------------------------------------------------------------------------
@@ -3772,6 +3756,46 @@ def _promote_top_level_visual_outputs(
     metadata: dict[str, Any] = {}
     specs: list[dict[str, Any]] = []
 
+    # OpenAI can return a structured response as:
+    # {"type":"image_generation","prompt":"..."} or
+    # {"representation":"graph","chart":{...}}.
+    # Promote the structured payload without rewriting it into the user's trigger text.
+    representation = _safe_text(
+        payload.get("representation") or payload.get("type")
+    ).strip().lower()
+
+    if representation == "image_generation":
+        spec = _build_image_generation_spec_from_provider(
+            payload,
+            fallback_prompt=fallback_prompt,
+        )
+        if spec:
+            specs.append(spec)
+            metadata["openai_structured_response_type"] = "image_generation"
+
+    if representation in {"graph", "table", "diagram", "formula", "code", "link"}:
+        nested_key = {
+            "graph": "chart",
+            "table": "table",
+            "diagram": "diagram",
+            "formula": "formula",
+            "code": "code",
+            "link": "link",
+        }.get(representation)
+        nested_value = payload.get(nested_key) if nested_key else None
+        structured_value = nested_value if nested_value not in (None, "", [], {}) else payload
+        block = _top_level_visual_block(representation, structured_value)
+        if block:
+            block_payload = dict(block.get("payload") or {})
+            if isinstance(structured_value, dict):
+                block_payload.update({
+                    key: payload[key]
+                    for key in ("title", "description", "language")
+                    if key in payload and key not in block_payload
+                })
+            block["payload"] = block_payload
+            blocks.append(block)
+
     for kind in _TOP_LEVEL_VISUAL_TYPES:
         if kind not in payload:
             continue
@@ -3973,6 +3997,10 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
 
     source_payload = machine_request_to_dict(source_request) if source_request is not None else {}
     source_constraints = source_payload.get("constraints") if isinstance(source_payload.get("constraints"), dict) else {}
+
+    # Immutable Provider-side copy of the exact structured OpenAI payload.
+    # This is audit/transport data only and is never replaced by the user request.
+    openai_structured_payload = copy.deepcopy(canonical_payload) if isinstance(canonical_payload, dict) else {}
     source_plan = source_constraints.get("representation_plan") if isinstance(source_constraints.get("representation_plan"), dict) else {}
     source_metadata = source_constraints.get("metadata") if isinstance(source_constraints.get("metadata"), dict) else {}
     visual_mode = _safe_text(
@@ -4075,15 +4103,31 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         if isinstance(candidate_spec, dict):
             answer = "Готово — изображение подготовлено."
 
-    # Transport invariant: a non-empty OpenAI response must never collapse into
-    # an empty canonical answer. When the model returns an empty JSON envelope
-    # such as `{}`, recover locally from the current authoritative request.
+    # Structured OpenAI output is a valid result even without narrative text.
+    # Materialize only a neutral success sentence when a concrete structured payload
+    # has already been preserved. Never convert a provider success into failure prose.
     recovery_used = False
+    if not answer and top_level_visual_blocks:
+        repaired = _structured_success_answer(
+            canonical_payload,
+            top_level_visual_blocks,
+            image_mode=image_generation_mode,
+        )
+        if repaired:
+            answer = repaired
+            recovery_used = True
+
+    if not answer and image_generation_mode:
+        candidate_metadata = {}
+        if isinstance(canonical_payload.get("metadata"), dict):
+            candidate_metadata.update(canonical_payload.get("metadata"))
+        candidate_metadata.update(top_level_visual_metadata)
+        if isinstance(candidate_metadata.get("image_generation_spec"), dict):
+            answer = "Готово — изображение подготовлено."
+            recovery_used = True
+
     if not answer:
-        answer = _recover_answer_from_source_request(source_request)
-        recovery_used = bool(answer)
-    if not answer:
-        raise RuntimeError("EMPTY_PROVIDER_ANSWER")
+        raise RuntimeError("EMPTY_PROVIDER_STRUCTURED_RESPONSE")
 
     # Never preserve a machine JSON envelope as visible content. The canonical
     # human content follows the already-unwrapped answer.
@@ -4129,6 +4173,13 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
 
     raw_metadata = canonical_payload.get("metadata")
     metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+    if openai_structured_payload:
+        metadata["openai_structured_response"] = copy.deepcopy(openai_structured_payload)
+        metadata["openai_structured_response_type"] = _safe_text(
+            openai_structured_payload.get("type")
+            or openai_structured_payload.get("representation")
+        ).strip().lower()
+        metadata["openai_structured_response_preserved"] = True
     if "render_explanation" not in metadata and any(
         isinstance(block, dict)
         and _safe_text(block.get("type") or block.get("artifact_type") or "").lower() not in {"", "text", "markdown"}
@@ -4151,7 +4202,7 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         "raw_text_chars": len(_safe_text(raw_text)),
         "parsed_answer_chars": len(answer),
         "parsed_content_chars": len(content),
-        "canonical_answer_recovery_used": bool(recovery_used),
+        "canonical_structured_answer_materialized": bool(recovery_used),
         "structured_output_answer_recovery_used": bool(structured_output_recovery_used),
         "parsed_render_blocks": len(canonical_payload.get("render_blocks") or []) if isinstance(canonical_payload.get("render_blocks"), list) else 0,
         "parsed_artifacts": len(canonical_payload.get("artifacts") or []) if isinstance(canonical_payload.get("artifacts"), list) else 0,
@@ -4198,7 +4249,11 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
         )
 
         normalized_spec = _build_image_generation_spec_from_provider(
-            candidate_spec if isinstance(candidate_spec, dict) else canonical_payload.get("image"),
+            candidate_spec if isinstance(candidate_spec, dict) else (
+                canonical_payload
+                if _safe_text(canonical_payload.get("type")).strip().lower() == "image_generation"
+                else canonical_payload.get("image")
+            ),
             fallback_prompt=fallback_image_prompt,
         )
         if normalized_spec is None and fallback_image_prompt:
@@ -4213,6 +4268,13 @@ def create_provider_contract(raw_text: Any, source_request: Any = None) -> dict[
             ).strip()
             if not semantic_generation_prompt:
                 semantic_generation_prompt = fallback_image_prompt.strip()
+
+            preserved_plan = _image_prompt_from_provider_payload(openai_structured_payload)
+            preserved_norm = re.sub(r"\s+", " ", preserved_plan).strip().casefold()
+            fallback_norm = re.sub(r"\s+", " ", fallback_image_prompt).strip().casefold()
+            if preserved_plan and preserved_norm != fallback_norm:
+                # OpenAI's same-turn visual meaning wins over the trigger wording.
+                semantic_generation_prompt = preserved_plan
 
             profile = _image_render_profile_from_context(
                 source_payload,
