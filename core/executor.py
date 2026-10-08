@@ -115,7 +115,14 @@ async def execute(user_id: str, chat_id: Any = None, text: str = "", *, internal
         "flow_id": flow_id,
     }
     identity = resolve_dialog_identity(payload_identity, user_id=uid, flow_id=flow_id)
-    interp = build_interpretation_identity(interpretation_id=interpretation_id, flow_id=identity["flow_id"], dialog_id=identity["dialog_id"])
+    interp = build_interpretation_identity(
+        april_id=identity["user_id"],
+        conversation_id=identity["conversation_id"],
+        dialog_id=identity["dialog_id"],
+        message_id=identity["message_id"],
+        interpretation_id=interpretation_id,
+        flow_id=identity["flow_id"],
+    )
     identity["interpretation_id"] = interp["interpretation_id"]
     rows = load_dialogue_pairs(uid, limit=0)
     memory_search = search_dialogue_memory(uid, current_en, limit=8) if current_en else {"matches": []}
