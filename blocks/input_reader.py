@@ -14,6 +14,7 @@ from email.parser import BytesParser
 from typing import Any
 
 from blocks.image_reader import read_image_bytes
+from blocks.voice_reader import is_voice_field, validate_voice
 
 MAX_TEXT_FILE_CHARS = 18000
 _TEXT_EXTENSIONS = {
@@ -54,6 +55,20 @@ def normalize_attachment(att: Attachment) -> Attachment:
     filename = att.filename or "file"
     ext = os.path.splitext(filename.lower())[1]
     mime = att.content_type.lower().split(";", 1)[0].strip()
+
+    if is_voice_field(
+        field_name=att.field_name,
+        filename=filename,
+        content_type=mime,
+    ):
+        voice = validate_voice(
+            att.data,
+            filename=filename,
+            content_type=mime,
+        )
+        att.kind = "voice"
+        att.metadata = voice
+        return att
 
     if mime.startswith("image/") or ext in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
         image = read_image_bytes(
