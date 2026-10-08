@@ -32,7 +32,7 @@ def _tokens(text: str) -> set[str]:
 
 def _score(current: str, previous: dict[str, Any]) -> float:
     a = _tokens(current)
-    b = _tokens("%s %s" % (previous.get("user_text_en") or "", previous.get("april_text_en") or ""))
+    b = _tokens("%s %s" % (previous.get("user_text_en") or previous.get("user_text") or "", previous.get("april_text_en") or previous.get("april_text") or ""))
     if not a or not b:
         return 0.0
     return len(a & b) / max(1, len(a))
@@ -44,7 +44,7 @@ def _interpret(current_en: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     low = _text(current_en).lower()
     marker = any(low == m or low.startswith(m + " ") for m in ("this", "that", "it", "continue", "more", "again", "also", "and how", "what about"))
     relation = "CONTINUE" if last and (score >= 0.16 or marker) else "NEW"
-    topic = _text(last.get("user_text_en"))[:160] if relation == "CONTINUE" else _text(current_en)[:160]
+    topic = _text(last.get("user_text_en") or last.get("user_text"))[:160] if relation == "CONTINUE" else _text(current_en)[:160]
     return {
         "dialogue_relation": relation,
         "relation_confidence": round(min(0.99, 0.55 + score * 0.35 + (0.09 if marker else 0.0)), 3),
@@ -66,7 +66,7 @@ def _rooms_for_request(text: str) -> list[dict[str, Any]]:
 
 def _context_plan(current_en: str, rows: list[dict[str, Any]], interpretation: dict[str, Any]) -> dict[str, Any]:
     selected = rows[-4:] if interpretation["dialogue_relation"] == "CONTINUE" else []
-    chain = [{"position": i + 1, "user_en": _text(r.get("user_text_en")), "april_en": _text(r.get("april_text_en"))} for i, r in enumerate(selected)]
+    chain = [{"position": i + 1, "user_en": _text(r.get("user_text_en") or r.get("user_text")), "april_en": _text(r.get("april_text_en") or r.get("april_text"))} for i, r in enumerate(selected)]
     return {
         "relation": interpretation["dialogue_relation"],
         "current_request_en": current_en,
