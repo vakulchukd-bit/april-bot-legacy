@@ -290,6 +290,34 @@ def init_db() -> None:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_memory_user_created ON dialogue_memory(user_id, created_at DESC)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_memory_user_dialog ON dialogue_memory(user_id, dialog_id, created_at DESC)")
 
+                # Binary inputs/outputs are stored separately from the compact
+                # USER↔APRIL pair JSON.  Scope is always authenticated user + dialog.
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS dialogue_assets (
+                        asset_id BIGSERIAL PRIMARY KEY,
+                        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        turn_index INTEGER NOT NULL DEFAULT 0,
+                        dialog_id TEXT NOT NULL,
+                        conversation_id TEXT NOT NULL,
+                        message_id TEXT NOT NULL,
+                        filename TEXT NOT NULL,
+                        mime_type TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        size_bytes BIGINT NOT NULL DEFAULT 0,
+                        sha256 TEXT NOT NULL,
+                        content BYTEA NOT NULL,
+                        text_content TEXT,
+                        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        UNIQUE (user_id, message_id, filename, sha256)
+                    )
+                    """
+                )
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_assets_scope ON dialogue_assets(user_id, dialog_id, created_at DESC)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_assets_conversation ON dialogue_assets(user_id, conversation_id, created_at DESC)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_assets_message ON dialogue_assets(user_id, message_id)")
+
                 # Required destructive sanitization: known legacy memory stores are
                 # no longer part of the schema and must not survive deployment.
                 _schema_cleanup(cur)
@@ -386,6 +414,9 @@ def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | i
             with conn.cursor() as cur:
                 if user_id is None:
                     cur.execute("DELETE FROM dialogue_memory WHERE created_at < %s", (cutoff,))
+                    deleted = int(cur.rowcount or 0)
+                    cur.execute("DELETE FROM dialogue_assets WHERE created_at < %s", (cutoff,))
+                    deleted += int(cur.rowcount or 0)
                 else:
                     uid = str(user_id)
                     if not _is_authenticated_cursor(cur, uid):
@@ -394,7 +425,13 @@ def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | i
                         "DELETE FROM dialogue_memory WHERE user_id = %s AND created_at < %s",
                         (uid, cutoff),
                     )
-                return int(cur.rowcount or 0)
+                    deleted = int(cur.rowcount or 0)
+                    cur.execute(
+                        "DELETE FROM dialogue_assets WHERE user_id = %s AND created_at < %s",
+                        (uid, cutoff),
+                    )
+                    deleted += int(cur.rowcount or 0)
+                return deleted
     except psycopg2.errors.UndefinedTable:
         return 0
     finally:
@@ -580,6 +617,164 @@ def search_dialogue_memory(user_id: Any, query: str, *, limit: int = 8) -> dict[
         "total_pairs": len(rows),
         "matches": matches,
     }
+
+
+# =========================================================
+# AUTHENTICATED DIALOGUE ASSETS
+# =========================================================
+
+MAX_DIALOGUE_ASSET_BYTES = int(os.getenv("APRIL_MAX_DIALOGUE_ASSET_BYTES", str(10 * 1024 * 1024)))
+
+
+def save_dialogue_asset(
+    user_id: Any,
+    *,
+    dialog_id: str,
+    conversation_id: str,
+    message_id: str,
+    filename: str,
+    mime_type: str,
+    kind: str,
+    content: bytes,
+    text_content: str = "",
+    turn_index: int = 0,
+    metadata: dict[str, Any] | None = None,
+    created_at: float | int | datetime | None = None,
+) -> bool:
+    """Store an input/output image or file under its authenticated dialogue IDs.
+
+    Assets are never looked up by filename alone.  Byte payloads are kept out of
+    dialogue_memory JSONB and have the same UTC retention window as dialogue pairs.
+    """
+    uid = str(user_id or "").strip()
+    raw = bytes(content or b"")
+    dialog_value = str(dialog_id or "").strip()
+    conversation_value = str(conversation_id or dialog_value).strip()
+    message_value = str(message_id or "").strip()
+    filename_value = os.path.basename(str(filename or "attachment"))[:240]
+    mime_value = str(mime_type or "application/octet-stream").split(";", 1)[0].strip().lower()
+    kind_value = str(kind or "file").strip().lower()
+    if kind_value not in {"image", "text_file", "file"}:
+        return False
+    if not uid or not dialog_value or not conversation_value or not message_value or not raw:
+        return False
+    if len(raw) > MAX_DIALOGUE_ASSET_BYTES:
+        return False
+    conn = get_conn()
+    if not conn:
+        return False
+    digest = hashlib.sha256(raw).hexdigest()
+    if isinstance(created_at, datetime):
+        dt = created_at.astimezone(timezone.utc)
+    elif created_at is None:
+        dt = now()
+    else:
+        dt = datetime.fromtimestamp(float(created_at), tz=timezone.utc)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                if not _is_authenticated_cursor(cur, uid):
+                    return False
+                # The asset table is created by init_db; do not widen identity scope.
+                cur.execute(
+                    """
+                    INSERT INTO dialogue_assets
+                        (user_id, created_at, turn_index, dialog_id, conversation_id,
+                         message_id, filename, mime_type, kind, size_bytes, sha256,
+                         content, text_content, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                    ON CONFLICT (user_id, message_id, filename, sha256) DO UPDATE SET
+                        created_at = EXCLUDED.created_at,
+                        turn_index = EXCLUDED.turn_index,
+                        dialog_id = EXCLUDED.dialog_id,
+                        conversation_id = EXCLUDED.conversation_id,
+                        mime_type = EXCLUDED.mime_type,
+                        kind = EXCLUDED.kind,
+                        size_bytes = EXCLUDED.size_bytes,
+                        content = EXCLUDED.content,
+                        text_content = EXCLUDED.text_content,
+                        metadata = EXCLUDED.metadata
+                    """,
+                    (uid, dt, int(turn_index or 0), dialog_value, conversation_value,
+                     message_value, filename_value, mime_value, kind_value, len(raw),
+                     digest, psycopg2.Binary(raw), str(text_content or "")[:18000] or None,
+                     json.dumps(metadata or {}, ensure_ascii=False, default=str)),
+                )
+                return True
+    except Exception as exc:
+        # Persisting assets must not take down the canonical chat route.  Caller
+        # can log False and still deliver the answer.
+        print(f"STATE: DIALOGUE ASSET SAVE ERROR: {type(exc).__name__}", flush=True)
+        return False
+    finally:
+        conn.close()
+
+
+def load_dialogue_assets(
+    user_id: Any,
+    *,
+    dialog_id: str,
+    conversation_id: str,
+    message_ids: list[str] | tuple[str, ...],
+    limit: int = 2,
+    timestamp: float | int | datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Load exact prior attachments for selected turns in the same auth scope."""
+    uid = str(user_id or "").strip()
+    dialog_value = str(dialog_id or "").strip()
+    conversation_value = str(conversation_id or dialog_value).strip()
+    ids = list(dict.fromkeys(str(item).strip() for item in (message_ids or []) if str(item).strip()))
+    if not uid or not dialog_value or not conversation_value or not ids:
+        return []
+    conn = get_conn()
+    if not conn:
+        return []
+    seed_start, current = dialogue_window_bounds(timestamp)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                if not _is_authenticated_cursor(cur, uid):
+                    return []
+                cur.execute(
+                    """
+                    SELECT asset_id, created_at, turn_index, dialog_id, conversation_id,
+                           message_id, filename, mime_type, kind, size_bytes, content,
+                           text_content, metadata
+                    FROM dialogue_assets
+                    WHERE user_id = %s
+                      AND dialog_id = %s
+                      AND conversation_id = %s
+                      AND message_id = ANY(%s)
+                      AND created_at >= %s
+                      AND created_at <= %s
+                    ORDER BY array_position(%s::text[], message_id) ASC,
+                             created_at DESC, asset_id DESC
+                    LIMIT %s
+                    """,
+                    (uid, dialog_value, conversation_value, ids, seed_start, current, ids,
+                     max(1, min(4, int(limit or 2)))),
+                )
+                result: list[dict[str, Any]] = []
+                for raw_row in cur.fetchall():
+                    row = dict(raw_row)
+                    created = row.get("created_at")
+                    if isinstance(created, datetime):
+                        row["created_at"] = created.astimezone(timezone.utc).timestamp()
+                    row["content"] = bytes(row.get("content") or b"")
+                    meta = row.get("metadata") or {}
+                    if isinstance(meta, str):
+                        try:
+                            meta = json.loads(meta)
+                        except Exception:
+                            meta = {}
+                    row["metadata"] = meta if isinstance(meta, dict) else {}
+                    result.append(row)
+                return result
+    except Exception as exc:
+        print(f"STATE: DIALOGUE ASSET LOAD ERROR: {type(exc).__name__}", flush=True)
+        return []
+    finally:
+        conn.close()
 
 
 # =========================================================
