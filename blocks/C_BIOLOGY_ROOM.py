@@ -1,7 +1,6 @@
 from typing import Any, Dict
 import os
 
-from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import (
     create_artifact,
     MachineRequest,
@@ -110,7 +109,7 @@ def build_machine_contribution(machine_request:MachineRequest)->Dict[str,Any]:
 # transport defined in C_ARTIFACT_CONTRACT.
 # =====================================================
 
-class BiologyRoom(Room):
+class BiologyRoom:
     name = ROOM_ID
     id = ROOM_ID
     domains = BIOLOGY_COMPETENCY["domains"]
