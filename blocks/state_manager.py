@@ -257,6 +257,18 @@ def set_relation(user_id: Any, relation: str, **metadata: Any) -> None:
 
 
 
+_SEMANTIC_ALIASES = {
+    # Russian inflections and common near-synonyms that matter in visual follow-ups.
+    "кошка": "кот", "кошки": "кот", "кошку": "кот", "кошкой": "кот",
+    "кошечка": "кот", "кошечки": "кот", "кошечку": "кот", "кошечкой": "кот",
+    "котик": "кот", "котика": "кот", "котиком": "кот", "котики": "кот",
+    "котенок": "кот", "котенка": "кот", "котенку": "кот", "котенком": "кот",
+    "цвета": "цвет", "цветом": "цвет", "цвете": "цвет", "цвету": "цвет",
+    "окрас": "цвет", "окраса": "цвет", "окрасом": "цвет",
+    "породы": "порода", "породой": "порода", "породе": "порода",
+    "фотографии": "фото", "фотографию": "фото", "фотографией": "фото",
+}
+
 _STOP_WORDS = {
     "и", "а", "но", "или", "ли", "же", "да", "нет", "ну", "вот", "как",
     "в", "во", "на", "по", "к", "ко", "с", "со", "у", "из", "от", "до",
@@ -291,11 +303,12 @@ def _tokens(value: Any) -> set[str]:
 
 
 def _semantic_tokens(value: Any) -> set[str]:
-    return {
-        token
-        for token in _tokens(value)
-        if token not in _STOP_WORDS and len(token) > 2
-    }
+    normalized = set()
+    for token in _tokens(value):
+        token = _SEMANTIC_ALIASES.get(token, token)
+        if token not in _STOP_WORDS and len(token) > 2:
+            normalized.add(token)
+    return normalized
 
 
 def _continuation_marker(query: str) -> bool:
@@ -359,6 +372,19 @@ def _looks_like_referential_followup(query: str) -> bool:
         "как он", "как она", "что он", "что она", "где он", "где она",
         "кто был", "что с ним", "что с ней",
         "что еще", "что ещё", "а что еще", "а что ещё",
+        # Explicit references to a previously supplied asset, even when the
+        # current turn contains no new file/image bytes.
+        "в этом файле", "в данном файле", "в прикрепленном файле",
+        "в прикреплённом файле", "в файле который я прислал",
+        "в файле, который я прислал", "на этой картинке", "на картинке",
+        "на этом фото", "на этой фотографии", "на изображении",
+        "тот файл", "этот файл", "тот код", "этот код", "тот скриншот",
+        "эту картинку", "эту фотографию", "картинку, которую я прислал",
+        "файл, который я присылал", "изображение, которое я прислал",
+        "какого цвета", "какой цвет", "какая порода", "какой породы",
+        "какого вида", "какого размера", "какой окрас", "какого окраса",
+        "проверь еще раз", "проверь ещё раз", "перепроверь", "посмотри еще раз",
+        "посмотри ещё раз", "я же скидывал картинку", "я скидывал фото",
     )
     if any(marker in low for marker in phrase_markers):
         return True
@@ -705,10 +731,26 @@ def search_dialogue_context(
     """
     uid = _uid(user_id)
     state = hydrate(uid)
-    rows = list(state.get("dialogue_pairs") or [])
+    all_rows = list(state.get("dialogue_pairs") or [])
     reference_followup = _looks_like_referential_followup(query)
     history_request = _is_history_request(query)
     new_topic_request = _looks_like_new_topic(query)
+
+    # Search the complete active dialogue, not merely its last turn.  Keep
+    # ordinary continuation scoped to the requested conversation; only explicit
+    # history requests may span the user's retained conversations.
+    if history_request:
+        rows = all_rows
+    elif dialog_id or conversation_id:
+        rows = [
+            row for row in all_rows
+            if isinstance(row, dict) and (
+                (dialog_id and _text(row.get("dialog_id")) == _text(dialog_id))
+                or (conversation_id and _text(row.get("conversation_id")) == _text(conversation_id))
+            )
+        ]
+    else:
+        rows = all_rows
     query_modalities = {
         modality for modality, enabled in (
             ("image", bool(has_image)),
@@ -877,7 +919,7 @@ def search_dialogue_context(
     topic_table_md = "\n".join(topic_table_lines)
 
     result = {
-        "engine": "state_manager_dialogue_search_v3",
+        "engine": "state_manager_dialogue_search_v4_asset_recall",
         "authenticated": True,
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "dialog_id": str(dialog_id or ""),
@@ -893,7 +935,14 @@ def search_dialogue_context(
         "history_request": history_request,
         "requested_topic_count": history_limit,
         "active_topic": active_topic,
-        "anchor": _compact_pair(latest_same_dialog or best) if (latest_same_dialog or best) else {},
+        # Keep the same semantic anchor used to build selected_pairs.  Returning
+        # latest_same_dialog unconditionally made later unrelated turns replace an
+        # older image/file anchor needed for follow-up questions.
+        "anchor": _compact_pair(
+            (anchor if relation == "CONTINUE" and isinstance(locals().get("anchor"), dict) else None)
+            or latest_same_dialog
+            or best
+        ) if (relation == "CONTINUE" and (locals().get("anchor") or latest_same_dialog or best)) else {},
         "matches": matches[:max(1, int(limit or 12))] if matches else [],
         "selected": selected_for_context[:6],
         "history_topics": history_topics,
