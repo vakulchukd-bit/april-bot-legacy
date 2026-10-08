@@ -576,10 +576,238 @@ ARTIFACT_RENDERER_ALIASES = {
 }
 
 # =====================================================
-# FACTORY ROOM MAP
+# CANONICAL APRIL ROOM REGISTRY
 # =====================================================
+# Registration lives here as metadata only.
+#
+# Important:
+#   * This registry DOES NOT import room modules.
+#   * This registry DOES NOT create alternate routes.
+#   * Executor remains responsible for selecting/activating rooms.
+#   * Room implementations remain in their existing blocks/*.py files.
+#   * C_ARTIFACT_CONTRACT is the single source of truth for room identity,
+#     capabilities and artifact expectations.
+#
+# Infrastructure components such as bot.ru, Exkrutor and the 12h memory
+# subsystem are NOT rooms and therefore are intentionally not registered here.
 
-FACTORY_ROOM_MAP: Dict[str, str] = {}
+ROOM_REGISTRY_VERSION = "1.0"
+
+@dataclass(frozen=True)
+class RoomRegistration:
+    room_id: str
+    module: str
+    class_name: str = ""
+    artifact_type: str = ""
+    room_type: str = ""
+    role: str = ""
+    capabilities: tuple[str, ...] = ()
+    enabled: bool = True
+    is_engine: bool = False
+
+
+ROOM_REGISTRY: Dict[str, RoomRegistration] = {
+    "C_APRIL_IMAGES_GENERATOR": RoomRegistration(
+        room_id="APRIL_IMAGES_GENERATION",
+        module="blocks.C_APRIL_IMAGES_GENERATOR",
+        class_name="AprilImagesGenerator",
+        artifact_type="image",
+        room_type="generator",
+        role="canonical image generation engine",
+        capabilities=("image_generation", "png", "gallery"),
+        is_engine=True,
+    ),
+    "C_BIOLOGY_ROOM": RoomRegistration(
+        room_id="biology",
+        module="blocks.C_BIOLOGY_ROOM",
+        class_name="BiologyRoom",
+        room_type="knowledge",
+        role="biology knowledge and research",
+        capabilities=("biology", "research", "knowledge"),
+    ),
+    "C_DIAGRAM_ROOM": RoomRegistration(
+        room_id="C_DIAGRAM_ROOM",
+        module="blocks.C_DIAGRAM_ROOM",
+        class_name="DiagramRoom",
+        artifact_type="diagram",
+        room_type="diagram_renderer",
+        role="canonical diagram structure",
+        capabilities=("diagram", "svg", "geometry"),
+    ),
+    "C_FORMULA_ROOM": RoomRegistration(
+        room_id="FORMULA_ROOM",
+        module="blocks.C_FORMULA_ROOM",
+        class_name="FormulaRoom",
+        artifact_type="formula",
+        room_type="visual",
+        role="formula rendering",
+        capabilities=("formula", "latex", "math"),
+    ),
+    "C_FUNCTION_ROOM": RoomRegistration(
+        room_id="FUNCTION_ROOM",
+        module="blocks.C_FUNCTION_ROOM",
+        class_name="FunctionRoom",
+        artifact_type="function",
+        room_type="visual",
+        role="function representation",
+        capabilities=("function", "mathematical_function"),
+    ),
+    "C_GALLERY_ROOM": RoomRegistration(
+        room_id="GALLERY_ROOM",
+        module="blocks.C_GALLERY_ROOM",
+        class_name="GalleryRoom",
+        artifact_type="gallery",
+        room_type="visual",
+        role="gallery composition",
+        capabilities=("gallery", "image_collection"),
+    ),
+    "C_GRAPH_ROOM": RoomRegistration(
+        room_id="C_GRAPH_ROOM",
+        module="blocks.C_GRAPH_ROOM",
+        class_name="GraphRoom",
+        artifact_type="graph",
+        room_type="graph_renderer",
+        role="canonical graph structure",
+        capabilities=("graph", "series", "data_visualization"),
+    ),
+    "C_IT_ROOM": RoomRegistration(
+        room_id="it",
+        module="blocks.C_IT_ROOM",
+        class_name="ITRoom",
+        room_type="knowledge",
+        role="software and code analysis",
+        capabilities=("software", "code", "git", "analysis"),
+    ),
+    "C_LINK_ROOM": RoomRegistration(
+        room_id="LINK_ROOM",
+        module="blocks.C_LINK_ROOM",
+        class_name="LinkRoom",
+        artifact_type="link",
+        room_type="visual",
+        role="link/card representation",
+        capabilities=("link", "url", "preview"),
+    ),
+    "C_LITERATURE_ROOM": RoomRegistration(
+        room_id="LITERATURE_ROOM",
+        module="blocks.C_LITERATURE_ROOM",
+        class_name="LiteratureRoom",
+        artifact_type="function",
+        room_type="knowledge",
+        role="literature knowledge and analysis",
+        capabilities=("literature", "authors", "literary_analysis"),
+    ),
+    "C_MATHEMATICS_ROOM": RoomRegistration(
+        room_id="MATHEMATICS_ROOM",
+        module="blocks.C_MATHEMATICS_ROOM",
+        class_name="MathematicsRoom",
+        artifact_type="function",
+        room_type="science",
+        role="mathematical reasoning",
+        capabilities=("mathematics", "calculation", "reasoning"),
+    ),
+    "C_NEWS_ROOM": RoomRegistration(
+        room_id="NEWS_ROOM",
+        module="blocks.C_NEWS_ROOM",
+        class_name="NewsRoom",
+        artifact_type="function",
+        room_type="professional",
+        role="news domain processing",
+        capabilities=("news", "current_events"),
+    ),
+    "C_POLITICS_ROOM": RoomRegistration(
+        room_id="POLITICS_ROOM",
+        module="blocks.C_POLITICS_ROOM",
+        class_name="PoliticsRoom",
+        artifact_type="function",
+        room_type="professional",
+        role="politics domain processing",
+        capabilities=("politics", "current_events"),
+    ),
+    "C_SOCIAL_ROOM": RoomRegistration(
+        room_id="SOCIAL_ROOM",
+        module="blocks.C_SOCIAL_ROOM",
+        class_name="SocialRoom",
+        artifact_type="function",
+        room_type="professional",
+        role="social domain processing",
+        capabilities=("social", "communication"),
+    ),
+    "C_TABLE_ROOM": RoomRegistration(
+        room_id="C_TABLE_ROOM",
+        module="blocks.C_TABLE_ROOM",
+        class_name="TableRoom",
+        artifact_type="table",
+        room_type="table_renderer",
+        role="canonical table structure",
+        capabilities=("table", "structured_data", "tabular"),
+    ),
+    "C_TRIGONOMETRY_ROOM": RoomRegistration(
+        room_id="TRIGONOMETRY_ROOM",
+        module="blocks.C_TRIGONOMETRY_ROOM",
+        class_name="TrigonometryRoom",
+        artifact_type="function",
+        room_type="science",
+        role="trigonometry reasoning",
+        capabilities=("trigonometry", "calculation", "geometry"),
+    ),
+    "C_UTC_ROOM": RoomRegistration(
+        room_id="UTC_ROOM",
+        module="blocks.C_UTC_ROOM",
+        class_name="UTCRoom",
+        artifact_type="function",
+        room_type="service",
+        role="UTC/time service",
+        capabilities=("utc", "time", "datetime"),
+    ),
+    "C_WEB_ROOM": RoomRegistration(
+        room_id="WEB_ROOM",
+        module="blocks.C_WEB_ROOM",
+        class_name="WebRoom",
+        artifact_type="link",
+        room_type="service",
+        role="web service/artifact representation",
+        capabilities=("web", "links", "retrieval"),
+    ),
+}
+
+# Compatibility map for existing Factory code.  It contains module paths only;
+# it does not import or execute rooms and does not create a second routing path.
+FACTORY_ROOM_MAP: Dict[str, str] = {
+    key: registration.module
+    for key, registration in ROOM_REGISTRY.items()
+}
+
+
+def register_room(registration: RoomRegistration) -> RoomRegistration:
+    """Register one room in the canonical C-ARTIFACT registry."""
+    if not isinstance(registration, RoomRegistration):
+        raise TypeError("registration must be RoomRegistration")
+    key = registration.module.rsplit(".", 1)[-1]
+    ROOM_REGISTRY[key] = registration
+    FACTORY_ROOM_MAP[key] = registration.module
+    return registration
+
+
+def get_room_registration(room_key: str) -> Optional[RoomRegistration]:
+    """Resolve a room registration without importing or executing the room."""
+    key = str(room_key or "").strip()
+    if not key:
+        return None
+    return ROOM_REGISTRY.get(key)
+
+
+def list_registered_rooms(*, include_engines: bool = True) -> List[RoomRegistration]:
+    """Return the canonical room list in stable registration order."""
+    values = list(ROOM_REGISTRY.values())
+    if include_engines:
+        return values
+    return [item for item in values if not item.is_engine]
+
+
+def is_room_registered(room_key: str) -> bool:
+    return get_room_registration(room_key) is not None
+
+
 
 # =====================================================
 # CANONICAL RENDER SIGNAL
