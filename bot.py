@@ -21,7 +21,7 @@ from typing import Any
 from blocks.input_reader import parse_json_payload, parse_multipart_payload
 from blocks.voice_reader import transcribe_voice_bytes
 from core.executor import execute
-from storage import init_db
+from storage import init_db, load_dialogue_pairs, save_dialogue_asset
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "10000"))
@@ -36,9 +36,14 @@ def _text(value: Any) -> str:
 
 
 def _detect_language(text: str, requested: str = "") -> str:
-    requested = _text(requested).lower()
+    requested = _text(requested).lower().replace("_", "-")
     if requested and requested not in {"auto", "default"}:
-        return requested
+        # Accept browser locale tags (ru-RU, uk-UA, en-US) while keeping the
+        # provider language contract stable and short.
+        language = requested.split("-", 1)[0]
+        if language in {"ru", "uk", "en", "ja", "zh", "ko", "ar", "hi", "el"}:
+            return language
+        return language or "en"
     value = text or ""
     low = value.lower()
     if re.search(r"[іїєґ]", low):
@@ -226,10 +231,83 @@ def _handle_payload(
         if semantic_text:
             original = (original + "\n\n" + semantic_text).strip()
 
+        # Reject unreadable/empty uploads before synthesizing an instruction.  An
+        # attachment-only message is valid only when the Reader produced actual
+        # visual/file input for the Provider.
         if not original and not visual_context and not file_inputs and not text_file_contents:
             if attachment_meta:
                 return _error("file is not readable by the Provider", 400)
             return _error("text, voice, image or file required", 400)
+
+        # An attachment-only message is a valid user request.  Give Interpretation
+        # an explicit neutral analysis task without mixing in the attachment bytes.
+        if not original and attachment_meta:
+            requested_language = _text(data.get("language") or data.get("display_language")).lower().replace("_", "-")
+            if requested_language in {"auto", "default"}:
+                requested_language = ""
+            if not requested_language:
+                # Use the last saved language for this exact authenticated dialog.
+                # This keeps an image-only upload in Russian/Ukrainian chats localised.
+                try:
+                    prior_pairs = load_dialogue_pairs(uid, limit=24)
+                    for prior in reversed(prior_pairs):
+                        if (
+                            _text(prior.get("dialog_id")) == (dialog_id or conversation_id)
+                            and _text(prior.get("conversation_id")) == (conversation_id or dialog_id)
+                            and _text(prior.get("language"))
+                        ):
+                            requested_language = _text(prior.get("language")).lower()
+                            break
+                except Exception:
+                    pass
+            kinds = {str(item.get("kind") or "").lower() for item in attachment_meta}
+            if kinds & {"image"}:
+                defaults = {
+                    "ru": "Опиши содержимое прикреплённого изображения.",
+                    "uk": "Опиши вміст прикріпленого зображення.",
+                    "en": "Describe the attached image.",
+                }
+            else:
+                defaults = {
+                    "ru": "Прочитай прикреплённый файл и кратко объясни его содержимое.",
+                    "uk": "Прочитай прикріплений файл і коротко поясни його вміст.",
+                    "en": "Read the attached file and briefly explain its contents.",
+                }
+            language_key = requested_language.replace("_", "-").split("-", 1)[0] if requested_language else ""
+            original = defaults[language_key] if language_key in defaults else defaults["en"]
+
+        # Store the uploaded assets under the same authenticated identity tuple as
+        # this POST.  Retrieval is by exact message_id + dialog/conversation, never
+        # by filename or by another account.  The chat response can still proceed if
+        # persistence is temporarily unavailable.
+        try:
+            init_db()
+            for att in attachments:
+                kind = str(getattr(att, "kind", "file") or "file").lower()
+                if kind not in {"image", "text_file", "file"}:
+                    continue
+                meta = getattr(att, "metadata", {}) or {}
+                raw_bytes = getattr(att, "data", b"") or b""
+                if not raw_bytes:
+                    continue
+                save_dialogue_asset(
+                    uid,
+                    dialog_id=dialog_id or conversation_id,
+                    conversation_id=conversation_id or dialog_id,
+                    message_id=message_id,
+                    filename=_text(getattr(att, "filename", "attachment")) or "attachment",
+                    mime_type=_text(meta.get("mime_type") or getattr(att, "content_type", "application/octet-stream")),
+                    kind=kind,
+                    content=raw_bytes,
+                    text_content=_text(meta.get("text")),
+                    metadata={
+                        "source_type": _text(meta.get("source_type") or kind),
+                        "reader": _text(meta.get("reader")),
+                        "provider_readable": bool(meta.get("provider_readable", False)),
+                    },
+                )
+        except Exception as asset_exc:
+            print(f"STATE: DIALOGUE ASSET PRE-SAVE ERROR: {type(asset_exc).__name__}", flush=True)
 
         language = _detect_language(
             original or voice_transcript,
@@ -373,7 +451,12 @@ class AprilHandler(BaseHTTPRequestHandler):
     server_version = "AprilBotRU/3.0"
 
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
-        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        # RFC 9110: a 204 response must not advertise/contain a JSON body.  The
+        # previous Content-Length: 2 with no bytes desynchronised HTTP/1.1 keep-alive
+        # connections; subsequent telemetry JSON was then parsed as a request line.
+        body = b"" if status == 204 else json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -392,6 +475,30 @@ class AprilHandler(BaseHTTPRequestHandler):
         self._send_json(200, {"success": True, "service": "april-bot", "canonical_route": CANONICAL_CHAT_ROUTE, "route_version": CANONICAL_ROUTE_VERSION})
 
     def do_POST(self) -> None:
+        if self.path == "/frontend_log":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length < 0 or length > 64 * 1024:
+                    self._send_json(413, {"success": False, "error": "LOG_BODY_TOO_LARGE"})
+                    return
+                raw_log = self.rfile.read(length)
+                try:
+                    entry = json.loads(raw_log.decode("utf-8") or "{}")
+                except Exception:
+                    entry = {}
+                if isinstance(entry, dict):
+                    safe_entry = {
+                        key: str(entry.get(key) or "")[:300]
+                        for key in ("room", "stage", "status", "error_code", "route", "flow_id", "message_id")
+                        if entry.get(key) is not None
+                    }
+                    print("[APRIL_FRONTEND] " + json.dumps(safe_entry, ensure_ascii=False), flush=True)
+                self._send_json(204, {})
+            except Exception as exc:
+                print(f"[APRIL_FRONTEND] LOG ERROR: {type(exc).__name__}", flush=True)
+                self._send_json(400, {"success": False, "error": "INVALID_FRONTEND_LOG"})
+            return
+
         if self.path != CANONICAL_CHAT_ROUTE:
             self._send_json(404, {"success": False, "error": "NOT_FOUND", "canonical_route": CANONICAL_CHAT_ROUTE})
             return
