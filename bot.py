@@ -15,16 +15,14 @@ import os
 import re
 import traceback
 import uuid
-import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from blocks.input_reader import parse_json_payload, parse_multipart_payload
-from blocks.voice_reader import validate_voice
+from blocks.voice_reader import transcribe_voice_bytes
 from core.executor import execute
-from blocks.provider_router import transcribe_voice
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "10000"))
@@ -188,22 +186,17 @@ def _prepare_attachments(
         if kind == "voice":
             meta[-1]["kind"] = "voice"
             raw_voice = getattr(att, "data", b"") or item.get("data") or b""
-            if voice_transcript:
-                extra_text.append(f"VOICE {filename}:\n{voice_transcript}")
-            elif raw_voice:
-                suffix = os.path.splitext(filename)[1] or ".webm"
-                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-                try:
-                    tmp.write(raw_voice)
-                    tmp.close()
-                    transcript = asyncio.run(transcribe_voice(tmp.name))
-                finally:
-                    try:
-                        os.unlink(tmp.name)
-                    except OSError:
-                        pass
-                if transcript:
-                    extra_text.append(f"VOICE {filename}:\n{transcript}")
+            transcript = _text(voice_transcript)
+            if not transcript and raw_voice:
+                transcript = transcribe_voice_bytes(
+                    raw_voice,
+                    filename=filename or "voice.webm",
+                    content_type=_text(getattr(att, "content_type", "")),
+                )
+            if transcript:
+                # Transcript is the semantic input; the original audio remains
+                # represented by attachment metadata.
+                extra_text.append(transcript)
         elif kind == "text_file":
             text = _text(item.get("text"))
             if text:
@@ -260,11 +253,12 @@ def _handle_payload(
     *,
     voice_transcript: str = "",
 ) -> tuple[int, dict[str, Any]]:
-    uid = _text(data.get("user_id") or data.get("april_id"))
+    identity = _canonical_identity(data)
+    uid = identity["user_id"]
     original = _text(data.get("text") or data.get("message") or data.get("content"))
-    conversation_id = _text(data.get("conversation_id"))
-    dialog_id = _text(data.get("dialog_id") or conversation_id)
-    message_id = _text(data.get("message_id")) or f"msg_{uuid.uuid4().hex}"
+    conversation_id = identity["conversation_id"]
+    dialog_id = identity["dialog_id"]
+    message_id = identity["message_id"]
     if not uid:
         return _error("user_id required", 400)
     if not conversation_id and not dialog_id:
@@ -322,21 +316,31 @@ def _voice_attachment(attachments: list[Any]) -> Any | None:
 
 
 def _transcribe_attachment(att: Any) -> str:
+    """Delegate transcription to the existing Voice block."""
     raw_voice = getattr(att, "data", b"") or b""
     if not raw_voice:
         raise ValueError("VOICE_EMPTY")
-    filename = _text(getattr(att, "filename", "voice.webm")) or "voice.webm"
-    suffix = os.path.splitext(filename)[1] or ".webm"
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    try:
-        tmp.write(raw_voice)
-        tmp.close()
-        return _text(asyncio.run(transcribe_voice(tmp.name)))
-    finally:
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
+    return transcribe_voice_bytes(
+        raw_voice,
+        filename=_text(getattr(att, "filename", "voice.webm")) or "voice.webm",
+        content_type=_text(getattr(att, "content_type", "")),
+    )
+
+
+def _canonical_identity(data: dict[str, Any]) -> dict[str, str]:
+    """Create one identity tuple and reuse it for transcript + final answer."""
+    conversation_id = _text(data.get("conversation_id") or data.get("dialog_id"))
+    dialog_id = _text(data.get("dialog_id") or conversation_id)
+    message_id = _text(data.get("message_id")) or f"msg_{uuid.uuid4().hex}"
+    flow_id = _text(data.get("flow_id")) or f"flow_{uuid.uuid4().hex}"
+    return {
+        "user_id": _text(data.get("user_id") or data.get("april_id")),
+        "conversation_id": conversation_id,
+        "dialog_id": dialog_id,
+        "message_id": message_id,
+        "interpretation_id": _text(data.get("interpretation_id")),
+        "flow_id": flow_id,
+    }
 
 
 def _handle_voice_stream(
@@ -350,24 +354,40 @@ def _handle_voice_stream(
         write_event({"type": "answer", "status": status, "data": payload})
         return
 
+    identity = _canonical_identity(data)
+    if not identity["user_id"]:
+        raise ValueError("USER_ID_REQUIRED")
+    if not identity["conversation_id"] and not identity["dialog_id"]:
+        raise ValueError("conversation_id or dialog_id required")
+
+    routed_data = dict(data)
+    routed_data.update(identity)
+
+    # Voice block -> existing Provider transcription.
     transcript = _transcribe_attachment(voice)
     if not transcript:
         raise ValueError("VOICE_EMPTY_TRANSCRIPT")
 
-    # Transcript is the first visible result on the same canonical route.
+    # First event on the same POST /api/v1/chat connection.
     write_event({
         "type": "transcript",
         "success": True,
         "text": transcript,
-        "user_id": _text(data.get("user_id") or data.get("april_id")),
-        "conversation_id": _text(data.get("conversation_id") or data.get("dialog_id")),
-        "dialog_id": _text(data.get("dialog_id") or data.get("conversation_id")),
-        "message_id": _text(data.get("message_id")),
-        "flow_id": _text(data.get("flow_id")),
+        "canonical_route": CANONICAL_CHAT_ROUTE,
+        "april_id": identity["user_id"],
+        "user_id": identity["user_id"],
+        "conversation_id": identity["conversation_id"],
+        "dialog_id": identity["dialog_id"],
+        "message_id": identity["message_id"],
+        "interpretation_id": identity["interpretation_id"],
+        "flow_id": identity["flow_id"],
     })
 
+    # Continue on the same canonical route; no second Web request is created.
     status, payload = _handle_payload(
-        data, attachments, voice_transcript=transcript
+        routed_data,
+        attachments,
+        voice_transcript=transcript,
     )
     write_event({"type": "answer", "status": status, "data": payload})
 
