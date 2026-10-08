@@ -14,6 +14,7 @@ import json
 import os
 import re
 import traceback
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -417,8 +418,16 @@ def _handle_voice_stream(
     routed_data = dict(data)
     routed_data.update(identity)
 
-    # Voice block -> existing Provider transcription.
+    # Voice block -> existing Provider transcription. Track this separately from
+    # the answer pipeline so production logs show exactly where time is spent.
+    voice_started = time.perf_counter()
     transcript = _transcribe_attachment(voice)
+    transcribe_ms = round((time.perf_counter() - voice_started) * 1000, 1)
+    print(
+        f"[APRIL_VOICE] stage=transcript_ready elapsed_ms={transcribe_ms} "
+        f"transcript_chars={len(transcript or '')}",
+        flush=True,
+    )
     if not transcript:
         raise ValueError("VOICE_EMPTY_TRANSCRIPT")
 
@@ -438,10 +447,22 @@ def _handle_voice_stream(
     })
 
     # Continue on the same canonical route; no second Web request is created.
+    answer_started = time.perf_counter()
     status, payload = _handle_payload(
         routed_data,
         attachments,
         voice_transcript=transcript,
+    )
+    answer_ms = round((time.perf_counter() - answer_started) * 1000, 1)
+    scene_contract = payload.get("scene_contract") if isinstance(payload, dict) else {}
+    scene_metadata = scene_contract.get("metadata") if isinstance(scene_contract, dict) else {}
+    provider_ms = scene_metadata.get("provider_ms") if isinstance(scene_metadata, dict) else None
+    print(
+        f"[APRIL_VOICE] stage=answer_ready elapsed_ms={answer_ms} "
+        f"provider_ms={provider_ms if provider_ms is not None else 'unknown'} "
+        f"total_ms={round((time.perf_counter() - voice_started) * 1000, 1)} "
+        f"http_status={status}",
+        flush=True,
     )
     write_event({"type": "answer", "status": status, "data": payload})
 
