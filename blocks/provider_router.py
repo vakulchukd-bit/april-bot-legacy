@@ -337,6 +337,30 @@ def _json_load(raw: str) -> dict[str, Any]:
 
 
 def _request_key(req: MachineRequest) -> str:
+    # Include attachment fingerprints.  Without these, the 90-second Provider
+    # cache could reuse a text-only or previous-image response for different bytes.
+    def fingerprint(value: Any) -> str:
+        if not isinstance(value, str) or not value:
+            return ""
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    visual = req.visual_context if isinstance(req.visual_context, dict) else {}
+    visual_fingerprints = [
+        fingerprint(item.get("image_url"))
+        for item in (visual.get("items") or [])
+        if isinstance(item, dict) and item.get("image_url")
+    ]
+    metadata = req.metadata if isinstance(req.metadata, dict) else {}
+    file_fingerprints = [
+        fingerprint(item.get("file_data"))
+        for item in (metadata.get("file_inputs") or [])
+        if isinstance(item, dict) and item.get("file_data")
+    ]
+    text_fingerprints = [
+        fingerprint(item.get("content"))
+        for item in (metadata.get("file_contents") or [])
+        if isinstance(item, dict) and item.get("content")
+    ]
     raw = json.dumps(
         {
             "user_id": req.fiber.identity.user_id,
@@ -346,6 +370,9 @@ def _request_key(req: MachineRequest) -> str:
             "memory": req.memory,
             "routing": req.routing,
             "constraints": req.constraints,
+            "visual_fingerprints": visual_fingerprints,
+            "file_fingerprints": file_fingerprints,
+            "text_fingerprints": text_fingerprints,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -462,6 +489,8 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
                 "filename": _clip(item.get("filename"), 120),
                 "source_type": _clip(item.get("source_type"), 60),
                 "mime_type": _clip(item.get("mime_type"), 60),
+                "recalled_from_memory": bool(item.get("recalled_from_memory")),
+                "asset_message_id": _clip(item.get("asset_message_id"), 120),
             })
 
     structured = {
@@ -517,6 +546,7 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
         },
         "INPUT_MODALITIES": modality_lines,
         "VISUAL_CONTEXT": visual_meta,
+        "RECALLED_ASSETS": memory.get("restored_assets") or [],
         "ATTACHMENTS": req.metadata.get("attachments", []) if isinstance(req.metadata, dict) else [],
         "ATTACHED_TEXT_FILES": req.metadata.get("file_contents", []) if isinstance(req.metadata, dict) else [],
         "C_ARTIFACT_RENDER_PLAN": render_plan,
@@ -662,7 +692,18 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
         data.get("answer")
         or data.get("content")
         or data.get("response")
+        or data.get("summary")
+        or data.get("internal_answer_en")
     )
+    if not answer:
+        raw_blocks = data.get("render_blocks") if isinstance(data.get("render_blocks"), list) else []
+        for block in raw_blocks:
+            if not isinstance(block, dict):
+                continue
+            candidate = _text(block.get("content") or block.get("text") or block.get("markdown"))
+            if candidate:
+                answer = candidate
+                break
     if not answer:
         raise RuntimeError("PROVIDER_EMPTY_ANSWER")
 
@@ -739,55 +780,123 @@ async def generate_text(
 
     _inflight.add(key)
     started = time.perf_counter()
-
+    failure_code = "PROVIDER_EMPTY_ANSWER"
+    contract: dict[str, Any] | None = None
+    usage_data: dict[str, int] = {}
     try:
-        response = await asyncio.to_thread(
-            _client_get().responses.create,
-            model=MODEL,
-            input=_build_input(request),
-            max_output_tokens=MAX_OUTPUT_TOKENS,
-        )
+        client = _client_get()
+        base_input = _build_input(request)
+        for attempt in range(2):
+            attempt_input = base_input
+            if attempt:
+                # A targeted one-time retry repairs incomplete JSON without
+                # creating a second route or changing the user's identity/context.
+                attempt_input = list(base_input) + [{
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": (
+                            "Your previous output was empty or not a valid non-empty JSON response. "
+                            "Return the full required JSON object now. The answer field must contain "
+                            "a useful user-facing answer in RETURN_LANGUAGE. If an attachment is "
+                            "present, describe/analyze that actual attachment; do not invent details."
+                        ),
+                    }],
+                }]
+            try:
+                response = await asyncio.to_thread(
+                    client.responses.create,
+                    model=MODEL,
+                    input=attempt_input,
+                    max_output_tokens=MAX_OUTPUT_TOKENS,
+                )
+                raw = _text(getattr(response, "output_text", ""))
+                if not raw:
+                    failure_code = "OPENAI_EMPTY_OUTPUT"
+                    continue
+                try:
+                    decoded = _json_load(raw)
+                    contract = _normalize(decoded)
+                    usage = getattr(response, "usage", None)
+                    if usage is not None:
+                        usage_data = {
+                            "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+                            "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+                            "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+                        }
+                    break
+                except Exception as exc:
+                    failure_code = str(exc) or "PROVIDER_INVALID_OUTPUT"
+                    contract = None
+                    continue
+            except Exception as exc:
+                # Network/auth/provider errors should retain their real error,
+                # not be hidden behind an invented answer.
+                if attempt == 1:
+                    raise
+                failure_code = str(exc) or "PROVIDER_REQUEST_FAILED"
+                continue
 
-        raw = _text(getattr(response, "output_text", ""))
-        if not raw:
-            raise RuntimeError("OPENAI_EMPTY_OUTPUT")
-
-        contract = _normalize(_json_load(raw))
-        machine_response = contract["machine_response"]
-        machine_response["metadata"]["provider_ms"] = round(
-            (time.perf_counter() - started) * 1000,
-            1,
-        )
-
-        usage = getattr(response, "usage", None)
-        if usage is not None:
-            machine_response["metadata"]["usage"] = {
-                "input_tokens": int(
-                    getattr(usage, "input_tokens", 0) or 0
-                ),
-                "output_tokens": int(
-                    getattr(usage, "output_tokens", 0) or 0
-                ),
-                "total_tokens": int(
-                    getattr(usage, "total_tokens", 0) or 0
-                ),
+        if contract is None:
+            language = _text(
+                (request.constraints or {}).get("display_language")
+                or (request.constraints or {}).get("provider_output_language")
+                or "en"
+            ).lower()
+            attachments = (request.metadata or {}).get("attachments", []) if isinstance(request.metadata, dict) else []
+            has_attachment = bool(attachments or (request.visual_context or {}).get("items") or (request.metadata or {}).get("file_inputs") or (request.metadata or {}).get("file_contents"))
+            if language.startswith("ru"):
+                answer = (
+                    "Не удалось получить содержательный ответ от модели по этому вложению. "
+                    "Повтори запрос; если проблема повторится, отправь файл или изображение ещё раз."
+                    if has_attachment else
+                    "Модель не вернула содержательный ответ. Повтори запрос, пожалуйста."
+                )
+            elif language.startswith("uk"):
+                answer = (
+                    "Не вдалося отримати змістовну відповідь моделі щодо цього вкладення. "
+                    "Повтори запит; якщо проблема повториться, надішли файл або зображення ще раз."
+                    if has_attachment else
+                    "Модель не повернула змістовної відповіді. Будь ласка, повтори запит."
+                )
+            else:
+                answer = (
+                    "I couldn't get a usable answer about this attachment. Please retry; if it happens again, resend the file or image."
+                    if has_attachment else
+                    "The model did not return a usable answer. Please retry your request."
+                )
+            contract = {
+                "machine_response": {
+                    "answer": answer,
+                    "content": answer,
+                    "summary": answer,
+                    "render_blocks": [{
+                        "type": "text",
+                        "renderer": "MessageTextBlock",
+                        "viewer": "MessageTextBlock",
+                        "content": answer,
+                    }],
+                    "metadata": {
+                        "provider_model": MODEL,
+                        "provider_context_authority": "PROCESSOR",
+                        "provider_fallback": True,
+                        "provider_error_code": failure_code,
+                    },
+                    "artifacts": [],
+                }
             }
+            print(f"[APRIL_PROVIDER] non-empty fallback returned after retries; code={failure_code}", flush=True)
 
-        _cache[key] = (time.time(), contract)
+        machine_response = contract["machine_response"]
+        machine_response.setdefault("metadata", {})
+        machine_response["metadata"]["provider_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        if usage_data:
+            machine_response["metadata"]["usage"] = usage_data
+
+        # Successful answers are cached. Failure fallbacks are not, so an
+        # immediate user retry has another chance to produce a real answer.
+        if not machine_response.get("metadata", {}).get("provider_fallback"):
+            _cache[key] = (time.time(), contract)
         return contract
     finally:
         _inflight.discard(key)
-
-
-async def transcribe_voice(file_path: str) -> str:
-    with open(file_path, "rb") as handle:
-        result = await asyncio.to_thread(
-            _client_get().audio.transcriptions.create,
-            model="gpt-4o-mini-transcribe",
-            file=handle,
-        )
-    return _text(getattr(result, "text", ""))
-
-
-def normalize_provider_input(value: Any) -> Any:
-    return value
