@@ -278,9 +278,14 @@ def build_interpretation(
     visual_context = [dict(x) for x in (visual_context or []) if isinstance(x, dict)]
 
     kinds = {str(item.get("kind") or "").lower() for item in attachments}
-    has_image = "image" in kinds or bool(visual_context)
+    restored_assets = [
+        dict(item) for item in (memory.get("restored_assets") or [])
+        if isinstance(item, dict)
+    ]
+    restored_kinds = {str(item.get("kind") or "").lower() for item in restored_assets}
+    has_image = "image" in kinds or "image" in restored_kinds or bool(visual_context)
     has_voice = "voice" in kinds
-    has_file = bool(kinds & {"file", "text_file"})
+    has_file = bool(kinds & {"file", "text_file"}) or bool(restored_kinds & {"file", "text_file"})
 
     requested_outputs = _detect_requested_outputs(original or text)
     wants_image = "image" in requested_outputs
@@ -354,6 +359,15 @@ def build_interpretation(
                 "anchor": continuation_anchor,
                 "history_topics": history_topics,
                 "known_topic_count": int(memory.get("known_topic_count") or len(history_topics)),
+                "restored_assets": [
+                    {
+                        "filename": _text(item.get("filename"))[:160],
+                        "kind": _text(item.get("kind")),
+                        "mime_type": _text(item.get("mime_type")),
+                        "asset_message_id": _text(item.get("asset_message_id")),
+                    }
+                    for item in restored_assets[:4]
+                ],
             },
             "new_dialogue": {} if relation == "CONTINUE" else {
                 "request": text,
@@ -364,12 +378,15 @@ def build_interpretation(
             "items": visual_context,
             "analysis_required": has_image,
             "generation_required": wants_image,
+            "input_source": "current_upload" if any(not item.get("recalled_from_memory") for item in visual_context) else ("dialogue_memory" if has_image else "none"),
+            "remembered_assets": [item for item in restored_assets if _text(item.get("kind")).lower() == "image"][:4],
             "generator": "C_APRIL_IMAGES_GENERATOR" if wants_image else "",
             "image_model": "gpt-image-2" if wants_image else "",
         },
         "files": {
             "items": attachments,
             "analysis_required": has_file,
+            "remembered_assets": [item for item in restored_assets if _text(item.get("kind")).lower() in {"file", "text_file"}][:4],
         },
         "request_structure": {
             "context_always_present": True,
