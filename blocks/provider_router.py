@@ -166,10 +166,14 @@ class _TranscriptionsCompat:
     def create(self, *, model: str, file: Any) -> Any:
         data = file.read()
         name = os.path.basename(getattr(file, "name", "audio.bin")) or "audio.bin"
+        content_type = _audio_content_type(
+            name,
+            getattr(file, "content_type", ""),
+        )
         payload = self._client._post_multipart(
             "/v1/audio/transcriptions",
             fields={"model": model},
-            file_field=("file", name, "application/octet-stream", data),
+            file_field=("file", name, content_type, data),
         )
         return type(
             "TranscriptionResult",
@@ -211,7 +215,13 @@ class _OpenAICompat:
             },
         )
         try:
-            with urlopen(req, timeout=120) as response:
+            # Keep provider stalls bounded.  The successful fast path is unchanged;
+            # this only limits how long a broken upstream can hold the chat request.
+            timeout_seconds = max(
+                15.0,
+                min(75.0, float(os.getenv("APRIL_OPENAI_TIMEOUT_SECONDS", "45") or 45)),
+            )
+            with urlopen(req, timeout=timeout_seconds) as response:
                 raw = response.read().decode("utf-8")
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -301,6 +311,77 @@ def _client_get() -> _OpenAICompat:
             raise RuntimeError("OPENAI_API_KEY_NOT_CONFIGURED")
         _client = _OpenAICompat(key)
     return _client
+
+
+def _audio_content_type(filename: str, declared: Any = "") -> str:
+    """Return a usable audio MIME type for the transcription endpoint."""
+    declared_type = _text(declared).lower().split(";", 1)[0].strip()
+    if declared_type.startswith("audio/") and declared_type != "audio/x-unknown":
+        return declared_type
+
+    suffix = os.path.splitext(os.path.basename(_text(filename).lower()))[1]
+    by_suffix = {
+        ".webm": "audio/webm",
+        ".ogg": "audio/ogg",
+        ".opus": "audio/ogg",
+        ".mp3": "audio/mpeg",
+        ".mpeg": "audio/mpeg",
+        ".mp4": "audio/mp4",
+        ".m4a": "audio/mp4",
+        ".wav": "audio/wav",
+        ".flac": "audio/flac",
+        ".aac": "audio/aac",
+    }
+    return by_suffix.get(suffix, "application/octet-stream")
+
+
+def transcribe_voice(
+    audio_bytes: bytes,
+    *,
+    filename: str = "voice.webm",
+    content_type: str = "",
+) -> str:
+    """Public compatibility API imported by blocks.voice_reader.transcribe_voice_bytes.
+
+    Kept synchronous because voice_reader is a synchronous input-normalization
+    boundary; its network work is bounded by APRIL_OPENAI_TIMEOUT_SECONDS.
+    """
+    import io
+
+    raw = bytes(audio_bytes or b"")
+    if not raw:
+        raise ValueError("VOICE_EMPTY")
+
+    safe_name = os.path.basename(_text(filename) or "voice.webm")
+    mime_type = _audio_content_type(safe_name, content_type)
+    upload = io.BytesIO(raw)
+    upload.name = safe_name
+    upload.content_type = mime_type
+
+    model = _text(os.getenv("APRIL_OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe"))
+    started = time.perf_counter()
+    try:
+        result = _client_get().audio.transcriptions.create(model=model, file=upload)
+        transcript = _text(getattr(result, "text", ""))
+    except Exception as exc:
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        print(
+            f"[APRIL_VOICE] stage=transcription status=error model={model} "
+            f"elapsed_ms={elapsed_ms} error={type(exc).__name__}",
+            flush=True,
+        )
+        raise
+
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+    print(
+        f"[APRIL_VOICE] stage=transcription status={'ok' if transcript else 'empty'} "
+        f"model={model} elapsed_ms={elapsed_ms} audio_bytes={len(raw)} "
+        f"transcript_chars={len(transcript)}",
+        flush=True,
+    )
+    if not transcript:
+        raise RuntimeError("VOICE_EMPTY_TRANSCRIPT")
+    return transcript
 
 
 def _text(value: Any) -> str:
@@ -830,12 +911,25 @@ async def generate_text(
                     contract = None
                     continue
             except Exception as exc:
-                # Network/auth/provider errors should retain their real error,
-                # not be hidden behind an invented answer.
-                if attempt == 1:
-                    raise
                 failure_code = str(exc) or "PROVIDER_REQUEST_FAILED"
-                continue
+                # Do not spend another full network timeout on auth, bad-request,
+                # or stalled-network failures. Retry only immediate transient
+                # rate-limit/server errors; malformed/empty model output is handled
+                # by the inner retry above.
+                retryable_http = any(
+                    marker in failure_code.upper()
+                    for marker in (
+                        "OPENAI_HTTP_429",
+                        "OPENAI_HTTP_500",
+                        "OPENAI_HTTP_502",
+                        "OPENAI_HTTP_503",
+                        "OPENAI_HTTP_504",
+                    )
+                )
+                if attempt == 0 and retryable_http:
+                    continue
+                contract = None
+                break
 
         if contract is None:
             language = _text(
