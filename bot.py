@@ -165,6 +165,11 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
         "render_blocks": blocks,
         "scene_contract": scene,
         "artifacts": result.get("artifacts", []),
+        # Safe input metadata is returned so the Web can preserve the exact
+        # filename/type/size in the user message. Raw bytes/data URIs are never
+        # returned in the response. input_reader remains the sole reader for
+        # documents/files; image_reader is used only for image/screenshot input.
+        "attachments": result.get("attachments", []),
         "interpretation": result.get("interpretation", {}),
         "route": result.get("route", {}),
         "april_id": result.get("april_id"),
@@ -241,6 +246,18 @@ def _handle_payload(
             file_inputs=file_inputs,
             translation=translation,
         ))
+        if isinstance(result, dict):
+            result["attachments"] = [
+                {
+                    "filename": _text(item.get("filename") or "file"),
+                    "content_type": _text(item.get("content_type") or item.get("mime_type") or "application/octet-stream"),
+                    "kind": _text(item.get("kind") or "file"),
+                    "size_bytes": int(item.get("size_bytes") or 0),
+                    "source_type": _text(item.get("source_type") or item.get("kind") or "file"),
+                    "provider_readable": bool(item.get("provider_readable", False)),
+                }
+                for item in attachment_meta
+            ]
         return 200, _payload(result)
     except Exception as exc:
         traceback.print_exc()
