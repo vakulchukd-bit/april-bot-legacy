@@ -589,6 +589,33 @@ async def execute(
         },
     )
 
+    # Persist the complete structured turn after Provider/SceneContract.
+    # PostgreSQL remains storage only; State Manager will search these fields
+    # on the next request.
+    structured_request = {
+        "request_id": request.request_id,
+        "goal": request.goal,
+        "intent": dict(request.intent),
+        "conversation": dict(request.conversation),
+        "memory": dict(request.memory),
+        "visual_context": dict(request.visual_context),
+        "available_tools": list(request.available_tools),
+        "requested_outputs": list(request.requested_outputs),
+        "required_competencies": list(request.required_competencies),
+        "required_artifacts": list(request.required_artifacts),
+        "routing": dict(request.routing),
+        "constraints": dict(request.constraints),
+    }
+    structured_response = {
+        "answer": response.answer,
+        "content": response.content,
+        "summary": response.summary,
+        "render_blocks": list(response.render_blocks or []),
+        "artifacts": list(response.artifacts or []),
+        "metadata": dict(response.metadata or {}),
+        "scene_contract": result.get("scene_contract") or {},
+    }
+
     saved = save_dialogue_pair(
         uid,
         original or current_text,
@@ -602,6 +629,8 @@ async def execute(
         conversation_id=identity["conversation_id"],
         message_id=identity["message_id"],
         interpretation_id=identity["interpretation_id"],
+        structured_request=structured_request,
+        structured_response=structured_response,
     )
 
     result.update(
