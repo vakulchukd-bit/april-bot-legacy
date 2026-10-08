@@ -72,8 +72,6 @@ def _select_rooms(interpretation: dict[str, Any]) -> list[dict[str, Any]]:
     required_capabilities: list[str] = []
     if intent.get("wants_image"):
         required_capabilities.extend(["image_generation", "png", "gallery"])
-    if input_data.get("has_image"):
-        required_capabilities.extend(["gallery", "image_collection"])
     if intent.get("wants_links"):
         required_capabilities.extend(["link", "url", "preview", "web"])
     if intent.get("wants_code"):
@@ -177,6 +175,11 @@ def _build_image_spec(
     interpretation: dict[str, Any],
     identity: dict[str, str],
 ) -> dict[str, Any] | None:
+    # Hard safety gate: attachment presence or Provider hallucination can never
+    # authorize image generation. Only Interpretation may authorize it.
+    if not bool((interpretation.get("intent") or {}).get("wants_image")):
+        return None
+
     artifacts = raw.get("artifacts")
     if isinstance(artifacts, list):
         for item in artifacts:
@@ -326,6 +329,7 @@ async def execute(
     visual_context: list[dict[str, Any]] | None = None,
     attachments: list[dict[str, Any]] | None = None,
     file_inputs: list[dict[str, Any]] | None = None,
+    file_contents: list[dict[str, Any]] | None = None,
     translation: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
@@ -340,7 +344,12 @@ async def execute(
         if isinstance(item, dict)
         and _text(item.get("file_data"))
     ]
-    if not current_text and not visual_context and not file_inputs:
+    file_contents = [
+        dict(item)
+        for item in (file_contents or [])
+        if isinstance(item, dict) and _text(item.get("content"))
+    ]
+    if not current_text and not visual_context and not file_inputs and not file_contents:
         raise ValueError("EMPTY_REQUEST")
 
     # Processor owns DB bootstrap; harmless and idempotent after the first call.
@@ -494,6 +503,15 @@ async def execute(
             }
             for item in file_inputs
         ],
+        "file_contents": [
+            {
+                "filename": _text(item.get("filename") or "file"),
+                "mime_type": _text(item.get("mime_type") or "text/plain"),
+                "size_bytes": int(item.get("size_bytes") or 0),
+                "content": _text(item.get("content")),
+            }
+            for item in file_contents
+        ],
         "translation": translation or {},
     }
 
@@ -511,12 +529,25 @@ async def execute(
 
     # The existing TextModule participates only as the canonical response
     # packaging/sanitization layer; it never creates a second Provider call.
+    raw_blocks = [dict(x) for x in (raw.get("render_blocks") or []) if isinstance(x, dict)]
+    raw_artifacts = [dict(x) for x in (raw.get("artifacts") or []) if isinstance(x, dict)]
+    wants_image = bool((interpretation.get("intent") or {}).get("wants_image"))
+    if not wants_image:
+        raw_blocks = [
+            block for block in raw_blocks
+            if str(block.get("type") or "").lower() not in {"image", "gallery"}
+        ]
+        raw_artifacts = [
+            artifact for artifact in raw_artifacts
+            if str(artifact.get("type") or artifact.get("artifact_type") or "").lower() not in {"image", "generated_image"}
+        ]
+
     packaged = package_provider_response(
         answer=answer,
         content=_text(raw.get("content") or answer),
         summary=_text(raw.get("summary") or answer[:180]),
-        render_blocks=list(raw.get("render_blocks") or []),
-        artifacts=list(raw.get("artifacts") or []),
+        render_blocks=raw_blocks,
+        artifacts=raw_artifacts,
     )
 
     image_result = None
