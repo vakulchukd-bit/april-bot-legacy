@@ -17,7 +17,9 @@ No alternate route, room register or second memory store is created here.
 from __future__ import annotations
 
 from typing import Any
+import json
 import os
+import re
 import time
 import uuid
 
@@ -40,11 +42,13 @@ from blocks.text_module import package_provider_response
 from storage import (
     init_db,
     is_authenticated_user,
+    load_dialogue_assets,
+    save_dialogue_asset,
     save_dialogue_pair,
 )
 
 
-PROCESSOR_VERSION = "april_exkrutor_single_route_v6"
+PROCESSOR_VERSION = "april_exkrutor_single_route_v7_dialogue_assets"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -283,7 +287,7 @@ def _build_scene(
         dialogue_state=dict((interpretation.get("dialogue") or {})),
         dialogue_development={
             "interpretation_id": identity["interpretation_id"],
-            "memory_search_engine": "state_manager_dialogue_search_v2",
+            "memory_search_engine": "state_manager_dialogue_search_v4_asset_recall",
         },
         result_event={
             "status": "complete",
@@ -312,6 +316,187 @@ def _build_scene(
         "scene_contract": contract.__dict__,
         "artifacts": list(response.artifacts or []),
     }
+
+
+def _mime_data_uri(raw: bytes, mime_type: str) -> str:
+    import base64
+    return f"data:{mime_type or 'application/octet-stream'};base64," + base64.b64encode(raw).decode("ascii")
+
+
+def _decode_saved_text(raw: bytes) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "cp1251", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _restore_selected_assets(
+    uid: str,
+    identity: dict[str, str],
+    dialogue_context: dict[str, Any],
+    visual_context: list[dict[str, Any]],
+    attachments: list[dict[str, Any]],
+    file_inputs: list[dict[str, Any]],
+    file_contents: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Rehydrate bytes only for a selected CONTINUE anchor in this exact dialog."""
+    if visual_context or file_inputs or file_contents:
+        return visual_context, attachments, file_inputs, file_contents, []
+    if _text(dialogue_context.get("relation")).upper() != "CONTINUE":
+        return visual_context, attachments, file_inputs, file_contents, []
+
+    selected = dialogue_context.get("selected_pairs") or []
+    anchor = dialogue_context.get("anchor") or {}
+    message_ids: list[str] = []
+    if isinstance(anchor, dict) and _text(anchor.get("message_id")):
+        message_ids.append(_text(anchor.get("message_id")))
+    for item in selected:
+        if isinstance(item, dict) and _text(item.get("message_id")):
+            message_ids.append(_text(item.get("message_id")))
+    # Restore the selected semantic anchor first and alone.  Only if that turn
+    # had no saved asset, fall back through ranked dialogue pairs one at a time.
+    # This prevents a later unrelated file from being sent alongside a cat photo.
+    message_ids = list(dict.fromkeys(message_ids))[:8]
+    rows = []
+    for selected_message_id in message_ids:
+        rows = load_dialogue_assets(
+            uid,
+            dialog_id=identity["dialog_id"],
+            conversation_id=identity["conversation_id"],
+            message_ids=[selected_message_id],
+            limit=1,
+        )
+        if rows:
+            break
+    restored_meta: list[dict[str, Any]] = []
+    import base64
+    for asset in rows:
+        raw = bytes(asset.get("content") or b"")
+        if not raw:
+            continue
+        kind = _text(asset.get("kind")).lower()
+        filename = _text(asset.get("filename") or "attachment")
+        mime_type = _text(asset.get("mime_type") or "application/octet-stream")
+        common = {
+            "filename": filename,
+            "content_type": mime_type,
+            "mime_type": mime_type,
+            "kind": kind,
+            "size_bytes": int(asset.get("size_bytes") or len(raw)),
+            "source_type": (asset.get("metadata") or {}).get("source_type") or kind,
+            "provider_readable": True,
+            "recalled_from_memory": True,
+            "asset_message_id": _text(asset.get("message_id")),
+        }
+        attachments.append(common)
+        restored_meta.append({k: common[k] for k in ("filename", "mime_type", "kind", "asset_message_id")})
+        if kind == "image" or mime_type.startswith("image/"):
+            data_uri = _mime_data_uri(raw, mime_type if mime_type.startswith("image/") else "image/png")
+            visual_context.append({
+                "type": "input_image",
+                "image_url": data_uri,
+                "filename": filename,
+                "source_type": common["source_type"],
+                "mime_type": mime_type,
+                "recalled_from_memory": True,
+                "asset_message_id": common["asset_message_id"],
+            })
+        elif kind == "text_file":
+            text_value = _text(asset.get("text_content")) or _decode_saved_text(raw)
+            file_contents.append({
+                "filename": filename,
+                "mime_type": mime_type or "text/plain",
+                "content": text_value[:18000],
+                "size_bytes": len(raw),
+                "recalled_from_memory": True,
+                "asset_message_id": common["asset_message_id"],
+            })
+        else:
+            file_inputs.append({
+                "type": "input_file",
+                "filename": filename,
+                "file_data": _mime_data_uri(raw, mime_type),
+                "mime_type": mime_type,
+                "size_bytes": len(raw),
+                "recalled_from_memory": True,
+                "asset_message_id": common["asset_message_id"],
+            })
+    if restored_meta:
+        print(
+            "STATE: DIALOGUE ASSETS RESTORED "
+            + json.dumps({"count": len(restored_meta), "assets": restored_meta}, ensure_ascii=False),
+            flush=True,
+        )
+    return visual_context, attachments, file_inputs, file_contents, restored_meta
+
+
+def _image_payload_bytes(value: Any) -> tuple[bytes, str] | None:
+    """Extract generated image bytes for binary asset persistence, if present."""
+    import base64
+    visited = 0
+    stack = [value]
+    while stack and visited < 500:
+        visited += 1
+        item = stack.pop()
+        if isinstance(item, dict):
+            for key in ("image_data_uri", "data_uri", "src", "url", "image"):
+                candidate = item.get(key)
+                if isinstance(candidate, str) and candidate.startswith("data:image/") and ";base64," in candidate:
+                    header, encoded = candidate.split(",", 1)
+                    mime = header[5:].split(";", 1)[0] or "image/png"
+                    try:
+                        raw = base64.b64decode(encoded, validate=True)
+                        if raw:
+                            return raw, mime
+                    except Exception:
+                        pass
+            for key in ("image_base64", "base64", "b64_json"):
+                candidate = item.get(key)
+                if isinstance(candidate, str) and candidate:
+                    try:
+                        raw = base64.b64decode(candidate, validate=True)
+                        if raw and raw.startswith(b"\x89PNG\r\n\x1a\n"):
+                            return raw, "image/png"
+                    except Exception:
+                        pass
+            stack.extend(v for v in item.values() if isinstance(v, (dict, list)))
+        elif isinstance(item, list):
+            stack.extend(v for v in item if isinstance(v, (dict, list)))
+    return None
+
+
+def _strip_inline_binary(value: Any) -> Any:
+    """Keep JSONB memory compact; raw bytes live in dialogue_assets."""
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            low = str(key).lower()
+            if low in {"image_base64", "image_data_uri", "data_uri", "file_data", "b64_json"}:
+                continue
+            if (
+                low in {"image_url", "src", "url", "image"}
+                and isinstance(item, str)
+                and item.startswith("data:")
+                and ";base64," in item
+            ):
+                continue
+            cleaned[key] = _strip_inline_binary(item)
+        return cleaned
+    if isinstance(value, list):
+        return [_strip_inline_binary(item) for item in value]
+    if isinstance(value, str):
+        # Also catch a data URI embedded in a larger JSON/text field, not only
+        # values that consist solely of the URI.
+        if value.startswith("data:") and ";base64," in value:
+            return "[stored as dialogue asset]"
+        return re.sub(
+            r"data:[^,\s;]+(?:;[^,\s;]+)*;base64,[A-Za-z0-9+/=_-]+",
+            "[stored as dialogue asset]",
+            value,
+        )
+    return value
 
 
 async def execute(
@@ -349,6 +534,8 @@ async def execute(
         for item in (file_contents or [])
         if isinstance(item, dict) and _text(item.get("content"))
     ]
+    visual_context = [dict(item) for item in (visual_context or []) if isinstance(item, dict)]
+    attachments = [dict(item) for item in (attachments or []) if isinstance(item, dict)]
     if not current_text and not visual_context and not file_inputs and not file_contents:
         raise ValueError("EMPTY_REQUEST")
 
@@ -393,9 +580,15 @@ async def execute(
         has_file=bool(file_inputs or file_contents),
         has_voice=any(
             _text(item.get("kind")).lower() == "voice"
-            for item in (attachments or [])
-            if isinstance(item, dict)
+            for item in attachments
         ),
+    )
+
+    # A follow-up may refer to an image/file from earlier in this conversation.
+    # Rehydrate only the assets attached to State Manager's selected anchor/pairs;
+    # do not mix older files into NEW requests or when a fresh attachment exists.
+    visual_context, attachments, file_inputs, file_contents, restored_assets = _restore_selected_assets(
+        uid, identity, dialogue_context, visual_context, attachments, file_inputs, file_contents
     )
 
     interpretation = build_interpretation(
@@ -440,6 +633,7 @@ async def execute(
             "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 7),
             "topic_table_markdown": dialogue_context.get("topic_table_markdown") or "",
             "anchor": dialogue_context.get("anchor") or {},
+            "restored_assets": restored_assets,
             "search": dialogue_context["search"],
         },
         visual_context={
@@ -480,6 +674,7 @@ async def execute(
                 "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 7),
                 "topic_table_markdown": dialogue_context.get("topic_table_markdown") or "",
                 "anchor": dialogue_context.get("anchor") or {},
+                "restored_assets": restored_assets,
                 "new_dialogue_request": (
                     current_text
                     if dialogue_context["relation"] == "NEW" and not dialogue_context.get("history_request")
@@ -677,13 +872,37 @@ async def execute(
     safe_visual_context["items"] = safe_visual_items
     safe_visual_context["has_input_images"] = bool(safe_visual_items)
 
-    structured_request = {
+    generated_asset_saved = False
+    if image_result:
+        # The generator returns validated raw bytes as well as a scene artifact.
+        # Persist raw bytes first; artifact fields are the compatibility fallback.
+        direct_image_bytes = image_result.get("image_bytes")
+        direct_mime = _text(image_result.get("mime_type") or "image/png")
+        if isinstance(direct_image_bytes, (bytes, bytearray)) and direct_image_bytes:
+            generated_image = (bytes(direct_image_bytes), direct_mime)
+        else:
+            generated_image = _image_payload_bytes(image_result.get("artifact") or image_result)
+        if generated_image:
+            generated_bytes, generated_mime = generated_image
+            generated_asset_saved = save_dialogue_asset(
+                uid,
+                dialog_id=identity["dialog_id"],
+                conversation_id=identity["conversation_id"],
+                message_id=identity["message_id"],
+                filename=f"april-generated-{identity['message_id']}.png",
+                mime_type=generated_mime,
+                kind="image",
+                content=generated_bytes,
+                turn_index=turn_index,
+                metadata={"source_type": "generated_image", "generator": "C_APRIL_IMAGES_GENERATOR"},
+            )
+
+    structured_request = _strip_inline_binary({
         "request_id": request.request_id,
         "goal": request.goal,
         "intent": dict(request.intent),
         "conversation": dict(request.conversation),
         "memory": dict(request.memory),
-        # Never persist base64 image bytes; PostgreSQL remains metadata storage.
         "visual_context": safe_visual_context,
         "attachments": list(attachments or []),
         "available_tools": list(request.available_tools),
@@ -692,8 +911,8 @@ async def execute(
         "required_artifacts": list(request.required_artifacts),
         "routing": dict(request.routing),
         "constraints": dict(request.constraints),
-    }
-    structured_response = {
+    })
+    structured_response = _strip_inline_binary({
         "answer": response.answer,
         "content": response.content,
         "summary": response.summary,
@@ -701,7 +920,8 @@ async def execute(
         "artifacts": list(response.artifacts or []),
         "metadata": dict(response.metadata or {}),
         "scene_contract": result.get("scene_contract") or {},
-    }
+        "generated_asset_saved": generated_asset_saved,
+    })
 
     saved = save_dialogue_pair(
         uid,
@@ -737,6 +957,8 @@ async def execute(
             "memory_pair_count": int(dialogue_context.get("search", {}).get("total_pairs") or 0),
             "memory_selected_count": len(dialogue_context.get("selected_pairs") or []),
             "memory_saved": saved,
+            "dialogue_assets_restored": restored_assets,
+            "generated_asset_saved": generated_asset_saved,
             "interpretation": interpretation,
             "route": result.get("scene_contract", {}).get("metadata", {}).get("route", {}),
         }
