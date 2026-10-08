@@ -1,145 +1,113 @@
-"""Input envelope reader used by bot.ru.
+"""Canonical Voice block for the single April chat route.
 
-Supports JSON and multipart/form-data without introducing a second API route.
-Text files are decoded into bounded text; images are normalized for the model;
-other binary files remain attachments with metadata.
+Responsibilities:
+- validate/normalize incoming voice bytes;
+- transcribe voice through the existing Provider transcription function;
+- never create a second API route;
+- never import itself.
+
+Route:
+    Web -> POST /api/v1/chat -> input_reader -> voice_reader
+        -> Provider transcription -> transcript event -> Exkrutor
 """
 from __future__ import annotations
 
-import json
+import asyncio
 import os
-from dataclasses import dataclass, field
-from email import policy
-from email.parser import BytesParser
+import tempfile
 from typing import Any
 
-from blocks.image_reader import read_image_bytes
-from blocks.voice_reader import validate_voice
+MAX_VOICE_BYTES = 25 * 1024 * 1024
 
-MAX_TEXT_FILE_CHARS = 18000
-_TEXT_EXTENSIONS = {
-    ".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".py", ".js",
-    ".jsx", ".tsx", ".html", ".htm", ".css", ".xml", ".yaml", ".yml",
-    ".toml", ".ini", ".cfg", ".log", ".sql", ".sh", ".bat", ".ps1",
+_AUDIO_EXTENSIONS = {
+    ".webm", ".ogg", ".oga", ".mp3", ".wav", ".m4a",
+    ".mp4", ".mpeg", ".mpga",
 }
-
-
-@dataclass
-class Attachment:
-    field_name: str
-    filename: str
-    content_type: str
-    data: bytes
-    kind: str = "file"
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def size_bytes(self) -> int:
-        return len(self.data)
+_AUDIO_MIME_TYPES = {"video/webm", "application/ogg"}
+_FIELD_NAMES = {"audio", "voice", "audio_file", "voice_file"}
 
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _decode_text(data: bytes) -> str:
-    for encoding in ("utf-8", "utf-8-sig", "cp1251", "latin-1"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace")
+def _normalized_mime(content_type: str) -> str:
+    return _text(content_type).lower().split(";", 1)[0].strip()
 
 
-def normalize_attachment(att: Attachment) -> Attachment:
-    filename = att.filename or "file"
-    ext = os.path.splitext(filename.lower())[1]
-    mime = att.content_type.lower().split(";", 1)[0].strip()
-
-    if (
-        _text(att.field_name).lower() in {"audio", "voice", "audio_file", "voice_file"}
-        or mime.startswith("audio/")
-        or mime in {"video/webm", "application/ogg"}
-        or ext in {".webm", ".ogg", ".oga", ".mp3", ".wav", ".m4a", ".mp4", ".mpeg", ".mpga"}
-    ):
-        voice = validate_voice(
-            att.data,
-            filename=filename,
-            content_type=mime,
-        )
-        att.kind = "voice"
-        att.metadata = voice
-        return att
-
-    if mime.startswith("image/") or ext in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
-        image = read_image_bytes(
-            att.data,
-            filename=filename,
-            content_type=mime,
-        )
-        att.kind = "image"
-        att.metadata = image
-        return att
-
-    if mime.startswith("text/") or ext in _TEXT_EXTENSIONS:
-        text = _decode_text(att.data)[:MAX_TEXT_FILE_CHARS]
-        att.kind = "text_file"
-        att.metadata = {
-            "filename": filename,
-            "mime_type": mime or "text/plain",
-            "size_bytes": len(att.data),
-            "text": text,
-            "truncated": len(_decode_text(att.data)) > MAX_TEXT_FILE_CHARS,
-        }
-        return att
-
-    att.kind = "file"
-    att.metadata = {
-        "filename": filename,
-        "mime_type": mime or "application/octet-stream",
-        "size_bytes": len(att.data),
-    }
-    return att
-
-
-def parse_json_payload(body: bytes) -> tuple[dict[str, Any], list[Attachment]]:
-    data = json.loads(body.decode("utf-8") or "{}")
-    if not isinstance(data, dict):
-        raise ValueError("JSON_OBJECT_REQUIRED")
-    return data, []
-
-
-def parse_multipart_payload(
-    body: bytes,
+def is_voice_field(
     *,
-    content_type: str,
-) -> tuple[dict[str, Any], list[Attachment]]:
-    header = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode() + body
-    message = BytesParser(policy=policy.default).parsebytes(header)
-    if not message.is_multipart():
-        raise ValueError("MULTIPART_REQUIRED")
+    field_name: str = "",
+    filename: str = "",
+    content_type: str = "",
+) -> bool:
+    field = _text(field_name).lower()
+    name = _text(filename).lower()
+    mime = _normalized_mime(content_type)
+    ext = os.path.splitext(name)[1]
+    return (
+        field in _FIELD_NAMES
+        or mime.startswith("audio/")
+        or mime in _AUDIO_MIME_TYPES
+        or ext in _AUDIO_EXTENSIONS
+    )
 
-    fields: dict[str, Any] = {}
-    attachments: list[Attachment] = []
 
-    for part in message.iter_parts():
-        name = part.get_param("name", header="content-disposition") or ""
-        filename = part.get_filename()
-        payload = part.get_payload(decode=True) or b""
-        ctype = part.get_content_type() or "application/octet-stream"
-        if filename:
-            attachments.append(
-                normalize_attachment(
-                    Attachment(
-                        field_name=_text(name) or "file",
-                        filename=_text(filename) or "file",
-                        content_type=ctype,
-                        data=payload,
-                    )
-                )
-            )
-        else:
-            value = payload.decode("utf-8", errors="replace")
-            fields[_text(name)] = value
+def validate_voice(
+    data: bytes,
+    *,
+    filename: str = "voice.webm",
+    content_type: str = "",
+) -> dict[str, Any]:
+    """Validate one voice attachment without doing interpretation."""
+    raw = data or b""
+    name = _text(filename) or "voice.webm"
+    mime = _normalized_mime(content_type)
 
-    return fields, attachments
+    if not raw:
+        raise ValueError("VOICE_EMPTY")
+    if len(raw) > MAX_VOICE_BYTES:
+        raise ValueError("VOICE_TOO_LARGE")
+    if not is_voice_field(
+        filename=name,
+        content_type=mime,
+    ):
+        raise ValueError("VOICE_UNSUPPORTED_FORMAT")
+
+    return {
+        "filename": name,
+        "mime_type": mime or "application/octet-stream",
+        "size_bytes": len(raw),
+        "source_type": "voice",
+        "transcription_provider": "provider_router",
+        "transcription_model": "gpt-4o-mini-transcribe",
+    }
+
+
+def transcribe_voice_bytes(
+    data: bytes,
+    *,
+    filename: str = "voice.webm",
+    content_type: str = "",
+) -> str:
+    """Send voice to the existing Provider transcription endpoint."""
+    metadata = validate_voice(
+        data,
+        filename=filename,
+        content_type=content_type,
+    )
+    suffix = os.path.splitext(metadata["filename"])[1] or ".webm"
+
+    # Local import deliberately prevents an import cycle at module load time.
+    from blocks.provider_router import transcribe_voice
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        tmp.write(data or b"")
+        tmp.close()
+        return _text(asyncio.run(transcribe_voice(tmp.name)))
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
