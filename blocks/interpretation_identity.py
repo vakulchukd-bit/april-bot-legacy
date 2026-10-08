@@ -210,6 +210,44 @@ def _detect_task(
     return "answer_request"
 
 
+
+_HISTORY_MARKERS = (
+    "о чем мы говорили", "о чём мы говорили", "о чем говорили", "о чём говорили",
+    "что мы обсуждали", "что обсуждали", "какие темы", "напомни темы",
+    "напомни о чем", "напомни о чём", "история диалога", "история разговора",
+    "наши темы", "о чем шла речь", "о чём шла речь",
+)
+_HISTORY_COUNTS = {
+    "один": 1, "одну": 1, "два": 2, "две": 2, "три": 3, "четыре": 4,
+    "пять": 5, "шесть": 6, "семь": 7, "восемь": 8, "девять": 9, "десять": 10,
+}
+
+
+def _is_history_request(text: str) -> bool:
+    low = _text(text).lower().replace("ё", "е")
+    return any(marker.replace("ё", "е") in low for marker in _HISTORY_MARKERS)
+
+
+def _history_count(text: str) -> int:
+    low = _text(text).lower().replace("ё", "е")
+    match = re.search(r"\b(10|[1-9])\b", low)
+    if match:
+        return max(1, min(10, int(match.group(1))))
+    for word, count in _HISTORY_COUNTS.items():
+        if re.search(rf"\b{word}\b", low):
+            return count
+    return 7
+
+
+def _select_history_topics(memory: dict[str, Any]) -> list[dict[str, Any]]:
+    topics = memory.get("history_topics")
+    return [
+        dict(item)
+        for item in topics
+        if isinstance(item, dict)
+    ][:10] if isinstance(topics, list) else []
+
+
 def _select_continuation_pairs(memory: dict[str, Any]) -> list[dict[str, Any]]:
     relation = _text(memory.get("relation")).upper()
     pairs = memory.get("selected_pairs")
@@ -219,7 +257,7 @@ def _select_continuation_pairs(memory: dict[str, Any]) -> list[dict[str, Any]]:
         dict(item)
         for item in pairs
         if isinstance(item, dict)
-    ][:4]
+    ][:6]
 
 
 def build_interpretation(
@@ -251,6 +289,13 @@ def build_interpretation(
 
     relation = _text(memory.get("relation") or "NEW").upper()
     selected_pairs = _select_continuation_pairs(memory)
+    history_request = bool(memory.get("history_request")) or _is_history_request(original or text)
+    history_count = max(1, min(10, int(memory.get("requested_topic_count") or _history_count(original or text) or 7)))
+    history_topics = _select_history_topics(memory)[:history_count]
+
+    # Referential questions such as "а про него еще?" are resolved by the
+    # State Manager anchor, not by guessing from the current sentence.
+    continuation_anchor = dict(memory.get("anchor") or {}) if isinstance(memory.get("anchor"), dict) else {}
 
     task = _detect_task(
         original or text,
@@ -295,6 +340,8 @@ def build_interpretation(
             "wants_formula": "formula" in requested_outputs,
             "wants_diagram": "diagram" in requested_outputs,
             "wants_table": "table" in requested_outputs,
+            "history_request": history_request,
+            "history_count": history_count if history_request else 0,
         },
         "dialogue": {
             "relation": relation,
@@ -304,6 +351,9 @@ def build_interpretation(
                 "reason": _text(memory.get("reason")),
                 "confidence": float(memory.get("relation_confidence") or 0.0),
                 "selected_pairs": selected_pairs,
+                "anchor": continuation_anchor,
+                "history_topics": history_topics,
+                "known_topic_count": int(memory.get("known_topic_count") or len(history_topics)),
             },
             "new_dialogue": {} if relation == "CONTINUE" else {
                 "request": text,
@@ -325,7 +375,11 @@ def build_interpretation(
             "context_always_present": True,
             "user_goal": text,
             "memory_context": selected_pairs,
-            "new_dialogue_request": text if relation == "NEW" else "",
+            "history_request": history_request,
+            "history_count": history_count if history_request else 0,
+            "history_topics": history_topics,
+            "topic_table_markdown": _text(memory.get("topic_table_markdown")),
+            "new_dialogue_request": text if relation == "NEW" and not history_request else "",
             "output_plan": requested_outputs,
         },
     }
