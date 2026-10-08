@@ -74,7 +74,7 @@ _USERS_COLUMNS = (
 _ALLOWED_TABLE_COLUMNS = {
     "users": set(_USERS_COLUMNS),
     "payments": {"id", "user_id", "plan", "amount", "created_at"},
-    "dialogue_memory": {"id", "user_id", "created_at", "turn_index", "user_text", "april_text", "user_text_en", "april_text_en", "language", "relation", "pair_hash"},
+    "dialogue_memory": {"id", "user_id", "created_at", "turn_index", "user_text", "april_text", "user_text_en", "april_text_en", "language", "relation", "pair_hash", "dialog_id", "conversation_id", "message_id", "interpretation_id"},
 }
 
 
@@ -261,7 +261,11 @@ def init_db() -> None:
                         april_text_en TEXT,
                         language TEXT NOT NULL DEFAULT 'en',
                         relation TEXT NOT NULL DEFAULT 'NEW',
-                        pair_hash TEXT NOT NULL UNIQUE
+                        pair_hash TEXT NOT NULL UNIQUE,
+                        dialog_id TEXT,
+                        conversation_id TEXT,
+                        message_id TEXT,
+                        interpretation_id TEXT
                     )
                     """
                 )
@@ -276,7 +280,12 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'en'")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS relation TEXT DEFAULT 'NEW'")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS pair_hash TEXT")
+                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS dialog_id TEXT")
+                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS conversation_id TEXT")
+                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS message_id TEXT")
+                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS interpretation_id TEXT")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_memory_user_created ON dialogue_memory(user_id, created_at DESC)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_memory_user_dialog ON dialogue_memory(user_id, dialog_id, created_at DESC)")
 
                 # Required destructive sanitization: known legacy memory stores are
                 # no longer part of the schema and must not survive deployment.
@@ -413,6 +422,10 @@ def save_dialogue_pair(
     april_en: str = "",
     language: str = "en",
     relation: str = "NEW",
+    dialog_id: str = "",
+    conversation_id: str = "",
+    message_id: str = "",
+    interpretation_id: str = "",
 ) -> bool:
     """Persist one authenticated USER↔APRIL pair and nothing else."""
     uid = str(user_id)
@@ -448,11 +461,11 @@ def save_dialogue_pair(
                 cur.execute(
                     """
                     INSERT INTO dialogue_memory
-                        (user_id, created_at, turn_index, user_text, april_text, user_text_en, april_text_en, language, relation, pair_hash)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        (user_id, created_at, turn_index, user_text, april_text, user_text_en, april_text_en, language, relation, pair_hash, dialog_id, conversation_id, message_id, interpretation_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (pair_hash) DO NOTHING
                     """,
-                    (uid, dt, int(turn_index or 0), user_value, april_value, str(user_en or ""), str(april_en or ""), str(language or "en"), str(relation or "NEW"), pair_hash),
+                    (uid, dt, int(turn_index or 0), user_value, april_value, str(user_en or ""), str(april_en or ""), str(language or "en"), str(relation or "NEW"), pair_hash, str(dialog_id or ""), str(conversation_id or ""), str(message_id or ""), str(interpretation_id or "")),
                 )
                 return True
     except psycopg2.errors.UndefinedTable:
@@ -476,7 +489,7 @@ def load_dialogue_pairs(user_id: Any, *, limit: int = 0, timestamp: float | int 
                 cur.execute(
                     """
                     SELECT id, user_id, created_at, turn_index, user_text, april_text,
-                           user_text_en, april_text_en, language, relation
+                           user_text_en, april_text_en, language, relation, dialog_id, conversation_id, message_id, interpretation_id
                     FROM dialogue_memory
                     WHERE user_id = %s
                       AND created_at >= %s
