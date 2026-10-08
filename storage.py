@@ -27,6 +27,7 @@ import os
 import random
 import re
 import threading
+import json
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -74,7 +75,7 @@ _USERS_COLUMNS = (
 _ALLOWED_TABLE_COLUMNS = {
     "users": set(_USERS_COLUMNS),
     "payments": {"id", "user_id", "plan", "amount", "created_at"},
-    "dialogue_memory": {"id", "user_id", "created_at", "turn_index", "user_text", "april_text", "user_text_en", "april_text_en", "language", "relation", "pair_hash", "dialog_id", "conversation_id", "message_id", "interpretation_id"},
+    "dialogue_memory": {"id", "user_id", "created_at", "turn_index", "user_text", "april_text", "user_text_en", "april_text_en", "language", "relation", "pair_hash", "dialog_id", "conversation_id", "message_id", "interpretation_id", "structured_request", "structured_response"},
 }
 
 
@@ -284,6 +285,8 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS conversation_id TEXT")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS message_id TEXT")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS interpretation_id TEXT")
+                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS structured_request JSONB")
+                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS structured_response JSONB")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_memory_user_created ON dialogue_memory(user_id, created_at DESC)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_memory_user_dialog ON dialogue_memory(user_id, dialog_id, created_at DESC)")
 
@@ -426,6 +429,8 @@ def save_dialogue_pair(
     conversation_id: str = "",
     message_id: str = "",
     interpretation_id: str = "",
+    structured_request: dict[str, Any] | None = None,
+    structured_response: dict[str, Any] | None = None,
 ) -> bool:
     """Persist one authenticated USER↔APRIL pair and nothing else."""
     uid = str(user_id)
@@ -461,27 +466,23 @@ def save_dialogue_pair(
                 cur.execute(
                     """
                     INSERT INTO dialogue_memory
-                        (
-                            user_id, created_at, turn_index,
-                            user_text, april_text,
-                            user_text_en, april_text_en,
-                            language, relation, pair_hash,
-                            dialog_id, conversation_id, message_id, interpretation_id
-                        )
-                    VALUES (
-                        %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s
-                    )
-                    ON CONFLICT (pair_hash) DO NOTHING
+                        (user_id, created_at, turn_index, user_text, april_text, user_text_en, april_text_en, language, relation, pair_hash, dialog_id, conversation_id, message_id, interpretation_id, structured_request, structured_response)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                    ON CONFLICT (pair_hash) DO UPDATE SET
+                        user_text_en = EXCLUDED.user_text_en,
+                        april_text_en = EXCLUDED.april_text_en,
+                        structured_request = EXCLUDED.structured_request,
+                        structured_response = EXCLUDED.structured_response,
+                        interpretation_id = EXCLUDED.interpretation_id
                     """,
                     (
-                        uid, dt, int(turn_index or 0),
-                        user_value, april_value,
-                        str(user_en or "").strip(), str(april_en or "").strip(),
-                        str(language or "en"), str(relation or "NEW"),
-                        pair_hash,
+                        uid, dt, int(turn_index or 0), user_value, april_value,
+                        str(user_en or user_value), str(april_en or april_value),
+                        str(language or "en"), str(relation or "NEW"), pair_hash,
                         str(dialog_id or ""), str(conversation_id or ""),
                         str(message_id or ""), str(interpretation_id or ""),
+                        json.dumps(structured_request or {}, ensure_ascii=False, default=str),
+                        json.dumps(structured_response or {}, ensure_ascii=False, default=str),
                     ),
                 )
                 return True
@@ -505,10 +506,9 @@ def load_dialogue_pairs(user_id: Any, *, limit: int = 0, timestamp: float | int 
                     return []
                 cur.execute(
                     """
-                    SELECT id, user_id, created_at, turn_index,
-                           user_text, april_text, user_text_en, april_text_en,
-                           language, relation, dialog_id, conversation_id,
-                           message_id, interpretation_id
+                    SELECT id, user_id, created_at, turn_index, user_text, april_text, user_text_en, april_text_en,
+                           language, relation, dialog_id, conversation_id, message_id, interpretation_id,
+                           structured_request, structured_response
                     FROM dialogue_memory
                     WHERE user_id = %s
                       AND created_at >= %s
@@ -566,6 +566,10 @@ def search_dialogue_memory(user_id: Any, query: str, *, limit: int = 8) -> dict[
             "created_at": float(row.get("created_at") or 0.0),
             "user": str(row.get("user_text") or ""),
             "april": str(row.get("april_text") or ""),
+            "user_text_en": str(row.get("user_text_en") or ""),
+            "april_text_en": str(row.get("april_text_en") or ""),
+            "structured_request": row.get("structured_request") or {},
+            "structured_response": row.get("structured_response") or {},
         })
     return {
         "engine": "dialogue_pairs_v1",
