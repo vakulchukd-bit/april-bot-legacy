@@ -325,6 +325,7 @@ async def execute(
     interpretation_id: str = "",
     visual_context: list[dict[str, Any]] | None = None,
     attachments: list[dict[str, Any]] | None = None,
+    file_inputs: list[dict[str, Any]] | None = None,
     translation: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
@@ -333,7 +334,13 @@ async def execute(
     current_text = _text(internal_text or original)
     if not uid:
         raise ValueError("USER_ID_REQUIRED")
-    if not current_text and not visual_context:
+    file_inputs = [
+        dict(item)
+        for item in (file_inputs or [])
+        if isinstance(item, dict)
+        and _text(item.get("file_data"))
+    ]
+    if not current_text and not visual_context and not file_inputs:
         raise ValueError("EMPTY_REQUEST")
 
     # Processor owns DB bootstrap; harmless and idempotent after the first call.
@@ -476,6 +483,17 @@ async def execute(
         "identity": identity,
         "interpretation": interpretation,
         "attachments": attachments or [],
+        # Raw file_data is request-scoped only. It is consumed by Provider and
+        # is deliberately excluded from structured_request/DB persistence below.
+        "file_inputs": [
+            {
+                "filename": _text(item.get("filename") or "file"),
+                "mime_type": _text(item.get("mime_type") or "application/octet-stream"),
+                "size_bytes": int(item.get("size_bytes") or 0),
+                "file_data": _text(item.get("file_data")),
+            }
+            for item in file_inputs
+        ],
         "translation": translation or {},
     }
 
@@ -592,13 +610,29 @@ async def execute(
     # Persist the complete structured turn after Provider/SceneContract.
     # PostgreSQL remains storage only; State Manager will search these fields
     # on the next request.
+    safe_visual_context = dict(request.visual_context)
+    safe_visual_items: list[dict[str, Any]] = []
+    for item in (request.visual_context.get("items") or []) if isinstance(request.visual_context, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        safe_visual_items.append({
+            "type": _text(item.get("type") or "input_image"),
+            "filename": _text(item.get("filename") or "image"),
+            "source_type": _text(item.get("source_type") or "image"),
+            "mime_type": _text(item.get("mime_type") or "image/*"),
+        })
+    safe_visual_context["items"] = safe_visual_items
+    safe_visual_context["has_input_images"] = bool(safe_visual_items)
+
     structured_request = {
         "request_id": request.request_id,
         "goal": request.goal,
         "intent": dict(request.intent),
         "conversation": dict(request.conversation),
         "memory": dict(request.memory),
-        "visual_context": dict(request.visual_context),
+        # Never persist base64 image bytes; PostgreSQL remains metadata storage.
+        "visual_context": safe_visual_context,
+        "attachments": list(attachments or []),
         "available_tools": list(request.available_tools),
         "requested_outputs": list(request.requested_outputs),
         "required_competencies": list(request.required_competencies),
