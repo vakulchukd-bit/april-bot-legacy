@@ -55,6 +55,8 @@ Always treat these sections as structured input:
 For CONTINUE, continue the selected subject and do not repeat questions already answered.
 For NEW, answer independently and do not let old context override the request.
 For an input image/screenshot, inspect the supplied image and use it as part of the answer when relevant.
+For an attached file, read the supplied input_file content and answer from the file itself when relevant; do not claim the file is missing when an input_file is present.
+Text supplied together with an image or file is the user's instruction for that same attachment; do not split it into a second request.
 For a requested image, return an image artifact specification for C_APRIL_IMAGES_GENERATOR; do not create the raster yourself.
 For links/files/tables/diagrams/formulas/code, return the structured render block required by C-ARTIFACT.
 
@@ -496,6 +498,26 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
                     "type": "input_image",
                     "image_url": image_url,
                 })
+
+    # Readable documents stay on the same canonical Provider call as the user's
+    # text. The raw data URI is transient request data and is not persisted.
+    file_inputs = req.metadata.get("file_inputs", []) if isinstance(req.metadata, dict) else []
+    if isinstance(file_inputs, list):
+        for item in file_inputs:
+            if not isinstance(item, dict):
+                continue
+            file_data = _text(item.get("file_data"))
+            if not file_data:
+                continue
+            file_item: dict[str, Any] = {
+                "type": "input_file",
+                "filename": _text(item.get("filename") or "file"),
+                "file_data": file_data,
+            }
+            mime_type = _text(item.get("mime_type")).lower()
+            if mime_type == "application/pdf":
+                file_item["detail"] = "auto"
+            content.append(file_item)
 
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
