@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import re
+import json
 import threading
 import time
 import uuid
@@ -27,7 +28,43 @@ _CONTINUATION_MARKERS = {
     "this", "that", "it", "these", "those", "continue", "more",
     "again", "also", "and how", "what about", "потом", "дальше",
     "это", "тот", "так", "ещё", "еще", "продолжи", "а дальше",
+    "про него", "про неё", "про нее", "про них", "про него еще",
+    "про неё еще", "про нее еще", "что еще", "что ещё",
 }
+
+_HISTORY_MARKERS = (
+    "о чем мы говорили",
+    "о чём мы говорили",
+    "о чем говорили",
+    "о чём говорили",
+    "что мы обсуждали",
+    "что обсуждали",
+    "какие темы мы обсуждали",
+    "какие темы обсуждали",
+    "напомни темы",
+    "напомни о чем",
+    "напомни, о чем",
+    "напомни о чём",
+    "напомни, о чём",
+    "история диалога",
+    "история разговора",
+    "наши темы",
+    "что было в диалоге",
+    "о чем шла речь",
+    "о чём шла речь",
+)
+
+_NEW_TOPIC_MARKERS = (
+    "новая тема",
+    "другая тема",
+    "другой вопрос",
+    "теперь о",
+    "теперь про",
+    "перейдем к",
+    "перейдём к",
+    "забудь это",
+    "не про это",
+)
 
 
 def _new_sequence() -> dict[str, Any]:
@@ -219,67 +256,318 @@ def set_relation(user_id: Any, relation: str, **metadata: Any) -> None:
     state["updated_at"] = time.time()
 
 
+
+_STOP_WORDS = {
+    "и", "а", "но", "или", "ли", "же", "да", "нет", "ну", "вот", "как",
+    "в", "во", "на", "по", "к", "ко", "с", "со", "у", "из", "от", "до",
+    "за", "для", "о", "об", "про", "при", "без", "не", "ни", "что",
+    "это", "этот", "эта", "эти", "тот", "та", "те", "так", "там", "тут",
+    "я", "ты", "мы", "вы", "он", "она", "они", "его", "ее", "её", "их",
+    "мне", "тебе", "ему", "ей", "им", "ним", "ней", "него", "нее", "неё",
+    "них", "меня", "тебя", "вас", "нас", "уже", "еще", "ещё", "тоже",
+    "был", "была", "были", "было", "быть", "есть", "можно", "можешь",
+    "скажи", "расскажи", "напомни", "покажи", "дай", "сделай", "сделать",
+}
+
+_HISTORY_COUNT_WORDS = {
+    "один": 1, "одну": 1,
+    "два": 2, "две": 2,
+    "три": 3, "четыре": 4,
+    "пять": 5, "шесть": 6, "семь": 7,
+    "восемь": 8, "девять": 9, "десять": 10,
+}
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
 def _tokens(value: Any) -> set[str]:
     return {
         token
-        for token in re.findall(
-            r"[\w\u0080-\uffff]+",
-            str(value or "").lower(),
-        )
+        for token in re.findall(r"[\w\u0080-\uffff]+", str(value or "").lower().replace("ё", "е"))
         if len(token) > 1
     }
 
 
+def _semantic_tokens(value: Any) -> set[str]:
+    return {
+        token
+        for token in _tokens(value)
+        if token not in _STOP_WORDS and len(token) > 2
+    }
+
+
 def _continuation_marker(query: str) -> bool:
-    low = str(query or "").strip().lower()
+    low = _text(query).lower().replace("ё", "е")
     if not low:
         return False
     return any(
-        low == marker or low.startswith(marker + " ")
+        low == marker.replace("ё", "е") or low.startswith(marker.replace("ё", "е") + " ")
+        or f" {marker.replace('ё', 'е')} " in f" {low} "
         for marker in _CONTINUATION_MARKERS
     )
 
 
+def _is_history_request(query: str) -> bool:
+    low = _text(query).lower().replace("ё", "е")
+    if not low:
+        return False
+    return any(marker.replace("ё", "е") in low for marker in _HISTORY_MARKERS)
+
+
+def _history_topic_limit(query: str, default: int = 7) -> int:
+    low = _text(query).lower().replace("ё", "е")
+    match = re.search(r"\b(10|[1-9])\b", low)
+    if match:
+        return max(1, min(10, int(match.group(1))))
+    for word, count in _HISTORY_COUNT_WORDS.items():
+        if re.search(rf"\b{word}\b", low):
+            return count
+    return default
+
+
 def _domain_terms(text: str) -> set[str]:
-    low = str(text or "").lower()
+    low = str(text or "").lower().replace("ё", "е")
     groups = {
         "code": {"code", "python", "javascript", "bug", "api", "railway", "github", "код", "ошибка"},
-        "image": {"image", "picture", "photo", "screenshot", "рисунок", "картинка", "скриншот"},
-        "math": {"math", "formula", "equation", "graph", "таблица", "формула", "график", "математика"},
+        "image": {"image", "picture", "photo", "screenshot", "рисунок", "картинка", "скриншот", "фото"},
+        "math": {"math", "formula", "equation", "graph", "таблица", "формула", "график", "математика", "теорема"},
         "web": {"web", "link", "url", "site", "сайт", "ссылка"},
         "file": {"file", "document", "pdf", "файл", "документ"},
         "voice": {"voice", "audio", "голос", "аудио"},
     }
     result: set[str] = set()
     for domain, terms in groups.items():
-        if low and any(term in low for term in terms):
+        if any(term in low for term in terms):
             result.add(domain)
     return result
 
 
-
 def _looks_like_referential_followup(query: str) -> bool:
-    """Detect short follow-ups that rely on the active dialog subject."""
-    low = _text(query).lower()
+    low = _text(query).lower().replace("ё", "е")
     if not low:
         return False
 
     phrase_markers = (
-        "с кем", "с ним", "с ней", "у него", "у неё", "у нее",
+        "с кем", "с ним", "с ней", "с ними", "у него", "у нее", "у неe",
+        "у неё", "его", "ее", "её", "него", "нее", "неё", "ним", "ней",
+        "про него", "про нее", "про неё", "про них",
         "что потом", "что дальше", "а дальше", "и дальше", "подробнее",
-        "расскажи больше", "продолжи", "что насчёт", "что насчет",
-        "а как", "а где", "а кто", "а почему", "а когда", "а чем", "а зачем",
-        "как он", "что он", "где он", "кто был", "что с ним",
+        "расскажи больше", "продолжи", "продолжай", "что насчёт", "что насчет",
+        "а дальше", "а что еще", "а что ещё", "что потом",
+        "как он", "как она", "что он", "что она", "где он", "где она",
+        "кто был", "что с ним", "что с ней",
+        "что еще", "что ещё", "а что еще", "а что ещё",
     )
-    if any(phrase in low for phrase in phrase_markers):
+    if any(marker in low for marker in phrase_markers):
         return True
 
     tokens = _tokens(low)
     reference_tokens = {
-        "он", "она", "они", "его", "ее", "её", "их", "это",
-        "тот", "та", "эта", "этот", "эти", "так",
+        "он", "она", "они", "его", "ее", "её", "их", "ему", "ей", "им",
+        "ним", "ней", "него", "нее", "неё", "них", "это", "тот", "та",
+        "эта", "этот", "эти", "так", "данный", "данная",
     }
-    return len(tokens) <= 7 and bool(tokens & reference_tokens)
+    return len(tokens) <= 10 and bool(tokens & reference_tokens)
+
+
+def _looks_like_new_topic(query: str) -> bool:
+    low = _text(query).lower().replace("ё", "е")
+    return any(marker.replace("ё", "е") in low for marker in _NEW_TOPIC_MARKERS)
+
+
+def _concept_overlap(query_tokens: set[str], candidate_tokens: set[str]) -> float:
+    if not query_tokens:
+        return 0.0
+    matched = 0
+    for q in query_tokens:
+        if q in candidate_tokens:
+            matched += 1
+            continue
+        if len(q) >= 5 and any(
+            len(c) >= 5 and (q[:5] == c[:5] or q.startswith(c[:6]) or c.startswith(q[:6]))
+            for c in candidate_tokens
+        ):
+            matched += 1
+    return matched / max(1, len(query_tokens))
+
+
+
+def _explicit_entity_overlap(query: str, row: dict[str, Any]) -> float:
+    """Measure overlap of meaningful subject terms, excluding pronouns and fillers."""
+    q = _semantic_tokens(query)
+    candidate = _semantic_tokens(
+        " ".join(
+            _text(row.get(name))
+            for name in ("user_text", "april_text", "user_text_en", "april_text_en")
+        )
+    )
+    return _concept_overlap(q, candidate)
+
+
+def _parse_json(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return {}
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+
+def _row_modalities(row: dict[str, Any]) -> set[str]:
+    """Recover persisted input modalities without storing a second memory copy."""
+    result: set[str] = set()
+    structured = _parse_json(row.get("structured_request"))
+    if not structured:
+        return result
+    interpretation = structured.get("intent") if isinstance(structured.get("intent"), dict) else {}
+    input_data = interpretation.get("input") if isinstance(interpretation, dict) else {}
+    if isinstance(input_data, dict):
+        for modality in input_data.get("modalities") or []:
+            if str(modality):
+                result.add(str(modality).lower())
+        if input_data.get("has_image"):
+            result.add("image")
+        if input_data.get("has_file"):
+            result.add("file")
+        if input_data.get("has_voice"):
+            result.add("voice")
+    for item in structured.get("attachments") or []:
+        if isinstance(item, dict):
+            kind = _text(item.get("kind") or item.get("source_type")).lower()
+            if kind:
+                result.add("text_file" if kind == "text_file" else kind)
+    visual = structured.get("visual_context")
+    if isinstance(visual, dict) and visual.get("has_input_images"):
+        result.add("image")
+    if structured.get("file_contents"):
+        result.add("file")
+    return result
+
+
+def _topic_label(row: dict[str, Any]) -> str:
+    structured = _parse_json(row.get("structured_request"))
+    dialogue = structured.get("dialogue") if isinstance(structured.get("dialogue"), dict) else {}
+    cont = dialogue.get("continuation_context") if isinstance(dialogue.get("continuation_context"), dict) else {}
+    for value in (
+        cont.get("active_topic"),
+        structured.get("request_structure", {}).get("user_goal") if isinstance(structured.get("request_structure"), dict) else "",
+        row.get("user_text"),
+        row.get("user_text_en"),
+    ):
+        value = _text(value)
+        if value:
+            return re.sub(r"\s+", " ", value)[:140]
+    return "Безымянная тема"
+
+
+def _topic_tokens(label: str) -> set[str]:
+    return _semantic_tokens(label)
+
+
+def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build a compact topic map from the whole retained dialogue window.
+
+    The map is derived from persisted USER↔APRIL pairs; it does not create a
+    second memory store.  Consecutive pairs are grouped by explicit NEW
+    relations or strong semantic continuity, then deduplicated.
+    """
+    if not rows:
+        return []
+
+    ordered = sorted(
+        [r for r in rows if isinstance(r, dict)],
+        key=lambda r: (float(r.get("created_at") or 0), int(r.get("turn_index") or 0)),
+    )
+    groups: list[dict[str, Any]] = []
+
+    for row in ordered:
+        label = _topic_label(row)
+        tokens = _topic_tokens(label)
+        relation = _text(row.get("relation") or "NEW").upper()
+        same_as_prev = False
+        if groups:
+            prev = groups[-1]
+            similarity = fuzz.token_set_ratio(label.lower(), str(prev.get("topic") or "").lower()) / 100.0
+            current_modalities = _row_modalities(row)
+            previous_modalities = set(prev.get("modalities") or [])
+            modality_changed = bool(current_modalities and previous_modalities and current_modalities.isdisjoint(previous_modalities))
+            same_as_prev = relation != "NEW" and similarity >= 0.28 and not modality_changed
+
+            # A clearly referential short follow-up can preserve a topic even
+            # when the sentence itself has little lexical overlap.
+            if not same_as_prev and not modality_changed and _looks_like_referential_followup(str(row.get("user_text") or "")):
+                same_as_prev = True
+
+        if not groups or not same_as_prev:
+            groups.append({
+                "topic": label,
+                "topic_tokens": sorted(tokens),
+                "start_turn": int(row.get("turn_index") or 0),
+                "end_turn": int(row.get("turn_index") or 0),
+                "first_at": float(row.get("created_at") or 0),
+                "last_at": float(row.get("created_at") or 0),
+                "last_question": _text(row.get("user_text"))[:180],
+                "message_id": _text(row.get("message_id")),
+                "dialog_id": _text(row.get("dialog_id")),
+                "conversation_id": _text(row.get("conversation_id")),
+                "modalities": sorted(_row_modalities(row)),
+                "pair_count": 1,
+            })
+        else:
+            g = groups[-1]
+            g["end_turn"] = int(row.get("turn_index") or g["end_turn"])
+            g["last_at"] = float(row.get("created_at") or g["last_at"])
+            g["last_question"] = _text(row.get("user_text"))[:180] or g["last_question"]
+            g["modalities"] = sorted(set(g.get("modalities") or []) | _row_modalities(row))
+            g["pair_count"] = int(g.get("pair_count") or 0) + 1
+
+    # Deduplicate adjacent/near-duplicate topic labels without losing the
+    # newest occurrence.
+    deduped: list[dict[str, Any]] = []
+    for item in groups:
+        found = None
+        for prev in reversed(deduped[-3:]):
+            similarity = fuzz.token_set_ratio(
+                str(item.get("topic") or "").lower(),
+                str(prev.get("topic") or "").lower(),
+            ) / 100.0
+            if similarity >= 0.78:
+                found = prev
+                break
+        if found is not None:
+            if float(item.get("last_at") or 0) >= float(found.get("last_at") or 0):
+                found.update({
+                    "end_turn": item.get("end_turn"),
+                    "last_at": item.get("last_at"),
+                    "last_question": item.get("last_question"),
+                    "message_id": item.get("message_id"),
+                    "pair_count": int(found.get("pair_count") or 0) + int(item.get("pair_count") or 0),
+                })
+        else:
+            deduped.append(item)
+
+    deduped.sort(key=lambda x: float(x.get("last_at") or 0), reverse=True)
+    visible = []
+    for idx, item in enumerate(deduped[:10], 1):
+        visible.append({
+            "number": idx,
+            "topic": _text(item.get("topic"))[:120],
+            "turns": f"{item.get('start_turn', 0)}-{item.get('end_turn', 0)}",
+            "last_question": _text(item.get("last_question"))[:140],
+            "pair_count": int(item.get("pair_count") or 0),
+            "last_at": item.get("last_at"),
+            "message_id": _text(item.get("message_id")),
+            "dialog_id": _text(item.get("dialog_id")),
+            "conversation_id": _text(item.get("conversation_id")),
+        })
+    return visible
+
 
 def _candidate_score(
     query: str,
@@ -287,6 +575,8 @@ def _candidate_score(
     *,
     dialog_id: str = "",
     now_ts: float | None = None,
+    reference_followup: bool = False,
+    query_modalities: set[str] | None = None,
 ) -> dict[str, Any]:
     q = str(query or "").strip().lower()
     user = str(row.get("user_text") or "")
@@ -294,19 +584,33 @@ def _candidate_score(
     user_en = str(row.get("user_text_en") or "")
     april_en = str(row.get("april_text_en") or "")
 
-    query_tokens = _tokens(q)
-    semantic_text = " ".join(x for x in (user, user_en, april, april_en) if x).lower()
-    candidate_tokens = _tokens(semantic_text)
+    query_tokens = _semantic_tokens(q)
+    user_tokens = _semantic_tokens(user)
+    answer_tokens = _semantic_tokens(april)
+    candidate_tokens = _semantic_tokens(" ".join(x for x in (user, user_en, april, april_en) if x))
 
-    lexical = fuzz.token_set_ratio(q, semantic_text) / 100.0 if q else 0.0
-    partial = fuzz.partial_ratio(q, semantic_text) / 100.0 if q else 0.0
-    overlap = (
-        len(query_tokens & candidate_tokens) / max(1, len(query_tokens))
-        if query_tokens else 0.0
+    lexical = fuzz.token_set_ratio(
+        " ".join(sorted(query_tokens)),
+        " ".join(sorted(candidate_tokens)),
+    ) / 100.0 if query_tokens and candidate_tokens else 0.0
+    overlap = _concept_overlap(query_tokens, candidate_tokens)
+    partial = (
+        fuzz.partial_ratio(q, " ".join(x for x in (user, april, user_en, april_en) if x)) / 100.0
+        if q and overlap > 0.0 else 0.0
     )
 
+    row_modalities = _row_modalities(row)
+    requested_modalities = set(query_modalities or set())
+    modality_match = (
+        len(requested_modalities & row_modalities) / max(1, len(requested_modalities))
+        if requested_modalities else 0.0
+    )
+    answer_overlap = _concept_overlap(query_tokens, answer_tokens)
+    user_overlap = _concept_overlap(query_tokens, user_tokens)
+    entity_overlap = _explicit_entity_overlap(query, row)
+
     q_domains = _domain_terms(q)
-    c_domains = _domain_terms(semantic_text)
+    c_domains = _domain_terms(" ".join(x for x in (user, april, user_en, april_en) if x))
     direction = (
         len(q_domains & c_domains) / max(1, len(q_domains))
         if q_domains else 0.0
@@ -317,25 +621,38 @@ def _candidate_score(
     age = max(0.0, stamp - created)
     recency = max(0.0, 1.0 - age / DIALOGUE_WINDOW_SECONDS)
 
-    exact_dialog = bool(
-        dialog_id
-        and str(row.get("dialog_id") or "").strip()
-        and str(row.get("dialog_id") or "").strip() == dialog_id
-    )
+    row_dialog = _text(row.get("dialog_id"))
+    exact_dialog = bool(dialog_id and row_dialog and row_dialog == dialog_id)
 
     score = (
-        lexical * 0.34
-        + partial * 0.18
+        lexical * 0.12
+        + partial * 0.04
         + overlap * 0.26
-        + direction * 0.12
+        + entity_overlap * 0.20
+        + answer_overlap * 0.08
+        + user_overlap * 0.04
+        + direction * 0.04
+        + modality_match * 0.08
         + recency * 0.05
-        + (0.05 if exact_dialog else 0.0)
+        + (0.09 if exact_dialog else 0.0)
     )
+    if reference_followup and exact_dialog:
+        score += 0.20
+    if exact_dialog and int(row.get("turn_index") or 0) == max(
+        [int(x.get("turn_index") or 0) for x in _STATES.get(_text(row.get("user_id")), {}).get("dialogue_pairs", []) if isinstance(x, dict)],
+        default=int(row.get("turn_index") or 0),
+    ):
+        score += 0.03
 
     return {
         "score": round(min(1.0, float(score)), 6),
         "semantic": round(lexical, 6),
         "context": round(overlap, 6),
+        "answer_overlap": round(answer_overlap, 6),
+        "user_overlap": round(user_overlap, 6),
+        "entity_overlap": round(entity_overlap, 6),
+        "modality_match": round(modality_match, 6),
+        "row_modalities": sorted(row_modalities),
         "direction": round(direction, 6),
         "recency": round(recency, 6),
         "same_dialog": exact_dialog,
@@ -346,9 +663,22 @@ def _candidate_score(
         "april": april,
         "april_en": april_en,
         "message_id": str(row.get("message_id") or ""),
-        "dialog_id": str(row.get("dialog_id") or ""),
+        "dialog_id": row_dialog,
         "conversation_id": str(row.get("conversation_id") or ""),
         "interpretation_id": str(row.get("interpretation_id") or ""),
+        "topic": _topic_label(row),
+    }
+
+
+def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "turn": item.get("turn_index"),
+        "user": _text(item.get("user") or item.get("user_text"))[:240],
+        "april": _text(item.get("april") or item.get("april_text"))[:300],
+        "topic": _text(item.get("topic"))[:100],
+        "score": item.get("score"),
+        "same_dialog": bool(item.get("same_dialog")),
+        "message_id": _text(item.get("message_id")),
     }
 
 
@@ -358,21 +688,42 @@ def search_dialogue_context(
     *,
     dialog_id: str = "",
     conversation_id: str = "",
-    limit: int = 8,
+    limit: int = 12,
+    has_image: bool = False,
+    has_file: bool = False,
+    has_voice: bool = False,
 ) -> dict[str, Any]:
-    """Search PostgreSQL dialogue pairs and return ranked context for interpretation.
+    """Search the retained authenticated dialogue with hybrid semantic retrieval.
 
-    PostgreSQL remains storage only.  Ranking and compatibility are performed here
-    so Interpretation Identity receives already-structured candidates.
+    The result is deliberately structured for Interpretation Identity:
+    - lexical + semantic token matching;
+    - attachment/domain compatibility;
+    - exact authenticated dialog continuity;
+    - explicit referential follow-up detection;
+    - neighboring turns;
+    - whole-window topic index for history questions.
     """
     uid = _uid(user_id)
     state = hydrate(uid)
     rows = list(state.get("dialogue_pairs") or [])
+    reference_followup = _looks_like_referential_followup(query)
+    history_request = _is_history_request(query)
+    new_topic_request = _looks_like_new_topic(query)
+    query_modalities = {
+        modality for modality, enabled in (
+            ("image", bool(has_image)),
+            ("file", bool(has_file)),
+            ("voice", bool(has_voice)),
+        ) if enabled
+    }
+
     matches = [
         _candidate_score(
             query,
             row,
             dialog_id=str(dialog_id or ""),
+            reference_followup=reference_followup,
+            query_modalities=query_modalities,
         )
         for row in rows
     ]
@@ -384,62 +735,149 @@ def search_dialogue_context(
         ),
         reverse=True,
     )
-    selected = matches[: max(1, int(limit or 8))] if matches else []
 
-    best = selected[0] if selected else None
-    marker = _continuation_marker(query)
-    referential_followup = _looks_like_referential_followup(query)
-
-    # Same authenticated dialogue is strong evidence only for short/reference
-    # follow-ups; it must not force unrelated new topics to CONTINUE.
-    same_dialog_followup = bool(
-        best
-        and bool(best.get("same_dialog"))
-        and referential_followup
-        and float(best["score"]) >= 0.10
+    latest_same_dialog = max(
+        (item for item in matches if bool(item.get("same_dialog"))),
+        key=lambda item: (float(item.get("created_at") or 0.0), int(item.get("turn_index") or 0)),
+        default=None,
     )
+    best = matches[0] if matches else None
+
+    # Strong continuity rules come before generic fuzzy similarity. A short
+    # referential request belongs to the same authenticated dialog whenever a
+    # previous turn exists, even when lexical overlap is almost zero.
+    same_dialog_exists = bool(latest_same_dialog)
+    marker = _continuation_marker(query)
     same_dialog_semantic = bool(
         best
-        and bool(best.get("same_dialog"))
-        and float(best["score"]) >= 0.35
-    )
-    continuation = bool(
-        best
         and (
-            float(best["score"]) >= 0.52
-            or (marker and float(best["score"]) >= 0.22)
-            or same_dialog_followup
-            or same_dialog_semantic
+            (
+                best.get("same_dialog")
+                and (
+                    float(best.get("entity_overlap") or 0.0) >= 0.18
+                    or float(best.get("context") or 0.0) >= 0.16
+                    or float(best.get("semantic") or 0.0) >= 0.52
+                )
+            )
+            or float(best.get("entity_overlap") or 0.0) >= 0.28
         )
     )
+    short_contextual = (
+        len(_tokens(query)) <= 12
+        and _text(query).lower().startswith(("а ", "и ", "ну ", "так "))
+        and (
+            reference_followup
+            or marker
+            or len(_semantic_tokens(query)) == 0
+        )
+    )
+    continuation = False
+
+    has_new_attachment = bool(query_modalities)
+    explicit_attachment_followup = has_new_attachment and reference_followup
+    if history_request:
+        continuation = False
+    elif new_topic_request:
+        continuation = False
+    elif has_new_attachment and not explicit_attachment_followup:
+        continuation = False
+    elif latest_same_dialog and reference_followup:
+        continuation = True
+    elif latest_same_dialog and (marker or short_contextual) and len(_tokens(query)) <= 14:
+        continuation = True
+    elif same_dialog_semantic:
+        continuation = True
+    elif best and float(best.get("score") or 0.0) >= 0.60:
+        continuation = True
+
     relation = "CONTINUE" if continuation else "NEW"
 
-    if relation == "CONTINUE" and selected:
-        latest_same_dialog = max(
-            (item for item in matches if bool(item.get("same_dialog"))),
-            key=lambda item: (float(item.get("created_at") or 0.0), int(item.get("turn_index") or 0)),
-            default=None,
-        )
-        if referential_followup and latest_same_dialog:
-            selected_for_context = [latest_same_dialog] + [
-                item for item in selected if item.get("message_id") != latest_same_dialog.get("message_id")
+    # For a continuation, preserve an anchor turn plus nearby turns around it.
+    selected_for_context: list[dict[str, Any]] = []
+    if relation == "CONTINUE" and rows:
+        anchor = best
+        if reference_followup and latest_same_dialog:
+            # Pure pronoun/follow-up queries have no reliable lexical subject;
+            # resolve them to the latest turn in the authenticated dialogue.
+            if float(best.get("entity_overlap") or 0.0) < 0.18:
+                anchor = latest_same_dialog
+        if anchor:
+            anchor_msg = _text(anchor.get("message_id"))
+            same_rows = [m for m in matches if bool(m.get("same_dialog"))]
+            # Keep the anchor first, then relevant semantic matches.
+            ordered = [anchor] + [
+                m for m in matches
+                if _text(m.get("message_id")) and _text(m.get("message_id")) != anchor_msg
             ]
-            selected_for_context = selected_for_context[:4]
-        else:
-            selected_for_context = selected[:4]
-        reason = "same_dialog_followup" if referential_followup and latest_same_dialog else "memory_match"
+            seen = set()
+            for item in ordered:
+                mid = _text(item.get("message_id"))
+                key = mid or f"{item.get('created_at')}|{item.get('turn_index')}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                selected_for_context.append(_compact_pair(item))
+                if len(selected_for_context) >= 6:
+                    break
+
+            # If the anchor is not recent enough, add its immediate temporal
+            # neighbors from the same dialog so the chain is understandable.
+            if anchor_msg:
+                all_same = [
+                    r for r in rows
+                    if _text(r.get("dialog_id")) == _text(anchor.get("dialog_id"))
+                ]
+                all_same.sort(key=lambda r: (float(r.get("created_at") or 0), int(r.get("turn_index") or 0)))
+                pos = next((i for i, r in enumerate(all_same) if _text(r.get("message_id")) == anchor_msg), None)
+                if pos is not None:
+                    neighbors = all_same[max(0, pos-1):min(len(all_same), pos+2)]
+                    existing_ids = {_text(x.get("message_id")) for x in selected_for_context}
+                    for row in neighbors:
+                        if _text(row.get("message_id")) not in existing_ids:
+                            selected_for_context.append(_compact_pair(
+                                _candidate_score(
+                                    query,
+                                    row,
+                                    dialog_id=str(dialog_id or ""),
+                                    reference_followup=reference_followup,
+                                    query_modalities=query_modalities,
+                                )
+                            ))
+        reason = (
+            "same_dialog_referential"
+            if reference_followup and latest_same_dialog
+            else "same_dialog_contextual"
+            if latest_same_dialog and (marker or short_contextual)
+            else "semantic_memory_match"
+        )
+        anchor_for_relation = anchor if 'anchor' in locals() else (latest_same_dialog or best or {})
         active_topic = (
-            selected_for_context[0].get("user_en")
-            or selected_for_context[0].get("user")
-            or ""
-        )[:180]
+            anchor_for_relation.get("topic")
+            or (selected_for_context[0].get("topic") if selected_for_context else "")
+            or _text(query)[:140]
+        )
     else:
         selected_for_context = []
-        reason = "new_request"
-        active_topic = str(query or "").strip()[:180]
+        reason = "history_request" if history_request else "new_request"
+        active_topic = _text(query)[:140]
+
+    topics = _build_topic_index(rows)
+    history_limit = _history_topic_limit(query, 7)
+    history_topics = topics[:history_limit] if history_request else []
+    topic_index = topics[:5]
+
+    # Markdown is a presentation aid for the Provider; structured JSON fields
+    # remain authoritative.
+    topic_table_lines = ["| # | Тема | Последний запрос | Ходы |", "|---:|---|---|---:|"]
+    for item in (history_topics or topics[:min(3, len(topics))]):
+        topic_table_lines.append(
+            f"| {item['number']} | {str(item['topic']).replace('|', '/')} | "
+            f"{str(item['last_question']).replace('|', '/')} | {item['turns']} |"
+        )
+    topic_table_md = "\n".join(topic_table_lines)
 
     result = {
-        "engine": "state_manager_dialogue_search_v2",
+        "engine": "state_manager_dialogue_search_v3",
         "authenticated": True,
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "dialog_id": str(dialog_id or ""),
@@ -449,15 +887,19 @@ def search_dialogue_context(
         "candidate_count": len(matches),
         "relation": relation,
         "reason": reason,
-        "relation_confidence": round(
-            float(best["score"]) if best else 0.0,
-            6,
-        ),
+        "relation_confidence": round(float(best["score"]) if best else (0.60 if latest_same_dialog and reference_followup else 0.0), 6),
         "continuation_marker": marker,
-        "referential_followup": referential_followup,
+        "referential_followup": reference_followup,
+        "history_request": history_request,
+        "requested_topic_count": history_limit,
         "active_topic": active_topic,
-        "matches": selected,
-        "selected": selected_for_context,
+        "anchor": _compact_pair(latest_same_dialog or best) if (latest_same_dialog or best) else {},
+        "matches": matches[:max(1, int(limit or 12))] if matches else [],
+        "selected": selected_for_context[:6],
+        "history_topics": history_topics,
+        "topic_index": topic_index,
+        "known_topic_count": len(topics),
+        "topic_table_markdown": topic_table_md,
     }
 
     with _LOCK:
@@ -479,7 +921,10 @@ def prepare_dialogue_context(
     *,
     dialog_id: str = "",
     conversation_id: str = "",
-    limit: int = 8,
+    limit: int = 12,
+    has_image: bool = False,
+    has_file: bool = False,
+    has_voice: bool = False,
 ) -> dict[str, Any]:
     """One processor-facing call: hydrate + search + continuation decision."""
     context = search_dialogue_context(
@@ -488,6 +933,9 @@ def prepare_dialogue_context(
         dialog_id=dialog_id,
         conversation_id=conversation_id,
         limit=limit,
+        has_image=has_image,
+        has_file=has_file,
+        has_voice=has_voice,
     )
     return {
         "window_hours": DIALOGUE_WINDOW_HOURS,
@@ -497,6 +945,13 @@ def prepare_dialogue_context(
         "active_topic": context["active_topic"],
         "selected_pairs": deepcopy(context["selected"]),
         "candidates": deepcopy(context["matches"]),
+        "history_topics": deepcopy(context.get("history_topics") or []),
+        "topic_index": deepcopy(context.get("topic_index") or []),
+        "known_topic_count": int(context.get("known_topic_count") or 0),
+        "history_request": bool(context.get("history_request")),
+        "requested_topic_count": int(context.get("requested_topic_count") or 7),
+        "topic_table_markdown": _text(context.get("topic_table_markdown")),
+        "anchor": deepcopy(context.get("anchor") or {}),
         "search": deepcopy(context),
     }
 
