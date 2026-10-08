@@ -1,9 +1,9 @@
 """APRIL canonical bot.ru gateway.
 
 There is exactly one public chat route: POST /api/v1/chat.
-Bot.ru owns the input translation boundary. It accepts text, voice, image/
-screenshot and file content in the same authenticated envelope, normalizes the
-user request to internal English, and passes the envelope to Exkrutor.
+Bot.ru owns the transport/input normalization boundary. It accepts text, voice,
+screenshot/image and file content in the same authenticated envelope and passes
+the normalized envelope to Exkrutor.
 No separate botru_transport/translation route or file exists.
 """
 from __future__ import annotations
@@ -17,20 +17,18 @@ import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 from blocks.input_reader import parse_json_payload, parse_multipart_payload
 from blocks.voice_reader import transcribe_voice_bytes
 from core.executor import execute
+from storage import init_db
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "10000"))
 MAX_BODY_BYTES = int(os.getenv("APRIL_MAX_HTTP_BODY_BYTES", str(25 * 1024 * 1024)))
 CANONICAL_CHAT_ROUTE = "/api/v1/chat"
 CANONICAL_ROUTE_VERSION = "april_web_botru_exkrutor_v1"
-TRANSLATION_VERSION = "botru_embedded_translation_v1"
-TRANSLATOR_MODEL = os.getenv("APRIL_TRANSLATOR_MODEL", os.getenv("APRIL_OPENAI_MODEL", "gpt-5.6-luna"))
+INPUT_NORMALIZATION_VERSION = "botru_input_normalization_v2"
 
 
 def _text(value: Any) -> str:
@@ -61,96 +59,6 @@ def _detect_language(text: str, requested: str = "") -> str:
         return "el"
     return "en"
 
-
-def _openai_translate_to_en(text: str) -> str:
-    """Translate/normalize one user request inside bot.ru.
-
-    This is the only translation boundary. It returns concise English semantic
-    text; it does not answer the user and does not create another chat route.
-    """
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY_NOT_CONFIGURED")
-    payload = {
-        "model": TRANSLATOR_MODEL,
-        "input": [
-            {
-                "role": "system",
-                "content": (
-                    "You are April bot.ru input translator. Convert the user's request "
-                    "from any language into concise, faithful English semantic text. "
-                    "Do not answer it. Preserve names, numbers, code, URLs, file names "
-                    "and explicit visual requirements. Return JSON only: "
-                    '{"text_en":"..."}'
-                ),
-            },
-            {"role": "user", "content": text},
-        ],
-        "max_output_tokens": 900,
-    }
-    req = Request(
-        "https://api.openai.com/v1/responses",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-    )
-    try:
-        with urlopen(req, timeout=90) as response:
-            raw = response.read().decode("utf-8")
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"BOTRU_TRANSLATION_HTTP_{exc.code}: {detail[:500]}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"BOTRU_TRANSLATION_NETWORK_ERROR: {exc.reason}") from exc
-
-    data = json.loads(raw)
-    output = _text(data.get("output_text"))
-    if not output:
-        chunks: list[str] = []
-        for item in data.get("output") or []:
-            for content in item.get("content") or []:
-                if isinstance(content, dict) and isinstance(content.get("text"), str):
-                    chunks.append(content["text"])
-        output = "\n".join(chunks).strip()
-    try:
-        parsed = json.loads(output)
-        translated = _text(parsed.get("text_en"))
-    except Exception:
-        translated = output.strip().strip("`")
-    if not translated:
-        raise RuntimeError("BOTRU_TRANSLATION_EMPTY")
-    return translated
-
-
-def _translate_input(text: str, language: str) -> tuple[str, dict[str, Any]]:
-    original = _text(text)
-    if not original:
-        return "", {
-            "version": TRANSLATION_VERSION,
-            "source_language": language,
-            "internal_language": "en",
-            "translated": False,
-        }
-    if language == "en":
-        return original, {
-            "version": TRANSLATION_VERSION,
-            "source_language": "en",
-            "internal_language": "en",
-            "translated": False,
-            "stage": "bot.ru",
-        }
-    translated = _openai_translate_to_en(original)
-    return translated, {
-        "version": TRANSLATION_VERSION,
-        "source_language": language,
-        "internal_language": "en",
-        "translated": True,
-        "stage": "bot.ru",
-    }
 
 
 def _decode_inline_file(value: Any) -> bytes:
@@ -233,6 +141,9 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
         "blocks": blocks,
         "render_blocks": blocks,
         "scene_contract": scene,
+        "artifacts": result.get("artifacts", []),
+        "interpretation": result.get("interpretation", {}),
+        "route": result.get("route", {}),
         "april_id": result.get("april_id"),
         "conversation_id": result.get("conversation_id"),
         "dialog_id": result.get("dialog_id"),
@@ -275,14 +186,20 @@ def _handle_payload(
         if not original and not visual_context:
             return _error("text, voice, image or file required", 400)
 
-        language = _detect_language(original, data.get("language") or data.get("display_language"))
-        internal_text, translation = _translate_input(original, language) if original else ("", {
-            "version": TRANSLATION_VERSION,
+        language = _detect_language(
+            original or voice_transcript,
+            data.get("language") or data.get("display_language"),
+        )
+        # bot.ru is transport/input normalization only.  The semantic structure is
+        # created by the Interpretation layer after Exkrutor's memory search.
+        internal_text = original
+        translation = {
+            "version": INPUT_NORMALIZATION_VERSION,
             "source_language": language,
-            "internal_language": "en",
+            "internal_language": "same_as_input",
             "translated": False,
             "stage": "bot.ru",
-        })
+        }
 
         result = asyncio.run(execute(
             uid,
@@ -338,7 +255,7 @@ def _canonical_identity(data: dict[str, Any]) -> dict[str, str]:
         "conversation_id": conversation_id,
         "dialog_id": dialog_id,
         "message_id": message_id,
-        "interpretation_id": _text(data.get("interpretation_id")),
+        "interpretation_id": _text(data.get("interpretation_id")) or f"interp_{uuid.uuid4().hex}",
         "flow_id": flow_id,
     }
 
@@ -480,6 +397,8 @@ def create_server() -> ThreadingHTTPServer:
 
 
 def main() -> None:
+    # Processor-side schema bootstrap must complete before the first chat request.
+    init_db()
     server = create_server()
     print(f"[APRIL] bot.ru listening on {HOST}:{PORT}; canonical route={CANONICAL_CHAT_ROUTE}", flush=True)
     try:
