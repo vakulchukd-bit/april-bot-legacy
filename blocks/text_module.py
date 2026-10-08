@@ -23,6 +23,7 @@ import json
 import re
 import time
 import traceback
+from copy import deepcopy
 from typing import Any, Dict, Optional
 
 from storage import get_user_plan
@@ -575,6 +576,58 @@ def get_text_patch_log() -> list[str]:
     return list(PATCH_LOG)
 
 
+def package_provider_response(
+    *,
+    answer: Any,
+    content: Any = "",
+    summary: Any = "",
+    render_blocks: Any = None,
+    artifacts: Any = None,
+) -> dict[str, Any]:
+    """Canonical response packaging only; never performs routing or Provider I/O."""
+    clean_answer = sanitize_model_output(answer)
+    if not clean_answer:
+        raise RuntimeError("CANONICAL_ANSWER_MISSING")
+
+    clean_content = sanitize_model_output(content or clean_answer) or clean_answer
+    clean_summary = sanitize_model_output(summary or clean_answer[:180]) or clean_answer[:180]
+
+    blocks = []
+    if isinstance(render_blocks, list):
+        for block in render_blocks:
+            if not isinstance(block, dict):
+                continue
+            item = dict(block)
+            if str(item.get("type") or "").lower() in {"text", "markdown"}:
+                visible = sanitize_model_output(
+                    item.get("content") or item.get("text") or item.get("markdown")
+                )
+                if not visible:
+                    continue
+                item["content"] = visible
+            blocks.append(item)
+
+    if not blocks:
+        blocks = [{
+            "type": "text",
+            "renderer": "MessageTextBlock",
+            "viewer": "MessageTextBlock",
+            "content": clean_answer,
+        }]
+
+    artifact_list = [
+        deepcopy(item) if isinstance(item, (dict, list)) else item
+        for item in (artifacts or [])
+    ] if isinstance(artifacts, list) else []
+
+    return {
+        "answer": clean_answer,
+        "content": clean_content,
+        "summary": clean_summary,
+        "render_blocks": blocks,
+        "artifacts": artifact_list,
+    }
+
 __all__ = [
     "process",
     "generate",
@@ -586,6 +639,7 @@ __all__ = [
     "TEXT_QUANTUM_MODEL",
     "TEXT_QUANTUM_SINGLE_ROUTE",
     "TEXT_QUANTUM_ONE_PROVIDER_CALL",
+    "package_provider_response",
 ]
 
 
