@@ -1,11 +1,8 @@
 """APRIL single provider for the canonical WebReal Web route.
 
-The provider receives a processor-selected context plan. It performs the semantic
-translation step inside the same provider call:
-
-    user language -> internal English meaning -> answer in user language
-
-No legacy room router, second interpretation service, or second chat route exists.
+The provider receives an already-normalized English request from bot.ru/Exkrutor.
+Bot.ru owns the input translation boundary. The provider performs reasoning and
+returns the answer in the requested display language. No second chat route exists.
 """
 from __future__ import annotations
 
@@ -26,7 +23,7 @@ MAX_OUTPUT_TOKENS = min(
     max(256, int(os.getenv("APRIL_MAX_OUTPUT_TOKENS", "2400") or 2400)),
 )
 INPUT_TOKEN_TARGET = 900
-TRANSLATION_ROUTE_VERSION = "botru_translation_v1"
+TRANSLATION_ROUTE_VERSION = "botru_embedded_translation_v1"
 
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _inflight: set[str] = set()
@@ -36,9 +33,8 @@ _client: _OpenAICompat | None = None
 SYSTEM_PROMPT = r"""
 You are April's single response provider.
 
-Internal processing is ALWAYS in English. The current request may be in any
-human language. First silently normalize its meaning into concise English.
-Never expose that internal translation.
+The processor has already normalized the request into concise English.
+Do not translate again and do not create a second interpretation route.
 
 The processor already decided NEW/CONTINUE and supplied the permitted context.
 Do not search memory, invent a second route, or create another context source.
@@ -327,7 +323,7 @@ def _clip(value: Any, chars: int) -> str:
     return text[: chars - 1].rstrip() + "…"
 
 
-def _build_input(req: MachineRequest) -> list[dict[str, str]]:
+def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
     plan = req.routing.get("provider_context_plan")
     if not isinstance(plan, dict):
         plan = {}
@@ -396,6 +392,16 @@ def _build_input(req: MachineRequest) -> list[dict[str, str]]:
         "summary + render_blocks"
     )
 
+    content: list[dict[str, Any]] = [{"type": "input_text", "text": user_text}]
+    visual = req.visual_context.get("items") if isinstance(req.visual_context, dict) else []
+    if isinstance(visual, list):
+        for item in visual:
+            if not isinstance(item, dict):
+                continue
+            image_url = _text(item.get("image_url"))
+            if image_url:
+                content.append({"type": "input_image", "image_url": image_url})
+
     return [
         {
             "role": "system",
@@ -403,7 +409,7 @@ def _build_input(req: MachineRequest) -> list[dict[str, str]]:
         },
         {
             "role": "user",
-            "content": user_text,
+            "content": content,
         },
     ]
 
