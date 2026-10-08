@@ -5,7 +5,6 @@
 from typing import Dict, Any
 from blocks.C_ARTIFACT_CONTRACT import MachineRequest
 
-from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
 
@@ -16,7 +15,7 @@ LITERATURE_COMPETENCY = {
     ]
 }
 
-class LiteratureRoom(Room):
+class LiteratureRoom:
 
     name = "literature"
 
