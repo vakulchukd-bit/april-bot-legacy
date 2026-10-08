@@ -75,12 +75,19 @@ def _prepare_attachments(
     attachments: list[Any],
     *,
     voice_transcript: str = "",
-) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return semantic text, visual inputs, safe attachment metadata and file inputs."""
-    extra_text: list[str] = []
+) -> tuple[
+    str,
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    """Separate user instruction from attachment contents on one canonical route."""
+    semantic_text: list[str] = []
     visual: list[dict[str, Any]] = []
     meta: list[dict[str, Any]] = []
     provider_files: list[dict[str, Any]] = []
+    text_file_contents: list[dict[str, Any]] = []
 
     for att in attachments:
         item = getattr(att, "metadata", {}) or {}
@@ -109,12 +116,20 @@ def _prepare_attachments(
             if transcript:
                 # Transcript is the semantic input; the original audio remains
                 # represented by attachment metadata.
-                extra_text.append(transcript)
+                semantic_text.append(transcript)
 
         elif kind == "text_file":
             text = _text(item.get("text"))
             if text:
-                extra_text.append(f"FILE {filename}:\n{text}")
+                # File contents are evidence for the Provider, never part of
+                # CURRENT_REQUEST. This prevents words such as "image",
+                # "python" and "code" inside a file from changing intent.
+                text_file_contents.append({
+                    "filename": filename or "file",
+                    "mime_type": content_type or item.get("mime_type") or "text/plain",
+                    "content": text,
+                    "size_bytes": size_bytes,
+                })
 
         elif kind == "image":
             uri = _text(item.get("data_uri"))
@@ -141,7 +156,7 @@ def _prepare_attachments(
                     "size_bytes": size_bytes,
                 })
 
-    return "\n\n".join(extra_text), visual, meta, provider_files
+    return "\n\n".join(semantic_text), visual, meta, provider_files, text_file_contents
 
 
 def _payload(result: dict[str, Any]) -> dict[str, Any]:
@@ -205,13 +220,13 @@ def _handle_payload(
 
     attachments = attachments or []
     try:
-        extra_text, visual_context, attachment_meta, file_inputs = _prepare_attachments(
+        semantic_text, visual_context, attachment_meta, file_inputs, text_file_contents = _prepare_attachments(
             data, attachments, voice_transcript=voice_transcript
         )
-        if extra_text:
-            original = (original + "\n\n" + extra_text).strip()
+        if semantic_text:
+            original = (original + "\n\n" + semantic_text).strip()
 
-        if not original and not visual_context and not file_inputs:
+        if not original and not visual_context and not file_inputs and not text_file_contents:
             if attachment_meta:
                 return _error("file is not readable by the Provider", 400)
             return _error("text, voice, image or file required", 400)
@@ -244,6 +259,7 @@ def _handle_payload(
             visual_context=visual_context,
             attachments=attachment_meta,
             file_inputs=file_inputs,
+            file_contents=text_file_contents,
             translation=translation,
         ))
         if isinstance(result, dict):
