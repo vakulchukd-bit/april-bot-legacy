@@ -54,6 +54,10 @@ def _new_state(uid: str) -> dict[str, Any]:
     }
 
 
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
 def _uid(user_id: Any) -> str:
     value = str(user_id or "").strip()
     if not value:
@@ -253,6 +257,30 @@ def _domain_terms(text: str) -> set[str]:
     return result
 
 
+
+def _looks_like_referential_followup(query: str) -> bool:
+    """Detect short follow-ups that rely on the active dialog subject."""
+    low = _text(query).lower()
+    if not low:
+        return False
+
+    phrase_markers = (
+        "с кем", "с ним", "с ней", "у него", "у неё", "у нее",
+        "что потом", "что дальше", "а дальше", "и дальше", "подробнее",
+        "расскажи больше", "продолжи", "что насчёт", "что насчет",
+        "а как", "а где", "а кто", "а почему", "а когда", "а чем", "а зачем",
+        "как он", "что он", "где он", "кто был", "что с ним",
+    )
+    if any(phrase in low for phrase in phrase_markers):
+        return True
+
+    tokens = _tokens(low)
+    reference_tokens = {
+        "он", "она", "они", "его", "ее", "её", "их", "это",
+        "тот", "та", "эта", "этот", "эти", "так",
+    }
+    return len(tokens) <= 7 and bool(tokens & reference_tokens)
+
 def _candidate_score(
     query: str,
     row: dict[str, Any],
@@ -360,25 +388,46 @@ def search_dialogue_context(
 
     best = selected[0] if selected else None
     marker = _continuation_marker(query)
+    referential_followup = _looks_like_referential_followup(query)
+
+    # Same authenticated dialogue is strong evidence only for short/reference
+    # follow-ups; it must not force unrelated new topics to CONTINUE.
+    same_dialog_followup = bool(
+        best
+        and bool(best.get("same_dialog"))
+        and referential_followup
+        and float(best["score"]) >= 0.10
+    )
+    same_dialog_semantic = bool(
+        best
+        and bool(best.get("same_dialog"))
+        and float(best["score"]) >= 0.35
+    )
     continuation = bool(
         best
         and (
             float(best["score"]) >= 0.52
-            or (
-                marker
-                and float(best["score"]) >= 0.22
-            )
-            or (
-                bool(best.get("same_dialog"))
-                and float(best["score"]) >= 0.35
-            )
+            or (marker and float(best["score"]) >= 0.22)
+            or same_dialog_followup
+            or same_dialog_semantic
         )
     )
     relation = "CONTINUE" if continuation else "NEW"
 
     if relation == "CONTINUE" and selected:
-        selected_for_context = selected[:4]
-        reason = "memory_match"
+        latest_same_dialog = max(
+            (item for item in matches if bool(item.get("same_dialog"))),
+            key=lambda item: (float(item.get("created_at") or 0.0), int(item.get("turn_index") or 0)),
+            default=None,
+        )
+        if referential_followup and latest_same_dialog:
+            selected_for_context = [latest_same_dialog] + [
+                item for item in selected if item.get("message_id") != latest_same_dialog.get("message_id")
+            ]
+            selected_for_context = selected_for_context[:4]
+        else:
+            selected_for_context = selected[:4]
+        reason = "same_dialog_followup" if referential_followup and latest_same_dialog else "memory_match"
         active_topic = (
             selected_for_context[0].get("user_en")
             or selected_for_context[0].get("user")
@@ -405,6 +454,7 @@ def search_dialogue_context(
             6,
         ),
         "continuation_marker": marker,
+        "referential_followup": referential_followup,
         "active_topic": active_topic,
         "matches": selected,
         "selected": selected_for_context,
