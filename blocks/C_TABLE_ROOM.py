@@ -15,7 +15,6 @@ from copy import deepcopy
 import uuid
 from typing import Any, Dict, List, Optional
 
-from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
 
@@ -222,7 +221,7 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-class TableRoom(Room):
+class TableRoom:
     name = "table"
     room_type = "table_renderer"
     artifact_type = ARTIFACT_TYPE
