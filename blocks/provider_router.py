@@ -1,736 +1,317 @@
-"""APRIL single provider for the canonical WebReal Web route.
+"""April Interpretation Identity + request interpretation layer.
 
-The provider receives an already-normalized English request from bot.ru/Exkrutor.
-Bot.ru owns the input translation boundary. The provider performs reasoning and
-returns the answer in the requested display language. No second chat route exists.
+This is the single semantic-structuring layer between Exkrutor and the Provider.
+It binds the authenticated identity and converts every input modality into one
+machine-readable interpretation without creating another route.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
-import asyncio
-import hashlib
-import json
-import os
+from uuid import uuid4
 import re
-import time
-
-from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse
-
-
-MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-5.6-luna")
-MAX_OUTPUT_TOKENS = min(
-    8000,
-    max(256, int(os.getenv("APRIL_MAX_OUTPUT_TOKENS", "2400") or 2400)),
-)
-INPUT_TOKEN_TARGET = 900
-TRANSLATION_ROUTE_VERSION = "botru_embedded_translation_v1"
-
-_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-_inflight: set[str] = set()
-_client: _OpenAICompat | None = None
-
-
-SYSTEM_PROMPT = r"""
-You are April's single response provider in the canonical route.
-
-The processor is authoritative.  It already performed:
-- input normalization;
-- authenticated identity binding;
-- 12-hour dialogue search and compatibility ranking;
-- NEW/CONTINUE decision;
-- Interpretation structure;
-- C-ARTIFACT room and Web renderer selection.
-
-Do not create another route, memory store, interpreter, room registry, or user identity.
-Do not expose internal reasoning.
-
-Always treat these sections as structured input:
-1. CURRENT_REQUEST
-2. CONTINUATION_CONTEXT (empty when NEW)
-3. NEW_DIALOGUE_REQUEST (empty when CONTINUE)
-4. INPUT_MODALITIES / VISUAL_CONTEXT
-5. C_ARTIFACT_RENDER_PLAN
-6. MCDOWELL_PRESENTATION_POLICY
-
-For CONTINUE, continue the selected subject and do not repeat questions already answered.
-For NEW, answer independently and do not let old context override the request.
-For an input image/screenshot, inspect the supplied image and describe/analyze what is visibly present. The supplied pixels are authoritative for the visual answer; do not invent, substitute, or infer an unrelated subject from memory or attachment text. If a visual detail is uncertain, say so instead of replacing it with a guessed object. An input image is NOT a request to generate an image.
-For an attached file, read the supplied input_file or ATTACHED_TEXT_FILES content and answer from the file itself when relevant. An input file is NOT a request to create/export a file.
-Text supplied together with an image or file is the user's instruction for those same attachments; keep attachment contents separate from CURRENT_REQUEST.
-Generation/editing is permission-based: only when INTERPRETATION.wants_image=true may C_APRIL_IMAGES_GENERATOR be used. Never infer image generation from the mere words "image", "photo", "picture", "картинка" or from attachment contents.
-For analyze_image, analyze_file, or analyze_input tasks, return the requested description/answer as text unless the user explicitly requested another output.
-For links/files/tables/diagrams/formulas/code, return the structured render block only when the user explicitly requested that output.
-
-Return JSON only:
-{
-  "internal_request_en": "...",
-  "internal_answer_en": "...",
-  "answer": "complete human-readable answer in RETURN_LANGUAGE",
-  "content": "same answer or concise equivalent",
-  "summary": "one-sentence summary",
-  "render_blocks": [
-    {
-      "type": "text",
-      "renderer": "MessageTextBlock",
-      "viewer": "MessageTextBlock",
-      "content": "..."
-    }
-  ],
-  "artifacts": []
-}
-
-For an image request, artifacts must contain:
-{
-  "type": "image",
-  "spec": {
-    "schema": "april_image_spec_v1",
-    "generator_signal": "C_APRIL_IMAGES_GENERATOR",
-    "request_anchor": "...",
-    "openai_structured_visual_plan_semantic": "...",
-    "visual_context": {}
-  }
-}
-
-Never return an empty answer.
-Never put machine metadata into answer/content.
-""".strip()
-
-
-
-class _ResponseResult:
-    def __init__(self, payload: dict[str, Any]):
-        self._payload = payload
-        self.output_text = self._extract_output_text(payload)
-        self.usage = _Usage(payload.get("usage") or {})
-
-    @staticmethod
-    def _extract_output_text(payload: dict[str, Any]) -> str:
-        direct = payload.get("output_text")
-        if isinstance(direct, str) and direct.strip():
-            return direct.strip()
-
-        chunks: list[str] = []
-        for item in payload.get("output") or []:
-            if not isinstance(item, dict):
-                continue
-            for content in item.get("content") or []:
-                if not isinstance(content, dict):
-                    continue
-                value = content.get("text")
-                if isinstance(value, str) and value.strip():
-                    chunks.append(value)
-        return "\n".join(chunks).strip()
-
-
-class _Usage:
-    def __init__(self, data: dict[str, Any]):
-        self.input_tokens = int(data.get("input_tokens", 0) or 0)
-        self.output_tokens = int(data.get("output_tokens", 0) or 0)
-        self.total_tokens = int(data.get("total_tokens", 0) or 0)
-
-
-class _ResponsesCompat:
-    def __init__(self, client: "_OpenAICompat"):
-        self._client = client
-
-    def create(
-        self,
-        *,
-        model: str,
-        input: Any,
-        max_output_tokens: int,
-    ) -> _ResponseResult:
-        payload = {
-            "model": model,
-            "input": input,
-            "max_output_tokens": max_output_tokens,
-        }
-        return _ResponseResult(
-            self._client._post_json("/v1/responses", payload)
-        )
-
-
-class _TranscriptionsCompat:
-    def __init__(self, client: "_OpenAICompat"):
-        self._client = client
-
-    def create(self, *, model: str, file: Any) -> Any:
-        data = file.read()
-        name = os.path.basename(getattr(file, "name", "audio.bin")) or "audio.bin"
-        payload = self._client._post_multipart(
-            "/v1/audio/transcriptions",
-            fields={"model": model},
-            file_field=("file", name, "application/octet-stream", data),
-        )
-        return type(
-            "TranscriptionResult",
-            (),
-            {"text": payload.get("text", "")},
-        )()
-
-
-class _AudioCompat:
-    def __init__(self, client: "_OpenAICompat"):
-        self.transcriptions = _TranscriptionsCompat(client)
-
-
-class _OpenAICompat:
-    """Small stdlib-only OpenAI HTTP client."""
-
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.responses = _ResponsesCompat(self)
-        self.audio = _AudioCompat(self)
-
-    def _request(
-        self,
-        path: str,
-        body: bytes,
-        content_type: str,
-    ) -> dict[str, Any]:
-        from urllib.error import HTTPError, URLError
-        from urllib.request import Request, urlopen
-
-        req = Request(
-            "https://api.openai.com" + path,
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": content_type,
-                "Accept": "application/json",
-            },
-        )
-        try:
-            with urlopen(req, timeout=120) as response:
-                raw = response.read().decode("utf-8")
-        except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(
-                f"OPENAI_HTTP_{exc.code}: {detail[:1000]}"
-            ) from exc
-        except URLError as exc:
-            raise RuntimeError(
-                f"OPENAI_NETWORK_ERROR: {exc.reason}"
-            ) from exc
-
-        try:
-            payload = json.loads(raw)
-        except Exception as exc:
-            raise RuntimeError("OPENAI_INVALID_JSON_RESPONSE") from exc
-
-        if not isinstance(payload, dict):
-            raise RuntimeError("OPENAI_INVALID_RESPONSE")
-        if payload.get("error"):
-            raise RuntimeError(
-                f"OPENAI_API_ERROR: {payload['error']}"
-            )
-        return payload
-
-    def _post_json(
-        self,
-        path: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        return self._request(
-            path,
-            json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            "application/json",
-        )
-
-    def _post_multipart(
-        self,
-        path: str,
-        *,
-        fields: dict[str, str],
-        file_field: tuple[str, str, str, bytes],
-    ) -> dict[str, Any]:
-        import uuid
-
-        boundary = "----AprilBoundary" + uuid.uuid4().hex
-        chunks: list[bytes] = []
-
-        for key, value in fields.items():
-            chunks.extend(
-                [
-                    f"--{boundary}\r\n".encode(),
-                    (
-                        f'Content-Disposition: form-data; name="{key}"'
-                        "\r\n\r\n"
-                    ).encode(),
-                    str(value).encode("utf-8"),
-                    b"\r\n",
-                ]
-            )
-
-        field_name, filename, content_type, data = file_field
-        chunks.extend(
-            [
-                f"--{boundary}\r\n".encode(),
-                (
-                    f'Content-Disposition: form-data; name="{field_name}"; '
-                    f'filename="{filename}"\r\n'
-                ).encode(),
-                f"Content-Type: {content_type}\r\n\r\n".encode(),
-                data,
-                b"\r\n",
-                f"--{boundary}--\r\n".encode(),
-            ]
-        )
-        return self._request(
-            path,
-            b"".join(chunks),
-            f"multipart/form-data; boundary={boundary}",
-        )
-
-
-def _client_get() -> _OpenAICompat:
-    global _client
-    if _client is None:
-        key = os.getenv("OPENAI_API_KEY")
-        if not key:
-            raise RuntimeError("OPENAI_API_KEY_NOT_CONFIGURED")
-        _client = _OpenAICompat(key)
-    return _client
 
 
 def _text(value: Any) -> str:
-    if isinstance(value, str):
-        return value.strip()
-    if value is None:
-        return ""
-    return str(value).strip()
+    return str(value or "").strip()
 
 
-def _json_load(raw: str) -> dict[str, Any]:
-    raw = _text(raw)
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.I)
-        raw = re.sub(r"\s*```$", "", raw)
+@dataclass(frozen=True)
+class InterpretationIdentity:
+    interpretation_id: str
+    dialog_id: str
+    conversation_id: str
+    message_id: str
+    april_id: str
 
-    try:
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
+    @classmethod
+    def create(
+        cls,
+        *,
+        april_id: Any,
+        conversation_id: Any,
+        dialog_id: Any,
+        message_id: Any,
+        interpretation_id: Any = None,
+    ) -> "InterpretationIdentity":
+        normalized = {
+            "april_id": _text(april_id),
+            "conversation_id": _text(conversation_id),
+            "dialog_id": _text(dialog_id),
+            "message_id": _text(message_id),
+        }
+        for name, value in normalized.items():
+            if not value:
+                raise ValueError(f"{name} is required")
 
-    match = re.search(r"\{.*\}", raw, re.S)
-    if match:
-        try:
-            data = json.loads(match.group(0))
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            pass
-
-    return {}
-
-
-def _request_key(req: MachineRequest) -> str:
-    raw = json.dumps(
-        {
-            "user_id": req.fiber.identity.user_id,
-            "conversation": req.conversation,
-            "intent": req.intent,
-            "text": req.conversation.get("current_request") or req.goal,
-            "memory": req.memory,
-            "routing": req.routing,
-            "constraints": req.constraints,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        default=str,
-    )
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def _clip(value: Any, chars: int) -> str:
-    text = _text(value)
-    if len(text) <= chars:
-        return text
-    return text[: chars - 1].rstrip() + "…"
-
-
-def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
-    intent = req.intent if isinstance(req.intent, dict) else {}
-    conversation = req.conversation if isinstance(req.conversation, dict) else {}
-    memory = req.memory if isinstance(req.memory, dict) else {}
-    routing = req.routing if isinstance(req.routing, dict) else {}
-    constraints = req.constraints if isinstance(req.constraints, dict) else {}
-    visual = req.visual_context if isinstance(req.visual_context, dict) else {}
-
-    interpretation = intent.get("interpretation") if isinstance(intent.get("interpretation"), dict) else intent
-    request_input = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
-    structured_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
-    dialogue = interpretation.get("dialogue") if isinstance(interpretation.get("dialogue"), dict) else {}
-
-    current = _clip(
-        conversation.get("current_request")
-        or request_input.get("original_request")
-        or conversation.get("resolved_request")
-        or req.goal,
-        1600,
-    )
-    relation = _text(
-        dialogue.get("relation")
-        or memory.get("relation")
-        or "NEW"
-    ).upper()
-
-    continuation = dialogue.get("continuation_context") if isinstance(dialogue.get("continuation_context"), dict) else {}
-    selected_pairs = continuation.get("selected_pairs") or memory.get("selected_pairs") or []
-    new_dialogue = dialogue.get("new_dialogue") if isinstance(dialogue.get("new_dialogue"), dict) else {}
-    render_plan = routing.get("render_plan") if isinstance(routing.get("render_plan"), list) else []
-    mcdowell = (routing.get("provider_context_plan") or {}).get("mcdowell")
-    if not isinstance(mcdowell, dict):
-        mcdowell = {"always": True, "role": "presentation_and_render_layout"}
-
-    def _pairs(rows: Any, limit: int = 4) -> list[dict[str, Any]]:
-        result: list[dict[str, Any]] = []
-        if not isinstance(rows, list):
-            return result
-        for item in rows[-limit:]:
-            if not isinstance(item, dict):
-                continue
-            result.append({
-                "position": item.get("turn_index"),
-                "user": _clip(item.get("user") or item.get("user_text"), 280),
-                "user_en": _clip(item.get("user_en") or item.get("user_text_en"), 280),
-                "april": _clip(item.get("april") or item.get("april_text"), 280),
-                "april_en": _clip(item.get("april_en") or item.get("april_text_en"), 280),
-                "score": item.get("score"),
-                "semantic": item.get("semantic"),
-                "context": item.get("context"),
-                "direction": item.get("direction"),
-            })
-        return result
-
-    modality_lines = {
-        "modalities": request_input.get("modalities") or [],
-        "has_image": bool(request_input.get("has_image") or visual.get("has_input_images")),
-        "has_voice": bool(request_input.get("has_voice")),
-        "has_file": bool(request_input.get("has_file")),
-    }
-
-    visual_items = visual.get("items")
-    visual_meta = []
-    if isinstance(visual_items, list):
-        for item in visual_items:
-            if not isinstance(item, dict):
-                continue
-            visual_meta.append({
-                "filename": _clip(item.get("filename"), 120),
-                "source_type": _clip(item.get("source_type"), 60),
-                "mime_type": _clip(item.get("mime_type"), 60),
-            })
-
-    structured = {
-        "CURRENT_REQUEST": current,
-        "RETURN_LANGUAGE": _text(
-            constraints.get("provider_output_language")
-            or request_input.get("display_language")
-            or "en"
-        ),
-        "INTERPRETATION": {
-            "schema": interpretation.get("schema", "april_interpretation_v2"),
-            "task": structured_intent.get("task", "answer_request"),
-            "requested_outputs": structured_intent.get("requested_outputs") or ["text"],
-            "wants_image": bool(structured_intent.get("wants_image")),
-            "wants_file": bool(structured_intent.get("wants_file")),
-            "wants_links": bool(structured_intent.get("wants_links")),
-            "explicit_generation_request": bool(structured_intent.get("explicit_generation_request")),
-        },
-        "DIALOGUE_RELATION": relation,
-        "CONTINUATION_CONTEXT": _pairs(selected_pairs) if relation == "CONTINUE" else [],
-        "NEW_DIALOGUE_REQUEST": _clip(
-            new_dialogue.get("request") if relation == "NEW" else "",
-            1600,
-        ),
-        "CONTEXT": {
-            "active_topic": _clip(
-                continuation.get("active_topic") or memory.get("active_topic"),
-                600,
-            ),
-            "reason": _clip(
-                continuation.get("reason") or memory.get("reason"),
-                400,
-            ),
-            "confidence": continuation.get("confidence") or memory.get("relation_confidence") or 0,
-        },
-        "INPUT_MODALITIES": modality_lines,
-        "VISUAL_CONTEXT": visual_meta,
-        "ATTACHMENTS": req.metadata.get("attachments", []) if isinstance(req.metadata, dict) else [],
-        "ATTACHED_TEXT_FILES": req.metadata.get("file_contents", []) if isinstance(req.metadata, dict) else [],
-        "C_ARTIFACT_RENDER_PLAN": render_plan,
-        "SELECTED_ROOMS": routing.get("selected_rooms") or [],
-        "MCDOWELL_PRESENTATION_POLICY": mcdowell,
-        "OUTPUT_CONTRACT": {
-            "required": [
-                "internal_request_en",
-                "internal_answer_en",
-                "answer",
-                "content",
-                "summary",
-                "render_blocks",
-                "artifacts",
-            ],
-            "image_generator": "C_APRIL_IMAGES_GENERATOR",
-            "scene_authority": "C_ARTIFACT_CONTRACT",
-        },
-    }
-
-    text = json.dumps(
-        structured,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-
-    content: list[dict[str, Any]] = [
-        {"type": "input_text", "text": text}
-    ]
-
-    text_files = req.metadata.get("file_contents", []) if isinstance(req.metadata, dict) else []
-    if isinstance(text_files, list):
-        for item in text_files:
-            if not isinstance(item, dict):
-                continue
-            filename = _clip(item.get("filename") or "file", 160)
-            file_content = _clip(item.get("content") or "", 12000)
-            if file_content:
-                content.append({
-                    "type": "input_text",
-                    "text": f"ATTACHED_TEXT_FILE {filename}:\n{file_content}",
-                })
-
-    items = visual.get("items")
-    if isinstance(items, list):
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            image_url = _text(item.get("image_url"))
-            if image_url:
-                content.append({
-                    "type": "input_image",
-                    "image_url": image_url,
-                })
-
-    # Readable documents stay on the same canonical Provider call as the user's
-    # text. The raw data URI is transient request data and is not persisted.
-    file_inputs = req.metadata.get("file_inputs", []) if isinstance(req.metadata, dict) else []
-    if isinstance(file_inputs, list):
-        for item in file_inputs:
-            if not isinstance(item, dict):
-                continue
-            file_data = _text(item.get("file_data"))
-            if not file_data:
-                continue
-            file_item: dict[str, Any] = {
-                "type": "input_file",
-                "filename": _text(item.get("filename") or "file"),
-                "file_data": file_data,
-            }
-            mime_type = _text(item.get("mime_type")).lower()
-            if mime_type == "application/pdf":
-                file_item["detail"] = "auto"
-            content.append(file_item)
-
-    return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": content},
-    ]
-
-
-def normalize_render_blocks(
-    value: Any,
-    answer: str,
-) -> list[dict[str, Any]]:
-    """Normalize renderer identity without changing provider payload."""
-    raw = value if isinstance(value, list) else []
-    result: list[dict[str, Any]] = []
-
-    renderer_map = {
-        "text": ("MessageTextBlock", "MessageTextBlock"),
-        "markdown": ("MessageTextBlock", "MessageTextBlock"),
-        "code": ("CodeBlock", "CodeBlock"),
-        "link": ("LinkCard", "LinkCard"),
-        "formula": ("FormulaRenderer", "FormulaRenderer"),
-        "graph": ("GraphBlock", "GraphBlock"),
-        "table": ("TableBlock", "TableBlock"),
-        "diagram": ("DiagramRenderer", "DiagramRenderer"),
-        "image": ("GalleryBlock", "GalleryBlock"),
-        "gallery": ("GalleryBlock", "GalleryBlock"),
-    }
-
-    for block in raw:
-        if not isinstance(block, dict):
-            continue
-
-        item = dict(block)
-        block_type = str(item.get("type") or "text").strip().lower()
-        renderer, viewer = renderer_map.get(
-            block_type,
-            ("MessageTextBlock", "MessageTextBlock"),
+        return cls(
+            interpretation_id=_text(interpretation_id) or f"interp_{uuid4().hex}",
+            dialog_id=normalized["dialog_id"],
+            conversation_id=normalized["conversation_id"],
+            message_id=normalized["message_id"],
+            april_id=normalized["april_id"],
         )
-        item["type"] = block_type
-        item.setdefault("renderer", renderer)
-        item.setdefault("viewer", viewer)
 
-        # Do not pass an empty visible text block to Web.
-        if block_type in {"text", "markdown"}:
-            visible = _text(
-                item.get("content")
-                or item.get("text")
-                or item.get("markdown")
-            )
-            if not visible:
-                continue
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "interpretation_id": self.interpretation_id,
+            "dialog_id": self.dialog_id,
+            "conversation_id": self.conversation_id,
+            "message_id": self.message_id,
+            "april_id": self.april_id,
+        }
 
-        result.append(item)
 
-    if not result:
-        result.append(
-            {
-                "type": "text",
-                "renderer": "MessageTextBlock",
-                "viewer": "MessageTextBlock",
-                "content": answer,
-            }
-        )
+def build_interpretation_identity(
+    *,
+    april_id: Any = "",
+    conversation_id: Any = "",
+    dialog_id: Any = "",
+    message_id: Any = "",
+    interpretation_id: Any = "",
+    flow_id: Any = "",
+    user_id: Any = "",
+) -> dict[str, str]:
+    """Build the canonical interpretation identity from route identity."""
+    resolved_april_id = _text(april_id or user_id)
+    resolved_dialog_id = _text(dialog_id or conversation_id)
+    resolved_conversation_id = _text(conversation_id or resolved_dialog_id)
+    resolved_message_id = _text(message_id)
+    if not resolved_message_id:
+        raise ValueError("message_id is required")
+
+    identity = InterpretationIdentity.create(
+        april_id=resolved_april_id,
+        conversation_id=resolved_conversation_id,
+        dialog_id=resolved_dialog_id,
+        message_id=resolved_message_id,
+        interpretation_id=interpretation_id,
+    )
+    result = identity.as_dict()
+    if _text(flow_id):
+        result["flow_id"] = _text(flow_id)
     return result
 
 
-def _normalize(data: dict[str, Any]) -> dict[str, Any]:
-    answer = _text(
-        data.get("answer")
-        or data.get("content")
-        or data.get("response")
+# Output intent is deliberately separated from INPUT modalities.
+# Words such as "картинка", "фото", "файл" describe an attached object;
+# they are NOT generation commands.
+_GENERATION_MARKERS = (
+    "сгенерируй", "сгенерировать", "генерируй", "нарисуй", "нарисовать",
+    "создай изображение", "создать изображение", "сделай картинку",
+    "сделать картинку", "создай картинку", "создать картинку",
+    "измени фото", "изменить фото", "отредактируй фото", "редактируй фото",
+    "edit image", "edit photo", "generate image", "create an image",
+    "draw an image", "make a picture",
+)
+_FILE_OUTPUT_MARKERS = (
+    "создай файл", "создать файл", "сделай файл", "сделать файл",
+    "сохрани в файл", "экспортируй в файл", "send me the file", "save as",
+)
+_LINK_OUTPUT_MARKERS = ("дай ссылку", "пришли ссылку", "ссылка на", "url", "link")
+_CODE_OUTPUT_MARKERS = (
+    "напиши код", "написать код", "исправь код", "исправить код",
+    "покажи код", "покажи полный код", "сделай код", "write code", "fix the code",
+)
+_FORMULA_OUTPUT_MARKERS = ("напиши формулу", "выведи формулу", "реши уравнение", "latex")
+_DIAGRAM_OUTPUT_MARKERS = ("нарисуй схему", "создай диаграмму", "построй график", "сделай график")
+_TABLE_OUTPUT_MARKERS = ("сделай таблицу", "создай таблицу", "выведи таблицу")
+
+
+def _has_phrase(text: str, phrases: tuple[str, ...]) -> bool:
+    low = _text(text).lower()
+    return any(phrase in low for phrase in phrases)
+
+
+def _detect_requested_outputs(text: str) -> list[str]:
+    """Detect requested OUTPUTS only; attachment nouns never imply generation."""
+    value = _text(text)
+    result = ["text"]
+    if _has_phrase(value, _GENERATION_MARKERS):
+        result.append("image")
+    if _has_phrase(value, _FILE_OUTPUT_MARKERS):
+        result.append("file")
+    if _has_phrase(value, _LINK_OUTPUT_MARKERS):
+        result.append("link")
+    if _has_phrase(value, _CODE_OUTPUT_MARKERS):
+        result.append("code")
+    if _has_phrase(value, _FORMULA_OUTPUT_MARKERS):
+        result.append("formula")
+    if _has_phrase(value, _DIAGRAM_OUTPUT_MARKERS):
+        result.append("diagram")
+    if _has_phrase(value, _TABLE_OUTPUT_MARKERS):
+        result.append("table")
+    return list(dict.fromkeys(result))
+
+
+def _detect_task(
+    text: str,
+    *,
+    has_image: bool,
+    has_voice: bool,
+    has_file: bool,
+    wants_image: bool,
+    wants_code: bool,
+) -> str:
+    low = _text(text).lower()
+    if wants_image:
+        return "generate_image"
+    if has_image and any(token in low for token in (
+        "analyze", "analyse", "what is", "describe", "что на", "опиши",
+        "что изображено", "кто на фото", "что видно", "какого цвета", "какой породы",
+    )):
+        return "analyze_image"
+    if has_file and wants_code:
+        return "analyze_file_and_code"
+    if has_file:
+        return "analyze_file"
+    if has_voice:
+        return "answer_transcribed_voice"
+    return "answer_request"
+
+
+def _select_continuation_pairs(memory: dict[str, Any]) -> list[dict[str, Any]]:
+    relation = _text(memory.get("relation")).upper()
+    pairs = memory.get("selected_pairs")
+    if relation != "CONTINUE" or not isinstance(pairs, list):
+        return []
+    return [dict(item) for item in pairs if isinstance(item, dict)][:4]
+
+
+def build_interpretation(
+    *,
+    current_request: str,
+    original_request: str = "",
+    display_language: str = "auto",
+    memory: dict[str, Any] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
+    visual_context: list[dict[str, Any]] | None = None,
+    identity: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Build a multimodal interpretation without mixing attachment content into the request."""
+    text = _text(current_request)
+    original = _text(original_request or current_request)
+    memory = dict(memory or {})
+    attachments = [dict(x) for x in (attachments or []) if isinstance(x, dict)]
+    visual_context = [dict(x) for x in (visual_context or []) if isinstance(x, dict)]
+
+    kinds = {str(item.get("kind") or "").lower() for item in attachments}
+    has_image = "image" in kinds or bool(visual_context)
+    has_voice = "voice" in kinds
+    has_file = bool(kinds & {"file", "text_file"})
+
+    requested_outputs = _detect_requested_outputs(original or text)
+    wants_image = "image" in requested_outputs
+    wants_file = "file" in requested_outputs
+    wants_links = "link" in requested_outputs
+    wants_code = "code" in requested_outputs
+    wants_formula = "formula" in requested_outputs
+    wants_diagram = "diagram" in requested_outputs
+    wants_table = "table" in requested_outputs
+
+    relation = _text(memory.get("relation") or "NEW").upper()
+    selected_pairs = _select_continuation_pairs(memory)
+    task = _detect_task(
+        original or text,
+        has_image=has_image,
+        has_voice=has_voice,
+        has_file=has_file,
+        wants_image=wants_image,
+        wants_code=wants_code,
     )
-    if not answer:
-        raise RuntimeError("PROVIDER_EMPTY_ANSWER")
+    if has_image and not wants_image and task == "answer_request":
+        task = "analyze_image"
 
-    internal_request_en = _text(
-        data.get("internal_request_en")
-        or data.get("normalized_request_en")
-    )
-    internal_answer_en = _text(
-        data.get("internal_answer_en")
-        or data.get("normalized_answer_en")
-    )
-
-    blocks = normalize_render_blocks(
-        data.get("render_blocks"),
-        answer,
-    )
-
-    artifacts = data.get("artifacts")
-    if not isinstance(artifacts, list):
-        artifacts = []
-    normalized_artifacts = [
-        dict(item) for item in artifacts if isinstance(item, dict)
-    ]
-
-    image_spec = data.get("image_spec")
-    if isinstance(image_spec, dict) and not any(
-        str(item.get("type") or item.get("artifact_type") or "").lower() == "image"
-        for item in normalized_artifacts
-    ):
-        normalized_artifacts.append({
-            "type": "image",
-            "spec": dict(image_spec),
-        })
-
+    # When the user sends only an attachment, the attachment is input context;
+    # it is never promoted to a generation request.
     return {
-        "machine_response": {
-            "answer": answer,
-            "content": _text(data.get("content") or answer),
-            "summary": _text(
-                data.get("summary") or answer[:180]
-            ),
-            "render_blocks": blocks,
-            "metadata": {
-                "provider_model": MODEL,
-                "provider_language": "en",
-                "provider_context_authority": "PROCESSOR",
-                "internal_request_en": internal_request_en,
-                "internal_answer_en": internal_answer_en,
-                "translation_route_version": TRANSLATION_ROUTE_VERSION,
+        "schema": "april_interpretation_v3",
+        "identity": dict(identity or {}),
+        "input": {
+            "original_request": original,
+            "normalized_request": text,
+            "display_language": _text(display_language or "auto") or "auto",
+            "modalities": sorted(modality for modality in (
+                "voice" if has_voice else "",
+                "image" if has_image else "",
+                "file" if has_file else "",
+                "text" if text else "",
+            ) if modality),
+            "has_voice": has_voice,
+            "has_image": has_image,
+            "has_file": has_file,
+        },
+        "intent": {
+            "task": task,
+            "requested_outputs": requested_outputs,
+            "wants_image": wants_image,
+            "wants_file": wants_file,
+            "wants_links": wants_links,
+            "wants_code": wants_code,
+            "wants_formula": wants_formula,
+            "wants_diagram": wants_diagram,
+            "wants_table": wants_table,
+            "generation_authorized": wants_image,
+        },
+        "dialogue": {
+            "relation": relation,
+            "is_new_dialogue": relation != "CONTINUE",
+            "continuation_context": {
+                "active_topic": _text(memory.get("active_topic")),
+                "reason": _text(memory.get("reason")),
+                "confidence": float(memory.get("relation_confidence") or 0.0),
+                "selected_pairs": selected_pairs,
+                "context_facts": list(memory.get("context_facts") or [])[:12],
             },
-            "artifacts": normalized_artifacts,
-        }
+            "new_dialogue": {} if relation == "CONTINUE" else {
+                "request": text,
+                "needs_independent_resolution": True,
+            },
+        },
+        "visual": {
+            "items": visual_context,
+            "analysis_required": has_image,
+            "generation_required": wants_image,
+            "generator": "C_APRIL_IMAGES_GENERATOR" if wants_image else "",
+            "image_model": "gpt-image-2" if wants_image else "",
+        },
+        "files": {
+            "items": attachments,
+            "analysis_required": has_file,
+        },
+        "request_structure": {
+            "context_always_present": True,
+            "user_goal": text,
+            "memory_context": selected_pairs,
+            "new_dialogue_request": text if relation == "NEW" else "",
+            "output_plan": requested_outputs,
+            "generation_gate": {
+                "authorized": wants_image,
+                "reason": "explicit_user_generation_request" if wants_image else "no_generation_request",
+            },
+        },
     }
 
 
-async def generate_text(
-    request: MachineRequest | dict[str, Any],
-) -> dict[str, Any]:
-    if isinstance(request, dict):
-        allowed = {
-            name: request[name]
-            for name in MachineRequest.__dataclass_fields__
-            if name in request
-        }
-        request = MachineRequest(**allowed)
-
-    key = _request_key(request)
-    cached = _cache.get(key)
-    if cached and time.time() - cached[0] < 90:
-        return cached[1]
-
-    if key in _inflight:
-        raise RuntimeError("DUPLICATE_PROVIDER_REQUEST")
-
-    _inflight.add(key)
-    started = time.perf_counter()
-
-    try:
-        response = await asyncio.to_thread(
-            _client_get().responses.create,
-            model=MODEL,
-            input=_build_input(request),
-            max_output_tokens=MAX_OUTPUT_TOKENS,
-        )
-
-        raw = _text(getattr(response, "output_text", ""))
-        if not raw:
-            raise RuntimeError("OPENAI_EMPTY_OUTPUT")
-
-        contract = _normalize(_json_load(raw))
-        machine_response = contract["machine_response"]
-        machine_response["metadata"]["provider_ms"] = round(
-            (time.perf_counter() - started) * 1000,
-            1,
-        )
-
-        usage = getattr(response, "usage", None)
-        if usage is not None:
-            machine_response["metadata"]["usage"] = {
-                "input_tokens": int(
-                    getattr(usage, "input_tokens", 0) or 0
-                ),
-                "output_tokens": int(
-                    getattr(usage, "output_tokens", 0) or 0
-                ),
-                "total_tokens": int(
-                    getattr(usage, "total_tokens", 0) or 0
-                ),
-            }
-
-        _cache[key] = (time.time(), contract)
-        return contract
-    finally:
-        _inflight.discard(key)
+def assert_same_identity(expected: dict[str, Any], actual: dict[str, Any]) -> None:
+    """Processor guard: reject a provider/scene response bound to another user/turn."""
+    fields = (
+        ("user_id", "user_id"),
+        ("conversation_id", "conversation_id"),
+        ("dialog_id", "dialog_id"),
+        ("message_id", "message_id"),
+        ("flow_id", "flow_id"),
+    )
+    for left, right in fields:
+        ev = _text(expected.get(left) or (expected.get("april_id") if left == "user_id" else ""))
+        av = _text(actual.get(right))
+        if ev and av and ev != av:
+            raise ValueError(f"IDENTITY_MISMATCH:{left}")
 
 
-async def transcribe_voice(file_path: str) -> str:
-    with open(file_path, "rb") as handle:
-        result = await asyncio.to_thread(
-            _client_get().audio.transcriptions.create,
-            model="gpt-4o-mini-transcribe",
-            file=handle,
-        )
-    return _text(getattr(result, "text", ""))
-
-
-def normalize_provider_input(value: Any) -> Any:
-    return value
+__all__ = [
+    "InterpretationIdentity",
+    "build_interpretation_identity",
+    "build_interpretation",
+    "assert_same_identity",
+]
