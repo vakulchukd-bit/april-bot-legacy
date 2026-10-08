@@ -111,6 +111,7 @@ def normalize_attachment(att: Attachment) -> Attachment:
             "text": text,
             "truncated": len(decoded) > MAX_TEXT_FILE_CHARS,
             "source_type": "text_file",
+            "reader": "input_reader_ru",
         }
         return att
 
@@ -134,6 +135,7 @@ def normalize_attachment(att: Attachment) -> Attachment:
         "mime_type": mime or "application/octet-stream",
         "size_bytes": len(att.data),
         "source_type": "document" if readable else "file",
+        "reader": "input_reader_ru",
         "provider_readable": bool(readable and len(att.data) <= MAX_INLINE_FILE_BYTES),
     }
 
