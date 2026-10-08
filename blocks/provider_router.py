@@ -53,7 +53,16 @@ Always treat these sections as structured input:
 6. MCDOWELL_PRESENTATION_POLICY
 
 For CONTINUE, continue the selected subject and do not repeat questions already answered.
+Use the anchor topic and selected USER↔APRIL pairs as the primary continuity evidence. Resolve
+pronouns and short follow-ups against that anchor before treating the request as new.
 For NEW, answer independently and do not let old context override the request.
+
+For a history_request, use DIALOGUE_HISTORY_TOPICS / DIALOGUE_TABLE_MARKDOWN as an index over
+the retained dialogue. Never claim that the dialogue is unavailable when the index contains
+topics. Show the requested number of topics, clamped to 10. Default to 7 when the user does
+not specify a number. The user may then name a topic or give a hint and April should continue
+from the corresponding anchor/pairs. Keep the hidden remainder known to the processor; do not
+invent topics that are not in the supplied index.
 For an input image/screenshot, inspect the supplied image and describe/analyze what is visibly present. The supplied pixels are authoritative for the visual answer; do not invent, substitute, or infer an unrelated subject from memory or attachment text. If a visual detail is uncertain, say so instead of replacing it with a guessed object. An input image is NOT a request to generate an image.
 For an attached file, read the supplied input_file or ATTACHED_TEXT_FILES content and answer from the file itself when relevant. An input file is NOT a request to create/export a file.
 Text supplied together with an image or file is the user's instruction for those same attachments; keep attachment contents separate from CURRENT_REQUEST.
@@ -381,10 +390,40 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
     continuation = dialogue.get("continuation_context") if isinstance(dialogue.get("continuation_context"), dict) else {}
     selected_pairs = continuation.get("selected_pairs") or memory.get("selected_pairs") or []
     new_dialogue = dialogue.get("new_dialogue") if isinstance(dialogue.get("new_dialogue"), dict) else {}
+    history_request = bool(structured_intent.get("history_request") or memory.get("history_request") or request_input.get("history_request"))
+    requested_topic_count = int(structured_intent.get("history_count") or memory.get("requested_topic_count") or 7)
+    requested_topic_count = max(1, min(10, requested_topic_count))
     render_plan = routing.get("render_plan") if isinstance(routing.get("render_plan"), list) else []
     mcdowell = (routing.get("provider_context_plan") or {}).get("mcdowell")
     if not isinstance(mcdowell, dict):
         mcdowell = {"always": True, "role": "presentation_and_render_layout"}
+
+
+    history_topics = dialogue.get("continuation_context", {}).get("history_topics")
+    if not isinstance(history_topics, list):
+        history_topics = memory.get("history_topics") or []
+    history_topics = [
+        {
+            "number": item.get("number"),
+            "topic": _clip(item.get("topic"), 100),
+            "last_question": _clip(item.get("last_question"), 120),
+            "turns": item.get("turns"),
+        }
+        for item in history_topics
+        if isinstance(item, dict)
+    ][:10]
+
+    topic_index = memory.get("topic_index") or history_topics
+    topic_index = [
+        {
+            "number": item.get("number"),
+            "topic": _clip(item.get("topic"), 100),
+            "last_question": _clip(item.get("last_question"), 110),
+            "turns": item.get("turns"),
+        }
+        for item in topic_index
+        if isinstance(item, dict)
+    ][:5]
 
     def _pairs(rows: Any, limit: int = 4) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
@@ -394,17 +433,17 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
             if not isinstance(item, dict):
                 continue
             result.append({
-                "position": item.get("turn_index"),
-                "user": _clip(item.get("user") or item.get("user_text"), 280),
-                "user_en": _clip(item.get("user_en") or item.get("user_text_en"), 280),
-                "april": _clip(item.get("april") or item.get("april_text"), 280),
-                "april_en": _clip(item.get("april_en") or item.get("april_text_en"), 280),
+                "turn": item.get("turn_index") or item.get("turn"),
+                "user": _clip(item.get("user") or item.get("user_text"), 240),
+                "april": _clip(item.get("april") or item.get("april_text"), 300),
+                "topic": _clip(item.get("topic"), 100),
                 "score": item.get("score"),
-                "semantic": item.get("semantic"),
-                "context": item.get("context"),
-                "direction": item.get("direction"),
+                "same_dialog": bool(item.get("same_dialog")),
+                "message_id": item.get("message_id"),
             })
         return result
+
+    anchor = continuation.get("anchor") or memory.get("anchor") or {}
 
     modality_lines = {
         "modalities": request_input.get("modalities") or [],
@@ -442,7 +481,25 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
             "explicit_generation_request": bool(structured_intent.get("explicit_generation_request")),
         },
         "DIALOGUE_RELATION": relation,
-        "CONTINUATION_CONTEXT": _pairs(selected_pairs) if relation == "CONTINUE" else [],
+        "HISTORY_REQUEST": history_request,
+        "HISTORY_TOPIC_COUNT": requested_topic_count if history_request else 0,
+        "DIALOGUE_ANCHOR": {
+            "topic": _clip(anchor.get("topic"), 120),
+            "user": _clip(anchor.get("user"), 220),
+            "april": _clip(anchor.get("april"), 300),
+            "message_id": anchor.get("message_id"),
+            "same_dialog": bool(anchor.get("same_dialog")),
+        },
+        "CONTINUATION_CONTEXT": _pairs(selected_pairs, 5) if relation == "CONTINUE" else [],
+        "DIALOGUE_HISTORY_TOPICS": history_topics if history_request else [],
+        "DIALOGUE_TOPIC_INDEX": topic_index if relation == "CONTINUE" else [],
+        "DIALOGUE_KNOWN_TOPIC_COUNT": int(memory.get("known_topic_count") or len(history_topics) or len(topic_index) or 0),
+        "DIALOGUE_TABLE_MARKDOWN": _clip(
+            memory.get("topic_table_markdown")
+            or (dialogue.get("continuation_context") or {}).get("topic_table_markdown")
+            or "",
+            2600,
+        ),
         "NEW_DIALOGUE_REQUEST": _clip(
             new_dialogue.get("request") if relation == "NEW" else "",
             1600,
