@@ -388,7 +388,14 @@ async def execute(
         current_text,
         dialog_id=identity["dialog_id"],
         conversation_id=identity["conversation_id"],
-        limit=8,
+        limit=12,
+        has_image=bool(visual_context),
+        has_file=bool(file_inputs or file_contents),
+        has_voice=any(
+            _text(item.get("kind")).lower() == "voice"
+            for item in (attachments or [])
+            if isinstance(item, dict)
+        ),
     )
 
     interpretation = build_interpretation(
@@ -426,6 +433,13 @@ async def execute(
             "relation_confidence": dialogue_context["relation_confidence"],
             "selected_pairs": dialogue_context["selected_pairs"],
             "candidates": dialogue_context["candidates"],
+            "history_topics": dialogue_context.get("history_topics") or [],
+            "topic_index": dialogue_context.get("topic_index") or [],
+            "known_topic_count": int(dialogue_context.get("known_topic_count") or 0),
+            "history_request": bool(dialogue_context.get("history_request")),
+            "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 7),
+            "topic_table_markdown": dialogue_context.get("topic_table_markdown") or "",
+            "anchor": dialogue_context.get("anchor") or {},
             "search": dialogue_context["search"],
         },
         visual_context={
@@ -459,15 +473,23 @@ async def execute(
                 "relation": dialogue_context["relation"],
                 "current_request": current_text,
                 "selected_dialogue_chain": dialogue_context["selected_pairs"],
+                "history_topics": dialogue_context.get("history_topics") or [],
+                "topic_index": dialogue_context.get("topic_index") or [],
+                "known_topic_count": int(dialogue_context.get("known_topic_count") or 0),
+                "history_request": bool(dialogue_context.get("history_request")),
+                "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 7),
+                "topic_table_markdown": dialogue_context.get("topic_table_markdown") or "",
+                "anchor": dialogue_context.get("anchor") or {},
                 "new_dialogue_request": (
                     current_text
-                    if dialogue_context["relation"] == "NEW"
+                    if dialogue_context["relation"] == "NEW" and not dialogue_context.get("history_request")
                     else ""
                 ),
                 "context": {
                     "active_topic": dialogue_context["active_topic"],
                     "reason": dialogue_context["reason"],
                     "confidence": dialogue_context["relation_confidence"],
+                    "anchor_topic": (dialogue_context.get("anchor") or {}).get("topic", ""),
                 },
                 "mcdowell": {
                     "always": True,
