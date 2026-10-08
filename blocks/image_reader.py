@@ -1,136 +1,64 @@
-"""Input envelope reader used by bot.ru.
+"""Canonical image/screenshot reader for bot.ru.
 
-Supports JSON and multipart/form-data without introducing a second API route.
-Text files are decoded into bounded text; images are normalized for the model;
-other binary files remain attachments with metadata.
+This module validates and normalizes PNG/JPEG/WebP/GIF image bytes. It does not
+interpret the picture itself; the normalized image is supplied to the model as
+an input_image item so the semantic processor remains the authority.
 """
 from __future__ import annotations
 
-import json
-import os
-from dataclasses import dataclass, field
-from email import policy
-from email.parser import BytesParser
+import base64
 from typing import Any
 
-from blocks.image_reader import read_image_bytes
-from blocks.voice_reader import validate_voice
-
-MAX_TEXT_FILE_CHARS = 18000
-_TEXT_EXTENSIONS = {
-    ".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".py", ".js",
-    ".jsx", ".tsx", ".html", ".htm", ".css", ".xml", ".yaml", ".yml",
-    ".toml", ".ini", ".cfg", ".log", ".sql", ".sh", ".bat", ".ps1",
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+_ALLOWED = {
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
 }
 
 
-@dataclass
-class Attachment:
-    field_name: str
-    filename: str
-    content_type: str
-    data: bytes
-    kind: str = "file"
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def size_bytes(self) -> int:
-        return len(self.data)
+def _mime_from_bytes(data: bytes) -> str:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "image/gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
 
 
-def _text(value: Any) -> str:
-    return str(value or "").strip()
-
-
-def _decode_text(data: bytes) -> str:
-    for encoding in ("utf-8", "utf-8-sig", "cp1251", "latin-1"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace")
-
-
-def normalize_attachment(att: Attachment) -> Attachment:
-    filename = att.filename or "file"
-    ext = os.path.splitext(filename.lower())[1]
-    mime = att.content_type.lower().split(";", 1)[0].strip()
-
-    if mime.startswith("audio/") or mime in {"video/webm", "application/ogg"} or ext in {".webm", ".ogg", ".mp3", ".wav", ".m4a", ".mp4"}:
-        voice = validate_voice(att.data, filename=filename, content_type=mime)
-        att.kind = "voice"
-        att.metadata = {**voice, "data": att.data}
-        return att
-
-    if mime.startswith("image/") or ext in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
-        image = read_image_bytes(
-            att.data,
-            filename=filename,
-            content_type=mime,
-        )
-        att.kind = "image"
-        att.metadata = image
-        return att
-
-    if mime.startswith("text/") or ext in _TEXT_EXTENSIONS:
-        text = _decode_text(att.data)[:MAX_TEXT_FILE_CHARS]
-        att.kind = "text_file"
-        att.metadata = {
-            "filename": filename,
-            "mime_type": mime or "text/plain",
-            "size_bytes": len(att.data),
-            "text": text,
-            "truncated": len(_decode_text(att.data)) > MAX_TEXT_FILE_CHARS,
-        }
-        return att
-
-    att.kind = "file"
-    att.metadata = {
-        "filename": filename,
-        "mime_type": mime or "application/octet-stream",
-        "size_bytes": len(att.data),
-    }
-    return att
-
-
-def parse_json_payload(body: bytes) -> tuple[dict[str, Any], list[Attachment]]:
-    data = json.loads(body.decode("utf-8") or "{}")
-    if not isinstance(data, dict):
-        raise ValueError("JSON_OBJECT_REQUIRED")
-    return data, []
-
-
-def parse_multipart_payload(
-    body: bytes,
+def read_image_bytes(
+    data: bytes,
     *,
-    content_type: str,
-) -> tuple[dict[str, Any], list[Attachment]]:
-    header = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode() + body
-    message = BytesParser(policy=policy.default).parsebytes(header)
-    if not message.is_multipart():
-        raise ValueError("MULTIPART_REQUIRED")
+    filename: str = "image",
+    content_type: str = "",
+) -> dict[str, Any]:
+    if not data:
+        raise ValueError("IMAGE_EMPTY")
+    if len(data) > MAX_IMAGE_BYTES:
+        raise ValueError("IMAGE_TOO_LARGE")
 
-    fields: dict[str, Any] = {}
-    attachments: list[Attachment] = []
+    declared = str(content_type or "").strip().lower()
+    detected = _mime_from_bytes(data)
+    mime_type = detected or declared
+    if mime_type not in _ALLOWED:
+        raise ValueError("UNSUPPORTED_IMAGE_TYPE")
 
-    for part in message.iter_parts():
-        name = part.get_param("name", header="content-disposition") or ""
-        filename = part.get_filename()
-        payload = part.get_payload(decode=True) or b""
-        ctype = part.get_content_type() or "application/octet-stream"
-        if filename:
-            attachments.append(
-                normalize_attachment(
-                    Attachment(
-                        field_name=_text(name) or "file",
-                        filename=_text(filename) or "file",
-                        content_type=ctype,
-                        data=payload,
-                    )
-                )
-            )
-        else:
-            value = payload.decode("utf-8", errors="replace")
-            fields[_text(name)] = value
+    encoded = base64.b64encode(data).decode("ascii")
+    return {
+        "filename": filename,
+        "mime_type": mime_type,
+        "size_bytes": len(data),
+        "data_uri": f"data:{mime_type};base64,{encoded}",
+        "source_type": "screenshot" if str(filename).lower().startswith(("screenshot", "screen")) else "image",
+    }
 
-    return fields, attachments
+
+def build_input_image(image: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "input_image",
+        "image_url": str(image.get("data_uri") or ""),
+    }
