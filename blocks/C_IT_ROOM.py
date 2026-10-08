@@ -4,7 +4,6 @@
 
 from typing import Any, Dict
 
-from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import (
     create_artifact,
     MachineRequest,
@@ -150,7 +149,7 @@ def execute(machine_request: MachineRequest):
         payload=contribution,
     )
 
-class ITRoom(Room):
+class ITRoom:
     name = ROOM_ID
     id = ROOM_ID
     domains = IT_COMPETENCY["domains"]
