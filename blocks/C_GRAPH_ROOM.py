@@ -22,7 +22,6 @@ import json
 import uuid
 from typing import Any, Dict, Iterable, List, Optional
 
-from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
 
@@ -471,7 +470,7 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
     return canonical
 
 
-class GraphRoom(Room):
+class GraphRoom:
     """Canonical graph construction node; no routing or text inference."""
 
     name = "graph"
