@@ -4,11 +4,10 @@
 
 from typing import Dict, Any, List
 
-from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
 
-class GalleryRoom(Room):
+class GalleryRoom:
 
     name = "gallery"
 
