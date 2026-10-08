@@ -75,40 +75,47 @@ def _prepare_attachments(
     attachments: list[Any],
     *,
     voice_transcript: str = "",
-) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return extra text, visual inputs and normalized attachment metadata."""
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return semantic text, visual inputs, safe attachment metadata and file inputs."""
     extra_text: list[str] = []
     visual: list[dict[str, Any]] = []
     meta: list[dict[str, Any]] = []
+    provider_files: list[dict[str, Any]] = []
 
     for att in attachments:
         item = getattr(att, "metadata", {}) or {}
         kind = str(getattr(att, "kind", "file") or "file")
         filename = _text(getattr(att, "filename", "file"))
+        content_type = _text(getattr(att, "content_type", ""))
+        size_bytes = int(getattr(att, "size_bytes", 0) or 0)
         meta.append({
             "filename": filename,
-            "content_type": _text(getattr(att, "content_type", "")),
+            "content_type": content_type,
             "kind": kind,
-            "size_bytes": int(getattr(att, "size_bytes", 0) or 0),
+            "size_bytes": size_bytes,
+            "source_type": item.get("source_type", kind),
+            "provider_readable": bool(item.get("provider_readable", kind in {"image", "text_file", "voice"})),
         })
+
         if kind == "voice":
-            meta[-1]["kind"] = "voice"
             raw_voice = getattr(att, "data", b"") or item.get("data") or b""
             transcript = _text(voice_transcript)
             if not transcript and raw_voice:
                 transcript = transcribe_voice_bytes(
                     raw_voice,
                     filename=filename or "voice.webm",
-                    content_type=_text(getattr(att, "content_type", "")),
+                    content_type=content_type,
                 )
             if transcript:
                 # Transcript is the semantic input; the original audio remains
                 # represented by attachment metadata.
                 extra_text.append(transcript)
+
         elif kind == "text_file":
             text = _text(item.get("text"))
             if text:
                 extra_text.append(f"FILE {filename}:\n{text}")
+
         elif kind == "image":
             uri = _text(item.get("data_uri"))
             if uri:
@@ -117,8 +124,24 @@ def _prepare_attachments(
                     "image_url": uri,
                     "filename": filename,
                     "source_type": item.get("source_type", "image"),
+                    "mime_type": content_type,
                 })
-    return "\n\n".join(extra_text), visual, meta
+
+        elif kind == "file":
+            uri = _text(item.get("data_uri"))
+            if uri:
+                # Raw file bytes are transported to Provider separately from
+                # persistent attachment metadata so PostgreSQL never becomes a
+                # binary-file store.
+                provider_files.append({
+                    "type": "input_file",
+                    "filename": filename or "file",
+                    "file_data": uri,
+                    "mime_type": content_type or item.get("mime_type") or "application/octet-stream",
+                    "size_bytes": size_bytes,
+                })
+
+    return "\n\n".join(extra_text), visual, meta, provider_files
 
 
 def _payload(result: dict[str, Any]) -> dict[str, Any]:
@@ -177,13 +200,15 @@ def _handle_payload(
 
     attachments = attachments or []
     try:
-        extra_text, visual_context, attachment_meta = _prepare_attachments(
+        extra_text, visual_context, attachment_meta, file_inputs = _prepare_attachments(
             data, attachments, voice_transcript=voice_transcript
         )
         if extra_text:
             original = (original + "\n\n" + extra_text).strip()
 
-        if not original and not visual_context:
+        if not original and not visual_context and not file_inputs:
+            if attachment_meta:
+                return _error("file is not readable by the Provider", 400)
             return _error("text, voice, image or file required", 400)
 
         language = _detect_language(
@@ -213,6 +238,7 @@ def _handle_payload(
             interpretation_id=_text(data.get("interpretation_id")),
             visual_context=visual_context,
             attachments=attachment_meta,
+            file_inputs=file_inputs,
             translation=translation,
         ))
         return 200, _payload(result)
