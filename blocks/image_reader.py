@@ -54,6 +54,7 @@ def read_image_bytes(
         "size_bytes": len(data),
         "data_uri": f"data:{mime_type};base64,{encoded}",
         "source_type": "screenshot" if str(filename).lower().startswith(("screenshot", "screen")) else "image",
+        "reader": "image_reader_ru",
     }
 
 
