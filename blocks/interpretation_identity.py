@@ -94,46 +94,81 @@ def build_interpretation_identity(
 
 
 _OUTPUT_MARKERS = {
+    # These markers describe an OUTPUT ACTION, not an input object.
+    # Merely mentioning "картинка", "файл", "python" or "код" must never
+    # request generation/production by itself.
     "image": {
-        "image", "picture", "photo", "draw", "drawing", "illustration",
-        "картин", "рисунк", "изображен", "фото", "нарисуй", "сгенерируй",
+        "draw", "drawing", "generate image", "generate a picture", "create image",
+        "create an image", "create a picture", "make an image", "make a picture",
+        "нарисуй", "нарисовать", "сгенерируй", "создай изображение", "создай картинку",
+        "сделай картинку", "сделай изображение", "изобрази", "создай фото",
     },
     "file": {
-        "file", "document", "pdf", "docx", "xlsx", "csv", "файл",
-        "документ", "отправь файл", "сохрани",
+        "create file", "make a file", "export file", "download file", "save to file",
+        "создай файл", "сделай файл", "выдай файл", "создай документ", "сделай документ",
+        "сохрани в файл", "экспортируй файл", "подготовь файл",
     },
     "link": {
-        "link", "url", "website", "site", "ссылк", "сайт", "страниц",
+        "give me a link", "send a link", "show link", "open link", "дай ссылку",
+        "отправь ссылку", "покажи ссылку", "пришли ссылку", "ссылка на сайт",
     },
     "code": {
-        "code", "python", "javascript", "typescript", "api", "bug", "код",
-        "скрипт", "программ",
+        "write code", "show code", "generate code", "provide code", "fix code",
+        "write python", "write a script", "create a script", "дай код", "напиши код",
+        "покажи код", "сгенерируй код", "исправь код", "напиши скрипт", "создай скрипт",
     },
     "formula": {
-        "formula", "equation", "latex", "формул", "уравнен", "latex",
+        "write formula", "show formula", "solve equation", "write an equation",
+        "напиши формулу", "покажи формулу", "реши уравнение", "запиши уравнение",
     },
     "diagram": {
-        "diagram", "scheme", "chart", "схем", "диаграм", "график",
+        "create diagram", "draw diagram", "show diagram", "создай диаграмму",
+        "нарисуй диаграмму", "построй диаграмму", "сделай диаграмму", "создай схему",
+        "нарисуй схему", "сделай схему",
     },
     "table": {
-        "table", "таблиц", "spreadsheet",
+        "create table", "make a table", "show table", "build a table",
+        "создай таблицу", "сделай таблицу", "построй таблицу", "покажи таблицу",
     },
+}
+
+_IMAGE_MODIFICATION_MARKERS = {
+    "edit image", "edit the image", "modify image", "change image", "alter image",
+    "edit photo", "modify photo", "change photo", "замени на фото", "измени фото",
+    "измени картинку", "измени изображение", "отредактируй фото", "отредактируй картинку",
+    "добавь на фото", "убери с фото", "замени на картинке", "измени на картинке",
 }
 
 
 def _contains_marker(text: str, marker: str) -> bool:
-    low = text.lower()
-    return marker in low if len(marker) > 4 else bool(
-        re.search(rf"\b{re.escape(marker)}\b", low)
-    )
+    low = _text(text).lower()
+    phrase = _text(marker).lower()
+    if not low or not phrase:
+        return False
+    # Phrase markers are deliberately explicit. Input nouns such as "файл",
+    # "картинка", "python" and "код" are NOT output requests.
+    if " " not in phrase:
+        return bool(re.search(rf"(?<![\w\u0080-\uffff]){re.escape(phrase)}(?![\w\u0080-\uffff])", low))
+    return phrase in low
+
+
+def _detect_image_modification(text: str) -> bool:
+    low = _text(text).lower()
+    return any(_contains_marker(low, marker) for marker in _IMAGE_MODIFICATION_MARKERS)
 
 
 def _detect_requested_outputs(text: str) -> list[str]:
     result: list[str] = []
-    low = text.lower()
+    low = _text(text).lower()
     for output, markers in _OUTPUT_MARKERS.items():
         if any(_contains_marker(low, marker) for marker in markers):
             result.append(output)
+
+    # A plain image/photo mention is input context, not an output request.
+    # Image editing is an explicit generation operation.
+    if _detect_image_modification(low) and "image" not in result:
+        result.append("image")
+
     if not result:
         result.append("text")
     elif "text" not in result:
@@ -141,18 +176,37 @@ def _detect_requested_outputs(text: str) -> list[str]:
     return result
 
 
-def _detect_task(text: str, *, has_image: bool, has_voice: bool, has_file: bool, wants_image: bool) -> str:
+def _detect_task(
+    text: str,
+    *,
+    has_image: bool,
+    has_voice: bool,
+    has_file: bool,
+    wants_image: bool,
+) -> str:
     low = _text(text).lower()
     if wants_image:
         return "generate_image"
-    if has_image and any(
-        token in low for token in ("analyze", "analyse", "what is", "describe", "проанализ", "что на", "опиши")
-    ):
+
+    explicit_visual_analysis = any(
+        token in low
+        for token in (
+            "analyze", "analyse", "what is", "what's in", "describe", "опиши",
+            "проанализ", "что на", "что изображено", "что видно", "что здесь",
+            "что на фото", "что на картинке", "что на изображении",
+        )
+    )
+
+    if has_image and has_file:
+        # One user request can describe all supplied inputs together. Do not
+        # turn either attachment into an output operation.
+        return "analyze_input"
+    if has_image:
         return "analyze_image"
-    if has_voice:
-        return "answer_transcribed_voice"
     if has_file:
         return "analyze_file"
+    if has_voice:
+        return "answer_transcribed_voice"
     return "answer_request"
 
 
@@ -234,6 +288,7 @@ def build_interpretation(
             "task": task,
             "requested_outputs": requested_outputs,
             "wants_image": wants_image,
+            "explicit_generation_request": wants_image,
             "wants_file": wants_file,
             "wants_links": wants_links,
             "wants_code": "code" in requested_outputs,
