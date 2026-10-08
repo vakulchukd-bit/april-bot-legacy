@@ -54,11 +54,12 @@ Always treat these sections as structured input:
 
 For CONTINUE, continue the selected subject and do not repeat questions already answered.
 For NEW, answer independently and do not let old context override the request.
-For an input image/screenshot, inspect the supplied image and use it as part of the answer when relevant.
-For an attached file, read the supplied input_file content and answer from the file itself when relevant; do not claim the file is missing when an input_file is present.
-Text supplied together with an image or file is the user's instruction for that same attachment; do not split it into a second request.
-For a requested image, return an image artifact specification for C_APRIL_IMAGES_GENERATOR; do not create the raster yourself.
-For links/files/tables/diagrams/formulas/code, return the structured render block required by C-ARTIFACT.
+For an input image/screenshot, inspect the supplied image and describe/analyze what is visibly present. The supplied pixels are authoritative for the visual answer; do not invent, substitute, or infer an unrelated subject from memory or attachment text. If a visual detail is uncertain, say so instead of replacing it with a guessed object. An input image is NOT a request to generate an image.
+For an attached file, read the supplied input_file or ATTACHED_TEXT_FILES content and answer from the file itself when relevant. An input file is NOT a request to create/export a file.
+Text supplied together with an image or file is the user's instruction for those same attachments; keep attachment contents separate from CURRENT_REQUEST.
+Generation/editing is permission-based: only when INTERPRETATION.wants_image=true may C_APRIL_IMAGES_GENERATOR be used. Never infer image generation from the mere words "image", "photo", "picture", "картинка" or from attachment contents.
+For analyze_image, analyze_file, or analyze_input tasks, return the requested description/answer as text unless the user explicitly requested another output.
+For links/files/tables/diagrams/formulas/code, return the structured render block only when the user explicitly requested that output.
 
 Return JSON only:
 {
@@ -438,6 +439,7 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
             "wants_image": bool(structured_intent.get("wants_image")),
             "wants_file": bool(structured_intent.get("wants_file")),
             "wants_links": bool(structured_intent.get("wants_links")),
+            "explicit_generation_request": bool(structured_intent.get("explicit_generation_request")),
         },
         "DIALOGUE_RELATION": relation,
         "CONTINUATION_CONTEXT": _pairs(selected_pairs) if relation == "CONTINUE" else [],
@@ -459,6 +461,7 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
         "INPUT_MODALITIES": modality_lines,
         "VISUAL_CONTEXT": visual_meta,
         "ATTACHMENTS": req.metadata.get("attachments", []) if isinstance(req.metadata, dict) else [],
+        "ATTACHED_TEXT_FILES": req.metadata.get("file_contents", []) if isinstance(req.metadata, dict) else [],
         "C_ARTIFACT_RENDER_PLAN": render_plan,
         "SELECTED_ROOMS": routing.get("selected_rooms") or [],
         "MCDOWELL_PRESENTATION_POLICY": mcdowell,
@@ -486,6 +489,19 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
     content: list[dict[str, Any]] = [
         {"type": "input_text", "text": text}
     ]
+
+    text_files = req.metadata.get("file_contents", []) if isinstance(req.metadata, dict) else []
+    if isinstance(text_files, list):
+        for item in text_files:
+            if not isinstance(item, dict):
+                continue
+            filename = _clip(item.get("filename") or "file", 160)
+            file_content = _clip(item.get("content") or "", 12000)
+            if file_content:
+                content.append({
+                    "type": "input_text",
+                    "text": f"ATTACHED_TEXT_FILE {filename}:\n{file_content}",
+                })
 
     items = visual.get("items")
     if isinstance(items, list):
