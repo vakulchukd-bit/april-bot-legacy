@@ -164,7 +164,12 @@ def _decode_inline_file(value: Any) -> bytes:
     return base64.b64decode(raw) if raw else b""
 
 
-def _prepare_attachments(data: dict[str, Any], attachments: list[Any]) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+def _prepare_attachments(
+    data: dict[str, Any],
+    attachments: list[Any],
+    *,
+    voice_transcript: str = "",
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     """Return extra text, visual inputs and normalized attachment metadata."""
     extra_text: list[str] = []
     visual: list[dict[str, Any]] = []
@@ -183,7 +188,9 @@ def _prepare_attachments(data: dict[str, Any], attachments: list[Any]) -> tuple[
         if kind == "voice":
             meta[-1]["kind"] = "voice"
             raw_voice = getattr(att, "data", b"") or item.get("data") or b""
-            if raw_voice:
+            if voice_transcript:
+                extra_text.append(f"VOICE {filename}:\n{voice_transcript}")
+            elif raw_voice:
                 suffix = os.path.splitext(filename)[1] or ".webm"
                 tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
                 try:
@@ -247,7 +254,12 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _handle_payload(data: dict[str, Any], attachments: list[Any] | None = None) -> tuple[int, dict[str, Any]]:
+def _handle_payload(
+    data: dict[str, Any],
+    attachments: list[Any] | None = None,
+    *,
+    voice_transcript: str = "",
+) -> tuple[int, dict[str, Any]]:
     uid = _text(data.get("user_id") or data.get("april_id"))
     original = _text(data.get("text") or data.get("message") or data.get("content"))
     conversation_id = _text(data.get("conversation_id"))
@@ -260,7 +272,9 @@ def _handle_payload(data: dict[str, Any], attachments: list[Any] | None = None) 
 
     attachments = attachments or []
     try:
-        extra_text, visual_context, attachment_meta = _prepare_attachments(data, attachments)
+        extra_text, visual_context, attachment_meta = _prepare_attachments(
+            data, attachments, voice_transcript=voice_transcript
+        )
         if extra_text:
             original = (original + "\n\n" + extra_text).strip()
 
@@ -298,6 +312,64 @@ def _handle_payload(data: dict[str, Any], attachments: list[Any] | None = None) 
 
 def _error(message: str, status: int = 500) -> tuple[int, dict[str, Any]]:
     return status, {"success": False, "error": _text(message) or "INTERNAL_ERROR", "canonical_route": CANONICAL_CHAT_ROUTE}
+
+
+def _voice_attachment(attachments: list[Any]) -> Any | None:
+    for att in attachments:
+        if str(getattr(att, "kind", "") or "").lower() == "voice":
+            return att
+    return None
+
+
+def _transcribe_attachment(att: Any) -> str:
+    raw_voice = getattr(att, "data", b"") or b""
+    if not raw_voice:
+        raise ValueError("VOICE_EMPTY")
+    filename = _text(getattr(att, "filename", "voice.webm")) or "voice.webm"
+    suffix = os.path.splitext(filename)[1] or ".webm"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        tmp.write(raw_voice)
+        tmp.close()
+        return _text(asyncio.run(transcribe_voice(tmp.name)))
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
+def _handle_voice_stream(
+    data: dict[str, Any],
+    attachments: list[Any],
+    write_event: Any,
+) -> None:
+    voice = _voice_attachment(attachments)
+    if voice is None:
+        status, payload = _handle_payload(data, attachments)
+        write_event({"type": "answer", "status": status, "data": payload})
+        return
+
+    transcript = _transcribe_attachment(voice)
+    if not transcript:
+        raise ValueError("VOICE_EMPTY_TRANSCRIPT")
+
+    # Transcript is the first visible result on the same canonical route.
+    write_event({
+        "type": "transcript",
+        "success": True,
+        "text": transcript,
+        "user_id": _text(data.get("user_id") or data.get("april_id")),
+        "conversation_id": _text(data.get("conversation_id") or data.get("dialog_id")),
+        "dialog_id": _text(data.get("dialog_id") or data.get("conversation_id")),
+        "message_id": _text(data.get("message_id")),
+        "flow_id": _text(data.get("flow_id")),
+    })
+
+    status, payload = _handle_payload(
+        data, attachments, voice_transcript=transcript
+    )
+    write_event({"type": "answer", "status": status, "data": payload})
 
 
 class AprilHandler(BaseHTTPRequestHandler):
@@ -338,6 +410,41 @@ class AprilHandler(BaseHTTPRequestHandler):
                 data, attachments = parse_multipart_payload(raw, content_type=content_type)
             else:
                 data, attachments = parse_json_payload(raw)
+            if _voice_attachment(attachments) is not None:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+                self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS, GET")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+
+                def write_event(event: dict[str, Any]) -> None:
+                    chunk = (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+                    self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii"))
+                    self.wfile.write(chunk)
+                    self.wfile.write(b"\r\n")
+                    self.wfile.flush()
+
+                try:
+                    _handle_voice_stream(data, attachments, write_event)
+                except Exception as exc:
+                    traceback.print_exc()
+                    write_event({
+                        "type": "answer",
+                        "status": 500,
+                        "data": {
+                            "success": False,
+                            "error": _text(str(exc)) or "VOICE_FAILED",
+                            "canonical_route": CANONICAL_CHAT_ROUTE,
+                        },
+                    })
+                finally:
+                    self.wfile.write(b"0\r\n\r\n")
+                    self.wfile.flush()
+                return
+
             status, payload = _handle_payload(data, attachments)
             self._send_json(status, payload)
         except Exception as exc:
