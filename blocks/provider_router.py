@@ -31,41 +31,67 @@ _client: _OpenAICompat | None = None
 
 
 SYSTEM_PROMPT = r"""
-You are April's single response provider.
+You are April's single response provider in the canonical route.
 
-The processor has already normalized the request into concise English.
-Do not translate again and do not create a second interpretation route.
+The processor is authoritative.  It already performed:
+- input normalization;
+- authenticated identity binding;
+- 12-hour dialogue search and compatibility ranking;
+- NEW/CONTINUE decision;
+- Interpretation structure;
+- C-ARTIFACT room and Web renderer selection.
 
-The processor already decided NEW/CONTINUE and supplied the permitted context.
-Do not search memory, invent a second route, or create another context source.
+Do not create another route, memory store, interpreter, room registry, or user identity.
+Do not expose internal reasoning.
 
-For CONTINUE:
-- keep the selected dialogue chain as the active subject;
-- answer the current request as the next turn;
-- do not ask for information already present in the chain.
+Always treat these sections as structured input:
+1. CURRENT_REQUEST
+2. CONTINUATION_CONTEXT (empty when NEW)
+3. NEW_DIALOGUE_REQUEST (empty when CONTINUE)
+4. INPUT_MODALITIES / VISUAL_CONTEXT
+5. C_ARTIFACT_RENDER_PLAN
+6. MCDOWELL_PRESENTATION_POLICY
 
-For NEW:
-- answer the current request independently;
-- recent context is only a relevance candidate and must not override the request.
+For CONTINUE, continue the selected subject and do not repeat questions already answered.
+For NEW, answer independently and do not let old context override the request.
+For an input image/screenshot, inspect the supplied image and use it as part of the answer when relevant.
+For a requested image, return an image artifact specification for C_APRIL_IMAGES_GENERATOR; do not create the raster yourself.
+For links/files/tables/diagrams/formulas/code, return the structured render block required by C-ARTIFACT.
 
 Return JSON only:
 {
-  "internal_request_en": "concise English semantic form of the current request",
-  "internal_answer_en": "concise English semantic form of the answer",
+  "internal_request_en": "...",
+  "internal_answer_en": "...",
   "answer": "complete human-readable answer in RETURN_LANGUAGE",
   "content": "same answer or concise equivalent",
   "summary": "one-sentence summary",
   "render_blocks": [
-    {"type":"text","renderer":"MessageTextBlock","viewer":"MessageTextBlock","content":"..."}
-  ]
+    {
+      "type": "text",
+      "renderer": "MessageTextBlock",
+      "viewer": "MessageTextBlock",
+      "content": "..."
+    }
+  ],
+  "artifacts": []
 }
 
-For code, include a code render block.
-For a direct URL, include a link render block.
-For visual data, preserve the payload needed by the Web renderer.
-Never put machine metadata in answer/content.
+For an image request, artifacts must contain:
+{
+  "type": "image",
+  "spec": {
+    "schema": "april_image_spec_v1",
+    "generator_signal": "C_APRIL_IMAGES_GENERATOR",
+    "request_anchor": "...",
+    "openai_structured_visual_plan_semantic": "...",
+    "visual_context": {}
+  }
+}
+
 Never return an empty answer.
+Never put machine metadata into answer/content.
 """.strip()
+
 
 
 class _ResponseResult:
@@ -324,93 +350,156 @@ def _clip(value: Any, chars: int) -> str:
 
 
 def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
-    plan = req.routing.get("provider_context_plan")
-    if not isinstance(plan, dict):
-        plan = {}
+    intent = req.intent if isinstance(req.intent, dict) else {}
+    conversation = req.conversation if isinstance(req.conversation, dict) else {}
+    memory = req.memory if isinstance(req.memory, dict) else {}
+    routing = req.routing if isinstance(req.routing, dict) else {}
+    constraints = req.constraints if isinstance(req.constraints, dict) else {}
+    visual = req.visual_context if isinstance(req.visual_context, dict) else {}
 
-    relation = str(
-        plan.get("relation")
-        or req.intent.get("dialogue_relation")
+    interpretation = intent.get("interpretation") if isinstance(intent.get("interpretation"), dict) else intent
+    request_input = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
+    structured_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    dialogue = interpretation.get("dialogue") if isinstance(interpretation.get("dialogue"), dict) else {}
+
+    current = _clip(
+        conversation.get("current_request")
+        or request_input.get("original_request")
+        or conversation.get("resolved_request")
+        or req.goal,
+        1600,
+    )
+    relation = _text(
+        dialogue.get("relation")
+        or memory.get("relation")
         or "NEW"
     ).upper()
 
-    selected_chain = plan.get("dialogue_chain")
-    recent_candidate = plan.get("recent_context_candidate")
+    continuation = dialogue.get("continuation_context") if isinstance(dialogue.get("continuation_context"), dict) else {}
+    selected_pairs = continuation.get("selected_pairs") or memory.get("selected_pairs") or []
+    new_dialogue = dialogue.get("new_dialogue") if isinstance(dialogue.get("new_dialogue"), dict) else {}
+    render_plan = routing.get("render_plan") if isinstance(routing.get("render_plan"), list) else []
+    mcdowell = (routing.get("provider_context_plan") or {}).get("mcdowell")
+    if not isinstance(mcdowell, dict):
+        mcdowell = {"always": True, "role": "presentation_and_render_layout"}
 
-    def chain_text(rows: Any, limit: int) -> str:
+    def _pairs(rows: Any, limit: int = 4) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
         if not isinstance(rows, list):
-            return ""
-        lines: list[str] = []
+            return result
         for item in rows[-limit:]:
             if not isinstance(item, dict):
                 continue
-            lines.append(
-                "PAIR "
-                + str(item.get("position") or "")
-                + ": USER_EN="
-                + _clip(item.get("user_en"), 700)
-                + " | APRIL_EN="
-                + _clip(item.get("april_en"), 700)
-                + " | USER_ORIGINAL="
-                + _clip(item.get("user"), 700)
-            )
-        return "\n".join(lines)
+            result.append({
+                "position": item.get("turn_index"),
+                "user": _clip(item.get("user") or item.get("user_text"), 280),
+                "user_en": _clip(item.get("user_en") or item.get("user_text_en"), 280),
+                "april": _clip(item.get("april") or item.get("april_text"), 280),
+                "april_en": _clip(item.get("april_en") or item.get("april_text_en"), 280),
+                "score": item.get("score"),
+                "semantic": item.get("semantic"),
+                "context": item.get("context"),
+                "direction": item.get("direction"),
+            })
+        return result
 
-    chain = chain_text(selected_chain, 4)
-    candidate = chain_text(recent_candidate, 1)
+    modality_lines = {
+        "modalities": request_input.get("modalities") or [],
+        "has_image": bool(request_input.get("has_image") or visual.get("has_input_images")),
+        "has_voice": bool(request_input.get("has_voice")),
+        "has_file": bool(request_input.get("has_file")),
+    }
 
-    current = _clip(
-        plan.get("current_request")
-        or req.conversation.get("current_request")
-        or req.goal,
-        3000,
+    visual_items = visual.get("items")
+    visual_meta = []
+    if isinstance(visual_items, list):
+        for item in visual_items:
+            if not isinstance(item, dict):
+                continue
+            visual_meta.append({
+                "filename": _clip(item.get("filename"), 120),
+                "source_type": _clip(item.get("source_type"), 60),
+                "mime_type": _clip(item.get("mime_type"), 60),
+            })
+
+    structured = {
+        "CURRENT_REQUEST": current,
+        "RETURN_LANGUAGE": _text(
+            constraints.get("provider_output_language")
+            or request_input.get("display_language")
+            or "en"
+        ),
+        "INTERPRETATION": {
+            "schema": interpretation.get("schema", "april_interpretation_v2"),
+            "task": structured_intent.get("task", "answer_request"),
+            "requested_outputs": structured_intent.get("requested_outputs") or ["text"],
+            "wants_image": bool(structured_intent.get("wants_image")),
+            "wants_file": bool(structured_intent.get("wants_file")),
+            "wants_links": bool(structured_intent.get("wants_links")),
+        },
+        "DIALOGUE_RELATION": relation,
+        "CONTINUATION_CONTEXT": _pairs(selected_pairs) if relation == "CONTINUE" else [],
+        "NEW_DIALOGUE_REQUEST": _clip(
+            new_dialogue.get("request") if relation == "NEW" else "",
+            1600,
+        ),
+        "CONTEXT": {
+            "active_topic": _clip(
+                continuation.get("active_topic") or memory.get("active_topic"),
+                600,
+            ),
+            "reason": _clip(
+                continuation.get("reason") or memory.get("reason"),
+                400,
+            ),
+            "confidence": continuation.get("confidence") or memory.get("relation_confidence") or 0,
+        },
+        "INPUT_MODALITIES": modality_lines,
+        "VISUAL_CONTEXT": visual_meta,
+        "ATTACHMENTS": req.metadata.get("attachments", []) if isinstance(req.metadata, dict) else [],
+        "C_ARTIFACT_RENDER_PLAN": render_plan,
+        "SELECTED_ROOMS": routing.get("selected_rooms") or [],
+        "MCDOWELL_PRESENTATION_POLICY": mcdowell,
+        "OUTPUT_CONTRACT": {
+            "required": [
+                "internal_request_en",
+                "internal_answer_en",
+                "answer",
+                "content",
+                "summary",
+                "render_blocks",
+                "artifacts",
+            ],
+            "image_generator": "C_APRIL_IMAGES_GENERATOR",
+            "scene_authority": "C_ARTIFACT_CONTRACT",
+        },
+    }
+
+    text = json.dumps(
+        structured,
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
-    language = _text(
-        req.constraints.get("provider_output_language") or "en"
-    )
 
-    user_text = (
-        "RELATION: "
-        + relation
-        + "\nCURRENT_REQUEST_ORIGINAL:\n"
-        + current
-        + "\n"
-        "SELECTED_DIALOGUE_CHAIN_EN:\n"
-        + (chain or "(none)")
-        + "\n"
-        "RECENT_CONTEXT_CANDIDATE:\n"
-        + (candidate or "(none)")
-        + "\n"
-        "RETURN_LANGUAGE: "
-        + language
-        + "\n"
-        "INTERNAL_LANGUAGE: en\n"
-        "TRANSLATION_ROUTE: "
-        + TRANSLATION_ROUTE_VERSION
-        + "\n"
-        "OUTPUT_CONTRACT: internal_request_en + answer + content + "
-        "summary + render_blocks"
-    )
+    content: list[dict[str, Any]] = [
+        {"type": "input_text", "text": text}
+    ]
 
-    content: list[dict[str, Any]] = [{"type": "input_text", "text": user_text}]
-    visual = req.visual_context.get("items") if isinstance(req.visual_context, dict) else []
-    if isinstance(visual, list):
-        for item in visual:
+    items = visual.get("items")
+    if isinstance(items, list):
+        for item in items:
             if not isinstance(item, dict):
                 continue
             image_url = _text(item.get("image_url"))
             if image_url:
-                content.append({"type": "input_image", "image_url": image_url})
+                content.append({
+                    "type": "input_image",
+                    "image_url": image_url,
+                })
 
     return [
-        {
-            "role": "system",
-            "content": SYSTEM_PROMPT,
-        },
-        {
-            "role": "user",
-            "content": content,
-        },
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": content},
     ]
 
 
@@ -496,6 +585,23 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
         answer,
     )
 
+    artifacts = data.get("artifacts")
+    if not isinstance(artifacts, list):
+        artifacts = []
+    normalized_artifacts = [
+        dict(item) for item in artifacts if isinstance(item, dict)
+    ]
+
+    image_spec = data.get("image_spec")
+    if isinstance(image_spec, dict) and not any(
+        str(item.get("type") or item.get("artifact_type") or "").lower() == "image"
+        for item in normalized_artifacts
+    ):
+        normalized_artifacts.append({
+            "type": "image",
+            "spec": dict(image_spec),
+        })
+
     return {
         "machine_response": {
             "answer": answer,
@@ -512,7 +618,7 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
                 "internal_answer_en": internal_answer_en,
                 "translation_route_version": TRANSLATION_ROUTE_VERSION,
             },
-            "artifacts": [],
+            "artifacts": normalized_artifacts,
         }
     }
 
