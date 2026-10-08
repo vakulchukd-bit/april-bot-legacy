@@ -461,11 +461,28 @@ def save_dialogue_pair(
                 cur.execute(
                     """
                     INSERT INTO dialogue_memory
-                        (user_id, created_at, turn_index, user_text, april_text, language, relation, pair_hash, dialog_id, conversation_id, message_id, interpretation_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        (
+                            user_id, created_at, turn_index,
+                            user_text, april_text,
+                            user_text_en, april_text_en,
+                            language, relation, pair_hash,
+                            dialog_id, conversation_id, message_id, interpretation_id
+                        )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s
+                    )
                     ON CONFLICT (pair_hash) DO NOTHING
                     """,
-                    (uid, dt, int(turn_index or 0), user_value, april_value, str(language or "en"), str(relation or "NEW"), pair_hash, str(dialog_id or ""), str(conversation_id or ""), str(message_id or ""), str(interpretation_id or "")),
+                    (
+                        uid, dt, int(turn_index or 0),
+                        user_value, april_value,
+                        str(user_en or "").strip(), str(april_en or "").strip(),
+                        str(language or "en"), str(relation or "NEW"),
+                        pair_hash,
+                        str(dialog_id or ""), str(conversation_id or ""),
+                        str(message_id or ""), str(interpretation_id or ""),
+                    ),
                 )
                 return True
     except psycopg2.errors.UndefinedTable:
@@ -488,8 +505,10 @@ def load_dialogue_pairs(user_id: Any, *, limit: int = 0, timestamp: float | int 
                     return []
                 cur.execute(
                     """
-                    SELECT id, user_id, created_at, turn_index, user_text, april_text,
-                           language, relation, dialog_id, conversation_id, message_id, interpretation_id
+                    SELECT id, user_id, created_at, turn_index,
+                           user_text, april_text, user_text_en, april_text_en,
+                           language, relation, dialog_id, conversation_id,
+                           message_id, interpretation_id
                     FROM dialogue_memory
                     WHERE user_id = %s
                       AND created_at >= %s
