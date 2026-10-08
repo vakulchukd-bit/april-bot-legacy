@@ -5,11 +5,10 @@
 from typing import Dict, Any
 from datetime import datetime, timezone
 
-from blocks.room_protocol import Room
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
 
-class UTCRoom(Room):
+class UTCRoom:
 
     name = "utc"
 
