@@ -266,7 +266,24 @@ def _handle_payload(
                 except Exception:
                     pass
             kinds = {str(item.get("kind") or "").lower() for item in attachment_meta}
-            if kinds & {"image"}:
+            has_image = "image" in kinds
+            has_file = bool(kinds & {"file", "text_file"})
+            if has_image and has_file:
+                defaults = {
+                    "ru": (
+                        "Разбери все вложения как одну задачу: кратко опиши каждое фото и файл отдельно, "
+                        "затем объясни их связь только там, где она подтверждается содержимым."
+                    ),
+                    "uk": (
+                        "Розглянь усі вкладення як одне завдання: коротко опиши кожне фото й файл окремо, "
+                        "потім поясни їхній зв’язок лише там, де це підтверджується вмістом."
+                    ),
+                    "en": (
+                        "Treat all attachments as one task: briefly describe each image and file separately, "
+                        "then explain their relationship only where supported by the contents."
+                    ),
+                }
+            elif has_image:
                 defaults = {
                     "ru": "Опиши содержимое прикреплённого изображения.",
                     "uk": "Опиши вміст прикріпленого зображення.",
