@@ -463,27 +463,10 @@ async def process(user_id, text, state, energy="MEDIUM"):
         {"type": type(machine_request).__name__, "model": TEXT_QUANTUM_MODEL},
     )
 
-    canonical_budget = getattr(
-        machine_request,
-        "response_output_tokens",
-        None,
-    )
-    if not isinstance(canonical_budget, int) or canonical_budget < 1:
-        constraints = getattr(machine_request, "constraints", {})
-        metadata = constraints.get("metadata", {}) if isinstance(constraints, dict) else {}
-        canonical_budget = metadata.get("response_budget") if isinstance(metadata, dict) else None
-
-    if not isinstance(canonical_budget, int) or not (1 <= canonical_budget <= 8000):
-        raise RuntimeError(
-            "Canonical adaptive response budget missing: Quantum Processor must supply it."
-        )
-
-    output = await generate_text(
-        messages=machine_request,
-        temperature=None,
-        max_output_tokens=canonical_budget,
-        model=TEXT_QUANTUM_MODEL,
-    )
+    # The provider request is canonical. Do not require or pass a second,
+    # application-owned response token budget; the provider uses model-native
+    # output capacity and the existing input-context allocator remains unchanged.
+    output = await generate_text(machine_request)
 
     packet = _clean_provider_packet(output)
     reply, packet = normalize_provider_output(packet)
@@ -536,8 +519,7 @@ async def process(user_id, text, state, energy="MEDIUM"):
             "artifacts": len(artifacts),
             "provider_calls": 1,
             "model": TEXT_QUANTUM_MODEL,
-            "response_budget": canonical_budget,
-            "response_budget_mode": "continuous_processor_budget",
+            "response_limit_mode": "model_native_no_application_cap",
         },
     )
 
