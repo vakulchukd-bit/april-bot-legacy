@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import time
+from difflib import SequenceMatcher
 from typing import Any
 from uuid import uuid4
 import re
@@ -274,9 +275,231 @@ _HISTORY_COUNTS = {
 }
 
 
+def _semantic_normalize(text: Any) -> tuple[str, list[str]]:
+    """Normalize user wording for intent analysis without rewriting the request."""
+    low = _text(text).lower().replace("ё", "е")
+    low = re.sub(r"[^\w\u0080-\uffff]+", " ", low, flags=re.UNICODE)
+    low = re.sub(r"\s+", " ", low).strip()
+    return low, [token for token in low.split(" ") if token]
+
+
+_SEMANTIC_ROOTS = {
+    "dialogue_action": ("говор", "обсужд", "разговар", "разговор", "обща", "общен", "перепис", "упомин", "затраг", "диалог", "реч", "dialogue", "conversation", "discuss", "talk", "talked", "talking", "chat", "communicat", "speech"),
+    "recall_action": ("напом", "вспом", "припомн", "восстанов", "remember", "recall", "remind", "summariz", "перескаж", "перечисл"),
+    "decision_action": ("решил", "решен", "вывод", "итог", "договор", "результат", "concluded", "decided", "decision", "outcome"),
+    "plan_action": ("план", "заплан", "собира", "намер", "предусмотр", "planned", "plan", "schedule"),
+    "continuation_action": ("продолж", "вернись", "возвращ", "останов", "resume", "continue", "return to"),
+    "past_reference": ("предыдущ", "прошл", "раньше", "ранее", "истори", "прошедш", "yesterday", "previous", "earlier", "before", "history"),
+    "future_reference": ("завтра", "будущ", "следующ", "потом", "дальнейш", "tomorrow", "future", "next"),
+    "today_reference": ("сегодня", "сегодн", "сегодняшн", "утром", "вечером", "today", "this morning", "tonight"),
+    "recent_reference": ("недавн", "последн", "сейчас", "недавно", "за день", "recent", "lately", "last few", "last 12"),
+}
+
+_SEMANTIC_FUZZY_FORMS = {
+    "dialogue_action": ("говорили", "говорил", "обсуждали", "обсудили", "разговаривали", "общались", "переписывались", "общение", "разговор", "discussed", "discussion", "talked", "talking", "conversation", "communicate"),
+    "recall_action": ("напомни", "напомнить", "вспомни", "вспомнить", "припомни", "восстанови", "summarize", "remember", "recall"),
+    "decision_action": ("решили", "решились", "выводы", "итоги", "договорились", "результаты", "decided", "concluded"),
+    "plan_action": ("планировали", "запланировали", "собирались", "намеревались", "planned", "schedule"),
+    "past_reference": ("предыдущий", "предыдущем", "прошлый", "прошлом", "раньше", "yesterday", "previous", "earlier"),
+    "future_reference": ("завтра", "будущее", "следующий", "следующим", "tomorrow", "future", "next"),
+    "today_reference": ("сегодня", "сегодняшний", "сегодняшнего", "утром", "вечером", "today", "tonight"),
+}
+
+
+def _semantic_group_hit(tokens: list[str], group: str) -> bool:
+    roots = _SEMANTIC_ROOTS.get(group, ())
+    for token in tokens:
+        if any(
+            (token == root) or (len(root) >= 5 and token.startswith(root))
+            for root in roots if " " not in root
+        ):
+            return True
+    forms = _SEMANTIC_FUZZY_FORMS.get(group, ())
+    for token in tokens:
+        if len(token) < 5:
+            continue
+        for form in forms:
+            if abs(len(token) - len(form)) > 2:
+                continue
+            if SequenceMatcher(None, token, form).ratio() >= 0.83:
+                return True
+    return False
+
+
+def interpret_request_semantics(text: str) -> dict[str, Any]:
+    """Infer request intent and retrieval direction before splitting into tasks.
+
+    This is a deterministic, typo-tolerant semantic feature layer, not a claim of
+    embedding-model confidence. Existing task splitting and memory ranking remain
+    intact; this profile supplies intent hints and auditable reasons.
+    """
+    source = _text(text)
+    low, tokens = _semantic_normalize(source)
+    token_set = set(tokens)
+    if not low:
+        return {
+            "schema": "april_request_semantics_v1", "method": "rules_fuzzy_lexical_v1",
+            "primary_intent": "NEW_INFORMATION", "direction": "ANSWER_NEW_REQUEST",
+            "time_scope": "UNSPECIFIED", "topic_reference": "UNSPECIFIED",
+            "requires_memory": False, "history_request": False, "search_scope": "CURRENT_DIALOGUE",
+            "intent_score": 0, "features": {}, "reason": "empty_request",
+        }
+
+    dialogue_action = _semantic_group_hit(tokens, "dialogue_action")
+    recall_action = _semantic_group_hit(tokens, "recall_action")
+    decision_action = _semantic_group_hit(tokens, "decision_action") or (
+        "пришли" in token_set and bool(token_set & {"к", "чему", "выводу"})
+    ) or "к чему мы пришли" in low or "what did we conclude" in low
+    plan_action = _semantic_group_hit(tokens, "plan_action")
+    continuation_action = _semantic_group_hit(tokens, "continuation_action")
+    past_reference = _semantic_group_hit(tokens, "past_reference")
+    future_reference = _semantic_group_hit(tokens, "future_reference")
+    today_reference = _semantic_group_hit(tokens, "today_reference")
+    recent_reference = _semantic_group_hit(tokens, "recent_reference")
+
+    self_reference = bool(token_set & {"мы", "нас", "нам", "наш", "наша", "наши", "наше", "we", "our", "us"}) or any(
+        token.startswith(("наш", "наша", "наши")) for token in tokens
+    )
+    # “с тобой” is a dialog reference, but do not let any generic preposition “с” trigger it.
+    self_reference = self_reference or ("тобой" in token_set and "с" in token_set)
+    self_reference = self_reference or bool(token_set & {"будем", "будете", "планируем", "собираемся", "we'll", "lets"})
+    interrogative = bool(token_set & {"что", "чем", "чего", "какие", "какая", "какой", "кто", "где", "когда", "почему", "как", "зачем", "which", "what", "who", "where", "when", "why", "how"}) or "?" in source or "？" in source
+    imperative_recall = bool(token_set & {"напомни", "вспомни", "перечисли", "перескажи", "восстанови", "найди", "вернись", "покажи", "remind", "recall", "remember", "summarize"})
+    temporal_past = past_reference or today_reference or recent_reference or bool(token_set & {"вчера", "сегодня", "утром", "вечером", "yesterday", "today"})
+    temporal_future = future_reference or bool(token_set & {"завтра", "будем", "буду", "будущем", "tomorrow", "will"})
+    explicit_discussion_question = dialogue_action and interrogative and (
+        self_reference or temporal_past or recall_action or any(term in low for term in (
+            "о чем", "про что", "что обсуждали", "что было в диалоге", "что было в разговоре",
+            "what did we discuss", "what were we talking", "what happened in our conversation",
+        ))
+    )
+    decision_recall = decision_action and (interrogative or recall_action) and (self_reference or temporal_past or dialogue_action or past_reference)
+    plan_past_form = any(token.startswith(root) for token in tokens for root in ("заплан", "планировали", "планировал", "собирались", "собирался", "намеревались"))
+    plan_recall = plan_action and (interrogative or recall_action or imperative_recall) and (
+        recall_action or past_reference or plan_past_form or (self_reference and not temporal_future)
+    )
+    future_topic_question = (
+        temporal_future and dialogue_action and interrogative
+        and bool(token_set & {"будем", "буду", "будете", "будут", "will", "планируем", "собираемся"})
+        and not (recall_action or past_reference or decision_action or plan_past_form)
+    )
+    history_recall = (
+        explicit_discussion_question
+        or (recall_action and (dialogue_action or self_reference or past_reference or today_reference or recent_reference or decision_action or plan_action))
+        or decision_recall
+        or plan_recall
+        or (past_reference and (dialogue_action or decision_action or plan_action) and (interrogative or imperative_recall))
+    ) and not future_topic_question
+
+    if history_recall:
+        requires_memory = True
+        history_request = True
+        search_scope = "ALL_DIALOGUE_HISTORY"
+        intent_score = 2 * int(dialogue_action) + 2 * int(recall_action) + 2 * int(decision_action) + 2 * int(plan_action) + int(self_reference) + int(temporal_past) + int(temporal_future) + int(interrogative)
+        if decision_recall and not plan_action:
+            primary_intent = "PRIOR_DECISION_RECALL"
+            direction = "SEARCH_PRIOR_DECISIONS"
+            topic_reference = "PRIOR_DECISION"
+            reason = "decision_terms_with_dialogue_or_time_reference"
+        elif plan_recall:
+            primary_intent = "PLAN_RECALL"
+            direction = "SEARCH_PRIOR_PLANS"
+            topic_reference = "PRIOR_PLAN"
+            reason = "plan_terms_with_prior_or_future_context"
+        elif any(term in low for term in ("кратко", "содержание", "перечисли", "какие темы", "список тем", "summarize", "list topics")):
+            primary_intent = "HISTORY_SUMMARY"
+            direction = "SEARCH_AND_SUMMARIZE_HISTORY"
+            topic_reference = "DIALOGUE_HISTORY"
+            reason = "summary_or_topic_list_requested"
+        elif any(term in low for term in ("конкрет", "фрагмент", "найди", "где мы", "какое сообщение", "find the part", "specific message")):
+            primary_intent = "HISTORY_SEARCH"
+            direction = "SEARCH_DIALOGUE_HISTORY"
+            topic_reference = "DIALOGUE_HISTORY"
+            reason = "specific_prior_fragment_requested"
+        else:
+            primary_intent = "HISTORY_RECALL"
+            direction = "SEARCH_DIALOGUE_HISTORY"
+            topic_reference = "TODAY_DIALOGUE" if today_reference else ("PREVIOUS_DIALOGUE" if past_reference or recent_reference else "DIALOGUE_HISTORY")
+            reason = "dialogue_reference_detected_semantically"
+        relation_hint = "HISTORY_LOOKUP"
+        time_scope = "TODAY" if today_reference else ("RECENT_WINDOW" if recent_reference else ("PAST_DIALOGUE" if past_reference else ("FUTURE_PLAN_CONTEXT" if temporal_future else "AVAILABLE_HISTORY")))
+    elif continuation_action or (any(token in token_set for token in {"это", "этого", "этом", "тот", "та", "ту", "там", "дальше", "прежнему", "прежней"}) and not temporal_future):
+        primary_intent = "TOPIC_CONTINUATION"
+        direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
+        topic_reference = "PREVIOUS_OR_ACTIVE_TOPIC"
+        time_scope = "ACTIVE_DIALOGUE"
+        requires_memory = True
+        history_request = False
+        search_scope = "TOPIC_OR_ACTIVE_CONTEXT"
+        intent_score = 2 + int(self_reference) + int(continuation_action)
+        relation_hint = "CONTINUE"
+        reason = "continuation_or_anaphoric_reference"
+    elif temporal_future and (plan_action or dialogue_action or bool(token_set & {"что", "как", "лучше", "нужно", "надо", "будем", "сделать", "план", "should", "tomorrow"})):
+        future_dialogue_topic = bool(dialogue_action and self_reference)
+        primary_intent = "FUTURE_TOPIC_PLANNING" if future_dialogue_topic else "FUTURE_PLANNING"
+        direction = "RETRIEVE_OR_PLAN_FUTURE_TOPICS" if future_dialogue_topic else "PLAN_OR_ANSWER_FUTURE_QUESTION"
+        topic_reference = "FUTURE_TOPIC"
+        time_scope = "FUTURE"
+        # A future-topic question tied to “our discussion” still needs the active
+        # dialogue context, but it must not be mistaken for recall of past history.
+        requires_memory = future_dialogue_topic
+        history_request = False
+        search_scope = "TOPIC_OR_ACTIVE_CONTEXT" if future_dialogue_topic else "CURRENT_DIALOGUE"
+        intent_score = 1 + int(temporal_future) + int(plan_action) + int(future_dialogue_topic)
+        relation_hint = "CONTINUE" if future_dialogue_topic else "NEW"
+        reason = "future_topic_tied_to_active_dialogue" if future_dialogue_topic else "future_question_without_prior_plan_recall"
+    else:
+        primary_intent = "NEW_INFORMATION"
+        direction = "ANSWER_NEW_REQUEST"
+        topic_reference = "UNSPECIFIED"
+        time_scope = "UNSPECIFIED"
+        requires_memory = False
+        history_request = False
+        search_scope = "CURRENT_DIALOGUE"
+        intent_score = 0
+        relation_hint = "NEW"
+        reason = "no_prior_dialogue_intent_detected"
+
+    # A compact feature vector makes routing inspectable; values are deterministic
+    # feature activations, not neural embeddings or calibrated probabilities.
+    features = {
+        "dialogue_action": bool(dialogue_action),
+        "recall_action": bool(recall_action),
+        "decision_action": bool(decision_action),
+        "plan_action": bool(plan_action),
+        "continuation_action": bool(continuation_action),
+        "self_reference": bool(self_reference),
+        "past_reference": bool(past_reference),
+        "today_reference": bool(today_reference),
+        "recent_reference": bool(recent_reference),
+        "future_reference": bool(temporal_future),
+        "interrogative": bool(interrogative),
+    }
+    return {
+        "schema": "april_request_semantics_v1",
+        "method": "rules_fuzzy_lexical_v1",
+        "primary_intent": primary_intent,
+        "direction": direction,
+        "time_scope": time_scope,
+        "topic_reference": topic_reference,
+        "requires_memory": bool(requires_memory),
+        "history_request": bool(history_request),
+        "search_scope": search_scope,
+        "relation_hint": relation_hint,
+        "intent_score": int(intent_score),
+        "features": features,
+        "reason": reason,
+    }
+
+
 def _is_history_request(text: str) -> bool:
     low = _text(text).lower().replace("ё", "е")
-    return any(marker.replace("ё", "е") in low for marker in _HISTORY_MARKERS)
+    if any(marker.replace("ё", "е") in low for marker in _HISTORY_MARKERS):
+        return True
+    try:
+        return bool(interpret_request_semantics(text).get("history_request"))
+    except Exception:
+        return False
 
 
 def _history_count(text: str) -> int:
@@ -355,8 +578,8 @@ def _split_request_sequence(text: str) -> list[str]:
     """Find ordered questions/tasks without rewriting or de-duplicating user text.
 
     Boundaries are conservative: list markers, explicit question marks, semicolons,
-    and a new imperative/action clause. Ordinary commas and coordinated noun phrases
-    are deliberately not split.
+    a new imperative/action clause, or a clear second interrogative clause. Ordinary
+    commas and coordinated noun phrases are otherwise preserved.
     """
     source = _text(text)
     if not source:
@@ -368,11 +591,18 @@ def _split_request_sequence(text: str) -> list[str]:
         line = re.sub(r"^\s*(?:[-*•]|\d+[.)]|[a-zA-Z][.)])\s*", "", line).strip()
         if not line:
             continue
+        # If the line itself is a question, a second interrogative clause after a
+        # comma is a safe boundary. Do not apply this to commands like “напомни,
+        # что ...”, where the second clause is the command's complement.
+        question_lead = r"(?:что|кто|где|когда|почему|как|какой|какая|какие|чем|сколько|зачем|к\s+чему|о\s+чем|про\s+что|what|who|where|when|why|how|which)"
+        if re.match(r"^" + question_lead + r"\b", line, flags=re.IGNORECASE):
+            line = re.sub(r",\s+(?=" + question_lead + r"\b)", "; ", line, flags=re.IGNORECASE)
         # Question marks are strong boundaries. Also split sentence periods only
         # when the next sentence visibly starts another task/question, avoiding
         # ordinary explanatory sentences and most abbreviation false positives.
         boundary_pattern = re.compile(
-            r"(?<=[?？])\s+|(?<=[.!])\s+(?=" + _TASK_OR_QUESTION_START + r")",
+            r"(?<=[?？])\s+|(?<=[.!])\s+(?=" + _TASK_OR_QUESTION_START + r")"
+            r"|\s+(?:и|а также|а|and|also)\s+(?=" + question_lead + r"\b)",
             flags=re.IGNORECASE,
         )
         questions = [piece.strip() for piece in boundary_pattern.split(line) if piece.strip()]
@@ -393,16 +623,89 @@ def _split_request_sequence(text: str) -> list[str]:
     return cleaned or [source]
 
 
-def build_question_sequence(text: str) -> list[dict[str, Any]]:
-    """Public ordered decomposition used before State Manager retrieval."""
+def build_question_sequence(
+    text: str,
+    *,
+    parent_interpretation: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Split a request only after intent pre-analysis; preserve intent per part.
+
+    Existing splitting rules remain, with narrow support for coordinated questions.
+    Added semantic fields are advisory and backward-compatible, allowing State
+    Manager to choose retrieval scope before each question is searched.
+    """
     sequence: list[dict[str, Any]] = []
-    for index, item in enumerate(_split_request_sequence(text), start=1):
+    parent = dict(parent_interpretation or interpret_request_semantics(text))
+    pieces = _split_request_sequence(text)
+    for index, item in enumerate(pieces, start=1):
         outputs = _detect_requested_outputs(item)
+        item_semantics = interpret_request_semantics(item)
+        # Restore omitted subjects in compact follow-on questions from the parent
+        # intent: “... and what decisions did we reach?” is a prior-decision query
+        # even when the child clause itself omits “we discussed this earlier”.
+        _, item_tokens = _semantic_normalize(item)
+        item_token_set = set(item_tokens)
+        child_is_interrogative = bool(item_token_set & {"что", "какие", "какая", "какой", "к", "чему", "what", "which"}) or "?" in item or "？" in item
+        child_has_decision = _semantic_group_hit(item_tokens, "decision_action") or (
+            "пришли" in item_token_set and bool(item_token_set & {"к", "чему", "выводу"})
+        )
+        if parent.get("requires_memory") and child_is_interrogative and child_has_decision:
+            item_semantics = {
+                **item_semantics,
+                "primary_intent": "PRIOR_DECISION_RECALL",
+                "direction": "SEARCH_PRIOR_DECISIONS",
+                "topic_reference": "PRIOR_DECISION",
+                "time_scope": parent.get("time_scope", "AVAILABLE_HISTORY"),
+                "requires_memory": True,
+                "history_request": bool(parent.get("history_request")),
+                "search_scope": parent.get("search_scope", "ALL_DIALOGUE_HISTORY"),
+                "parent_context_dependency": True,
+                "parent_intent": parent.get("primary_intent", "HISTORY_RECALL"),
+                "reason": "decision_question_inherited_parent_history_context",
+            }
+        # A child task may need the parent context as source material (for
+        # example, “remind me what we discussed and make a table of conclusions”).
+        # Do not propagate history into a short but independent question such as
+        # “what is photosynthesis?”; require an explicit referential/content cue.
+        item_outputs = outputs or ["text"]
+        has_independent_output_action = any(output != "text" for output in item_outputs)
+        child_context_reference = bool(item_token_set & {
+            "это", "этого", "этой", "этом", "тот", "та", "ту", "те", "эти", "их", "него", "нее", "неё",
+            "там", "дальше", "прежнему", "прежней", "предыдущего", "предыдущей", "сказанного",
+            "список", "перечень", "сводка", "содержание", "выводы", "решения", "итоги", "результаты",
+            "topics", "summary", "conclusions", "decisions", "results", "list",
+        }) or any(term in _text(item).lower().replace("ё", "е") for term in (
+            "на основе", "по итогам", "из этого", "из обсуждения", "по предыдущему", "по сказанному",
+        ))
+        parent_context_dependency = bool(
+            parent.get("requires_memory")
+            and item_semantics.get("primary_intent") == "NEW_INFORMATION"
+            and (child_context_reference or (has_independent_output_action and child_has_decision))
+        )
+        if parent_context_dependency:
+            item_semantics = {
+                **item_semantics,
+                "requires_memory": True,
+                "history_request": bool(parent.get("history_request")),
+                "search_scope": parent.get("search_scope", "TOPIC_OR_ACTIVE_CONTEXT"),
+                "parent_context_dependency": True,
+                "parent_intent": parent.get("primary_intent", "NEW_INFORMATION"),
+                "reason": "child_action_uses_parent_context",
+            }
         sequence.append({
             "step_index": index,
             "request": item,
             "output_types": outputs or ["text"],
             "answer_in_order": True,
+            "semantic_intent": item_semantics.get("primary_intent", "NEW_INFORMATION"),
+            "search_direction": item_semantics.get("direction", "ANSWER_NEW_REQUEST"),
+            "time_scope": item_semantics.get("time_scope", "UNSPECIFIED"),
+            "topic_reference": item_semantics.get("topic_reference", "UNSPECIFIED"),
+            "requires_memory": bool(item_semantics.get("requires_memory")),
+            "history_request": bool(item_semantics.get("history_request")),
+            "semantic_reason": item_semantics.get("reason", ""),
+            "parent_context_dependency": bool(item_semantics.get("parent_context_dependency")),
+            "parent_intent": item_semantics.get("parent_intent", ""),
         })
     return sequence
 
@@ -433,12 +736,14 @@ def build_interpretation(
     attachments: list[dict[str, Any]] | None = None,
     visual_context: list[dict[str, Any]] | None = None,
     identity: dict[str, str] | None = None,
+    semantic_interpretation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create the structured request that the Provider is allowed to answer."""
     interpretation_started = time.perf_counter()
     text = _text(current_request)
     original = _text(original_request or current_request)
     memory = dict(memory or {})
+    request_semantics = dict(semantic_interpretation or interpret_request_semantics(original or text))
     attachments = [dict(x) for x in (attachments or []) if isinstance(x, dict)]
     visual_context = [dict(x) for x in (visual_context or []) if isinstance(x, dict)]
 
@@ -471,7 +776,11 @@ def build_interpretation(
 
     relation = _text(memory.get("relation") or "NEW").upper()
     selected_pairs = _select_continuation_pairs(memory)
-    history_request = bool(memory.get("history_request")) or _is_history_request(original or text)
+    history_request = (
+        bool(memory.get("history_request"))
+        or bool(request_semantics.get("history_request"))
+        or _is_history_request(original or text)
+    )
     history_count = max(1, min(10, int(memory.get("requested_topic_count") or _history_count(original or text) or 7)))
     history_topics = _select_history_topics(memory)[:history_count]
 
@@ -576,6 +885,9 @@ def build_interpretation(
             "wants_table": "table" in requested_outputs,
             "history_request": history_request,
             "history_count": history_count if history_request else 0,
+            "semantic_intent": _text(request_semantics.get("primary_intent") or "NEW_INFORMATION"),
+            "search_direction": _text(request_semantics.get("direction") or "ANSWER_NEW_REQUEST"),
+            "semantic_reason": _text(request_semantics.get("reason")),
         },
         "dialogue": {
             "relation": relation,
@@ -650,12 +962,17 @@ def build_interpretation(
             },
             "improvement_policy": "Improve the requested result while preserving unaffected behavior; do not invent missing source content.",
             "output_plan": requested_outputs,
+            "semantic_interpretation": request_semantics,
+            "semantic_interpretation_version": "april_request_semantics_v1",
         },
     }
     _apr_timing_log("build_interpretation", interpretation_started,
         relation=relation, task=task, requested_outputs=requested_outputs,
         input_chars=len(text), selected_pairs=len(selected_pairs), history_topics=len(history_topics),
         question_sequence_count=len((result.get("request_structure") or {}).get("question_sequence") or []),
+        semantic_intent=request_semantics.get("primary_intent"),
+        search_direction=request_semantics.get("direction"),
+        history_request=bool(request_semantics.get("history_request")),
         attachment_task_count=len(asset_task_map),
         selected_section=_text((memory.get("selected_section") or {}).get("heading")),
         clarification_needed=bool(memory.get("clarification_needed")),
@@ -684,5 +1001,6 @@ __all__ = [
     "build_interpretation_identity",
     "build_interpretation",
     "build_question_sequence",
+    "interpret_request_semantics",
     "assert_same_identity",
 ]
