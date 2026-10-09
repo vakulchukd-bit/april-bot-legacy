@@ -159,9 +159,17 @@ _OUTPUT_MARKERS = {
         "нарисуй диаграмму", "построй диаграмму", "сделай диаграмму", "создай схему",
         "нарисуй схему", "сделай схему",
     },
+    "graph": {
+        "plot a graph", "build a graph", "make a graph", "show a graph", "create a chart",
+        "show a chart", "plot the data", "построй график", "покажи график",
+        "создай график", "сделай график", "нарисуй график", "график функции",
+        "построй диаграмму данных", "визуализируй данные",
+    },
     "table": {
         "create table", "make a table", "show table", "build a table",
-        "создай таблицу", "сделай таблицу", "построй таблицу", "покажи таблицу",
+        "создай таблицу", "создайте таблицу", "создать таблицу", "сделай таблицу", "сделайте таблицу", "сделать таблицу",
+        "построй таблицу", "постройте таблицу", "построить таблицу", "покажи таблицу", "покажите таблицу", "показать таблицу",
+        "створи таблицю", "створіть таблицю", "побудуй таблицю", "побудуйте таблицю",
     },
 }
 
@@ -201,6 +209,16 @@ def _detect_requested_outputs(text: str) -> list[str]:
     # Image editing is an explicit generation operation.
     if _detect_image_modification(low) and "image" not in result:
         result.append("image")
+
+    # Common compound requests say "build a table and graph" only once. Recognize
+    # the chart noun together with an explicit construction/visualization verb.
+    has_graph_noun = bool(re.search(r"\b(?:graph|chart|plot|график|графика|графики|графиков)\b", low))
+    has_graph_action = bool(re.search(
+        r"\b(?:build|create|show|draw|plot|make|visualize|visualise|построй|постройте|построить|создай|создайте|создать|покажи|покажите|показать|нарисуй|нарисуйте|нарисовать|сделай|сделайте|сделать|визуализируй|визуализируйте|визуализировать|побудуй|побудуйте)\b",
+        low,
+    ))
+    if has_graph_noun and has_graph_action and "graph" not in result:
+        result.append("graph")
 
     if not result:
         result.append("text")
@@ -293,43 +311,90 @@ def _select_continuation_pairs(memory: dict[str, Any]) -> list[dict[str, Any]]:
     ][:6]
 
 
+_TASK_START_VERBS = (
+    # Russian / Ukrainian task starts. Keep this list action-oriented so a noun
+    # phrase such as "график Эйнштейна" is not accidentally split by itself.
+    "расскажи", "расскажите", "рассказать", "объясни", "объясните", "объяснить", "поясни", "поясните",
+    "покажи", "покажите", "показать", "сравни", "сравните", "сравнить", "вычисли", "вычислите", "вычислить",
+    "посчитай", "посчитайте", "посчитать", "рассчитай", "рассчитайте", "рассчитать", "построй", "постройте", "построить",
+    "создай", "создайте", "создать", "составь", "составьте", "составить", "найди", "найдите", "найти", "продолжи", "продолжите", "продолжить",
+    "перечисли", "перечислите", "опиши", "опишите", "проанализируй", "проанализируйте",
+    "напиши", "напишите", "проверь", "проверьте", "уточни", "уточните",
+    "приведи", "приведите", "подбери", "подберите", "выведи", "выведите",
+    "нарисуй", "нарисуйте", "нарисовать", "визуализируй", "визуализируйте", "визуализировать", "дай", "дайте", "дать",
+    "сделай", "сделайте", "сделать", "определи", "определите", "определить", "расширь", "расширьте", "расширить",
+    "перечисли", "перечислите", "перечислить", "опиши", "опишите", "описать", "проанализируй", "проанализируйте", "проанализировать",
+    "напиши", "напишите", "написать", "проверь", "проверьте", "проверить", "приведи", "приведите", "привести", "подбери", "подберите", "подобрать",
+    "розкажи", "розкажіть", "поясни", "поясніть", "порівняй", "порівняйте", "обчисли", "побудуй", "побудуйте", "створи", "створіть", "склади", "знайди", "знайдіть", "перевір", "перевірте", "намалюй", "намалюйте", "продовжи", "продовжіть",
+    "continue", "explain", "describe", "compare", "calculate", "compute", "build",
+    "create", "find", "list", "analyze", "analyse", "write", "check", "show",
+    "draw", "plot", "visualize", "visualise", "give", "make", "define", "summarize",
+)
+_TASK_START_WORDS = "|".join(re.escape(verb) for verb in sorted(_TASK_START_VERBS, key=len, reverse=True))
+_TASK_CONNECTORS = r"(?:(?:и|а также|а потом|и потом|а теперь|и еще|и ещё|а еще|а ещё|и дополнительно|затем|потом|также|отдельно|после этого|кроме того|and then|then|also|additionally)\s+)?"
+_TASK_CONNECTORS_TEXT = r"(?:и|а также|а потом|и потом|а теперь|и еще|и ещё|а еще|а ещё|и дополнительно|затем|потом|также|отдельно|после этого|кроме того|and then|then|also|additionally)"
+_TASK_START_PATTERN = re.compile(
+    r"\s+" + _TASK_CONNECTORS + r"(?=(?:" + _TASK_START_WORDS + r")\b)",
+    flags=re.IGNORECASE,
+)
+_LEADING_TASK_CONNECTOR = re.compile(
+    r"^" + _TASK_CONNECTORS_TEXT + r"\s+(?=(?:" + _TASK_START_WORDS + r")\b)",
+    flags=re.IGNORECASE,
+)
+_TASK_OR_QUESTION_START = _TASK_CONNECTORS + r"(?:" + _TASK_START_WORDS + r"|что|кто|где|когда|почему|как|какой|какая|какие|чем|сколько|зачем|what|who|where|when|why|how|which|how\s+many)\b"
+
+
+
+def _split_explicit_tasks(text: str) -> list[str]:
+    """Split a text span at clear task-start boundaries while preserving its words."""
+    source = _LEADING_TASK_CONNECTOR.sub("", str(text or "").strip(), count=1)
+    return [piece.strip() for piece in _TASK_START_PATTERN.split(source) if piece.strip()]
+
+
 def _split_request_sequence(text: str) -> list[str]:
-    """Split explicit multi-part requests without rewriting their wording."""
+    """Find ordered questions/tasks without rewriting or de-duplicating user text.
+
+    Boundaries are conservative: list markers, explicit question marks, semicolons,
+    and a new imperative/action clause. Ordinary commas and coordinated noun phrases
+    are deliberately not split.
+    """
     source = _text(text)
     if not source:
         return []
 
-    # Numbered/list lines are reliable boundaries; keep the original wording.
-    lines = [line.strip() for line in source.splitlines() if line.strip()]
+    lines = [line.strip() for line in source.splitlines() if line.strip()] or [source]
     parts: list[str] = []
-    for line in lines or [source]:
+    for line in lines:
         line = re.sub(r"^\s*(?:[-*•]|\d+[.)]|[a-zA-Z][.)])\s*", "", line).strip()
         if not line:
             continue
-        # Several direct questions in one paragraph are independent steps.
-        question_parts = [piece.strip() for piece in re.split(r"(?<=[?？])\s+", line) if piece.strip()]
-        if len(question_parts) > 1:
-            parts.extend(question_parts)
-        else:
-            parts.append(line)
+        # Question marks are strong boundaries. Also split sentence periods only
+        # when the next sentence visibly starts another task/question, avoiding
+        # ordinary explanatory sentences and most abbreviation false positives.
+        boundary_pattern = re.compile(
+            r"(?<=[?？])\s+|(?<=[.!])\s+(?=" + _TASK_OR_QUESTION_START + r")",
+            flags=re.IGNORECASE,
+        )
+        questions = [piece.strip() for piece in boundary_pattern.split(line) if piece.strip()]
+        for question in questions or [line]:
+            # A semicolon is an explicit task boundary even when there are only
+            # two parts (one separator).
+            semicolon_parts = [piece.strip() for piece in re.split(r"\s*;\s*", question) if piece.strip()]
+            for part in semicolon_parts or [question]:
+                parts.extend(_split_explicit_tasks(part) or [part])
 
-    # A single unnumbered line with semicolon-separated imperatives is also a
-    # useful task sequence; avoid splitting ordinary prose on commas.
-    if len(parts) == 1 and parts[0].count(";") >= 2:
-        parts = [piece.strip() for piece in parts[0].split(";") if piece.strip()]
-    # Stable de-duplication prevents a repeated line from generating duplicate work.
-    result: list[str] = []
-    seen: set[str] = set()
-    for part in parts:
-        key = re.sub(r"\s+", " ", part).casefold()
-        if key and key not in seen:
-            seen.add(key)
-            result.append(part)
-    return result or [source]
+    # Never collapse repeated steps: repetition can be intentional, and the output
+    # sequence must stay one-to-one with the user's requested order.
+    cleaned = [re.sub(r"\s+", " ", part).strip() for part in parts if part.strip()]
+    if len(cleaned) > 24:
+        # Keep every request, but combine the tail into one final ordered unit to
+        # bound per-turn memory searches and prevent unbounded preprocessing time.
+        cleaned = cleaned[:23] + ["; ".join(cleaned[23:])]
+    return cleaned or [source]
 
 
-def _build_question_sequence(text: str) -> list[dict[str, Any]]:
-    """Describe the user's requested steps and their Web artifact types."""
+def build_question_sequence(text: str) -> list[dict[str, Any]]:
+    """Public ordered decomposition used before State Manager retrieval."""
     sequence: list[dict[str, Any]] = []
     for index, item in enumerate(_split_request_sequence(text), start=1):
         outputs = _detect_requested_outputs(item)
@@ -340,6 +405,11 @@ def _build_question_sequence(text: str) -> list[dict[str, Any]]:
             "answer_in_order": True,
         })
     return sequence
+
+
+def _build_question_sequence(text: str) -> list[dict[str, Any]]:
+    """Compatibility alias for existing interpretation callers."""
+    return build_question_sequence(text)
 
 
 _CODE_MODIFICATION_MARKERS = (
@@ -502,6 +572,7 @@ def build_interpretation(
             "wants_code": "code" in requested_outputs,
             "wants_formula": "formula" in requested_outputs,
             "wants_diagram": "diagram" in requested_outputs,
+            "wants_graph": "graph" in requested_outputs,
             "wants_table": "table" in requested_outputs,
             "history_request": history_request,
             "history_count": history_count if history_request else 0,
@@ -612,5 +683,6 @@ __all__ = [
     "InterpretationIdentity",
     "build_interpretation_identity",
     "build_interpretation",
+    "build_question_sequence",
     "assert_same_identity",
 ]
