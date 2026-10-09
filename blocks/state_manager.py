@@ -383,6 +383,10 @@ def _looks_like_referential_followup(query: str) -> bool:
         "файл, который я присылал", "изображение, которое я прислал",
         "какого цвета", "какой цвет", "какая порода", "какой породы",
         "какого вида", "какого размера", "какой окрас", "какого окраса",
+        "предыдущее фото", "предыдущим фото", "предыдущую картинку", "предыдущей картинке",
+        "предыдущий файл", "предыдущий код", "прошлое фото", "прошлый файл",
+        "сравни с", "сравни это", "сравни с предыдущ", "сравни с прошлым",
+        "вернись к картинке", "вернись к фото", "вернись к файлу",
         "проверь еще раз", "проверь ещё раз", "перепроверь", "посмотри еще раз",
         "посмотри ещё раз", "я же скидывал картинку", "я скидывал фото",
     )
@@ -396,6 +400,21 @@ def _looks_like_referential_followup(query: str) -> bool:
         "эта", "этот", "эти", "так", "данный", "данная",
     }
     return len(tokens) <= 10 and bool(tokens & reference_tokens)
+
+
+def _looks_like_asset_reference(query: str) -> bool:
+    """Detect an explicit mention of a prior image/file/code artifact.
+
+    Such requests must anchor to the best matching asset turn, not blindly to
+    the immediately preceding unrelated turn.
+    """
+    low = _text(query).lower().replace("ё", "е")
+    markers = (
+        "фото", "картинк", "изображен", "скриншот", "файл", "код", "скрипт",
+        "photo", "picture", "image", "screenshot", "file", "code", "script",
+        "предыдущ", "прошл", "сравни", "вернись к",
+    )
+    return any(marker in low for marker in markers)
 
 
 def _looks_like_new_topic(query: str) -> bool:
@@ -473,6 +492,15 @@ def _row_modalities(row: dict[str, Any]) -> set[str]:
         result.add("image")
     if structured.get("file_contents"):
         result.add("file")
+    attachment_index = structured.get("attachment_index")
+    if isinstance(attachment_index, list):
+        for item in attachment_index:
+            if isinstance(item, dict):
+                kind = _text(item.get("kind")).lower()
+                if kind in {"file", "text_file"}:
+                    result.add("file")
+                elif kind == "image":
+                    result.add("image")
     return result
 
 
@@ -480,7 +508,16 @@ def _topic_label(row: dict[str, Any]) -> str:
     structured = _parse_json(row.get("structured_request"))
     dialogue = structured.get("dialogue") if isinstance(structured.get("dialogue"), dict) else {}
     cont = dialogue.get("continuation_context") if isinstance(dialogue.get("continuation_context"), dict) else {}
+    response = _parse_json(row.get("structured_response"))
+    response_meta = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
+    memory_record = response.get("dialogue_memory_record") or response_meta.get("dialogue_memory_record") or {}
+    if not isinstance(memory_record, dict):
+        memory_record = {}
+    attachment_index = structured.get("attachment_index") if isinstance(structured.get("attachment_index"), list) else []
+    first_attachment = next((x for x in attachment_index if isinstance(x, dict)), {})
     for value in (
+        memory_record.get("topic"),
+        (f"Файл {first_attachment.get('filename')}: {first_attachment.get('summary') or first_attachment.get('content_preview', '')[:90]}" if first_attachment.get("filename") else ""),
         cont.get("active_topic"),
         structured.get("request_structure", {}).get("user_goal") if isinstance(structured.get("request_structure"), dict) else "",
         row.get("user_text"),
@@ -595,6 +632,53 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return visible
 
 
+def _row_attachment_evidence(row: dict[str, Any]) -> str:
+    """Compact, searchable evidence retained with a USER↔APRIL pair.
+
+    Raw file/image bytes stay in dialogue_assets; this index contains only
+    bounded filenames, source snippets and the provider's grounded summary.
+    """
+    req = _parse_json(row.get("structured_request"))
+    resp = _parse_json(row.get("structured_response"))
+    chunks: list[str] = []
+    index = req.get("attachment_index")
+    if isinstance(index, list):
+        for item in index[:6]:
+            if not isinstance(item, dict):
+                continue
+            chunks.extend([
+                _text(item.get("filename")), _text(item.get("kind")),
+                _text(item.get("mime_type")), _text(item.get("content_preview"))[:3500],
+                _text(item.get("summary"))[:800],
+            ])
+    for item in req.get("attachments") or []:
+        if isinstance(item, dict):
+            chunks.extend([_text(item.get("filename")), _text(item.get("kind")), _text(item.get("source_type"))])
+    record = resp.get("dialogue_memory_record")
+    if not isinstance(record, dict):
+        metadata = resp.get("metadata") if isinstance(resp.get("metadata"), dict) else {}
+        record = metadata.get("dialogue_memory_record") if isinstance(metadata.get("dialogue_memory_record"), dict) else {}
+    chunks.extend([_text(record.get("topic")), _text(record.get("summary"))[:1400]])
+    # Include a bounded excerpt of the exact code/document output generated by
+    # April. This makes later requests about a function/symbol retrieve the pair
+    # that owns the output asset, without putting raw binary into JSONB.
+    for block in resp.get("render_blocks") or []:
+        if not isinstance(block, dict) or _text(block.get("type")).lower() != "code":
+            continue
+        chunks.extend([_text(block.get("filename")), _text(block.get("language")), _text(block.get("code") or block.get("content"))[:3500]])
+    asset_refs = resp.get("asset_refs") if isinstance(resp.get("asset_refs"), dict) else {}
+    for item in asset_refs.get("april_outputs") or []:
+        if isinstance(item, dict):
+            chunks.extend([_text(item.get("filename")), _text(item.get("output_type")), _text(item.get("language"))])
+    for key in ("entities", "visual_observations", "code_symbols", "file_purpose"):
+        value = record.get(key)
+        if isinstance(value, list):
+            chunks.extend(_text(part)[:400] for part in value[:12])
+        elif value:
+            chunks.append(_text(value)[:900])
+    return " ".join(part for part in chunks if part)[:9000]
+
+
 def _candidate_score(
     query: str,
     row: dict[str, Any],
@@ -613,7 +697,9 @@ def _candidate_score(
     query_tokens = _semantic_tokens(q)
     user_tokens = _semantic_tokens(user)
     answer_tokens = _semantic_tokens(april)
-    candidate_tokens = _semantic_tokens(" ".join(x for x in (user, user_en, april, april_en) if x))
+    attachment_evidence = _row_attachment_evidence(row)
+    candidate_text = " ".join(x for x in (user, user_en, april, april_en, attachment_evidence) if x)
+    candidate_tokens = _semantic_tokens(candidate_text)
 
     lexical = fuzz.token_set_ratio(
         " ".join(sorted(query_tokens)),
@@ -621,7 +707,7 @@ def _candidate_score(
     ) / 100.0 if query_tokens and candidate_tokens else 0.0
     overlap = _concept_overlap(query_tokens, candidate_tokens)
     partial = (
-        fuzz.partial_ratio(q, " ".join(x for x in (user, april, user_en, april_en) if x)) / 100.0
+        fuzz.partial_ratio(q, candidate_text) / 100.0
         if q and overlap > 0.0 else 0.0
     )
 
@@ -636,7 +722,7 @@ def _candidate_score(
     entity_overlap = _explicit_entity_overlap(query, row)
 
     q_domains = _domain_terms(q)
-    c_domains = _domain_terms(" ".join(x for x in (user, april, user_en, april_en) if x))
+    c_domains = _domain_terms(candidate_text)
     direction = (
         len(q_domains & c_domains) / max(1, len(q_domains))
         if q_domains else 0.0
@@ -693,6 +779,7 @@ def _candidate_score(
         "conversation_id": str(row.get("conversation_id") or ""),
         "interpretation_id": str(row.get("interpretation_id") or ""),
         "topic": _topic_label(row),
+        "attachment_evidence": attachment_evidence[:1800],
     }
 
 
@@ -705,6 +792,7 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
         "score": item.get("score"),
         "same_dialog": bool(item.get("same_dialog")),
         "message_id": _text(item.get("message_id")),
+        "attachment_evidence": (_text(item.get("attachment_evidence")) or _row_attachment_evidence(item))[:1800],
     }
 
 
@@ -841,7 +929,7 @@ def search_dialogue_context(
         if reference_followup and latest_same_dialog:
             # Pure pronoun/follow-up queries have no reliable lexical subject;
             # resolve them to the latest turn in the authenticated dialogue.
-            if float(best.get("entity_overlap") or 0.0) < 0.18:
+            if float(best.get("entity_overlap") or 0.0) < 0.18 and not _looks_like_asset_reference(query):
                 anchor = latest_same_dialog
         if anchor:
             anchor_msg = _text(anchor.get("message_id"))
