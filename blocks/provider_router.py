@@ -63,12 +63,13 @@ topics. Show the requested number of topics, clamped to 10. Default to 7 when th
 not specify a number. The user may then name a topic or give a hint and April should continue
 from the corresponding anchor/pairs. Keep the hidden remainder known to the processor; do not
 invent topics that are not in the supplied index.
-For an input image/screenshot, inspect the supplied image and describe/analyze what is visibly present. The supplied pixels are authoritative for the visual answer; do not invent, substitute, or infer an unrelated subject from memory or attachment text. If a visual detail is uncertain, say so instead of replacing it with a guessed object. An input image is NOT a request to generate an image.
-For an attached file, read the supplied input_file or ATTACHED_TEXT_FILES content and answer from the file itself when relevant. An input file is NOT a request to create/export a file.
-Text supplied together with an image or file is the user's instruction for those same attachments; keep attachment contents separate from CURRENT_REQUEST.
-Generation/editing is permission-based: only when INTERPRETATION.wants_image=true may C_APRIL_IMAGES_GENERATOR be used. Never infer image generation from the mere words "image", "photo", "picture", "картинка" or from attachment contents.
-For analyze_image, analyze_file, or analyze_input tasks, return the requested description/answer as text unless the user explicitly requested another output.
-For links/files/tables/diagrams/formulas/code, return the structured render block only when the user explicitly requested that output.
+For every input image/screenshot, inspect the actual supplied pixels. Give a useful grounded description with the main subject, visible colors/markings, posture/shape, nearby objects and scene context. Distinguish direct observations from uncertainty; never invent a breed, material, location or detail that the pixels do not support. For follow-ups, re-inspect the recalled original image if it is included. If multiple images are supplied, keep them labelled by filename/role; compare only when the user asks. An input image is NOT a request to generate an image.
+For every attached file, read the actual supplied input_file or ATTACHED_TEXT_FILES content. For source code, describe its real purpose, entry points, key functions, data flow and concrete problems visible in the supplied source; cite filenames/function names rather than giving a generic description. An input file is NOT a request to create/export a file.
+Text supplied with image/file inputs is the instruction for those attachments. Keep ATTACHMENT_INDEX, attachment role (USER_INPUT vs APRIL_OUTPUT), source message ID, and CURRENT_REQUEST distinct. In a continuation, use the original asset and its paired prior answer as evidence, not only the short prior user sentence.
+Generation/editing is permission-based: only when INTERPRETATION.wants_image=true may C_APRIL_IMAGES_GENERATOR be used. Never infer image generation from image words or attachment contents.
+For analyze_image, analyze_file, or analyze_input tasks, answer in explanatory text and retain enough specific facts to support follow-up questions. Avoid generic one-sentence summaries when the user asks what an image/file contains.
+For a code modification request, return an explanatory text block followed by a separate render block with type="code", language, filename, and the complete corrected code when size permits. Preserve unaffected behavior, do not replace missing sections with ellipses/placeholders, and do not claim the code was saved as a downloadable file unless an actual file artifact/link is supplied. If INTERPRETATION.wants_file=true and you return corrected source, also include an artifact {"type":"file","filename":"the_real_output_name.ext","mime_type":"the appropriate text MIME type","content":"the same complete corrected source text"}; never invent a filesystem path or URL. For a request to explain code only, do not rewrite it unasked.
+Use render blocks that match the requested output: type="code" for code, type="table" for tables, type="diagram" for diagrams, type="formula" for formulas. Keep narrative explanation as a text block before the structured block. Only create an output file artifact if explicitly requested and actual file contents are provided.
 
 Return JSON only:
 {
@@ -78,17 +79,23 @@ Return JSON only:
   "content": "same answer or concise equivalent",
   "summary": "one-sentence summary",
   "render_blocks": [
-    {
-      "type": "text",
-      "renderer": "MessageTextBlock",
-      "viewer": "MessageTextBlock",
-      "content": "..."
-    }
+    {"type":"text","renderer":"MessageTextBlock","viewer":"MessageTextBlock","content":"Grounded explanation in RETURN_LANGUAGE"}
   ],
-  "artifacts": []
+  "artifacts": [],
+  "dialogue_memory_record": {
+    "topic": "short stable subject label",
+    "summary": "grounded summary for future follow-ups",
+    "entities": [],
+    "visual_observations": [],
+    "file_purpose": "",
+    "code_symbols": [],
+    "attachment_refs": []
+  }
 }
 
-For an image request, artifacts must contain:
+When code is explicitly requested, include a render block like {"type":"code","renderer":"CodeBlock","viewer":"CodeBlock","language":"python","filename":"module.py","code":"<complete source>","content":"<same complete source>"}. The explanatory text remains a separate text block.
+
+For an image generation request, artifacts must contain:
 {
   "type": "image",
   "spec": {
@@ -548,6 +555,7 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
                 "score": item.get("score"),
                 "same_dialog": bool(item.get("same_dialog")),
                 "message_id": item.get("message_id"),
+                "attachment_evidence": _clip(item.get("attachment_evidence"), 1800),
             })
         return result
 
@@ -572,6 +580,8 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
                 "mime_type": _clip(item.get("mime_type"), 60),
                 "recalled_from_memory": bool(item.get("recalled_from_memory")),
                 "asset_message_id": _clip(item.get("asset_message_id"), 120),
+                "asset_role": _clip(item.get("asset_role") or "user_input", 32),
+                "output_type": _clip(item.get("output_type"), 40),
             })
 
     structured = {
@@ -587,6 +597,7 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
             "requested_outputs": structured_intent.get("requested_outputs") or ["text"],
             "wants_image": bool(structured_intent.get("wants_image")),
             "wants_file": bool(structured_intent.get("wants_file")),
+            "wants_code": bool(structured_intent.get("wants_code")),
             "wants_links": bool(structured_intent.get("wants_links")),
             "explicit_generation_request": bool(structured_intent.get("explicit_generation_request")),
         },
@@ -628,6 +639,7 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
         "INPUT_MODALITIES": modality_lines,
         "VISUAL_CONTEXT": visual_meta,
         "RECALLED_ASSETS": memory.get("restored_assets") or [],
+        "ATTACHMENT_INDEX": req.metadata.get("attachment_index", []) if isinstance(req.metadata, dict) else [],
         "ATTACHMENTS": req.metadata.get("attachments", []) if isinstance(req.metadata, dict) else [],
         "ATTACHED_TEXT_FILES": req.metadata.get("file_contents", []) if isinstance(req.metadata, dict) else [],
         "C_ARTIFACT_RENDER_PLAN": render_plan,
@@ -642,6 +654,7 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
                 "summary",
                 "render_blocks",
                 "artifacts",
+                "dialogue_memory_record",
             ],
             "image_generator": "C_APRIL_IMAGES_GENERATOR",
             "scene_authority": "C_ARTIFACT_CONTRACT",
@@ -664,11 +677,13 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
             if not isinstance(item, dict):
                 continue
             filename = _clip(item.get("filename") or "file", 160)
-            file_content = _clip(item.get("content") or "", 12000)
+            file_content = _clip(item.get("content") or "", 18000)
+            role = _clip(item.get("asset_role") or "user_input", 32)
+            source_message_id = _clip(item.get("asset_message_id") or "current", 120)
             if file_content:
                 content.append({
                     "type": "input_text",
-                    "text": f"ATTACHED_TEXT_FILE {filename}:\n{file_content}",
+                    "text": f"ATTACHED_TEXT_FILE role={role} source_message_id={source_message_id} filename={filename}:\n{file_content}",
                 })
 
     items = visual.get("items")
@@ -678,6 +693,13 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
                 continue
             image_url = _text(item.get("image_url"))
             if image_url:
+                filename = _clip(item.get("filename") or "image", 160)
+                role = _clip(item.get("asset_role") or "user_input", 32)
+                source_message_id = _clip(item.get("asset_message_id") or "current", 120)
+                content.append({
+                    "type": "input_text",
+                    "text": f"NEXT_INPUT_IMAGE role={role} filename={filename} source_message_id={source_message_id}; inspect the immediately following image as this asset.",
+                })
                 content.append({
                     "type": "input_image",
                     "image_url": image_url,
@@ -693,9 +715,18 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
             file_data = _text(item.get("file_data"))
             if not file_data:
                 continue
+            filename = _text(item.get("filename") or "file")
+            role = _clip(item.get("asset_role") or "user_input", 32)
+            source_message_id = _clip(item.get("asset_message_id") or "current", 120)
+            content.append({
+                "type": "input_text",
+                "text": f"NEXT_INPUT_FILE role={role} filename={filename} source_message_id={source_message_id}; inspect the immediately following file as this asset.",
+            })
+            # Keep the actual input_file payload to the Provider API's fields;
+            # role/identity metadata belongs in the adjacent input_text label.
             file_item: dict[str, Any] = {
                 "type": "input_file",
-                "filename": _text(item.get("filename") or "file"),
+                "filename": filename,
                 "file_data": file_data,
             }
             mime_type = _text(item.get("mime_type")).lower()
@@ -743,6 +774,14 @@ def normalize_render_blocks(
         item["type"] = block_type
         item.setdefault("renderer", renderer)
         item.setdefault("viewer", viewer)
+        if block_type == "code":
+            code_value = _text(item.get("code") or item.get("content") or item.get("text"))
+            if code_value:
+                item["code"] = code_value
+                item.setdefault("content", code_value)
+                item.setdefault("language", "text")
+                if not _text(item.get("filename")):
+                    item["filename"] = "generated-code.txt"
 
         # Do not pass an empty visible text block to Web.
         if block_type in {"text", "markdown"}:
@@ -819,6 +858,19 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
             "spec": dict(image_spec),
         })
 
+    memory_record = data.get("dialogue_memory_record") or data.get("memory_record") or {}
+    if not isinstance(memory_record, dict):
+        memory_record = {}
+    memory_record = {
+        "topic": _clip(memory_record.get("topic") or answer.split("\n", 1)[0], 180),
+        "summary": _clip(memory_record.get("summary") or data.get("summary") or answer, 1600),
+        "entities": [str(x)[:160] for x in (memory_record.get("entities") or [])[:16]] if isinstance(memory_record.get("entities"), list) else [],
+        "visual_observations": [str(x)[:300] for x in (memory_record.get("visual_observations") or [])[:12]] if isinstance(memory_record.get("visual_observations"), list) else [],
+        "file_purpose": _clip(memory_record.get("file_purpose"), 600),
+        "code_symbols": [str(x)[:160] for x in (memory_record.get("code_symbols") or [])[:20]] if isinstance(memory_record.get("code_symbols"), list) else [],
+        "attachment_refs": [dict(x) for x in (memory_record.get("attachment_refs") or [])[:8] if isinstance(x, dict)] if isinstance(memory_record.get("attachment_refs"), list) else [],
+    }
+
     return {
         "machine_response": {
             "answer": answer,
@@ -834,6 +886,7 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
                 "internal_request_en": internal_request_en,
                 "internal_answer_en": internal_answer_en,
                 "translation_route_version": TRANSLATION_ROUTE_VERSION,
+                "dialogue_memory_record": memory_record,
             },
             "artifacts": normalized_artifacts,
         }
