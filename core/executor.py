@@ -295,7 +295,7 @@ def _build_scene(
             "status": "complete",
             "provider_calls": 1,
             "provider_retries": 0,
-            "provider_max_output_tokens": 8000,
+            "provider_output_limit": "model_native_no_application_cap",
             "canonical_route": CANONICAL_ROUTE,
         },
         blocks=list(response.render_blocks or []),
@@ -957,7 +957,7 @@ async def execute(
                     "renderer": "FormulaRenderer",
                 },
                 "provider_policy": {
-                    "max_output_tokens": 8000,
+                    "output_limit": "model_native_no_application_cap",
                     "provider_calls_per_turn": 1,
                     "retry_count": 0,
                     "question_sequence_required": True,
@@ -1193,6 +1193,8 @@ async def execute(
                 raw.get("metadata", {}).get("dialogue_memory_record", {})
                 if isinstance(raw.get("metadata"), dict) else {}
             ),
+            "provider_fallback": bool(provider_metadata.get("provider_fallback")),
+            "provider_error_code": _text(provider_metadata.get("provider_error_code")),
         },
     )
 
