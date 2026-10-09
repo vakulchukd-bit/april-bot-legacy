@@ -354,7 +354,15 @@ def _is_history_request(query: str) -> bool:
     low = _text(query).lower().replace("ё", "е")
     if not low:
         return False
-    return any(marker.replace("ё", "е") in low for marker in _HISTORY_MARKERS)
+    if any(marker.replace("ё", "е") in low for marker in _HISTORY_MARKERS):
+        return True
+    # Keep direct/legacy callers on the same intent logic as Exkrutor. The import
+    # is lazy to avoid changing module initialization order.
+    try:
+        from blocks.interpretation_identity import interpret_request_semantics
+        return bool(interpret_request_semantics(query).get("history_request"))
+    except Exception:
+        return False
 
 
 def _history_topic_limit(query: str, default: int = 7) -> int:
@@ -1349,6 +1357,7 @@ def search_dialogue_context(
     has_image: bool = False,
     has_file: bool = False,
     has_voice: bool = False,
+    query_interpretation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Find the smallest reliable continuation point in the authenticated 12h memory.
 
@@ -1361,8 +1370,22 @@ def search_dialogue_context(
     state = hydrate(uid)
     all_rows = [row for row in (state.get("dialogue_pairs") or []) if isinstance(row, dict) and not _is_failed_provider_row(row)]
     reference_followup = _looks_like_referential_followup(query)
-    history_request = _is_history_request(query)
+    query_interpretation = dict(query_interpretation or {})
+    history_request = bool(query_interpretation.get("history_request")) or _is_history_request(query)
     new_topic_request = _looks_like_new_topic(query)
+    interpreted_direction = _text(query_interpretation.get("direction"))
+    interpreted_intent = _text(query_interpretation.get("primary_intent"))
+    _apr_timing_log(
+        "memory_intent_received",
+        user_key=_apr_diag_ref(uid),
+        dialog_key=_apr_diag_ref(dialog_id),
+        query_key=_apr_diag_ref(query),
+        history_request=history_request,
+        semantic_intent=interpreted_intent,
+        search_direction=interpreted_direction,
+        time_scope=_text(query_interpretation.get("time_scope")),
+        search_scope=_text(query_interpretation.get("search_scope")),
+    )
 
     scope_started = time.perf_counter()
     if history_request:
@@ -1845,6 +1868,7 @@ def prepare_dialogue_context(
     has_image: bool = False,
     has_file: bool = False,
     has_voice: bool = False,
+    query_interpretation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One processor-facing call: hydrate + search + continuation decision."""
     prepare_started = time.perf_counter()
@@ -1857,6 +1881,7 @@ def prepare_dialogue_context(
         has_image=has_image,
         has_file=has_file,
         has_voice=has_voice,
+        query_interpretation=query_interpretation,
     )
     result = {
         "window_hours": DIALOGUE_WINDOW_HOURS,
