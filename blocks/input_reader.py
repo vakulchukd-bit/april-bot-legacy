@@ -18,7 +18,10 @@ from typing import Any
 from blocks.image_reader import read_image_bytes
 from blocks.voice_reader import is_voice_field, validate_voice
 
-MAX_TEXT_FILE_CHARS = 18000
+# Source files commonly exceed 18k characters while still being small enough
+# to analyze in one Provider request. Keep a bounded limit, but do not silently
+# cut off ordinary Python modules near their closing definitions.
+MAX_TEXT_FILE_CHARS = 48000
 MAX_INLINE_FILE_BYTES = 10 * 1024 * 1024
 _TEXT_EXTENSIONS = {
     ".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".py", ".js",
@@ -109,6 +112,7 @@ def normalize_attachment(att: Attachment) -> Attachment:
             "mime_type": mime or "text/plain",
             "size_bytes": len(att.data),
             "text": text,
+            "source_chars": len(decoded),
             "truncated": len(decoded) > MAX_TEXT_FILE_CHARS,
             "source_type": "text_file",
             "reader": "input_reader_ru",
