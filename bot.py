@@ -136,6 +136,8 @@ def _prepare_attachments(
                     "mime_type": content_type or item.get("mime_type") or "text/plain",
                     "content": text,
                     "size_bytes": size_bytes,
+                    "reader_truncated": bool(item.get("truncated")),
+                    "source_chars": int(item.get("source_chars") or len(text)),
                     "asset_role": "user_input",
                 })
 
@@ -326,6 +328,8 @@ def _handle_payload(
                         "source_type": _text(meta.get("source_type") or kind),
                         "reader": _text(meta.get("reader")),
                         "provider_readable": bool(meta.get("provider_readable", False)),
+                        "reader_truncated": bool(meta.get("truncated", False)),
+                        "source_chars": int(meta.get("source_chars") or len(_text(meta.get("text")))),
                         "asset_role": "user_input",
                         "paired_message_id": message_id,
                     },
