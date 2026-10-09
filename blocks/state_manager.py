@@ -8,6 +8,7 @@ the Interpretation Identity layer.  It never owns a second database.
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import re
 import json
 import threading
@@ -22,6 +23,26 @@ DIALOGUE_WINDOW_SECONDS = DIALOGUE_WINDOW_HOURS * 3600
 
 _LOCK = threading.RLock()
 _STATES: dict[str, dict[str, Any]] = {}
+
+
+def _apr_timing_log(stage: str, started: float | None = None, **fields: Any) -> None:
+    """Low-overhead diagnostic timing; logging must never affect the request path."""
+    try:
+        payload = {"component": "state_manager", "stage": stage}
+        if started is not None:
+            payload["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        payload.update(fields)
+        print("[APRIL_TIMING] " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str), flush=True)
+    except Exception:
+        pass
+
+def _apr_diag_ref(value: Any) -> str:
+    """One-way short reference for joining logs without exposing raw user IDs."""
+    try:
+        raw = str(value or "").strip()
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10] if raw else ""
+    except Exception:
+        return ""
 
 
 _CONTINUATION_MARKERS = {
@@ -137,10 +158,15 @@ def hydrate(
     rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Refresh in-memory state from the canonical PostgreSQL dialogue store."""
+    hydrate_started = time.perf_counter()
     uid = _uid(user_id)
+    load_started = time.perf_counter()
+    load_source = "provided_rows" if rows is not None else "postgres_load_dialogue_pairs"
     if rows is None:
         from storage import load_dialogue_pairs
         rows = load_dialogue_pairs(uid, limit=0)
+    _apr_timing_log("history_rows_loaded", load_started, user_key=_apr_diag_ref(uid),
+        source=load_source, rows_loaded=len(rows or []))
 
     state = get_state(uid)
     with _LOCK:
@@ -150,6 +176,8 @@ def hydrate(
         _prune(state)
         state["last_activity"] = time.time()
         state["updated_at"] = state["last_activity"]
+        _apr_timing_log("hydrate_complete", hydrate_started, user_key=_apr_diag_ref(uid),
+            retained_pairs=len(state.get("dialogue_pairs") or []))
         return state
 
 
@@ -933,6 +961,7 @@ def search_dialogue_context(
     - neighboring turns;
     - whole-window topic index for history questions.
     """
+    search_started = time.perf_counter()
     uid = _uid(user_id)
     state = hydrate(uid)
     all_rows = [
@@ -943,6 +972,7 @@ def search_dialogue_context(
     history_request = _is_history_request(query)
     new_topic_request = _looks_like_new_topic(query)
 
+    scope_started = time.perf_counter()
     # Search the complete active dialogue, not merely its last turn.  Keep
     # ordinary continuation scoped to the requested conversation; only explicit
     # history requests may span the user's retained conversations.
@@ -958,6 +988,10 @@ def search_dialogue_context(
         ]
     else:
         rows = all_rows
+    _apr_timing_log("memory_scope", scope_started, user_key=_apr_diag_ref(uid),
+        dialog_key=_apr_diag_ref(dialog_id), conversation_key=_apr_diag_ref(conversation_id),
+        rows_in_window=len(all_rows), rows_in_scope=len(rows), history_request=history_request,
+        query_chars=len(str(query or "")))
     query_modalities = {
         modality for modality, enabled in (
             ("image", bool(has_image)),
@@ -966,6 +1000,7 @@ def search_dialogue_context(
         ) if enabled
     }
 
+    candidate_started = time.perf_counter()
     matches = [
         _candidate_score(
             query,
@@ -985,6 +1020,8 @@ def search_dialogue_context(
         reverse=True,
     )
 
+    _apr_timing_log("candidate_score_rank", candidate_started, candidates_scored=len(rows),
+        matches=len(matches))
     latest_same_dialog = max(
         (item for item in matches if bool(item.get("same_dialog"))),
         key=lambda item: (float(item.get("created_at") or 0.0), int(item.get("turn_index") or 0)),
@@ -1110,7 +1147,9 @@ def search_dialogue_context(
         reason = "history_request" if history_request else "new_request"
         active_topic = _text(query)[:140]
 
+    topic_index_started = time.perf_counter()
     topics = _build_topic_index(rows)
+    _apr_timing_log("topic_index_build", topic_index_started, rows=len(rows), topics=len(topics))
     history_limit = _history_topic_limit(query, 7)
     history_topics = topics[:history_limit] if history_request else []
     topic_index = topics[:5]
@@ -1168,6 +1207,12 @@ def search_dialogue_context(
         }
         state["updated_at"] = time.time()
 
+    _apr_timing_log("memory_search_total", search_started, user_key=_apr_diag_ref(uid),
+        dialog_key=_apr_diag_ref(dialog_id), conversation_key=_apr_diag_ref(conversation_id),
+        relation=relation, reason=reason, total_pairs=len(rows), candidates=len(matches),
+        selected_pairs=len(selected_for_context), topic_index_count=len(topic_index),
+        selected_message_keys=[_apr_diag_ref(x.get("message_id")) for x in selected_for_context if isinstance(x, dict) and x.get("message_id")],
+        anchor_message_key=_apr_diag_ref((result.get("anchor") or {}).get("message_id") if isinstance(result.get("anchor"), dict) else ""))
     return result
 
 
@@ -1183,6 +1228,7 @@ def prepare_dialogue_context(
     has_voice: bool = False,
 ) -> dict[str, Any]:
     """One processor-facing call: hydrate + search + continuation decision."""
+    prepare_started = time.perf_counter()
     context = search_dialogue_context(
         user_id,
         query,
@@ -1193,7 +1239,7 @@ def prepare_dialogue_context(
         has_file=has_file,
         has_voice=has_voice,
     )
-    return {
+    result = {
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "relation": context["relation"],
         "relation_confidence": context["relation_confidence"],
@@ -1210,6 +1256,10 @@ def prepare_dialogue_context(
         "anchor": deepcopy(context.get("anchor") or {}),
         "search": deepcopy(context),
     }
+    _apr_timing_log("prepare_dialogue_context_total", prepare_started,
+        relation=result.get("relation"), candidates=len(result.get("candidates") or []),
+        selected_pairs=len(result.get("selected_pairs") or []), topic_index_count=len(result.get("topic_index") or []))
+    return result
 
 
 def initialize() -> None:
