@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 import base64
+import hashlib
 import json
 import os
 import re
@@ -52,6 +53,26 @@ from storage import (
 
 PROCESSOR_VERSION = "april_exkrutor_single_route_v8_structured_chain_single_call"
 CANONICAL_ROUTE = "/api/v1/chat"
+
+
+def _apr_timing_log(stage: str, started: float | None = None, **fields: Any) -> None:
+    """Low-overhead diagnostic timing; logging must never affect the request path."""
+    try:
+        payload = {"component": "executor", "stage": stage}
+        if started is not None:
+            payload["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        payload.update(fields)
+        print("[APRIL_TIMING] " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str), flush=True)
+    except Exception:
+        pass
+
+def _apr_diag_ref(value: Any) -> str:
+    """One-way short reference for joining logs without exposing raw user IDs."""
+    try:
+        raw = str(value or "").strip()
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10] if raw else ""
+    except Exception:
+        return ""
 
 
 def _text(value: Any) -> str:
@@ -776,6 +797,7 @@ async def execute(
     translation: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
+    pipeline_started = time.perf_counter()
     uid = _text(user_id)
     original = _text(text)
     current_text = _text(internal_text or original)
@@ -798,12 +820,17 @@ async def execute(
         raise ValueError("EMPTY_REQUEST")
 
     # Processor owns DB bootstrap; harmless and idempotent after the first call.
+    db_started = time.perf_counter()
     init_db()
+    _apr_timing_log("db_bootstrap", db_started, user_key=_apr_diag_ref(uid))
 
     require_auth = str(os.getenv("APRIL_REQUIRE_AUTH", "1")).lower() not in {"0", "false", "no"}
+    auth_started = time.perf_counter()
     if require_auth and not is_authenticated_user(uid):
         raise ValueError("AUTHENTICATED_USER_REQUIRED")
+    _apr_timing_log("auth_check", auth_started, user_key=_apr_diag_ref(uid), required=require_auth)
 
+    identity_started = time.perf_counter()
     payload_identity = {
         "dialog_id": dialog_id or conversation_id,
         "conversation_id": conversation_id or dialog_id,
@@ -826,8 +853,15 @@ async def execute(
             flow_id=identity["flow_id"],
         )["interpretation_id"]
     )
+    _apr_timing_log(
+        "identity_bind", identity_started, user_key=_apr_diag_ref(uid),
+        dialog_key=_apr_diag_ref(identity.get("dialog_id")),
+        message_key=_apr_diag_ref(identity.get("message_id")),
+        flow_key=_apr_diag_ref(identity.get("flow_id")),
+    )
 
     # 12h memory search is owned by state_manager; PostgreSQL is only storage.
+    memory_started = time.perf_counter()
     dialogue_context = prepare_dialogue_context(
         uid,
         current_text,
@@ -841,15 +875,34 @@ async def execute(
             for item in attachments
         ),
     )
+    search_result = dialogue_context.get("search") if isinstance(dialogue_context.get("search"), dict) else {}
+    anchor = dialogue_context.get("anchor") if isinstance(dialogue_context.get("anchor"), dict) else {}
+    selected_pairs = dialogue_context.get("selected_pairs") or []
+    _apr_timing_log(
+        "dialogue_context_ready", memory_started, user_key=_apr_diag_ref(uid),
+        dialog_key=_apr_diag_ref(identity.get("dialog_id")),
+        message_key=_apr_diag_ref(identity.get("message_id")),
+        relation=dialogue_context.get("relation"), reason=dialogue_context.get("reason"),
+        total_pairs=search_result.get("total_pairs"), candidates=search_result.get("candidate_count", len(dialogue_context.get("candidates") or [])),
+        selected_pairs=len(selected_pairs), selected_message_keys=[_apr_diag_ref(x.get("message_id")) for x in selected_pairs if isinstance(x, dict) and x.get("message_id")],
+        anchor_message_key=_apr_diag_ref(anchor.get("message_id")), topic_index_count=len(dialogue_context.get("topic_index") or []),
+    )
 
     # A follow-up may refer to an image/file from earlier in this conversation.
     # Rehydrate only the assets attached to State Manager's selected anchor/pairs;
     # do not mix older files into NEW requests or when a fresh attachment exists.
+    restore_started = time.perf_counter()
     visual_context, attachments, file_inputs, file_contents, restored_assets = _restore_selected_assets(
         uid, identity, dialogue_context, visual_context, attachments, file_inputs, file_contents,
         current_request=current_text,
     )
+    _apr_timing_log(
+        "selected_asset_restore", restore_started, user_key=_apr_diag_ref(uid),
+        restored_assets=len(restored_assets or []), visual_items=len(visual_context or []),
+        file_inputs=len(file_inputs or []), file_contents=len(file_contents or []),
+    )
 
+    interpretation_started = time.perf_counter()
     interpretation = build_interpretation(
         current_request=current_text,
         original_request=original,
@@ -859,11 +912,19 @@ async def execute(
         visual_context=visual_context or [],
         identity=identity,
     )
+    _apr_timing_log(
+        "interpretation_ready", interpretation_started,
+        relation=(interpretation.get("dialogue") or {}).get("relation"),
+        task=(interpretation.get("intent") or {}).get("task"),
+        requested_outputs=(interpretation.get("intent") or {}).get("requested_outputs"),
+        question_sequence_count=len(((interpretation.get("request_structure") or {}).get("question_sequence") or [])),
+    )
 
     selected_rooms = _select_rooms(interpretation)
     render_plan = _renderer_plan(interpretation, selected_rooms)
 
     identity["flow_id"] = _text(identity["flow_id"])
+    request_build_started = time.perf_counter()
     request = MachineRequest(
         request_id=identity["flow_id"] or str(uuid.uuid4()),
         goal="answer_user_request",
@@ -979,10 +1040,15 @@ async def execute(
             "input_modalities": (interpretation.get("input") or {}).get("modalities", []),
         },
     )
+    _apr_timing_log("machine_request_build", request_build_started,
+        relation=dialogue_context.get("relation"), selected_pairs=len(dialogue_context.get("selected_pairs") or []),
+        candidates=len(dialogue_context.get("candidates") or []), input_chars=len(current_text),
+        request_id_key=_apr_diag_ref(getattr(request, "request_id", "")))
     request.fiber.identity.user_id = uid
     # Search index is deliberately separate from binary storage. It contains a
     # bounded source preview, exact filenames/roles and the message ID used to
     # restore original bytes. The original bytes remain in dialogue_assets.
+    request_metadata_started = time.perf_counter()
     attachment_index: list[dict[str, Any]] = []
     for item in (attachments or []):
         if not isinstance(item, dict):
@@ -1102,23 +1168,40 @@ async def execute(
         ],
         "translation": translation or {},
     }
+    _apr_timing_log("request_metadata_ready", request_metadata_started,
+        attachment_index_count=len(attachment_index), visual_items=len(visual_context or []),
+        file_inputs_count=len(file_inputs or []), file_contents_count=len(file_contents or []),
+        file_content_chars=sum(len(_text(x.get("content"))) for x in (file_contents or []) if isinstance(x, dict)))
 
-    started = time.perf_counter()
+    provider_started = time.perf_counter()
     provider_packet = await generate_text(request)
-    provider_ms = round((time.perf_counter() - started) * 1000, 1)
+    provider_ms = round((time.perf_counter() - provider_started) * 1000, 1)
+    provider_machine = provider_packet.get("machine_response") if isinstance(provider_packet, dict) else {}
+    provider_machine = provider_machine if isinstance(provider_machine, dict) else {}
+    provider_meta_for_log = provider_machine.get("metadata") if isinstance(provider_machine.get("metadata"), dict) else {}
+    _apr_timing_log("provider_wait_complete", provider_started,
+        request_id_key=_apr_diag_ref(getattr(request, "request_id", "")), provider_ms=provider_ms,
+        answer_chars=len(_text(provider_machine.get("answer") or provider_machine.get("content"))),
+        render_blocks=len(provider_machine.get("render_blocks") or []), artifacts=len(provider_machine.get("artifacts") or []),
+        input_tokens=(provider_meta_for_log.get("usage") or {}).get("input_tokens"),
+        output_tokens=(provider_meta_for_log.get("usage") or {}).get("output_tokens"),
+        provider_fallback=bool(provider_meta_for_log.get("provider_fallback")))
 
     raw = provider_packet.get("machine_response") if isinstance(provider_packet, dict) else None
     if not isinstance(raw, dict):
         raise RuntimeError("PROVIDER_CONTRACT_MISSING")
 
     provider_metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+    asset_summary_started = time.perf_counter()
     _persist_asset_analysis_summaries(
         uid,
         identity,
         attachment_index,
         provider_metadata.get("dialogue_memory_record"),
     )
+    _apr_timing_log("asset_summary_persist", asset_summary_started, attachment_index_count=len(attachment_index))
 
+    response_package_started = time.perf_counter()
     answer = _text(raw.get("answer") or raw.get("content"))
     if not answer:
         raise RuntimeError("CANONICAL_ANSWER_MISSING")
@@ -1145,14 +1228,19 @@ async def execute(
         render_blocks=raw_blocks,
         artifacts=raw_artifacts,
     )
+    _apr_timing_log("response_package_ready", response_package_started, answer_chars=len(answer),
+        raw_render_blocks=len(raw_blocks), raw_artifacts=len(raw_artifacts),
+        packaged_blocks=len(packaged.get("render_blocks") or []), packaged_artifacts=len(packaged.get("artifacts") or []))
 
     image_result = None
     if (interpretation.get("intent") or {}).get("wants_image"):
+        image_started = time.perf_counter()
         image_result = await _generate_image_artifact(
             interpretation,
             raw,
             identity,
         )
+        _apr_timing_log("image_generation", image_started, succeeded=bool(image_result))
         if image_result:
             packaged["artifacts"].append(image_result.get("artifact") or image_result)
             image_block = {
@@ -1216,6 +1304,7 @@ async def execute(
     if _text(dialogue_context.get("relation")).upper() == "NEW":
         turn_index = 0
 
+    scene_started = time.perf_counter()
     result = _build_scene(
         response,
         identity,
@@ -1239,6 +1328,8 @@ async def execute(
             ],
         },
     )
+    _apr_timing_log("scene_contract_build", scene_started,
+        render_blocks=len(response.render_blocks or []), answer_chars=len(response.answer or ""))
 
     # Persist the complete structured turn after Provider/SceneContract.
     # PostgreSQL remains storage only; State Manager will search these fields
@@ -1260,6 +1351,7 @@ async def execute(
     safe_visual_context["items"] = safe_visual_items
     safe_visual_context["has_input_images"] = bool(safe_visual_items)
 
+    output_asset_persist_started = time.perf_counter()
     generated_asset_saved = False
     if image_result:
         # The generator returns validated raw bytes as well as a scene artifact.
@@ -1377,6 +1469,9 @@ async def execute(
             if saved_output:
                 output_asset_refs.append({"filename": filename, "kind": "text_file" if mime.startswith("text/") else "file", "asset_role": "april_output", "output_type": "file", "message_id": identity["message_id"], "sha256": source_hash})
 
+    _apr_timing_log("output_asset_persist", output_asset_persist_started,
+        generated_asset_saved=generated_asset_saved, output_asset_refs=len(output_asset_refs))
+
     # Make the current Scene carry asset pointers and retrieval evidence as well
     # as the renderer blocks; no data URI or private file bytes enter the Scene.
     scene_contract = result.get("scene_contract") if isinstance(result.get("scene_contract"), dict) else {}
@@ -1421,6 +1516,7 @@ async def execute(
         "dialogue_memory_record": (response.metadata or {}).get("dialogue_memory_record", {}),
     })
 
+    pair_save_started = time.perf_counter()
     saved = save_dialogue_pair(
         uid,
         original or current_text,
@@ -1437,6 +1533,11 @@ async def execute(
         structured_request=structured_request,
         structured_response=structured_response,
     )
+    pair_save_ms = round((time.perf_counter() - pair_save_started) * 1000, 1)
+    _apr_timing_log("dialogue_pair_persist", saved=bool(saved), elapsed_ms=pair_save_ms,
+        answer_chars=len(answer), structured_request_fields=len(structured_request),
+        structured_response_fields=len(structured_response), render_blocks=len(response.render_blocks or []),
+        artifacts=len(response.artifacts or []))
 
     result.update(
         {
@@ -1462,6 +1563,10 @@ async def execute(
             "route": result.get("scene_contract", {}).get("metadata", {}).get("route", {}),
         }
     )
+    _apr_timing_log("execute_total", pipeline_started, user_key=_apr_diag_ref(uid),
+        dialog_key=_apr_diag_ref(identity.get("dialog_id")), message_key=_apr_diag_ref(identity.get("message_id")),
+        relation=dialogue_context.get("relation"), answer_chars=len(answer), saved=bool(saved),
+        provider_ms=provider_ms, restored_assets=len(restored_assets or []))
     return result
 
 
