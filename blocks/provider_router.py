@@ -50,6 +50,12 @@ Always treat these sections as structured input:
 3. NEW_DIALOGUE_REQUEST (always contains the literal current request; consult NEW_DIALOGUE_ACTIVE before treating it as a topic switch)
 4. ATTACHMENT_TASK_MAP / INPUT_MODALITIES / VISUAL_CONTEXT / ATTACHED_TEXT_FILES
 5. REQUEST_SEQUENCE (answer each explicit question/step in supplied order)
+   Each step's dialogue_search.relation and dialogue_search context were retrieved independently
+   from the authenticated user's history. For each step, use CONTINUE context only when that
+   step says CONTINUE; a NEW step is independent even if another step continues an old topic.
+   Never let the top-level DIALOGUE_RELATION override per-step relation. Resolve task dependencies
+   in sequence order and preserve step_index order in the answer and render_blocks.
+   If one subtask needs clarification, answer the other clear subtasks and ask only about that part.
 6. C_ARTIFACT_RENDER_PLAN and MCDOWELL_KATEX_PRESENTATION_POLICY
 7. SCENE_CONTRACT / OUTPUT_BUDGET_POLICY
 
@@ -153,7 +159,7 @@ its concise summary and selected anchor rather than full previous answers. If CL
 exists, honor its original_request and treat CURRENT_REQUEST as a clarification reply, not a replacement
 intent. For status topic_not_found or needs_more_detail, apologize briefly and say no clear match was found in saved history,
 without claiming the topic definitely never came up; don't repeat old options, and ask for a couple of concrete hints. Keep any resolved topic active.
-Use compact section maps to know what was already covered and how to deepen it. Do not repeat answered sections verbatim. On NEW, answer independently. Use topic history only when
+Use compact section maps to know what was already covered and how to deepen it. Do not repeat answered sections verbatim. On NEW, answer independently. For each REQUEST_SEQUENCE item, prefer its own dialogue_search relation/context (or compact r/c fields) over the top-level relation. A NEW item must not inherit another item's context. If one item needs clarification, answer all clear items and ask only about the unresolved item. Use topic history only when
 HISTORY_REQUEST=true. For multi-section
 explanations, use user-visible Markdown headings and put the same ordered heading/summary map in
 dialogue_memory_record.sections.
@@ -780,8 +786,54 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     sequence = data.get("REQUEST_SEQUENCE") if isinstance(data.get("REQUEST_SEQUENCE"), list) else []
     if sequence:
         for item in sequence:
-            if isinstance(item, dict):
-                item["request"] = _semantic_compress(item.get("request"), MAX_TOPIC_PROMPT_TOKENS - 24)
+            if not isinstance(item, dict):
+                continue
+            item["request"] = _semantic_compress(item.get("request"), MAX_TOPIC_PROMPT_TOKENS - 24)
+            if item.get("search_query"):
+                item["search_query"] = _semantic_compress(item.get("search_query"), 100)
+            task_search = item.get("dialogue_search")
+            if isinstance(task_search, dict):
+                task_search["topic"] = _semantic_compress(task_search.get("topic"), 70)
+                task_search["reason"] = _semantic_compress(task_search.get("reason"), 40)
+                task_search["clarification_prompt"] = _semantic_compress(task_search.get("clarification_prompt"), 90)
+                task_search["selected_pairs"] = [
+                    {
+                        "topic": _semantic_compress(pair.get("topic"), 35),
+                        "user": _semantic_compress(pair.get("user"), 45),
+                        "april": _semantic_compress(pair.get("april"), 60),
+                        "message_id": pair.get("message_id"),
+                        "sections": [
+                            {"heading": _semantic_compress(sec.get("heading"), 14),
+                             "summary": _semantic_compress(sec.get("summary"), 24),
+                             "order": sec.get("order"), "message_id": sec.get("message_id")}
+                            for sec in (pair.get("sections") or [])[:3] if isinstance(sec, dict)
+                        ],
+                    }
+                    for pair in (task_search.get("selected_pairs") or [])[:1] if isinstance(pair, dict)
+                ]
+                if isinstance(task_search.get("anchor"), dict):
+                    anchor = task_search["anchor"]
+                    task_search["anchor"] = {
+                        "topic": _semantic_compress(anchor.get("topic"), 35),
+                        "user": _semantic_compress(anchor.get("user"), 45),
+                        "april": _semantic_compress(anchor.get("april"), 60),
+                        "message_id": anchor.get("message_id"),
+                    }
+                if isinstance(task_search.get("selected_section"), dict):
+                    section = task_search["selected_section"]
+                    task_search["selected_section"] = {
+                        "topic": _semantic_compress(section.get("topic"), 35),
+                        "heading": _semantic_compress(section.get("heading"), 20),
+                        "summary": _semantic_compress(section.get("summary"), 35),
+                        "order": section.get("order"), "message_id": section.get("message_id"),
+                    }
+                task_search["clarification_options"] = [
+                    {"topic": _semantic_compress(option.get("topic"), 20),
+                     "heading": _semantic_compress(option.get("heading"), 18),
+                     "summary": _semantic_compress(option.get("summary"), 24),
+                     "message_id": option.get("message_id")}
+                    for option in (task_search.get("clarification_options") or [])[:2] if isinstance(option, dict)
+                ]
         data["REQUEST_SEQUENCE"] = sequence
     current_limit = max(1, MAX_TOPIC_PROMPT_TOKENS - 24) if len(sequence) <= 1 else max(1, min(MAX_TOPIC_PROMPT_TOKENS - 8, 420, max(24, MAX_PROMPT_TOKENS // 4)))
     data["CURRENT_REQUEST"] = _semantic_compress(source_current_request, current_limit)
@@ -955,15 +1007,54 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             outputs = item.get("output_types") or ["text"]
             if isinstance(outputs, list) and len(outputs) == 1:
                 outputs = outputs[0]
+            task_search = item.get("dialogue_search") if isinstance(item.get("dialogue_search"), dict) else {}
+            search_min = {
+                "status": task_search.get("status", "unavailable"),
+                "relation": task_search.get("relation", "NEW"),
+                "topic": _semantic_compress(task_search.get("topic"), max(8, summary_budget // 2)),
+                "reason": _semantic_compress(task_search.get("reason"), max(8, summary_budget // 3)),
+                "anchor": {
+                    "topic": _semantic_compress((task_search.get("anchor") or {}).get("topic"), max(8, summary_budget // 2)),
+                    "user": _semantic_compress((task_search.get("anchor") or {}).get("user"), max(8, summary_budget // 2)),
+                    "april": _semantic_compress((task_search.get("anchor") or {}).get("april"), max(12, summary_budget)),
+                    "message_id": (task_search.get("anchor") or {}).get("message_id"),
+                } if isinstance(task_search.get("anchor"), dict) and task_search.get("anchor") else {},
+                "selected_section": {
+                    "topic": _semantic_compress((task_search.get("selected_section") or {}).get("topic"), max(8, summary_budget // 2)),
+                    "heading": _semantic_compress((task_search.get("selected_section") or {}).get("heading"), max(8, summary_budget // 2)),
+                    "summary": _semantic_compress((task_search.get("selected_section") or {}).get("summary"), max(12, summary_budget)),
+                    "message_id": (task_search.get("selected_section") or {}).get("message_id"),
+                } if isinstance(task_search.get("selected_section"), dict) and task_search.get("selected_section") else {},
+                "selected_pairs": [
+                    {"topic": _semantic_compress(pair.get("topic"), max(8, summary_budget // 2)),
+                     "user": _semantic_compress(pair.get("user"), max(8, summary_budget // 2)),
+                     "april": _semantic_compress(pair.get("april"), max(12, summary_budget)),
+                     "message_id": pair.get("message_id"),
+                     "sections": [{"heading": _semantic_compress(sec.get("heading"), max(8, summary_budget // 2)),
+                                   "summary": _semantic_compress(sec.get("summary"), max(12, summary_budget // 2)),
+                                   "order": sec.get("order")} for sec in (pair.get("sections") or [])[:2] if isinstance(sec, dict)]}
+                    for pair in (task_search.get("selected_pairs") or [])[:1] if isinstance(pair, dict)
+                ],
+                "clarification_needed": bool(task_search.get("clarification_needed")),
+                "clarification_prompt": _semantic_compress(task_search.get("clarification_prompt"), max(8, summary_budget)),
+                "clarification_options": [
+                    {"topic": _semantic_compress(option.get("topic"), max(8, summary_budget // 2)),
+                     "heading": _semantic_compress(option.get("heading"), max(8, summary_budget // 2)),
+                     "summary": _semantic_compress(option.get("summary"), max(8, summary_budget))}
+                    for option in (task_search.get("clarification_options") or [])[:2] if isinstance(option, dict)
+                ],
+            }
             seq.append({
                 "i": item.get("step_index", idx + 1),
                 "q": _semantic_compress(item.get("request"), max(8, share)),
                 "o": outputs,
+                "r": task_search.get("relation", "NEW"),
+                "c": search_min,
             })
         identity_min = {k: v for k, v in (data.get("AUTHENTICATED_IDENTITY") or {}).items() if v}
         intent_min = data.get("INTERPRETATION") if isinstance(data.get("INTERPRETATION"), dict) else {}
         keep_intent = {k: v for k, v in intent_min.items() if k in {
-            "schema", "task", "requested_outputs", "wants_image", "wants_file", "wants_code", "wants_links", "explicit_generation_request"
+            "schema", "task", "requested_outputs", "wants_image", "wants_file", "wants_code", "wants_links", "wants_graph", "explicit_generation_request"
         }}
         dialogue_anchor = data.get("DIALOGUE_ANCHOR") if isinstance(data.get("DIALOGUE_ANCHOR"), dict) else {}
         anchor_min = {
@@ -1127,6 +1218,12 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     "i": item.get("step_index", idx + 1),
                     "q": _semantic_compress(item.get("request"), tiny_topic_budget),
                     "o": (item.get("output_types") or ["text"])[0] if isinstance(item.get("output_types") or ["text"], list) and len(item.get("output_types") or ["text"]) == 1 else (item.get("output_types") or ["text"]),
+                    "r": ((item.get("dialogue_search") or {}).get("relation", "NEW") if isinstance(item.get("dialogue_search"), dict) else "NEW"),
+                    "c": {
+                        "relation": ((item.get("dialogue_search") or {}).get("relation", "NEW") if isinstance(item.get("dialogue_search"), dict) else "NEW"),
+                        "topic": _semantic_compress(((item.get("dialogue_search") or {}).get("topic", "") if isinstance(item.get("dialogue_search"), dict) else ""), max(4, tiny_topic_budget)),
+                        "clarification_needed": bool(((item.get("dialogue_search") or {}).get("clarification_needed", False) if isinstance(item.get("dialogue_search"), dict) else False)),
+                    },
                 }
                 for idx, item in enumerate(original_sequence) if isinstance(item, dict)
             ]
@@ -1488,6 +1585,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "wants_file": bool(structured_intent.get("wants_file")),
             "wants_code": bool(structured_intent.get("wants_code")),
             "wants_links": bool(structured_intent.get("wants_links")),
+            "wants_graph": bool(structured_intent.get("wants_graph")),
             "explicit_generation_request": bool(structured_intent.get("explicit_generation_request")),
         },
         "DIALOGUE_RELATION": relation,
