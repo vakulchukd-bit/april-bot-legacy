@@ -19,7 +19,6 @@ from __future__ import annotations
 from typing import Any
 import base64
 import hashlib
-import importlib
 import json
 import os
 import re
@@ -33,15 +32,13 @@ from blocks.C_ARTIFACT_CONTRACT import (
     build_scene_contract,
     get_web_renderer_registration,
     list_registered_rooms,
-    ROOM_REGISTRY,
-    prepare_render_blocks_for_room_dispatch,
-    WEB_RENDERER_REGISTRY_VERSION,
 )
 from blocks.dialog_identity import resolve_dialog_identity, assert_identity_match
 from blocks.interpretation_identity import (
     build_interpretation_identity,
     build_interpretation,
     build_question_sequence,
+    interpret_request_semantics,
 )
 from blocks.provider_router import generate_text
 from blocks.state_manager import prepare_dialogue_context
@@ -56,7 +53,7 @@ from storage import (
 )
 
 
-PROCESSOR_VERSION = "april_exkrutor_single_route_v10_structured_room_signals"
+PROCESSOR_VERSION = "april_exkrutor_single_route_v9_per_question_search"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -164,33 +161,12 @@ def _identity_tuple(identity: dict[str, Any]) -> dict[str, str]:
 
 
 def _select_rooms(interpretation: dict[str, Any]) -> list[dict[str, Any]]:
-    """Select only C_ARTIFACT-registered rooms required by Interpretation."""
+    """Select registered rooms/engines only from C_ARTIFACT_CONTRACT."""
     intent = interpretation.get("intent") or {}
+    input_data = interpretation.get("input") or {}
     selected: list[dict[str, Any]] = []
+
     required_capabilities: list[str] = []
-    output_capabilities = {
-        "image": ("image_generation", "png", "gallery"),
-        "generated_image": ("image_generation", "png", "gallery"),
-        "gallery": ("gallery", "image_collection"),
-        "graph": ("graph", "series", "data_visualization"),
-        "graph_data": ("graph", "series", "data_visualization"),
-        "table": ("table", "structured_data", "tabular"),
-        "table_data": ("table", "structured_data", "tabular"),
-        "diagram": ("diagram", "geometry", "svg"),
-        "formula": ("formula", "latex", "math"),
-        "math": ("formula", "latex", "math"),
-        "code": ("software", "code", "analysis"),
-        "link": ("link", "url", "preview", "web"),
-        "file": ("link", "url", "preview", "web"),
-    }
-    requested = {
-        str(output or "").strip().lower().replace("-", "_")
-        for output in (intent.get("requested_outputs") or []) if str(output or "").strip()
-    }
-    aliases = {"chart": "graph", "plot": "graph", "graph_data": "graph", "table_data": "table", "math": "formula", "generated_image": "image", "image_artifact": "image", "hyperlink": "link"}
-    requested = {aliases.get(item, item) for item in requested}
-    for output in requested:
-        required_capabilities.extend(output_capabilities.get(output, ()))
     if intent.get("wants_image"):
         required_capabilities.extend(["image_generation", "png", "gallery"])
     if intent.get("wants_links"):
@@ -200,58 +176,63 @@ def _select_rooms(interpretation: dict[str, Any]) -> list[dict[str, Any]]:
     if intent.get("wants_formula"):
         required_capabilities.extend(["formula", "latex", "math"])
     if intent.get("wants_diagram"):
-        required_capabilities.extend(["diagram", "geometry", "svg"])
+        required_capabilities.extend(["diagram", "geometry"])
     if intent.get("wants_table"):
         required_capabilities.extend(["table", "structured_data", "tabular"])
     if intent.get("wants_graph"):
         required_capabilities.extend(["graph", "series", "data_visualization"])
-    required_capabilities.extend(str(x) for x in interpretation.get("routing_capabilities", []) if str(x))
-    required = set(required_capabilities)
 
-    seen_registry_keys: set[str] = set()
-    for registry_key, room in ROOM_REGISTRY.items():
-        if not room.enabled or registry_key in seen_registry_keys:
-            continue
-        if not set(room.capabilities).intersection(required):
-            continue
-        selected.append({
-            "registry_key": registry_key,
-            "room_id": room.room_id,
-            "room": room.room_id,
-            "module": room.module,
-            "class_name": room.class_name,
-            "capabilities": list(room.capabilities),
-            "artifact_type": room.artifact_type,
-            "room_type": room.room_type,
-            "role": room.role,
-            "enabled": room.enabled,
-            "is_engine": room.is_engine,
-        })
-        seen_registry_keys.add(registry_key)
+    # Domain hints from the current request are additive, never authoritative over
+    # the Interpretation decision.
+    required_capabilities.extend(
+        str(x) for x in interpretation.get("routing_capabilities", []) if str(x)
+    )
 
-    # Text remains the default representation, but do not claim an unrelated room
-    # was required. C_ARTIFACT still defines the MessageTextBlock contract.
+    seen: set[str] = set()
+    for room in list_registered_rooms():
+        if not room.enabled or room.room_id in seen:
+            continue
+        caps = set(room.capabilities)
+        if caps.intersection(required_capabilities):
+            selected.append(
+                {
+                    "room": room.room_id,
+                    "module": room.module,
+                    "capabilities": list(room.capabilities),
+                    "artifact_type": room.artifact_type,
+                    "room_type": room.room_type,
+                    "is_engine": room.is_engine,
+                }
+            )
+            seen.add(room.room_id)
+
+    # Text is always a legal primary output. C-ARTIFACT remains the renderer
+    # authority even when no specialized room was selected.
     if not selected:
-        selected = [{
-            "registry_key": registry_key,
-            "room_id": room.room_id,
-            "room": room.room_id,
-            "module": room.module,
-            "class_name": room.class_name,
-            "capabilities": list(room.capabilities),
-            "artifact_type": room.artifact_type,
-            "room_type": room.room_type,
-            "role": room.role,
-            "enabled": room.enabled,
-            "is_engine": room.is_engine,
-        } for registry_key, room in ROOM_REGISTRY.items() if registry_key == "C_IT_ROOM"]
+        selected = [
+            {
+                "room": room.room_id,
+                "module": room.module,
+                "capabilities": list(room.capabilities),
+                "artifact_type": room.artifact_type,
+                "room_type": room.room_type,
+                "is_engine": room.is_engine,
+            }
+            for room in list_registered_rooms(include_engines=False)
+            if room.room_id in {"it", "WEB_ROOM"}
+        ][:1]
 
-    # Existing image flow: image generation engine first, Gallery room for the
-    # same generated payload second. The executor still builds only one scene.
+    # For image generation, keep the generator first and gallery renderer second.
     if intent.get("wants_image"):
-        ordered_keys = ("C_APRIL_IMAGES_GENERATOR", "C_GALLERY_ROOM")
-        ordered = [item for key in ordered_keys for item in selected if item.get("registry_key") == key]
-        selected = ordered + [item for item in selected if item not in ordered]
+        ordered: list[dict[str, Any]] = []
+        for preferred in ("APRIL_IMAGES_GENERATION", "GALLERY_ROOM"):
+            for item in selected:
+                if item["room"] == preferred and item not in ordered:
+                    ordered.append(item)
+        selected = ordered + [
+            item for item in selected if item not in ordered
+        ]
+
     return selected
 
 
@@ -259,149 +240,34 @@ def _renderer_plan(
     interpretation: dict[str, Any],
     selected_rooms: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Build the exact output -> renderer/payload/room contract from C_ARTIFACT."""
+    """Ask C-ARTIFACT for concrete Web renderers; no local renderer map."""
     outputs = list((interpretation.get("intent") or {}).get("requested_outputs") or ["text"])
     plan: list[dict[str, Any]] = []
     seen: set[str] = set()
+
     for output in outputs:
-        requested = str(output or "text").strip().lower().replace("-", "_")
-        if not requested or requested in seen:
+        key = str(output or "text").strip().lower()
+        if key in seen:
             continue
-        seen.add(requested)
-        reg = get_web_renderer_registration(requested)
-        canonical = str(reg.get("representation") or requested)
-        matching_rooms = []
-        for item in selected_rooms:
-            caps = {str(cap).lower() for cap in (item.get("capabilities") or [])}
-            artifact_type = str(item.get("artifact_type") or "").lower()
-            if artifact_type == canonical or canonical in caps or (canonical == "image" and item.get("registry_key") in {"C_APRIL_IMAGES_GENERATOR", "C_GALLERY_ROOM"}):
-                matching_rooms.append(item)
-        plan.append({
-            "output": canonical,
-            "requested_output": requested,
-            "renderer": reg.get("renderer", "MessageTextBlock"),
-            "viewer": reg.get("viewer", reg.get("renderer", "MessageTextBlock")),
-            "payload_keys": list(reg.get("payload_keys") or []),
-            "web_registry_version": WEB_RENDERER_REGISTRY_VERSION,
-            "presentation_engine": "McDowell",
-            "room_signals_required": True,
-            "empty_payload_allowed": canonical in {"text", "markdown"},
-            "source_rooms": [item.get("room") or item.get("room_id") for item in matching_rooms],
-            "source_room_registry_keys": [item.get("registry_key") for item in matching_rooms],
-        })
+        seen.add(key)
+        reg = get_web_renderer_registration(key)
+        plan.append(
+            {
+                "output": key,
+                "renderer": reg.get("renderer", ""),
+                "viewer": reg.get("viewer", ""),
+                "payload_keys": list(reg.get("payload_keys") or []),
+                "presentation_engine": "McDowell",
+                "source_rooms": [
+                    item["room"]
+                    for item in selected_rooms
+                    if item.get("artifact_type") in {key, "gallery" if key == "image" else key}
+                    or key in set(item.get("capabilities") or [])
+                ],
+            }
+        )
     return plan
 
-
-def _activate_selected_render_rooms(
-    blocks: list[dict[str, Any]],
-    selected_rooms: list[dict[str, Any]],
-    interpretation: dict[str, Any],
-    identity: dict[str, str],
-) -> list[dict[str, Any]]:
-    """Run only the canonical C_ARTIFACT room selected for each valid visual block.
-
-    It normalizes structured data in the current authenticated turn; it does not
-    call a provider, retrieve memory, or create a second delivery route.
-    """
-    room_for_type = {
-        "graph": "C_GRAPH_ROOM",
-        "table": "C_TABLE_ROOM",
-        "diagram": "C_DIAGRAM_ROOM",
-        "formula": "C_FORMULA_ROOM",
-        "link": "C_LINK_ROOM",
-        "gallery": "C_GALLERY_ROOM",
-        "image": "C_GALLERY_ROOM",
-    }
-    selected_by_key = {str(item.get("registry_key") or ""): item for item in selected_rooms if isinstance(item, dict)}
-    dialogue = interpretation.get("dialogue") if isinstance(interpretation.get("dialogue"), dict) else {}
-    intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
-    topic_group = str(((dialogue.get("continuation_context") or {}).get("active_topic") or dialogue.get("active_topic") or "")).strip()
-    output: list[dict[str, Any]] = []
-    for index, original_block in enumerate(blocks):
-        block = dict(original_block)
-        kind = str(block.get("type") or block.get("artifact_type") or "text").strip().lower()
-        registry_key = room_for_type.get(kind)
-        # Images are generated by C_APRIL_IMAGES_GENERATOR first; C_GALLERY_ROOM
-        # only normalizes the real raster result into the Web GalleryBlock contract.
-        if kind == "image" and not bool(intent.get("wants_image")):
-            output.append(block)
-            continue
-        registration = selected_by_key.get(registry_key or "")
-        payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-        # A selected room is mandatory for structured visual dispatch; if no room
-        # was selected, retain the explicit payload for SceneContract to transport.
-        if not registration or not payload:
-            output.append(block)
-            continue
-        # C_GRAPH/TABLE/DIAGRAM/FORMULA/LINK/GALLERY are the canonical normalizers.
-        try:
-            module = importlib.import_module(str(registration.get("module") or ""))
-            room = getattr(module, "ROOM", None)
-            if room is None or not callable(getattr(room, "process", None)):
-                raise RuntimeError("REGISTERED_ROOM_PROCESS_MISSING")
-            task = {
-                **payload,
-                "payload": payload,
-                "title": payload.get("title") or block.get("title") or "",
-                "description": payload.get("description") or block.get("description") or "",
-                "scene_id": f"scene_{identity['message_id']}",
-                "turn_id": identity["message_id"],
-                "flow_id": identity["flow_id"],
-                "topic_group": topic_group,
-                "continuation": str(dialogue.get("relation") or "NEW").upper() == "CONTINUE",
-                "block_id": str(block.get("block_id") or block.get("id") or f"block_{index + 1}"),
-                "render_id": str(block.get("render_id") or f"render_{identity['message_id']}_{index + 1}"),
-                "role": registration.get("role") or registration.get("room_type") or "renderer",
-                "user_id": identity["user_id"],
-                "conversation_id": identity["conversation_id"],
-                "dialog_id": identity["dialog_id"],
-                "dialogue_sequence_id": identity["dialog_id"],
-                "message_id": identity["message_id"],
-                "interpretation_id": identity["interpretation_id"],
-                "source_context": {
-                    "user_id": identity["user_id"],
-                    "conversation_id": identity["conversation_id"],
-                    "dialogue_sequence_id": identity["dialog_id"],
-                    "turn_id": identity["message_id"],
-                    "flow_id": identity["flow_id"],
-                    "interpretation_id": identity["interpretation_id"],
-                    "relation": dialogue.get("relation"),
-                    "active_topic": topic_group,
-                },
-            }
-            artifact = room.process(task)
-            artifact_data = getattr(artifact, "data", {}) if artifact is not None else {}
-            artifact_data = artifact_data if isinstance(artifact_data, dict) else {}
-            room_payload = artifact_data.get("payload") if isinstance(artifact_data.get("payload"), dict) else {}
-            from blocks.C_ARTIFACT_CONTRACT import _has_render_payload as _contract_has_render_payload
-            if room_payload and _contract_has_render_payload(kind, room_payload, block):
-                block["payload"] = room_payload
-                block["room_signal"] = artifact_data.get("render_signal") if isinstance(artifact_data.get("render_signal"), dict) else {}
-                block["source_room"] = str(registration.get("room") or registration.get("room_id") or registry_key)
-                block["source_room_registry_key"] = registry_key
-                block["renderer"] = str((get_web_renderer_registration(kind) or {}).get("renderer") or block.get("renderer") or "MessageTextBlock")
-                block["viewer"] = str((get_web_renderer_registration(kind) or {}).get("viewer") or block["renderer"])
-                _apr_timing_log("room_render_signal", None,
-                    user_key=_apr_diag_ref(identity.get("user_id")), dialog_key=_apr_diag_ref(identity.get("dialog_id")),
-                    message_key=_apr_diag_ref(identity.get("message_id")), flow_key=_apr_diag_ref(identity.get("flow_id")),
-                    representation=kind, registry_key=registry_key, room_id=registration.get("room_id"),
-                    renderer=block.get("renderer"), payload_keys=sorted(room_payload.keys()), payload_valid=True, status="normalized")
-            else:
-                _apr_timing_log("room_render_signal", None,
-                    user_key=_apr_diag_ref(identity.get("user_id")), dialog_key=_apr_diag_ref(identity.get("dialog_id")),
-                    message_key=_apr_diag_ref(identity.get("message_id")), flow_key=_apr_diag_ref(identity.get("flow_id")),
-                    representation=kind, registry_key=registry_key, room_id=registration.get("room_id"),
-                    renderer=block.get("renderer"), payload_keys=sorted(payload.keys()), payload_valid=False, status="room_returned_no_valid_payload")
-        except Exception as exc:
-            # A room-specific failure must not erase a valid explicit provider payload.
-            _apr_timing_log("room_render_signal", None,
-                user_key=_apr_diag_ref(identity.get("user_id")), dialog_key=_apr_diag_ref(identity.get("dialog_id")),
-                message_key=_apr_diag_ref(identity.get("message_id")), flow_key=_apr_diag_ref(identity.get("flow_id")),
-                representation=kind, registry_key=registry_key, room_id=registration.get("room_id"),
-                renderer=block.get("renderer"), payload_keys=sorted(payload.keys()), payload_valid=False,
-                status="room_error_preserved_source_payload", error_type=type(exc).__name__)
-        output.append(block)
-    return output
 
 def _build_image_spec(
     raw: dict[str, Any],
@@ -1066,12 +932,50 @@ async def execute(
         flow_key=_apr_diag_ref(identity.get("flow_id")),
     )
 
-    # Discover task boundaries BEFORE relation classification. Each task then uses
-    # the existing State Manager independently; single-question messages retain the
-    # exact previous search path and cost profile.
+    # First infer the overall semantic direction, intent, time scope and memory
+    # need; only then split the request into ordered questions. The classifier is
+    # local/deterministic and does not add an API call or replace the existing splitter.
     memory_started = time.perf_counter()
-    question_sequence = build_question_sequence(original or current_text)
-    normalized_sequence = build_question_sequence(current_text)
+    semantic_started = time.perf_counter()
+    semantic_interpretation = interpret_request_semantics(original or current_text)
+    _apr_timing_log(
+        "semantic_preinterpretation", semantic_started,
+        user_key=_apr_diag_ref(uid),
+        dialog_key=_apr_diag_ref(identity.get("dialog_id")),
+        message_key=_apr_diag_ref(identity.get("message_id")),
+        semantic_intent=semantic_interpretation.get("primary_intent"),
+        search_direction=semantic_interpretation.get("direction"),
+        time_scope=semantic_interpretation.get("time_scope"),
+        topic_reference=semantic_interpretation.get("topic_reference"),
+        requires_memory=bool(semantic_interpretation.get("requires_memory")),
+        history_request=bool(semantic_interpretation.get("history_request")),
+        intent_score=semantic_interpretation.get("intent_score"),
+        intent_features=semantic_interpretation.get("features"),
+        reason=semantic_interpretation.get("reason"),
+    )
+    question_sequence = build_question_sequence(
+        original or current_text, parent_interpretation=semantic_interpretation
+    )
+    normalized_semantics = interpret_request_semantics(current_text)
+    normalized_sequence = build_question_sequence(
+        current_text, parent_interpretation=normalized_semantics
+    )
+    _apr_timing_log(
+        "question_decomposition_result",
+        user_key=_apr_diag_ref(uid),
+        dialog_key=_apr_diag_ref(identity.get("dialog_id")),
+        message_key=_apr_diag_ref(identity.get("message_id")),
+        question_count=len(question_sequence),
+        questions=[{
+            "step_index": item.get("step_index"),
+            "request_key": _apr_diag_ref(item.get("request")),
+            "semantic_intent": item.get("semantic_intent"),
+            "search_direction": item.get("search_direction"),
+            "time_scope": item.get("time_scope"),
+            "history_request": bool(item.get("history_request")),
+            "reason": item.get("semantic_reason"),
+        } for item in question_sequence],
+    )
     has_voice_input = any(_text(item.get("kind")).lower() == "voice" for item in attachments)
     search_kwargs = {
         "dialog_id": identity["dialog_id"],
@@ -1084,9 +988,40 @@ async def execute(
     question_contexts: list[dict[str, Any]] = []
 
     if len(question_sequence) <= 1:
-        dialogue_context = prepare_dialogue_context(uid, current_text, **search_kwargs)
+        single_semantics = {
+            "schema": "april_request_semantics_v1",
+            "primary_intent": semantic_interpretation.get("primary_intent"),
+            "direction": semantic_interpretation.get("direction"),
+            "time_scope": semantic_interpretation.get("time_scope"),
+            "topic_reference": semantic_interpretation.get("topic_reference"),
+            "requires_memory": semantic_interpretation.get("requires_memory"),
+            "history_request": semantic_interpretation.get("history_request"),
+            "search_scope": semantic_interpretation.get("search_scope"),
+            "relation_hint": semantic_interpretation.get("relation_hint"),
+            "reason": semantic_interpretation.get("reason"),
+            "features": semantic_interpretation.get("features", {}),
+        }
+        dialogue_context = prepare_dialogue_context(
+            uid, current_text, query_interpretation=single_semantics, **search_kwargs
+        )
         if question_sequence:
             question_sequence[0]["dialogue_search"] = _compact_question_search(dialogue_context, current_text)
+        _apr_timing_log(
+            "request_question_search", memory_started,
+            user_key=_apr_diag_ref(uid),
+            dialog_key=_apr_diag_ref(identity.get("dialog_id")),
+            message_key=_apr_diag_ref(identity.get("message_id")),
+            step_index=question_sequence[0].get("step_index") if question_sequence else 1,
+            query_key=_apr_diag_ref(current_text),
+            semantic_intent=single_semantics.get("primary_intent"),
+            search_direction=single_semantics.get("direction"),
+            history_request=bool(dialogue_context.get("history_request")),
+            relation=dialogue_context.get("relation"),
+            candidates=len(dialogue_context.get("candidates") or []),
+            selected_pairs=len(dialogue_context.get("selected_pairs") or []),
+            topic_index_count=len(dialogue_context.get("topic_index") or []),
+            status="ok",
+        )
     else:
         aligned_normalized = len(normalized_sequence) == len(question_sequence)
         for index, question_item in enumerate(question_sequence):
@@ -1095,7 +1030,26 @@ async def execute(
                 if aligned_normalized else _text(question_item.get("request"))
             )
             try:
-                task_context = prepare_dialogue_context(uid, search_query, **search_kwargs)
+                task_semantics = {
+                    "schema": "april_request_semantics_v1",
+                    "primary_intent": question_item.get("semantic_intent", "NEW_INFORMATION"),
+                    "direction": question_item.get("search_direction", "ANSWER_NEW_REQUEST"),
+                    "time_scope": question_item.get("time_scope", "UNSPECIFIED"),
+                    "topic_reference": question_item.get("topic_reference", "UNSPECIFIED"),
+                    "requires_memory": question_item.get("requires_memory", False),
+                    "history_request": question_item.get("history_request", False),
+                    "search_scope": "ALL_DIALOGUE_HISTORY" if question_item.get("history_request") else (
+                        "TOPIC_OR_ACTIVE_CONTEXT" if question_item.get("requires_memory") else "CURRENT_DIALOGUE"
+                    ),
+                    "relation_hint": "HISTORY_LOOKUP" if question_item.get("history_request") else "CONTINUE" if question_item.get("requires_memory") else "NEW",
+                    "reason": question_item.get("semantic_reason", ""),
+                    "features": {},
+                    "parent_context_dependency": bool(question_item.get("parent_context_dependency")),
+                    "parent_intent": question_item.get("parent_intent", ""),
+                }
+                task_context = prepare_dialogue_context(
+                    uid, search_query, query_interpretation=task_semantics, **search_kwargs
+                )
                 task_search = _compact_question_search(task_context, search_query)
             except Exception as exc:
                 # A task-search failure must not discard the whole user request.
@@ -1129,12 +1083,29 @@ async def execute(
                 selected_pairs=len(task_context.get("selected_pairs") or []) if isinstance(task_context, dict) else 0,
                 clarification_needed=bool(task_search.get("clarification_needed")),
                 status=task_search.get("status"),
+                semantic_intent=task_semantics.get("primary_intent"),
+                search_direction=task_semantics.get("direction"),
+                history_request=bool(task_context.get("history_request")) if isinstance(task_context, dict) else False,
+                topic_index_count=len(task_context.get("topic_index") or []) if isinstance(task_context, dict) else 0,
             )
 
         # Preserve the established top-level route contract by using the first
         # ordered task as the legacy turn anchor. All other per-task relation and
         # history results travel in REQUEST_SEQUENCE; no second dialogue is made.
         dialogue_context = dict(question_contexts[0] if question_contexts else {})
+        # Keep the legacy first-question anchor, but do not lose history topics when
+        # a history-recall item appears later in a compound request.
+        history_context = next((ctx for ctx in question_contexts if isinstance(ctx, dict) and ctx.get("history_request")), None)
+        if history_context:
+            dialogue_context["history_available_for_request"] = True
+            dialogue_context["history_topics"] = list(history_context.get("history_topics") or [])
+            dialogue_context["topic_index"] = list(history_context.get("topic_index") or dialogue_context.get("topic_index") or [])
+            dialogue_context["known_topic_count"] = max(
+                int(dialogue_context.get("known_topic_count") or 0),
+                int(history_context.get("known_topic_count") or 0),
+            )
+            dialogue_context["requested_topic_count"] = int(history_context.get("requested_topic_count") or 7)
+            dialogue_context["topic_table_markdown"] = _text(history_context.get("topic_table_markdown") or dialogue_context.get("topic_table_markdown"))
         if not dialogue_context:
             # Do not fall back to a whole-message retrieval if one per-question
             # search failed. That could accidentally replace the first task's
@@ -1221,11 +1192,14 @@ async def execute(
         attachments=attachments or [],
         visual_context=visual_context or [],
         identity=identity,
+        semantic_interpretation=semantic_interpretation,
     )
     request_structure = interpretation.setdefault("request_structure", {})
     request_structure["question_sequence"] = question_sequence
     request_structure["answer_sequence_in_order"] = True
-    request_structure["question_search_engine"] = "state_manager_per_question_v1"
+    request_structure["question_search_engine"] = "state_manager_per_question_semantic_v2"
+    request_structure["semantic_interpretation"] = semantic_interpretation
+    request_structure["semantic_interpretation_version"] = "april_request_semantics_v1"
     request_structure["question_search_count"] = len(question_sequence)
     request_structure["question_relations"] = [
         {
@@ -1242,6 +1216,9 @@ async def execute(
         task=(interpretation.get("intent") or {}).get("task"),
         requested_outputs=(interpretation.get("intent") or {}).get("requested_outputs"),
         question_sequence_count=len(((interpretation.get("request_structure") or {}).get("question_sequence") or [])),
+        semantic_intent=semantic_interpretation.get("primary_intent"),
+        search_direction=semantic_interpretation.get("direction"),
+        history_request=bool(semantic_interpretation.get("history_request")),
     )
 
     selected_rooms = _select_rooms(interpretation)
@@ -1638,28 +1615,6 @@ async def execute(
                 "content": packaged["answer"],
             }
         ]
-
-    # Canonical same-turn path: normalize explicit provider blocks, dispatch each
-    # eligible payload through its C_ARTIFACT-registered room, then let the one
-    # SceneContract attach authenticated identity and RenderMessage signals.
-    normalized_blocks = prepare_render_blocks_for_room_dispatch(
-        normalized_blocks,
-        answer=str(packaged.get("answer") or ""),
-        requested_outputs=(interpretation.get("intent") or {}).get("requested_outputs") or ["text"],
-    )
-    normalized_blocks = _activate_selected_render_rooms(
-        normalized_blocks,
-        selected_rooms,
-        interpretation,
-        identity,
-    )
-    if not normalized_blocks:
-        normalized_blocks = [{
-            "type": "text",
-            "renderer": "MessageTextBlock",
-            "viewer": "MessageTextBlock",
-            "content": str(packaged.get("answer") or ""),
-        }]
 
     response = MachineResponse(
         answer=packaged["answer"],
