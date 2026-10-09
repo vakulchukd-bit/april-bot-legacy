@@ -46,6 +46,7 @@ from storage import (
     load_dialogue_assets,
     save_dialogue_asset,
     save_dialogue_pair,
+    update_dialogue_asset_analysis,
 )
 
 
@@ -347,6 +348,49 @@ def _explicit_prior_asset_reference(value: Any) -> bool:
     return any(marker.replace("ё", "е") in low for marker in markers)
 
 
+def _requires_original_asset(value: Any, kind: str, cached_summary: str) -> bool:
+    """Decide whether a follow-up needs original bytes rather than its sidecar.
+
+    A cached summary is the default continuity representation. Original bytes are
+    reattached only when the user explicitly references an earlier asset or asks
+    for exact extraction/verification/editing that a summary cannot safely supply.
+    This gate does not decide whether to generate an image; Interpretation owns
+    that decision independently.
+    """
+    text = _text(value).lower().replace("ё", "е")
+    if not cached_summary or _explicit_prior_asset_reference(text):
+        return True
+
+    exact_read_markers = (
+        "что написано", "что там написано", "прочитай текст", "прочти текст",
+        "прочитай номер", "какой номер", "номер документа", "текст на фото",
+        "текст на изображении", "перепиши текст", "проверь данные на",
+        "приблизь", "увеличь фрагмент", "разбери мелкий текст",
+        "read the text", "what does it say", "extract the text", "read the number",
+        "zoom in", "verify the details", "transcribe the image", "ocr this",
+        "по этому фото", "по этой фотографии", "по этой картинке", "на основе фото",
+        "на основе этой картинки", "используй фото как референс", "используй картинку как референс",
+        "сделай вариант по фото", "как на этой фотографии", "отредактируй изображение",
+    )
+    if any(marker in text for marker in exact_read_markers):
+        return True
+
+    if str(kind or "").lower() in {"file", "text_file"}:
+        source_edit_markers = (
+            "исправь код", "исправь файл", "измени файл", "обнови код",
+            "улучши код", "оптимизируй код", "перепиши код", "улучши файл",
+            "найди ошибку в", "покажи полный код", "разбери строку",
+            "исправь этот скрипт", "refactor the code", "fix the code",
+            "improve the code", "optimize the code", "rewrite the code",
+            "edit the file", "patch the source", "show the full source",
+            "trace the bug in",
+        )
+        if any(marker in text for marker in source_edit_markers):
+            return True
+
+    return False
+
+
 def _source_code_from_block(block: dict[str, Any]) -> tuple[str, str, str] | None:
     language = _text(block.get("language") or block.get("lang") or "text").lower()
     filename = _text(block.get("filename") or "")
@@ -371,6 +415,114 @@ def _source_code_from_block(block: dict[str, Any]) -> tuple[str, str, str] | Non
     return code, language, ext
 
 
+def _persist_asset_analysis_summaries(
+    uid: str,
+    identity: dict[str, str],
+    attachment_index: list[dict[str, Any]],
+    memory_record: Any,
+) -> int:
+    """Persist provider-grounded attachment summaries beside exact source bytes."""
+    if not isinstance(memory_record, dict):
+        return 0
+
+    allowed: list[dict[str, str]] = []
+    for item in attachment_index:
+        if not isinstance(item, dict):
+            continue
+        role = _text(item.get("asset_role") or "user_input")
+        kind = _text(item.get("kind")).lower()
+        if role != "user_input" or kind not in {"image", "text_file", "file"}:
+            continue
+        if not bool(item.get("source_bytes_attached", True)):
+            continue
+        filename = os.path.basename(_text(item.get("filename")))[:240]
+        message_id = _text(item.get("asset_message_id") or identity.get("message_id"))
+        if filename and message_id:
+            allowed.append({"filename": filename, "kind": kind, "message_id": message_id, "role": role})
+
+    # De-duplicate index entries contributed by both metadata and content readers.
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in allowed:
+        key = (item["message_id"], item["filename"], item["kind"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(item)
+    allowed = deduped
+    if not allowed:
+        return 0
+
+    raw_summaries = memory_record.get("attachment_summaries")
+    summaries = [dict(item) for item in raw_summaries if isinstance(item, dict)] if isinstance(raw_summaries, list) else []
+
+    # Compatibility with providers that return the established memory fields but
+    # omit per-asset records: only use a fallback when one-to-one attribution is
+    # unambiguous. Never copy a composite answer onto every attached file.
+    if not summaries:
+        images = [item for item in allowed if item["kind"] == "image"]
+        files = [item for item in allowed if item["kind"] in {"file", "text_file"}]
+        observations = memory_record.get("visual_observations")
+        if len(images) == 1 and isinstance(observations, list) and observations:
+            summaries.append({
+                **images[0],
+                "asset_message_id": images[0]["message_id"],
+                "summary": "; ".join(_text(item) for item in observations if _text(item))[:1200],
+            })
+        file_purpose = _text(memory_record.get("file_purpose"))
+        if len(files) == 1 and file_purpose:
+            symbols = memory_record.get("code_symbols")
+            symbol_text = ", ".join(_text(item) for item in symbols[:8] if _text(item)) if isinstance(symbols, list) else ""
+            summaries.append({
+                **files[0],
+                "asset_message_id": files[0]["message_id"],
+                "summary": (file_purpose + (f" Key elements: {symbol_text}" if symbol_text else ""))[:1200],
+            })
+
+    changed = 0
+    for summary_item in summaries[:12]:
+        filename = os.path.basename(_text(summary_item.get("filename")))[:240]
+        kind = _text(summary_item.get("kind")).lower()
+        summary_text = _text(summary_item.get("summary"))[:1200]
+        details = summary_item.get("key_details")
+        if not isinstance(details, list):
+            details = []
+        requested_message_id = _text(summary_item.get("asset_message_id") or summary_item.get("message_id"))
+        if requested_message_id in {"current", "this_message"}:
+            requested_message_id = _text(identity.get("message_id"))
+        candidates = [
+            item for item in allowed
+            if item["filename"] == filename
+            and (not kind or item["kind"] == kind)
+            and (not requested_message_id or item["message_id"] == requested_message_id)
+        ]
+        if not candidates and not requested_message_id and filename:
+            candidates = [item for item in allowed if item["filename"] == filename and (not kind or item["kind"] == kind)]
+        if len(candidates) != 1:
+            continue
+        target = candidates[0]
+        if target["role"] != "user_input" or not summary_text:
+            continue
+        if update_dialogue_asset_analysis(
+            uid,
+            dialog_id=identity["dialog_id"],
+            conversation_id=identity["conversation_id"],
+            message_id=target["message_id"],
+            filename=target["filename"],
+            kind=target["kind"],
+            summary=summary_text,
+            key_details=details,
+        ):
+            changed += 1
+
+    if changed:
+        print(
+            "STATE: DIALOGUE ASSET ANALYSIS UPDATED "
+            + json.dumps({"count": changed, "source": "provider_attachment_summaries"}, ensure_ascii=False),
+            flush=True,
+        )
+    return changed
+
+
 def _restore_selected_assets(
     uid: str,
     identity: dict[str, str],
@@ -381,10 +533,12 @@ def _restore_selected_assets(
     file_contents: list[dict[str, Any]],
     current_request: str = "",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Restore all assets on the selected message in this authenticated dialog.
+    """Restore sidecars for the selected authenticated turn and original bytes on demand.
 
-    Current uploads take precedence. Older assets are added alongside them only
-    when the user explicitly asks to compare/reference an earlier attachment.
+    Current uploads take precedence. A known older asset is represented by its
+    semantic sidecar for ordinary continuity; original bytes are reattached only
+    when precise inspection, editing, comparison, or an uncached first analysis is
+    required.
     """
     has_current_asset = bool(visual_context or file_inputs or file_contents)
     if has_current_asset and not _explicit_prior_asset_reference(current_request):
@@ -427,6 +581,12 @@ def _restore_selected_assets(
         asset_metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
         source_type = _text(asset_metadata.get("source_type") or kind)
         asset_role = _text(asset_metadata.get("asset_role") or ("april_output" if source_type in {"generated_image", "april_output", "generated_file"} else "user_input"))
+        analysis_summary = _text(asset_metadata.get("analysis_summary"))[:1200]
+        analysis_key_details = asset_metadata.get("analysis_key_details")
+        if not isinstance(analysis_key_details, list):
+            analysis_key_details = []
+        analysis_key_details = [_text(item)[:220] for item in analysis_key_details if _text(item)][:8]
+        restore_original = _requires_original_asset(current_request, kind, analysis_summary)
         common = {
             "filename": filename,
             "content_type": mime_type,
@@ -439,9 +599,19 @@ def _restore_selected_assets(
             "provider_readable": True,
             "recalled_from_memory": True,
             "asset_message_id": _text(asset.get("message_id")),
+            "analysis_summary": analysis_summary,
+            "analysis_key_details": analysis_key_details,
+            "requires_original_analysis": restore_original,
         }
         attachments.append(common)
-        restored_meta.append({k: common[k] for k in ("filename", "mime_type", "kind", "asset_role", "output_type", "asset_message_id")})
+        restored_meta.append({k: common[k] for k in ("filename", "mime_type", "kind", "asset_role", "output_type", "asset_message_id", "analysis_summary", "analysis_key_details")})
+
+        # Recalled assets with a valid sidecar normally enter the dialogue as
+        # semantic context only. Reattach the original bytes for precise reads,
+        # explicit references, modifications, or when no sidecar exists yet.
+        if not restore_original:
+            continue
+
         if kind == "image" or mime_type.startswith("image/"):
             data_uri = _mime_data_uri(raw, mime_type if mime_type.startswith("image/") else "image/png")
             visual_context.append({
@@ -454,6 +624,9 @@ def _restore_selected_assets(
                 "asset_message_id": common["asset_message_id"],
                 "asset_role": asset_role,
                 "output_type": common["output_type"],
+                "analysis_summary": analysis_summary,
+                "analysis_key_details": analysis_key_details,
+                "requires_original_analysis": True,
             })
         elif kind == "text_file":
             text_value = _text(asset.get("text_content")) or _decode_saved_text(raw)
@@ -466,6 +639,9 @@ def _restore_selected_assets(
                 "asset_message_id": common["asset_message_id"],
                 "asset_role": asset_role,
                 "output_type": common["output_type"],
+                "analysis_summary": analysis_summary,
+                "analysis_key_details": analysis_key_details,
+                "requires_original_analysis": True,
             })
         else:
             file_inputs.append({
@@ -478,11 +654,26 @@ def _restore_selected_assets(
                 "asset_message_id": common["asset_message_id"],
                 "asset_role": asset_role,
                 "output_type": common["output_type"],
+                "analysis_summary": analysis_summary,
+                "analysis_key_details": analysis_key_details,
+                "requires_original_analysis": True,
             })
     if restored_meta:
+        # Do not place OCR or semantic details from documents into operational
+        # logs. The returned metadata still carries the sidecar into Provider.
+        log_assets = [
+            {
+                "filename": item.get("filename"),
+                "kind": item.get("kind"),
+                "asset_role": item.get("asset_role"),
+                "asset_message_id": item.get("asset_message_id"),
+                "analysis_cached": bool(item.get("analysis_summary")),
+            }
+            for item in restored_meta
+        ]
         print(
             "STATE: DIALOGUE ASSETS RESTORED "
-            + json.dumps({"count": len(restored_meta), "assets": restored_meta}, ensure_ascii=False),
+            + json.dumps({"count": len(restored_meta), "assets": log_assets}, ensure_ascii=False),
             flush=True,
         )
     return visual_context, attachments, file_inputs, file_contents, restored_meta
@@ -776,6 +967,15 @@ async def execute(
             "asset_role": _text(item.get("asset_role") or "user_input"),
             "asset_message_id": _text(item.get("asset_message_id") or identity["message_id"]),
             "source_type": _text(item.get("source_type"))[:100],
+            "analysis_summary": _text(item.get("analysis_summary"))[:1200],
+            "analysis_key_details": item.get("analysis_key_details") if isinstance(item.get("analysis_key_details"), list) else [],
+            "recalled_from_memory": bool(item.get("recalled_from_memory")),
+            "requires_original_analysis": bool(item.get("requires_original_analysis")),
+            "source_bytes_attached": (
+                bool(item.get("requires_original_analysis"))
+                if item.get("recalled_from_memory")
+                else (_text(item.get("kind")).lower() in {"image", "text_file"} or bool(item.get("provider_readable", True)))
+            ),
         })
     for item in (file_contents or []):
         if not isinstance(item, dict):
@@ -787,7 +987,12 @@ async def execute(
             "asset_role": _text(item.get("asset_role") or "user_input"),
             "asset_message_id": _text(item.get("asset_message_id") or identity["message_id"]),
             "content_preview": _text(item.get("content"))[:4500],
-            "summary": "",
+            "summary": _text(item.get("analysis_summary"))[:1200],
+            "analysis_summary": _text(item.get("analysis_summary"))[:1200],
+            "analysis_key_details": item.get("analysis_key_details") if isinstance(item.get("analysis_key_details"), list) else [],
+            "recalled_from_memory": bool(item.get("recalled_from_memory")),
+            "requires_original_analysis": bool(item.get("requires_original_analysis", True)),
+            "source_bytes_attached": True,
         })
     for item in (visual_context or []):
         if not isinstance(item, dict):
@@ -799,11 +1004,21 @@ async def execute(
             "asset_role": _text(item.get("asset_role") or "user_input"),
             "asset_message_id": _text(item.get("asset_message_id") or identity["message_id"]),
             "source_type": _text(item.get("source_type") or "image")[:100],
+            "analysis_summary": _text(item.get("analysis_summary"))[:1200],
+            "analysis_key_details": item.get("analysis_key_details") if isinstance(item.get("analysis_key_details"), list) else [],
+            "recalled_from_memory": bool(item.get("recalled_from_memory")),
+            "requires_original_analysis": bool(item.get("requires_original_analysis")),
+            "source_bytes_attached": not bool(item.get("recalled_from_memory")) or bool(item.get("requires_original_analysis")),
         })
     unique_index: list[dict[str, Any]] = []
-    index_by_asset_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    index_by_asset_key: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for item in attachment_index:
-        asset_key = (_text(item.get("asset_message_id")), _text(item.get("filename")), _text(item.get("asset_role")))
+        asset_key = (
+            _text(item.get("asset_message_id")),
+            _text(item.get("filename")),
+            _text(item.get("asset_role")),
+            _text(item.get("kind")),
+        )
         existing = index_by_asset_key.get(asset_key)
         if existing is None:
             existing = dict(item)
@@ -836,6 +1051,8 @@ async def execute(
                 "file_data": _text(item.get("file_data")),
                 "asset_role": _text(item.get("asset_role") or "user_input"),
                 "asset_message_id": _text(item.get("asset_message_id")),
+                "analysis_summary": _text(item.get("analysis_summary"))[:1200],
+                "analysis_key_details": item.get("analysis_key_details") if isinstance(item.get("analysis_key_details"), list) else [],
             }
             for item in file_inputs
         ],
@@ -847,6 +1064,8 @@ async def execute(
                 "content": _text(item.get("content")),
                 "asset_role": _text(item.get("asset_role") or "user_input"),
                 "asset_message_id": _text(item.get("asset_message_id")),
+                "analysis_summary": _text(item.get("analysis_summary"))[:1200],
+                "analysis_key_details": item.get("analysis_key_details") if isinstance(item.get("analysis_key_details"), list) else [],
             }
             for item in file_contents
         ],
@@ -860,6 +1079,14 @@ async def execute(
     raw = provider_packet.get("machine_response") if isinstance(provider_packet, dict) else None
     if not isinstance(raw, dict):
         raise RuntimeError("PROVIDER_CONTRACT_MISSING")
+
+    provider_metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+    _persist_asset_analysis_summaries(
+        uid,
+        identity,
+        attachment_index,
+        provider_metadata.get("dialogue_memory_record"),
+    )
 
     answer = _text(raw.get("answer") or raw.get("content"))
     if not answer:
