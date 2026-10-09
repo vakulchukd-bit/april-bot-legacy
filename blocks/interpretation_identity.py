@@ -267,6 +267,55 @@ def _select_continuation_pairs(memory: dict[str, Any]) -> list[dict[str, Any]]:
     ][:6]
 
 
+def _split_request_sequence(text: str) -> list[str]:
+    """Split explicit multi-part requests without rewriting their wording."""
+    source = _text(text)
+    if not source:
+        return []
+
+    # Numbered/list lines are reliable boundaries; keep the original wording.
+    lines = [line.strip() for line in source.splitlines() if line.strip()]
+    parts: list[str] = []
+    for line in lines or [source]:
+        line = re.sub(r"^\s*(?:[-*•]|\d+[.)]|[a-zA-Z][.)])\s*", "", line).strip()
+        if not line:
+            continue
+        # Several direct questions in one paragraph are independent steps.
+        question_parts = [piece.strip() for piece in re.split(r"(?<=[?？])\s+", line) if piece.strip()]
+        if len(question_parts) > 1:
+            parts.extend(question_parts)
+        else:
+            parts.append(line)
+
+    # A single unnumbered line with semicolon-separated imperatives is also a
+    # useful task sequence; avoid splitting ordinary prose on commas.
+    if len(parts) == 1 and parts[0].count(";") >= 2:
+        parts = [piece.strip() for piece in parts[0].split(";") if piece.strip()]
+    # Stable de-duplication prevents a repeated line from generating duplicate work.
+    result: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        key = re.sub(r"\s+", " ", part).casefold()
+        if key and key not in seen:
+            seen.add(key)
+            result.append(part)
+    return result or [source]
+
+
+def _build_question_sequence(text: str) -> list[dict[str, Any]]:
+    """Describe the user's requested steps and their Web artifact types."""
+    sequence: list[dict[str, Any]] = []
+    for index, item in enumerate(_split_request_sequence(text), start=1):
+        outputs = _detect_requested_outputs(item)
+        sequence.append({
+            "step_index": index,
+            "request": item[:1800],
+            "output_types": outputs or ["text"],
+            "answer_in_order": True,
+        })
+    return sequence
+
+
 _CODE_MODIFICATION_MARKERS = (
     "исправь код", "исправь этот код", "улучши код", "улучши этот код",
     "улучшить код", "оптимизируй код", "перепиши код", "обнови код",
@@ -332,6 +381,53 @@ def build_interpretation(
     # Referential questions such as "а про него еще?" are resolved by the
     # State Manager anchor, not by guessing from the current sentence.
     continuation_anchor = dict(memory.get("anchor") or {}) if isinstance(memory.get("anchor"), dict) else {}
+    identity_data = dict(identity or {})
+    current_identity = {
+        "user_id": _text(identity_data.get("user_id") or identity_data.get("april_id")),
+        "conversation_id": _text(identity_data.get("conversation_id")),
+        "dialog_id": _text(identity_data.get("dialog_id")),
+        "message_id": _text(identity_data.get("message_id")),
+        "flow_id": _text(identity_data.get("flow_id")),
+        "interpretation_id": _text(identity_data.get("interpretation_id")),
+    }
+    asset_slot = "continuation_context" if relation == "CONTINUE" else "new_dialogue_request"
+    asset_task_map: list[dict[str, Any]] = []
+    for item in attachments:
+        asset_task_map.append({
+            "filename": _text(item.get("filename"))[:240],
+            "kind": _text(item.get("kind") or "file").lower(),
+            "asset_role": _text(item.get("asset_role") or "user_input"),
+            "asset_message_id": _text(item.get("asset_message_id") or current_identity.get("message_id")),
+            "context_slot": asset_slot,
+            "analysis_summary": _text(item.get("analysis_summary"))[:1200],
+            "original_required": bool(item.get("requires_original_analysis", not bool(item.get("recalled_from_memory")))),
+        })
+    for item in visual_context:
+        asset_task_map.append({
+            "filename": _text(item.get("filename") or "image")[:240],
+            "kind": "image",
+            "asset_role": _text(item.get("asset_role") or "user_input"),
+            "asset_message_id": _text(item.get("asset_message_id") or current_identity.get("message_id")),
+            "context_slot": asset_slot,
+            "analysis_summary": _text(item.get("analysis_summary"))[:1200],
+            "original_required": bool(item.get("requires_original_analysis", not bool(item.get("recalled_from_memory")))),
+        })
+    # bot.ru presents image metadata and decoded image data separately. Merge
+    # those views into one semantic asset entry per original source.
+    unique_asset_task_map: list[dict[str, Any]] = []
+    seen_asset_keys: set[tuple[str, str, str, str]] = set()
+    for asset in asset_task_map:
+        key = (
+            _text(asset.get("asset_message_id")),
+            _text(asset.get("filename")),
+            _text(asset.get("kind")),
+            _text(asset.get("asset_role")),
+        )
+        if key in seen_asset_keys:
+            continue
+        seen_asset_keys.add(key)
+        unique_asset_task_map.append(asset)
+    asset_task_map = unique_asset_task_map
 
     task = _detect_task(
         original or text,
@@ -350,7 +446,7 @@ def build_interpretation(
 
     return {
         "schema": "april_interpretation_v2",
-        "identity": dict(identity or {}),
+        "identity": current_identity,
         "input": {
             "original_request": original,
             "normalized_request": text,
@@ -404,9 +500,12 @@ def build_interpretation(
                     for item in restored_assets[:4]
                 ],
             },
-            "new_dialogue": {} if relation == "CONTINUE" else {
-                "request": text,
-                "needs_independent_resolution": True,
+            # Keep the exact current request present on every turn. The active flag
+            # controls topic switching; a CONTINUE request is not reclassified as NEW.
+            "new_dialogue": {
+                "request": original or text,
+                "active": relation != "CONTINUE" and not history_request,
+                "needs_independent_resolution": relation != "CONTINUE" and not history_request,
             },
         },
         "visual": {
@@ -431,7 +530,18 @@ def build_interpretation(
             "history_count": history_count if history_request else 0,
             "history_topics": history_topics,
             "topic_table_markdown": _text(memory.get("topic_table_markdown")),
-            "new_dialogue_request": text if relation == "NEW" and not history_request else "",
+            "new_dialogue_request": original or text,
+            "new_dialogue_active": relation != "CONTINUE" and not history_request,
+            "continuation_context": selected_pairs if relation == "CONTINUE" else [],
+            "asset_task_map": asset_task_map,
+            "question_sequence": _build_question_sequence(original or text),
+            "answer_sequence_in_order": True,
+            "presentation_contract": {
+                "mcdowell_required": True,
+                "katex_required_for_math": True,
+                "scene_contract_required": True,
+            },
+            "improvement_policy": "Improve the requested result while preserving unaffected behavior; do not invent missing source content.",
             "output_plan": requested_outputs,
         },
     }
