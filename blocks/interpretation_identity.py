@@ -515,6 +515,10 @@ def build_interpretation(
                 "confidence": float(memory.get("relation_confidence") or 0.0),
                 "selected_pairs": selected_pairs,
                 "anchor": continuation_anchor,
+                "selected_section": dict(memory.get("selected_section") or {}),
+                "clarification_needed": bool(memory.get("clarification_needed")),
+                "pending_clarification": dict(memory.get("pending_clarification") or {}),
+                "clarification_resolution": dict(memory.get("clarification_resolution") or {}),
                 "history_topics": history_topics,
                 "known_topic_count": int(memory.get("known_topic_count") or len(history_topics)),
                 "restored_assets": [
@@ -560,6 +564,11 @@ def build_interpretation(
             "new_dialogue_request": original or text,
             "new_dialogue_active": relation != "CONTINUE" and not history_request,
             "continuation_context": selected_pairs if relation == "CONTINUE" else [],
+            "selected_section": dict(memory.get("selected_section") or {}),
+            "clarification_needed": bool(memory.get("clarification_needed")),
+            "pending_clarification": dict(memory.get("pending_clarification") or {}),
+            "clarification_resolution": dict(memory.get("clarification_resolution") or {}),
+            "topic_index": [dict(item) for item in (memory.get("topic_index") or []) if isinstance(item, dict)][:10],
             "asset_task_map": asset_task_map,
             "question_sequence": _build_question_sequence(original or text),
             "answer_sequence_in_order": True,
@@ -576,7 +585,10 @@ def build_interpretation(
         relation=relation, task=task, requested_outputs=requested_outputs,
         input_chars=len(text), selected_pairs=len(selected_pairs), history_topics=len(history_topics),
         question_sequence_count=len((result.get("request_structure") or {}).get("question_sequence") or []),
-        attachment_task_count=len(asset_task_map))
+        attachment_task_count=len(asset_task_map),
+        selected_section=_text((memory.get("selected_section") or {}).get("heading")),
+        clarification_needed=bool(memory.get("clarification_needed")),
+        clarification_resolved=bool(memory.get("clarification_resolution")))
     return result
 
 
