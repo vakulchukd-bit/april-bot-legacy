@@ -194,7 +194,14 @@ def _prepare_attachments(
 
 def _payload(result: dict[str, Any]) -> dict[str, Any]:
     scene = result.get("scene_contract") or {}
-    blocks = result.get("render_blocks") or scene.get("render_blocks") or []
+    # SceneContract is the only rendering authority. Prefer its complete block
+    # sequence even when a legacy top-level mirror is stale or shorter; this
+    # prevents a generated image/diagram signal from disappearing at bot.ru.
+    scene_blocks = scene.get("render_blocks") if isinstance(scene, dict) else None
+    legacy_blocks = result.get("render_blocks")
+    blocks = scene_blocks if isinstance(scene_blocks, list) and scene_blocks else (
+        legacy_blocks if isinstance(legacy_blocks, list) else []
+    )
     answer = _text(result.get("answer") or result.get("content"))
     if not answer:
         raise RuntimeError("CANONICAL_ANSWER_MISSING")
