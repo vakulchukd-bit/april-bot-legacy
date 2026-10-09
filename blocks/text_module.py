@@ -19,6 +19,7 @@ Executor -> TextModule -> Quantum Provider -> TextModule -> Artifact Contract ->
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -58,6 +59,26 @@ TEXT_OUTPUT_CHANNEL = {
 
 PATCH_LOG: list[str] = []
 TEXT_EXECUTION_LOG: list[dict[str, Any]] = []
+
+
+def _apr_timing_log(stage: str, started: float | None = None, **fields: Any) -> None:
+    """Low-overhead diagnostic timing; logging must never affect the request path."""
+    try:
+        payload = {"component": "text_module", "stage": stage}
+        if started is not None:
+            payload["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        payload.update(fields)
+        print("[APRIL_TIMING] " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str), flush=True)
+    except Exception:
+        pass
+
+def _apr_diag_ref(value: Any) -> str:
+    """One-way short reference for joining logs without exposing raw user IDs."""
+    try:
+        raw = str(value or "").strip()
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10] if raw else ""
+    except Exception:
+        return ""
 
 
 def safe_patch_log(message: Any) -> None:
@@ -451,12 +472,19 @@ async def process(user_id, text, state, energy="MEDIUM"):
     performs the one Luna Provider call and passes the canonical response
     envelope forward without semantic reclassification or duplicate wrapping.
     """
-    log_text_execution("TEXT_MODULE_ENTER", text)
+    process_started = time.perf_counter()
+    log_text_execution("TEXT_MODULE_ENTER", {"input_chars": len(safe_text(text)), "energy": energy})
     state = state if isinstance(state, dict) else {}
 
+    request_extract_started = time.perf_counter()
     machine_request = _extract_canonical_machine_request(state)
+    _apr_timing_log("canonical_request_extract", request_extract_started,
+        request_id_key=_apr_diag_ref(getattr(machine_request, "request_id", "")),
+        request_type=type(machine_request).__name__)
+    plan_started = time.perf_counter()
     plan = get_user_plan(user_id)
     runtime = build_plan_runtime(plan)
+    _apr_timing_log("plan_runtime_build", plan_started, plan=str(plan or "")[:24])
 
     log_text_execution(
         "CANONICAL_MACHINE_REQUEST_READY",
@@ -466,11 +494,18 @@ async def process(user_id, text, state, energy="MEDIUM"):
     # The provider request is canonical. Do not require or pass a second,
     # application-owned response token budget; the provider uses model-native
     # output capacity and the existing input-context allocator remains unchanged.
+    provider_started = time.perf_counter()
     output = await generate_text(machine_request)
+    _apr_timing_log("provider_call_returned", provider_started,
+        request_id_key=_apr_diag_ref(getattr(machine_request, "request_id", "")),
+        packet_type=type(output).__name__)
 
+    normalize_started = time.perf_counter()
     packet = _clean_provider_packet(output)
     reply, packet = normalize_provider_output(packet)
     reply = sanitize_model_output(reply)
+    _apr_timing_log("provider_output_normalize", normalize_started, answer_chars=len(reply),
+        render_blocks=len(_provider_packet_render_blocks(packet)) if isinstance(packet, dict) else 0)
 
     if not reply:
         raise RuntimeError("Quantum Provider returned an empty canonical answer.")
@@ -482,6 +517,7 @@ async def process(user_id, text, state, energy="MEDIUM"):
     state["provider_machine_response"] = _machine_response_from_packet(packet)
 
     # If Provider already supplied the canonical Fiber/Scene envelope, preserve it.
+    contract_started = time.perf_counter()
     existing_contract = packet.get("artifact_contract") if isinstance(packet, dict) else None
     if existing_contract is None and isinstance(packet, dict):
         existing_contract = packet.get("transport_contract")
@@ -510,6 +546,10 @@ async def process(user_id, text, state, energy="MEDIUM"):
         if mr is not None
         else _provider_packet_artifacts(packet)
     )
+    _apr_timing_log("transport_contract_ready", contract_started,
+        request_id_key=_apr_diag_ref(getattr(machine_request, "request_id", "")),
+        answer_chars=len(reply), render_blocks=len(blocks), artifacts=len(artifacts),
+        contract_source="provider" if existing_contract is not None else "created_here")
 
     log_text_execution(
         "TEXT_ARTIFACT_READY",
@@ -523,7 +563,7 @@ async def process(user_id, text, state, energy="MEDIUM"):
         },
     )
 
-    return {
+    result = {
         "type": "text",
         "content": reply,
         "answer": reply,
@@ -549,6 +589,10 @@ async def process(user_id, text, state, energy="MEDIUM"):
         "provider_model": TEXT_QUANTUM_MODEL,
         "summary_visible": False,
     }
+    _apr_timing_log("text_module_total", process_started,
+        request_id_key=_apr_diag_ref(getattr(machine_request, "request_id", "")),
+        answer_chars=len(reply), render_blocks=len(blocks), artifacts=len(artifacts), provider_calls=1)
+    return result
 
 def get_text_execution_log() -> list[dict[str, Any]]:
     return list(TEXT_EXECUTION_LOG)
