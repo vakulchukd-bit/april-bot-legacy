@@ -105,8 +105,12 @@ _OUTPUT_MARKERS = {
     },
     "file": {
         "create file", "make a file", "export file", "download file", "save to file",
-        "создай файл", "сделай файл", "выдай файл", "создай документ", "сделай документ",
-        "сохрани в файл", "экспортируй файл", "подготовь файл",
+        "создай файл", "сделай файл", "выдай файл", "выдай исправленный файл",
+        "выдай новый файл", "сохрани исправленный файл", "пришли файл с кодом",
+        "создай документ", "сделай документ", "сохрани в файл", "экспортируй файл", "подготовь файл",
+        "выдай улучшенный файл", "выдай файл с улучшенным кодом", "создай файл с исправленным кодом",
+        "сформируй файл с исправленным кодом", "сохрани исправленный код в файл",
+        "файл с улучшенным кодом", "дай файл с кодом", "пришли исправленный код файлом",
     },
     "link": {
         "give me a link", "send a link", "show link", "open link", "дай ссылку",
@@ -115,7 +119,10 @@ _OUTPUT_MARKERS = {
     "code": {
         "write code", "show code", "generate code", "provide code", "fix code",
         "write python", "write a script", "create a script", "дай код", "напиши код",
-        "покажи код", "сгенерируй код", "исправь код", "напиши скрипт", "создай скрипт",
+        "покажи код", "сгенерируй код", "исправь код", "исправь этот код", "улучши код",
+        "улучши этот код", "улучшить код", "оптимизируй код", "перепиши код", "обнови код",
+        "исправь скрипт", "перепиши скрипт", "исправь файл с кодом", "выдай исправленный код",
+        "выдай новый код", "выдай новый файл с кодом", "напиши скрипт", "создай скрипт",
     },
     "formula": {
         "write formula", "show formula", "solve equation", "write an equation",
@@ -260,6 +267,18 @@ def _select_continuation_pairs(memory: dict[str, Any]) -> list[dict[str, Any]]:
     ][:6]
 
 
+_CODE_MODIFICATION_MARKERS = (
+    "исправь код", "исправь этот код", "улучши код", "улучши этот код",
+    "улучшить код", "оптимизируй код", "перепиши код", "обнови код",
+    "исправь скрипт", "перепиши скрипт", "fix this code", "improve this code",
+    "refactor this code", "optimize this code", "rewrite this code",
+)
+
+def _is_code_modification_request(text: str) -> bool:
+    low = _text(text).lower().replace("ё", "е")
+    return any(marker.replace("ё", "е") in low for marker in _CODE_MODIFICATION_MARKERS)
+
+
 def build_interpretation(
     *,
     current_request: str,
@@ -309,6 +328,10 @@ def build_interpretation(
         has_file=has_file,
         wants_image=wants_image,
     )
+    # A modification verb requests a code edit; merely asking what a code file
+    # does remains analyze_file and never silently becomes code generation.
+    if _is_code_modification_request(original or text) and has_file:
+        task = "modify_code"
 
     if has_image and task == "answer_request":
         task = "analyze_image"
