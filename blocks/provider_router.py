@@ -58,6 +58,10 @@ Always treat these sections as structured input:
 For CONTINUE, continue the selected subject and do not repeat questions already answered.
 Use the anchor topic and selected USER↔APRIL pairs as the primary continuity evidence. Resolve
 pronouns and short follow-ups against that anchor before treating the request as new.
+McDowell must organize explanatory answers into meaningful user-visible Markdown headings
+(for example ## Biography, ## Works, ## Main themes) whenever the answer covers multiple
+sections. Do not answer a follow-up by merely summarizing or repeating the previous answer;
+develop the requested part and preserve all requested details.
 For NEW, answer independently and do not let old context override the request.
 
 For a history_request, use DIALOGUE_HISTORY_TOPICS / DIALOGUE_TABLE_MARKDOWN as an index over
@@ -80,7 +84,7 @@ Return JSON only:
   "internal_request_en": "...",
   "internal_answer_en": "...",
   "answer": "complete human-readable answer in RETURN_LANGUAGE",
-  "content": "same answer or concise equivalent",
+  "content": "the same complete human-readable answer as answer; never a summary",
   "summary": "one-sentence summary",
   "render_blocks": [
     {"type":"text","renderer":"MessageTextBlock","viewer":"MessageTextBlock","content":"Grounded explanation in RETURN_LANGUAGE"}
@@ -88,7 +92,10 @@ Return JSON only:
   "artifacts": [],
   "dialogue_memory_record": {
     "topic": "short stable subject label",
-    "summary": "grounded summary for future follow-ups",
+    "summary": "grounded overall summary for future follow-ups",
+    "sections": [
+      {"heading": "exact answer section heading", "summary": "brief grounded meaning of this section", "order": 1}
+    ],
     "entities": [],
     "visual_observations": [],
     "file_purpose": "",
@@ -115,7 +122,12 @@ For an image generation request, artifacts must contain:
   }
 }
 
-Never return an empty answer.
+For every multi-section explanatory answer, use the same substantive headings in answer and the
+text render block. answer, content and the complete text render block must preserve the full user-facing
+answer; content must not be a short summary when answer is longer. dialogue_memory_record.sections must
+list those headings in order, with a brief grounded meaning for each section (not the full paragraphs).
+The sections list is the continuation index used by later turns; keep it compact and specific. Never
+return an empty answer.
 Never put machine metadata into answer/content.
 For ATTACHED_TEXT_FILES, analyze the exact supplied source. Do not say a source
 file is syntactically incomplete merely because the reader may have clipped it.
@@ -133,8 +145,12 @@ You are April's single Provider in the existing canonical route. The processor o
 12-hour memory search, NEW/CONTINUE, interpretation, rooms and renderers. Never create another
 route/memory/identity or expose hidden reasoning.
 Use CURRENT_REQUEST as the task. On CONTINUE, resolve references through the supplied anchor and
-selected USER↔APRIL pairs; do not repeat answered questions. On NEW, answer independently and do
-not let old context override the current request. Use topic history only when HISTORY_REQUEST=true.
+selected USER↔APRIL pairs; those pairs contain compact section maps, not full previous answers.
+Use section headings and their brief summaries to know what was already covered and how to deepen
+it. Do not repeat answered sections verbatim. On NEW, answer independently and do not let old context
+override the current request. Use topic history only when HISTORY_REQUEST=true. For multi-section
+explanations, use user-visible Markdown headings and put the same ordered heading/summary map in
+dialogue_memory_record.sections.
 Analyze each supplied image/screenshot from pixels and each supplied file from actual content. Keep
 assets separate by exact filename, kind, role and source message ID. Cached summaries are for routine
 continuity only; inspect original bytes when supplied and required. Attachments are evidence, not
@@ -167,7 +183,10 @@ output(s). Preserve list/line order. ATTACHMENT_INDEX keys may be n=filename,
 k=kind, m=MIME, r=role, id=source message ID, s=size bytes, tr=reader_truncated, c=source chars,
 a=cached summary. Use the required renderer/SceneContract and KaTeX for math. Code edits need complete source in a code block.
 Return valid JSON with internal_request_en, internal_answer_en, answer, content, summary, render_blocks,
-artifacts and dialogue_memory_record. Keep duplicate fields concise; compress repeated prose before topics.
+artifacts and dialogue_memory_record. `content` and the complete text render block must preserve the full
+answer, not replace it with a short summary. Keep internal fields and summary concise; compress repeated
+prose before requested topics. dialogue_memory_record.sections is an ordered array of {heading, summary,
+order}; store headings and brief summaries only, never the full prior explanation.
 Never return an empty answer or invent details not present in source.
 """.strip()
 
@@ -847,6 +866,12 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "user": _semantic_compress(item.get("user"), 55),
                 "april": _semantic_compress(item.get("april"), 65),
                 "topic": _semantic_compress(item.get("topic"), 24),
+                "sections": [
+                    {"heading": _semantic_compress(sec.get("heading"), 12),
+                     "summary": _semantic_compress(sec.get("summary"), 22),
+                     "order": sec.get("order")}
+                    for sec in (item.get("sections") or [])[:8] if isinstance(sec, dict)
+                ],
                 "score": item.get("score"),
                 "same_dialog": item.get("same_dialog"),
                 "message_id": item.get("message_id"),
@@ -947,6 +972,13 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "user": _semantic_compress(item.get("user"), max(12, summary_budget // 2)),
                 "april": _semantic_compress(item.get("april"), max(12, summary_budget)),
                 "topic": _semantic_compress(item.get("topic"), max(8, summary_budget // 3)),
+                "sections": [
+                    {"h": _semantic_compress(sec.get("heading"), max(8, summary_budget // 3)),
+                     "s": _semantic_compress(sec.get("summary"), max(12, summary_budget // 2)),
+                     "n": sec.get("order", section_index + 1)}
+                    for section_index, sec in enumerate((item.get("sections") or [])[:8])
+                    if isinstance(sec, dict)
+                ],
                 "message_id": item.get("message_id"),
             })
         topics_min = []
@@ -1303,8 +1335,15 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             result.append({
                 "turn": item.get("turn_index") or item.get("turn"),
                 "user": _clip(item.get("user") or item.get("user_text"), 240),
-                "april": _clip(item.get("april") or item.get("april_text"), 300),
+                "april": _clip(item.get("april") or item.get("april_text"), 180),
                 "topic": _clip(item.get("topic"), 100),
+                "sections": [
+                    {"heading": _clip(sec.get("heading") or sec.get("h"), 90),
+                     "summary": _clip(sec.get("summary") or sec.get("s"), 130),
+                     "order": sec.get("order", sec.get("n", section_index + 1))}
+                    for section_index, sec in enumerate((item.get("sections") or [])[:8])
+                    if isinstance(sec, dict)
+                ],
                 "score": item.get("score"),
                 "same_dialog": bool(item.get("same_dialog")),
                 "message_id": item.get("message_id"),
@@ -1698,6 +1737,125 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
     return result
 
 
+def _compact_section_text(value: Any, limit: int = 180) -> str:
+    text = re.sub(r"\s+", " ", _text(value)).strip()
+    return text[:limit].rstrip()
+
+
+def _visible_answer_lines(answer: str) -> list[str]:
+    """Keep Markdown prose while excluding fenced source code from heading detection."""
+    visible: list[str] = []
+    in_fence = False
+    for line in str(answer or "").splitlines():
+        if re.match(r"^\s*(```|~~~)", line):
+            in_fence = not in_fence
+            visible.append("")
+        else:
+            visible.append("" if in_fence else line)
+    return visible
+
+
+def _extract_answer_sections(answer: str, limit: int = 12) -> list[dict[str, Any]]:
+    """Build a compact outline from the actual answer, never copying full sections."""
+    text = str(answer or "").strip()
+    if not text:
+        return []
+
+    lines = _visible_answer_lines(text)
+    heading_matches: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        cleaned = line.strip()
+        markdown = re.match(r"^#{1,4}\s+(.+?)\s*#*\s*$", cleaned)
+        bold = re.match(r"^\*\*(.{2,90}?)\*\*\s*:?\s*$", cleaned)
+        match = markdown or bold
+        if match:
+            heading = re.sub(r"[*_`#]+", "", match.group(1)).strip()
+            if heading and len(heading) <= 100:
+                heading_matches.append((index, heading))
+
+    sections: list[dict[str, Any]] = []
+    if heading_matches:
+        for pos, (line_index, heading) in enumerate(heading_matches[:limit]):
+            end = heading_matches[pos + 1][0] if pos + 1 < len(heading_matches) else len(lines)
+            body = " ".join(line.strip() for line in lines[line_index + 1:end] if line.strip())
+            body = re.sub(r"(?:^|\s)[*_`#]+", " ", body)
+            sections.append({
+                "heading": heading[:100],
+                "summary": _compact_section_text(body, 180) or "Раздел присутствует в полном ответе.",
+                "order": pos + 1,
+            })
+        return sections
+
+    # Legacy answers may not have headings. Use paragraph-local labels as a fallback;
+    # the updated prompt will produce real headings for new multi-section answers.
+    paragraphs = [re.sub(r"\s+", " ", chunk).strip() for chunk in re.split(r"\n\s*\n", text) if chunk.strip()]
+    for paragraph in paragraphs[:limit]:
+        plain = re.sub(r"^[#>*\-\d.)\s]+", "", paragraph).strip()
+        colon = re.match(r"^([^:—–]{3,65})\s*[:—–]\s*(.+)$", plain)
+        if colon:
+            heading = colon.group(1).strip()
+            summary = colon.group(2).strip()
+        else:
+            words = plain.split()
+            heading = " ".join(words[:6]).strip(" ,.;:—–")
+            if len(words) > 6:
+                heading += "…"
+            summary = plain
+        if heading:
+            sections.append({
+                "heading": heading[:100],
+                "summary": _compact_section_text(summary, 180),
+                "order": len(sections) + 1,
+            })
+    return sections
+
+
+def _normalize_memory_sections(raw_sections: Any, answer: str) -> list[dict[str, Any]]:
+    """Persist every visible answer heading and its compact, grounded meaning."""
+    extracted = _extract_answer_sections(answer)
+    provided: list[dict[str, Any]] = []
+    if isinstance(raw_sections, list):
+        for item in raw_sections[:12]:
+            if not isinstance(item, dict):
+                continue
+            heading = _compact_section_text(item.get("heading") or item.get("title"), 100)
+            if not heading:
+                continue
+            try:
+                order = int(item.get("order") or len(provided) + 1)
+            except (TypeError, ValueError):
+                order = len(provided) + 1
+            provided.append({
+                "heading": heading,
+                "summary": _compact_section_text(item.get("summary") or item.get("content"), 180),
+                "order": order,
+            })
+
+    provided_by_heading = {x["heading"].casefold(): x for x in provided}
+    # When Markdown headings are present in the actual answer, they are authoritative:
+    # never let an incomplete memory list silently drop visible sections.
+    has_visible_headings = any(
+        re.match(r"^\s*(?:#{1,4}\s+|\*\*[^*]{2,90}\*\*\s*$)", line.strip())
+        for line in _visible_answer_lines(answer)
+    )
+    if has_visible_headings and extracted:
+        result = []
+        for index, section in enumerate(extracted, 1):
+            supplied = provided_by_heading.get(section["heading"].casefold(), {})
+            result.append({
+                "heading": section["heading"],
+                "summary": supplied.get("summary") or section.get("summary", ""),
+                "order": index,
+            })
+        return result
+    if provided:
+        return [
+            {"heading": item["heading"], "summary": item["summary"] or next((x["summary"] for x in extracted if x["heading"].casefold() == item["heading"].casefold()), ""), "order": index}
+            for index, item in enumerate(provided, 1)
+        ]
+    return extracted
+
+
 def normalize_render_blocks(
     value: Any,
     answer: str,
@@ -1753,6 +1911,27 @@ def normalize_render_blocks(
 
         result.append(item)
 
+    # Integrity guard: a single text block is the Web representation of the answer.
+    # If the model returned a short description in render_blocks but a complete answer
+    # in `answer` (as happened on the third Turgenev turn), never deliver that summary
+    # as if it were the full answer. Preserve specialized/multiple blocks unchanged.
+    if len(result) == 1 and result[0].get("type") in {"text", "markdown"}:
+        visible = _text(result[0].get("content") or result[0].get("text") or result[0].get("markdown"))
+        canonical = _text(answer)
+        if canonical and len(canonical) >= 400 and len(visible) < int(len(canonical) * 0.75):
+            result[0]["content"] = canonical
+            result[0].pop("text", None)
+            result[0].pop("markdown", None)
+            result[0]["renderer"] = "MessageTextBlock"
+            result[0]["viewer"] = "MessageTextBlock"
+            _log_json("RENDER_BLOCK_INTEGRITY", {
+                "status": "repaired_from_canonical_answer",
+                "answer_chars": len(canonical),
+                "block_chars_before": len(visible),
+                "block_chars_after": len(canonical),
+                "blocks": 1,
+            })
+
     if not result:
         result.append(
             {
@@ -1798,6 +1977,15 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
         data.get("render_blocks"),
         answer,
     )
+    content_value = _text(data.get("content") or answer)
+    if len(answer) >= 400 and len(content_value) < int(len(answer) * 0.75):
+        _log_json("CONTENT_INTEGRITY", {
+            "status": "repaired_from_canonical_answer",
+            "answer_chars": len(answer),
+            "content_chars_before": len(content_value),
+            "content_chars_after": len(answer),
+        })
+        content_value = answer
 
     artifacts = data.get("artifacts")
     if not isinstance(artifacts, list):
@@ -1821,7 +2009,8 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
         raw_memory_record = {}
     memory_record = {
         "topic": _clip(raw_memory_record.get("topic") or answer.split("\n", 1)[0], 180),
-        "summary": _clip(raw_memory_record.get("summary") or data.get("summary") or answer, 1600),
+        "summary": _clip(raw_memory_record.get("summary") or data.get("summary") or answer, 500),
+        "sections": _normalize_memory_sections(raw_memory_record.get("sections"), answer),
         "entities": [str(x)[:160] for x in (raw_memory_record.get("entities") or [])[:16]] if isinstance(raw_memory_record.get("entities"), list) else [],
         "visual_observations": [str(x)[:300] for x in (raw_memory_record.get("visual_observations") or [])[:12]] if isinstance(raw_memory_record.get("visual_observations"), list) else [],
         "file_purpose": _clip(raw_memory_record.get("file_purpose"), 600),
@@ -1854,7 +2043,7 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
     return {
         "machine_response": {
             "answer": answer,
-            "content": _text(data.get("content") or answer),
+            "content": content_value,
             "summary": _text(
                 data.get("summary") or answer[:180]
             ),
