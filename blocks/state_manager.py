@@ -464,6 +464,29 @@ def _parse_json(value: Any) -> dict[str, Any]:
 
 
 
+def _is_failed_provider_row(row: dict[str, Any]) -> bool:
+    """A timeout/error bubble is not a completed assistant answer for continuity."""
+    response = _parse_json(row.get("structured_response"))
+    metadata = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
+    if metadata.get("provider_fallback") or metadata.get("provider_error_code"):
+        return True
+
+    # Exclude legacy fallback turns created before provider_fallback metadata
+    # was persisted. Keep the rows in storage, but never use them as dialogue facts.
+    answer = _text(row.get("april_text") or row.get("april_text_en")).strip().lower()
+    legacy_failure_markers = (
+        "модель не вернула завершённый ответ за один запрос",
+        "модель не вернула завершенный ответ за один запрос",
+        "не удалось завершить ответ модели за один запрос",
+        "не удалось завершить ответ модели в этом запросе",
+        "the model did not return a complete response in one provider call",
+        "the model could not complete this response in one provider call",
+        "модель не повернула завершеної відповіді за один запит",
+        "не вдалося завершити відповідь моделі в цьому запиті",
+    )
+    return any(answer.startswith(marker) for marker in legacy_failure_markers)
+
+
 def _row_modalities(row: dict[str, Any]) -> set[str]:
     """Recover persisted input modalities without storing a second memory copy."""
     result: set[str] = set()
@@ -912,7 +935,10 @@ def search_dialogue_context(
     """
     uid = _uid(user_id)
     state = hydrate(uid)
-    all_rows = list(state.get("dialogue_pairs") or [])
+    all_rows = [
+        row for row in (state.get("dialogue_pairs") or [])
+        if isinstance(row, dict) and not _is_failed_provider_row(row)
+    ]
     reference_followup = _looks_like_referential_followup(query)
     history_request = _is_history_request(query)
     new_topic_request = _looks_like_new_topic(query)
