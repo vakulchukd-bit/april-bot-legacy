@@ -305,6 +305,18 @@ def build_interpretation(
     has_image = "image" in kinds or "image" in restored_kinds or bool(visual_context)
     has_voice = "voice" in kinds
     has_file = bool(kinds & {"file", "text_file"}) or bool(restored_kinds & {"file", "text_file"})
+    # Distinguish an asset's presence in dialogue memory from actual source bytes
+    # available for a fresh inspection. A cached sidecar is enough for normal
+    # continuity, and must not trigger repeated image/file analysis by itself.
+    has_original_image = any(
+        not bool(item.get("recalled_from_memory")) or bool(item.get("requires_original_analysis"))
+        for item in visual_context
+    )
+    has_original_file = any(
+        _text(item.get("kind")).lower() in {"file", "text_file"}
+        and (not bool(item.get("recalled_from_memory")) or bool(item.get("requires_original_analysis")))
+        for item in attachments
+    )
 
     requested_outputs = _detect_requested_outputs(original or text)
     wants_image = "image" in requested_outputs
@@ -323,9 +335,9 @@ def build_interpretation(
 
     task = _detect_task(
         original or text,
-        has_image=has_image,
+        has_image=has_original_image,
         has_voice=has_voice,
-        has_file=has_file,
+        has_file=has_original_file,
         wants_image=wants_image,
     )
     # A modification verb requests a code edit; merely asking what a code file
@@ -333,7 +345,7 @@ def build_interpretation(
     if _is_code_modification_request(original or text) and has_file:
         task = "modify_code"
 
-    if has_image and task == "answer_request":
+    if has_original_image and task == "answer_request":
         task = "analyze_image"
 
     return {
@@ -399,7 +411,7 @@ def build_interpretation(
         },
         "visual": {
             "items": visual_context,
-            "analysis_required": has_image,
+            "analysis_required": has_original_image,
             "generation_required": wants_image,
             "input_source": "current_upload" if any(not item.get("recalled_from_memory") for item in visual_context) else ("dialogue_memory" if has_image else "none"),
             "remembered_assets": [item for item in restored_assets if _text(item.get("kind")).lower() == "image"][:4],
@@ -408,7 +420,7 @@ def build_interpretation(
         },
         "files": {
             "items": attachments,
-            "analysis_required": has_file,
+            "analysis_required": has_original_file,
             "remembered_assets": [item for item in restored_assets if _text(item.get("kind")).lower() in {"file", "text_file"}][:4],
         },
         "request_structure": {
