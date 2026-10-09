@@ -12,9 +12,7 @@ Route:
 """
 from __future__ import annotations
 
-import asyncio
 import os
-import tempfile
 from typing import Any
 
 MAX_VOICE_BYTES = 25 * 1024 * 1024
@@ -96,18 +94,17 @@ def transcribe_voice_bytes(
         filename=filename,
         content_type=content_type,
     )
-    suffix = os.path.splitext(metadata["filename"])[1] or ".webm"
-
     # Local import deliberately prevents an import cycle at module load time.
+    # provider_router.transcribe_voice is synchronous and accepts audio BYTES,
+    # not a temporary-file path. Passing tmp.name here caused
+    # TypeError: string argument without an encoding in production.
     from blocks.provider_router import transcribe_voice
 
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    try:
-        tmp.write(data or b"")
-        tmp.close()
-        return _text(asyncio.run(transcribe_voice(tmp.name)))
-    finally:
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
+    raw = bytes(data)
+    return _text(
+        transcribe_voice(
+            raw,
+            filename=metadata["filename"],
+            content_type=metadata["mime_type"],
+        )
+    )
