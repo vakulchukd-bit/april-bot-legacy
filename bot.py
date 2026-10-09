@@ -338,16 +338,20 @@ def _handle_payload(
         # persistence is temporarily unavailable.
         asset_save_started = time.perf_counter()
         asset_saved_count = 0
+        persistable_attachments = [
+            att for att in attachments
+            if str(getattr(att, "kind", "file") or "file").lower() in {"image", "text_file", "file"}
+            and bool(getattr(att, "data", b"") or b"")
+        ]
         try:
-            init_db()
-            for att in attachments:
+            # No-op text turns must not pay DB initialization / connection cost
+            # just to discover that there are no input assets to persist.
+            if persistable_attachments:
+                init_db()
+            for att in persistable_attachments:
                 kind = str(getattr(att, "kind", "file") or "file").lower()
-                if kind not in {"image", "text_file", "file"}:
-                    continue
                 meta = getattr(att, "metadata", {}) or {}
                 raw_bytes = getattr(att, "data", b"") or b""
-                if not raw_bytes:
-                    continue
                 asset_saved = save_dialogue_asset(
                     uid,
                     dialog_id=dialog_id or conversation_id,
