@@ -5,3 +5,4 @@ psycopg2-binary>=2.9,<3
 rapidfuzz>=3.0,<4
 Pillow>=10.0,<13
 openai>=1.0,<3
+tiktoken
