@@ -1105,6 +1105,17 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     return system, card, total, "budget_overflow_metadata_preserved"
 
 
+def _apr_timing_log(stage: str, started: float | None = None, **fields: Any) -> None:
+    """Low-overhead provider timings; never log prompts, answers, keys or raw assets."""
+    try:
+        payload = {"component": "provider", "stage": stage}
+        if started is not None:
+            payload["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        payload.update(fields)
+        print("[APRIL_TIMING] " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str), flush=True)
+    except Exception:
+        pass
+
 def _log_json(event: str, data: dict[str, Any]) -> None:
     """Structured single-line diagnostics; never log raw file or image bytes."""
     try:
@@ -1612,8 +1623,13 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         sent_card = json.loads(text)
         log_previews = str(os.getenv("APRIL_OPENAI_LOG_CONTENT_PREVIEW", "1")).strip().lower() not in {"0", "false", "no", "off"}
         field_diagnostics = []
+        duplicate_signatures: dict[str, list[str]] = {}
+        duplicate_char_lengths: dict[str, int] = {}
         for field_name, field_value in sent_card.items():
             field_text = json.dumps(field_value, ensure_ascii=False, separators=(",", ":"), default=str)
+            field_signature = hashlib.sha256(field_text.encode("utf-8")).hexdigest()
+            duplicate_signatures.setdefault(field_signature, []).append(field_name)
+            duplicate_char_lengths[field_signature] = len(field_text)
             field_row = {
                 "field": field_name,
                 "chars": len(field_text),
@@ -1696,6 +1712,11 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
                     "token_count_source": "API_usage_required_for_file_tokens",
                 })
         logged_topic_token_counts = [int(item.get("token_estimate") or 0) for item in topic_diagnostics]
+        duplicate_field_groups = [
+            {"fields": names, "chars_each": duplicate_char_lengths[signature],
+             "duplicated_chars_total": duplicate_char_lengths[signature] * (len(names) - 1)}
+            for signature, names in duplicate_signatures.items() if len(names) > 1
+        ]
         diagnostics_out.update({
             "model": MODEL,
             "token_count_method": _token_count_method(),
@@ -1717,6 +1738,9 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "prompt_budget_met_by_estimate": card_token_estimate <= MAX_PROMPT_TOKENS,
             "compression_stage": compression_stage,
             "field_breakdown": field_diagnostics,
+            "duplicate_field_groups": duplicate_field_groups,
+            "duplicate_field_groups_count": len(duplicate_field_groups),
+            "exact_duplicate_chars_estimate": sum(item["duplicated_chars_total"] for item in duplicate_field_groups),
             "request_topics": topic_diagnostics,
             "request_topic_count": len(topic_diagnostics),
             "max_topic_token_estimate": max(logged_topic_token_counts, default=0),
@@ -2085,8 +2109,28 @@ async def generate_text(
     input_diagnostics: dict[str, Any] = {}
     response_summary: dict[str, Any] = {}
     try:
+        client_was_initialized = _client is not None
+        client_started = time.perf_counter()
         client = _client_get()
+        _apr_timing_log("client_ready", client_started, request_fingerprint=key[:16], reused_client=client_was_initialized)
+        input_build_started = time.perf_counter()
         base_input = _build_input(request, diagnostics_out=input_diagnostics)
+        input_build_ms = round((time.perf_counter() - input_build_started) * 1000, 1)
+        conversation = request.conversation if isinstance(request.conversation, dict) else {}
+        intent_data = request.intent if isinstance(request.intent, dict) else {}
+        identity_data = intent_data.get("identity") if isinstance(intent_data.get("identity"), dict) else {}
+        _apr_timing_log("prompt_build_complete", input_build_started, request_fingerprint=key[:16],
+            request_id_key=hashlib.sha256(str(getattr(request, "request_id", "")).encode("utf-8")).hexdigest()[:10],
+            user_key=hashlib.sha256(str(identity_data.get("user_id") or "").encode("utf-8")).hexdigest()[:10] if identity_data.get("user_id") else "",
+            dialog_key=hashlib.sha256(str(conversation.get("dialog_id") or "").encode("utf-8")).hexdigest()[:10] if conversation.get("dialog_id") else "",
+            message_key=hashlib.sha256(str(conversation.get("message_id") or "").encode("utf-8")).hexdigest()[:10] if conversation.get("message_id") else "",
+            prompt_build_ms=input_build_ms, system_prompt_chars=input_diagnostics.get("system_prompt_chars"),
+            structured_card_chars=input_diagnostics.get("structured_card_chars"),
+            system_plus_card_token_estimate=input_diagnostics.get("system_plus_card_token_estimate"),
+            compression_stage=input_diagnostics.get("compression_stage"),
+            duplicate_field_groups=input_diagnostics.get("duplicate_field_groups_count", 0),
+            exact_duplicate_chars_estimate=input_diagnostics.get("exact_duplicate_chars_estimate", 0),
+            selected_context_pairs=len((request.memory or {}).get("selected_pairs") or []) if isinstance(request.memory, dict) else 0)
         _log_json("REQUEST", {
             "status": "sending",
             "request_fingerprint": key[:16],
@@ -2096,11 +2140,14 @@ async def generate_text(
             **input_diagnostics,
         })
         try:
+            api_started = time.perf_counter()
             response = await asyncio.to_thread(
                 client.responses.create,
                 model=MODEL,
                 input=base_input,
             )
+            _apr_timing_log("openai_roundtrip", api_started, request_fingerprint=key[:16], outcome="returned")
+            response_process_started = time.perf_counter()
             raw = _text(getattr(response, "output_text", ""))
             response_status = _text(getattr(response, "status", "")).lower()
             usage = getattr(response, "usage", None)
@@ -2200,6 +2247,9 @@ async def generate_text(
                     }
                     response_summary["parsed_output"] = parsed_output
                     _log_json("OUTPUT_CONTENT", {"request_fingerprint": key[:16], **response_summary.get("parsed_output", {})})
+                    _apr_timing_log("response_parse_and_contract", response_process_started,
+                        request_fingerprint=key[:16], answer_chars=len(answer_text), raw_output_chars=len(raw),
+                        render_blocks=len(out_blocks), artifacts=len(out_artifacts), status="parsed")
                 except Exception as exc:
                     failure_code = str(exc) or "PROVIDER_INVALID_OUTPUT"
                     contract = None
@@ -2299,4 +2349,12 @@ async def generate_text(
             _cache[key] = (time.time(), contract)
         return contract
     finally:
+        machine_for_timing = (contract or {}).get("machine_response") if isinstance(contract, dict) else None
+        metadata_for_timing = machine_for_timing.get("metadata") if isinstance(machine_for_timing, dict) and isinstance(machine_for_timing.get("metadata"), dict) else {}
+        outcome_for_timing = ("fallback" if metadata_for_timing.get("provider_fallback")
+                              else ("success" if contract is not None else "error"))
+        _apr_timing_log("provider_total", started, request_fingerprint=key[:16],
+            outcome=outcome_for_timing, failure_code=failure_code if outcome_for_timing != "success" else "",
+            model=MODEL, prompt_build_ms=locals().get("input_build_ms"),
+            output_chars=len(_text(machine_for_timing.get("answer"))) if isinstance(machine_for_timing, dict) else 0)
         _inflight.discard(key)
