@@ -629,12 +629,21 @@ def _restore_selected_assets(
                 "requires_original_analysis": True,
             })
         elif kind == "text_file":
-            text_value = _text(asset.get("text_content")) or _decode_saved_text(raw)
+            # Re-decode the preserved original bytes instead of trusting the
+            # text_content sidecar: older versions stored only the first 18k
+            # characters there, so preferring it would keep old assets clipped
+            # even after the input-reader limit is raised.
+            decoded_source = _decode_saved_text(raw)
+            text_value = decoded_source or _text(asset.get("text_content"))
+            source_chars = len(text_value)
+            reader_truncated = source_chars > 48000
             file_contents.append({
                 "filename": filename,
                 "mime_type": mime_type or "text/plain",
-                "content": text_value[:18000],
+                "content": text_value[:48000],
                 "size_bytes": len(raw),
+                "reader_truncated": reader_truncated,
+                "source_chars": source_chars,
                 "recalled_from_memory": True,
                 "asset_message_id": common["asset_message_id"],
                 "asset_role": asset_role,
@@ -987,6 +996,8 @@ async def execute(
             "asset_role": _text(item.get("asset_role") or "user_input"),
             "asset_message_id": _text(item.get("asset_message_id") or identity["message_id"]),
             "content_preview": _text(item.get("content"))[:4500],
+            "reader_truncated": bool(item.get("reader_truncated", False)),
+            "source_chars": int(item.get("source_chars") or len(_text(item.get("content")))),
             "summary": _text(item.get("analysis_summary"))[:1200],
             "analysis_summary": _text(item.get("analysis_summary"))[:1200],
             "analysis_key_details": item.get("analysis_key_details") if isinstance(item.get("analysis_key_details"), list) else [],
@@ -1062,6 +1073,8 @@ async def execute(
                 "mime_type": _text(item.get("mime_type") or "text/plain"),
                 "size_bytes": int(item.get("size_bytes") or 0),
                 "content": _text(item.get("content")),
+                "reader_truncated": bool(item.get("reader_truncated", False)),
+                "source_chars": int(item.get("source_chars") or len(_text(item.get("content")))),
                 "asset_role": _text(item.get("asset_role") or "user_input"),
                 "asset_message_id": _text(item.get("asset_message_id")),
                 "analysis_summary": _text(item.get("analysis_summary"))[:1200],
