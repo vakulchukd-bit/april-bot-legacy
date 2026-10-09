@@ -1100,8 +1100,54 @@ def _latest_pending_clarification(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {}
 
 
+_CLARIFICATION_REJECTION_MARKERS = (
+    "это не то", "не то", "не те темы", "это не те темы", "не тот раздел",
+    "не тот пункт", "я не это имел", "я не это имела", "я имел в виду другое",
+    "я имела в виду другое", "не это имел в виду", "не это имела в виду",
+    "я имел ввиду другое", "я имела ввиду другое", "не то имел в виду",
+    "не то имела в виду", "i meant something else", "not those topics", "not that section",
+)
+
+_CLARIFICATION_META_NOISE = _SECTION_TOPIC_NOISE | {
+    "нет", "не", "то", "те", "тот", "раз", "правильно", "неправильно", "значит",
+    "имел", "имела", "ввиду", "имею", "хотел", "хотела", "говорил", "говорила",
+    "другое", "именно", "this", "that", "wrong", "mean", "meant", "topic", "topics",
+}
+
+
+def _looks_like_clarification_rejection(query: str) -> bool:
+    low = _text(query).lower().replace("ё", "е")
+    return any(marker.replace("ё", "е") in low for marker in _CLARIFICATION_REJECTION_MARKERS)
+
+
+def _clarification_target_text(query: str) -> str:
+    """Remove conversational correction framing while preserving the user's topic words."""
+    value = re.sub(r"\s+", " ", _text(query)).strip(" \t\r\n.,;:!?—–-")
+    # Remove a numbered choice prefix, but not a number explicitly introduced as a section.
+    value = re.sub(r"^\s*(?:да[, ]*)?([1-9])\s*[.)\-:]\s*", "", value, flags=re.I)
+    value = re.sub(r"^\s*(?:нет[, ]*)?(?:это не то|это не те темы|не те темы|не тот раздел|не тот пункт)[, :—–-]*", "", value, flags=re.I)
+    value = re.sub(r"^\s*(?:нет[, ]*)?(?:я имел|я имела|я хотел|я хотела)\s+(?:в виду|ввиду)?[, :—–-]*", "", value, flags=re.I)
+    value = re.sub(r"\b(?:я имел|я имела|я хотел|я хотела)\s+(?:в виду|ввиду)\b", " ", value, flags=re.I)
+    value = re.sub(r"\b(?:я про|я говорил о|я говорила о)\b", " ", value, flags=re.I)
+    value = re.sub(r"\b(?:это не то|это не те темы|не те темы|не тот раздел|не тот пункт|не это|это другое)\b", " ", value, flags=re.I)
+    value = re.sub(r"^\s*(?:нет|да|извини|возможно)[, :—–-]+", "", value, flags=re.I)
+    return re.sub(r"\s+", " ", value).strip(" \t\r\n.,;:!?—–-")
+
+
+def _option_similarity(query: str, item: dict[str, Any]) -> float:
+    target = _clarification_target_text(query)
+    q_tokens = _semantic_tokens(target) - _CLARIFICATION_META_NOISE
+    label = " ".join(_text(item.get(k)) for k in ("topic", "heading", "summary"))
+    label_tokens = _semantic_tokens(label) - _CLARIFICATION_META_NOISE
+    if not q_tokens or not label_tokens:
+        return 0.0
+    overlap = _fuzzy_token_overlap(q_tokens, label_tokens)
+    fuzz_score = fuzz.token_set_ratio(" ".join(sorted(q_tokens)), " ".join(sorted(label_tokens))) / 100.0
+    return round(0.58 * overlap + 0.42 * fuzz_score, 6)
+
+
 def _match_clarification_option(query: str, pending: dict[str, Any]) -> dict[str, Any]:
-    """Resolve a short choice without another model call; ties remain unresolved."""
+    """Resolve numbers, partial titles or free-form replies without trapping the user."""
     options = [item for item in (pending.get("options") or []) if isinstance(item, dict)]
     if not options:
         return {}
@@ -1116,39 +1162,160 @@ def _match_clarification_option(query: str, pending: dict[str, Any]) -> dict[str
         if normalized_choice == phrase and index <= len(options):
             return dict(options[index - 1])
 
-    scored: list[tuple[float, dict[str, Any]]] = []
-    query_tokens = _semantic_tokens(low)
-    for item in options:
-        label = " ".join(_text(item.get(k)) for k in ("topic", "heading", "summary"))
-        label_tokens = _semantic_tokens(label)
-        overlap = _concept_overlap(query_tokens, label_tokens) if query_tokens else 0.0
-        fuzz_score = fuzz.token_set_ratio(" ".join(sorted(query_tokens)), " ".join(sorted(label_tokens))) / 100.0 if query_tokens and label_tokens else 0.0
-        score = 0.55 * overlap + 0.45 * fuzz_score
-        scored.append((score, dict(item)))
-    scored.sort(key=lambda entry: entry[0], reverse=True)
+    # A user often writes both the menu number and the section name. Accept the
+    # number only when the words following it also identify that same option.
+    prefixed = re.match(r"^\s*(?:да[, ]*)?([1-9])\s+(?!вариант)(.+)$", low)
+    if prefixed:
+        index = int(prefixed.group(1)) - 1
+        if index < len(options):
+            target_score = _option_similarity(prefixed.group(2), options[index])
+            if target_score >= 0.26:
+                return dict(options[index])
+
+    scored = sorted(
+        ((_option_similarity(low, item), dict(item)) for item in options),
+        key=lambda entry: entry[0], reverse=True,
+    )
     if not scored:
         return {}
     second = scored[1][0] if len(scored) > 1 else 0.0
-    return scored[0][1] if scored[0][0] >= 0.52 and scored[0][0] - second >= 0.12 else {}
+    return scored[0][1] if scored[0][0] >= 0.43 and scored[0][0] - second >= 0.08 else {}
+
+
+def _explicit_section_number(query: str) -> int | None:
+    """Read section numbers in natural Russian/English word order, including inflections."""
+    low = _clarification_target_text(query).lower().replace("ё", "е")
+    patterns = (
+        r"\b(?:раздел\w*|пункт\w*|част\w*|подраздел\w*|тема\w*|section|subsection|part|item)\s*(?:№\s*)?(\d{1,2})\b",
+        r"\b(\d{1,2})\s*(?:-?й\s*)?(?:раздел\w*|пункт\w*|част\w*|подраздел\w*|тема\w*|section|subsection|part|item)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, low)
+        if match:
+            try:
+                return int(match.group(1))
+            except (TypeError, ValueError):
+                return None
+    # A compact request such as "6 как атомы соединяются" is also a numbered pointer.
+    match = re.match(r"^\s*(\d{1,2})\s+(?=(?:как|что|почему|зачем|about|how|what|why)\b)", low)
+    return int(match.group(1)) if match else None
+
+
+def _rank_sections_across_history(query: str, rows: list[dict[str, Any]], limit: int = 12) -> list[dict[str, Any]]:
+    """Search all authenticated 12-hour turns, including stored section headings and summaries."""
+    target = _clarification_target_text(query)
+    explicit_order = _explicit_section_number(target)
+    # Remove the ordinal marker from text similarity; it is matched as a separate
+    # structural field below so section 8 cannot be mistaken for section 5 or 6.
+    target = re.sub(r"\b(?:раздел\w*|пункт\w*|част\w*|подраздел\w*|тема\w*|section|subsection|part|item)\s*(?:№\s*)?\d{1,2}\b", " ", target, flags=re.I)
+    target = re.sub(r"\b\d{1,2}\s*(?:-?й\s*)?(?:раздел\w*|пункт\w*|част\w*|подраздел\w*|тема\w*|section|subsection|part|item)\b", " ", target, flags=re.I)
+    if explicit_order is None:
+        leading = re.match(r"^\s*(\d{1,2})\s+(?=(?:как|что|почему|зачем|about|how|what|why)\b)", target, flags=re.I)
+        if leading:
+            explicit_order = int(leading.group(1))
+            target = re.sub(r"^\s*\d{1,2}\s+", "", target)
+    query_tokens = _semantic_tokens(target) - _CLARIFICATION_META_NOISE
+    if not query_tokens and explicit_order is None:
+        return []
+
+    ranked: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or _row_is_pending_clarification(row):
+            continue
+        topic = _topic_label(row)
+        topic_overlap = _topic_query_overlap(target, topic)
+        if explicit_order is not None and not query_tokens:
+            sections = [
+                {
+                    "topic": topic,
+                    "heading": _text(section.get("heading"))[:90],
+                    "summary": _text(section.get("summary"))[:180],
+                    "order": section.get("order"),
+                    "message_id": _text(section.get("message_id") or row.get("message_id")),
+                    "dialog_id": _text(row.get("dialog_id")),
+                    "conversation_id": _text(row.get("conversation_id")),
+                    "score": 1.0,
+                }
+                for section in _dialogue_section_map(row)
+                if int(section.get("order") or 0) == explicit_order
+            ]
+        else:
+            sections = _rank_sections_for_row(target, row)
+        if sections:
+            for section in sections:
+                score = 0.78 * float(section.get("score") or 0) + 0.20 * topic_overlap
+                order_matches = explicit_order is not None and int(section.get("order") or 0) == explicit_order
+                if order_matches:
+                    score = min(1.0, score + (0.28 if topic_overlap >= 0.20 else 0.20))
+                elif explicit_order is not None:
+                    # Penalize mismatched section numbers, rather than quietly
+                    # ranking a nearby heading as if it were the requested one.
+                    score *= 0.35
+                section["score"] = round(score, 6)
+                section["topic_overlap"] = round(topic_overlap, 6)
+                ranked.append(section)
+        # Keep a topic-level route for legacy turns whose answer has no headings.
+        summary = _compact_memory_summary(row)
+        topic_score = 0.72 * topic_overlap + 0.28 * _fuzzy_token_overlap(
+            query_tokens, _semantic_tokens(topic + " " + summary)
+        ) if query_tokens else 0.0
+        if topic_score >= 0.28:
+            ranked.append({
+                "topic": topic,
+                "heading": topic,
+                "summary": summary[:180],
+                "order": 0,
+                "message_id": _text(row.get("message_id")),
+                "dialog_id": _text(row.get("dialog_id")),
+                "conversation_id": _text(row.get("conversation_id")),
+                "score": round(topic_score, 6),
+                "topic_overlap": round(topic_overlap, 6),
+            })
+    ranked.sort(key=lambda item: (float(item.get("score") or 0), float(item.get("topic_overlap") or 0)), reverse=True)
+    # Deduplicate same section from overlapping legacy rows while preserving rank.
+    output: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in ranked:
+        key = (_text(item.get("message_id")), _text(item.get("heading")).casefold(), _text(item.get("topic")).casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(item)
+        if len(output) >= limit:
+            break
+    return output
 
 
 def _clarification_prompt(original_request: str, options: list[dict[str, Any]], language: str = "ru") -> str:
+    options = [item for item in options[:3] if isinstance(item, dict)]
+    if not options:
+        if language == "uk":
+            return "Можливо, я не так зрозуміла номер або назву розділу й не хочу підміняти його схожою темою. Нагадай, будь ласка, кілька слів із заголовка або про що там ішлося — я ще раз перевірю історію."
+        if language == "en":
+            return "I may have misread the section number or title, and I don't want to substitute a similar topic. Could you share a few words from its heading or what it covered? I'll check the history again."
+        return "Похоже, я могла неверно определить номер или название раздела и не хочу подменять его похожей темой. Напомни, пожалуйста, пару слов из заголовка или о чём там шла речь — я ещё раз проверю историю."
+    topics = {_text(item.get("topic")) for item in options if _text(item.get("topic"))}
+    shared_topic = next(iter(topics)) if len(topics) == 1 else ""
+    topic_caption = f" в теме «{shared_topic[:90]}»" if shared_topic and shared_topic.casefold() not in {"тема диалога", "безымянная тема"} else ""
     labels = []
-    for index, item in enumerate(options[:3], 1):
-        topic = _text(item.get("topic"))
-        heading = _text(item.get("heading"))
-        label = f"{topic} — {heading}" if topic and topic.casefold() != heading.casefold() else (heading or topic)
-        labels.append(f"{index}. {label[:130]}")
+    for index, item in enumerate(options, 1):
+        heading = _text(item.get("heading") or item.get("topic"))
+        summary = _text(item.get("summary"))
+        label = heading[:90]
+        if summary and summary.casefold() != heading.casefold():
+            label += " — " + summary[:95]
+        labels.append(f"{index}. {label[:190]}")
     choices = "\n".join(labels)
+    request = _text(original_request)[:130]
     if language == "uk":
-        lead = f"Щоб продовжити саме ваш запит «{_text(original_request)[:180]}», уточніть, який розділ ви маєте на увазі:"
-        tail = "\nВідповідайте номером або назвою. Початковий запит збережено."
+        lead = f"Хочу продовжити твій запит «{request}»{topic_caption} і не вибрати схожий, але не той розділ. Я знайшла кілька близьких варіантів:"
+        tail = "\nМожеш назвати номер або описати своїми словами — я звірю це з історією."
     elif language == "en":
-        lead = f'To continue your request “{_text(original_request)[:180]}”, which section do you mean?'
-        tail = "\nReply with the number or section name. Your original request is preserved."
+        lead = f'I want to continue “{request}”{topic_caption} without picking the wrong section. I found a few close matches:'
+        tail = "\nReply with a number or describe it in your own words, and I will check the history."
     else:
-        lead = f"Чтобы продолжить именно ваш запрос «{_text(original_request)[:180]}», уточните, какой раздел вы имеете в виду:"
-        tail = "\nОтветьте номером или названием. Исходный запрос сохранён."
+        lead = f"Хочу продолжить твой запрос «{request}»{topic_caption} и не выбрать похожий, но не тот раздел. Нашла несколько близких вариантов:"
+        tail = "\nМожешь назвать номер или описать своими словами — я сверю это с историей."
     return lead + ("\n" + choices if choices else "") + tail
 
 
@@ -1295,6 +1462,10 @@ def search_dialogue_context(
         continuation = False
     elif has_new_attachment and not explicit_attachment_followup:
         continuation = False
+    elif _is_section_request(query) and _explicit_section_number(query) is not None and rows:
+        # A numbered section reference is a history pointer even when it contains
+        # no topic nouns (e.g. "пункт 8"). Search memory instead of classifying it NEW.
+        continuation = True
     elif latest_same_dialog and reference_followup:
         continuation = True
     elif latest_same_dialog and (marker or short_contextual) and len(_tokens(query)) <= 14:
@@ -1316,11 +1487,16 @@ def search_dialogue_context(
     clarification_options: list[dict[str, Any]] = []
     pending_for_next_turn: dict[str, Any] = {}
 
-    if pending_clarification and not new_topic_request:
-        if pending_resolved:
+    pending_rejected = bool(pending_clarification and _looks_like_clarification_rejection(query))
+    if pending_clarification and (not new_topic_request or pending_rejected):
+        original_pending_request = _text(pending_clarification.get("original_request"))
+        if pending_resolved and not pending_rejected:
+            # Number/title choice matched the offered clarification. An explicit
+            # rejection always bypasses the offered list and starts a wider search. Preserve the
+            # initial request and continue from the exact stored section.
             forced_section = dict(pending_option)
-            original_pending_request = _text(pending_clarification.get("original_request"))
             clarification_resolution = {
+                "status": "resolved_from_options",
                 "original_request": original_pending_request,
                 "clarification_reply": _text(query)[:240],
                 "selected_section": forced_section,
@@ -1328,19 +1504,76 @@ def search_dialogue_context(
             source_id = _text(forced_section.get("message_id"))
             source_row = next((row for row in all_rows if _text(row.get("message_id")) == source_id), None)
             if source_row is not None:
-                anchor = _candidate_score(original_pending_request or query, source_row, dialog_id=str(dialog_id or ""), reference_followup=True, query_modalities=query_modalities)
+                anchor = _candidate_score(
+                    original_pending_request or query, source_row,
+                    dialog_id=str(dialog_id or ""), reference_followup=True,
+                    query_modalities=query_modalities,
+                )
             relation = "CONTINUE"
         else:
-            clarification_needed = True
-            pending_for_next_turn = dict(pending_clarification)
-            clarification_options = [dict(x) for x in (pending_clarification.get("options") or []) if isinstance(x, dict)][:3]
-            prompt_text = _text(pending_clarification.get("prompt")) or _clarification_prompt(_text(pending_clarification.get("original_request")) or query, clarification_options)
-            pending_for_next_turn["prompt"] = prompt_text
-            source_id = _text((clarification_options[0] if clarification_options else {}).get("message_id"))
-            source_row = next((row for row in all_rows if _text(row.get("message_id")) == source_id), None)
-            if source_row is not None:
-                anchor = _candidate_score(_text(pending_clarification.get("original_request")) or query, source_row, dialog_id=str(dialog_id or ""), reference_followup=True)
-            relation = "CONTINUE"
+            # Never re-emit an unresolved prompt verbatim. Treat the user's
+            # reply as a search hint and search every stored topic/section in the
+            # authenticated 12-hour window, not just the three offered choices.
+            recovery_query = _clarification_target_text(query)
+            recovered = _rank_sections_across_history(recovery_query, all_rows, limit=16)
+            top = recovered[0] if recovered else {}
+            second_score = float(recovered[1].get("score") or 0) if len(recovered) > 1 else 0.0
+            top_score = float(top.get("score") or 0)
+            recovered_topic = _text(top.get("topic"))
+            top_is_section = bool(_text(top.get("heading")) and _text(top.get("heading")).casefold() != recovered_topic.casefold())
+            clear_match = bool(
+                top
+                and top_score >= (0.43 if top_is_section else 0.47)
+                and (len(recovered) == 1 or top_score - second_score >= 0.055
+                     or float(top.get("topic_overlap") or 0) >= 0.72)
+            )
+
+            if clear_match:
+                forced_section = dict(top)
+                clarification_resolution = {
+                    "status": "resolved_by_history_search",
+                    "original_request": original_pending_request,
+                    "clarification_reply": _text(query)[:240],
+                    "search_query": recovery_query[:180],
+                    "selected_section": forced_section,
+                }
+                source_id = _text(forced_section.get("message_id"))
+                source_row = next((row for row in all_rows if _text(row.get("message_id")) == source_id), None)
+                if source_row is not None:
+                    anchor = _candidate_score(
+                        recovery_query or original_pending_request or query, source_row,
+                        dialog_id=str(dialog_id or ""), reference_followup=True,
+                        query_modalities=query_modalities,
+                    )
+                relation = "CONTINUE"
+            else:
+                # Dismiss stale menu state. A failed match becomes a normal
+                # conversational turn with a gentle recovery instruction; a later
+                # user hint is searched from scratch rather than trapped here.
+                target_tokens = _semantic_tokens(recovery_query) - _CLARIFICATION_META_NOISE
+                status = "topic_not_found" if pending_rejected and len(target_tokens) >= 2 else "needs_more_detail"
+                clarification_resolution = {
+                    "status": status,
+                    "original_request": original_pending_request,
+                    "clarification_reply": _text(query)[:240],
+                    "search_query": recovery_query[:180],
+                    "selected_section": {},
+                }
+                non_pending_same_dialog = [
+                    item for item in matches
+                    if item.get("same_dialog") and not item.get("is_pending_clarification")
+                ]
+                fallback_match = max(
+                    non_pending_same_dialog,
+                    key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)),
+                    default=None,
+                )
+                if fallback_match is not None:
+                    anchor = fallback_match
+                relation = "CONTINUE"
+        # Any reply to a pending clarification is now either resolved, searched
+        # globally, or handed back to normal dialogue. It must not create another
+        # local clarification from the old options.
     elif relation == "CONTINUE" and rows:
         if explicit_topic_hits:
             chosen_global = explicit_topic_hits[0][1]
@@ -1376,6 +1609,7 @@ def search_dialogue_context(
                 break
 
     selected_section: dict[str, Any] = {}
+    section_anchor_overridden = False
     if forced_section:
         selected_section = dict(forced_section)
     else:
@@ -1389,8 +1623,86 @@ def search_dialogue_context(
             anchor_id = _text(anchor.get("message_id"))
             source_row = next((row for row in all_rows if _text(row.get("message_id")) == anchor_id), None)
             ranked_sections = _rank_sections_for_row(section_query, source_row) if source_row else []
+            requested_section_number = _explicit_section_number(section_query)
+            if requested_section_number is not None:
+                # Section numbers are structural identifiers. Search the active
+                # answer first, then the full 12-hour user history; never suggest
+                # a nearby numbered section when the requested number is absent.
+                exact_local = [item for item in ranked_sections if int(item.get("order") or 0) == requested_section_number]
+                if not exact_local and source_row:
+                    exact_local = [
+                        {
+                            "topic": _topic_label(source_row),
+                            "heading": _text(section.get("heading"))[:90],
+                            "summary": _text(section.get("summary"))[:180],
+                            "order": section.get("order"),
+                            "message_id": _text(section.get("message_id") or source_row.get("message_id")),
+                            "dialog_id": _text(source_row.get("dialog_id")),
+                            "conversation_id": _text(source_row.get("conversation_id")),
+                            "score": 1.0,
+                        }
+                        for section in _dialogue_section_map(source_row)
+                        if int(section.get("order") or 0) == requested_section_number
+                    ]
+                if exact_local:
+                    ranked_sections = exact_local
+                    if len(exact_local) == 1:
+                        # Exact section number inside the selected source is a
+                        # stronger signal than fuzzy lexical similarity.
+                        selected_section = dict(exact_local[0])
+                    else:
+                        clarification_needed = True
+                        clarification_options = exact_local[:3]
+                        pending_for_next_turn = {
+                            "active": True,
+                            "original_request": _text(section_query)[:500],
+                            "active_topic": active_topic[:140],
+                            "requested_section_number": requested_section_number,
+                            "options": [dict(item) for item in clarification_options],
+                        }
+                else:
+                    global_ranked = _rank_sections_across_history(section_query, all_rows, limit=20)
+                    exact_global = [item for item in global_ranked if int(item.get("order") or 0) == requested_section_number]
+                    if exact_global:
+                        top_global = exact_global[0]
+                        second_global = float(exact_global[1].get("score") or 0) if len(exact_global) > 1 else 0.0
+                        top_global_score = float(top_global.get("score") or 0)
+                        global_is_clear = top_global_score >= 0.40 and (
+                            len(exact_global) == 1 or top_global_score - second_global >= 0.055
+                        )
+                        if global_is_clear:
+                            selected_section = dict(top_global)
+                            forced_section = dict(top_global)
+                            target_id = _text(top_global.get("message_id"))
+                            target_row = next((row for row in all_rows if _text(row.get("message_id")) == target_id), None)
+                            if target_row is not None:
+                                anchor = _candidate_score(
+                                    section_query, target_row, dialog_id=str(dialog_id or ""),
+                                    reference_followup=True, query_modalities=query_modalities,
+                                )
+                                section_anchor_overridden = True
+                        else:
+                            clarification_needed = True
+                            clarification_options = exact_global[:3]
+                    else:
+                        # No indexed item has this number. Ask an open, human
+                        # follow-up rather than listing unrelated fuzzy matches.
+                        clarification_needed = True
+                        clarification_options = []
+                    if clarification_needed:
+                        pending_for_next_turn = {
+                            "active": True,
+                            "original_request": _text(section_query)[:500],
+                            "active_topic": active_topic[:140],
+                            "requested_section_number": requested_section_number,
+                            "options": [dict(item) for item in clarification_options],
+                        }
+                    ranked_sections = []
             generic_pointer = _is_generic_section_pointer(section_query)
-            if generic_pointer and source_row:
+            if requested_section_number is not None and (selected_section or clarification_needed):
+                # The explicit numbered-search branch above owns this request.
+                pass
+            elif generic_pointer and source_row:
                 # A broad phrase such as "подробнее о её применении" does not
                 # identify one specific subsection. Prefer sections explicitly
                 # about applications/usage; ask locally when several exist.
@@ -1457,6 +1769,10 @@ def search_dialogue_context(
                 prompt_text = _clarification_prompt(section_query, clarification_options, language if language in {"ru", "uk", "en"} else "ru")
                 pending_for_next_turn["prompt"] = prompt_text
 
+    if section_anchor_overridden and anchor:
+        active_topic = _text(anchor.get("topic")) or active_topic
+        selected_for_context = [_compact_pair(anchor)]
+
     topics = _build_topic_index(all_rows)
     history_limit = _history_topic_limit(query, 7)
     history_topics = topics[:history_limit] if history_request else []
@@ -1467,7 +1783,7 @@ def search_dialogue_context(
     topic_table_md = "\n".join(topic_table_lines)
 
     result = {
-        "engine": "state_manager_topic_section_search_v5_clarification",
+        "engine": "state_manager_topic_section_search_v6_recovery",
         "authenticated": True,
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "dialog_id": str(dialog_id or ""),
@@ -1476,7 +1792,16 @@ def search_dialogue_context(
         "total_pairs": len(rows),
         "candidate_count": len(matches),
         "relation": relation,
-        "reason": "clarification_resolved" if clarification_resolution else "clarification_pending" if clarification_needed else ("history_request" if history_request else "named_topic_match" if explicit_topic_hits else "active_topic_default" if relation == "CONTINUE" and anchor else "new_request" if relation == "NEW" else "semantic_memory_match"),
+        "reason": (
+            "clarification_resolved" if clarification_resolution and _text(clarification_resolution.get("status")).startswith("resolved")
+            else "clarification_researched" if clarification_resolution
+            else "clarification_pending" if clarification_needed
+            else "history_request" if history_request
+            else "named_topic_match" if explicit_topic_hits
+            else "active_topic_default" if relation == "CONTINUE" and anchor
+            else "new_request" if relation == "NEW"
+            else "semantic_memory_match"
+        ),
         "relation_confidence": round(float((anchor or best or {}).get("score") or (0.60 if relation == "CONTINUE" else 0.0)), 6),
         "continuation_marker": marker,
         "referential_followup": reference_followup,
@@ -1505,6 +1830,7 @@ def search_dialogue_context(
         relation=relation, reason=result["reason"], total_pairs=len(rows), candidates=len(matches),
         selected_pairs=len(selected_for_context), topic_index_count=len(topic_index),
         selected_section_heading=_text(selected_section.get("heading")), clarification_needed=clarification_needed,
+        clarification_status=_text(clarification_resolution.get("status")),
         selected_message_keys=[_apr_diag_ref(x.get("message_id")) for x in selected_for_context if isinstance(x, dict) and x.get("message_id")],
         anchor_message_key=_apr_diag_ref((result.get("anchor") or {}).get("message_id") if isinstance(result.get("anchor"), dict) else ""))
     return result
