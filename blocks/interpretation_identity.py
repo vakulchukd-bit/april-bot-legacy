@@ -309,7 +309,7 @@ def _build_question_sequence(text: str) -> list[dict[str, Any]]:
         outputs = _detect_requested_outputs(item)
         sequence.append({
             "step_index": index,
-            "request": item[:1800],
+            "request": item,
             "output_types": outputs or ["text"],
             "answer_in_order": True,
         })
