@@ -17,6 +17,7 @@ No alternate route, room register or second memory store is created here.
 from __future__ import annotations
 
 from typing import Any
+import base64
 import json
 import os
 import re
@@ -332,6 +333,44 @@ def _decode_saved_text(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def _explicit_prior_asset_reference(value: Any) -> bool:
+    low = _text(value).lower().replace("ё", "е")
+    markers = (
+        "предыдущее фото", "предыдущую картинку", "предыдущем фото", "прошлое фото",
+        "раньше присылал", "которое я присылал", "который я присылал", "которую я присылал",
+        "то фото", "та картинка", "тот файл", "предыдущий файл", "предыдущий код",
+        "сравни с", "сравни это", "сравни с предыдущ", "вернись к фото", "вернись к файлу",
+        "на той картинке", "на предыдущей картинке", "на старой картинке",
+        "that image", "previous image", "previous photo", "the earlier file",
+        "the file i sent", "the image i sent", "compare with", "compare to previous",
+    )
+    return any(marker.replace("ё", "е") in low for marker in markers)
+
+
+def _source_code_from_block(block: dict[str, Any]) -> tuple[str, str, str] | None:
+    language = _text(block.get("language") or block.get("lang") or "text").lower()
+    filename = _text(block.get("filename") or "")
+    code = _text(block.get("code") or block.get("content") or block.get("text"))
+    if not code:
+        return None
+    # Accept a single fenced block while preserving internal source lines.
+    match = re.fullmatch(r"```[\w.+-]*\s*\n(.*?)\n```", code, flags=re.S)
+    if match:
+        code = match.group(1)
+    extensions = {
+        "python": "py", "py": "py", "javascript": "js", "js": "js",
+        "typescript": "ts", "ts": "ts", "tsx": "tsx", "jsx": "jsx",
+        "json": "json", "sql": "sql", "bash": "sh", "shell": "sh",
+        "html": "html", "css": "css", "yaml": "yml", "toml": "toml",
+        "markdown": "md", "md": "md", "text": "txt",
+    }
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else extensions.get(language, "txt")
+    allowed_exts = {"py", "js", "ts", "tsx", "jsx", "json", "sql", "sh", "html", "css", "yml", "toml", "md", "txt"}
+    if ext not in allowed_exts:
+        ext = extensions.get(language, "txt")
+    return code, language, ext
+
+
 def _restore_selected_assets(
     uid: str,
     identity: dict[str, str],
@@ -340,9 +379,15 @@ def _restore_selected_assets(
     attachments: list[dict[str, Any]],
     file_inputs: list[dict[str, Any]],
     file_contents: list[dict[str, Any]],
+    current_request: str = "",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Rehydrate bytes only for a selected CONTINUE anchor in this exact dialog."""
-    if visual_context or file_inputs or file_contents:
+    """Restore all assets on the selected message in this authenticated dialog.
+
+    Current uploads take precedence. Older assets are added alongside them only
+    when the user explicitly asks to compare/reference an earlier attachment.
+    """
+    has_current_asset = bool(visual_context or file_inputs or file_contents)
+    if has_current_asset and not _explicit_prior_asset_reference(current_request):
         return visual_context, attachments, file_inputs, file_contents, []
     if _text(dialogue_context.get("relation")).upper() != "CONTINUE":
         return visual_context, attachments, file_inputs, file_contents, []
@@ -366,7 +411,7 @@ def _restore_selected_assets(
             dialog_id=identity["dialog_id"],
             conversation_id=identity["conversation_id"],
             message_ids=[selected_message_id],
-            limit=1,
+            limit=4,
         )
         if rows:
             break
@@ -379,19 +424,24 @@ def _restore_selected_assets(
         kind = _text(asset.get("kind")).lower()
         filename = _text(asset.get("filename") or "attachment")
         mime_type = _text(asset.get("mime_type") or "application/octet-stream")
+        asset_metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+        source_type = _text(asset_metadata.get("source_type") or kind)
+        asset_role = _text(asset_metadata.get("asset_role") or ("april_output" if source_type in {"generated_image", "april_output", "generated_file"} else "user_input"))
         common = {
             "filename": filename,
             "content_type": mime_type,
             "mime_type": mime_type,
             "kind": kind,
             "size_bytes": int(asset.get("size_bytes") or len(raw)),
-            "source_type": (asset.get("metadata") or {}).get("source_type") or kind,
+            "source_type": source_type,
+            "asset_role": asset_role,
+            "output_type": _text(asset_metadata.get("output_type")),
             "provider_readable": True,
             "recalled_from_memory": True,
             "asset_message_id": _text(asset.get("message_id")),
         }
         attachments.append(common)
-        restored_meta.append({k: common[k] for k in ("filename", "mime_type", "kind", "asset_message_id")})
+        restored_meta.append({k: common[k] for k in ("filename", "mime_type", "kind", "asset_role", "output_type", "asset_message_id")})
         if kind == "image" or mime_type.startswith("image/"):
             data_uri = _mime_data_uri(raw, mime_type if mime_type.startswith("image/") else "image/png")
             visual_context.append({
@@ -402,6 +452,8 @@ def _restore_selected_assets(
                 "mime_type": mime_type,
                 "recalled_from_memory": True,
                 "asset_message_id": common["asset_message_id"],
+                "asset_role": asset_role,
+                "output_type": common["output_type"],
             })
         elif kind == "text_file":
             text_value = _text(asset.get("text_content")) or _decode_saved_text(raw)
@@ -412,6 +464,8 @@ def _restore_selected_assets(
                 "size_bytes": len(raw),
                 "recalled_from_memory": True,
                 "asset_message_id": common["asset_message_id"],
+                "asset_role": asset_role,
+                "output_type": common["output_type"],
             })
         else:
             file_inputs.append({
@@ -422,6 +476,8 @@ def _restore_selected_assets(
                 "size_bytes": len(raw),
                 "recalled_from_memory": True,
                 "asset_message_id": common["asset_message_id"],
+                "asset_role": asset_role,
+                "output_type": common["output_type"],
             })
     if restored_meta:
         print(
@@ -588,7 +644,8 @@ async def execute(
     # Rehydrate only the assets attached to State Manager's selected anchor/pairs;
     # do not mix older files into NEW requests or when a fresh attachment exists.
     visual_context, attachments, file_inputs, file_contents, restored_assets = _restore_selected_assets(
-        uid, identity, dialogue_context, visual_context, attachments, file_inputs, file_contents
+        uid, identity, dialogue_context, visual_context, attachments, file_inputs, file_contents,
+        current_request=current_text,
     )
 
     interpretation = build_interpretation(
@@ -705,10 +762,70 @@ async def execute(
         },
     )
     request.fiber.identity.user_id = uid
+    # Search index is deliberately separate from binary storage. It contains a
+    # bounded source preview, exact filenames/roles and the message ID used to
+    # restore original bytes. The original bytes remain in dialogue_assets.
+    attachment_index: list[dict[str, Any]] = []
+    for item in (attachments or []):
+        if not isinstance(item, dict):
+            continue
+        attachment_index.append({
+            "filename": _text(item.get("filename"))[:200],
+            "kind": _text(item.get("kind") or "file"),
+            "mime_type": _text(item.get("mime_type") or item.get("content_type"))[:100],
+            "asset_role": _text(item.get("asset_role") or "user_input"),
+            "asset_message_id": _text(item.get("asset_message_id") or identity["message_id"]),
+            "source_type": _text(item.get("source_type"))[:100],
+        })
+    for item in (file_contents or []):
+        if not isinstance(item, dict):
+            continue
+        attachment_index.append({
+            "filename": _text(item.get("filename") or "file")[:200],
+            "kind": "text_file",
+            "mime_type": _text(item.get("mime_type") or "text/plain")[:100],
+            "asset_role": _text(item.get("asset_role") or "user_input"),
+            "asset_message_id": _text(item.get("asset_message_id") or identity["message_id"]),
+            "content_preview": _text(item.get("content"))[:4500],
+            "summary": "",
+        })
+    for item in (visual_context or []):
+        if not isinstance(item, dict):
+            continue
+        attachment_index.append({
+            "filename": _text(item.get("filename") or "image")[:200],
+            "kind": "image",
+            "mime_type": _text(item.get("mime_type") or "image/*")[:100],
+            "asset_role": _text(item.get("asset_role") or "user_input"),
+            "asset_message_id": _text(item.get("asset_message_id") or identity["message_id"]),
+            "source_type": _text(item.get("source_type") or "image")[:100],
+        })
+    unique_index: list[dict[str, Any]] = []
+    index_by_asset_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in attachment_index:
+        asset_key = (_text(item.get("asset_message_id")), _text(item.get("filename")), _text(item.get("asset_role")))
+        existing = index_by_asset_key.get(asset_key)
+        if existing is None:
+            existing = dict(item)
+            index_by_asset_key[asset_key] = existing
+            unique_index.append(existing)
+        else:
+            # Merge rather than discard the richer text-file entry: attachment
+            # metadata is appended before the decoded text preview by design.
+            for key, value in item.items():
+                if value not in (None, "", [], {}):
+                    existing[key] = value
+    attachment_index = unique_index[:12]
+    attachment_refs = [
+        {key: item.get(key) for key in ("filename", "kind", "mime_type", "asset_role", "asset_message_id", "source_type", "size_bytes") if item.get(key) is not None}
+        for item in attachment_index
+    ]
+
     request.metadata = {
         "identity": identity,
         "interpretation": interpretation,
         "attachments": attachments or [],
+        "attachment_index": attachment_index,
         # Raw file_data is request-scoped only. It is consumed by Provider and
         # is deliberately excluded from structured_request/DB persistence below.
         "file_inputs": [
@@ -717,6 +834,8 @@ async def execute(
                 "mime_type": _text(item.get("mime_type") or "application/octet-stream"),
                 "size_bytes": int(item.get("size_bytes") or 0),
                 "file_data": _text(item.get("file_data")),
+                "asset_role": _text(item.get("asset_role") or "user_input"),
+                "asset_message_id": _text(item.get("asset_message_id")),
             }
             for item in file_inputs
         ],
@@ -726,6 +845,8 @@ async def execute(
                 "mime_type": _text(item.get("mime_type") or "text/plain"),
                 "size_bytes": int(item.get("size_bytes") or 0),
                 "content": _text(item.get("content")),
+                "asset_role": _text(item.get("asset_role") or "user_input"),
+                "asset_message_id": _text(item.get("asset_message_id")),
             }
             for item in file_contents
         ],
@@ -810,6 +931,10 @@ async def execute(
             "selected_rooms": selected_rooms,
             "render_plan": render_plan,
             "image_generated": bool(image_result),
+            "dialogue_memory_record": (
+                raw.get("metadata", {}).get("dialogue_memory_record", {})
+                if isinstance(raw.get("metadata"), dict) else {}
+            ),
         },
     )
 
@@ -868,6 +993,9 @@ async def execute(
             "filename": _text(item.get("filename") or "image"),
             "source_type": _text(item.get("source_type") or "image"),
             "mime_type": _text(item.get("mime_type") or "image/*"),
+            "asset_role": _text(item.get("asset_role") or "user_input"),
+            "asset_message_id": _text(item.get("asset_message_id") or identity["message_id"]),
+            "output_type": _text(item.get("output_type")),
         })
     safe_visual_context["items"] = safe_visual_items
     safe_visual_context["has_input_images"] = bool(safe_visual_items)
@@ -894,8 +1022,112 @@ async def execute(
                 kind="image",
                 content=generated_bytes,
                 turn_index=turn_index,
-                metadata={"source_type": "generated_image", "generator": "C_APRIL_IMAGES_GENERATOR"},
+                metadata={"source_type": "generated_image", "asset_role": "april_output", "output_type": "image", "paired_message_id": identity["message_id"], "interpretation_id": identity["interpretation_id"], "generator": "C_APRIL_IMAGES_GENERATOR"},
             )
+
+    # Save code/file output as a separately versioned asset paired to this turn.
+    # A visible CodeBlock remains in SceneContract; this binary/text asset lets
+    # later CONTINUE requests retrieve the exact source rather than its summary.
+    output_asset_refs: list[dict[str, Any]] = []
+    requested_outputs = set(str(x).lower() for x in (interpretation.get("intent") or {}).get("requested_outputs", []))
+    should_persist_code = bool((interpretation.get("intent") or {}).get("wants_code") or (interpretation.get("intent") or {}).get("wants_file"))
+    if should_persist_code:
+        code_blocks = [block for block in normalized_blocks if isinstance(block, dict) and str(block.get("type") or "").lower() == "code"]
+        seen_source_hashes: set[str] = set()
+        import hashlib
+        for block_index, block in enumerate(code_blocks[:4], 1):
+            extracted = _source_code_from_block(block)
+            if not extracted:
+                continue
+            code_text, language, extension = extracted
+            code_bytes = code_text.encode("utf-8")
+            source_hash = hashlib.sha256(code_bytes).hexdigest()
+            if source_hash in seen_source_hashes:
+                continue
+            seen_source_hashes.add(source_hash)
+            filename = _text(block.get("filename")) or f"april-output-{identity['message_id'][-10:]}-{block_index}.{extension}"
+            saved_output = save_dialogue_asset(
+                uid,
+                dialog_id=identity["dialog_id"],
+                conversation_id=identity["conversation_id"],
+                message_id=identity["message_id"],
+                filename=filename,
+                mime_type="text/x-python" if extension == "py" else "text/plain",
+                kind="text_file",
+                content=code_bytes,
+                text_content=code_text,
+                turn_index=turn_index,
+                metadata={
+                    "source_type": "april_output_code", "asset_role": "april_output",
+                    "output_type": "code", "language": language, "extension": extension,
+                    "paired_message_id": identity["message_id"],
+                    "interpretation_id": identity["interpretation_id"],
+                    "source_input_assets": attachment_refs[:8],
+                },
+            )
+            if saved_output:
+                output_asset_refs.append({"filename": filename, "kind": "text_file", "asset_role": "april_output", "output_type": "code", "message_id": identity["message_id"], "sha256": source_hash, "language": language})
+
+        # Persist explicit file artifacts as actual bytes/text, not only as a
+        # caption in JSONB. Do not duplicate an already-saved CodeBlock.
+        for artifact_index, artifact in enumerate((raw_artifacts or [])[:6], 1):
+            if not isinstance(artifact, dict):
+                continue
+            artifact_type = _text(artifact.get("type") or artifact.get("artifact_type")).lower()
+            if artifact_type not in {"file", "document", "text_file", "code_file"}:
+                continue
+            filename = _text(artifact.get("filename") or artifact.get("name") or f"april-output-{identity['message_id'][-10:]}-{artifact_index}.txt")
+            mime = _text(artifact.get("mime_type") or artifact.get("content_type") or "text/plain")
+            body_value = artifact.get("content") or artifact.get("text") or artifact.get("code")
+            file_bytes = b""
+            text_content = ""
+            if isinstance(body_value, str) and body_value.strip():
+                text_content = body_value
+                file_bytes = body_value.encode("utf-8")
+            encoded = artifact.get("file_base64") or artifact.get("base64") or artifact.get("b64_json")
+            data_uri = artifact.get("data_uri") or artifact.get("file_data_uri")
+            try:
+                if isinstance(data_uri, str) and data_uri.startswith("data:") and ";base64," in data_uri:
+                    header, b64 = data_uri.split(",", 1)
+                    file_bytes = base64.b64decode(b64, validate=True)
+                    mime = header[5:].split(";", 1)[0] or mime
+                    if mime.startswith("text/"):
+                        text_content = file_bytes.decode("utf-8", errors="replace")
+                elif isinstance(encoded, str) and encoded:
+                    file_bytes = base64.b64decode(encoded, validate=True)
+                    if mime.startswith("text/"):
+                        text_content = file_bytes.decode("utf-8", errors="replace")
+            except Exception:
+                file_bytes = b""
+            if not file_bytes or len(file_bytes) > 10 * 1024 * 1024:
+                continue
+            source_hash = hashlib.sha256(file_bytes).hexdigest()
+            if source_hash in seen_source_hashes:
+                continue
+            saved_output = save_dialogue_asset(
+                uid,
+                dialog_id=identity["dialog_id"], conversation_id=identity["conversation_id"],
+                message_id=identity["message_id"], filename=filename, mime_type=mime,
+                kind="text_file" if mime.startswith("text/") else "file", content=file_bytes,
+                text_content=text_content, turn_index=turn_index,
+                metadata={"source_type": "april_output_file", "asset_role": "april_output",
+                          "output_type": "file", "paired_message_id": identity["message_id"],
+                          "interpretation_id": identity["interpretation_id"], "source_input_assets": attachment_refs[:8]},
+            )
+            if saved_output:
+                output_asset_refs.append({"filename": filename, "kind": "text_file" if mime.startswith("text/") else "file", "asset_role": "april_output", "output_type": "file", "message_id": identity["message_id"], "sha256": source_hash})
+
+    # Make the current Scene carry asset pointers and retrieval evidence as well
+    # as the renderer blocks; no data URI or private file bytes enter the Scene.
+    scene_contract = result.get("scene_contract") if isinstance(result.get("scene_contract"), dict) else {}
+    scene_meta = scene_contract.get("metadata") if isinstance(scene_contract.get("metadata"), dict) else {}
+    scene_meta["dialogue_assets"] = {
+        "user_inputs": attachment_refs,
+        "april_outputs": output_asset_refs,
+        "pairing": {"user_id": uid, "dialog_id": identity["dialog_id"], "conversation_id": identity["conversation_id"], "message_id": identity["message_id"], "interpretation_id": identity["interpretation_id"]},
+    }
+    scene_contract["metadata"] = scene_meta
+    result["scene_contract"] = scene_contract
 
     structured_request = _strip_inline_binary({
         "request_id": request.request_id,
@@ -905,6 +1137,7 @@ async def execute(
         "memory": dict(request.memory),
         "visual_context": safe_visual_context,
         "attachments": list(attachments or []),
+        "attachment_index": attachment_index,
         "available_tools": list(request.available_tools),
         "requested_outputs": list(request.requested_outputs),
         "required_competencies": list(request.required_competencies),
@@ -921,6 +1154,11 @@ async def execute(
         "metadata": dict(response.metadata or {}),
         "scene_contract": result.get("scene_contract") or {},
         "generated_asset_saved": generated_asset_saved,
+        "asset_refs": {
+            "source_inputs": attachment_refs,
+            "april_outputs": output_asset_refs + ([{"filename": f"april-generated-{identity['message_id']}.png", "kind": "image", "asset_role": "april_output", "output_type": "image", "message_id": identity["message_id"]}] if generated_asset_saved else []),
+        },
+        "dialogue_memory_record": (response.metadata or {}).get("dialogue_memory_record", {}),
     })
 
     saved = save_dialogue_pair(
@@ -959,6 +1197,7 @@ async def execute(
             "memory_saved": saved,
             "dialogue_assets_restored": restored_assets,
             "generated_asset_saved": generated_asset_saved,
+            "dialogue_asset_refs": {"source_inputs": attachment_refs, "april_outputs": output_asset_refs},
             "interpretation": interpretation,
             "route": result.get("scene_contract", {}).get("metadata", {}).get("route", {}),
         }
