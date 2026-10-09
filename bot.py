@@ -9,6 +9,7 @@ No separate botru_transport/translation route or file exists.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import base64
 import json
 import os
@@ -30,6 +31,26 @@ MAX_BODY_BYTES = int(os.getenv("APRIL_MAX_HTTP_BODY_BYTES", str(25 * 1024 * 1024
 CANONICAL_CHAT_ROUTE = "/api/v1/chat"
 CANONICAL_ROUTE_VERSION = "april_web_botru_exkrutor_v1"
 INPUT_NORMALIZATION_VERSION = "botru_input_normalization_v2"
+
+
+def _apr_timing_log(stage: str, started: float | None = None, **fields: Any) -> None:
+    """Low-overhead diagnostic timing; logging must never affect the request path."""
+    try:
+        payload = {"component": "botru", "stage": stage}
+        if started is not None:
+            payload["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        payload.update(fields)
+        print("[APRIL_TIMING] " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str), flush=True)
+    except Exception:
+        pass
+
+def _apr_diag_ref(value: Any) -> str:
+    """One-way short reference for joining logs without exposing raw user IDs."""
+    try:
+        raw = str(value or "").strip()
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10] if raw else ""
+    except Exception:
+        return ""
 
 
 def _text(value: Any) -> str:
@@ -219,9 +240,14 @@ def _handle_payload(
     *,
     voice_transcript: str = "",
 ) -> tuple[int, dict[str, Any]]:
+    pipeline_started = time.perf_counter()
+    identity_started = time.perf_counter()
     identity = _canonical_identity(data)
     uid = identity["user_id"]
     original = _text(data.get("text") or data.get("message") or data.get("content"))
+    _apr_timing_log("request_identity", identity_started, user_key=_apr_diag_ref(uid),
+        dialog_key=_apr_diag_ref(identity.get("dialog_id")), message_key=_apr_diag_ref(identity.get("message_id")),
+        flow_key=_apr_diag_ref(identity.get("flow_id")), input_chars=len(original), attachment_count=len(attachments or []))
     conversation_id = identity["conversation_id"]
     dialog_id = identity["dialog_id"]
     message_id = identity["message_id"]
@@ -231,12 +257,18 @@ def _handle_payload(
         return _error("conversation_id or dialog_id required", 400)
 
     attachments = attachments or []
+    input_normalization_started = time.perf_counter()
     try:
         semantic_text, visual_context, attachment_meta, file_inputs, text_file_contents = _prepare_attachments(
             data, attachments, voice_transcript=voice_transcript
         )
         if semantic_text:
             original = (original + "\n\n" + semantic_text).strip()
+        _apr_timing_log("input_normalization", input_normalization_started, user_key=_apr_diag_ref(uid),
+            input_chars=len(original), semantic_attachment_chars=len(semantic_text),
+            attachment_meta_count=len(attachment_meta), image_count=len(visual_context),
+            file_input_count=len(file_inputs), text_file_count=len(text_file_contents),
+            text_file_chars=sum(len(_text(x.get("content"))) for x in text_file_contents if isinstance(x, dict)))
 
         # Reject unreadable/empty uploads before synthesizing an instruction.  An
         # attachment-only message is valid only when the Reader produced actual
@@ -304,6 +336,8 @@ def _handle_payload(
         # this POST.  Retrieval is by exact message_id + dialog/conversation, never
         # by filename or by another account.  The chat response can still proceed if
         # persistence is temporarily unavailable.
+        asset_save_started = time.perf_counter()
+        asset_saved_count = 0
         try:
             init_db()
             for att in attachments:
@@ -314,7 +348,7 @@ def _handle_payload(
                 raw_bytes = getattr(att, "data", b"") or b""
                 if not raw_bytes:
                     continue
-                save_dialogue_asset(
+                asset_saved = save_dialogue_asset(
                     uid,
                     dialog_id=dialog_id or conversation_id,
                     conversation_id=conversation_id or dialog_id,
@@ -334,8 +368,12 @@ def _handle_payload(
                         "paired_message_id": message_id,
                     },
                 )
+                if asset_saved:
+                    asset_saved_count += 1
         except Exception as asset_exc:
             print(f"STATE: DIALOGUE ASSET PRE-SAVE ERROR: {type(asset_exc).__name__}", flush=True)
+        _apr_timing_log("input_asset_persist", asset_save_started, user_key=_apr_diag_ref(uid),
+            attempted_assets=len(attachments), saved_assets=asset_saved_count)
 
         language = _detect_language(
             original or voice_transcript,
@@ -352,6 +390,7 @@ def _handle_payload(
             "stage": "bot.ru",
         }
 
+        executor_started = time.perf_counter()
         result = asyncio.run(execute(
             uid,
             text=original,
@@ -368,6 +407,9 @@ def _handle_payload(
             file_contents=text_file_contents,
             translation=translation,
         ))
+        _apr_timing_log("executor_returned", executor_started, user_key=_apr_diag_ref(uid),
+            message_key=_apr_diag_ref(message_id), result_type=type(result).__name__,
+            answer_chars=len(_text(result.get("answer") or result.get("content"))) if isinstance(result, dict) else 0)
         if isinstance(result, dict):
             result["attachments"] = [
                 {
@@ -380,7 +422,15 @@ def _handle_payload(
                 }
                 for item in attachment_meta
             ]
-        return 200, _payload(result)
+        payload_started = time.perf_counter()
+        response_payload = _payload(result)
+        _apr_timing_log("http_payload_build", payload_started,
+            answer_chars=len(_text(response_payload.get("answer"))),
+            render_blocks=len(response_payload.get("render_blocks") or []),
+            artifacts=len(response_payload.get("artifacts") or []))
+        _apr_timing_log("handle_payload_total", pipeline_started, user_key=_apr_diag_ref(uid),
+            message_key=_apr_diag_ref(message_id), status=200)
+        return 200, response_payload
     except Exception as exc:
         traceback.print_exc()
         return _error(str(exc), 500)
@@ -550,6 +600,7 @@ class AprilHandler(BaseHTTPRequestHandler):
         if self.path != CANONICAL_CHAT_ROUTE:
             self._send_json(404, {"success": False, "error": "NOT_FOUND", "canonical_route": CANONICAL_CHAT_ROUTE})
             return
+        http_started = time.perf_counter()
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length < 0 or length > MAX_BODY_BYTES:
@@ -557,10 +608,14 @@ class AprilHandler(BaseHTTPRequestHandler):
                 return
             raw = self.rfile.read(length)
             content_type = self.headers.get("Content-Type", "application/json")
+            parse_started = time.perf_counter()
             if content_type.lower().startswith("multipart/form-data"):
                 data, attachments = parse_multipart_payload(raw, content_type=content_type)
             else:
                 data, attachments = parse_json_payload(raw)
+            _apr_timing_log("http_request_parse", parse_started, body_bytes=length,
+                content_type=content_type.split(";", 1)[0], attachment_count=len(attachments or []),
+                input_chars=len(_text(data.get("text") or data.get("message") or data.get("content"))) if isinstance(data, dict) else 0)
             if _voice_attachment(attachments) is not None:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
@@ -596,8 +651,14 @@ class AprilHandler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 return
 
+            handler_started = time.perf_counter()
             status, payload = _handle_payload(data, attachments)
+            _apr_timing_log("http_handler_total", handler_started, http_elapsed_ms=round((time.perf_counter() - http_started) * 1000, 1),
+                status=status, answer_chars=len(_text(payload.get("answer"))) if isinstance(payload, dict) else 0)
+            send_started = time.perf_counter()
             self._send_json(status, payload)
+            _apr_timing_log("http_response_send", send_started, status=status,
+                serialized_answer_chars=len(_text(payload.get("answer"))) if isinstance(payload, dict) else 0)
         except Exception as exc:
             traceback.print_exc()
             self._send_json(500, {"success": False, "error": str(exc), "canonical_route": CANONICAL_CHAT_ROUTE})
