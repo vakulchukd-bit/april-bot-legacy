@@ -18,10 +18,10 @@ from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse
 
 
 MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-5.6-luna")
-MAX_OUTPUT_TOKENS = min(
-    8000,
-    max(256, int(os.getenv("APRIL_MAX_OUTPUT_TOKENS", "2400") or 2400)),
-)
+# Product requirement: one provider call with the full 8k output budget.
+# Do not let a stale Railway APRIL_MAX_OUTPUT_TOKENS=2400 silently reinstate
+# the old truncation ceiling.
+MAX_OUTPUT_TOKENS = 8000
 INPUT_TOKEN_TARGET = 900
 TRANSLATION_ROUTE_VERSION = "botru_embedded_translation_v1"
 
@@ -45,12 +45,13 @@ Do not create another route, memory store, interpreter, room registry, or user i
 Do not expose internal reasoning.
 
 Always treat these sections as structured input:
-1. CURRENT_REQUEST
-2. CONTINUATION_CONTEXT (empty when NEW)
-3. NEW_DIALOGUE_REQUEST (empty when CONTINUE)
-4. INPUT_MODALITIES / VISUAL_CONTEXT
-5. C_ARTIFACT_RENDER_PLAN
-6. MCDOWELL_PRESENTATION_POLICY
+1. AUTHENTICATED_IDENTITY and CURRENT_REQUEST (the current request always exists)
+2. CONTINUATION_CONTEXT (selected USER↔APRIL pairs; MUST be [] when NEW)
+3. NEW_DIALOGUE_REQUEST (always contains the literal current request; consult NEW_DIALOGUE_ACTIVE before treating it as a topic switch)
+4. ATTACHMENT_TASK_MAP / INPUT_MODALITIES / VISUAL_CONTEXT / ATTACHED_TEXT_FILES
+5. REQUEST_SEQUENCE (answer each explicit question/step in supplied order)
+6. C_ARTIFACT_RENDER_PLAN and MCDOWELL_KATEX_PRESENTATION_POLICY
+7. SCENE_CONTRACT / OUTPUT_BUDGET_POLICY
 
 For CONTINUE, continue the selected subject and do not repeat questions already answered.
 Use the anchor topic and selected USER↔APRIL pairs as the primary continuity evidence. Resolve
@@ -68,8 +69,9 @@ For each newly supplied or explicitly reattached file, read the actual input_fil
 Treat the user's CURRENT_REQUEST as the task for all attachments in that message. When a message contains both an image and a file, analyze each source distinctly and explain how they relate only when the contents support that link; don't answer each attachment as an unrelated task. Keep ATTACHMENT_INDEX, attachment role (USER_INPUT vs APRIL_OUTPUT), source message ID, and CURRENT_REQUEST distinct. Prefer cached sidecars for routine continuation; avoid repeating previously supplied descriptions. A concise per-asset sidecar must preserve enough concrete facts for later follow-up, and must be labelled by the exact filename, kind, and source message ID from ATTACHMENT_INDEX.
 Generation/editing is permission-based: only when INTERPRETATION.wants_image=true may C_APRIL_IMAGES_GENERATOR be used. Never infer image generation from image words or attachment contents.
 For analyze_image, analyze_file, or analyze_input tasks, answer in explanatory text and retain enough specific facts to support follow-up questions. Avoid generic one-sentence summaries when the user asks what an image/file contains.
-For a code modification request, return an explanatory text block followed by a separate render block with type="code", language, filename, and the complete corrected code when size permits. Preserve unaffected behavior, do not replace missing sections with ellipses/placeholders, and do not claim the code was saved as a downloadable file unless an actual file artifact/link is supplied. If INTERPRETATION.wants_file=true and you return corrected source, also include an artifact {"type":"file","filename":"the_real_output_name.ext","mime_type":"the appropriate text MIME type","content":"the same complete corrected source text"}; never invent a filesystem path or URL. For a request to explain code only, do not rewrite it unasked.
-Use render blocks that match the requested output: type="code" for code, type="table" for tables, type="diagram" for diagrams, type="formula" for formulas. Keep narrative explanation as a text block before the structured block. Only create an output file artifact if explicitly requested and actual file contents are provided.
+For a code modification request, return an explanatory text block followed by a separate render block with type="code", language, filename, and the complete corrected code. Preserve unaffected behavior; never replace required source lines with ellipses/placeholders. Do not claim a file was saved unless an actual file artifact is present. If a file artifact is explicitly requested, include its real content, but keep narrative/summary fields concise and do not repeat source code in any other prose field. For a request to explain code only, do not rewrite it unasked.
+Use render blocks that match each request-sequence step: type="code" for code, type="table" for tables, type="diagram" for diagrams, type="formula" for formulas, type="image" for generated images, and type="text" for explanations. Set step_index and step_title on blocks when several steps exist, and preserve step order. KaTeX-compatible LaTeX is mandatory for mathematical expressions; McDowell presentation metadata is mandatory for every scene. Always return a complete SceneContract-compatible structured answer.
+For multi-question requests, answer every explicit question in order and make the output type match the question; do not merge separate questions into one generic paragraph. Aim for the most useful improved result within the user's scope. For large outputs, compress repeated explanations and metadata first; preserve requested source details and never silently truncate code.
 
 Return JSON only:
 {
@@ -645,7 +647,25 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
                 "analysis_key_details": [str(value)[:220] for value in (item.get("analysis_key_details") or [])[:8]] if isinstance(item.get("analysis_key_details"), list) else [],
             })
 
+    identity = dict(interpretation.get("identity") or {})
+    if not identity:
+        identity = {
+            "user_id": _text(getattr(getattr(getattr(req, "fiber", None), "identity", None), "user_id", "")),
+            "conversation_id": _text(conversation.get("conversation_id")),
+            "dialog_id": _text(conversation.get("dialog_id")),
+            "message_id": _text(conversation.get("message_id")),
+            "flow_id": _text(routing.get("flow_id")),
+            "interpretation_id": _text(routing.get("interpretation_id")),
+        }
+    request_structure = interpretation.get("request_structure") if isinstance(interpretation.get("request_structure"), dict) else {}
+    question_sequence = request_structure.get("question_sequence") if isinstance(request_structure.get("question_sequence"), list) else []
+    asset_task_map = request_structure.get("asset_task_map") if isinstance(request_structure.get("asset_task_map"), list) else []
+    presentation_contract = request_structure.get("presentation_contract") if isinstance(request_structure.get("presentation_contract"), dict) else {}
+    mcdowell_policy = dict(mcdowell) if isinstance(mcdowell, dict) else {}
+    mcdowell_policy.update({"always": True, "required": True, "role": "presentation_and_render_layout"})
+
     structured = {
+        "AUTHENTICATED_IDENTITY": {key: _clip(value, 180) for key, value in identity.items() if value},
         "CURRENT_REQUEST": current,
         "RETURN_LANGUAGE": _text(
             constraints.get("provider_output_language")
@@ -682,10 +702,17 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
             or "",
             2600,
         ),
-        "NEW_DIALOGUE_REQUEST": _clip(
-            new_dialogue.get("request") if relation == "NEW" else "",
-            1600,
-        ),
+        "NEW_DIALOGUE_REQUEST": _clip(new_dialogue.get("request") or current, 1600),
+        "NEW_DIALOGUE_ACTIVE": bool(new_dialogue.get("active", relation == "NEW")) and relation != "CONTINUE",
+        "REQUEST_SEQUENCE": question_sequence or [{"step_index": 1, "request": current, "output_types": structured_intent.get("requested_outputs") or ["text"], "answer_in_order": True}],
+        "ATTACHMENT_TASK_MAP": asset_task_map,
+        "REQUEST_EXECUTION_POLICY": {
+            "preserve_authenticated_identity": True,
+            "answer_all_steps_in_order": True,
+            "improve_requested_result": True,
+            "compress_repeated_prose_first": True,
+            "do_not_omit_required_source_code": True,
+        },
         "CONTEXT": {
             "active_topic": _clip(
                 continuation.get("active_topic") or memory.get("active_topic"),
@@ -707,7 +734,27 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
         "ATTACHED_TEXT_FILES": text_file_manifest,
         "C_ARTIFACT_RENDER_PLAN": render_plan,
         "SELECTED_ROOMS": routing.get("selected_rooms") or [],
-        "MCDOWELL_PRESENTATION_POLICY": mcdowell,
+        "MCDOWELL_PRESENTATION_POLICY": mcdowell_policy,
+        "MCDOWELL_KATEX_PRESENTATION_POLICY": {
+            "mcdowell": {"required": True, "role": "whole_scene_layout"},
+            "katex": {"required_for_math": True, "latex_delimiters": ["\\(...\\)", "\\[...\\]"], "renderer": "FormulaRenderer"},
+            **presentation_contract,
+        },
+        "SCENE_CONTRACT": {"required": True, "authenticated_scope_required": True, "ordered_render_blocks_required": True},
+        "OUTPUT_BUDGET_POLICY": {
+            "max_output_tokens": MAX_OUTPUT_TOKENS,
+            "single_provider_call": True,
+            "response_style": "concise_complete",
+            "compress_when_large": True,
+            "priority_order": [
+                "answer_all_requested_steps",
+                "preserve_complete_requested_source",
+                "grounded_attachment_analysis",
+                "remove_repeated_explanation_and_metadata",
+            ],
+            "compress_repeated_explanation_before_content": True,
+            "avoid_duplicate_source_code_fields": True,
+        },
         "OUTPUT_CONTRACT": {
             "required": [
                 "internal_request_en",
@@ -1013,51 +1060,28 @@ async def generate_text(
     try:
         client = _client_get()
         base_input = _build_input(request)
-        for attempt in range(2):
-            attempt_input = base_input
-            if attempt:
-                # A targeted one-time retry repairs incomplete JSON without
-                # creating a second route or changing the user's identity/context.
-                attempt_input = list(base_input) + [{
-                    "role": "user",
-                    "content": [{
-                        "type": "input_text",
-                        "text": (
-                            "Your previous output was empty or not a valid non-empty JSON response. "
-                            "Return one valid JSON object now, with a concise but specific answer "
-                            "in RETURN_LANGUAGE. Do not dump source code unless the user explicitly "
-                            "asked for code changes. Keep the answer focused on the request and "
-                            "include grounded attachment details; do not invent details."
-                        ),
-                    }],
-                }]
-            try:
-                response = await asyncio.to_thread(
-                    client.responses.create,
-                    model=MODEL,
-                    input=attempt_input,
-                    max_output_tokens=MAX_OUTPUT_TOKENS,
+        try:
+            response = await asyncio.to_thread(
+                client.responses.create,
+                model=MODEL,
+                input=base_input,
+                max_output_tokens=MAX_OUTPUT_TOKENS,
+            )
+            raw = _text(getattr(response, "output_text", ""))
+            response_status = _text(getattr(response, "status", "")).lower()
+            if response_status == "incomplete":
+                failure_code = "PROVIDER_OUTPUT_INCOMPLETE"
+                reason = _text(getattr(response, "incomplete_reason", "")) or "unknown"
+                print(
+                    f"[APRIL_PROVIDER] incomplete model output; retries=0 "
+                    f"reason={re.sub(r'[^A-Za-z0-9_:-]', '_', reason)[:80]} "
+                    f"output_chars={len(raw)} max_output_tokens={MAX_OUTPUT_TOKENS}",
+                    flush=True,
                 )
-                raw = _text(getattr(response, "output_text", ""))
-                response_status = _text(getattr(response, "status", "")).lower()
-                if response_status == "incomplete":
-                    failure_code = "PROVIDER_OUTPUT_INCOMPLETE"
-                    reason = _text(getattr(response, "incomplete_reason", "")) or "unknown"
-                    print(
-                        f"[APRIL_PROVIDER] incomplete model output attempt={attempt + 1} "
-                        f"reason={re.sub(r'[^A-Za-z0-9_:-]', '_', reason)[:80]} "
-                        f"output_chars={len(raw)}",
-                        flush=True,
-                    )
-                    continue
-                if not raw:
-                    failure_code = "OPENAI_EMPTY_OUTPUT"
-                    print(
-                        f"[APRIL_PROVIDER] empty model output attempt={attempt + 1} "
-                        f"input_messages={len(attempt_input)}",
-                        flush=True,
-                    )
-                    continue
+            elif not raw:
+                failure_code = "OPENAI_EMPTY_OUTPUT"
+                print("[APRIL_PROVIDER] empty model output; retries=0", flush=True)
+            else:
                 try:
                     decoded = _json_load(raw)
                     contract = _normalize(decoded)
@@ -1068,40 +1092,25 @@ async def generate_text(
                             "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
                             "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
                         }
-                    break
                 except Exception as exc:
                     failure_code = str(exc) or "PROVIDER_INVALID_OUTPUT"
                     contract = None
-                    # Log only the rejection class and response length; never
-                    # dump user files, image data, prompts, or model output.
                     safe_code = re.match(r"[A-Z0-9_]+", failure_code.upper())
                     print(
-                        f"[APRIL_PROVIDER] response rejected attempt={attempt + 1} "
+                        f"[APRIL_PROVIDER] response rejected; retries=0 "
                         f"code={(safe_code.group(0) if safe_code else 'PROVIDER_INVALID_OUTPUT')} "
                         f"output_chars={len(raw)}",
                         flush=True,
                     )
-                    continue
-            except Exception as exc:
-                failure_code = str(exc) or "PROVIDER_REQUEST_FAILED"
-                # Do not spend another full network timeout on auth, bad-request,
-                # or stalled-network failures. Retry only immediate transient
-                # rate-limit/server errors; malformed/empty model output is handled
-                # by the inner retry above.
-                retryable_http = any(
-                    marker in failure_code.upper()
-                    for marker in (
-                        "OPENAI_HTTP_429",
-                        "OPENAI_HTTP_500",
-                        "OPENAI_HTTP_502",
-                        "OPENAI_HTTP_503",
-                        "OPENAI_HTTP_504",
-                    )
-                )
-                if attempt == 0 and retryable_http:
-                    continue
-                contract = None
-                break
+        except Exception as exc:
+            failure_code = str(exc) or "PROVIDER_REQUEST_FAILED"
+            contract = None
+            safe_code = re.match(r"[A-Z0-9_]+", failure_code.upper())
+            print(
+                f"[APRIL_PROVIDER] request failed; retries=0 "
+                f"code={(safe_code.group(0) if safe_code else 'PROVIDER_REQUEST_FAILED')}",
+                flush=True,
+            )
 
         if contract is None:
             language = _text(
@@ -1113,23 +1122,24 @@ async def generate_text(
             has_attachment = bool(attachments or (request.visual_context or {}).get("items") or (request.metadata or {}).get("file_inputs") or (request.metadata or {}).get("file_contents"))
             if language.startswith("ru"):
                 answer = (
-                    "Не удалось получить содержательный ответ от модели по этому вложению. "
-                    "Повтори запрос; если проблема повторится, отправь файл или изображение ещё раз."
+                    "Не удалось завершить ответ модели за один запрос (" + failure_code + "). "
+                    "Оригинал вложения сохранён в контексте диалога; повторная загрузка не требуется."
                     if has_attachment else
-                    "Модель не вернула содержательный ответ. Повтори запрос, пожалуйста."
+                    "Модель не вернула завершённый ответ за один запрос (" + failure_code + "). Сформулируй продолжение, и ответ будет обработан как новый запрос."
                 )
             elif language.startswith("uk"):
                 answer = (
-                    "Не вдалося отримати змістовну відповідь моделі щодо цього вкладення. "
-                    "Повтори запит; якщо проблема повториться, надішли файл або зображення ще раз."
+                    "Не вдалося завершити відповідь моделі за один запит (" + failure_code + "). "
+                    "Оригінал вкладення збережено в контексті діалогу; повторно завантажувати його не потрібно."
                     if has_attachment else
-                    "Модель не повернула змістовної відповіді. Будь ласка, повтори запит."
+                    "Модель не повернула завершеної відповіді за один запит (" + failure_code + "). Продовження буде оброблено як новий запит."
                 )
             else:
                 answer = (
-                    "I couldn't get a usable answer about this attachment. Please retry; if it happens again, resend the file or image."
+                    "The model could not complete this response in one provider call (" + failure_code + "). "
+                    "The original attachment remains saved in dialogue context; re-uploading is not required."
                     if has_attachment else
-                    "The model did not return a usable answer. Please retry your request."
+                    "The model did not return a complete response in one provider call (" + failure_code + "). Continue with a new message to try a new request."
                 )
             contract = {
                 "machine_response": {
@@ -1151,7 +1161,7 @@ async def generate_text(
                     "artifacts": [],
                 }
             }
-            print(f"[APRIL_PROVIDER] non-empty fallback returned after retries; code={failure_code}", flush=True)
+            print(f"[APRIL_PROVIDER] non-empty fallback returned; retries=0 code={failure_code}", flush=True)
 
         machine_response = contract["machine_response"]
         machine_response.setdefault("metadata", {})
