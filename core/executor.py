@@ -50,7 +50,7 @@ from storage import (
 )
 
 
-PROCESSOR_VERSION = "april_exkrutor_single_route_v7_dialogue_assets"
+PROCESSOR_VERSION = "april_exkrutor_single_route_v8_structured_chain_single_call"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -294,6 +294,8 @@ def _build_scene(
         result_event={
             "status": "complete",
             "provider_calls": 1,
+            "provider_retries": 0,
+            "provider_max_output_tokens": 8000,
             "canonical_route": CANONICAL_ROUTE,
         },
         blocks=list(response.render_blocks or []),
@@ -932,10 +934,12 @@ async def execute(
                 "topic_table_markdown": dialogue_context.get("topic_table_markdown") or "",
                 "anchor": dialogue_context.get("anchor") or {},
                 "restored_assets": restored_assets,
-                "new_dialogue_request": (
-                    current_text
-                    if dialogue_context["relation"] == "NEW" and not dialogue_context.get("history_request")
-                    else ""
+                # Always carry the literal current request in the structured chain.
+                # This field is active as a topic switch only for NEW dialogue.
+                "new_dialogue_request": original or current_text,
+                "new_dialogue_active": (
+                    dialogue_context["relation"] == "NEW"
+                    and not dialogue_context.get("history_request")
                 ),
                 "context": {
                     "active_topic": dialogue_context["active_topic"],
@@ -945,7 +949,18 @@ async def execute(
                 },
                 "mcdowell": {
                     "always": True,
+                    "required": True,
                     "role": "presentation_and_render_layout",
+                },
+                "katex": {
+                    "required_for_math": True,
+                    "renderer": "FormulaRenderer",
+                },
+                "provider_policy": {
+                    "max_output_tokens": 8000,
+                    "provider_calls_per_turn": 1,
+                    "retry_count": 0,
+                    "question_sequence_required": True,
                 },
             },
         },
@@ -958,6 +973,9 @@ async def execute(
             "structured_response": True,
             "context_always_present": True,
             "mcdowell_always_present": True,
+            "katex_required_for_math": True,
+            "provider_calls_per_turn": 1,
+            "provider_retry_count": 0,
             "input_modalities": (interpretation.get("input") or {}).get("modalities", []),
         },
     )
