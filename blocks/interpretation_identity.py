@@ -7,10 +7,33 @@ machine-readable interpretation without creating another route.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
+import time
 from typing import Any
 from uuid import uuid4
 import re
 
+
+
+def _apr_timing_log(stage: str, started: float | None = None, **fields: Any) -> None:
+    """Low-overhead diagnostic timing; logging must never affect the request path."""
+    try:
+        payload = {"component": "interpretation", "stage": stage}
+        if started is not None:
+            payload["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        payload.update(fields)
+        print("[APRIL_TIMING] " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str), flush=True)
+    except Exception:
+        pass
+
+def _apr_diag_ref(value: Any) -> str:
+    """One-way short reference for joining logs without exposing raw user IDs."""
+    try:
+        raw = str(value or "").strip()
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10] if raw else ""
+    except Exception:
+        return ""
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
@@ -73,6 +96,7 @@ def build_interpretation_identity(
     user_id: Any = "",
 ) -> dict[str, str]:
     """Build the canonical interpretation identity from route identity."""
+    identity_started = time.perf_counter()
     resolved_april_id = _text(april_id or user_id)
     resolved_dialog_id = _text(dialog_id or conversation_id)
     resolved_conversation_id = _text(conversation_id or resolved_dialog_id)
@@ -90,6 +114,8 @@ def build_interpretation_identity(
     result = identity.as_dict()
     if _text(flow_id):
         result["flow_id"] = _text(flow_id)
+    _apr_timing_log("identity_create", identity_started, user_key=_apr_diag_ref(resolved_april_id),
+        dialog_key=_apr_diag_ref(resolved_dialog_id), message_key=_apr_diag_ref(resolved_message_id))
     return result
 
 
@@ -339,6 +365,7 @@ def build_interpretation(
     identity: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Create the structured request that the Provider is allowed to answer."""
+    interpretation_started = time.perf_counter()
     text = _text(current_request)
     original = _text(original_request or current_request)
     memory = dict(memory or {})
@@ -444,7 +471,7 @@ def build_interpretation(
     if has_original_image and task == "answer_request":
         task = "analyze_image"
 
-    return {
+    result = {
         "schema": "april_interpretation_v2",
         "identity": current_identity,
         "input": {
@@ -545,6 +572,12 @@ def build_interpretation(
             "output_plan": requested_outputs,
         },
     }
+    _apr_timing_log("build_interpretation", interpretation_started,
+        relation=relation, task=task, requested_outputs=requested_outputs,
+        input_chars=len(text), selected_pairs=len(selected_pairs), history_topics=len(history_topics),
+        question_sequence_count=len((result.get("request_structure") or {}).get("question_sequence") or []),
+        attachment_task_count=len(asset_task_map))
+    return result
 
 
 def assert_same_identity(expected: dict[str, Any], actual: dict[str, Any]) -> None:
