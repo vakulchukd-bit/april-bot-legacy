@@ -310,11 +310,11 @@ def _build_scene(
         dialogue_state=dict((interpretation.get("dialogue") or {})),
         dialogue_development={
             "interpretation_id": identity["interpretation_id"],
-            "memory_search_engine": "state_manager_dialogue_search_v4_asset_recall",
+            "memory_search_engine": "state_manager_topic_section_search_v5_clarification",
         },
         result_event={
             "status": "complete",
-            "provider_calls": 1,
+            "provider_calls": 0 if bool((response.metadata or {}).get("local_clarification")) else 1,
             "provider_retries": 0,
             "provider_output_limit": "model_native_no_application_cap",
             "canonical_route": CANONICAL_ROUTE,
@@ -892,10 +892,14 @@ async def execute(
     # Rehydrate only the assets attached to State Manager's selected anchor/pairs;
     # do not mix older files into NEW requests or when a fresh attachment exists.
     restore_started = time.perf_counter()
-    visual_context, attachments, file_inputs, file_contents, restored_assets = _restore_selected_assets(
-        uid, identity, dialogue_context, visual_context, attachments, file_inputs, file_contents,
-        current_request=current_text,
-    )
+    if bool(dialogue_context.get("clarification_needed")):
+        # Clarification must be quick and must not restore/load unrelated assets.
+        restored_assets = []
+    else:
+        visual_context, attachments, file_inputs, file_contents, restored_assets = _restore_selected_assets(
+            uid, identity, dialogue_context, visual_context, attachments, file_inputs, file_contents,
+            current_request=current_text,
+        )
     _apr_timing_log(
         "selected_asset_restore", restore_started, user_key=_apr_diag_ref(uid),
         restored_assets=len(restored_assets or []), visual_items=len(visual_context or []),
@@ -946,6 +950,10 @@ async def execute(
             "relation_confidence": dialogue_context["relation_confidence"],
             "selected_pairs": dialogue_context["selected_pairs"],
             "candidates": dialogue_context["candidates"],
+            "selected_section": dialogue_context.get("selected_section") or {},
+            "clarification_needed": bool(dialogue_context.get("clarification_needed")),
+            "pending_clarification": dialogue_context.get("pending_clarification") or {},
+            "clarification_resolution": dialogue_context.get("clarification_resolution") or {},
             "history_topics": dialogue_context.get("history_topics") or [],
             "topic_index": dialogue_context.get("topic_index") or [],
             "known_topic_count": int(dialogue_context.get("known_topic_count") or 0),
@@ -987,6 +995,10 @@ async def execute(
                 "relation": dialogue_context["relation"],
                 "current_request": current_text,
                 "selected_dialogue_chain": dialogue_context["selected_pairs"],
+                "selected_section": dialogue_context.get("selected_section") or {},
+                "clarification_needed": bool(dialogue_context.get("clarification_needed")),
+                "pending_clarification": dialogue_context.get("pending_clarification") or {},
+                "clarification_resolution": dialogue_context.get("clarification_resolution") or {},
                 "history_topics": dialogue_context.get("history_topics") or [],
                 "topic_index": dialogue_context.get("topic_index") or [],
                 "known_topic_count": int(dialogue_context.get("known_topic_count") or 0),
@@ -1019,7 +1031,8 @@ async def execute(
                 },
                 "provider_policy": {
                     "output_limit": "model_native_no_application_cap",
-                    "provider_calls_per_turn": 1,
+                    "provider_calls_per_turn": 0 if dialogue_context.get("clarification_needed") else 1,
+                    "local_clarification_allowed": True,
                     "retry_count": 0,
                     "question_sequence_required": True,
                 },
@@ -1035,8 +1048,9 @@ async def execute(
             "context_always_present": True,
             "mcdowell_always_present": True,
             "katex_required_for_math": True,
-            "provider_calls_per_turn": 1,
+            "provider_calls_per_turn": 0 if dialogue_context.get("clarification_needed") else 1,
             "provider_retry_count": 0,
+            "local_clarification_allowed": True,
             "input_modalities": (interpretation.get("input") or {}).get("modalities", []),
         },
     )
@@ -1174,8 +1188,48 @@ async def execute(
         file_content_chars=sum(len(_text(x.get("content"))) for x in (file_contents or []) if isinstance(x, dict)))
 
     provider_started = time.perf_counter()
-    provider_packet = await generate_text(request)
-    provider_ms = round((time.perf_counter() - provider_started) * 1000, 1)
+    if bool(dialogue_context.get("clarification_needed")):
+        # This is a deterministic UI-facing clarification, not a provider fallback.
+        # The original request and options are persisted in dialogue_memory_record,
+        # so the user's next reply resolves this exact question without losing intent.
+        clarification_answer = _text(dialogue_context.get("clarification_prompt"))
+        pending = dict(dialogue_context.get("pending_clarification") or {})
+        if not clarification_answer:
+            clarification_answer = "Уточните, пожалуйста, какой именно раздел продолжить. Исходный запрос сохранён."
+        topic_name = _text(pending.get("active_topic") or dialogue_context.get("active_topic")) or "Тема диалога"
+        memory_record = {
+            "topic": topic_name[:140],
+            "summary": "Ожидается уточнение выбранного раздела; исходный запрос сохранён без потери намерения пользователя.",
+            "sections": [],
+            "entities": [],
+            "pending_clarification": pending,
+        }
+        provider_packet = {"machine_response": {
+            "answer": clarification_answer,
+            "content": clarification_answer,
+            "summary": "Уточнение раздела для продолжения диалога.",
+            "render_blocks": [{
+                "type": "text",
+                "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
+                "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
+                "content": clarification_answer,
+            }],
+            "artifacts": [],
+            "metadata": {
+                "identity": identity,
+                "dialogue_memory_record": memory_record,
+                "local_clarification": True,
+                "provider_calls": 0,
+            },
+            "internal_answer_en": clarification_answer,
+        }}
+        provider_ms = 0.0
+        _apr_timing_log("local_clarification_ready", provider_started,
+            options=len(pending.get("options") or []), active_topic=topic_name,
+            original_request_chars=len(_text(pending.get("original_request"))))
+    else:
+        provider_packet = await generate_text(request)
+        provider_ms = round((time.perf_counter() - provider_started) * 1000, 1)
     provider_machine = provider_packet.get("machine_response") if isinstance(provider_packet, dict) else {}
     provider_machine = provider_machine if isinstance(provider_machine, dict) else {}
     provider_meta_for_log = provider_machine.get("metadata") if isinstance(provider_machine.get("metadata"), dict) else {}
@@ -1185,7 +1239,8 @@ async def execute(
         render_blocks=len(provider_machine.get("render_blocks") or []), artifacts=len(provider_machine.get("artifacts") or []),
         input_tokens=(provider_meta_for_log.get("usage") or {}).get("input_tokens"),
         output_tokens=(provider_meta_for_log.get("usage") or {}).get("output_tokens"),
-        provider_fallback=bool(provider_meta_for_log.get("provider_fallback")))
+        provider_fallback=bool(provider_meta_for_log.get("provider_fallback")),
+        local_clarification=bool(provider_meta_for_log.get("local_clarification")))
 
     raw = provider_packet.get("machine_response") if isinstance(provider_packet, dict) else None
     if not isinstance(raw, dict):
@@ -1277,6 +1332,7 @@ async def execute(
             "selected_rooms": selected_rooms,
             "render_plan": render_plan,
             "image_generated": bool(image_result),
+            "local_clarification": bool(provider_metadata.get("local_clarification")),
             "dialogue_memory_record": (
                 raw.get("metadata", {}).get("dialogue_memory_record", {})
                 if isinstance(raw.get("metadata"), dict) else {}
