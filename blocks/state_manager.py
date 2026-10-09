@@ -779,20 +779,113 @@ def _candidate_score(
         "conversation_id": str(row.get("conversation_id") or ""),
         "interpretation_id": str(row.get("interpretation_id") or ""),
         "topic": _topic_label(row),
+        "sections": _dialogue_section_map(row),
+        "memory_summary": _compact_memory_summary(row),
         "attachment_evidence": attachment_evidence[:1800],
     }
 
 
+def _dialogue_section_map(row: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
+    """Read McDowell's persisted section index, with a legacy-answer fallback."""
+    direct_sections = row.get("sections")
+    response = _parse_json(row.get("structured_response"))
+    metadata = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
+    record = response.get("dialogue_memory_record")
+    if not isinstance(record, dict):
+        record = metadata.get("dialogue_memory_record") if isinstance(metadata.get("dialogue_memory_record"), dict) else {}
+    raw_sections = direct_sections if isinstance(direct_sections, list) else (record.get("sections") if isinstance(record, dict) else None)
+    sections: list[dict[str, Any]] = []
+    if isinstance(raw_sections, list):
+        for item in raw_sections[:limit]:
+            if not isinstance(item, dict):
+                continue
+            heading = _text(item.get("heading") or item.get("title"))[:90]
+            summary = re.sub(r"\s+", " ", _text(item.get("summary")))[:140]
+            if heading:
+                try:
+                    order = int(item.get("order") or len(sections) + 1)
+                except (TypeError, ValueError):
+                    order = len(sections) + 1
+                sections.append({"heading": heading, "summary": summary, "order": order})
+    if sections:
+        return sections
+
+    # Compatibility for stored turns created before the McDowell section index existed.
+    answer = _text(response.get("answer") or response.get("content") or row.get("april_text") or row.get("april"))
+    lines = answer.splitlines()
+    found: list[tuple[int, str]] = []
+    for idx, line in enumerate(lines):
+        match = re.match(r"^\s*#{1,4}\s+(.+?)\s*#*\s*$", line.strip())
+        if match and match.group(1).strip():
+            found.append((idx, match.group(1).strip()[:90]))
+    for pos, (idx, heading) in enumerate(found[:limit]):
+        end = found[pos + 1][0] if pos + 1 < len(found) else len(lines)
+        body = re.sub(r"\s+", " ", " ".join(x.strip() for x in lines[idx + 1:end] if x.strip()))
+        sections.append({"heading": heading, "summary": body[:140], "order": pos + 1})
+    if sections:
+        return sections
+
+    # Old stored answers sometimes contain separated paragraphs but no Markdown
+    # headings. Create compact paragraph labels so CONTINUE does not fall back to
+    # sending the opening 300 characters as a substitute for a topic map.
+    paragraphs = [
+        re.sub(r"\s+", " ", part).strip()
+        for part in re.split(r"\n\s*\n", answer)
+        if part.strip()
+    ]
+    for paragraph in paragraphs[:limit]:
+        plain = re.sub(r"^[#>*\-\d.)\s]+", "", paragraph).strip()
+        labelled = re.match(r"^([^:—–]{3,65})\s*[:—–]\s*(.+)$", plain)
+        if labelled:
+            heading, summary = labelled.group(1).strip(), labelled.group(2).strip()
+        else:
+            words = plain.split()
+            heading = " ".join(words[:6]).strip(" ,.;:—–")
+            if len(words) > 6:
+                heading += "…"
+            summary = plain
+        if heading:
+            sections.append({"heading": heading[:90], "summary": summary[:140], "order": len(sections) + 1})
+    return sections
+
+
+def _compact_memory_summary(row: dict[str, Any]) -> str:
+    direct = _text(row.get("memory_summary"))
+    if direct:
+        return re.sub(r"\s+", " ", direct)[:220]
+    response = _parse_json(row.get("structured_response"))
+    metadata = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
+    record = response.get("dialogue_memory_record")
+    if not isinstance(record, dict):
+        record = metadata.get("dialogue_memory_record") if isinstance(metadata.get("dialogue_memory_record"), dict) else {}
+    summary = _text(record.get("summary")) if isinstance(record, dict) else ""
+    if not summary:
+        summary = _text(response.get("summary"))
+    if not summary:
+        summary = _text(row.get("april_text"))
+    return re.sub(r"\s+", " ", summary)[:220]
+
+
 def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
+    sections = _dialogue_section_map(item)
+    # Do not feed the previous long explanation back into the next prompt. Retain
+    # a compact summary plus McDowell's ordered section index instead.
+    outline = _compact_memory_summary(item)
+    if not outline:
+        outline = _text(item.get("april") or item.get("april_text"))[:180]
+    modalities = set(item.get("row_modalities") or [])
+    has_asset = bool(modalities & {"image", "file", "text_file", "voice"})
+    evidence = (_text(item.get("attachment_evidence")) or _row_attachment_evidence(item))[:900] if has_asset else ""
     return {
         "turn": item.get("turn_index"),
-        "user": _text(item.get("user") or item.get("user_text"))[:240],
-        "april": _text(item.get("april") or item.get("april_text"))[:300],
+        "user": _text(item.get("user") or item.get("user_text"))[:180],
+        "april": outline[:220],
         "topic": _text(item.get("topic"))[:100],
+        "sections": sections,
         "score": item.get("score"),
         "same_dialog": bool(item.get("same_dialog")),
         "message_id": _text(item.get("message_id")),
-        "attachment_evidence": (_text(item.get("attachment_evidence")) or _row_attachment_evidence(item))[:1800],
+        "attachment_evidence": evidence,
     }
 
 
