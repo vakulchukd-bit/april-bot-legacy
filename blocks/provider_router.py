@@ -63,9 +63,9 @@ topics. Show the requested number of topics, clamped to 10. Default to 7 when th
 not specify a number. The user may then name a topic or give a hint and April should continue
 from the corresponding anchor/pairs. Keep the hidden remainder known to the processor; do not
 invent topics that are not in the supplied index.
-For every input image/screenshot, inspect the actual supplied pixels. Give a useful grounded description with the main subject, visible colors/markings, posture/shape, nearby objects and scene context. Distinguish direct observations from uncertainty; never invent a breed, material, location or detail that the pixels do not support. For follow-ups, re-inspect the recalled original image if it is included. If multiple images are supplied, keep them labelled by filename/role; compare only when the user asks. An input image is NOT a request to generate an image.
-For every attached file, read the actual supplied input_file or ATTACHED_TEXT_FILES content. For source code, describe its real purpose, entry points, key functions, data flow and concrete problems visible in the supplied source; cite filenames/function names rather than giving a generic description. An input file is NOT a request to create/export a file.
-Text supplied with image/file inputs is the instruction for those attachments. Keep ATTACHMENT_INDEX, attachment role (USER_INPUT vs APRIL_OUTPUT), source message ID, and CURRENT_REQUEST distinct. In a continuation, use the original asset and its paired prior answer as evidence, not only the short prior user sentence.
+For each newly supplied image/screenshot, inspect the actual pixels and record a concise grounded analysis: main subject, relevant visible details, text only when legible, uncertainty, and context. Never invent details that the pixels do not support. For a recalled asset with CACHED_ASSET_ANALYSIS, use that sidecar for ordinary follow-ups and do not restart with a generic image description. Inspect recalled original bytes only when they are actually supplied and the current question needs details beyond the sidecar. If multiple images are supplied, keep them labelled by filename/role and compare only when asked. An input image is NOT a request to generate an image.
+For each newly supplied or explicitly reattached file, read the actual input_file or ATTACHED_TEXT_FILES content. For source code, describe its real purpose, entry points, key functions, data flow and concrete problems visible in the source; cite filenames/function names rather than giving a generic description. If only a cached asset summary is supplied, use it for continuity and do not claim to have reread the original file. An input file is NOT a request to create/export a file.
+Treat the user's CURRENT_REQUEST as the task for all attachments in that message. When a message contains both an image and a file, analyze each source distinctly and explain how they relate only when the contents support that link; don't answer each attachment as an unrelated task. Keep ATTACHMENT_INDEX, attachment role (USER_INPUT vs APRIL_OUTPUT), source message ID, and CURRENT_REQUEST distinct. Prefer cached sidecars for routine continuation; avoid repeating previously supplied descriptions. A concise per-asset sidecar must preserve enough concrete facts for later follow-up, and must be labelled by the exact filename, kind, and source message ID from ATTACHMENT_INDEX.
 Generation/editing is permission-based: only when INTERPRETATION.wants_image=true may C_APRIL_IMAGES_GENERATOR be used. Never infer image generation from image words or attachment contents.
 For analyze_image, analyze_file, or analyze_input tasks, answer in explanatory text and retain enough specific facts to support follow-up questions. Avoid generic one-sentence summaries when the user asks what an image/file contains.
 For a code modification request, return an explanatory text block followed by a separate render block with type="code", language, filename, and the complete corrected code when size permits. Preserve unaffected behavior, do not replace missing sections with ellipses/placeholders, and do not claim the code was saved as a downloadable file unless an actual file artifact/link is supplied. If INTERPRETATION.wants_file=true and you return corrected source, also include an artifact {"type":"file","filename":"the_real_output_name.ext","mime_type":"the appropriate text MIME type","content":"the same complete corrected source text"}; never invent a filesystem path or URL. For a request to explain code only, do not rewrite it unasked.
@@ -89,9 +89,13 @@ Return JSON only:
     "visual_observations": [],
     "file_purpose": "",
     "code_symbols": [],
-    "attachment_refs": []
+    "attachment_refs": [],
+    "attachment_summaries": [
+      {"filename": "exact filename from ATTACHMENT_INDEX", "asset_message_id": "exact source message ID", "kind": "image", "summary": "concise grounded analysis of this asset", "key_details": []}
+    ]
   }
 }
+In attachment_summaries, create one record per supplied USER_INPUT asset when possible. The kind value must be exactly one of image, text_file, or file. Copy filename and asset_message_id exactly from ATTACHMENT_INDEX; never invent a reference. For a mixed image/file message, make separate summaries instead of blending two different sources into one note.
 
 When code is explicitly requested, include a render block like {"type":"code","renderer":"CodeBlock","viewer":"CodeBlock","language":"python","filename":"module.py","code":"<complete source>","content":"<same complete source>"}. The explanatory text remains a separate text block.
 
@@ -483,6 +487,37 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
     routing = req.routing if isinstance(req.routing, dict) else {}
     constraints = req.constraints if isinstance(req.constraints, dict) else {}
     visual = req.visual_context if isinstance(req.visual_context, dict) else {}
+    request_metadata = req.metadata if isinstance(req.metadata, dict) else {}
+    raw_attachment_index = request_metadata.get("attachment_index")
+    attachment_index: list[dict[str, Any]] = []
+    if isinstance(raw_attachment_index, list):
+        for item in raw_attachment_index[:12]:
+            if not isinstance(item, dict):
+                continue
+            slim = {
+                key: item.get(key)
+                for key in (
+                    "filename", "kind", "mime_type", "asset_role", "asset_message_id",
+                    "source_type", "size_bytes", "analysis_summary", "analysis_key_details",
+                    "recalled_from_memory", "requires_original_analysis", "source_bytes_attached",
+                )
+                if item.get(key) not in (None, "", [], {})
+            }
+            attachment_index.append(slim)
+    raw_file_contents = request_metadata.get("file_contents")
+    file_contents = [item for item in raw_file_contents if isinstance(item, dict)] if isinstance(raw_file_contents, list) else []
+    text_file_manifest = [
+        {
+            "filename": _clip(item.get("filename") or "file", 160),
+            "mime_type": _clip(item.get("mime_type") or "text/plain", 100),
+            "size_bytes": int(item.get("size_bytes") or len(_text(item.get("content")))),
+            "asset_role": _clip(item.get("asset_role") or "user_input", 32),
+            "asset_message_id": _clip(item.get("asset_message_id") or "current", 120),
+            "analysis_summary": _clip(item.get("analysis_summary"), 1200),
+            "content_available": bool(_text(item.get("content"))),
+        }
+        for item in file_contents[:12]
+    ]
 
     interpretation = intent.get("interpretation") if isinstance(intent.get("interpretation"), dict) else intent
     request_input = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
@@ -582,6 +617,8 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
                 "asset_message_id": _clip(item.get("asset_message_id"), 120),
                 "asset_role": _clip(item.get("asset_role") or "user_input", 32),
                 "output_type": _clip(item.get("output_type"), 40),
+                "analysis_summary": _clip(item.get("analysis_summary"), 1200),
+                "analysis_key_details": [str(value)[:220] for value in (item.get("analysis_key_details") or [])[:8]] if isinstance(item.get("analysis_key_details"), list) else [],
             })
 
     structured = {
@@ -639,9 +676,11 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
         "INPUT_MODALITIES": modality_lines,
         "VISUAL_CONTEXT": visual_meta,
         "RECALLED_ASSETS": memory.get("restored_assets") or [],
-        "ATTACHMENT_INDEX": req.metadata.get("attachment_index", []) if isinstance(req.metadata, dict) else [],
-        "ATTACHMENTS": req.metadata.get("attachments", []) if isinstance(req.metadata, dict) else [],
-        "ATTACHED_TEXT_FILES": req.metadata.get("file_contents", []) if isinstance(req.metadata, dict) else [],
+        "ATTACHMENT_INDEX": attachment_index,
+        "ATTACHMENTS": request_metadata.get("attachments", []),
+        # Bodies are supplied exactly once as adjacent input_text parts below;
+        # this manifest avoids copying thousands of file characters into JSON.
+        "ATTACHED_TEXT_FILES": text_file_manifest,
         "C_ARTIFACT_RENDER_PLAN": render_plan,
         "SELECTED_ROOMS": routing.get("selected_rooms") or [],
         "MCDOWELL_PRESENTATION_POLICY": mcdowell,
@@ -671,19 +710,18 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
         {"type": "input_text", "text": text}
     ]
 
-    text_files = req.metadata.get("file_contents", []) if isinstance(req.metadata, dict) else []
-    if isinstance(text_files, list):
-        for item in text_files:
-            if not isinstance(item, dict):
-                continue
+    if file_contents:
+        for item in file_contents:
             filename = _clip(item.get("filename") or "file", 160)
             file_content = _clip(item.get("content") or "", 18000)
             role = _clip(item.get("asset_role") or "user_input", 32)
             source_message_id = _clip(item.get("asset_message_id") or "current", 120)
+            cached_summary = _clip(item.get("analysis_summary") or item.get("summary"), 1200)
+            cached_note = f"\nCACHED_ASSET_ANALYSIS (continuity note; not a substitute for requested exact source inspection): {cached_summary}" if cached_summary else ""
             if file_content:
                 content.append({
                     "type": "input_text",
-                    "text": f"ATTACHED_TEXT_FILE role={role} source_message_id={source_message_id} filename={filename}:\n{file_content}",
+                    "text": f"ATTACHED_TEXT_FILE role={role} source_message_id={source_message_id} filename={filename}:{cached_note}\n{file_content}",
                 })
 
     items = visual.get("items")
@@ -696,9 +734,11 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
                 filename = _clip(item.get("filename") or "image", 160)
                 role = _clip(item.get("asset_role") or "user_input", 32)
                 source_message_id = _clip(item.get("asset_message_id") or "current", 120)
+                cached_summary = _clip(item.get("analysis_summary"), 1200)
+                cached_note = f" CACHED_ASSET_ANALYSIS: {cached_summary}. Use it for continuity; only re-inspect relevant details for the user's current question." if cached_summary else ""
                 content.append({
                     "type": "input_text",
-                    "text": f"NEXT_INPUT_IMAGE role={role} filename={filename} source_message_id={source_message_id}; inspect the immediately following image as this asset.",
+                    "text": f"NEXT_INPUT_IMAGE role={role} filename={filename} source_message_id={source_message_id}; inspect the immediately following image as this asset when original inspection is required.{cached_note}",
                 })
                 content.append({
                     "type": "input_image",
@@ -718,9 +758,11 @@ def _build_input(req: MachineRequest) -> list[dict[str, Any]]:
             filename = _text(item.get("filename") or "file")
             role = _clip(item.get("asset_role") or "user_input", 32)
             source_message_id = _clip(item.get("asset_message_id") or "current", 120)
+            cached_summary = _clip(item.get("analysis_summary"), 1200)
+            cached_note = f" CACHED_ASSET_ANALYSIS: {cached_summary}. Use this for continuity, and inspect the attached original only for details needed by the current task." if cached_summary else ""
             content.append({
                 "type": "input_text",
-                "text": f"NEXT_INPUT_FILE role={role} filename={filename} source_message_id={source_message_id}; inspect the immediately following file as this asset.",
+                "text": f"NEXT_INPUT_FILE role={role} filename={filename} source_message_id={source_message_id}; inspect the immediately following file as this asset when original inspection is required.{cached_note}",
             })
             # Keep the actual input_file payload to the Provider API's fields;
             # role/identity metadata belongs in the adjacent input_text label.
@@ -858,18 +900,40 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
             "spec": dict(image_spec),
         })
 
-    memory_record = data.get("dialogue_memory_record") or data.get("memory_record") or {}
-    if not isinstance(memory_record, dict):
-        memory_record = {}
+    raw_memory_record = data.get("dialogue_memory_record") or data.get("memory_record") or {}
+    if not isinstance(raw_memory_record, dict):
+        raw_memory_record = {}
     memory_record = {
-        "topic": _clip(memory_record.get("topic") or answer.split("\n", 1)[0], 180),
-        "summary": _clip(memory_record.get("summary") or data.get("summary") or answer, 1600),
-        "entities": [str(x)[:160] for x in (memory_record.get("entities") or [])[:16]] if isinstance(memory_record.get("entities"), list) else [],
-        "visual_observations": [str(x)[:300] for x in (memory_record.get("visual_observations") or [])[:12]] if isinstance(memory_record.get("visual_observations"), list) else [],
-        "file_purpose": _clip(memory_record.get("file_purpose"), 600),
-        "code_symbols": [str(x)[:160] for x in (memory_record.get("code_symbols") or [])[:20]] if isinstance(memory_record.get("code_symbols"), list) else [],
-        "attachment_refs": [dict(x) for x in (memory_record.get("attachment_refs") or [])[:8] if isinstance(x, dict)] if isinstance(memory_record.get("attachment_refs"), list) else [],
+        "topic": _clip(raw_memory_record.get("topic") or answer.split("\n", 1)[0], 180),
+        "summary": _clip(raw_memory_record.get("summary") or data.get("summary") or answer, 1600),
+        "entities": [str(x)[:160] for x in (raw_memory_record.get("entities") or [])[:16]] if isinstance(raw_memory_record.get("entities"), list) else [],
+        "visual_observations": [str(x)[:300] for x in (raw_memory_record.get("visual_observations") or [])[:12]] if isinstance(raw_memory_record.get("visual_observations"), list) else [],
+        "file_purpose": _clip(raw_memory_record.get("file_purpose"), 600),
+        "code_symbols": [str(x)[:160] for x in (raw_memory_record.get("code_symbols") or [])[:20]] if isinstance(raw_memory_record.get("code_symbols"), list) else [],
+        "attachment_refs": [dict(x) for x in (raw_memory_record.get("attachment_refs") or [])[:8] if isinstance(x, dict)] if isinstance(raw_memory_record.get("attachment_refs"), list) else [],
     }
+    raw_asset_summaries = raw_memory_record.get("attachment_summaries")
+    normalized_asset_summaries: list[dict[str, Any]] = []
+    if isinstance(raw_asset_summaries, list):
+        for item in raw_asset_summaries[:12]:
+            if not isinstance(item, dict):
+                continue
+            filename = os.path.basename(_text(item.get("filename")))[:240]
+            summary_text = _clip(item.get("summary"), 1200)
+            kind = _text(item.get("kind")).lower()
+            if kind not in {"image", "text_file", "file"}:
+                continue
+            if not filename or not summary_text:
+                continue
+            details = item.get("key_details")
+            normalized_asset_summaries.append({
+                "filename": filename,
+                "asset_message_id": _clip(item.get("asset_message_id") or item.get("message_id"), 120),
+                "kind": kind,
+                "summary": summary_text,
+                "key_details": [str(value)[:220] for value in details[:8] if _text(value)] if isinstance(details, list) else [],
+            })
+    memory_record["attachment_summaries"] = normalized_asset_summaries
 
     return {
         "machine_response": {
@@ -947,6 +1011,11 @@ async def generate_text(
                 raw = _text(getattr(response, "output_text", ""))
                 if not raw:
                     failure_code = "OPENAI_EMPTY_OUTPUT"
+                    print(
+                        f"[APRIL_PROVIDER] empty model output attempt={attempt + 1} "
+                        f"input_messages={len(attempt_input)}",
+                        flush=True,
+                    )
                     continue
                 try:
                     decoded = _json_load(raw)
@@ -962,6 +1031,15 @@ async def generate_text(
                 except Exception as exc:
                     failure_code = str(exc) or "PROVIDER_INVALID_OUTPUT"
                     contract = None
+                    # Log only the rejection class and response length; never
+                    # dump user files, image data, prompts, or model output.
+                    safe_code = re.match(r"[A-Z0-9_]+", failure_code.upper())
+                    print(
+                        f"[APRIL_PROVIDER] response rejected attempt={attempt + 1} "
+                        f"code={(safe_code.group(0) if safe_code else 'PROVIDER_INVALID_OUTPUT')} "
+                        f"output_chars={len(raw)}",
+                        flush=True,
+                    )
                     continue
             except Exception as exc:
                 failure_code = str(exc) or "PROVIDER_REQUEST_FAILED"
