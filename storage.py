@@ -777,6 +777,86 @@ def load_dialogue_assets(
         conn.close()
 
 
+def update_dialogue_asset_analysis(
+    user_id: Any,
+    *,
+    dialog_id: str,
+    conversation_id: str,
+    message_id: str,
+    filename: str,
+    kind: str,
+    summary: str,
+    key_details: list[str] | tuple[str, ...] | None = None,
+    analysis_version: str = "asset_analysis_v1",
+) -> bool:
+    """Attach a compact semantic note to an existing original asset.
+
+    The original bytes and exact authenticated identity tuple are preserved.
+    This updates JSON metadata only; it never replaces an uploaded file with a
+    generated description or looks up assets by filename alone.
+    """
+    uid = str(user_id or "").strip()
+    dialog_value = str(dialog_id or "").strip()
+    conversation_value = str(conversation_id or dialog_value).strip()
+    message_value = str(message_id or "").strip()
+    filename_value = os.path.basename(str(filename or "").strip())[:240]
+    kind_value = str(kind or "").strip().lower()
+    summary_value = str(summary or "").strip()[:1200]
+    details_value = [str(item or "").strip()[:220] for item in (key_details or [])]
+    details_value = [item for item in details_value if item][:8]
+
+    if (
+        not uid or not dialog_value or not conversation_value or not message_value
+        or not filename_value or not summary_value
+        or kind_value not in {"image", "text_file", "file"}
+    ):
+        return False
+
+    conn = get_conn()
+    if not conn:
+        return False
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                if not _is_authenticated_cursor(cur, uid):
+                    return False
+                cur.execute(
+                    """
+                    UPDATE dialogue_assets
+                    SET metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb
+                    WHERE user_id = %s
+                      AND dialog_id = %s
+                      AND conversation_id = %s
+                      AND message_id = %s
+                      AND filename = %s
+                      AND kind = %s
+                      AND COALESCE(metadata->>'asset_role', 'user_input') = 'user_input'
+                    """,
+                    (
+                        json.dumps(
+                            {
+                                "analysis_summary": summary_value,
+                                "analysis_key_details": details_value,
+                                "analysis_version": str(analysis_version or "asset_analysis_v1")[:80],
+                            },
+                            ensure_ascii=False,
+                        ),
+                        uid,
+                        dialog_value,
+                        conversation_value,
+                        message_value,
+                        filename_value,
+                        kind_value,
+                    ),
+                )
+                return cur.rowcount > 0
+    except Exception as exc:
+        print(f"STATE: DIALOGUE ASSET ANALYSIS SAVE ERROR: {type(exc).__name__}", flush=True)
+        return False
+    finally:
+        conn.close()
+
+
 # =========================================================
 # USER / SUBSCRIPTION / PAYMENTS API
 # =========================================================
