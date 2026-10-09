@@ -107,6 +107,7 @@ def _prepare_attachments(
             "kind": kind,
             "size_bytes": size_bytes,
             "source_type": item.get("source_type", kind),
+            "asset_role": "user_input",
             "provider_readable": bool(item.get("provider_readable", kind in {"image", "text_file", "voice"})),
         })
 
@@ -135,6 +136,7 @@ def _prepare_attachments(
                     "mime_type": content_type or item.get("mime_type") or "text/plain",
                     "content": text,
                     "size_bytes": size_bytes,
+                    "asset_role": "user_input",
                 })
 
         elif kind == "image":
@@ -146,6 +148,7 @@ def _prepare_attachments(
                     "filename": filename,
                     "source_type": item.get("source_type", "image"),
                     "mime_type": content_type,
+                    "asset_role": "user_input",
                 })
 
         elif kind == "file":
@@ -160,6 +163,7 @@ def _prepare_attachments(
                     "file_data": uri,
                     "mime_type": content_type or item.get("mime_type") or "application/octet-stream",
                     "size_bytes": size_bytes,
+                    "asset_role": "user_input",
                 })
 
     return "\n\n".join(semantic_text), visual, meta, provider_files, text_file_contents
@@ -305,6 +309,8 @@ def _handle_payload(
                         "source_type": _text(meta.get("source_type") or kind),
                         "reader": _text(meta.get("reader")),
                         "provider_readable": bool(meta.get("provider_readable", False)),
+                        "asset_role": "user_input",
+                        "paired_message_id": message_id,
                     },
                 )
         except Exception as asset_exc:
