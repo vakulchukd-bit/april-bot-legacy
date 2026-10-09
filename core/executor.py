@@ -37,6 +37,7 @@ from blocks.dialog_identity import resolve_dialog_identity, assert_identity_matc
 from blocks.interpretation_identity import (
     build_interpretation_identity,
     build_interpretation,
+    build_question_sequence,
 )
 from blocks.provider_router import generate_text
 from blocks.state_manager import prepare_dialogue_context
@@ -51,7 +52,7 @@ from storage import (
 )
 
 
-PROCESSOR_VERSION = "april_exkrutor_single_route_v8_structured_chain_single_call"
+PROCESSOR_VERSION = "april_exkrutor_single_route_v9_per_question_search"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -77,6 +78,74 @@ def _apr_diag_ref(value: Any) -> str:
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _compact_question_search(context: dict[str, Any], query: str = "") -> dict[str, Any]:
+    """Bounded per-question retrieval context for the existing Provider sequence."""
+    if not isinstance(context, dict):
+        return {"status": "unavailable", "relation": "NEW", "context": []}
+
+    def compact_pair(item: Any) -> dict[str, Any]:
+        if not isinstance(item, dict):
+            return {}
+        sections = []
+        for section in (item.get("sections") or [])[:4]:
+            if not isinstance(section, dict):
+                continue
+            sections.append({
+                "heading": _text(section.get("heading"))[:80],
+                "summary": _text(section.get("summary"))[:150],
+                "order": section.get("order"),
+                "message_id": _text(section.get("message_id"))[:120],
+            })
+        return {
+            "topic": _text(item.get("topic"))[:100],
+            "user": _text(item.get("user"))[:180],
+            "april": _text(item.get("april"))[:240],
+            "sections": sections,
+            "message_id": _text(item.get("message_id"))[:120],
+            "same_dialog": bool(item.get("same_dialog")),
+        }
+
+    anchor = context.get("anchor") if isinstance(context.get("anchor"), dict) else {}
+    section = context.get("selected_section") if isinstance(context.get("selected_section"), dict) else {}
+    pairs = [compact_pair(item) for item in (context.get("selected_pairs") or [])[:2]]
+    pairs = [item for item in pairs if item]
+    pending = context.get("pending_clarification") if isinstance(context.get("pending_clarification"), dict) else {}
+    options = []
+    for item in (pending.get("options") or [])[:3]:
+        if not isinstance(item, dict):
+            continue
+        options.append({
+            "topic": _text(item.get("topic"))[:90],
+            "heading": _text(item.get("heading"))[:90],
+            "summary": _text(item.get("summary"))[:140],
+            "message_id": _text(item.get("message_id"))[:120],
+        })
+    return {
+        "status": "ready",
+        "relation": _text(context.get("relation") or "NEW").upper(),
+        "confidence": round(float(context.get("relation_confidence") or 0.0), 4),
+        "reason": _text(context.get("reason"))[:80],
+        "topic": (_text(context.get("active_topic")) or _text(query))[:120],
+        "anchor": {
+            "topic": _text(anchor.get("topic"))[:100],
+            "user": _text(anchor.get("user"))[:180],
+            "april": _text(anchor.get("april"))[:240],
+            "message_id": _text(anchor.get("message_id"))[:120],
+        } if anchor else {},
+        "selected_section": {
+            "topic": _text(section.get("topic"))[:100],
+            "heading": _text(section.get("heading"))[:90],
+            "summary": _text(section.get("summary"))[:180],
+            "order": section.get("order"),
+            "message_id": _text(section.get("message_id"))[:120],
+        } if section else {},
+        "selected_pairs": pairs,
+        "clarification_needed": bool(context.get("clarification_needed")),
+        "clarification_prompt": _text(context.get("clarification_prompt"))[:280],
+        "clarification_options": options,
+    }
 
 
 def _identity_tuple(identity: dict[str, Any]) -> dict[str, str]:
@@ -109,6 +178,8 @@ def _select_rooms(interpretation: dict[str, Any]) -> list[dict[str, Any]]:
         required_capabilities.extend(["diagram", "geometry"])
     if intent.get("wants_table"):
         required_capabilities.extend(["table", "structured_data", "tabular"])
+    if intent.get("wants_graph"):
+        required_capabilities.extend(["graph", "series", "data_visualization"])
 
     # Domain hints from the current request are additive, never authoritative over
     # the Interpretation decision.
@@ -860,21 +931,110 @@ async def execute(
         flow_key=_apr_diag_ref(identity.get("flow_id")),
     )
 
-    # 12h memory search is owned by state_manager; PostgreSQL is only storage.
+    # Discover task boundaries BEFORE relation classification. Each task then uses
+    # the existing State Manager independently; single-question messages retain the
+    # exact previous search path and cost profile.
     memory_started = time.perf_counter()
-    dialogue_context = prepare_dialogue_context(
-        uid,
-        current_text,
-        dialog_id=identity["dialog_id"],
-        conversation_id=identity["conversation_id"],
-        limit=12,
-        has_image=bool(visual_context),
-        has_file=bool(file_inputs or file_contents),
-        has_voice=any(
-            _text(item.get("kind")).lower() == "voice"
-            for item in attachments
-        ),
-    )
+    question_sequence = build_question_sequence(original or current_text)
+    normalized_sequence = build_question_sequence(current_text)
+    has_voice_input = any(_text(item.get("kind")).lower() == "voice" for item in attachments)
+    search_kwargs = {
+        "dialog_id": identity["dialog_id"],
+        "conversation_id": identity["conversation_id"],
+        "limit": 12,
+        "has_image": bool(visual_context),
+        "has_file": bool(file_inputs or file_contents),
+        "has_voice": has_voice_input,
+    }
+    question_contexts: list[dict[str, Any]] = []
+
+    if len(question_sequence) <= 1:
+        dialogue_context = prepare_dialogue_context(uid, current_text, **search_kwargs)
+        if question_sequence:
+            question_sequence[0]["dialogue_search"] = _compact_question_search(dialogue_context, current_text)
+    else:
+        aligned_normalized = len(normalized_sequence) == len(question_sequence)
+        for index, question_item in enumerate(question_sequence):
+            search_query = (
+                _text(normalized_sequence[index].get("request"))
+                if aligned_normalized else _text(question_item.get("request"))
+            )
+            try:
+                task_context = prepare_dialogue_context(uid, search_query, **search_kwargs)
+                task_search = _compact_question_search(task_context, search_query)
+            except Exception as exc:
+                # A task-search failure must not discard the whole user request.
+                # Keep order/identity and allow other tasks to proceed independently.
+                task_context = {}
+                task_search = {
+                    "status": "search_error",
+                    "relation": "NEW",
+                    "confidence": 0.0,
+                    "reason": type(exc).__name__,
+                    "topic": "",
+                    "anchor": {},
+                    "selected_section": {},
+                    "selected_pairs": [],
+                    "clarification_needed": False,
+                    "clarification_prompt": "",
+                    "clarification_options": [],
+                }
+            question_item["dialogue_search"] = task_search
+            question_item["search_query"] = search_query[:500]
+            question_contexts.append(task_context)
+            _apr_timing_log(
+                "request_question_search", memory_started,
+                user_key=_apr_diag_ref(uid),
+                dialog_key=_apr_diag_ref(identity.get("dialog_id")),
+                message_key=_apr_diag_ref(identity.get("message_id")),
+                step_index=question_item.get("step_index"),
+                query_key=_apr_diag_ref(search_query),
+                relation=task_search.get("relation"),
+                candidates=len(task_context.get("candidates") or []) if isinstance(task_context, dict) else 0,
+                selected_pairs=len(task_context.get("selected_pairs") or []) if isinstance(task_context, dict) else 0,
+                clarification_needed=bool(task_search.get("clarification_needed")),
+                status=task_search.get("status"),
+            )
+
+        # Preserve the established top-level route contract by using the first
+        # ordered task as the legacy turn anchor. All other per-task relation and
+        # history results travel in REQUEST_SEQUENCE; no second dialogue is made.
+        dialogue_context = dict(question_contexts[0] if question_contexts else {})
+        if not dialogue_context:
+            # Do not fall back to a whole-message retrieval if one per-question
+            # search failed. That could accidentally replace the first task's
+            # relation with a mixed CONTINUE/NEW decision. Keep the canonical
+            # request alive with an empty, correctly-shaped memory context.
+            dialogue_context = {
+                "window_hours": 12,
+                "relation": "NEW",
+                "relation_confidence": 0.0,
+                "reason": "per_question_search_unavailable",
+                "active_topic": _text(question_sequence[0].get("request")) if question_sequence else current_text,
+                "selected_pairs": [],
+                "candidates": [],
+                "history_topics": [],
+                "topic_index": [],
+                "known_topic_count": 0,
+                "history_request": False,
+                "requested_topic_count": 7,
+                "topic_table_markdown": "",
+                "anchor": {},
+                "selected_section": {},
+                "clarification_needed": False,
+                "clarification_prompt": "",
+                "pending_clarification": {},
+                "clarification_resolution": {},
+                "search": {"relation": "NEW", "total_pairs": 0, "candidate_count": 0},
+            }
+        # A local stop for one ambiguous subtask would hide every other task. In a
+        # compound request, pass the ambiguity within its task entry so Provider can
+        # answer the clear tasks and ask only about the unresolved part.
+        dialogue_context["clarification_needed"] = False
+        dialogue_context["clarification_prompt"] = ""
+        dialogue_context["pending_clarification"] = {}
+        dialogue_context["request_sequence_count"] = len(question_sequence)
+
     search_result = dialogue_context.get("search") if isinstance(dialogue_context.get("search"), dict) else {}
     anchor = dialogue_context.get("anchor") if isinstance(dialogue_context.get("anchor"), dict) else {}
     selected_pairs = dialogue_context.get("selected_pairs") or []
@@ -883,6 +1043,7 @@ async def execute(
         dialog_key=_apr_diag_ref(identity.get("dialog_id")),
         message_key=_apr_diag_ref(identity.get("message_id")),
         relation=dialogue_context.get("relation"), reason=dialogue_context.get("reason"),
+        question_count=len(question_sequence),
         total_pairs=search_result.get("total_pairs"), candidates=search_result.get("candidate_count", len(dialogue_context.get("candidates") or [])),
         selected_pairs=len(selected_pairs), selected_message_keys=[_apr_diag_ref(x.get("message_id")) for x in selected_pairs if isinstance(x, dict) and x.get("message_id")],
         anchor_message_key=_apr_diag_ref(anchor.get("message_id")), topic_index_count=len(dialogue_context.get("topic_index") or []),
@@ -896,8 +1057,18 @@ async def execute(
         # Clarification must be quick and must not restore/load unrelated assets.
         restored_assets = []
     else:
+        asset_context = dialogue_context
+        if len(question_sequence) > 1:
+            for question_item, task_context in zip(question_sequence, question_contexts):
+                if (
+                    isinstance(task_context, dict)
+                    and _text(task_context.get("relation")).upper() == "CONTINUE"
+                    and _explicit_prior_asset_reference(question_item.get("request"))
+                ):
+                    asset_context = task_context
+                    break
         visual_context, attachments, file_inputs, file_contents, restored_assets = _restore_selected_assets(
-            uid, identity, dialogue_context, visual_context, attachments, file_inputs, file_contents,
+            uid, identity, asset_context, visual_context, attachments, file_inputs, file_contents,
             current_request=current_text,
         )
     _apr_timing_log(
@@ -916,6 +1087,20 @@ async def execute(
         visual_context=visual_context or [],
         identity=identity,
     )
+    request_structure = interpretation.setdefault("request_structure", {})
+    request_structure["question_sequence"] = question_sequence
+    request_structure["answer_sequence_in_order"] = True
+    request_structure["question_search_engine"] = "state_manager_per_question_v1"
+    request_structure["question_search_count"] = len(question_sequence)
+    request_structure["question_relations"] = [
+        {
+            "step_index": item.get("step_index"),
+            "relation": (item.get("dialogue_search") or {}).get("relation", "NEW"),
+            "topic": (item.get("dialogue_search") or {}).get("topic", ""),
+            "confidence": (item.get("dialogue_search") or {}).get("confidence", 0.0),
+        }
+        for item in question_sequence
+    ]
     _apr_timing_log(
         "interpretation_ready", interpretation_started,
         relation=(interpretation.get("dialogue") or {}).get("relation"),
