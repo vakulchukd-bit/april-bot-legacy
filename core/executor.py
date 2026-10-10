@@ -46,10 +46,7 @@ from blocks.text_module import package_provider_response
 from storage import (
     init_db,
     is_authenticated_user,
-    load_dialogue_assets,
-    save_dialogue_asset,
     save_dialogue_pair,
-    update_dialogue_asset_analysis,
 )
 
 
@@ -550,7 +547,7 @@ def _persist_asset_analysis_summaries(
     attachment_index: list[dict[str, Any]],
     memory_record: Any,
 ) -> int:
-    """Persist provider-grounded attachment summaries beside exact source bytes."""
+    """Keep provider-grounded attachment summaries in the canonical memory record."""
     if not isinstance(memory_record, dict):
         return 0
 
@@ -631,21 +628,27 @@ def _persist_asset_analysis_summaries(
         target = candidates[0]
         if target["role"] != "user_input" or not summary_text:
             continue
-        if update_dialogue_asset_analysis(
-            uid,
-            dialog_id=identity["dialog_id"],
-            conversation_id=identity["conversation_id"],
-            message_id=target["message_id"],
-            filename=target["filename"],
-            kind=target["kind"],
-            summary=summary_text,
-            key_details=details,
-        ):
-            changed += 1
+        index_matches = [
+            item for item in attachment_index
+            if isinstance(item, dict)
+            and os.path.basename(_text(item.get("filename")))[:240] == target["filename"]
+            and _text(item.get("kind")).lower() == target["kind"]
+            and _text(item.get("asset_message_id") or identity.get("message_id")) == target["message_id"]
+            and _text(item.get("asset_role") or "user_input") == "user_input"
+        ]
+        if len(index_matches) != 1:
+            continue
+        # These bounded semantic fields are saved as part of structured_request
+        # inside dialogue_memory; no sidecar-table update is required.
+        index_matches[0]["analysis_summary"] = summary_text
+        index_matches[0]["analysis_key_details"] = [
+            _text(item)[:220] for item in details if _text(item)
+        ][:8]
+        changed += 1
 
     if changed:
         print(
-            "STATE: DIALOGUE ASSET ANALYSIS UPDATED "
+            "STATE: DIALOGUE MEMORY ATTACHMENT SUMMARIES INDEXED "
             + json.dumps({"count": changed, "source": "provider_attachment_summaries"}, ensure_ascii=False),
             flush=True,
         )
@@ -687,17 +690,9 @@ def _restore_selected_assets(
     # had no saved asset, fall back through ranked dialogue pairs one at a time.
     # This prevents a later unrelated file from being sent alongside a cat photo.
     message_ids = list(dict.fromkeys(message_ids))[:8]
+    # Canonical dialogue memory contains searchable text/metadata, not binary
+    # sidecars. Historical raw bytes are therefore not rehydrated from a second table.
     rows = []
-    for selected_message_id in message_ids:
-        rows = load_dialogue_assets(
-            uid,
-            dialog_id=identity["dialog_id"],
-            conversation_id=identity["conversation_id"],
-            message_ids=[selected_message_id],
-            limit=4,
-        )
-        if rows:
-            break
     restored_meta: list[dict[str, Any]] = []
     import base64
     for asset in rows:
@@ -853,7 +848,7 @@ def _image_payload_bytes(value: Any) -> tuple[bytes, str] | None:
 
 
 def _strip_inline_binary(value: Any) -> Any:
-    """Keep JSONB memory compact; raw bytes live in dialogue_assets."""
+    """Keep canonical dialogue-memory JSON compact by stripping inline binary payloads."""
     if isinstance(value, dict):
         cleaned: dict[str, Any] = {}
         for key, item in value.items():
@@ -875,10 +870,10 @@ def _strip_inline_binary(value: Any) -> Any:
         # Also catch a data URI embedded in a larger JSON/text field, not only
         # values that consist solely of the URI.
         if value.startswith("data:") and ";base64," in value:
-            return "[stored as dialogue asset]"
+            return "[binary payload omitted from persistent dialogue memory]"
         return re.sub(
             r"data:[^,\s;]+(?:;[^,\s;]+)*;base64,[A-Za-z0-9+/=_-]+",
-            "[stored as dialogue asset]",
+            "[binary payload omitted from persistent dialogue memory]",
             value,
         )
     return value
@@ -1394,7 +1389,7 @@ async def execute(
     request.fiber.identity.user_id = uid
     # Search index is deliberately separate from binary storage. It contains a
     # bounded source preview, exact filenames/roles and the message ID used to
-    # restore original bytes. The original bytes remain in dialogue_assets.
+    # restore original bytes. Historical binary sidecars are no longer persisted.
     request_metadata_started = time.perf_counter()
     attachment_index: list[dict[str, Any]] = []
     for item in (attachments or []):
@@ -1753,18 +1748,9 @@ async def execute(
             generated_image = _image_payload_bytes(image_result.get("artifact") or image_result)
         if generated_image:
             generated_bytes, generated_mime = generated_image
-            generated_asset_saved = save_dialogue_asset(
-                uid,
-                dialog_id=identity["dialog_id"],
-                conversation_id=identity["conversation_id"],
-                message_id=identity["message_id"],
-                filename=f"april-generated-{identity['message_id']}.png",
-                mime_type=generated_mime,
-                kind="image",
-                content=generated_bytes,
-                turn_index=turn_index,
-                metadata={"source_type": "generated_image", "asset_role": "april_output", "output_type": "image", "paired_message_id": identity["message_id"], "interpretation_id": identity["interpretation_id"], "generator": "C_APRIL_IMAGES_GENERATOR"},
-            )
+            # Keep generated image bytes in the live response/rendering path only.
+            # Persisting them to the removed dialogue_assets sidecar is disabled.
+            generated_asset_saved = False
 
     # Save code/file output as a separately versioned asset paired to this turn.
     # A visible CodeBlock remains in SceneContract; this binary/text asset lets
@@ -1787,25 +1773,9 @@ async def execute(
                 continue
             seen_source_hashes.add(source_hash)
             filename = _text(block.get("filename")) or f"april-output-{identity['message_id'][-10:]}-{block_index}.{extension}"
-            saved_output = save_dialogue_asset(
-                uid,
-                dialog_id=identity["dialog_id"],
-                conversation_id=identity["conversation_id"],
-                message_id=identity["message_id"],
-                filename=filename,
-                mime_type="text/x-python" if extension == "py" else "text/plain",
-                kind="text_file",
-                content=code_bytes,
-                text_content=code_text,
-                turn_index=turn_index,
-                metadata={
-                    "source_type": "april_output_code", "asset_role": "april_output",
-                    "output_type": "code", "language": language, "extension": extension,
-                    "paired_message_id": identity["message_id"],
-                    "interpretation_id": identity["interpretation_id"],
-                    "source_input_assets": attachment_refs[:8],
-                },
-            )
+            # The CodeBlock remains in SceneContract and structured_response;
+            # no second binary/text asset table is written.
+            saved_output = False
             if saved_output:
                 output_asset_refs.append({"filename": filename, "kind": "text_file", "asset_role": "april_output", "output_type": "code", "message_id": identity["message_id"], "sha256": source_hash, "language": language})
 
@@ -1845,16 +1815,9 @@ async def execute(
             source_hash = hashlib.sha256(file_bytes).hexdigest()
             if source_hash in seen_source_hashes:
                 continue
-            saved_output = save_dialogue_asset(
-                uid,
-                dialog_id=identity["dialog_id"], conversation_id=identity["conversation_id"],
-                message_id=identity["message_id"], filename=filename, mime_type=mime,
-                kind="text_file" if mime.startswith("text/") else "file", content=file_bytes,
-                text_content=text_content, turn_index=turn_index,
-                metadata={"source_type": "april_output_file", "asset_role": "april_output",
-                          "output_type": "file", "paired_message_id": identity["message_id"],
-                          "interpretation_id": identity["interpretation_id"], "source_input_assets": attachment_refs[:8]},
-            )
+            # File artifact content remains in the live provider/SceneContract
+            # response; do not persist a duplicate sidecar row.
+            saved_output = False
             if saved_output:
                 output_asset_refs.append({"filename": filename, "kind": "text_file" if mime.startswith("text/") else "file", "asset_role": "april_output", "output_type": "file", "message_id": identity["message_id"], "sha256": source_hash})
 
