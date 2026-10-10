@@ -701,7 +701,7 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     deduped.sort(key=lambda item: float(item.get("last_at") or 0), reverse=True)
     visible = []
-    for idx, item in enumerate(deduped[:12], 1):
+    for idx, item in enumerate(deduped[:30], 1):
         visible.append({
             "number": idx,
             "topic": _text(item.get("topic"))[:120],
@@ -993,6 +993,22 @@ _SECTION_TOPIC_NOISE = _SECTION_QUERY_NOISE | {
     "имел", "имела", "имели", "ввиду", "виду", "говорил", "говорила", "подразумевал",
     "имелввиду", "значил", "имею", "нет", "actually", "meant", "mean",
 }
+
+# Words that express the act/time of recalling history, not the topic being recalled.
+# Keeping this separate from the general stop-word list prevents names and subject nouns
+# from being removed when selecting relevant memories.
+_HISTORY_QUERY_NOISE = _SECTION_TOPIC_NOISE | {
+    "говорил", "говорила", "говорили", "говорились", "общались", "обсуждали",
+    "обсуждение", "обсуждении", "разговор", "разговора", "разговоре", "речь",
+    "история", "истории", "диалог", "диалога", "диалоге", "общение", "общения",
+    "сегодня", "вчера", "позавчера", "сейчас", "раньше", "тогда", "недавно",
+    "прошлый", "прошлая", "прошлое", "прошлую", "предыдущий", "предыдущая",
+    "предыдущее", "предыдущую", "напомни", "вспомни", "помнишь", "помним",
+    "вспомнить", "напомнить", "сказать", "расскажи", "расскажите", "кратко",
+    "краткий", "содержание", "содержании", "тема", "темы", "тему", "вопрос",
+    "вопросе", "вопросы", "какие", "какую", "какой", "какое", "что", "чем",
+    "мы", "нам", "наше", "наши", "наш", "нашу", "мне", "мои", "мой",
+}
 _SECTION_REQUEST_MARKERS = (
     "подроб", "применен", "раздел", "пункт", "часть", "расскажи больше", "объясни подробнее",
     "углуб", "как это работает", "почему это", "more detail", "application", "section", "subsection",
@@ -1024,6 +1040,125 @@ def _topic_query_overlap(query: str, topic: str) -> float:
     query_tokens = _semantic_tokens(query) - _SECTION_TOPIC_NOISE
     topic_tokens = _topic_tokens(topic)
     return _fuzzy_token_overlap(query_tokens, topic_tokens) if query_tokens else 0.0
+
+
+def _history_query_topic_tokens(query: str) -> set[str]:
+    """Extract subject-bearing words from a history request, excluding recall wording and times."""
+    return {
+        token for token in (_semantic_tokens(query) - _HISTORY_QUERY_NOISE)
+        if not token.isdigit() and len(token) > 2
+    }
+
+
+def _history_topic_text(item: dict[str, Any]) -> str:
+    sections = item.get("sections") if isinstance(item.get("sections"), list) else []
+    section_text = " ".join(
+        f"{_text(section.get('heading'))} {_text(section.get('summary'))}"
+        for section in sections if isinstance(section, dict)
+    )
+    return " ".join((
+        _text(item.get("topic")), _text(item.get("summary")),
+        _text(item.get("last_question")), section_text,
+    ))
+
+
+def _rank_history_topics(query: str, topics: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Prefer matching topics for a subject-specific recall; keep recency order for broad recall."""
+    bounded = [dict(item) for item in topics if isinstance(item, dict)]
+    tokens = _history_query_topic_tokens(query)
+    if not tokens:
+        return bounded[:max(1, min(10, int(limit or 7)))]
+    ranked: list[tuple[float, float, dict[str, Any]]] = []
+    for item in bounded:
+        candidate_tokens = _semantic_tokens(_history_topic_text(item))
+        overlap = _fuzzy_token_overlap(tokens, candidate_tokens)
+        if overlap <= 0:
+            continue
+        phrase = fuzz.token_set_ratio(" ".join(sorted(tokens)), " ".join(sorted(candidate_tokens))) / 100.0 if candidate_tokens else 0.0
+        score = 0.78 * overlap + 0.22 * phrase
+        ranked.append((score, float(item.get("last_at") or 0), item))
+    if not ranked:
+        # Preserve a usable overview if no topic label matches. The selected-pair
+        # search still checks all rows, so this fallback must not imply no history exists.
+        return bounded[:max(1, min(10, int(limit or 7)))]
+    ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    return [dict(item) for _, _, item in ranked[:max(1, min(10, int(limit or 7)))]]
+
+
+def _select_history_context_pairs(
+    query: str,
+    matches: list[dict[str, Any]],
+    topic_index: list[dict[str, Any]],
+    all_rows: list[dict[str, Any]],
+    *,
+    requested_topic_count: int = 7,
+) -> tuple[list[dict[str, Any]], str, int]:
+    """Select grounded pairs for history recall even though its relation remains NEW."""
+    tokens = _history_query_topic_tokens(query)
+    eligible = [item for item in matches if isinstance(item, dict) and not item.get("is_pending_clarification")]
+    selected: list[dict[str, Any]] = []
+    method = "topic_index_overview"
+    matched_count = 0
+
+    if tokens:
+        method = "subject_ranked_pairs"
+        ranked: list[tuple[float, float, dict[str, Any]]] = []
+        for item in eligible:
+            section_text = " ".join(
+                f"{_text(section.get('heading'))} {_text(section.get('summary'))}"
+                for section in (item.get("sections") or []) if isinstance(section, dict)
+            )
+            candidate_text = " ".join((
+                _text(item.get("topic")), _text(item.get("user")), _text(item.get("user_en")),
+                _text(item.get("april")), _text(item.get("april_en")),
+                _text(item.get("memory_summary")), section_text,
+            ))
+            overlap = _fuzzy_token_overlap(tokens, _semantic_tokens(candidate_text))
+            if overlap <= 0:
+                continue
+            # Subject overlap must dominate generic recency/current-dialog bonuses.
+            relevance = 0.78 * overlap + 0.17 * float(item.get("entity_overlap") or 0) + 0.05 * float(item.get("score") or 0)
+            ranked.append((relevance, float(item.get("created_at") or 0), item))
+        matched_count = len(ranked)
+        ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
+        # Return up to four evidence pairs for the named topic; deduplicate exact message IDs.
+        seen_ids: set[str] = set()
+        for _, _, item in ranked:
+            message_id = _text(item.get("message_id"))
+            if message_id and message_id in seen_ids:
+                continue
+            if message_id:
+                seen_ids.add(message_id)
+            selected.append(_compact_pair(item))
+            if len(selected) >= 4:
+                break
+
+        if not selected:
+            # Secondary bridge: a topic-index entry may identify the matching turn
+            # even if the old row's text/translation fields differ from the new query.
+            topic_ranked = _rank_history_topics(query, topic_index, 4)
+            row_by_id = {_text(row.get("message_id")): row for row in all_rows if _text(row.get("message_id"))}
+            for topic in topic_ranked:
+                row = row_by_id.get(_text(topic.get("message_id")))
+                if row:
+                    selected.append(_compact_pair(_candidate_score(query, row, dialog_id="")))
+                    if len(selected) >= 3:
+                        break
+            if selected:
+                method = "subject_topic_index_fallback"
+    else:
+        # Broad recall: use representatives of the latest distinct topics, not
+        # arbitrary pairs with high recency-weighted similarity to the word 'today'.
+        row_by_id = {_text(row.get("message_id")): row for row in all_rows if _text(row.get("message_id"))}
+        for topic in topic_index[:min(4, max(1, requested_topic_count))]:
+            row = row_by_id.get(_text(topic.get("message_id")))
+            if row is None:
+                continue
+            selected.append(_compact_pair(_candidate_score(query, row, dialog_id="")))
+        if not selected:
+            selected = [_compact_pair(item) for item in eligible[:min(3, max(1, requested_topic_count))]]
+
+    return selected, method, matched_count
 
 
 def _section_match_score(query: str, section: dict[str, Any]) -> float:
@@ -1450,6 +1585,12 @@ def search_dialogue_context(
     matches.sort(key=lambda item: (float(item["score"]), float(item["recency"]), int(item["turn_index"])), reverse=True)
     _apr_timing_log("candidate_score_rank", candidate_started, candidates_scored=len(rows), matches=len(matches))
 
+    # Build the index once and share it between topic ranking, pair selection and Provider.
+    topics = _build_topic_index(all_rows)
+    history_limit = _history_topic_limit(query, 7)
+    topic_index = _rank_history_topics(query, topics, 10) if history_request else topics[:10]
+    history_topics = _rank_history_topics(query, topics, history_limit) if history_request else []
+
     latest_same_dialog = max((item for item in matches if bool(item.get("same_dialog"))),
         key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)), default=None)
     best = matches[0] if matches else None
@@ -1613,7 +1754,20 @@ def search_dialogue_context(
     active_topic = _text((anchor or {}).get("topic")) or _text((latest_same_dialog or {}).get("topic")) or _text(query)[:140]
 
     selected_for_context: list[dict[str, Any]] = []
-    if relation == "CONTINUE":
+    history_selection_method = "not_history_request"
+    history_matched_count = 0
+    if history_request:
+        selected_for_context, history_selection_method, history_matched_count = _select_history_context_pairs(
+            query, matches, topic_index, all_rows, requested_topic_count=history_limit
+        )
+        _apr_timing_log(
+            "history_pair_selection",
+            user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
+            query_key=_apr_diag_ref(query), topic_signal_count=len(_history_query_topic_tokens(query)),
+            candidate_match_count=history_matched_count, selected_pairs=len(selected_for_context),
+            selection_method=history_selection_method, topic_index_count=len(topic_index),
+        )
+    elif relation == "CONTINUE":
         if anchor:
             selected_for_context.append(_compact_pair(anchor))
         # At most one corroborating pair; never forward a pile of unrelated turns.
@@ -1796,10 +1950,6 @@ def search_dialogue_context(
         active_topic = _text(anchor.get("topic")) or active_topic
         selected_for_context = [_compact_pair(anchor)]
 
-    topics = _build_topic_index(all_rows)
-    history_limit = _history_topic_limit(query, 7)
-    history_topics = topics[:history_limit] if history_request else []
-    topic_index = topics[:10]
     topic_table_lines = ["| # | Тема | Последний запрос | Ходы |", "|---:|---|---|---:|"]
     for item in (history_topics or topic_index[:min(3, len(topic_index))]):
         topic_table_lines.append(f"| {item['number']} | {str(item['topic']).replace('|', '/')} | {str(item['last_question']).replace('|', '/')} | {item['turns']} |")
@@ -1833,7 +1983,7 @@ def search_dialogue_context(
         "active_topic": active_topic,
         "anchor": _compact_pair(anchor) if relation == "CONTINUE" and anchor else {},
         "matches": matches[:max(1, int(limit or 12))] if matches else [],
-        "selected": selected_for_context[:2],
+        "selected": selected_for_context[:4 if history_request else 2],
         "history_topics": history_topics,
         "topic_index": topic_index,
         "known_topic_count": len(topics),
