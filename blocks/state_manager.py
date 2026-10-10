@@ -736,8 +736,9 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _row_attachment_evidence(row: dict[str, Any]) -> str:
     """Compact, searchable evidence retained with a USER↔APRIL pair.
 
-    Raw file/image bytes stay in dialogue_assets; this index contains only
-    bounded filenames, source snippets and the provider's grounded summary.
+    Original binary payloads are not persisted in a sidecar table. This index
+    retrieves bounded filenames, source snippets and Provider-grounded summaries
+    stored inside dialogue_memory's structured request/response fields.
     """
     req = _parse_json(row.get("structured_request"))
     resp = _parse_json(row.get("structured_response"))
