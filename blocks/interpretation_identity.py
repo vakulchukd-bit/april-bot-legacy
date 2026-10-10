@@ -221,6 +221,20 @@ def _detect_requested_outputs(text: str) -> list[str]:
     if has_graph_noun and has_graph_action and "graph" not in result:
         result.append("graph")
 
+    # A 3D visualization can be requested without the word "graph/chart".
+    # Treat an explicit create/build/show action plus 3D + visualization/scene/model
+    # terminology as a graph artifact request, not as a text-only explanation.
+    has_3d_marker = bool(re.search(
+        r"(?:\b3\s*[- ]?d\b|\bthree[- ]dimensional\b|\b3d\s+(?:graph|plot|scene|model|visuali[sz]ation)\b|тр[её]хмерн\w*)",
+        low,
+    ))
+    has_visual_noun = bool(re.search(
+        r"(?:visuali[sz]ation|visualisation|visualization|3d[- ]?scene|3d[- ]?model|\bscene\b|\bmodel\b|визуализац\w*|\bсцен\w*|\bмодел\w*)",
+        low,
+    ))
+    if has_3d_marker and has_graph_action and has_visual_noun and "graph" not in result:
+        result.append("graph")
+
     if not result:
         result.append("text")
     elif "text" not in result:
