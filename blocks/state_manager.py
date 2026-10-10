@@ -781,6 +781,158 @@ def _row_attachment_evidence(row: dict[str, Any]) -> str:
     return " ".join(part for part in chunks if part)[:9000]
 
 
+_PROTECTED_STRUCTURED_TYPE_ALIASES = {
+    "graph": "graph", "graph_data": "graph", "chart": "graph", "plot": "graph",
+    "table": "table", "table_data": "table",
+    "formula": "formula", "formula_data": "formula", "equation": "formula",
+    "math": "formula", "latex": "formula", "physics_formula": "formula",
+    "chemistry_formula": "formula", "biology_formula": "formula",
+    "solution": "solution", "math_solution": "solution", "problem_solution": "solution",
+    "worked_solution": "solution", "solution_steps": "solution",
+}
+
+def _protected_structured_kind(value: Any) -> str:
+    """Classify payloads from renderer/schema metadata, never from user wording."""
+    if not isinstance(value, dict):
+        return ""
+    tags = []
+    for key in ("type", "artifact_type", "representation", "payload_type", "kind", "output_type"):
+        tag = _text(value.get(key)).lower().replace("-", "_").replace(" ", "_")
+        if tag:
+            tags.append(tag)
+    renderer_map = {
+        "graphblock": "graph", "tableblock": "table", "formularenderer": "formula",
+        "formulablock": "formula", "mathsolutionblock": "solution", "problemsolutionblock": "solution",
+    }
+    for key in ("renderer", "viewer"):
+        renderer = _text(value.get(key)).lower().replace("_", "").replace("-", "")
+        if renderer in renderer_map:
+            return renderer_map[renderer]
+    for tag in tags:
+        if tag in _PROTECTED_STRUCTURED_TYPE_ALIASES:
+            return _PROTECTED_STRUCTURED_TYPE_ALIASES[tag]
+    payload = value.get("payload") if isinstance(value.get("payload"), dict) else value
+    keys = set(payload.keys()) if isinstance(payload, dict) else set()
+    if keys.intersection({"rows", "columns", "headers", "matrix", "cell_roles"}):
+        return "table"
+    if keys.intersection({"series", "datasets", "traces", "points", "data_points", "x_values", "y_values", "x_axis", "y_axis"}):
+        return "graph"
+    if keys.intersection({"latex", "latex_formulas", "formula", "formulas", "equation", "equations", "expression", "expressions"}):
+        return "formula"
+    if keys.intersection({"solution_steps", "steps", "derivation", "calculations", "given_values", "known_values", "unknowns"}):
+        return "solution"
+    return ""
+
+def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Extract exact typed payloads plus their owning answer, without lexical triggers."""
+    response = _parse_json(row.get("structured_response"))
+    if not response:
+        return {}
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def collect_typed_nodes(value: Any, source_field: str, path: tuple[Any, ...] = (), depth: int = 0) -> None:
+        """Walk renderer contracts by declared structure, never by prose keywords."""
+        if depth > 10:
+            return
+        if isinstance(value, list):
+            for index, child in enumerate(value[:1500]):
+                collect_typed_nodes(child, source_field, path + (index,), depth + 1)
+            return
+        if not isinstance(value, dict):
+            return
+
+        kind = _protected_structured_kind(value)
+        if kind:
+            serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+            fingerprint = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+            if fingerprint not in seen:
+                seen.add(fingerprint)
+                items.append({
+                    "kind": kind,
+                    "source_field": source_field,
+                    "index": list(path),
+                    "data": deepcopy(value),
+                })
+            # Capturing a typed node preserves its nested payload in one piece.
+            return
+
+        # Traverse scene-contract wrappers, renderer envelopes and legacy payload
+        # containers. Strings are never inspected for trigger words.
+        for key, child in value.items():
+            if isinstance(child, (dict, list)):
+                collect_typed_nodes(child, source_field, path + (key,), depth + 1)
+
+    for field_name in ("render_blocks", "artifacts", "scene_contract"):
+        raw_items = response.get(field_name)
+        if isinstance(raw_items, (dict, list)):
+            collect_typed_nodes(raw_items, field_name)
+    if not items:
+        # Legacy text-only answers can still be recognized from the declared
+        # renderer plan / selected room metadata stored with the same pair. This
+        # is schema routing, not a keyword match against the user's wording.
+        request = _parse_json(row.get("structured_request"))
+        routing = request.get("routing") if isinstance(request.get("routing"), dict) else {}
+        declared: set[str] = set()
+        output_values: list[Any] = []
+        for field_name in ("requested_outputs", "required_artifacts"):
+            values = request.get(field_name)
+            if isinstance(values, list):
+                output_values.extend(values)
+        request_intent = request.get("intent") if isinstance(request.get("intent"), dict) else {}
+        nested_intent = request_intent.get("intent") if isinstance(request_intent.get("intent"), dict) else {}
+        for field_name in ("requested_outputs", "required_artifacts"):
+            values = nested_intent.get(field_name)
+            if isinstance(values, list):
+                output_values.extend(values)
+        output_aliases = {
+            "graph": "graph", "chart": "graph", "plot": "graph",
+            "table": "table", "formula": "formula", "equation": "formula",
+            "math_solution": "solution", "problem_solution": "solution",
+            "worked_solution": "solution", "solution": "solution",
+        }
+        for output in output_values:
+            normalized = _text(output).lower().replace("-", "_").replace(" ", "_")
+            if normalized in output_aliases:
+                declared.add(output_aliases[normalized])
+        for flag, kind in (("wants_graph", "graph"), ("wants_table", "table"), ("wants_formula", "formula")):
+            if bool(nested_intent.get(flag) or request_intent.get(flag)):
+                declared.add(kind)
+        rooms = routing.get("selected_rooms") if isinstance(routing.get("selected_rooms"), list) else []
+        for room in rooms:
+            if not isinstance(room, dict):
+                continue
+            room_id = _text(room.get("room") or room.get("room_id")).upper()
+            artifact_type = _text(room.get("artifact_type")).lower()
+            if room_id in {"MATHEMATICS_ROOM", "C_MATHEMATICS_ROOM"}:
+                declared.add("solution")
+            elif room_id in {"FORMULA_ROOM", "C_FORMULA_ROOM"} or artifact_type == "formula":
+                declared.add("formula")
+        # A text-only answer from a declared math/formula/rendering route still
+        # contains reusable exact values, even if an old renderer emitted no data block.
+        if declared:
+            for kind in sorted(declared):
+                items.append({
+                    "kind": kind,
+                    "source_field": "structured_request_schema",
+                    "index": len(items),
+                    "data": {"type": kind, "source_room_plan": True},
+                })
+    if not items:
+        return {}
+    payload = {
+        "schema": "april_protected_structured_data_v1",
+        "source_message_id": _text(row.get("message_id")),
+        "items": items,
+        # Some legacy visual blocks are metadata-only; points/formulas can live
+        # in the complete answer, so preserve that exact text alongside the block.
+        "source_answer": str(response.get("answer") or response.get("content") or row.get("april_text") or ""),
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    payload["sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return payload
+
+
 def _candidate_score(
     query: str,
     row: dict[str, Any],
@@ -885,6 +1037,7 @@ def _candidate_score(
         "is_pending_clarification": _row_is_pending_clarification(row),
         "memory_summary": _compact_memory_summary(row),
         "attachment_evidence": attachment_evidence[:1800],
+        "protected_structured_data": _protected_structured_data_from_row(row),
     }
 
 
@@ -993,6 +1146,9 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
         "same_dialog": bool(item.get("same_dialog")),
         "message_id": _text(item.get("message_id")),
         "attachment_evidence": evidence,
+        # Exact structured data stays separate from the clipped semantic summary.
+        "protected_structured_data": deepcopy(item.get("protected_structured_data"))
+        if isinstance(item.get("protected_structured_data"), dict) else {},
     }
 
 
