@@ -524,14 +524,15 @@ def _select_history_topics(memory: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _select_continuation_pairs(memory: dict[str, Any]) -> list[dict[str, Any]]:
     relation = _text(memory.get("relation")).upper()
+    history_request = bool(memory.get("history_request"))
     pairs = memory.get("selected_pairs")
-    if relation != "CONTINUE" or not isinstance(pairs, list):
+    # HISTORY_RECALL intentionally remains relation=NEW, but its selected evidence
+    # must still reach the Provider. Relation controls topic continuation, not whether
+    # authenticated history evidence may be attached to the current request.
+    if (relation != "CONTINUE" and not history_request) or not isinstance(pairs, list):
         return []
-    return [
-        dict(item)
-        for item in pairs
-        if isinstance(item, dict)
-    ][:6]
+    limit = 6 if history_request else 2
+    return [dict(item) for item in pairs if isinstance(item, dict)][:limit]
 
 
 _TASK_START_VERBS = (
@@ -946,7 +947,7 @@ def build_interpretation(
             "topic_table_markdown": _text(memory.get("topic_table_markdown")),
             "new_dialogue_request": original or text,
             "new_dialogue_active": relation != "CONTINUE" and not history_request,
-            "continuation_context": selected_pairs if relation == "CONTINUE" else [],
+            "continuation_context": selected_pairs if (relation == "CONTINUE" or history_request) else [],
             "selected_section": dict(memory.get("selected_section") or {}),
             "clarification_needed": bool(memory.get("clarification_needed")),
             "pending_clarification": dict(memory.get("pending_clarification") or {}),
