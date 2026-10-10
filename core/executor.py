@@ -78,6 +78,33 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _is_structured_3d_graph_block(block: Any) -> bool:
+    if not isinstance(block, dict):
+        return False
+    block_type = _text(block.get("type") or block.get("artifact_type")).lower()
+    if block_type not in {"graph", "chart", "plot"}:
+        return False
+    payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+    if not payload and isinstance(block.get("artifact"), dict):
+        candidate = block["artifact"].get("payload")
+        payload = candidate if isinstance(candidate, dict) else {}
+    representation = _text(payload.get("representation") or payload.get("graph_type") or payload.get("chart_type")).lower()
+    return bool(
+        "3d" in representation
+        or payload.get("three_d") is True
+        or payload.get("dimensions") == 3
+        or payload.get("objects_3d")
+        or payload.get("spheres")
+        or payload.get("surface_grid")
+        or payload.get("z_values")
+        or any(
+            isinstance(point, dict) and ("z" in point or "value_z" in point)
+            for series in (payload.get("series") or []) if isinstance(series, dict)
+            for point in (series.get("points") or series.get("data") or [])
+        )
+    )
+
+
 def _compact_question_search(
     context: dict[str, Any],
     query: str = "",
@@ -1606,6 +1633,7 @@ async def execute(
             artifact for artifact in raw_artifacts
             if str(artifact.get("type") or artifact.get("artifact_type") or "").lower() not in {"image", "generated_image"}
         ]
+
 
     packaged = package_provider_response(
         answer=answer,
