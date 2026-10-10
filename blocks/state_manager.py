@@ -198,8 +198,24 @@ def get_language(user_id: Any) -> str:
     return str(get_state(user_id).get("language") or "en")
 
 
-def get_dialogue_pairs(user_id: Any) -> list[dict[str, Any]]:
-    return deepcopy(get_state(user_id).get("dialogue_pairs") or [])
+def get_dialogue_pairs(
+    user_id: Any,
+    *,
+    refresh: bool = False,
+    limit: int = 0,
+) -> list[dict[str, Any]]:
+    """Return dialogue pairs through State Manager, optionally refreshing canonical DB state.
+
+    The storage adapter is called only by ``hydrate``; persistent history reads
+    therefore use the single ``dialogue_memory`` source and share this layer's
+    authenticated-user and UTC-window policy. ``limit`` returns the most recent
+    pairs while preserving chronological order.
+    """
+    state = hydrate(user_id) if refresh else get_state(user_id)
+    pairs = deepcopy(state.get("dialogue_pairs") or [])
+    if limit and len(pairs) > int(limit):
+        pairs = pairs[-int(limit):]
+    return pairs
 
 
 def get_active_sequence(user_id: Any) -> dict[str, Any]:
