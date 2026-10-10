@@ -50,7 +50,7 @@ from storage import (
 )
 
 
-PROCESSOR_VERSION = "april_exkrutor_single_route_v9_per_question_search"
+PROCESSOR_VERSION = "april_exkrutor_single_route_v10_structured_source_scope"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -90,6 +90,9 @@ def _compact_question_search(
     def compact_pair(item: Any) -> dict[str, Any]:
         if not isinstance(item, dict):
             return {}
+        # Keep per-question retrieval semantic and bounded. The lossless structured
+        # payload is intentionally not copied into every sub-search; Provider gets
+        # it only through State Manager's top-level selected-source lane.
         sections = []
         for section in (item.get("sections") or [])[:4]:
             if not isinstance(section, dict):
@@ -100,7 +103,6 @@ def _compact_question_search(
                 "order": section.get("order"),
                 "message_id": _text(section.get("message_id"))[:120],
             })
-        protected = item.get("protected_structured_data")
         return {
             "topic": _text(item.get("topic"))[:100],
             "user": _text(item.get("user"))[:180],
@@ -108,8 +110,6 @@ def _compact_question_search(
             "sections": sections,
             "message_id": _text(item.get("message_id"))[:120],
             "same_dialog": bool(item.get("same_dialog")),
-            # Preserve typed data separately from the compact semantic text.
-            "protected_structured_data": protected if isinstance(protected, dict) else {},
         }
 
     anchor = context.get("anchor") if isinstance(context.get("anchor"), dict) else {}
@@ -168,8 +168,6 @@ def _compact_question_search(
             "user": _text(anchor.get("user"))[:180],
             "april": _text(anchor.get("april"))[:240],
             "message_id": _text(anchor.get("message_id"))[:120],
-            "protected_structured_data": anchor.get("protected_structured_data")
-            if isinstance(anchor.get("protected_structured_data"), dict) else {},
         } if anchor else {},
         "selected_section": {
             "topic": _text(section.get("topic"))[:100],
