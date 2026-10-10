@@ -81,7 +81,11 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _compact_question_search(context: dict[str, Any], query: str = "") -> dict[str, Any]:
+def _compact_question_search(
+    context: dict[str, Any],
+    query: str = "",
+    semantics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Bounded per-question retrieval context for the existing Provider sequence."""
     if not isinstance(context, dict):
         return {"status": "unavailable", "relation": "NEW", "context": []}
@@ -123,9 +127,39 @@ def _compact_question_search(context: dict[str, Any], query: str = "") -> dict[s
             "summary": _text(item.get("summary"))[:140],
             "message_id": _text(item.get("message_id"))[:120],
         })
+    semantics = dict(semantics or {})
+    history_request = bool(context.get("history_request") or semantics.get("history_request"))
+    topic_index = []
+    if history_request:
+        topic_index = [
+            {
+                "number": item.get("number"),
+                "topic": _text(item.get("topic"))[:100],
+                "summary": _text(item.get("summary"))[:160],
+                "last_question": _text(item.get("last_question"))[:100],
+                "message_id": _text(item.get("message_id"))[:120],
+            }
+            for item in (context.get("topic_index") or [])[:4] if isinstance(item, dict)
+        ]
+    history_topics = [
+        {
+            "number": item.get("number"),
+            "topic": _text(item.get("topic"))[:100],
+            "summary": _text(item.get("summary"))[:160],
+            "last_question": _text(item.get("last_question"))[:100],
+            "message_id": _text(item.get("message_id"))[:120],
+        }
+        for item in (context.get("history_topics") or [])[:4] if isinstance(item, dict)
+    ] if history_request else []
     return {
         "status": "ready",
         "relation": _text(context.get("relation") or "NEW").upper(),
+        "history_request": history_request,
+        "semantic_intent": _text(semantics.get("primary_intent") or ("HISTORY_RECALL" if history_request else "NEW_INFORMATION")),
+        "search_direction": _text(semantics.get("direction") or ("SEARCH_DIALOGUE_HISTORY" if history_request else "ANSWER_NEW_REQUEST")),
+        "time_scope": _text(semantics.get("time_scope") or "UNSPECIFIED"),
+        "history_topics": history_topics,
+        "topic_index": topic_index,
         "confidence": round(float(context.get("relation_confidence") or 0.0), 4),
         "reason": _text(context.get("reason"))[:80],
         "topic": (_text(context.get("active_topic")) or _text(query))[:120],
@@ -1005,7 +1039,9 @@ async def execute(
             uid, current_text, query_interpretation=single_semantics, **search_kwargs
         )
         if question_sequence:
-            question_sequence[0]["dialogue_search"] = _compact_question_search(dialogue_context, current_text)
+            question_sequence[0]["dialogue_search"] = _compact_question_search(
+                dialogue_context, current_text, single_semantics
+            )
         _apr_timing_log(
             "request_question_search", memory_started,
             user_key=_apr_diag_ref(uid),
@@ -1050,7 +1086,7 @@ async def execute(
                 task_context = prepare_dialogue_context(
                     uid, search_query, query_interpretation=task_semantics, **search_kwargs
                 )
-                task_search = _compact_question_search(task_context, search_query)
+                task_search = _compact_question_search(task_context, search_query, task_semantics)
             except Exception as exc:
                 # A task-search failure must not discard the whole user request.
                 # Keep order/identity and allow other tasks to proceed independently.
