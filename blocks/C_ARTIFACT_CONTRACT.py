@@ -2455,7 +2455,14 @@ def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[st
         return isinstance(cols, list) and bool(cols) and isinstance(rows, list) and bool(rows)
     if block_type in {"graph", "knowledge_graph", "relation_graph", "relations"}:
         series = p.get("series") or p.get("datasets") or p.get("traces")
-        return bool((isinstance(series, list) and any(isinstance(item, dict) and (item.get("points") or item.get("x") or item.get("y") or item.get("data") or item.get("values")) for item in series)) or (isinstance(p.get("x_values"), list) and isinstance(p.get("y_values"), list) and min(len(p["x_values"]), len(p["y_values"])) >= 2) or (isinstance(p.get("points"), list) and len(p["points"]) >= 2) or (isinstance(p.get("nodes"), list) and bool(p["nodes"]) and isinstance(p.get("edges"), list) and bool(p["edges"])) or bool(p.get("matrix") or p.get("data_table")))
+        return bool(
+            (isinstance(series, list) and any(isinstance(item, dict) and (item.get("points") or item.get("x") or item.get("y") or item.get("data") or item.get("values")) for item in series))
+            or (isinstance(p.get("x_values"), list) and isinstance(p.get("y_values"), list) and min(len(p["x_values"]), len(p["y_values"])) >= 2)
+            or (isinstance(p.get("points"), list) and len(p["points"]) >= 2)
+            or (isinstance(p.get("nodes"), list) and bool(p["nodes"]) and isinstance(p.get("edges"), list) and bool(p.get("edges")))
+            or bool(p.get("matrix") or p.get("data_table") or p.get("surface_grid") or p.get("z_values"))
+            or bool(p.get("objects_3d") or p.get("spheres") or p.get("meshes"))
+        )
     if block_type == "diagram":
         return bool(str(p.get("svg") or p.get("svg_payload") or p.get("drawing") or "").strip() or (isinstance(p.get("nodes"), list) and len(p["nodes"]) >= 2 and isinstance(p.get("edges"), list) and bool(p["edges"])) or (isinstance(p.get("elements"), list) and bool(p["elements"])) or (isinstance(p.get("shapes"), list) and bool(p["shapes"])))
     if block_type in {"image", "gallery"}:
