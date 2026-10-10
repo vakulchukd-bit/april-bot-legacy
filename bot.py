@@ -24,7 +24,7 @@ from blocks.input_reader import parse_json_payload, parse_multipart_payload
 from blocks.voice_reader import transcribe_voice_bytes
 from core.executor import execute
 from blocks.state_manager import get_dialogue_pairs
-from storage import init_db, save_dialogue_asset
+from storage import init_db
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "10000"))
@@ -340,52 +340,12 @@ def _handle_payload(
             language_key = requested_language.replace("_", "-").split("-", 1)[0] if requested_language else ""
             original = defaults[language_key] if language_key in defaults else defaults["en"]
 
-        # Store the uploaded assets under the same authenticated identity tuple as
-        # this POST.  Retrieval is by exact message_id + dialog/conversation, never
-        # by filename or by another account.  The chat response can still proceed if
-        # persistence is temporarily unavailable.
-        asset_save_started = time.perf_counter()
-        asset_saved_count = 0
-        persistable_attachments = [
-            att for att in attachments
-            if str(getattr(att, "kind", "file") or "file").lower() in {"image", "text_file", "file"}
-            and bool(getattr(att, "data", b"") or b"")
-        ]
-        try:
-            # No-op text turns must not pay DB initialization / connection cost
-            # just to discover that there are no input assets to persist.
-            if persistable_attachments:
-                init_db()
-            for att in persistable_attachments:
-                kind = str(getattr(att, "kind", "file") or "file").lower()
-                meta = getattr(att, "metadata", {}) or {}
-                raw_bytes = getattr(att, "data", b"") or b""
-                asset_saved = save_dialogue_asset(
-                    uid,
-                    dialog_id=dialog_id or conversation_id,
-                    conversation_id=conversation_id or dialog_id,
-                    message_id=message_id,
-                    filename=_text(getattr(att, "filename", "attachment")) or "attachment",
-                    mime_type=_text(meta.get("mime_type") or getattr(att, "content_type", "application/octet-stream")),
-                    kind=kind,
-                    content=raw_bytes,
-                    text_content=_text(meta.get("text")),
-                    metadata={
-                        "source_type": _text(meta.get("source_type") or kind),
-                        "reader": _text(meta.get("reader")),
-                        "provider_readable": bool(meta.get("provider_readable", False)),
-                        "reader_truncated": bool(meta.get("truncated", False)),
-                        "source_chars": int(meta.get("source_chars") or len(_text(meta.get("text")))),
-                        "asset_role": "user_input",
-                        "paired_message_id": message_id,
-                    },
-                )
-                if asset_saved:
-                    asset_saved_count += 1
-        except Exception as asset_exc:
-            print(f"STATE: DIALOGUE ASSET PRE-SAVE ERROR: {type(asset_exc).__name__}", flush=True)
-        _apr_timing_log("input_asset_persist", asset_save_started, user_key=_apr_diag_ref(uid),
-            attempted_assets=len(attachments), saved_assets=asset_saved_count)
+        # Current attachments remain request-scoped and are passed directly to Exkrutor.
+        # Persistent dialogue history and its searchable attachment evidence are saved
+        # with the USER↔APRIL pair in dialogue_memory; no binary sidecar table is used.
+        _apr_timing_log("input_attachment_forwarding", None, user_key=_apr_diag_ref(uid),
+            attachment_count=len(attachments or []), visual_items=len(visual_context),
+            file_inputs=len(file_inputs), file_contents=len(text_file_contents))
 
         language = _detect_language(
             original or voice_transcript,
