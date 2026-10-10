@@ -166,6 +166,9 @@ def _structured_payload(task: Dict[str, Any]) -> Dict[str, Any]:
             "open", "high", "low", "close", "volume", "lower", "upper",
             "q1", "median", "q3", "whisker_low", "whisker_high",
             "nodes", "edges", "links", "vertices", "matrix", "timeline",
+            "spheres", "objects_3d", "objects", "surface_grid", "z_values",
+            "surface", "mesh", "meshes", "curved_grid", "show_curved_grid",
+            "grid_resolution", "domain", "three_d", "scene3d", "dimensions",
             "periods", "events", "funnel", "waterfall", "bins", "ranges",
             "error", "errors", "error_low", "error_high", "values_3d",
             "camera", "z_axis", "semantic", "interpretation", "data_semantics",
@@ -346,6 +349,8 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
         bool(_list(payload.get("matrix") or payload.get("z") or payload.get("values"))),
         bool(_list(payload.get("nodes") or payload.get("vertices"))),
         bool(_list(payload.get("edges") or payload.get("links") or payload.get("connections"))),
+        bool(_list(payload.get("spheres") or payload.get("objects_3d") or payload.get("objects"))),
+        bool(_list(payload.get("surface_grid") or payload.get("z_values") or payload.get("surface"))),
         bool(_list(_obj(payload.get("timeline")).get("periods") or payload.get("periods"))),
         bool(_list(_obj(payload.get("timeline")).get("events") or payload.get("events"))),
     ])
@@ -377,7 +382,11 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
         "gantt_chart": "gantt", "sankey_chart": "sankey",
         "treemap_chart": "treemap", "network_graph": "network",
         "3d": "surface3d", "3d_surface": "surface3d", "surface_3d": "surface3d",
-        "3d_scatter": "scatter3d", "polar_chart": "polar",
+        "3d_scatter": "scatter3d", "scatter_3d": "scatter3d",
+        "scene3d": "surface3d", "scene_3d": "surface3d", "3d_scene": "surface3d",
+        "sphere_scene3d": "surface3d", "spacetime_curvature": "surface3d",
+        "mesh_3d": "surface3d", "mesh3d": "surface3d", "bar3d": "scatter3d",
+        "polar_chart": "polar",
     }
     representation = representation_aliases.get(representation, representation)
 
@@ -465,7 +474,7 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
         "pie", "donut", "histogram", "heatmap", "radar", "waterfall", "funnel",
         "boxplot", "violin", "errorbar", "candlestick", "ohlc", "timeline", "gantt",
         "network", "sankey", "treemap", "polar", "surface3d", "scatter3d", "contour",
-        "function",
+        "function", "scene3d", "mesh3d", "bar3d",
     ]
     return canonical
 
