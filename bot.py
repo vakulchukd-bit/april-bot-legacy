@@ -24,7 +24,7 @@ from blocks.input_reader import parse_json_payload, parse_multipart_payload
 from blocks.voice_reader import transcribe_voice_bytes
 from core.executor import execute
 from blocks.state_manager import get_dialogue_pairs
-from storage import init_db
+from storage import find_or_create_user, init_db
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "10000"))
@@ -545,6 +545,66 @@ class AprilHandler(BaseHTTPRequestHandler):
         self._send_json(200, {"success": True, "service": "april-bot", "canonical_route": CANONICAL_CHAT_ROUTE, "route_version": CANONICAL_ROUTE_VERSION})
 
     def do_POST(self) -> None:
+        # Existing April Web authentication bridge. Keep account identity in the
+        # canonical users table; never derive an April user ID from email.
+        if self.path == "/api/users/find-or-create":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length < 0 or length > 64 * 1024:
+                    self._send_json(413, {"success": False, "error": "REQUEST_BODY_TOO_LARGE"})
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    body = json.loads(raw.decode("utf-8") or "{}")
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    self._send_json(400, {"success": False, "error": "INVALID_JSON"})
+                    return
+                if not isinstance(body, dict):
+                    self._send_json(400, {"success": False, "error": "INVALID_REQUEST"})
+                    return
+
+                email = _text(body.get("email")).lower()
+                provider = _text(body.get("provider"))
+                provider_user_id = _text(body.get("provider_user_id"))
+                name = _text(body.get("name"))
+                if not email or not provider or not provider_user_id:
+                    self._send_json(400, {"success": False, "error": "INVALID_REQUEST"})
+                    return
+
+                user = find_or_create_user(
+                    email=email,
+                    name=name,
+                    provider=provider,
+                    provider_user_id=provider_user_id,
+                )
+                if not user:
+                    self._send_json(503, {"success": False, "error": "USER_REGISTRY_UNAVAILABLE"})
+                    return
+
+                # The canonical April ID is also users.user_id in this schema.
+                # Emit both camelCase and database field names for current clients.
+                april_id = _text(user.get("april_id") or user.get("aprilUserId") or user.get("aprilId") or user.get("user_id"))
+                user_id = _text(user.get("user_id") or april_id)
+                if not april_id or not user_id:
+                    self._send_json(500, {"success": False, "error": "USER_ID_NOT_AVAILABLE"})
+                    return
+                payload_user = {
+                    "user_id": user_id,
+                    "april_id": april_id,
+                    "aprilId": april_id,
+                    "aprilUserId": april_id,
+                    "email": _text(user.get("email") or email),
+                    "name": _text(user.get("name") or name),
+                    "provider": _text(user.get("provider") or provider),
+                    "plan": _text(user.get("plan") or "free"),
+                    "currentPlan": _text(user.get("plan") or "free"),
+                }
+                self._send_json(200, {"success": True, "user": payload_user})
+            except Exception as exc:
+                print(f"[APRIL] USER_REGISTRY_ERROR: {type(exc).__name__}", flush=True)
+                self._send_json(500, {"success": False, "error": "USER_REGISTRY_FAILED"})
+            return
+
         if self.path == "/frontend_log":
             try:
                 length = int(self.headers.get("Content-Length", "0"))
