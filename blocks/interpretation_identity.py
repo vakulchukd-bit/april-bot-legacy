@@ -125,10 +125,23 @@ _OUTPUT_MARKERS = {
     # Merely mentioning "картинка", "файл", "python" or "код" must never
     # request generation/production by itself.
     "image": {
-        "draw", "drawing", "generate image", "generate a picture", "create image",
+        # Image generation is explicit only when the request asks for a picture,
+        # image, illustration or photo. Generic drawing verbs are deliberately
+        # excluded: simple shapes and objects belong to the structured diagram
+        # route and must not spend an Images Generator call.
+        "generate image", "generate an image", "generate a picture", "create image",
         "create an image", "create a picture", "make an image", "make a picture",
-        "нарисуй", "нарисовать", "сгенерируй", "создай изображение", "создай картинку",
-        "сделай картинку", "сделай изображение", "изобрази", "создай фото",
+        "draw a picture", "draw the picture", "draw an image", "draw the image",
+        "draw picture", "draw image", "show a picture", "show an image",
+        "show me a picture", "show me an image", "create an illustration",
+        "draw an illustration", "generate an illustration",
+        "нарисуй картинку", "нарисуй изображение", "нарисуй иллюстрацию",
+        "нарисовать картинку", "нарисовать изображение", "нарисовать иллюстрацию",
+        "покажи картинку", "покажи изображение", "покажи иллюстрацию",
+        "создай изображение", "создай картинку", "создай иллюстрацию",
+        "сделай картинку", "сделай изображение", "сделай иллюстрацию",
+        "сгенерируй изображение", "сгенерируй картинку", "сгенерируй иллюстрацию",
+        "изобрази картинку", "изобрази изображение", "создай фото", "сделай фото",
     },
     "file": {
         "create file", "make a file", "export file", "download file", "save to file",
@@ -272,6 +285,36 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     if comparison and "table" not in outputs:
         outputs.append("table")
     if workflow_or_architecture and "diagram" not in outputs:
+        outputs.append("diagram")
+
+    # Ordinary drawing requests are semantic visualization requests, not
+    # necessarily raster-image generation. Route simple geometry and common
+    # objects through the existing structured Diagram/Gallery renderer unless
+    # the user explicitly requests a picture/image/illustration/photo.
+    visual_action = bool(re.search(
+        r"(?<![\w\u0080-\uffff])(?:draw(?:ing)?|show|display|build|create|make|render|visuali[sz]e|"
+        r"нарис\w*|покаж\w*|отобраз\w*|изобраз\w*|постро\w*|созда\w*|сдела\w*|визуализир\w*)(?![\w\u0080-\uffff])",
+        low,
+    ))
+    simple_visual_subject = bool(re.search(
+        r"(?:\b(?:triangle|triangles|square|squares|parallelogram|parallelograms|rectangle|rectangles|"
+        r"circle|circles|cube|cubes|sphere|spheres|cone|cones|cylinder|cylinders|pyramid|pyramids|"
+        r"polygon|polygons|cat|cats|dog|dogs|forest|forests|tree|trees|flower|flowers|house|houses|"
+        r"car|cars|bird|birds|fish|fish|mountain|mountains|cloud|clouds|planet|planets)\b"
+        r"|треугольн\w*|параллелограмм\w*|квадрат\w*|прямоугольник\w*|круг\w*|окружност\w*|"
+        r"куб\w*|сфер\w*|шар\w*|конус\w*|цилиндр\w*|пирамид\w*|многоугольник\w*|"
+        r"кошк\w*|кот\w*|собак\w*|пёс\w*|лес\w*|дерев\w*|цвет\w*|дом\w*|машин\w*|"
+        r"птиц\w*|рыб\w*|гор\w*|облак\w*|планет\w*)",
+        low,
+    ))
+    if (
+        visual_action
+        and simple_visual_subject
+        and "image" not in outputs
+        and "diagram" not in outputs
+        and "graph" not in outputs
+        and "table" not in outputs
+    ):
         outputs.append("diagram")
     # Formula view only for a clearly mathematical request. Graphs remain explicit
     # unless the request asks to plot/visualize data or a function.
@@ -929,7 +972,10 @@ def build_question_sequence(
     parent = dict(parent_interpretation or interpret_request_semantics(text))
     pieces = _split_request_sequence(text)
     for index, item in enumerate(pieces, start=1):
-        outputs = _detect_requested_outputs(item)
+        # Per-question output signals must use the same semantic enhancement as
+        # the turn-level contract. Without this, INTERPRETATION could request a
+        # diagram while REQUEST_SEQUENCE still tells Provider to return text only.
+        outputs = _enhance_requested_outputs(item, _detect_requested_outputs(item))
         item_semantics = interpret_request_semantics(item)
         # Restore omitted subjects in compact follow-on questions from the parent
         # intent: “... and what decisions did we reach?” is a prior-decision query
@@ -1274,7 +1320,7 @@ def build_interpretation(
             "rendering_guidance": [
                 "Always preserve a concise explanatory text answer.",
                 "Use a structured table for a clear comparison when the answer has comparable attributes.",
-                "Use a diagram for an actual workflow, architecture, or sequence of steps.",
+                "Use a diagram for workflows/architecture/sequences and for simple requested shapes or objects when intent.wants_diagram=true. Emit a concrete payload.svg, drawing elements, geometry, or nodes/edges; do not only describe the intended drawing.",
                 "Use a formula renderer for mathematical notation; use a graph only when a function or grounded numeric data can define it.",
                 "For graph requests, follow intent.graph_policy: trends/time-ordered values use line; categorical comparisons use bar; choose only among those 2D types unless explicit 3D intent or real 3D source data supports 3D.",
                 "Never turn 2D x/y data into a 3D chart by inventing a zero z-axis; true 3D requires explicit XYZ values, a real surface grid/function of x and y, or structured spatial objects.",
