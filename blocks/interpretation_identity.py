@@ -251,6 +251,42 @@ def _detect_requested_outputs(text: str) -> list[str]:
     if has_3d_marker and has_graph_action and has_visual_noun and "graph" not in result:
         result.append("graph")
 
+    # Natural-language educational prompts often name a representation rather
+    # than use the fixed command "show formula/table". Recognize those direct
+    # output requests without treating a bare input noun as generation intent.
+    has_formula_noun = bool(re.search(r"формул\w*|\bformulae?\b|\bequations?\b", low))
+    has_formula_context = bool(re.search(
+        r"(?:покаж\w*|объясн\w*|обрис\w*|применен\w*|запиш\w*|структурир\w*|"
+        r"расскаж\w*|визуализир\w*|show|explain|apply|application|structure|visuali[sz]e)",
+        low,
+    ))
+    if has_formula_noun and has_formula_context and "formula" not in result:
+        result.append("formula")
+
+    # Multi-part educational explanations with structured formatting and a
+    # display verb benefit from a comparison table and a concept/process diagram.
+    # This does not request an image-generation call and does not authorize made-up
+    # numeric data for a graph.
+    has_structured_presentation = bool(re.search(
+        r"(?:структурир\w*|по\s+пункт\w*|все\s+основн\w*|всё\s+основн\w*|"
+        r"полный\s+разбор|цельный\s+разбор|complete\s+overview|structured\s+overview)",
+        low,
+    ))
+    has_visual_action = bool(re.search(
+        r"(?:покаж\w*|визуализир\w*|нарис\w*|изобраз\w*|отобраз\w*|show|visuali[sz]e|draw|display)",
+        low,
+    ))
+    has_educational_sections = bool(re.search(
+        r"(?:опыт\w*|эксперимент\w*|биограф\w*|вклад\w*|применен\w*|теори\w*|"
+        r"формул\w*|открыти\w*|изобретен\w*|человечеств\w*|физик\w*)",
+        low,
+    ))
+    if has_structured_presentation and has_educational_sections:
+        if "table" not in result:
+            result.append("table")
+        if has_visual_action and "diagram" not in result:
+            result.append("diagram")
+
     if not result:
         result.append("text")
     elif "text" not in result:
@@ -265,6 +301,35 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     """
     low = _text(text).lower().replace("ё", "е")
     outputs = list(dict.fromkeys(explicit_outputs or ["text"]))
+
+    # A request to use "all renderers" is an explicit request for a rich,
+    # multi-renderer SceneContract, not just a text answer. Expand only to
+    # structured explanatory renderers; raster images, code files and links
+    # still require their own grounded intent/payload and are never fabricated.
+    all_renderers_requested = bool(re.search(
+        r"(?:во\s+всех\s+рендер(?:ах|ерах)|всеми\s+рендер(?:ами|ерами)|"
+        r"по\s+всем\s+рендер(?:ам|ерам)|все\s+(?:доступные\s+)?рендер(?:ы|а)|"
+        r"все\s+виды\s+(?:визуализац\w*|отображен\w*)|"
+        r"\ball\s+(?:available\s+)?renderers\b|\bin\s+every\s+renderer\b|"
+        r"\buse\s+all\s+renderers\b|\ball\s+rendering\s+formats\b)",
+        low,
+    ))
+    if all_renderers_requested:
+        for output in ("table", "diagram", "formula", "graph"):
+            if output not in outputs:
+                outputs.append(output)
+
+        # In this exact phrase the user explicitly asks to visualize the subject
+        # across every available renderer. Allow the existing April image generator
+        # to participate as well, but do not infer image generation from a generic
+        # request such as "show me everything" or from a bare image mention.
+        explicit_visual_action = bool(re.search(
+            r"(?:визуализир\w*|покаж\w*|нарис\w*|изобраз\w*|созда\w*\s+(?:картинк\w*|изображен\w*)|"
+            r"visuali[sz]\w*|show\s+(?:me\s+)?(?:a\s+)?visual|draw\w*|create\s+(?:an?\s+)?image)",
+            low,
+        ))
+        if explicit_visual_action and "image" not in outputs:
+            outputs.append("image")
 
     comparison = bool(re.search(
         r"\b(?:compare|comparison|compare\s+with|versus|vs\.?|differences?\s+between|pros\s+and\s+cons)\b"
@@ -894,6 +959,17 @@ def _split_request_sequence(text: str) -> list[str]:
     if not source:
         return []
 
+    # Conversational lead-ins are not independent tasks. In the previous
+    # sequence splitter, "Так, расскажи..." became an empty-content step named
+    # "Так," and consumed a memory search of its own.
+    source = re.sub(
+        r"^\s*(?:так|ну|итак|ладно|хорошо|смотри|слушай|окей|okay|well)\s*[,!:—–-]\s*",
+        "",
+        source,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+
     # A detailed 3D-scene prompt is one artifact task with many constraints, not
     # a collection of independent questions. Keep its formula, object counts,
     # geometry, axes, colours and interaction requirements bound together so the
@@ -934,8 +1010,14 @@ def _split_request_sequence(text: str) -> list[str]:
         # Question marks are strong boundaries. Also split sentence periods only
         # when the next sentence visibly starts another task/question, avoiding
         # ordinary explanatory sentences and most abbreviation false positives.
+        ordinal_start = (
+            r"(?:и\s+)?(?:во[- ]?(?:первых|вторых|третьих|четвертых|четвёртых|пятых)|"
+            r"перв(?:ое|ый|ая)|втор(?:ое|ой|ая)|треть(?:е|я)|"
+            r"четверт(?:ое|ый|ая)|четвёрт(?:ое|ый|ая)|пят(?:ое|ый|ая)|"
+            r"first|second|third|fourth|fifth)\b"
+        )
         boundary_pattern = re.compile(
-            r"(?<=[?？])\s+|(?<=[.!])\s+(?=" + _TASK_OR_QUESTION_START + r")"
+            r"(?<=[?？])\s+|(?<=[.!])\s+(?=(?:" + _TASK_OR_QUESTION_START + r"|" + ordinal_start + r"))"
             r"|\s+(?:и|а также|а|and|also)\s+(?=" + question_lead + r"\b)",
             flags=re.IGNORECASE,
         )
@@ -950,6 +1032,40 @@ def _split_request_sequence(text: str) -> list[str]:
     # Never collapse repeated steps: repetition can be intentional, and the output
     # sequence must stay one-to-one with the user's requested order.
     cleaned = [re.sub(r"\s+", " ", part).strip() for part in parts if part.strip()]
+
+    # The action-oriented splitter can cut just before a verb and leave the
+    # step label alone, e.g. "Третье," + "визуализируй...". Bind that label to
+    # its action so each numbered requirement remains one coherent sequence item.
+    ordinal_only = re.compile(
+        r"^(?:и\s+)?(?:перв(?:ое|ый)|втор(?:ое|ой)|треть(?:е|я)|"
+        r"четверт(?:ое|ый)|четвёрт(?:ое|ый)|пят(?:ое|ый)|"
+        r"first|second|third|fourth|fifth)\s*[,.:;—–-]*$",
+        flags=re.IGNORECASE,
+    )
+    merged: list[str] = []
+    index = 0
+    while index < len(cleaned):
+        current = cleaned[index]
+        if ordinal_only.fullmatch(current) and index + 1 < len(cleaned):
+            merged.append(f"{current.rstrip(' ,.:;—–-')} {cleaned[index + 1]}".strip())
+            index += 2
+            continue
+        merged.append(current)
+        index += 1
+    cleaned = merged
+    # A trailing "and show" with no object is part of the preceding request,
+    # not a standalone task whose only query is the verb "show".
+    bare_show = re.compile(
+        r"^(?:и\s+)?(?:покажи(?:те)?|показать|покажіть|show|display|визуализируй(?:те)?|visuali[sz]e)\s*[.!?？]*$",
+        flags=re.IGNORECASE,
+    )
+    combined: list[str] = []
+    for piece in cleaned:
+        if bare_show.fullmatch(piece) and combined:
+            combined[-1] = f"{combined[-1].rstrip(' .!?？')} и {piece.strip().rstrip('.!?？')}"
+        else:
+            combined.append(piece)
+    cleaned = combined
     if len(cleaned) > 24:
         # Keep every request, but combine the tail into one final ordered unit to
         # bound per-turn memory searches and prevent unbounded preprocessing time.
