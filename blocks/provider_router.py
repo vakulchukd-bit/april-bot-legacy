@@ -1910,6 +1910,9 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "ATTACHED_TEXT_FILES": text_file_manifest,
         "C_ARTIFACT_RENDER_PLAN": render_plan,
         "SELECTED_ROOMS": routing.get("selected_rooms") or [],
+        # Semantic rendering guidance is created by Interpretation, not inferred
+        # by the UI. This keeps output choice in the single request pipeline.
+        "REQUESTED_RENDERING_GUIDANCE": request_structure.get("rendering_guidance") or [],
         "MCDOWELL_PRESENTATION_POLICY": mcdowell_policy,
         "MCDOWELL_KATEX_PRESENTATION_POLICY": {
             "mcdowell": {"required": True, "role": "whole_scene_layout"},
