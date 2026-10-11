@@ -245,6 +245,68 @@ def _detect_requested_outputs(text: str) -> list[str]:
     return result
 
 
+def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[str]:
+    """Add only high-confidence structured views implied by the user's task.
+
+    This never infers image generation, invented data, or external-source URLs.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    outputs = list(dict.fromkeys(explicit_outputs or ["text"]))
+
+    comparison = bool(re.search(
+        r"\b(?:compare|comparison|compare\s+with|versus|vs\.?|differences?\s+between|pros\s+and\s+cons)\b"
+        r"|(?:сравни\w*|сравнен\w*|разниц\w*\s+между|отличи\w*|чем\s+отличает\w*|плюсы\s+и\s+минусы|преимуществ\w*\s+и\s+недостатк\w*)",
+        low,
+    ))
+    workflow_or_architecture = bool(re.search(
+        r"\b(?:workflow|workflows|pipeline|architecture|sequence|process\s+flow|flowchart|algorithm|steps\s+of|system\s+design)\b"
+        r"|(?:архитектур\w*|последовательност\w*|алгоритм\w*|блок[- ]схем\w*|схем\w*\s+работ\w*|цепочк\w*\s+работ\w*|этап\w*\s+процесс\w*|как\s+устроен\w*|порядок\s+работ\w*)",
+        low,
+    ))
+    mathematical_function = bool(re.search(
+        r"\b(?:function|exponential|exponent|equation|derivative|integral|sin|cos|tan|cot)\b"
+        r"|(?:функци\w*|экспонент\w*|уравнен\w*|производн\w*|интеграл\w*|синус\w*|косинус\w*|тангенс\w*|тригонометр\w*)",
+        low,
+    ))
+
+    if comparison and "table" not in outputs:
+        outputs.append("table")
+    if workflow_or_architecture and "diagram" not in outputs:
+        outputs.append("diagram")
+    # Formula view only for a clearly mathematical request. Graphs remain explicit
+    # unless the request asks to plot/visualize data or a function.
+    if mathematical_function and bool(re.search(
+        r"(?:формул\w*|уравнен\w*|запиши\w*|реши\w*|formula|equation|derive|solve|write\s+the)"
+        r"|(?:график\w*|построй\w*|визуализир\w*|plot\s+the|graph\s+of)", low
+    )) and "formula" not in outputs and "graph" not in outputs:
+        outputs.append("formula")
+
+    if "text" not in outputs:
+        outputs.insert(0, "text")
+    return list(dict.fromkeys(outputs))
+
+
+def _infer_routing_capabilities(text: str) -> list[str]:
+    """Map obvious subject matter to registered C-ARTIFACT room capabilities."""
+    low = _text(text).lower().replace("ё", "е")
+    capabilities: list[str] = []
+    rules = [
+        (r"(?:\bbiology\b|\bdna\b|\bgene\w*\b|\bprotein\w*\b|\bcell\w*\b|\bevolution\b|биолог\w*|днк|ген\w*|белок\w*|клетк\w*|эволюц\w*|организм\w*)", ("biology", "research", "knowledge")),
+        (r"(?:\bpython\b|\btypescript\b|\bjavascript\b|\bapi\b|\bgit\b|\bdatabase\b|\bserver\b|\bdeploy\w*\b|\bsoftware\b|\bcode\b|\bpostgres(?:ql)?\b|\bsqlite\b|\bmysql\b|\bredis\b|\bkubernetes\b|программ\w*|код\w*|разработ\w*|баз\w*\s+данн\w*|сервер\w*|депло\w*|репозитор\w*)", ("software", "code", "git", "analysis")),
+        (r"(?:\bliterature\b|\bnovel\b|\bpoem\b|\bpoetry\b|\bauthor\b|\bbook\b|литератур\w*|роман\w*|поэм\w*|стих\w*|автор\w*|книг\w*)", ("literature", "authors", "literary_analysis")),
+        (r"(?:\btrigonometry\b|\bsin\b|\bcos\b|\btan\b|\bcot\b|тригонометр\w*|синус\w*|косинус\w*|тангенс\w*)", ("trigonometry", "calculation", "geometry")),
+        (r"(?:\bmathematics\b|\bcalculate\b|\bcalculation\b|\bsolve\s+(?:for|the)\b|\bequation\b|\bexponential\b|\bfunction\b|математ\w*|вычисл\w*|посчитай\w*|уравнен\w*|экспонент\w*|функци\w*|числов\w*|производн\w*|интеграл\w*)", ("mathematics", "calculation", "reasoning", "function", "mathematical_function")),
+        (r"(?:\bnews\b|\blatest\s+(?:events|news)\b|\bcurrent\s+events\b|новост\w*|последн\w*\s+событи\w*|актуальн\w*\s+событи\w*)", ("news", "current_events")),
+        (r"(?:\bpolitic\w*\b|\belection\w*\b|\bgovernment\b|\bparliament\b|политик\w*|выбор\w*|правительств\w*|парламент\w*|президент\w*)", ("politics", "current_events")),
+        (r"(?:\bsocial\s+(?:behavior|relations|issues)\b|\bsociety\b|\bcommunication\b|социолог\w*|социальн\w*|общественн\w*\s+отношен\w*|общение\w*|коммуникац\w*)", ("social", "communication")),
+        (r"(?:\b(?:utc|time\s+zone|timezone|current\s+time|date\s+and\s+time)\b|часов\w*\s+пояс\w*|время\s+в\s+[а-яa-z]|текуще\w*\s+время|дата\s+и\s+время)", ("utc", "time", "datetime")),
+    ]
+    for pattern, values in rules:
+        if re.search(pattern, low):
+            capabilities.extend(values)
+    return list(dict.fromkeys(capabilities))
+
+
 def _detect_task(
     text: str,
     *,
@@ -812,7 +874,9 @@ def build_interpretation(
         for item in attachments
     )
 
-    requested_outputs = _detect_requested_outputs(original or text)
+    detected_outputs = _detect_requested_outputs(original or text)
+    requested_outputs = _enhance_requested_outputs(original or text, detected_outputs)
+    routing_capabilities = _infer_routing_capabilities(original or text)
     wants_image = "image" in requested_outputs
     wants_file = "file" in requested_outputs
     wants_links = "link" in requested_outputs
@@ -896,6 +960,9 @@ def build_interpretation(
     result = {
         "schema": "april_interpretation_v2",
         "identity": current_identity,
+        # Executor uses this additive hint to select registered domain rooms.
+        # These hints never override identity, memory, or explicit task intent.
+        "routing_capabilities": routing_capabilities,
         "input": {
             "original_request": original,
             "normalized_request": text,
@@ -1002,7 +1069,18 @@ def build_interpretation(
                 "mcdowell_required": True,
                 "katex_required_for_math": True,
                 "scene_contract_required": True,
+                "single_scene_contract": True,
+                "renderer_signal_source": "C_ARTIFACT_CONTRACT",
             },
+            "rendering_guidance": [
+                "Always preserve a concise explanatory text answer.",
+                "Use a structured table for a clear comparison when the answer has comparable attributes.",
+                "Use a diagram for an actual workflow, architecture, or sequence of steps.",
+                "Use a formula renderer for mathematical notation; use a graph only when a function or grounded numeric data can define it.",
+                "Use code, link, file, image, and gallery renderers only when the response contains matching valid payloads and the request/context supports them.",
+                "Never invent numeric data, URLs, files, or images just to fill a renderer.",
+                "Every structured artifact must carry an explicit renderer type and its payload through the canonical SceneContract.",
+            ],
             "improvement_policy": "Improve the requested result while preserving unaffected behavior; do not invent missing source content.",
             "output_plan": requested_outputs,
             "semantic_interpretation": request_semantics,
