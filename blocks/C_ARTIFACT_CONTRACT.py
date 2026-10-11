@@ -518,7 +518,7 @@ class BaseArtifact:
 # artifact_type identifies the produced representation; renderer identifies
 # the concrete Web viewer for this particular artifact. One room may therefore
 # produce multiple concrete renderers without creating a second route.
-WEB_RENDERER_REGISTRY_VERSION = "3.2"
+WEB_RENDERER_REGISTRY_VERSION = "3.3"
 
 # Exact renderer contract mirrored from the actual April Web RenderMessage
 # registry. This describes the destination component; it never performs routing.
@@ -526,7 +526,7 @@ WEB_RENDERER_REGISTRY = {
     "text": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "answer"]},
     "markdown": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "markdown"]},
     "formula": {"renderer": "FormulaRenderer", "viewer": "FormulaRenderer", "fallback_renderer": "", "payload_keys": ["formula", "formulas", "latex", "latex_formulas", "equation", "expression", "math", "markdown", "content"], "mode": "force_math"},
-    "graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["series", "datasets", "traces", "curves", "points", "data_points", "x_values", "y_values", "categories", "labels", "data_table", "matrix", "x_axis", "y_axis", "axes", "representation", "chart_type", "visualization", "graph_type", "plot_type", "fn", "function", "expression", "equation", "x_domain", "y_domain"]},
+    "graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["series", "datasets", "traces", "curves", "points", "data_points", "x_values", "y_values", "categories", "labels", "data_table", "matrix", "x_axis", "y_axis", "z_axis", "axes", "representation", "chart_type", "visualization", "graph_type", "plot_type", "fn", "function", "expression", "equation", "formula", "x_domain", "y_domain", "z_domain", "x_range", "y_range", "z_range", "domain", "surface", "surface_grid", "surface_function", "z_function", "z_expression", "grid_resolution", "spheres", "objects_3d", "objects", "shapes", "meshes", "geometry", "scene", "dimensions", "three_d", "show_curved_grid", "curved_grid"]},
     "knowledge_graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "series", "points", "labels", "title", "description"]},
     "relation_graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "series", "points", "labels", "title", "description"]},
     "relations": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "title", "description"]},
@@ -2455,13 +2455,34 @@ def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[st
         return isinstance(cols, list) and bool(cols) and isinstance(rows, list) and bool(rows)
     if block_type in {"graph", "knowledge_graph", "relation_graph", "relations"}:
         series = p.get("series") or p.get("datasets") or p.get("traces")
+        nested_scene = p.get("scene") if isinstance(p.get("scene"), dict) else {}
+        nested_geometry = p.get("geometry") if isinstance(p.get("geometry"), dict) else {}
+        nested_surface = p.get("surface") if isinstance(p.get("surface"), dict) else {}
+        has_nested_surface_expression = any(
+            str(candidate or "").strip()
+            for candidate in (
+                nested_surface.get("surface_function"), nested_surface.get("z_function"),
+                nested_surface.get("expression"), nested_surface.get("formula"),
+                nested_surface.get("function"),
+            )
+        )
+        has_nested_3d_objects = any(
+            isinstance(candidate, list) and bool(candidate)
+            for candidate in (
+                nested_scene.get("objects"), nested_geometry.get("objects"),
+                nested_geometry.get("spheres"),
+            )
+        )
         return bool(
             (isinstance(series, list) and any(isinstance(item, dict) and (item.get("points") or item.get("x") or item.get("y") or item.get("data") or item.get("values")) for item in series))
             or (isinstance(p.get("x_values"), list) and isinstance(p.get("y_values"), list) and min(len(p["x_values"]), len(p["y_values"])) >= 2)
             or (isinstance(p.get("points"), list) and len(p["points"]) >= 2)
             or (isinstance(p.get("nodes"), list) and bool(p["nodes"]) and isinstance(p.get("edges"), list) and bool(p.get("edges")))
             or bool(p.get("matrix") or p.get("data_table") or p.get("surface_grid") or p.get("z_values"))
-            or bool(p.get("objects_3d") or p.get("spheres") or p.get("meshes"))
+            or bool(p.get("surface_function") or p.get("z_function") or p.get("z_expression"))
+            or has_nested_surface_expression
+            or has_nested_3d_objects
+            or bool(p.get("objects_3d") or p.get("spheres") or p.get("objects") or p.get("shapes") or p.get("meshes"))
         )
     if block_type == "diagram":
         return bool(str(p.get("svg") or p.get("svg_payload") or p.get("drawing") or "").strip() or (isinstance(p.get("nodes"), list) and len(p["nodes"]) >= 2 and isinstance(p.get("edges"), list) and bool(p["edges"])) or (isinstance(p.get("elements"), list) and bool(p["elements"])) or (isinstance(p.get("shapes"), list) and bool(p["shapes"])))
