@@ -355,6 +355,169 @@ def _semantic_tokens(value: Any) -> set[str]:
     return normalized
 
 
+# These are task vocabulary rather than subject identity. Removing them from the
+# subject signature prevents different datasets (oil, bananas, cabbage, etc.) from
+# being merged just because they all discuss prices, tables or graphs.
+_CONTEXT_GENERIC_TERMS = {
+    "покажи", "показать", "покажите", "построй", "построить", "постройте", "сделай",
+    "сделать", "сделайте", "создай", "создать", "создайте", "исправь", "исправить",
+    "данные", "данных", "значение", "значения", "число", "числа", "точка", "точки",
+    "график", "графика", "графике", "диаграмма", "диаграммы", "таблица", "таблицу",
+    "таблице", "формула", "формулы", "уравнение", "цена", "цены", "цену", "цене",
+    "стоимость", "стоимости", "рост", "роста", "падение", "падения", "изменение",
+    "изменения", "динамика", "динамики", "начинался", "начинались", "начинается",
+    "начинаются", "начало", "сначала", "заканчивался", "заканчивались", "конец",
+    "поменяй", "поменять", "изменить", "день", "дня", "дней", "днями", "неделя",
+    "неделю", "недели", "месяц", "месяца", "месяцев", "год", "года", "грн", "руб",
+    "рубль", "рубля", "рублей", "доллар", "доллара", "долларов", "евро", "пункт",
+    "пункта", "строка", "строки", "колонка", "колонки", "линейный", "линейная",
+    "столбчатый", "условный", "условная", "равномерно", "равномерный", "пример",
+    "примера", "теперь", "снова", "далее", "также", "верно", "правильный",
+    "the", "this", "that", "these", "those", "show", "build", "create", "make",
+    "fix", "correct", "data", "value", "values", "point", "points", "chart", "graph",
+    "table", "formula", "equation", "price", "prices", "cost", "growth", "fall",
+    "change", "day", "days", "week", "weeks", "month", "months", "year", "years",
+    "uah", "usd", "dollar", "dollars", "rubles", "ruble", "euro", "linear", "bar",
+}
+_CONTEXT_REFERENCE_TERMS = {
+    "это", "этого", "этой", "этом", "эти", "этих", "тот", "та", "те", "того",
+    "данный", "данная", "данное", "такие", "такой", "такую", "такого", "них", "их",
+    "него", "нее", "неё", "ней", "ним", "previous", "earlier", "these", "those",
+    "this", "that", "same", "them", "it", "дальше", "ещё", "еще",
+}
+
+def _subject_family(token: Any) -> str:
+    value = _text(token).lower().replace("ё", "е")
+    return value[:5] if len(value) >= 5 else value
+
+def _subject_tokens(value: Any) -> set[str]:
+    """Approximate subject/entity signature, excluding task, format and unit words."""
+    result = set()
+    for token in _semantic_tokens(value):
+        if token.isdigit() or token in _CONTEXT_GENERIC_TERMS or len(token) < 4:
+            continue
+        family = _subject_family(token)
+        if family and family not in _CONTEXT_GENERIC_TERMS:
+            result.add(family)
+    return result
+
+def _row_subject_text(row: dict[str, Any]) -> str:
+    """Prefer the user's original task and persisted request intent over generated prose."""
+    request = _parse_json(row.get("structured_request"))
+    request_structure = request.get("request_structure") if isinstance(request.get("request_structure"), dict) else {}
+    request_intent = request.get("intent") if isinstance(request.get("intent"), dict) else {}
+    dialogue = request.get("dialogue") if isinstance(request.get("dialogue"), dict) else {}
+    continuation = dialogue.get("continuation_context") if isinstance(dialogue.get("continuation_context"), dict) else {}
+    response = _parse_json(row.get("structured_response"))
+    memory_record = response.get("dialogue_memory_record")
+    if not isinstance(memory_record, dict):
+        metadata = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
+        memory_record = metadata.get("dialogue_memory_record") if isinstance(metadata.get("dialogue_memory_record"), dict) else {}
+    values = (
+        row.get("user_text"), row.get("user_text_en"),
+        request_structure.get("user_goal"), request_structure.get("task_goal"),
+        request_intent.get("user_goal"), continuation.get("active_topic"),
+        memory_record.get("topic"), row.get("memory_summary"),
+    )
+    return " ".join(_text(item) for item in values if _text(item))
+
+def _row_subject_tokens(row: dict[str, Any]) -> set[str]:
+    return _subject_tokens(_row_subject_text(row))
+
+def _subject_overlap(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return round(_concept_overlap(left, right), 6)
+
+def _subject_conflicts(query_subjects: set[str], row_subjects: set[str]) -> bool:
+    # Missing subject evidence is neutral; two populated but disjoint signatures
+    # indicate different contexts, even if the task vocabulary is almost identical.
+    return bool(query_subjects and row_subjects and _subject_overlap(query_subjects, row_subjects) < 0.20)
+
+def _numeric_anchors(value: Any) -> set[str]:
+    found = set()
+    for match in re.finditer(r"(?<![\w])\d+(?:[.,]\d+)?(?![\w])", _text(value)):
+        try:
+            number = float(match.group(0).replace(",", "."))
+        except (TypeError, ValueError):
+            continue
+        found.add(f"{number:.6f}".rstrip("0").rstrip("."))
+    return found
+
+def _query_numeric_overlap(query: str, row: dict[str, Any], query_subjects: set[str]) -> float:
+    query_numbers = _numeric_anchors(query)
+    if not query_numbers:
+        return 0.0
+    # Compare with the original user request, not generated table row labels like Day 5.
+    source_text = " ".join((_text(row.get("user_text")), _text(row.get("user_text_en"))))
+    source_numbers = _numeric_anchors(source_text)
+    if not source_numbers:
+        return 0.0
+    # Numbers alone are weak evidence; they contribute only within a compatible subject.
+    row_subjects = _row_subject_tokens(row)
+    if _subject_conflicts(query_subjects, row_subjects):
+        return 0.0
+    return len(query_numbers & source_numbers) / max(1, len(query_numbers))
+
+
+def _source_data_alignment(row: dict[str, Any], protected_data: dict[str, Any] | None = None) -> float:
+    """Measure whether a row's value-bearing output preserves numbers from the user's source request.
+
+    This is provenance evidence, not a claim that every derived answer is correct. It helps
+    choose the original data-defining turn over a newer format-conversion response when a
+    follow-up says 'these data' without repeating the values.
+    """
+    source_text = " ".join((_text(row.get("user_text")), _text(row.get("user_text_en"))))
+    source_numbers = _numeric_anchors(source_text)
+    if len(source_numbers) < 2:
+        return 0.0
+    protected = protected_data if isinstance(protected_data, dict) else _protected_structured_data_from_row(row)
+    # Score the typed payload only, not generated prose: an answer can repeat the
+    # correct values in its explanation while the actual table/graph is wrong.
+    items = protected.get("items") if isinstance(protected.get("items"), list) else []
+    typed_values = [item.get("data") for item in items if isinstance(item, dict) and isinstance(item.get("data"), dict)]
+    output_numbers = _numeric_anchors(json.dumps(typed_values, ensure_ascii=False, default=str))
+    if not output_numbers:
+        return 0.0
+    return round(len(source_numbers & output_numbers) / max(1, len(source_numbers)), 6)
+
+def _structured_data_richness(payload: Any) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    richness = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        encoded = json.dumps(data, ensure_ascii=False, default=str)
+        # A schema declaration without values is much less useful than retained points/rows.
+        has_values = any(key in data for key in ("payload", "spec", "points", "data_points", "series", "datasets", "rows", "matrix", "x_values", "y_values"))
+        richness += (8 if has_values else 1) + min(24, len(encoded) // 120)
+    return richness
+
+def _query_context_signature(query: str, interpretation: dict[str, Any] | None = None) -> dict[str, Any]:
+    interpretation = interpretation if isinstance(interpretation, dict) else {}
+    supplied = interpretation.get("context_signature")
+    if isinstance(supplied, dict):
+        terms = supplied.get("subject_terms")
+        if isinstance(terms, list):
+            return {
+                **supplied,
+                "subject_terms": sorted({_subject_family(item) for item in terms if _text(item)}),
+            }
+    subjects = _subject_tokens(query)
+    refs = _semantic_tokens(query) & _CONTEXT_REFERENCE_TERMS
+    return {
+        "subject_terms": sorted(subjects)[:12],
+        "has_explicit_subject": bool(subjects),
+        "reference_strength": round(min(1.0, len(refs) / max(2.0, len(_tokens(query)) * 0.35)), 3),
+        "reference_terms": sorted(refs)[:8],
+        "output_forms": [],
+        "numeric_anchors": sorted(_numeric_anchors(query))[:8],
+    }
+
+
 def _continuation_marker(query: str) -> bool:
     low = _text(query).lower().replace("ё", "е")
     if not low:
@@ -442,8 +605,18 @@ def _looks_like_referential_followup(query: str) -> bool:
         "проверь еще раз", "проверь ещё раз", "перепроверь", "посмотри еще раз",
         "посмотри ещё раз", "я же скидывал картинку", "я скидывал фото",
     )
-    if any(marker in low for marker in phrase_markers):
-        return True
+    # Match single words as tokens, not substrings inside unrelated words. The
+    # previous substring test treated fragments such as "та", "ей" or "него"
+    # inside ordinary nouns as a dialogue reference and forced CONTINUE.
+    for marker in phrase_markers:
+        marker = marker.replace("ё", "е").strip()
+        if not marker:
+            continue
+        if re.search(r"\s", marker):
+            if marker in low:
+                return True
+        elif re.search(rf"(?<![\w\u0080-\uffff]){re.escape(marker)}(?![\w\u0080-\uffff])", low):
+            return True
 
     tokens = _tokens(low)
     reference_tokens = {
@@ -662,8 +835,12 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             current_modalities = _row_modalities(row)
             previous_modalities = set(prev.get("modalities") or [])
             modality_changed = bool(current_modalities and previous_modalities and current_modalities.isdisjoint(previous_modalities))
-            same_as_prev = relation != "NEW" and similarity >= 0.28 and not modality_changed
-            if not same_as_prev and not modality_changed and _looks_like_referential_followup(str(row.get("user_text") or "")):
+            current_subjects = _row_subject_tokens(row)
+            previous_subjects = set(prev.get("subject_terms") or [])
+            subject_conflict = _subject_conflicts(current_subjects, previous_subjects)
+            same_as_prev = relation != "NEW" and similarity >= 0.28 and not modality_changed and not subject_conflict
+            if (not same_as_prev and not modality_changed and not subject_conflict
+                    and _looks_like_referential_followup(str(row.get("user_text") or ""))):
                 same_as_prev = True
 
         row_sections = _dialogue_section_map(row)
@@ -671,6 +848,7 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             groups.append({
                 "topic": label,
                 "topic_tokens": sorted(tokens),
+                "subject_terms": sorted(_row_subject_tokens(row)),
                 "start_turn": int(row.get("turn_index") or 0),
                 "end_turn": int(row.get("turn_index") or 0),
                 "first_at": float(row.get("created_at") or 0),
@@ -700,7 +878,8 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         found = None
         for prev in reversed(deduped[-3:]):
             similarity = fuzz.token_set_ratio(str(item.get("topic") or "").lower(), str(prev.get("topic") or "").lower()) / 100.0
-            if similarity >= 0.78:
+            subject_conflict = _subject_conflicts(set(item.get("subject_terms") or []), set(prev.get("subject_terms") or []))
+            if similarity >= 0.78 and not subject_conflict:
                 found = prev
                 break
         if found is not None:
@@ -709,6 +888,7 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "end_turn": item.get("end_turn"), "last_at": item.get("last_at"),
                     "last_question": item.get("last_question"), "message_id": item.get("message_id"),
                     "summary": item.get("summary") or found.get("summary"),
+                    "subject_terms": sorted(set(found.get("subject_terms") or []) | set(item.get("subject_terms") or [])),
                     "sections": merge_sections(found.get("sections") or [], item.get("sections") or [], _text(item.get("message_id"))),
                     "pair_count": int(found.get("pair_count") or 0) + int(item.get("pair_count") or 0),
                 })
@@ -1100,6 +1280,14 @@ def _candidate_score(
     answer_overlap = _concept_overlap(query_tokens, answer_tokens)
     user_overlap = _concept_overlap(query_tokens, user_tokens)
     entity_overlap = _explicit_entity_overlap(query, row)
+    query_subjects = _subject_tokens(query)
+    row_subjects = _row_subject_tokens(row)
+    subject_overlap = _subject_overlap(query_subjects, row_subjects)
+    subject_mismatch = _subject_conflicts(query_subjects, row_subjects)
+    numeric_anchor_overlap = _query_numeric_overlap(query, row, query_subjects)
+    protected_data = _protected_structured_data_from_row(row)
+    data_richness = _structured_data_richness(protected_data)
+    source_data_alignment = _source_data_alignment(row, protected_data=protected_data) if data_richness else 0.0
 
     q_domains = _domain_terms(q)
     c_domains = _domain_terms(candidate_text)
@@ -1136,13 +1324,33 @@ def _candidate_score(
     ):
         score += 0.03
 
+    # Context consistency outranks generic lexical similarity. Explicitly disjoint
+    # subjects are penalized; an aligned subject, original numeric constraint and
+    # value-bearing artifact are positive provenance signals.
+    if query_subjects and row_subjects:
+        score += 0.07 * subject_overlap
+        if subject_mismatch:
+            score -= 0.30
+    score += 0.22 * numeric_anchor_overlap
+    # A source request whose supplied values survive into its structured output is
+    # more authoritative than a newer conversion answer that merely repeats the topic.
+    score += 0.12 * source_data_alignment
+    if reference_followup and data_richness:
+        score += min(0.08, 0.015 * data_richness)
+
     return {
-        "score": round(min(1.0, float(score)), 6),
+        "score": round(max(0.0, min(1.0, float(score))), 6),
         "semantic": round(lexical, 6),
         "context": round(overlap, 6),
         "answer_overlap": round(answer_overlap, 6),
         "user_overlap": round(user_overlap, 6),
         "entity_overlap": round(entity_overlap, 6),
+        "subject_terms": sorted(row_subjects)[:12],
+        "subject_overlap": round(subject_overlap, 6),
+        "subject_mismatch": bool(subject_mismatch),
+        "numeric_anchor_overlap": round(numeric_anchor_overlap, 6),
+        "source_data_alignment": round(source_data_alignment, 6),
+        "structured_data_richness": int(data_richness),
         "modality_match": round(modality_match, 6),
         "row_modalities": sorted(row_modalities),
         "direction": round(direction, 6),
@@ -1163,7 +1371,7 @@ def _candidate_score(
         "is_pending_clarification": _row_is_pending_clarification(row),
         "memory_summary": _compact_memory_summary(row),
         "attachment_evidence": attachment_evidence[:1800],
-        "protected_structured_data": _protected_structured_data_from_row(row),
+        "protected_structured_data": protected_data,
     }
 
 
@@ -1272,6 +1480,13 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
         "same_dialog": bool(item.get("same_dialog")),
         "message_id": _text(item.get("message_id")),
         "attachment_evidence": evidence,
+        "context_binding": {
+            "subject_terms": list(item.get("subject_terms") or [])[:12],
+            "numeric_anchor_overlap": float(item.get("numeric_anchor_overlap") or 0),
+            "source_data_alignment": float(item.get("source_data_alignment") or 0),
+            "subject_overlap": float(item.get("subject_overlap") or 0),
+            "has_value_bearing_structure": int(item.get("structured_data_richness") or 0) >= 8,
+        },
         "protected_structured_data": deepcopy(item.get("protected_structured_data"))
         if isinstance(item.get("protected_structured_data"), dict) else {},
     }
@@ -1808,6 +2023,8 @@ def search_dialogue_context(
     new_topic_request = _looks_like_new_topic(query)
     interpreted_direction = _text(query_interpretation.get("direction"))
     interpreted_intent = _text(query_interpretation.get("primary_intent"))
+    context_signature = _query_context_signature(query, query_interpretation)
+    query_subjects = set(context_signature.get("subject_terms") or _subject_tokens(query))
     _apr_timing_log(
         "memory_intent_received",
         user_key=_apr_diag_ref(uid),
@@ -1833,7 +2050,7 @@ def search_dialogue_context(
 
     # Search the whole user's 12-hour window for a distinctly named old topic,
     # but do not let generic words such as "применение" switch the active topic.
-    topic_bearing = _semantic_tokens(query) - _SECTION_QUERY_NOISE
+    topic_bearing = _semantic_tokens(query) - _SECTION_QUERY_NOISE - _CONTEXT_GENERIC_TERMS
     named_rows: list[tuple[float, dict[str, Any]]] = []
     if not history_request and topic_bearing:
         scoped_ids = {_text(row.get("message_id")) for row in scoped_rows}
@@ -1843,9 +2060,17 @@ def search_dialogue_context(
             mid = _text(row.get("message_id"))
             if mid and mid in scoped_ids:
                 continue
-            overlap = _topic_query_overlap(query, _topic_label(row))
-            if overlap >= 0.50:
-                named_rows.append((overlap, row))
+            row_subjects = _row_subject_tokens(row)
+            subject_overlap = _subject_overlap(query_subjects, row_subjects)
+            if _subject_conflicts(query_subjects, row_subjects):
+                continue
+            searchable_topic = " ".join((_topic_label(row), _row_subject_text(row)))
+            overlap = _topic_query_overlap(query, searchable_topic)
+            if overlap >= 0.50 or (query_subjects and subject_overlap >= 0.60):
+                # Subject alignment is useful only when there is also meaningful
+                # task/topic overlap; it must not pull a different old task solely
+                # because the same product noun appears in it.
+                named_rows.append((max(overlap, subject_overlap * 0.72), row))
         named_rows.sort(key=lambda item: (item[0], float(item[1].get("created_at") or 0)), reverse=True)
         for _, row in named_rows[:6]:
             scoped_rows.append(row)
@@ -1892,19 +2117,54 @@ def search_dialogue_context(
     latest_same_dialog = max((item for item in matches if bool(item.get("same_dialog"))),
         key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)), default=None)
     best = matches[0] if matches else None
+    active_subjects = set(latest_same_dialog.get("subject_terms") or []) if latest_same_dialog else set()
+    active_subject_conflict = _subject_conflicts(query_subjects, active_subjects)
+    # A named subject change in a self-contained new request is a new task even
+    # when old and new requests share the same verbs/output format. Referential
+    # corrections remain eligible for retrieval from the matching older context.
+    semantic_subject_switch = bool(
+        active_subject_conflict
+        and interpreted_intent == "NEW_INFORMATION"
+        and not reference_followup
+        and not _continuation_marker(query)
+        and not history_request
+        and not new_topic_request
+    )
+    candidate_match_by_id = {
+        _text(item.get("message_id")): item for item in matches if _text(item.get("message_id"))
+    }
     explicit_topic_hits = []
     seen_topic_hit_ids: set[str] = set()
     for row in all_rows:
         if _row_is_pending_clarification(row):
             continue
-        overlap = _topic_query_overlap(query, _topic_label(row))
+        row_subjects = _row_subject_tokens(row)
+        subject_overlap = _subject_overlap(query_subjects, row_subjects)
+        if _subject_conflicts(query_subjects, row_subjects):
+            continue
+        searchable_topic = " ".join((_topic_label(row), _row_subject_text(row)))
+        overlap = _topic_query_overlap(query, searchable_topic)
+        topic_hit = overlap >= 0.50 or (query_subjects and subject_overlap >= 0.60 and (reference_followup or _looks_like_topic_correction(query)))
         mid = _text(row.get("message_id")) or f"{row.get('created_at')}|{row.get('turn_index')}"
-        if overlap >= 0.50 and mid not in seen_topic_hit_ids:
+        if topic_hit and mid not in seen_topic_hit_ids:
             seen_topic_hit_ids.add(mid)
-            explicit_topic_hits.append((overlap, row))
+            # Prefer a compatible row with exact original values/typed data over a
+            # generic text-only derivative, without making old data win by age alone.
+            candidate_match = candidate_match_by_id.get(mid) or {}
+            source_alignment = (
+                float(candidate_match.get("source_data_alignment") or 0)
+                if mid in candidate_match_by_id else _source_data_alignment(row)
+            )
+            row_rank = (
+                float(candidate_match.get("score") or 0)
+                + 0.30 * max(overlap, subject_overlap * 0.72)
+                + min(0.08, 0.012 * _structured_data_richness(_protected_structured_data_from_row(row)))
+                + (0.32 * source_alignment)
+            )
+            explicit_topic_hits.append((row_rank, row))
     explicit_topic_hits.sort(key=lambda item: (item[0], float(item[1].get("created_at") or 0)), reverse=True)
 
-    same_dialog_semantic = bool(best and (
+    same_dialog_semantic = bool(best and not best.get("subject_mismatch") and (
         (best.get("same_dialog") and (
             float(best.get("entity_overlap") or 0) >= 0.18
             or float(best.get("context") or 0) >= 0.16
@@ -1934,9 +2194,9 @@ def search_dialogue_context(
         continuation = True
     elif explicit_topic_hits and (reference_followup or _is_section_request(query) or _looks_like_topic_correction(query)):
         continuation = True
-    elif same_dialog_semantic:
+    elif same_dialog_semantic and not semantic_subject_switch:
         continuation = True
-    elif best and float(best.get("score") or 0) >= 0.60:
+    elif best and float(best.get("score") or 0) >= 0.60 and not semantic_subject_switch:
         continuation = True
     relation = "CONTINUE" if continuation else "NEW"
 
@@ -2069,19 +2329,49 @@ def search_dialogue_context(
         if anchor:
             selected_for_context.append(_compact_pair(anchor))
         # At most one corroborating pair; never forward a pile of unrelated turns.
+        anchor_subjects = set((anchor or {}).get("subject_terms") or [])
+        anchor_has_values = bool(int((anchor or {}).get("structured_data_richness") or 0) >= 8)
+        related_candidates = []
         for item in matches:
             if item.get("is_pending_clarification"):
                 continue
             if not item.get("message_id") or _text(item.get("message_id")) == _text((anchor or {}).get("message_id")):
                 continue
-            if selected_for_context and len(selected_for_context) >= 2:
-                break
+            if bool(query_subjects and item.get("subject_mismatch")):
+                continue
+            if bool(item.get("same_dialog")) is False and _text(item.get("dialog_id")) != _text(dialog_id):
+                continue
             topic_similarity = fuzz.token_set_ratio(
                 _text((anchor or {}).get("topic")).casefold(), _text(item.get("topic")).casefold()
             ) / 100.0 if _text((anchor or {}).get("topic")) and _text(item.get("topic")) else 0.0
-            if _topic_query_overlap(query, _text(item.get("topic"))) >= 0.50 or topic_similarity >= 0.65:
-                selected_for_context.append(_compact_pair(item))
-                break
+            item_subjects = set(item.get("subject_terms") or [])
+            subject_similarity = _subject_overlap(anchor_subjects, item_subjects)
+            structured_richness = int(item.get("structured_data_richness") or 0)
+            item_source_alignment = float(item.get("source_data_alignment") or 0)
+            # Once the anchor contains the user's original constraints and matching
+            # structured values, do not attach a later value-bearing derivative whose
+            # own request supplied no numbers. It may represent a mistaken reformatting
+            # and otherwise reintroduce the very values the active source corrected.
+            if (
+                anchor_has_values
+                and float((anchor or {}).get("source_data_alignment") or 0) >= 0.60
+                and structured_richness >= 8
+                and item_source_alignment < 0.20
+                and int(item.get("turn_index") or 0) > int((anchor or {}).get("turn_index") or 0)
+            ):
+                continue
+            same_context = (topic_similarity >= 0.65 or subject_similarity >= 0.60
+                            or _topic_query_overlap(query, _text(item.get("topic"))) >= 0.50)
+            if reference_followup and anchor_subjects and item_subjects and subject_similarity >= 0.60:
+                same_context = True
+            if same_context:
+                # If the anchor is a text-only derivative, prefer its nearest source
+                # with the original structured values; otherwise retain relevance rank.
+                provenance_bonus = 0.10 if (not anchor_has_values and structured_richness >= 8) else 0.0
+                related_candidates.append((float(item.get("score") or 0) + provenance_bonus, item))
+        if related_candidates:
+            related_candidates.sort(key=lambda pair: pair[0], reverse=True)
+            selected_for_context.append(_compact_pair(related_candidates[0][1]))
 
     selected_section: dict[str, Any] = {}
     section_anchor_overridden = False
@@ -2260,6 +2550,9 @@ def search_dialogue_context(
         "dialog_id": str(dialog_id or ""),
         "conversation_id": str(conversation_id or ""),
         "query": str(query or ""),
+        "context_signature": context_signature,
+        "active_subject_conflict": bool(active_subject_conflict),
+        "semantic_subject_switch": bool(semantic_subject_switch),
         "total_pairs": len(rows),
         "candidate_count": len(matches),
         "relation": relation,
@@ -2303,7 +2596,16 @@ def search_dialogue_context(
         selected_section_heading=_text(selected_section.get("heading")), clarification_needed=clarification_needed,
         clarification_status=_text(clarification_resolution.get("status")),
         selected_message_keys=[_apr_diag_ref(x.get("message_id")) for x in selected_for_context if isinstance(x, dict) and x.get("message_id")],
-        anchor_message_key=_apr_diag_ref((result.get("anchor") or {}).get("message_id") if isinstance(result.get("anchor"), dict) else ""))
+        anchor_message_key=_apr_diag_ref((result.get("anchor") or {}).get("message_id") if isinstance(result.get("anchor"), dict) else ""),
+        query_subject_terms=sorted(query_subjects)[:10], active_subject_conflict=bool(active_subject_conflict),
+        semantic_subject_switch=bool(semantic_subject_switch),
+        top_candidate_alignment=[{
+            "message_key": _apr_diag_ref(x.get("message_id")), "score": x.get("score"),
+            "subject_overlap": x.get("subject_overlap"), "subject_mismatch": x.get("subject_mismatch"),
+            "numeric_anchor_overlap": x.get("numeric_anchor_overlap"),
+            "source_data_alignment": x.get("source_data_alignment"),
+            "structured_data_richness": x.get("structured_data_richness"),
+        } for x in matches[:3]])
     return result
 
 def prepare_dialogue_context(
