@@ -2654,6 +2654,7 @@ def prepare_render_blocks_for_room_dispatch(
     render_blocks: Any,
     answer: str = "",
     requested_outputs: Any = None,
+    graph_policy: Any = None,
 ) -> List[Dict[str, Any]]:
     """Bind same-turn structured content to the canonical Web renderer types.
 
@@ -2663,6 +2664,7 @@ def prepare_render_blocks_for_room_dispatch(
     flowchart, delimited math, or literal URL). It never invents data or assets.
     """
     requested = _render_requested_outputs(requested_outputs)
+    interpreted_graph_policy = deepcopy(graph_policy) if isinstance(graph_policy, dict) else {}
     source_answer = str(answer or "")
     # The answer may already contain a structured representation even when the
     # user did not name its renderer explicitly. Reuse that evidence rather than
@@ -2724,6 +2726,17 @@ def prepare_render_blocks_for_room_dispatch(
             if formulas_from_answer:
                 payload = {"formulas": formulas_from_answer, "formula": formulas_from_answer[0], "latex": formulas_from_answer[0]}
 
+        if block_type == "graph" and payload and interpreted_graph_policy:
+            # Carry Interpretation's decision to the Web renderer. The renderer
+            # validates data integrity; it does not rediscover dialogue intent.
+            payload_policy = payload.get("graph_policy") if isinstance(payload.get("graph_policy"), dict) else {}
+            payload["graph_policy"] = {**payload_policy, **interpreted_graph_policy}
+            payload.setdefault(
+                "fallback_representation",
+                interpreted_graph_policy.get("fallback_representation")
+                or interpreted_graph_policy.get("preferred_representation")
+                or "line",
+            )
         if payload:
             block["payload"] = payload
         if block_type in {"table", "graph", "diagram", "image", "gallery", "formula", "code", "link", "file"}:
@@ -2740,6 +2753,15 @@ def prepare_render_blocks_for_room_dispatch(
         existing_types.add("table")
     if "graph" in requested and "graph" not in existing_types and table_from_answer:
         graph_payload = _graph_payload_from_table(table_from_answer)
+        if graph_payload and interpreted_graph_policy:
+            graph_payload_policy = graph_payload.get("graph_policy") if isinstance(graph_payload.get("graph_policy"), dict) else {}
+            graph_payload["graph_policy"] = {**graph_payload_policy, **interpreted_graph_policy}
+            graph_payload.setdefault(
+                "fallback_representation",
+                interpreted_graph_policy.get("fallback_representation")
+                or interpreted_graph_policy.get("preferred_representation")
+                or "line",
+            )
         if graph_payload and _has_render_payload("graph", graph_payload):
             prepared.append({"type": "graph", "artifact_type": "graph", "renderer": "GraphBlock", "viewer": "GraphBlock", "payload": graph_payload, "source_room": "C_GRAPH_ROOM"})
             existing_types.add("graph")
@@ -2841,10 +2863,12 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
 
     # The answer is a single normal text node in the same scene, not a fallback.
     answer = _scene_text(scene)
+    active_task = scene.active_task if isinstance(scene.active_task, dict) else {}
     blocks = prepare_render_blocks_for_room_dispatch(
         blocks,
         answer,
-        (scene.active_task or {}).get("requested_outputs") if isinstance(scene.active_task, dict) else None,
+        active_task.get("requested_outputs"),
+        graph_policy=active_task.get("graph_policy"),
     )
     visible_types = {str(item.get("type") or "").lower() for item in blocks if isinstance(item, dict)}
     answer = _strip_rendered_segments(answer, visible_types)
