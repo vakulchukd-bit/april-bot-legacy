@@ -91,6 +91,9 @@ For each newly supplied or explicitly reattached file, read the actual input_fil
 Treat the user's CURRENT_REQUEST as the task for all attachments in that message. When a message contains both an image and a file, analyze each source distinctly and explain how they relate only when the contents support that link; don't answer each attachment as an unrelated task. Keep ATTACHMENT_INDEX, attachment role (USER_INPUT vs APRIL_OUTPUT), source message ID, and CURRENT_REQUEST distinct. Prefer cached sidecars for routine continuation; avoid repeating previously supplied descriptions. A concise per-asset sidecar must preserve enough concrete facts for later follow-up, and must be labelled by the exact filename, kind, and source message ID from ATTACHMENT_INDEX.
 Generation/editing is permission-based: only when INTERPRETATION.wants_image=true may C_APRIL_IMAGES_GENERATOR be used. Never infer image generation from image words or attachment contents.
 When INTERPRETATION.wants_diagram=true and wants_image=false, fulfill simple drawing requests (geometry and common objects) as a structured diagram through the existing SceneContract route. Include concrete payload data the Web can render, preferably payload.svg or supported geometry/drawing elements/nodes+edges; do not return only a sentence claiming the drawing exists. Generic verbs such as "draw", "нарисуй", "show" or "покажи" do not authorize raster image generation by themselves. Only explicit picture/image/illustration/photo intent with wants_image=true uses C_APRIL_IMAGES_GENERATOR.
+If C_ARTIFACT_RENDER_PLAN contains output="gallery", provide a separate type="gallery" render block only when the payload contains actual directly loadable public image URLs or image data supplied in the current turn. Use payload.images as an array of objects with src/url, title/alt, caption and source_url where known. Do not use a category/search page as an image src, and do not invent or guess asset URLs. A source-gallery request is not image generation: do not emit an image-generation artifact or use C_APRIL_IMAGES_GENERATOR unless INTERPRETATION.intent.wants_image=true. If source images cannot be grounded, say so in text and preserve verified source links as type="link" blocks.
+For type="links" or "link_list" outputs, normalize to type="link" and supply payload.links with one URL/title/description per source. For experiment explanations requested as diagrams, encode the described experimental steps as diagram payload.nodes + payload.edges or valid SVG; never return an empty diagram shell.
+TURN-LEVEL RENDER PLAN OVERRIDES NARROW STEP LABELS: when C_ARTIFACT_RENDER_PLAN contains multiple output families for one broad/composite user request, REQUEST_SEQUENCE items with output_types=["text"] must not suppress the turn-level plan. Produce one grounded render block for each feasible planned family (gallery, link, table, graph, diagram, formula, code, etc.), alongside explanatory text. Do not invent image URLs, empirical measurements, code, or unsupported data. If a planned family cannot be populated from supplied or verifiable source data, state that limitation rather than emitting an empty block.
 For analyze_image, analyze_file, or analyze_input tasks, answer in explanatory text and retain enough specific facts to support follow-up questions. Avoid generic one-sentence summaries when the user asks what an image/file contains.
 For a code modification request, return an explanatory text block followed by a separate render block with type="code", language, filename, and the complete corrected code. Preserve unaffected behavior; never replace required source lines with ellipses/placeholders. Do not claim a file was saved unless an actual file artifact is present. If a file artifact is explicitly requested, include its real content, but keep narrative/summary fields concise and do not repeat source code in any other prose field. For a request to explain code only, do not rewrite it unasked.
 Use render blocks that match each request-sequence step: type="code" for code, type="table" for tables, type="diagram" for diagrams, type="formula" for formulas, type="image" for generated images, and type="text" for explanations. Set step_index and step_title on blocks when several steps exist, and preserve step order. KaTeX-compatible LaTeX is mandatory for mathematical expressions; McDowell presentation metadata is mandatory for every scene. Always return a complete SceneContract-compatible structured answer.
@@ -1379,7 +1382,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "ATTACHMENT_INDEX": assets_min,
             "C_ARTIFACT_RENDER_PLAN": [
                 {k: item[k] for k in ("output", "renderer", "viewer", "source_rooms") if k in item}
-                for item in (data.get("C_ARTIFACT_RENDER_PLAN") or [])[:4] if isinstance(item, dict)
+                # Preserve every requested renderer family in a compound scene.
+                # The plan is compact metadata; slicing to four silently removed
+                # graph/diagram/gallery requests from large multi-renderer scenes.
+                for item in (data.get("C_ARTIFACT_RENDER_PLAN") or [])[:12] if isinstance(item, dict)
             ],
             "SCENE_CONTRACT": {"required": True, "authenticated_scope_required": True, "ordered_render_blocks_required": True},
             "OUTPUT_BUDGET_POLICY": {
@@ -2356,7 +2362,18 @@ def normalize_render_blocks(
             continue
 
         item = dict(block)
-        block_type = str(item.get("type") or "text").strip().lower()
+        block_type = str(item.get("type") or "text").strip().lower().replace("-", "_")
+        type_aliases = {
+            "chart": "graph", "plot": "graph", "graph_data": "graph",
+            "table_data": "table", "math": "formula", "latex": "formula",
+            "generated_image": "image", "image_artifact": "image", "image_data": "image", "figure": "image",
+            "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
+            "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link",
+            "file_card": "file", "svg": "diagram", "svgblock": "diagram", "schematic": "diagram",
+            "arithmeticdiagram": "diagram", "arithmetic_diagram": "diagram", "experimental_diagram": "diagram",
+            "message": "text", "message_text": "text",
+        }
+        block_type = type_aliases.get(block_type, block_type)
         renderer, viewer = renderer_map.get(
             block_type,
             ("MessageTextBlock", "MessageTextBlock"),
