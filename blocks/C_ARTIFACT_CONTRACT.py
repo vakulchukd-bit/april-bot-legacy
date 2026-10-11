@@ -533,7 +533,7 @@ WEB_RENDERER_REGISTRY = {
     "table": {"renderer": "TableBlock", "viewer": "TableBlock", "fallback_renderer": "", "payload_keys": ["rows", "columns", "headers", "data", "values", "items", "caption", "column_roles", "cell_roles", "wrap", "download"]},
     "diagram": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["svg", "svg_payload", "drawing", "nodes", "edges", "relations", "elements", "shapes", "points", "source", "mermaid", "format", "layout", "direction"], "specialized_renderers": ["SvgBlock", "ArithmeticDiagram"]},
     "image": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "items", "gallery", "sources", "src", "url", "image", "asset_url", "image_asset_url", "image_data_uri", "image_base64", "base64", "mime_type", "width", "height", "alt", "caption"]},
-    "gallery": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "items", "gallery", "sources"]},
+    "gallery": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "items", "gallery", "sources", "src", "url", "asset_url", "image_asset_url", "image_url", "image", "image_data_uri", "alt", "title", "caption", "source_url"]},
     "scene": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["elements", "svg", "images", "objects", "nodes", "edges", "title", "description"]},
     "layout": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["elements", "nodes", "edges", "svg", "title", "description", "direction"]},
     "visual": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["elements", "nodes", "edges", "svg", "images", "title", "description"]},
@@ -1901,7 +1901,10 @@ def get_web_renderer_registration(payload_type: str) -> Dict[str, Any]:
         "image_data": "image", "figure": "image", "math": "formula", "latex": "formula",
         "svg": "diagram", "svgblock": "diagram", "schematic": "diagram",
         "arithmeticdiagram": "diagram", "arithmetic_diagram": "diagram",
-        "message": "text", "message_text": "text", "hyperlink": "link", "file_card": "file",
+        "message": "text", "message_text": "text", "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link", "file_card": "file",
+        "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
+        "experimental_diagram": "diagram", "mermaid": "diagram",
+        "scene": "diagram", "layout": "diagram", "visual": "diagram", "renderer_scene": "diagram",
         "generated_image": "image", "image_data": "image", "image_artifact": "image", "figure": "image",
     }
     canonical = aliases.get(key, key)
@@ -2179,9 +2182,11 @@ def _scene_block_type(block: Dict[str, Any]) -> str:
         "chart": "graph", "plot": "graph", "graph_data": "graph",
         "table_data": "table", "math": "formula", "latex": "formula",
         "generated_image": "image", "image_artifact": "image", "image_data": "image", "figure": "image",
-        "hyperlink": "link", "file_card": "file",
+        "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link", "file_card": "file",
+        "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
         "svg": "diagram", "svgblock": "diagram", "schematic": "diagram",
-        "arithmeticdiagram": "diagram", "arithmetic_diagram": "diagram",
+        "arithmeticdiagram": "diagram", "arithmetic_diagram": "diagram", "experimental_diagram": "diagram",
+        "mermaid": "diagram", "scene": "diagram", "layout": "diagram", "visual": "diagram", "renderer_scene": "diagram",
         "message": "text", "message_text": "text",
     }
     normalized = [
@@ -2346,7 +2351,14 @@ def _scene_blueprint_blocks(blueprint: Dict[str, Any], *, scene_id: str, turn_id
 def _render_requested_outputs(values: Any) -> set[str]:
     if not isinstance(values, (list, tuple, set)):
         return set()
-    aliases = {"chart": "graph", "plot": "graph", "graph_data": "graph", "table_data": "table", "math": "formula", "latex": "formula", "generated_image": "image", "image_artifact": "image", "svg": "diagram", "schematic": "diagram", "hyperlink": "link"}
+    aliases = {
+        "chart": "graph", "plot": "graph", "graph_data": "graph", "table_data": "table",
+        "math": "formula", "latex": "formula", "generated_image": "image", "image_artifact": "image",
+        "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
+        "svg": "diagram", "schematic": "diagram", "experimental_diagram": "diagram",
+        "mermaid": "diagram", "scene": "diagram", "layout": "diagram", "visual": "diagram", "renderer_scene": "diagram",
+        "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link",
+    }
     return {aliases.get(str(value or "").strip().lower().replace("-", "_"), str(value or "").strip().lower().replace("-", "_")) for value in values if str(value or "").strip()}
 
 
@@ -2555,6 +2567,40 @@ def _mermaid_payload(source: str) -> Dict[str, Any]:
     return {"source": text, "mermaid": text, "format": "mermaid", "nodes": nodes, "edges": edges, "direction": re.search(r"(?im)^\s*(?:flowchart|graph)\s+(LR|RL|TB|TD|BT)\b", text).group(1)}
 
 
+def _experiment_steps_payload(answer: str) -> Dict[str, Any]:
+    """Convert explicit experiment/procedure steps in the answer into a diagram.
+
+    This only restructures steps already written in the answer; it does not add
+    scientific steps, measurements, or claims.
+    """
+    lines = str(answer or "").splitlines()
+    section_pattern = re.compile(r"(?:опыт|эксперимент|ход\s+работ|процедур|experiment|procedure)", re.IGNORECASE)
+    item_pattern = re.compile(r"^\s*(?:\d{1,2}[.)]|[-*•])\s+(.{3,180})\s*$")
+    for index, line in enumerate(lines):
+        if not section_pattern.search(line):
+            continue
+        items: List[str] = []
+        started = False
+        for candidate in lines[index + 1:index + 18]:
+            match = item_pattern.match(candidate)
+            if match:
+                items.append(re.sub(r"\s+", " ", match.group(1)).strip())
+                started = True
+                if len(items) >= 8:
+                    break
+            elif started and not candidate.strip():
+                break
+            elif started and re.match(r"^\s*#{1,6}\s+", candidate):
+                break
+            elif started and candidate.strip() and not candidate.startswith(("  ", "\t")):
+                break
+        if len(items) >= 2:
+            nodes = [{"id": f"step_{n+1}", "label": label} for n, label in enumerate(items)]
+            edges = [{"from": f"step_{n+1}", "to": f"step_{n+2}"} for n in range(len(items)-1)]
+            return {"nodes": nodes, "edges": edges, "direction": "TB", "layout": "hierarchical", "source": "same_turn_experiment_steps"}
+    return {}
+
+
 def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[str, Any]:
     """Merge structured payload sources with the explicit block payload winning.
 
@@ -2673,17 +2719,30 @@ def prepare_render_blocks_for_room_dispatch(
     mermaid_match = re.search(r"```\s*mermaid\s*\n([\s\S]*?)\n```", source_answer, re.IGNORECASE)
     mermaid_from_answer = mermaid_match.group(1).strip() if mermaid_match else ""
     diagram_from_answer = _mermaid_payload(mermaid_from_answer) if mermaid_from_answer else {}
+    experiment_steps_from_answer = _experiment_steps_payload(source_answer) if "diagram" in requested else {}
     code_match = re.search(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", source_answer)
     if code_match and code_match.group(1).strip().lower() in {"mermaid", "diagram"}:
         code_match = None
     formula_matches = re.findall(r"\\\[([\s\S]*?)\\\]|\\\((.*?)\\\)", source_answer)
     formulas_from_answer = [a or b for a, b in formula_matches if (a or b).strip()]
     urls_from_answer = list(dict.fromkeys(re.findall(r"https?://[^\s<>\]\[()]+", source_answer, re.IGNORECASE)))
+    # Explicit Markdown image embeds are already concrete visual evidence from
+    # this answer. Promote them to the same gallery contract when the user asked
+    # for source images, even if Provider omitted the separate gallery block.
+    markdown_images = [
+        {"src": str(url).rstrip(".,;:!?"), "url": str(url).rstrip(".,;:!?"),
+         "alt": str(alt or "").strip(), "title": str(alt or "").strip(),
+         "source_url": str(url).rstrip(".,;:!?")}
+        for alt, url in re.findall(r"!\[([^\]]{0,180})\]\((https?://[^\s)]+)(?:\s+['\"][^)]*?)?\)", source_answer, re.IGNORECASE)
+    ]
     source_blocks = [deepcopy(item) for item in render_blocks if isinstance(item, dict)] if isinstance(render_blocks, list) else []
     aliases = {
         "chart": "graph", "plot": "graph", "graph_data": "graph", "table_data": "table",
         "math": "formula", "latex": "formula", "generated_image": "image", "image_artifact": "image",
-        "hyperlink": "link", "file_card": "file", "svg": "diagram", "schematic": "diagram",
+        "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link", "file_card": "file",
+        "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
+        "svg": "diagram", "schematic": "diagram", "experimental_diagram": "diagram",
+        "mermaid": "diagram", "scene": "diagram", "layout": "diagram", "visual": "diagram", "renderer_scene": "diagram",
         "svgblock": "diagram", "arithmeticdiagram": "diagram", "arithmetic_diagram": "diagram",
         "generated_image": "image", "image_artifact": "image", "image_data": "image", "figure": "image",
         "message": "text", "message_text": "text",
@@ -2715,10 +2774,35 @@ def prepare_render_blocks_for_room_dispatch(
             if parsed:
                 payload = {**payload, **parsed}
                 block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
-        elif block_type == "link" and not _has_render_payload("link", payload):
-            if urls_from_answer:
-                payload = {"url": urls_from_answer[0], "links": [{"url": urls_from_answer[0]}], "source": "same_turn_answer"}
+            elif experiment_steps_from_answer:
+                payload = {**payload, **deepcopy(experiment_steps_from_answer)}
+                block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
+        elif block_type == "gallery" and not _has_render_payload("gallery", payload):
+            if markdown_images:
+                payload = {"images": deepcopy(markdown_images), "source": "same_turn_markdown_image"}
+                block["source_room"] = block.get("source_room") or "GALLERY_ROOM"
+        elif block_type == "link":
+            if not _has_render_payload("link", payload) and urls_from_answer:
+                payload = {"url": urls_from_answer[0], "links": [{"url": url} for url in urls_from_answer], "source": "same_turn_answer"}
                 block["source_room"] = block.get("source_room") or "C_LINK_ROOM"
+            elif _has_render_payload("link", payload) and urls_from_answer:
+                # Merge grounded URLs from the answer into the provider's link block.
+                # This retains provider metadata while preventing all-but-first links
+                # from being lost when the response's dedicated block is incomplete.
+                existing_links = payload.get("links") if isinstance(payload.get("links"), list) else []
+                links: List[Dict[str, Any]] = [deepcopy(item) for item in existing_links if isinstance(item, dict)]
+                seen_urls = {str(item.get("url") or item.get("href") or "").strip().rstrip(".,;:!?") for item in links}
+                markdown_links = re.findall(r"\[([^\]]{1,180})\]\((https?://[^\s)]+)\)", source_answer, re.IGNORECASE)
+                grounded = [{"url": str(url).rstrip(".,;:!?"), "title": str(title).strip()} for title, url in markdown_links]
+                grounded.extend({"url": str(url).rstrip(".,;:!?")} for url in urls_from_answer)
+                for item in grounded:
+                    url = str(item.get("url") or "").strip()
+                    if url and url not in seen_urls:
+                        links.append(item)
+                        seen_urls.add(url)
+                if links:
+                    payload["links"] = links
+                    payload.setdefault("url", str(links[0].get("url") or links[0].get("href") or ""))
         elif block_type == "code" and not _has_render_payload("code", payload, block):
             if code_match:
                 payload = {"code": code_match.group(2), "content": code_match.group(2), "language": code_match.group(1) or "text", "filename": "generated-code.txt"}
@@ -2746,6 +2830,24 @@ def prepare_render_blocks_for_room_dispatch(
         prepared.append(block)
 
     existing_types = {str(b.get("type") or "").lower() for b in prepared if isinstance(b, dict)}
+    if "diagram" in requested and experiment_steps_from_answer and "diagram" not in existing_types:
+        prepared.append({
+            "type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer",
+            "viewer": "DiagramRenderer", "payload": deepcopy(experiment_steps_from_answer),
+            "source_room": "C_DIAGRAM_ROOM", "source": "same_turn_experiment_steps",
+        })
+        existing_types.add("diagram")
+    # A requested source gallery may be absent as a separate block even though
+    # the same answer contains explicit Markdown image embeds. Reuse only those
+    # URLs; never convert ordinary source links into guessed image URLs.
+    if "gallery" in requested and "gallery" not in existing_types and markdown_images:
+        prepared.append({
+            "type": "gallery", "artifact_type": "gallery", "renderer": "GalleryBlock",
+            "viewer": "GalleryBlock", "payload": {"images": deepcopy(markdown_images), "source": "same_turn_markdown_image"},
+            "source_room": "GALLERY_ROOM",
+        })
+        existing_types.add("gallery")
+
     # A requested table may be absent as a block even though the model returned
     # its literal Markdown table. Promote that same table, without changing cells.
     if ("table" in requested or table_from_answer) and "table" not in existing_types and table_from_answer and _has_render_payload("table", table_from_answer):
@@ -2767,7 +2869,30 @@ def prepare_render_blocks_for_room_dispatch(
             existing_types.add("graph")
     if ("link" in requested or urls_from_answer) and "link" not in existing_types:
         if urls_from_answer:
-            prepared.append({"type": "link", "artifact_type": "link", "renderer": "LinkCard", "viewer": "LinkCard", "payload": {"url": urls_from_answer[0], "links": [{"url": urls_from_answer[0]}], "source": "same_turn_answer"}, "source_room": "C_LINK_ROOM"})
+            # Preserve every source URL from the same-turn answer. Previously only
+            # urls_from_answer[0] reached LinkRenderer, silently dropping citations.
+            markdown_links = re.findall(
+                r"\[([^\]]{1,180})\]\((https?://[^\s)]+)\)",
+                source_answer,
+                re.IGNORECASE,
+            )
+            links: List[Dict[str, Any]] = []
+            seen_urls: set[str] = set()
+            for title, url in markdown_links:
+                clean_url = str(url or "").rstrip(".,;:!?")
+                if clean_url and clean_url not in seen_urls:
+                    links.append({"url": clean_url, "title": str(title or "").strip()})
+                    seen_urls.add(clean_url)
+            for url in urls_from_answer:
+                clean_url = str(url or "").rstrip(".,;:!?")
+                if clean_url and clean_url not in seen_urls:
+                    links.append({"url": clean_url})
+                    seen_urls.add(clean_url)
+            prepared.append({
+                "type": "link", "artifact_type": "link", "renderer": "LinkCard",
+                "viewer": "LinkCard", "payload": {"url": links[0]["url"], "links": links, "source": "same_turn_answer"},
+                "source_room": "C_LINK_ROOM",
+            })
             existing_types.add("link")
     if ("diagram" in requested or diagram_from_answer) and "diagram" not in existing_types:
         if diagram_from_answer:
