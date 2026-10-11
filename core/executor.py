@@ -230,7 +230,14 @@ def _select_rooms(interpretation: dict[str, Any]) -> list[dict[str, Any]]:
     required_capabilities: list[str] = []
     if intent.get("wants_image"):
         required_capabilities.extend(["image_generation", "png", "gallery"])
-    if intent.get("wants_links"):
+    requested_outputs = {
+        str(value or "").strip().lower().replace("-", "_")
+        for value in (intent.get("requested_outputs") or [])
+        if str(value or "").strip()
+    }
+    if "gallery" in requested_outputs:
+        required_capabilities.extend(["gallery", "image_collection", "visual_context"])
+    if intent.get("wants_links") or "link" in requested_outputs:
         required_capabilities.extend(["link", "url", "preview", "web"])
     if intent.get("wants_code"):
         required_capabilities.extend(["software", "code", "analysis"])
@@ -1626,15 +1633,25 @@ async def execute(
     # packaging/sanitization layer; it never creates a second Provider call.
     raw_blocks = [dict(x) for x in (raw.get("render_blocks") or []) if isinstance(x, dict)]
     raw_artifacts = [dict(x) for x in (raw.get("artifacts") or []) if isinstance(x, dict)]
-    wants_image = bool((interpretation.get("intent") or {}).get("wants_image"))
+    intent_for_outputs = interpretation.get("intent") or {}
+    wants_image = bool(intent_for_outputs.get("wants_image"))
+    requested_outputs = {
+        str(value or "").strip().lower().replace("-", "_")
+        for value in (intent_for_outputs.get("requested_outputs") or [])
+        if str(value or "").strip()
+    }
+    wants_source_gallery = "gallery" in requested_outputs
     if not wants_image:
+        # Keep requested source-image collections, but never pass through a generated
+        # image artifact unless the intent explicitly authorized image generation.
         raw_blocks = [
             block for block in raw_blocks
-            if str(block.get("type") or "").lower() not in {"image", "gallery"}
+            if str(block.get("type") or "").strip().lower() not in {"image", "generated_image", "image_artifact"}
+            and (wants_source_gallery or str(block.get("type") or "").strip().lower() not in {"gallery", "image_gallery", "gallery_block"})
         ]
         raw_artifacts = [
             artifact for artifact in raw_artifacts
-            if str(artifact.get("type") or artifact.get("artifact_type") or "").lower() not in {"image", "generated_image"}
+            if str(artifact.get("type") or artifact.get("artifact_type") or "").strip().lower() not in {"image", "generated_image", "image_artifact"}
         ]
 
 
