@@ -286,6 +286,123 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     return list(dict.fromkeys(outputs))
 
 
+def _graph_representation_policy(text: str, *, allow_data_driven_3d: bool = False) -> dict[str, Any]:
+    """Choose the intended graph family before Provider builds its render payload.
+
+    Interpretation owns chart intent; renderers only validate/render the structured
+    data. Ordinary one-dependent-variable trends stay 2D. Three-dimensional output
+    requires an explicit 3D request or genuine structured XYZ/surface/object data.
+    """
+    low = _text(text).lower().replace("ё", "е")
+
+    explicit_3d = bool(re.search(
+        r"(?:\b3\s*[- ]?d\b|\bthree[- ]dimensional\b|\b3d\s+(?:graph|plot|scene|model|projection|visuali[sz]ation)\b|"
+        r"тр[её]хмерн\w*|\b3д\b|в\s+3д|в\s+тр[её]хмерн\w*|тр[её]хмерн\w*\s+проекц)",
+        low,
+    ))
+
+    explicit_bar = bool(re.search(
+        r"(?:\bbar\s+chart\b|\bcolumn\s+chart\b|\bstacked\s+bar\b|столбчат\w*\s+(?:диаграмм\w*|график\w*)|"
+        r"гистограмм\w*)",
+        low,
+    ))
+    explicit_line = bool(re.search(
+        r"(?:\bline\s+(?:chart|graph)\b|линейн\w*\s+(?:график\w*|диаграмм\w*))",
+        low,
+    ))
+    trend_or_time = bool(re.search(
+        r"(?:\bgrowth\b|\bgrowing\b|\btrend\b|\bover\s+time\b|\btime\s+series\b|\bdaily\b|\bweekly\b|\bmonthly\b|\byearly\b|"
+        r"рост\w*|увелич\w*|сниж\w*|динамик\w*|изменен\w*|за\s+недел\w*|по\s+дням|по\s+датам|по\s+месяц\w*|по\s+год\w*|"
+        r"в\s+течени\w*\s+(?:дня|недел\w*|месяц\w*|года)|временн\w*\s+ряд)",
+        low,
+    ))
+    categorical_comparison = bool(re.search(
+        r"(?:\bcompare\b|\bcomparison\b|\bby\s+category\b|\bby\s+country\b|\bby\s+product\b|\bcategories\b|"
+        r"сравни\w*|сравнен\w*|по\s+категори\w*|по\s+странам|по\s+стране|по\s+товарам|по\s+продукт\w*|категори\w*|"
+        r"распределен\w*|дол\w*\s+категори\w*)",
+        low,
+    ))
+    structured_3d_signal = bool(re.search(
+        r"(?:\bxyz\b|координат\w*\s*(?:x\s*[,; ]+\s*y\s*[,; ]+\s*z|x\s*y\s*z)|"
+        r"\bz\s*=\s*f\s*\(\s*x\s*[,;]\s*y\s*\)|"
+        r"\bz\s*=\s*[^\n;]*(?:\bx\b[^\n;]*\by\b|\by\b[^\n;]*\bx\b)|"
+        r"\b(?:surface\s+grid|surface\s+function|3d\s+data|spatial\s+coordinates)\b|"
+        r"функци\w*\s+(?:двух|2)\s+перемен\w*|поверхност\w*\s+(?:график\w*|функци\w*)|"
+        r"трехмерн\w*\s+данн\w*|пространствен\w*\s+координат\w*)",
+        low,
+    ))
+
+    if explicit_3d:
+        if re.search(r"(?:\bsphere\w*\b|\bcube\w*\b|\bobject\s+scene\b|\b3d\s+scene\b|сфер\w*|куб\w*|объект\w*\s+сцен\w*|пространствен\w*\s+объект)", low):
+            representation = "scene3d"
+        elif re.search(r"(?:\bscatter\b|\bxyz\b|\bcoordinates\b|\bpoint\s+cloud\b|координат\w*|облак\w*\s+точек|пространствен\w*\s+точк)", low):
+            representation = "scatter3d"
+        else:
+            # A 3D function/surface is the natural choice for explicit requests
+            # such as an exponential function in 3D; the provider must supply z=f(x,y).
+            representation = "surface3d"
+        fallback = "bar" if explicit_bar or categorical_comparison else "line"
+        return {
+            "mode": "explicit_3d",
+            "preferred_representation": representation,
+            "fallback_representation": fallback,
+            "allowed_2d_representations": ["line", "bar"],
+            "allow_3d_for_explicit_request": True,
+            "allow_3d_when_structured_data_exists": True,
+            "require_real_third_dimension": True,
+            "decision_reason": "explicit_3d_request",
+        }
+
+    if structured_3d_signal:
+        if re.search(r"(?:\bxyz\b|координат\w*\s*(?:x\s*[,; ]+\s*y\s*[,; ]+\s*z)|облак\w*\s+точек|точечн\w*\s+облак\w*|scatter)", low):
+            representation = "scatter3d"
+        elif re.search(r"(?:сфер\w*|куб\w*|пространствен\w*\s+объект)", low):
+            representation = "scene3d"
+        else:
+            representation = "surface3d"
+        fallback = "bar" if explicit_bar or categorical_comparison else "line"
+        return {
+            "mode": "structured_3d_data",
+            "preferred_representation": representation,
+            "fallback_representation": fallback,
+            "allowed_2d_representations": ["line", "bar"],
+            "allow_3d_for_explicit_request": False,
+            "allow_3d_when_structured_data_exists": True,
+            "require_real_third_dimension": True,
+            "decision_reason": "structured_3d_data_signal",
+        }
+
+    if explicit_bar:
+        preferred = "bar"
+        reason = "explicit_bar_request"
+    elif explicit_line:
+        preferred = "line"
+        reason = "explicit_line_request"
+    elif categorical_comparison:
+        preferred = "bar"
+        reason = "categorical_comparison"
+    elif trend_or_time:
+        preferred = "line"
+        reason = "ordered_trend_or_explicit_line"
+    else:
+        # Generic graph requests remain 2D by default; Provider may switch between
+        # line and bar when the actual returned data clearly favors one.
+        preferred = "line"
+        reason = "safe_2d_default"
+
+    return {
+        "mode": "adaptive_2d",
+        "preferred_representation": preferred,
+        "fallback_representation": preferred,
+        "allowed_2d_representations": ["line", "bar"],
+        "allow_3d_for_explicit_request": False,
+        "allow_3d_when_structured_data_exists": bool(allow_data_driven_3d),
+        "source_data_attachment_detected": bool(allow_data_driven_3d),
+        "require_real_third_dimension": True,
+        "decision_reason": "structured_source_attachment" if allow_data_driven_3d else reason,
+    }
+
+
 def _infer_routing_capabilities(text: str) -> list[str]:
     """Map obvious subject matter to registered C-ARTIFACT room capabilities."""
     low = _text(text).lower().replace("ё", "е")
@@ -880,6 +997,17 @@ def build_interpretation(
     wants_image = "image" in requested_outputs
     wants_file = "file" in requested_outputs
     wants_links = "link" in requested_outputs
+    structured_data_extensions = {".csv", ".tsv", ".json", ".xlsx", ".xls", ".ods", ".parquet"}
+    data_source_attached = any(
+        str(item.get("kind") or "").lower() in {"file", "text_file"}
+        and str(item.get("asset_role") or "user_input").lower() not in {"april_output", "assistant_output", "generated"}
+        and ("." + str(item.get("filename") or "").lower().rsplit(".", 1)[-1]) in structured_data_extensions
+        for item in attachments
+    )
+    graph_policy = _graph_representation_policy(
+        original or text,
+        allow_data_driven_3d=data_source_attached,
+    ) if "graph" in requested_outputs else {}
 
     relation = _text(memory.get("relation") or "NEW").upper()
     selected_pairs = _select_continuation_pairs(memory)
@@ -992,6 +1120,7 @@ def build_interpretation(
             "wants_formula": "formula" in requested_outputs,
             "wants_diagram": "diagram" in requested_outputs,
             "wants_graph": "graph" in requested_outputs,
+            "graph_policy": graph_policy,
             "wants_table": "table" in requested_outputs,
             "history_request": history_request,
             "history_count": history_count if history_request else 0,
@@ -1077,6 +1206,8 @@ def build_interpretation(
                 "Use a structured table for a clear comparison when the answer has comparable attributes.",
                 "Use a diagram for an actual workflow, architecture, or sequence of steps.",
                 "Use a formula renderer for mathematical notation; use a graph only when a function or grounded numeric data can define it.",
+                "For graph requests, follow intent.graph_policy: trends/time-ordered values use line; categorical comparisons use bar; choose only among those 2D types unless explicit 3D intent or real 3D source data supports 3D.",
+                "Never turn 2D x/y data into a 3D chart by inventing a zero z-axis; true 3D requires explicit XYZ values, a real surface grid/function of x and y, or structured spatial objects.",
                 "Use code, link, file, image, and gallery renderers only when the response contains matching valid payloads and the request/context supports them.",
                 "Never invent numeric data, URLs, files, or images just to fill a renderer.",
                 "Every structured artifact must carry an explicit renderer type and its payload through the canonical SceneContract.",
