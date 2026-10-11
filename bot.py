@@ -609,6 +609,9 @@ class AprilHandler(BaseHTTPRequestHandler):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 if length < 0 or length > 64 * 1024:
+                    # Do not reuse a keep-alive connection while an oversized body
+                    # remains unread; otherwise body bytes can be parsed as a new request.
+                    self.close_connection = True
                     self._send_json(413, {"success": False, "error": "LOG_BODY_TOO_LARGE"})
                     return
                 raw_log = self.rfile.read(length)
