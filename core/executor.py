@@ -1059,6 +1059,7 @@ async def execute(
             "relation_hint": semantic_interpretation.get("relation_hint"),
             "reason": semantic_interpretation.get("reason"),
             "features": semantic_interpretation.get("features", {}),
+            "context_signature": semantic_interpretation.get("context_signature", {}),
         }
         dialogue_context = prepare_dialogue_context(
             uid, current_text, query_interpretation=single_semantics, **search_kwargs
@@ -1105,6 +1106,7 @@ async def execute(
                     "relation_hint": "HISTORY_LOOKUP" if question_item.get("history_request") else "CONTINUE" if question_item.get("requires_memory") else "NEW",
                     "reason": question_item.get("semantic_reason", ""),
                     "features": {},
+                    "context_signature": question_item.get("context_signature", {}),
                     "parent_context_dependency": bool(question_item.get("parent_context_dependency")),
                     "parent_intent": question_item.get("parent_intent", ""),
                 }
