@@ -1029,6 +1029,7 @@ async def execute(
             "step_index": item.get("step_index"),
             "request_key": _apr_diag_ref(item.get("request")),
             "semantic_intent": item.get("semantic_intent"),
+            "output_types": item.get("output_types", ["text"]),
             "search_direction": item.get("search_direction"),
             "time_scope": item.get("time_scope"),
             "history_request": bool(item.get("history_request")),
