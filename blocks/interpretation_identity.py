@@ -266,6 +266,76 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     low = _text(text).lower().replace("ё", "е")
     outputs = list(dict.fromkeys(explicit_outputs or ["text"]))
 
+    # A requested representation is often phrased as a case-inflected noun rather
+    # than an imperative ("в скриншотах", "со ссылками", "не показал таблицы").
+    # Treat those as presentation intent, not as image-generation permission.
+    # In particular, `gallery` means source/illustrative images; only `image` may
+    # authorize C_APRIL_IMAGES_GENERATOR.
+    presentation_context = bool(re.search(
+        r"(?:\b(?:покаж\w*|добав\w*|допол\w*|представ\w*|визуализир\w*|обобщ\w*|" 
+        r"не\s+показ\w*|не\s+увид\w*|хотел\w*|нужн\w*|" 
+        r"всеми?\s+рендер\w*|все\s+рендер\w*|всеми?\s+формат\w*)\b)"
+        r"|\b(?:в|во|со|с|через)\s+(?:все\s+)?(?:скриншот\w*|картинк\w*|изображен\w*|фотограф\w*|ссылк\w*|график\w*|диаграмм\w*|таблиц\w*|схем\w*)",
+        low,
+    ))
+
+    visual_noun_mentioned = bool(re.search(
+        r"(?:скриншот\w*|картинк\w*|изображен\w*|фотограф\w*|галере\w*|\bimages?\b|\bpictures?\b)",
+        low,
+    ))
+    negative_display_feedback = bool(re.search(
+        r"(?:не\s+(?:показ\w*|увид\w*|отобраз\w*|вид\w*)|отсутств\w*|пропал\w*|не\s+работа\w*)",
+        low,
+    ))
+    gallery_mentioned = visual_noun_mentioned and (presentation_context or negative_display_feedback)
+    if gallery_mentioned and "image" not in outputs and "gallery" not in outputs:
+        outputs.append("gallery")
+
+    # Link requests are often listed alongside other requested formats
+    # ("картинки, графиками, ссылками, опытами"), so don't require a verb after
+    # the noun. Requiring presentation_context prevents ordinary mentions of a
+    # website from automatically creating a link renderer.
+    links_mentioned = bool(re.search(
+        r"(?:ссылк\w*|\burls?\b|\bhyperlinks?\b|первоисточник\w*|источник\w*)",
+        low,
+    )) and (presentation_context or negative_display_feedback)
+    if links_mentioned and "link" not in outputs:
+        outputs.append("link")
+
+    table_mentioned = bool(re.search(r"таблиц\w*|\btables?\b", low)) and presentation_context
+    if table_mentioned and "table" not in outputs:
+        outputs.append("table")
+
+    graph_mentioned = bool(re.search(r"график\w*|диаграмм\w*|\bgraphs?\b|\bcharts?\b", low)) and presentation_context
+    if graph_mentioned and "graph" not in outputs:
+        outputs.append("graph")
+
+    experience_mentioned = bool(re.search(r"опыт\w*|эксперимент\w*|\bexperiments?\b", low))
+    diagram_mentioned = (
+        bool(re.search(r"схем\w*|диаграмм\w*|\bdiagrams?\b|\bflowcharts?\b", low)) and presentation_context
+    ) or (experience_mentioned and presentation_context)
+    if diagram_mentioned and "diagram" not in outputs:
+        outputs.append("diagram")
+    if experience_mentioned and presentation_context and "diagram" not in outputs:
+        outputs.append("diagram")
+
+    # Broad-scene requests should select relevant render families together. This
+    # is an additive plan only: it never invents measurements or authorizes raster
+    # image generation. Numeric/experimental material is handled by the rules above.
+    all_renderers_requested = bool(re.search(
+        r"(?:всеми?\s+рендер\w*|все\s+рендер\w*|всеми?\s+тип\w*\s+(?:рендер\w*|отображен\w*|визуализац\w*)|"
+        r"все-все-все|всю\s+информац\w*|все,?\s+что\s+(?:ты\s+)?зна\w*)",
+        low,
+    ))
+    if all_renderers_requested and presentation_context:
+        for output in ("gallery", "link", "table"):
+            if output not in outputs and "image" not in outputs:
+                outputs.append(output)
+        if re.search(r"(?:опыт\w*|эксперимент\w*|исследован\w*|научн\w*|процесс\w*|устройств\w*)", low) and "diagram" not in outputs:
+            outputs.append("diagram")
+        if re.search(r"(?:изменен\w*|зависимост\w*|измерен\w*|данн\w*|график\w*|диаграмм\w*|опыт\w*|эксперимент\w*|исследован\w*|научн\w*|физик\w*|электричеств\w*)", low) and "graph" not in outputs:
+            outputs.append("graph")
+
     comparison = bool(re.search(
         r"\b(?:compare|comparison|compare\s+with|versus|vs\.?|differences?\s+between|pros\s+and\s+cons)\b"
         r"|(?:сравни\w*|сравнен\w*|разниц\w*\s+между|отличи\w*|чем\s+отличает\w*|плюсы\s+и\s+минусы|преимуществ\w*\s+и\s+недостатк\w*)",
