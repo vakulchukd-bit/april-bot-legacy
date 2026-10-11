@@ -97,7 +97,9 @@ Use render blocks that match each request-sequence step: type="code" for code, t
 CRITICAL STRUCTURED 3D RENDER CONTRACT:
 - If INTERPRETATION.intent.wants_graph is true or C_ARTIFACT_RENDER_PLAN contains output="graph", and the user asks to build/show/create a graph or 3D visualization, emit a real render_blocks item of type="graph". A sentence claiming that a visualization was created is NOT a visual artifact.
 - For explicit 3D requests, set payload.representation to "surface3d", "scatter3d", "mesh3d", or "scene3d" as appropriate. Put all render data inside the block's payload; use renderer="GraphBlock" and viewer="GraphBlock".
-- For 3D object scenes, use payload.objects_3d (or payload.spheres for spheres). Each item should contain id, label, x, y, z when applicable, radius/size, color, and relevant numeric properties. For deformed grids, use show_curved_grid=true and describe the surface through surface_grid or an explicit curvature configuration. For 3D scatter plots, provide point coordinates with x, y, and z. For 3D surfaces, provide a numeric surface_grid/matrix plus axis domains when known.
+- For 3D object scenes, use payload.objects_3d (or payload.spheres for spheres). Each item should contain id, label, shape/type, x, y, z when applicable, size/radius/dimensions, color, and relevant numeric properties. The object list is dynamic: include exactly the requested objects and never assume a fixed count or that every object is a sphere. Supported shape names include sphere, cube/box, triangle, pyramid, cone, cylinder and funnel.
+- For analytic 3D surfaces, prefer payload.surface_function or payload.z_function with a complete expression in x and y (for example "x^2 + y^2" or "sin(sqrt(x^2+y^2))"), x_domain, y_domain and grid_resolution. The Web renderer samples supported expressions into a numeric surface. If the expression cannot be represented, supply a complete numeric surface_grid/matrix instead. Do not provide only a prose description of a surface.
+- For deformed object grids, use show_curved_grid=true with either a complete numeric surface_grid/matrix or explicit curvature configuration. For 3D scatter plots, provide point coordinates with x, y and z. Keep the exact formula and coordinate ranges from CURRENT_REQUEST; do not replace them with a generic example.
 - Do not invent empirical measurements or claim scientific precision when values are illustrative. If the user supplied only a conceptual scene, encode the supplied visual properties and mark the scene as illustrative.
 - Keep the normal explanatory text block, but never substitute it for the required graph block. The web renderer supports structured interactive 3D scenes through the same SceneContract/render_blocks path; do not return a separate route or image-generation request for a chart.
 For multi-question requests, answer every explicit question in order and make the output type match the question; do not merge separate questions into one generic paragraph. Do not shorten an answer to meet an application output-token budget. Preserve every requested topic, all material details, and complete requested code/source; remove only genuinely repetitive wording or metadata when needed.
@@ -783,6 +785,82 @@ def _semantic_compress(value: Any, max_tokens: int) -> str:
     return " ".join(kept) + (" … " + " ".join(tail) if tail else "")
 
 
+def _compress_3d_scene_specification(value: Any, max_tokens: int) -> str:
+    """Preserve complete unique scene constraints before considering lossy compression.
+
+    A 3D prompt is one artifact specification: commas often separate independent
+    visual requirements rather than independent questions. First remove exact
+    repeated sentences, then preserve the complete text whenever it fits. Only if
+    it exceeds the scene budget do we rank whole clauses, keeping geometry,
+    formulas, ranges, counts, axes, colour, and interaction requirements first.
+    """
+    text = re.sub(r"\s+", " ", _text(value)).strip()
+    if not text or max_tokens <= 0:
+        return ""
+
+    def unique_in_order(parts: list[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for part in parts:
+            clean = re.sub(r"\s+", " ", part).strip()
+            if not clean:
+                continue
+            key = re.sub(r"[.!?;:]+$", "", clean).strip().casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(clean)
+        return result
+
+    sentences = unique_in_order(re.split(r"(?<=[.!?;:])\s+|\n+", text))
+    complete = " ".join(sentences)
+    if _estimate_tokens(complete) <= max_tokens:
+        return complete
+
+    # Keep numeric coordinate tuples intact while splitting a very long sentence.
+    protected: list[str] = []
+    def protect_coordinates(match: re.Match[str]) -> str:
+        protected.append(match.group(0))
+        return f"SCENECOORDINATE{len(protected) - 1}TOKEN"
+
+    comma_safe = re.sub(
+        r"\(\s*[-+]?\d+(?:\.\d+)?(?:\s*,\s*[-+]?\d+(?:\.\d+)?){1,2}\s*\)",
+        protect_coordinates,
+        complete,
+    )
+    clauses = unique_in_order(re.split(r",\s+|\s+(?:а также|и дополнительно|кроме того)\s+", comma_safe, flags=re.I))
+    clauses = [
+        re.sub(r"SCENECOORDINATE(\d+)TOKEN", lambda m: protected[int(m.group(1))], clause)
+        for clause in clauses
+    ]
+    if _estimate_tokens("; ".join(clauses)) <= max_tokens:
+        return "; ".join(clauses)
+
+    priority_pattern = re.compile(
+        r"\d|[=^*/]|\b(?:z\s*=|x|y|surface_function|z_function|objects_3d|sphere|spheres|cube|triangle|funnel|wave|mesh|formula|function|domain|range|resolution|grid|axis|axes|colour|color|perspective|rotate|zoom|interactive|масса|сфер\w*|куб\w*|треугольн\w*|воронк\w*|волн\w*|сетк\w*|формул\w*|поверхност\w*|диапазон\w*|ось|оси|цвет\w*|перспектив\w*|вращ\w*|приближа\w*|интерактив\w*|координат\w*|не\s+добавляй|не\s+заменяй)\b",
+        re.I,
+    )
+    chosen: set[int] = {0, len(clauses) - 1} if clauses else set()
+    ranks = sorted(
+        range(len(clauses)),
+        key=lambda index: (
+            len(priority_pattern.findall(clauses[index])),
+            min(len(clauses[index]), 280),
+            1 if index in {0, len(clauses) - 1} else 0,
+        ),
+        reverse=True,
+    )
+    for index in ranks:
+        trial = sorted(chosen | {index})
+        candidate = "; ".join(clauses[position] for position in trial)
+        if _estimate_tokens(candidate) <= max_tokens:
+            chosen.add(index)
+    compact = "; ".join(clauses[index] for index in sorted(chosen))
+    if compact and _estimate_tokens(compact) <= max_tokens:
+        return compact
+    return _semantic_compress(compact or complete, max_tokens)
+
+
 def _json_card(structured: dict[str, Any]) -> str:
     return json.dumps(structured, ensure_ascii=False, separators=(",", ":"))
 
@@ -879,11 +957,26 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     source_current_request = _text(data.get("CURRENT_REQUEST"))
     source_new_request = _text(data.get("NEW_DIALOGUE_REQUEST"))
     sequence = data.get("REQUEST_SEQUENCE") if isinstance(data.get("REQUEST_SEQUENCE"), list) else []
+    interpretation_card = data.get("INTERPRETATION") if isinstance(data.get("INTERPRETATION"), dict) else {}
+    scene_plan = data.get("C_ARTIFACT_RENDER_PLAN") if isinstance(data.get("C_ARTIFACT_RENDER_PLAN"), list) else []
+    wants_graph = bool(interpretation_card.get("wants_graph")) or any(
+        isinstance(item, dict) and str(item.get("output") or "").lower() == "graph"
+        for item in scene_plan
+    )
+    is_single_3d_scene_task = bool(
+        wants_graph
+        and len(sequence) == 1
+        and re.search(r"(?:\b3\s*[- ]?d\b|\bthree[- ]dimensional\b|тр[её]хмерн\w*|surface3d|scene3d)", source_current_request, re.IGNORECASE)
+        and not is_history
+    )
     if sequence:
         for item in sequence:
             if not isinstance(item, dict):
                 continue
-            item["request"] = _semantic_compress(item.get("request"), MAX_TOPIC_PROMPT_TOKENS - 24)
+            if is_single_3d_scene_task:
+                item["request"] = "Use CURRENT_REQUEST as the complete 3D scene specification; every clause is a constraint for this one graph artifact."
+            else:
+                item["request"] = _semantic_compress(item.get("request"), MAX_TOPIC_PROMPT_TOKENS - 24)
             if item.get("search_query"):
                 item["search_query"] = _semantic_compress(item.get("search_query"), 100)
             task_search = item.get("dialogue_search")
@@ -930,9 +1023,11 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     for option in (task_search.get("clarification_options") or [])[:2] if isinstance(option, dict)
                 ]
         data["REQUEST_SEQUENCE"] = sequence
-    current_limit = max(1, MAX_TOPIC_PROMPT_TOKENS - 24) if len(sequence) <= 1 else max(1, min(MAX_TOPIC_PROMPT_TOKENS - 8, 420, max(24, MAX_PROMPT_TOKENS // 4)))
+    current_limit = (820 if is_single_3d_scene_task else max(1, MAX_TOPIC_PROMPT_TOKENS - 24)) if len(sequence) <= 1 else max(1, min(MAX_TOPIC_PROMPT_TOKENS - 8, 420, max(24, MAX_PROMPT_TOKENS // 4)))
     data["CURRENT_REQUEST"] = _semantic_compress(source_current_request, current_limit)
-    if source_new_request and source_new_request == source_current_request:
+    if is_single_3d_scene_task:
+        data["NEW_DIALOGUE_REQUEST"] = "Same as CURRENT_REQUEST; preserve all scene constraints."
+    elif source_new_request and source_new_request == source_current_request:
         data["NEW_DIALOGUE_REQUEST"] = data["CURRENT_REQUEST"]
 
     def count(system: str, obj: dict[str, Any]) -> tuple[str, int]:
@@ -1289,6 +1384,32 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "compress_explanation_before_protected_values": True,
             },
         }
+
+    # A 3D scene's many clauses describe one artifact. Prioritize this path before
+    # generic topic compaction so formula/ranges/shape instructions are not reduced
+    # to a few sampled keywords. The request is carried once in CURRENT_REQUEST;
+    # REQUEST_SEQUENCE points back to it instead of duplicating and truncating it.
+    if is_single_3d_scene_task:
+        visual_system = SYSTEM_PROMPT_MINIMAL
+        for scene_request_budget in (820, 760, 700, 640, 580, 540):
+            visual_min = build_minimal(scene_request_budget, 18, 8, min(1, len(original_pairs)))
+            visual_min["CURRENT_REQUEST"] = _compress_3d_scene_specification(source_current_request, scene_request_budget)
+            visual_sequence = visual_min.get("REQUEST_SEQUENCE")
+            if isinstance(visual_sequence, list) and visual_sequence:
+                visual_sequence[0]["q"] = "Full scene specification is in CURRENT_REQUEST. Treat all clauses as constraints for one scene."
+            visual_min["NEW_DIALOGUE_REQUEST"] = "Same as CURRENT_REQUEST; preserve all scene constraints."
+            if str(data.get("DIALOGUE_RELATION") or "NEW").upper() != "CONTINUE":
+                visual_min["DIALOGUE_ANCHOR"] = {}
+                visual_min["CONTINUATION_CONTEXT"] = []
+                visual_min["DIALOGUE_TOPIC_INDEX"] = []
+                visual_min["DIALOGUE_HISTORY_TOPICS"] = []
+                visual_min["DIALOGUE_TABLE_MARKDOWN"] = ""
+                visual_min["SELECTED_SECTION"] = {}
+                visual_min["CLARIFICATION_RESOLUTION"] = {}
+            card = _json_card(visual_min)
+            total = _estimate_tokens(visual_system) + _estimate_tokens(card)
+            if total <= MAX_PROMPT_TOKENS:
+                return visual_system, card, total, "single_3d_scene_preserved"
 
     # Try progressively smaller allocations. Topic requests are always <= 30% of
     # 1800 estimated tokens, and each step remains represented in REQUEST_SEQUENCE.
