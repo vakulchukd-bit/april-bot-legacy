@@ -14,7 +14,12 @@ import os
 import re
 import time
 
-from blocks.C_ARTIFACT_CONTRACT import MachineRequest, MachineResponse
+from blocks.C_ARTIFACT_CONTRACT import (
+    MachineRequest,
+    MachineResponse,
+    WEB_RENDERER_REGISTRY,
+    get_web_renderer_registration,
+)
 
 
 MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-5.6-luna")
@@ -32,6 +37,15 @@ _client: _OpenAICompat | None = None
 
 SYSTEM_PROMPT = r"""
 You are April's single response provider in the canonical route.
+
+USER-VISIBLE ANSWER INTEGRITY IS A HARD REQUIREMENT:
+- `answer` is the complete user-facing answer in RETURN_LANGUAGE, never merely an introduction.
+- `content` and the complete `text` render block must carry that same complete visible answer.
+- `internal_answer_en` is only a concise internal English translation/label; never put the detailed
+  answer exclusively in that field. Keep it to at most one sentence and do not expand it beyond
+  the visible answer. `summary` is metadata only and must remain short.
+- Required visual structures belong in separate typed `render_blocks` with concrete payloads.
+- Before returning, verify that no requested numbered step or required renderer was omitted.
 
 The processor is authoritative.  It already performed:
 - input normalization;
@@ -178,6 +192,9 @@ SYSTEM_PROMPT_COMPACT = r"""
 You are April's single Provider in the existing canonical route. The processor owns identity,
 12-hour memory search, NEW/CONTINUE, interpretation, rooms and renderers. Never create another
 route/memory/identity or expose hidden reasoning.
+`answer` is the complete answer in RETURN_LANGUAGE; `content` and its complete text render block
+must match it. `internal_answer_en` is at most one concise sentence, never the hidden place for the
+full explanation. Keep `summary` short and emit required visual structures as typed render blocks.
 Use CURRENT_REQUEST as the task. On CONTINUE, SELECTED_SECTION is the target when present; use
 its concise summary and selected anchor rather than full previous answers. If CLARIFICATION_RESOLUTION
 exists, honor its original_request and treat CURRENT_REQUEST as a clarification reply, not a replacement
@@ -206,6 +223,10 @@ actually supplied. For attached text, honor reader_truncated=true/false correctl
 
 SYSTEM_PROMPT_MINIMAL = r"""
 April Provider: one canonical call; processor owns authenticated identity, memory and NEW/CONTINUE.
+`answer` is the complete user-facing answer in RETURN_LANGUAGE. `content` and the full text render
+block must match it. `internal_answer_en` is only a one-sentence internal translation, never the
+place for the full response; `summary` is short metadata. Emit requested structured renderers with
+concrete payloads and verify all numbered steps before returning.
 Answer CURRENT_REQUEST in RETURN_LANGUAGE. On CONTINUE, use SELECTED_SECTION as the target when present.
 If CLARIFICATION_RESOLUTION exists, fulfill original_request and treat CURRENT_REQUEST as the user's
 clarification reply, not a replacement intent. For status topic_not_found or needs_more_detail, apologize and say no clear match
@@ -2385,25 +2406,55 @@ def normalize_render_blocks(
 
         result.append(item)
 
-    # Integrity guard: a single text block is the Web representation of the answer.
-    # If the model returned a short description in render_blocks but a complete answer
-    # in `answer` (as happened on the third Turgenev turn), never deliver that summary
-    # as if it were the full answer. Preserve specialized/multiple blocks unchanged.
-    if len(result) == 1 and result[0].get("type") in {"text", "markdown"}:
-        visible = _text(result[0].get("content") or result[0].get("text") or result[0].get("markdown"))
-        canonical = _text(answer)
-        if canonical and len(canonical) >= 400 and len(visible) < int(len(canonical) * 0.75):
-            result[0]["content"] = canonical
-            result[0].pop("text", None)
-            result[0].pop("markdown", None)
-            result[0]["renderer"] = "MessageTextBlock"
-            result[0]["viewer"] = "MessageTextBlock"
+    # SceneContract always includes its user-visible text, even when the scene
+    # also contains graph/table/formula blocks. The Web client deliberately renders
+    # this one canonical block list and does not reconstruct missing text from side
+    # channels, so enforce that invariant before the contract leaves the provider.
+    canonical = _text(answer)
+    text_indices = [
+        index for index, item in enumerate(result)
+        if str(item.get("type") or "").lower() in {"text", "markdown", "message", "message_text"}
+    ]
+    if not text_indices and canonical:
+        result.insert(0, {
+            "type": "text",
+            "renderer": "MessageTextBlock",
+            "viewer": "MessageTextBlock",
+            "content": canonical,
+            "integrity_repaired": True,
+        })
+        _log_json("RENDER_BLOCK_INTEGRITY", {
+            "status": "inserted_missing_canonical_text_block",
+            "answer_chars": len(canonical),
+            "blocks": len(result),
+        })
+    elif len(text_indices) == 1:
+        # A single text block may coexist with any number of typed renderer blocks.
+        # Do not let that richer scene turn a summary intro into the entire answer.
+        index = text_indices[0]
+        visible = _text(
+            result[index].get("content")
+            or result[index].get("text")
+            or result[index].get("markdown")
+        )
+        if (
+            canonical
+            and len(canonical) >= 400
+            and len(canonical) >= max(400, int(len(visible) * 1.5))
+            and len(canonical) - len(visible) >= 240
+        ):
+            result[index]["content"] = canonical
+            result[index].pop("text", None)
+            result[index].pop("markdown", None)
+            result[index]["renderer"] = "MessageTextBlock"
+            result[index]["viewer"] = "MessageTextBlock"
+            result[index]["integrity_repaired"] = True
             _log_json("RENDER_BLOCK_INTEGRITY", {
                 "status": "repaired_from_canonical_answer",
                 "answer_chars": len(canonical),
                 "block_chars_before": len(visible),
                 "block_chars_after": len(canonical),
-                "blocks": 1,
+                "blocks": len(result),
             })
 
     if not result:
@@ -2418,14 +2469,155 @@ def normalize_render_blocks(
     return result
 
 
-def _normalize(data: dict[str, Any]) -> dict[str, Any]:
-    answer = _text(
-        data.get("answer")
-        or data.get("content")
-        or data.get("response")
-        or data.get("summary")
-        or data.get("internal_answer_en")
+def _plain_public_text(value: Any) -> str:
+    """Accept visible text fields, but never stringify a serialized object."""
+    candidate = _text(value)
+    if not candidate:
+        return ""
+    if candidate[:1] in {"{", "["}:
+        try:
+            decoded = json.loads(candidate)
+            if isinstance(decoded, (dict, list)):
+                return ""
+        except Exception:
+            pass
+    return candidate
+
+
+def _canonical_display_answer(
+    data: dict[str, Any],
+    *,
+    display_language: str = "",
+) -> str:
+    """Recover a complete public answer when the model mislabeled a summary.
+
+    The provider sometimes returns a short `answer` while placing the complete
+    localized body in `content` or its text render block. Prefer the longer
+    public body only when the difference is large enough to be a real integrity
+    failure, not ordinary wording variation. Never expose the internal English
+    answer for a non-English display language.
+    """
+    public_candidates: list[tuple[str, str]] = []
+    for key in ("answer", "content", "response", "explanation", "display_text", "text"):
+        value = _plain_public_text(data.get(key))
+        if value:
+            public_candidates.append((key, value))
+
+    raw_blocks = data.get("render_blocks")
+    if isinstance(raw_blocks, list):
+        for index, block in enumerate(raw_blocks):
+            if not isinstance(block, dict):
+                continue
+            block_type = _text(block.get("type") or block.get("artifact_type") or "text").lower()
+            if block_type not in {"text", "markdown", "message", "message_text"}:
+                continue
+            value = _plain_public_text(block.get("content") or block.get("text") or block.get("markdown"))
+            if value:
+                public_candidates.append((f"render_blocks[{index}]", value))
+
+    language = _text(display_language).lower().replace("_", "-")
+    internal_english = _plain_public_text(data.get("internal_answer_en"))
+    if language.startswith("en") and internal_english:
+        public_candidates.append(("internal_answer_en", internal_english))
+
+    if not public_candidates:
+        return _plain_public_text(data.get("summary"))
+
+    first_source, first_value = public_candidates[0]
+    longest_source, longest_value = max(public_candidates, key=lambda pair: len(pair[1]))
+    if (
+        longest_source != first_source
+        and len(longest_value) >= max(400, int(len(first_value) * 1.5))
+        and len(longest_value) - len(first_value) >= 240
+    ):
+        _log_json("PUBLIC_ANSWER_INTEGRITY", {
+            "status": "recovered_longer_user_visible_body",
+            "selected_source": longest_source,
+            "discarded_source": first_source,
+            "short_chars": len(first_value),
+            "complete_chars": len(longest_value),
+        })
+        return longest_value
+
+    if (
+        internal_english
+        and not language.startswith("en")
+        and len(internal_english) >= max(400, int(len(first_value) * 1.5))
+        and len(internal_english) - len(first_value) >= 240
+    ):
+        # Do not leak English into a localized answer. Record enough length-only
+        # evidence to diagnose prompt-contract regressions on the next turn.
+        _log_json("PUBLIC_ANSWER_INTEGRITY", {
+            "status": "internal_answer_longer_than_localized_answer",
+            "display_language": language or "unspecified",
+            "localized_chars": len(first_value),
+            "internal_english_chars": len(internal_english),
+            "action": "keep_display_language_and_require_provider_contract",
+        })
+
+    return first_value
+
+
+def _artifact_render_block(artifact: dict[str, Any]) -> dict[str, Any] | None:
+    """Adapt a valid artifact into the one canonical SceneContract block shape."""
+    source_type = _text(artifact.get("type") or artifact.get("artifact_type")).lower()
+    if not source_type:
+        return None
+    registration = get_web_renderer_registration(source_type)
+    canonical_type = _text(registration.get("representation") or source_type).lower()
+    if canonical_type not in WEB_RENDERER_REGISTRY or canonical_type in {"text", "markdown"}:
+        return None
+
+    nested_payload = artifact.get("payload")
+    if not isinstance(nested_payload, dict):
+        nested_payload = artifact.get("data")
+    if not isinstance(nested_payload, dict):
+        nested_payload = artifact.get("spec")
+
+    payload = dict(nested_payload) if isinstance(nested_payload, dict) else {
+        key: value for key, value in artifact.items()
+        if key not in {"type", "artifact_type", "renderer", "viewer", "artifact_id", "metadata"}
+    }
+    payload_keys = set(registration.get("payload_keys") or [])
+    has_payload = any(
+        key in payload
+        and payload[key] is not None
+        and payload[key] != ""
+        and payload[key] != []
+        and payload[key] != {}
+        for key in payload_keys
     )
+
+    # A generator spec is a command, not an image. It must go through the
+    # existing April image generator before a GalleryBlock can be emitted.
+    if canonical_type in {"image", "gallery"}:
+        image_keys = {"images", "items", "src", "url", "asset_url", "image_asset_url", "image_data_uri", "base64", "image_base64"}
+        has_payload = any(
+            key in payload and payload[key] not in (None, "", [], {})
+            for key in image_keys
+        )
+
+    if not has_payload:
+        return None
+
+    block: dict[str, Any] = {
+        "type": canonical_type,
+        "renderer": registration.get("renderer", ""),
+        "viewer": registration.get("viewer", ""),
+        "payload": payload,
+        "source": "artifact_contract_adapter",
+    }
+    for key in (
+        "title", "caption", "content", "text", "code", "language", "filename",
+        "url", "href", "step_index", "step_title", "artifact_id", "sequence_index",
+    ):
+        if key in artifact and key not in block:
+            block[key] = artifact[key]
+    return block
+
+
+def _normalize(data: dict[str, Any], *, display_language: str = "") -> dict[str, Any]:
+    answer = _canonical_display_answer(data, display_language=display_language)
     if not answer:
         raw_blocks = data.get("render_blocks") if isinstance(data.get("render_blocks"), list) else []
         for block in raw_blocks:
@@ -2447,10 +2639,7 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
         or data.get("normalized_answer_en")
     )
 
-    blocks = normalize_render_blocks(
-        data.get("render_blocks"),
-        answer,
-    )
+    blocks = normalize_render_blocks(data.get("render_blocks"), answer)
     content_value = _text(data.get("content") or answer)
     if len(answer) >= 400 and len(content_value) < int(len(answer) * 0.75):
         _log_json("CONTENT_INTEGRITY", {
@@ -2467,6 +2656,32 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
     normalized_artifacts = [
         dict(item) for item in artifacts if isinstance(item, dict)
     ]
+
+    # Some responses place real typed payloads in `artifacts` but omit the
+    # matching render_blocks entry. Carry those payloads into the canonical
+    # SceneContract rather than silently dropping a renderer at the provider
+    # boundary. The image-generator spec exception above remains enforced.
+    present_types = {
+        _text(block.get("type") or block.get("artifact_type")).lower()
+        for block in blocks if isinstance(block, dict)
+    }
+    restored_artifact_types: list[str] = []
+    for artifact in normalized_artifacts:
+        block = _artifact_render_block(artifact)
+        if not block:
+            continue
+        block_type = _text(block.get("type")).lower()
+        if block_type in present_types:
+            continue
+        blocks.append(block)
+        present_types.add(block_type)
+        restored_artifact_types.append(block_type)
+    if restored_artifact_types:
+        _log_json("ARTIFACT_RENDER_BLOCK_RESTORATION", {
+            "status": "restored_to_scene_contract",
+            "types": restored_artifact_types,
+            "render_block_count": len(blocks),
+        })
 
     image_spec = data.get("image_spec")
     if isinstance(image_spec, dict) and not any(
@@ -2644,7 +2859,12 @@ async def generate_text(
             else:
                 try:
                     decoded = _json_load(raw)
-                    contract = _normalize(decoded)
+                    display_language = _text(
+                        (request.constraints or {}).get("display_language")
+                        or (request.constraints or {}).get("provider_output_language")
+                        or ""
+                    )
+                    contract = _normalize(decoded, display_language=display_language)
                     machine = contract.get("machine_response") if isinstance(contract, dict) else {}
                     machine = machine if isinstance(machine, dict) else {}
                     out_blocks = machine.get("render_blocks") if isinstance(machine.get("render_blocks"), list) else []
@@ -2678,10 +2898,17 @@ async def generate_text(
                     parsed_output = {
                         "json_keys": sorted(decoded.keys()),
                         "answer_chars": len(answer_text),
+                        "content_chars": len(_text(decoded.get("content"))),
+                        "internal_answer_en_chars": len(_text(decoded.get("internal_answer_en"))),
                         "summary_chars": len(summary_text),
                         "answer_preview": _clip(answer_text, 320) if log_previews else None,
                         "summary_preview": _clip(summary_text, 180) if log_previews else None,
                         "render_block_count": len(out_blocks),
+                        "text_render_block_chars": max((
+                            len(_text(block.get("content") or block.get("text") or block.get("markdown")))
+                            for block in out_blocks
+                            if isinstance(block, dict) and str(block.get("type") or "text").lower() in {"text", "markdown"}
+                        ), default=0),
                         "render_block_types": [str(x.get("type") or "unknown") for x in out_blocks if isinstance(x, dict)],
                         "render_blocks": output_blocks_diagnostics[:100],
                         "render_blocks_over_log_limit": max(0, len(output_blocks_diagnostics) - 100),
