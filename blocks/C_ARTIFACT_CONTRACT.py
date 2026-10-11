@@ -518,7 +518,7 @@ class BaseArtifact:
 # artifact_type identifies the produced representation; renderer identifies
 # the concrete Web viewer for this particular artifact. One room may therefore
 # produce multiple concrete renderers without creating a second route.
-WEB_RENDERER_REGISTRY_VERSION = "3.3"
+WEB_RENDERER_REGISTRY_VERSION = "3.4"
 
 # Exact renderer contract mirrored from the actual April Web RenderMessage
 # registry. This describes the destination component; it never performs routing.
@@ -546,6 +546,20 @@ WEB_RENDERER_REGISTRY = {
     "video": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["url", "src", "path", "content"]},
     "action": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["action", "target", "parameters", "content"]},
     "memory": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "summary", "memory"]},
+    # C rooms may emit function/domain artifacts. They remain in the same SceneContract
+    # and use the canonical text renderer when they do not request a specialized visual.
+    "function": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["function", "expression", "description", "analysis", "summary", "content", "text"]},
+    # Domain rooms travel inside the same SceneContract. They use the normal
+    # text renderer unless they emit a registered structured artifact type.
+    "biology": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "analysis", "summary", "content", "text"]},
+    "it": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "analysis", "summary", "content", "text", "code"]},
+    "literature": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "analysis", "summary", "content", "text"]},
+    "mathematics": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "analysis", "summary", "content", "text", "formula", "expression"]},
+    "news": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "summary", "content", "text", "sources", "links"]},
+    "politics": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "summary", "content", "text", "sources", "links"]},
+    "social": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "analysis", "summary", "content", "text"]},
+    "trigonometry": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "analysis", "summary", "content", "text", "formula", "expression"]},
+    "utc": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "summary", "content", "text", "datetime", "timezone"]},
 }
 
 ARTIFACT_BLOCK_MAP = {kind: spec["renderer"] for kind, spec in WEB_RENDERER_REGISTRY.items()}
@@ -1888,6 +1902,7 @@ def get_web_renderer_registration(payload_type: str) -> Dict[str, Any]:
         "svg": "diagram", "svgblock": "diagram", "schematic": "diagram",
         "arithmeticdiagram": "diagram", "arithmetic_diagram": "diagram",
         "message": "text", "message_text": "text", "hyperlink": "link", "file_card": "file",
+        "generated_image": "image", "image_data": "image", "image_artifact": "image", "figure": "image",
     }
     canonical = aliases.get(key, key)
     registration = WEB_RENDERER_REGISTRY.get(canonical) or WEB_RENDERER_REGISTRY["text"]
@@ -2124,7 +2139,62 @@ def _scene_hash(value: Any) -> str:
 
 
 def _scene_block_type(block: Dict[str, Any]) -> str:
-    return str(block.get("type") or block.get("artifact_type") or block.get("representation") or "text").strip().lower()
+    """Resolve the artifact type from the whole canonical signal envelope.
+
+    Providers/rooms may carry the representation on the block, the artifact,
+    or a render signal. Reading only the top-level `type` made otherwise valid
+    Table/Code/Link/Diagram signals silently become text blocks.
+    """
+    if not isinstance(block, dict):
+        return "text"
+
+    candidates: List[Any] = [
+        block.get("type"), block.get("artifact_type"), block.get("representation"),
+        block.get("payload_type"),
+    ]
+    for key in ("presentation", "presentation_signal", "render_signal", "room_signal", "signal"):
+        envelope = block.get(key)
+        if isinstance(envelope, dict):
+            candidates.extend((
+                envelope.get("representation"), envelope.get("artifact_type"),
+                envelope.get("payload_type"), envelope.get("type"), envelope.get("kind"),
+            ))
+            presentation = envelope.get("presentation")
+            if isinstance(presentation, dict):
+                candidates.extend((presentation.get("representation"), presentation.get("kind"), presentation.get("type")))
+    artifact = block.get("artifact")
+    if isinstance(artifact, dict):
+        candidates.extend((artifact.get("type"), artifact.get("artifact_type"), artifact.get("representation")))
+        metadata = artifact.get("metadata")
+        if isinstance(metadata, dict):
+            candidates.append(metadata.get("artifact_type"))
+        payload = artifact.get("payload")
+        if isinstance(payload, dict):
+            candidates.extend((payload.get("artifact_type"), payload.get("representation"), payload.get("type"), payload.get("payload_type")))
+    payload = block.get("payload")
+    if isinstance(payload, dict):
+        candidates.extend((payload.get("artifact_type"), payload.get("representation"), payload.get("payload_type"), payload.get("type")))
+
+    aliases = {
+        "chart": "graph", "plot": "graph", "graph_data": "graph",
+        "table_data": "table", "math": "formula", "latex": "formula",
+        "generated_image": "image", "image_artifact": "image", "image_data": "image", "figure": "image",
+        "hyperlink": "link", "file_card": "file",
+        "svg": "diagram", "svgblock": "diagram", "schematic": "diagram",
+        "arithmeticdiagram": "diagram", "arithmetic_diagram": "diagram",
+        "message": "text", "message_text": "text",
+    }
+    normalized = [
+        aliases.get(str(item).strip().lower().replace("-", "_"), str(item).strip().lower().replace("-", "_"))
+        for item in candidates if isinstance(item, str) and item.strip()
+    ]
+    generic = {"text", "markdown", "message", "message_text", "unknown"}
+    # Prefer a known specialist signal when the outer block only says text.
+    known_types = set(WEB_RENDERER_REGISTRY) | {"function", "biology", "it", "literature", "mathematics", "news", "politics", "social", "trigonometry", "utc"}
+    for item in normalized:
+        if item not in generic and item in known_types:
+            return item
+    return next((item for item in normalized if item not in generic), "text")
 
 
 def _scene_block_renderer(block: Dict[str, Any]) -> str:
@@ -2326,6 +2396,61 @@ def _markdown_table_payload(answer: str) -> Dict[str, Any]:
     return {}
 
 
+def _strip_first_markdown_table(answer: str, expected: Dict[str, Any]) -> str:
+    """Remove a Markdown table from prose only after a TableBlock was created."""
+    if not answer or not expected:
+        return answer
+    lines = str(answer).replace("\r", "").split("\n")
+    expected_columns = list(expected.get("columns") or expected.get("headers") or [])
+    expected_rows = [list(row) for row in (expected.get("rows") or []) if isinstance(row, (list, tuple))]
+    for index in range(len(lines) - 1):
+        headers = _split_markdown_table_row(lines[index])
+        separator = _split_markdown_table_row(lines[index + 1])
+        if headers != expected_columns or len(separator) != len(headers):
+            continue
+        if not all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in separator):
+            continue
+        table_rows: List[List[str]] = []
+        end = index + 2
+        while end < len(lines) and lines[end].strip():
+            cells = _split_markdown_table_row(lines[end])
+            if len(cells) != len(headers):
+                break
+            table_rows.append(cells)
+            end += 1
+        if table_rows != expected_rows:
+            continue
+        remaining = lines[:index] + lines[end:]
+        cleaned = "\n".join(remaining)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned.strip()
+    return answer
+
+
+def _strip_rendered_segments(text: str, rendered_types: set[str]) -> str:
+    """Keep the narrative concise when exact structures are displayed separately."""
+    cleaned = str(text or "")
+    if not cleaned or not rendered_types:
+        return cleaned.strip()
+    if "table" in rendered_types:
+        table = _markdown_table_payload(cleaned)
+        cleaned = _strip_first_markdown_table(cleaned, table)
+    if "diagram" in rendered_types:
+        match = re.search(r"```\s*mermaid\s*\n([\s\S]*?)\n```", cleaned, re.IGNORECASE)
+        if match and _mermaid_payload(match.group(1).strip()):
+            cleaned = cleaned.replace(match.group(0), "", 1)
+    if "code" in rendered_types:
+        match = re.search(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", cleaned)
+        if match and match.group(1).strip().lower() not in {"mermaid", "diagram"}:
+            cleaned = cleaned.replace(match.group(0), "", 1)
+    if "formula" in rendered_types:
+        match = re.search(r"\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)", cleaned)
+        if match:
+            cleaned = cleaned.replace(match.group(0), "", 1)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def _number_for_render(value: Any) -> Optional[float]:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
@@ -2431,18 +2556,42 @@ def _mermaid_payload(source: str) -> Dict[str, Any]:
 
 
 def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[str, Any]:
-    candidates = [block.get("payload"), block.get("data"), block.get("artifact_payload"), block.get("table"), block.get("graph"), block.get("diagram"), block.get("link")]
+    """Merge structured payload sources with the explicit block payload winning.
+
+    A signal may carry the table rows/code/URL while the envelope carries identity
+    metadata. Returning only the first dictionary discarded complementary fields.
+    """
+    candidates: List[Any] = []
     artifact = block.get("artifact")
     if isinstance(artifact, dict):
-        candidates.insert(0, artifact.get("payload"))
-        if isinstance(artifact.get("data"), dict):
-            candidates.insert(0, artifact.get("data", {}).get("payload"))
-    signal = block.get("render_signal") or block.get("room_signal")
-    if isinstance(signal, dict):
-        candidates.insert(0, signal.get("payload"))
+        artifact_data = artifact.get("data")
+        if isinstance(artifact_data, dict):
+            candidates.append(artifact_data.get("payload"))
+        candidates.extend((artifact.get("payload"), artifact_data))
+    presentation = block.get("presentation")
+    if isinstance(presentation, dict):
+        payload_contract = presentation.get("payload_contract")
+        if isinstance(payload_contract, dict):
+            candidates.append(payload_contract.get("payload"))
+    for key in ("signal", "room_signal", "render_signal", "presentation_signal"):
+        envelope = block.get(key)
+        if isinstance(envelope, dict):
+            candidates.append(envelope.get("payload"))
+            nested_presentation = envelope.get("presentation")
+            if isinstance(nested_presentation, dict):
+                nested_contract = nested_presentation.get("payload_contract")
+                if isinstance(nested_contract, dict):
+                    candidates.append(nested_contract.get("payload"))
+    candidates.extend((
+        block.get("data"), block.get("artifact_payload"), block.get("table"),
+        block.get("graph"), block.get("diagram"), block.get("link"), block.get("payload"),
+    ))
+    merged: Dict[str, Any] = {}
     for candidate in candidates:
-        if isinstance(candidate, dict) and candidate:
-            return deepcopy(candidate)
+        if isinstance(candidate, dict):
+            merged.update({key: deepcopy(value) for key, value in candidate.items() if value not in (None, "", [], {})})
+    if merged:
+        return merged
     keys = (WEB_RENDERER_REGISTRY.get(block_type) or {}).get("payload_keys") or []
     return {key: deepcopy(block[key]) for key in keys if key in block and block[key] not in (None, "", [], {})}
 
@@ -2506,25 +2655,40 @@ def prepare_render_blocks_for_room_dispatch(
     answer: str = "",
     requested_outputs: Any = None,
 ) -> List[Dict[str, Any]]:
-    """Bind same-turn structured content to requested Web renderer types.
+    """Bind same-turn structured content to the canonical Web renderer types.
 
-    This is a deterministic adapter, not a second route: it only derives a
-    payload from explicit content already present in this turn's answer or the
-    provider's structured block. It never guesses missing business/scientific
-    data and never adds a representation Interpretation did not request.
+    This is a deterministic adapter, not a second route. It promotes a structure
+    only when Interpretation requested it OR the same-turn answer already contains
+    an unambiguous representation (Markdown table, fenced source code, Mermaid
+    flowchart, delimited math, or literal URL). It never invents data or assets.
     """
     requested = _render_requested_outputs(requested_outputs)
     source_answer = str(answer or "")
-    table_from_answer = _markdown_table_payload(source_answer) if ({"table", "graph"} & requested) else {}
+    # The answer may already contain a structured representation even when the
+    # user did not name its renderer explicitly. Reuse that evidence rather than
+    # forcing a valid table/code/diagram to remain trapped inside a text block.
+    table_from_answer = _markdown_table_payload(source_answer)
+    mermaid_match = re.search(r"```\s*mermaid\s*\n([\s\S]*?)\n```", source_answer, re.IGNORECASE)
+    mermaid_from_answer = mermaid_match.group(1).strip() if mermaid_match else ""
+    diagram_from_answer = _mermaid_payload(mermaid_from_answer) if mermaid_from_answer else {}
+    code_match = re.search(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", source_answer)
+    if code_match and code_match.group(1).strip().lower() in {"mermaid", "diagram"}:
+        code_match = None
+    formula_matches = re.findall(r"\\\[([\s\S]*?)\\\]|\\\((.*?)\\\)", source_answer)
+    formulas_from_answer = [a or b for a, b in formula_matches if (a or b).strip()]
+    urls_from_answer = list(dict.fromkeys(re.findall(r"https?://[^\s<>\]\[()]+", source_answer, re.IGNORECASE)))
     source_blocks = [deepcopy(item) for item in render_blocks if isinstance(item, dict)] if isinstance(render_blocks, list) else []
     aliases = {
         "chart": "graph", "plot": "graph", "graph_data": "graph", "table_data": "table",
         "math": "formula", "latex": "formula", "generated_image": "image", "image_artifact": "image",
-        "hyperlink": "link", "svg": "diagram", "schematic": "diagram",
+        "hyperlink": "link", "file_card": "file", "svg": "diagram", "schematic": "diagram",
+        "svgblock": "diagram", "arithmeticdiagram": "diagram", "arithmetic_diagram": "diagram",
+        "generated_image": "image", "image_artifact": "image", "image_data": "image", "figure": "image",
+        "message": "text", "message_text": "text",
     }
     prepared: List[Dict[str, Any]] = []
     for block in source_blocks:
-        raw_type = str(block.get("type") or block.get("artifact_type") or block.get("representation") or "text").strip().lower().replace("-", "_")
+        raw_type = _scene_block_type(block)
         block_type = aliases.get(raw_type, raw_type)
         block["type"] = block_type
         block["artifact_type"] = str(block.get("artifact_type") or block_type)
@@ -2532,7 +2696,7 @@ def prepare_render_blocks_for_room_dispatch(
 
         # Room payloads are hydrated only from evidence already returned for this turn.
         if block_type == "table" and not _has_render_payload("table", payload):
-            if "table" in requested and table_from_answer:
+            if table_from_answer:
                 payload = deepcopy(table_from_answer)
                 block["source_room"] = block.get("source_room") or "C_TABLE_ROOM"
         elif block_type == "graph" and not _has_render_payload("graph", payload):
@@ -2543,30 +2707,22 @@ def prepare_render_blocks_for_room_dispatch(
                     block["source_room"] = block.get("source_room") or "C_GRAPH_ROOM"
         elif block_type == "diagram" and not _has_render_payload("diagram", payload):
             source = str(payload.get("source") or payload.get("mermaid") or block.get("source") or block.get("mermaid") or "")
-            if not source and "diagram" in requested:
-                fenced = re.search(r"```(?:mermaid)\s*\n([\s\S]*?)\n```", source_answer, re.IGNORECASE)
-                source = fenced.group(1).strip() if fenced else ""
+            if not source and mermaid_from_answer:
+                source = mermaid_from_answer
             parsed = _mermaid_payload(source)
             if parsed:
                 payload = {**payload, **parsed}
                 block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
         elif block_type == "link" and not _has_render_payload("link", payload):
-            if "link" in requested:
-                urls = list(dict.fromkeys(re.findall(r"https?://[^\s<>\]\[()]+", source_answer, re.IGNORECASE)))
-                if urls:
-                    payload = {"url": urls[0], "links": [{"url": urls[0]}], "source": "same_turn_answer"}
-                    block["source_room"] = block.get("source_room") or "C_LINK_ROOM"
+            if urls_from_answer:
+                payload = {"url": urls_from_answer[0], "links": [{"url": urls_from_answer[0]}], "source": "same_turn_answer"}
+                block["source_room"] = block.get("source_room") or "C_LINK_ROOM"
         elif block_type == "code" and not _has_render_payload("code", payload, block):
-            if "code" in requested:
-                match = re.search(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", source_answer)
-                if match:
-                    payload = {"code": match.group(2), "content": match.group(2), "language": match.group(1) or "text", "filename": "generated-code.txt"}
+            if code_match:
+                payload = {"code": code_match.group(2), "content": code_match.group(2), "language": code_match.group(1) or "text", "filename": "generated-code.txt"}
         elif block_type == "formula" and not _has_render_payload("formula", payload):
-            if "formula" in requested:
-                matches = re.findall(r"\\\[([\s\S]*?)\\\]|\\\((.*?)\\\)", source_answer)
-                extracted = [a or b for a, b in matches if (a or b).strip()]
-                if extracted:
-                    payload = {"formulas": extracted, "formula": extracted[0], "latex": extracted[0]}
+            if formulas_from_answer:
+                payload = {"formulas": formulas_from_answer, "formula": formulas_from_answer[0], "latex": formulas_from_answer[0]}
 
         if payload:
             block["payload"] = payload
@@ -2579,7 +2735,7 @@ def prepare_render_blocks_for_room_dispatch(
     existing_types = {str(b.get("type") or "").lower() for b in prepared if isinstance(b, dict)}
     # A requested table may be absent as a block even though the model returned
     # its literal Markdown table. Promote that same table, without changing cells.
-    if "table" in requested and "table" not in existing_types and table_from_answer and _has_render_payload("table", table_from_answer):
+    if ("table" in requested or table_from_answer) and "table" not in existing_types and table_from_answer and _has_render_payload("table", table_from_answer):
         prepared.append({"type": "table", "artifact_type": "table", "renderer": "TableBlock", "viewer": "TableBlock", "payload": table_from_answer, "source_room": "C_TABLE_ROOM"})
         existing_types.add("table")
     if "graph" in requested and "graph" not in existing_types and table_from_answer:
@@ -2587,26 +2743,21 @@ def prepare_render_blocks_for_room_dispatch(
         if graph_payload and _has_render_payload("graph", graph_payload):
             prepared.append({"type": "graph", "artifact_type": "graph", "renderer": "GraphBlock", "viewer": "GraphBlock", "payload": graph_payload, "source_room": "C_GRAPH_ROOM"})
             existing_types.add("graph")
-    if "link" in requested and "link" not in existing_types:
-        urls = list(dict.fromkeys(re.findall(r"https?://[^\s<>\]\[()]+", source_answer, re.IGNORECASE)))
-        if urls:
-            prepared.append({"type": "link", "artifact_type": "link", "renderer": "LinkCard", "viewer": "LinkCard", "payload": {"url": urls[0], "links": [{"url": urls[0]}], "source": "same_turn_answer"}, "source_room": "C_LINK_ROOM"})
+    if ("link" in requested or urls_from_answer) and "link" not in existing_types:
+        if urls_from_answer:
+            prepared.append({"type": "link", "artifact_type": "link", "renderer": "LinkCard", "viewer": "LinkCard", "payload": {"url": urls_from_answer[0], "links": [{"url": urls_from_answer[0]}], "source": "same_turn_answer"}, "source_room": "C_LINK_ROOM"})
             existing_types.add("link")
-    if "diagram" in requested and "diagram" not in existing_types:
-        fenced = re.search(r"```(?:mermaid)\s*\n([\s\S]*?)\n```", source_answer, re.IGNORECASE)
-        parsed = _mermaid_payload(fenced.group(1).strip()) if fenced else {}
-        if parsed:
-            prepared.append({"type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "payload": parsed, "source_room": "C_DIAGRAM_ROOM"})
+    if ("diagram" in requested or diagram_from_answer) and "diagram" not in existing_types:
+        if diagram_from_answer:
+            prepared.append({"type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "payload": diagram_from_answer, "source_room": "C_DIAGRAM_ROOM"})
             existing_types.add("diagram")
-    if "code" in requested and "code" not in existing_types:
-        match = re.search(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", source_answer)
-        if match:
-            prepared.append({"type": "code", "artifact_type": "code", "renderer": "CodeBlock", "viewer": "CodeBlock", "payload": {"code": match.group(2), "content": match.group(2), "language": match.group(1) or "text", "filename": "generated-code.txt"}})
-    if "formula" in requested and "formula" not in existing_types:
-        matches = re.findall(r"\\\[([\s\S]*?)\\\]|\\\((.*?)\\\)", source_answer)
-        extracted = [a or b for a, b in matches if (a or b).strip()]
-        if extracted:
-            prepared.append({"type": "formula", "artifact_type": "formula", "renderer": "FormulaRenderer", "viewer": "FormulaRenderer", "payload": {"formulas": extracted, "formula": extracted[0], "latex": extracted[0]}})
+    if ("code" in requested or code_match) and "code" not in existing_types:
+        if code_match:
+            prepared.append({"type": "code", "artifact_type": "code", "renderer": "CodeBlock", "viewer": "CodeBlock", "payload": {"code": code_match.group(2), "content": code_match.group(2), "language": code_match.group(1) or "text", "filename": "generated-code.txt"}})
+            existing_types.add("code")
+    if ("formula" in requested or formulas_from_answer) and "formula" not in existing_types:
+        if formulas_from_answer:
+            prepared.append({"type": "formula", "artifact_type": "formula", "renderer": "FormulaRenderer", "viewer": "FormulaRenderer", "payload": {"formulas": formulas_from_answer, "formula": formulas_from_answer[0], "latex": formulas_from_answer[0]}})
 
     # Remove duplicates based on actual payload, not renderer metadata. Keep text
     # and each different selected representation in the same ordered response.
@@ -2622,6 +2773,31 @@ def prepare_render_blocks_for_room_dispatch(
             continue
         seen.add(signature)
         result.append(block)
+
+    # The visual representation now owns its exact table/code/diagram/math body.
+    # Keep only surrounding narrative in the text node to avoid rendering the
+    # same content twice while still preserving explanatory prose.
+    rendered_types = {str(item.get("type") or "").lower() for item in result if isinstance(item, dict)}
+    if rendered_types & {"table", "code", "diagram", "formula"}:
+        for item in result:
+            if not isinstance(item, dict) or str(item.get("type") or "").lower() not in {"text", "markdown"}:
+                continue
+            original_text = str(item.get("content") or item.get("text") or "")
+            cleaned_text = _strip_rendered_segments(original_text, rendered_types)
+            if original_text.strip() and not cleaned_text.strip():
+                # Do not produce an empty text bubble if the entire source answer
+                # was a table/code/diagram; the structured renderer now owns it.
+                cyrillic = bool(re.search(r"[А-Яа-яІіЇїЄєҐґ]", original_text))
+                if "table" in rendered_types:
+                    cleaned_text = "Данные представлены в таблице." if cyrillic else "The data is shown in the table."
+                elif "diagram" in rendered_types:
+                    cleaned_text = "Схема представлена ниже." if cyrillic else "The diagram is shown below."
+                elif "code" in rendered_types:
+                    cleaned_text = "Код представлен отдельным блоком." if cyrillic else "The code is shown in a separate block."
+                else:
+                    cleaned_text = "Формула представлена отдельным блоком." if cyrillic else "The formula is shown in a separate block."
+            item["content"] = cleaned_text
+            item["text"] = cleaned_text
     return result
 
 def _scene_payload_has_content(block_type: str, payload: Dict[str, Any], block: Dict[str, Any] | None = None) -> bool:
@@ -2670,6 +2846,8 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
         answer,
         (scene.active_task or {}).get("requested_outputs") if isinstance(scene.active_task, dict) else None,
     )
+    visible_types = {str(item.get("type") or "").lower() for item in blocks if isinstance(item, dict)}
+    answer = _strip_rendered_segments(answer, visible_types)
     if answer and not any(_scene_block_type(b) in {"text", "markdown", "formula"} and _scene_text(b) for b in blocks if isinstance(b, dict)):
         blocks.insert(0, {
             "type": "text",
