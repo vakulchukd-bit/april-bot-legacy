@@ -522,6 +522,74 @@ def _semantic_group_hit(tokens: list[str], group: str) -> bool:
     return False
 
 
+_CONTEXT_SIGNATURE_GENERIC = {
+    # Operations, presentation forms, units and generic data words are not subjects.
+    "покажи", "показать", "покажите", "построй", "построить", "постройте",
+    "сделай", "сделать", "сделайте", "создай", "создать", "исправь", "исправить",
+    "данные", "данных", "значение", "значения", "число", "числа", "точка", "точки",
+    "график", "графика", "графике", "диаграмма", "диаграммы", "таблица", "таблицу",
+    "таблице", "формула", "формулы", "цена", "цены", "цену", "цене", "стоимость",
+    "рост", "роста", "растет", "растёт", "падение", "падения", "изменение",
+    "начинался", "начинались", "начинается", "начинаются", "начало", "сначала",
+    "заканчивался", "заканчивались", "конец", "поменяй", "поменять", "изменить",
+    "день", "дня", "дней", "днями", "неделя", "неделю", "недели", "месяц",
+    "месяца", "месяцев", "год", "года", "грн", "руб", "рубль", "рубля",
+    "доллар", "доллара", "долларов", "евро", "по", "для", "этот", "эта", "эти",
+    "это", "тот", "та", "те", "такой", "такую", "такие", "данный", "данная",
+    "данное", "данные", "мои", "мне", "теперь", "также", "ещё", "еще", "и", "а",
+    "the", "this", "that", "these", "those", "show", "build", "create", "make",
+    "fix", "correct", "data", "value", "values", "chart", "graph", "table",
+    "formula", "price", "cost", "growth", "fall", "day", "days", "week", "weeks",
+    "month", "months", "year", "years", "uah", "uah.", "usd", "dollar", "dollars",
+}
+_CONTEXT_SIGNATURE_REFERENCES = {
+    "это", "этого", "этой", "этом", "эти", "этих", "тот", "та", "те", "того",
+    "данный", "данная", "данное", "такой", "такую", "такого", "такие", "них",
+    "их", "него", "нее", "неё", "ней", "ним", "those", "these", "that", "this",
+    "it", "them", "they", "same", "previous", "earlier", "еще", "ещё", "дальше",
+}
+_CONTEXT_OUTPUT_TERMS = {
+    "graph": {"graph", "chart", "plot", "график", "диаграмм"},
+    "table": {"table", "таблиц"},
+    "formula": {"formula", "формул", "уравнен"},
+    "image": {"image", "picture", "photo", "картинк", "изображен", "фото"},
+}
+
+def _context_signature(text: Any) -> dict[str, Any]:
+    """Build an advisory subject/action signature without routing on fixed phrases."""
+    _, tokens = _semantic_normalize(text)
+    token_set = set(tokens)
+    subjects = set()
+    for token in tokens:
+        if not token or token.isdigit() or token in _CONTEXT_SIGNATURE_GENERIC:
+            continue
+        if len(token) < 4:
+            continue
+        # A small morphological stem keeps inflected Russian nouns aligned.
+        subjects.add(token[:5] if len(token) >= 5 else token)
+    reference_hits = token_set & _CONTEXT_SIGNATURE_REFERENCES
+    # Output form is metadata only; it does not decide whether memory is reused.
+    output_forms = []
+    for name, terms in _CONTEXT_OUTPUT_TERMS.items():
+        if any(token == term or (len(term) >= 5 and token.startswith(term)) for token in tokens for term in terms):
+            output_forms.append(name)
+    numbers = []
+    for match in re.finditer(r"(?<![\w])\d+(?:[.,]\d+)?(?![\w])", _text(text)):
+        value = match.group(0).replace(",", ".")
+        if value not in numbers:
+            numbers.append(value)
+        if len(numbers) >= 8:
+            break
+    return {
+        "subject_terms": sorted(subjects)[:12],
+        "has_explicit_subject": bool(subjects),
+        "reference_strength": round(min(1.0, len(reference_hits) / max(2.0, len(token_set) * 0.35)), 3),
+        "reference_terms": sorted(reference_hits)[:8],
+        "output_forms": output_forms,
+        "numeric_anchors": numbers,
+    }
+
+
 def interpret_request_semantics(text: str) -> dict[str, Any]:
     """Infer request intent and retrieval direction before splitting into tasks.
 
@@ -685,6 +753,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "intent_score": int(intent_score),
         "features": features,
         "reason": reason,
+        "context_signature": _context_signature(source),
     }
 
 
@@ -926,6 +995,7 @@ def build_question_sequence(
             "requires_memory": bool(item_semantics.get("requires_memory")),
             "history_request": bool(item_semantics.get("history_request")),
             "semantic_reason": item_semantics.get("reason", ""),
+            "context_signature": item_semantics.get("context_signature") or _context_signature(item),
             "parent_context_dependency": bool(item_semantics.get("parent_context_dependency")),
             "parent_intent": item_semantics.get("parent_intent", ""),
         })
