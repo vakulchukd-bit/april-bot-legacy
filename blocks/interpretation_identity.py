@@ -213,7 +213,10 @@ def _detect_requested_outputs(text: str) -> list[str]:
 
     # Common compound requests say "build a table and graph" only once. Recognize
     # the chart noun together with an explicit construction/visualization verb.
-    has_graph_noun = bool(re.search(r"\b(?:graph|chart|plot|график|графика|графики|графиков)\b", low))
+    has_graph_noun = bool(re.search(
+        r"\b(?:graph|chart|plot|график|графика|графики|графиков)\b|(?:столбчат\w*|линейн\w*)\s+(?:диаграмм\w*|график\w*)|\bbar\s+chart\b",
+        low,
+    ))
     has_graph_action = bool(re.search(
         r"\b(?:build|create|show|draw|plot|make|visualize|visualise|построй|постройте|построить|создай|создайте|создать|покажи|покажите|показать|нарисуй|нарисуйте|нарисовать|сделай|сделайте|сделать|визуализируй|визуализируйте|визуализировать|побудуй|побудуйте)\b",
         low,
@@ -229,7 +232,7 @@ def _detect_requested_outputs(text: str) -> list[str]:
         low,
     ))
     has_visual_noun = bool(re.search(
-        r"(?:visuali[sz]ation|visualisation|visualization|3d[- ]?scene|3d[- ]?model|\bscene\b|\bmodel\b|визуализац\w*|\bсцен\w*|\bмодел\w*)",
+        r"(?:visuali[sz]ation|visualisation|visualization|3d[- ]?scene|3d[- ]?model|\bscene\b|\bmodel\b|визуализац\w*|\bсцен\w*|\bмодел\w*|поверхност\w*|сфер\w*|куб\w*|треугольн\w*|воронк\w*|волн\w*|\bmesh(?:es)?\b|\bsphere(?:s)?\b|\bcube(?:s)?\b|\btriangle(?:s)?\b|\bfunnel(?:s)?\b|\bsurface\w*|\bplot\b|\bchart\b|\bgraph\b|график\w*|диаграмм\w*)",
         low,
     ))
     if has_3d_marker and has_graph_action and has_visual_noun and "graph" not in result:
@@ -599,6 +602,31 @@ def _split_request_sequence(text: str) -> list[str]:
     source = _text(text)
     if not source:
         return []
+
+    # A detailed 3D-scene prompt is one artifact task with many constraints, not
+    # a collection of independent questions. Keep its formula, object counts,
+    # geometry, axes, colours and interaction requirements bound together so the
+    # Provider receives one coherent scene specification and memory is searched
+    # once. Independent requests remain split by the established path below.
+    parent_outputs = _detect_requested_outputs(source)
+    starts_visual_build = bool(re.match(
+        r"^\s*(?:построй(?:те)?|создай(?:те)?|покажи(?:те)?|сделай(?:те)?|нарисуй(?:те)?|визуализируй(?:те)?|побудуй(?:те)?|створи(?:те)?|build|create|show|make|draw|visuali[sz]e|plot)\b",
+        source,
+        flags=re.IGNORECASE,
+    ))
+    has_3d_scene_language = bool(re.search(
+        r"(?:\b3\s*[- ]?d\b|\bthree[- ]dimensional\b|тр[её]хмерн\w*|3d[- ]?(?:поверхност|сцен|модел|визуализац))",
+        source,
+        flags=re.IGNORECASE,
+    ))
+    has_visual_artifact_noun = bool(re.search(
+        r"(?:график\w*|диаграмм\w*|\bgraph\b|\bchart\b|\bplot\b|поверхност\w*|сфер\w*|куб\w*|треугольн\w*|воронк\w*|волн\w*|\bsurface\w*|\bsphere(?:s)?\b|\bcube(?:s)?\b|\bfunnel(?:s)?\b|\bmesh(?:es)?\b)",
+        source,
+        flags=re.IGNORECASE,
+    ))
+    only_graph_artifact_outputs = set(parent_outputs).issubset({"text", "graph"})
+    if starts_visual_build and "graph" in parent_outputs and only_graph_artifact_outputs and (has_3d_scene_language or has_visual_artifact_noun) and not re.search(r"[?？]\s+\S", source):
+        return [source]
 
     lines = [line.strip() for line in source.splitlines() if line.strip()] or [source]
     parts: list[str] = []
