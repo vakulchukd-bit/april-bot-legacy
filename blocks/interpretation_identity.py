@@ -224,42 +224,6 @@ def _detect_requested_outputs(text: str) -> list[str]:
     if _detect_image_modification(low) and "image" not in result:
         result.append("image")
 
-    # Natural-language renderer lists are frequently spoken as nouns rather than
-    # command phrases (for example: "картинки, ссылки, визуализация, рендеры
-    # всех опытов"). Treat that combined list as an output request, but do not
-    # trigger image generation for a bare mention of a picture in isolation.
-    has_visual_bundle_context = bool(re.search(
-        r"(?:визуализац\w*|рендер\w*|покаж\w*|изобраз\w*|нарис\w*|"
-        r"create|show|visuali[sz]\w*|render\w*)",
-        low,
-    ))
-    has_picture_noun = bool(re.search(
-        r"(?:картинк\w*|изображен\w*|иллюстрац\w*|\bpictures?\b|\bimages?\b|\billustrations?\b)",
-        low,
-    ))
-    if has_visual_bundle_context and has_picture_noun and "image" not in result:
-        result.append("image")
-
-    # Explicit requests for source links commonly occur as "ссылки на его
-    # открытия" or "links to the discoveries" rather than "дай ссылку".
-    if re.search(r"(?:ссылк\w*|\blinks?\b|\bsources?\b)", low) and re.search(
-        r"(?:\bна\s+\w+|\bto\s+\w+|\bof\s+\w+|открыт\w*|источник\w*|source)",
-        low,
-    ) and "link" not in result:
-        result.append("link")
-
-    # A renderer/experiment phrase is a structured visual request, even when
-    # speech recognition omitted an imperative such as "визуализируй".
-    if re.search(
-        r"(?:рендер\w*\s+(?:всех|кажд\w*)\s+(?:опыт\w*|эксперимент\w*)|"
-        r"(?:всех|все)\s+(?:опыт\w*|эксперимент\w*)\s+.{0,40}рендер\w*|"
-        r"визуализац\w*.{0,50}рендер\w*|рендер\w*.{0,50}визуализац\w*)",
-        low,
-    ):
-        for output in ("diagram", "graph"):
-            if output not in result:
-                result.append(output)
-
     # Common compound requests say "build a table and graph" only once. Recognize
     # the chart noun together with an explicit construction/visualization verb.
     has_graph_noun = bool(re.search(
@@ -287,42 +251,6 @@ def _detect_requested_outputs(text: str) -> list[str]:
     if has_3d_marker and has_graph_action and has_visual_noun and "graph" not in result:
         result.append("graph")
 
-    # Natural-language educational prompts often name a representation rather
-    # than use the fixed command "show formula/table". Recognize those direct
-    # output requests without treating a bare input noun as generation intent.
-    has_formula_noun = bool(re.search(r"формул\w*|\bformulae?\b|\bequations?\b", low))
-    has_formula_context = bool(re.search(
-        r"(?:покаж\w*|объясн\w*|обрис\w*|применен\w*|запиш\w*|структурир\w*|"
-        r"расскаж\w*|визуализир\w*|show|explain|apply|application|structure|visuali[sz]e)",
-        low,
-    ))
-    if has_formula_noun and has_formula_context and "formula" not in result:
-        result.append("formula")
-
-    # Multi-part educational explanations with structured formatting and a
-    # display verb benefit from a comparison table and a concept/process diagram.
-    # This does not request an image-generation call and does not authorize made-up
-    # numeric data for a graph.
-    has_structured_presentation = bool(re.search(
-        r"(?:структурир\w*|по\s+пункт\w*|все\s+основн\w*|всё\s+основн\w*|"
-        r"полный\s+разбор|цельный\s+разбор|complete\s+overview|structured\s+overview)",
-        low,
-    ))
-    has_visual_action = bool(re.search(
-        r"(?:покаж\w*|визуализир\w*|нарис\w*|изобраз\w*|отобраз\w*|show|visuali[sz]e|draw|display)",
-        low,
-    ))
-    has_educational_sections = bool(re.search(
-        r"(?:опыт\w*|эксперимент\w*|биограф\w*|вклад\w*|применен\w*|теори\w*|"
-        r"формул\w*|открыти\w*|изобретен\w*|человечеств\w*|физик\w*)",
-        low,
-    ))
-    if has_structured_presentation and has_educational_sections:
-        if "table" not in result:
-            result.append("table")
-        if has_visual_action and "diagram" not in result:
-            result.append("diagram")
-
     if not result:
         result.append("text")
     elif "text" not in result:
@@ -337,37 +265,6 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     """
     low = _text(text).lower().replace("ё", "е")
     outputs = list(dict.fromkeys(explicit_outputs or ["text"]))
-
-    # A request to use "all renderers" is an explicit request for a rich,
-    # multi-renderer SceneContract, not just a text answer. Expand only to
-    # structured explanatory renderers; raster images, code files and links
-    # still require their own grounded intent/payload and are never fabricated.
-    all_renderers_requested = bool(re.search(
-        r"(?:во\s+всех\s+рендер(?:ах|ерах)|всеми\s+рендер(?:ами|ерами)|"
-        r"по\s+всем\s+рендер(?:ам|ерам)|все\s+(?:доступные\s+)?рендер(?:ы|а)|"
-        r"все\s+виды\s+(?:визуализац\w*|отображен\w*)|"
-        r"рендер\w*\s+(?:всех|кажд\w*)\s+(?:опыт\w*|эксперимент\w*)|"
-        r"(?:визуализац\w*.{0,50}рендер\w*|рендер\w*.{0,50}визуализац\w*)|"
-        r"\ball\s+(?:available\s+)?renderers\b|\bin\s+every\s+renderer\b|"
-        r"\buse\s+all\s+renderers\b|\ball\s+rendering\s+formats\b)",
-        low,
-    ))
-    if all_renderers_requested:
-        for output in ("table", "diagram", "formula", "graph"):
-            if output not in outputs:
-                outputs.append(output)
-
-        # In this exact phrase the user explicitly asks to visualize the subject
-        # across every available renderer. Allow the existing April image generator
-        # to participate as well, but do not infer image generation from a generic
-        # request such as "show me everything" or from a bare image mention.
-        explicit_visual_action = bool(re.search(
-            r"(?:визуализир\w*|покаж\w*|нарис\w*|изобраз\w*|созда\w*\s+(?:картинк\w*|изображен\w*)|"
-            r"visuali[sz]\w*|show\s+(?:me\s+)?(?:a\s+)?visual|draw\w*|create\s+(?:an?\s+)?image)",
-            low,
-        ))
-        if explicit_visual_action and "image" not in outputs:
-            outputs.append("image")
 
     comparison = bool(re.search(
         r"\b(?:compare|comparison|compare\s+with|versus|vs\.?|differences?\s+between|pros\s+and\s+cons)\b"
@@ -390,35 +287,35 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     if workflow_or_architecture and "diagram" not in outputs:
         outputs.append("diagram")
 
-    # Ordinary drawing requests are semantic visualization requests, not
-    # necessarily raster-image generation. Route simple geometry and common
-    # objects through the existing structured Diagram/Gallery renderer unless
-    # the user explicitly requests a picture/image/illustration/photo.
+    # Semantic drawing policy: ordinary requests to draw/create/show a picture
+    # go to Images Generator. Diagram is reserved for explicit schematic,
+    # blueprint, technical drawing, or measured-drawing intent. Graphs remain
+    # a separate mathematical/data visualization route.
     visual_action = bool(re.search(
-        r"(?<![\w\u0080-\uffff])(?:draw(?:ing)?|show|display|build|create|make|render|visuali[sz]e|"
-        r"нарис\w*|покаж\w*|отобраз\w*|изобраз\w*|постро\w*|созда\w*|сдела\w*|визуализир\w*)(?![\w\u0080-\uffff])",
+        r"(?<![\w\u0080-\uffff])(?:draw(?:ing)?|show|display|create|make|render|visuali[sz]e|"
+        r"нарис\w*|покаж\w*|отобраз\w*|изобраз\w*|созда\w*|сдела\w*|визуализир\w*)(?![\w\u0080-\uffff])",
         low,
     ))
-    simple_visual_subject = bool(re.search(
-        r"(?:\b(?:triangle|triangles|square|squares|parallelogram|parallelograms|rectangle|rectangles|"
-        r"circle|circles|cube|cubes|sphere|spheres|cone|cones|cylinder|cylinders|pyramid|pyramids|"
-        r"polygon|polygons|cat|cats|dog|dogs|forest|forests|tree|trees|flower|flowers|house|houses|"
-        r"car|cars|bird|birds|fish|fish|mountain|mountains|cloud|clouds|planet|planets)\b"
-        r"|треугольн\w*|параллелограмм\w*|квадрат\w*|прямоугольник\w*|круг\w*|окружност\w*|"
-        r"куб\w*|сфер\w*|шар\w*|конус\w*|цилиндр\w*|пирамид\w*|многоугольник\w*|"
-        r"кошк\w*|кот\w*|собак\w*|пёс\w*|лес\w*|дерев\w*|цвет\w*|дом\w*|машин\w*|"
-        r"птиц\w*|рыб\w*|гор\w*|облак\w*|планет\w*)",
+    explicit_diagram_intent = bool(re.search(
+        r"(?:\b(?:diagram|schematic|blueprint|technical drawing|engineering drawing|flowchart)\b|"
+        r"диаграмм\w*|схем\w*|чертеж\w*|креслен\w*|блок[- ]схем\w*)",
         low,
     ))
+    explicit_graph_intent = bool(re.search(
+        r"(?:\b(?:graph|chart|plot|3d graph)\b|график\w*|график\s+функци\w*|"
+        r"постро\w*\s+(?:график|поверхност))",
+        low,
+    ))
+    if visual_action and explicit_diagram_intent and "diagram" not in outputs:
+        outputs.append("diagram")
     if (
         visual_action
-        and simple_visual_subject
+        and not explicit_diagram_intent
+        and not explicit_graph_intent
         and "image" not in outputs
-        and "diagram" not in outputs
-        and "graph" not in outputs
-        and "table" not in outputs
+        and not any(kind in outputs for kind in ("diagram", "graph", "table", "formula", "code", "file", "link"))
     ):
-        outputs.append("diagram")
+        outputs.append("image")
     # Formula view only for a clearly mathematical request. Graphs remain explicit
     # unless the request asks to plot/visualize data or a function.
     if mathematical_function and bool(re.search(
@@ -981,22 +878,9 @@ _TASK_OR_QUESTION_START = _TASK_CONNECTORS + r"(?:" + _TASK_START_WORDS + r"|ч�
 
 
 def _split_explicit_tasks(text: str) -> list[str]:
-    """Split at clear task starts, binding trailing adverb + verb phrases together."""
+    """Split a text span at clear task-start boundaries while preserving its words."""
     source = _LEADING_TASK_CONNECTOR.sub("", str(text or "").strip(), count=1)
-    pieces = [piece.strip() for piece in _TASK_START_PATTERN.split(source) if piece.strip()]
-    merged: list[str] = []
-    index = 0
-    detail_tail = re.compile(r"(?:подробн\w*|поподробн\w*|детальн\w*|в\s+деталях)[,\s.!?—–-]*$", re.IGNORECASE)
-    trailing_verb = re.compile(r"^(?:расскажи(?:те)?|объясни(?:те)?|поясни(?:те)?|рассказать|explain|describe)[.!?]*$", re.IGNORECASE)
-    while index < len(pieces):
-        current = pieces[index]
-        if index + 1 < len(pieces) and detail_tail.search(current) and trailing_verb.fullmatch(pieces[index + 1]):
-            merged.append(f"{current.rstrip()} {pieces[index + 1].strip()}")
-            index += 2
-            continue
-        merged.append(current)
-        index += 1
-    return merged
+    return [piece.strip() for piece in _TASK_START_PATTERN.split(source) if piece.strip()]
 
 
 def _split_request_sequence(text: str) -> list[str]:
@@ -1009,25 +893,6 @@ def _split_request_sequence(text: str) -> list[str]:
     source = _text(text)
     if not source:
         return []
-
-    # Conversational lead-ins are not independent tasks. In the previous
-    # sequence splitter, "Так, расскажи..." became an empty-content step named
-    # "Так," and consumed a memory search of its own.
-    source = re.sub(
-        r"^\s*(?:так|ну|итак|ладно|хорошо|смотри|слушай|окей|okay|well)\s*[,!:—–-]\s*",
-        "",
-        source,
-        count=1,
-        flags=re.IGNORECASE,
-    )
-    # Spoken emphasis at the very end is not a separate subtask; keep the full
-    # request while preventing "Всё-всё-всё" from receiving its own memory search.
-    source = re.sub(
-        r"\s+(?:все|всё)(?:[-\s]+(?:все|всё)){1,5}[.!?？,;:—–-]*\s*$",
-        "",
-        source,
-        flags=re.IGNORECASE,
-    )
 
     # A detailed 3D-scene prompt is one artifact task with many constraints, not
     # a collection of independent questions. Keep its formula, object counts,
@@ -1069,14 +934,8 @@ def _split_request_sequence(text: str) -> list[str]:
         # Question marks are strong boundaries. Also split sentence periods only
         # when the next sentence visibly starts another task/question, avoiding
         # ordinary explanatory sentences and most abbreviation false positives.
-        ordinal_start = (
-            r"(?:и\s+)?(?:во[- ]?(?:первых|вторых|третьих|четвертых|четвёртых|пятых)|"
-            r"перв(?:ое|ый|ая)|втор(?:ое|ой|ая)|треть(?:е|я)|"
-            r"четверт(?:ое|ый|ая)|четвёрт(?:ое|ый|ая)|пят(?:ое|ый|ая)|"
-            r"first|second|third|fourth|fifth)\b"
-        )
         boundary_pattern = re.compile(
-            r"(?<=[?？])\s+|(?<=[.!])\s+(?=(?:" + _TASK_OR_QUESTION_START + r"|" + ordinal_start + r"))"
+            r"(?<=[?？])\s+|(?<=[.!])\s+(?=" + _TASK_OR_QUESTION_START + r")"
             r"|\s+(?:и|а также|а|and|also)\s+(?=" + question_lead + r"\b)",
             flags=re.IGNORECASE,
         )
@@ -1091,46 +950,6 @@ def _split_request_sequence(text: str) -> list[str]:
     # Never collapse repeated steps: repetition can be intentional, and the output
     # sequence must stay one-to-one with the user's requested order.
     cleaned = [re.sub(r"\s+", " ", part).strip() for part in parts if part.strip()]
-    filler_only = re.compile(
-        r"^(?:все|всё)(?:[-\s]+(?:все|всё)){1,5}[.!?？,;:—–-]*$|"
-        r"^(?:подробнее|поподробнее|все подробности|that's all)[.!?？,;:—–-]*$",
-        flags=re.IGNORECASE,
-    )
-    cleaned = [part for part in cleaned if not filler_only.fullmatch(part)]
-
-    # The action-oriented splitter can cut just before a verb and leave the
-    # step label alone, e.g. "Третье," + "визуализируй...". Bind that label to
-    # its action so each numbered requirement remains one coherent sequence item.
-    ordinal_only = re.compile(
-        r"^(?:и\s+)?(?:перв(?:ое|ый)|втор(?:ое|ой)|треть(?:е|я)|"
-        r"четверт(?:ое|ый)|четвёрт(?:ое|ый)|пят(?:ое|ый)|"
-        r"first|second|third|fourth|fifth)\s*[,.:;—–-]*$",
-        flags=re.IGNORECASE,
-    )
-    merged: list[str] = []
-    index = 0
-    while index < len(cleaned):
-        current = cleaned[index]
-        if ordinal_only.fullmatch(current) and index + 1 < len(cleaned):
-            merged.append(f"{current.rstrip(' ,.:;—–-')} {cleaned[index + 1]}".strip())
-            index += 2
-            continue
-        merged.append(current)
-        index += 1
-    cleaned = merged
-    # A trailing "and show" with no object is part of the preceding request,
-    # not a standalone task whose only query is the verb "show".
-    bare_show = re.compile(
-        r"^(?:и\s+)?(?:покажи(?:те)?|показать|покажіть|show|display|визуализируй(?:те)?|visuali[sz]e)\s*[.!?？]*$",
-        flags=re.IGNORECASE,
-    )
-    combined: list[str] = []
-    for piece in cleaned:
-        if bare_show.fullmatch(piece) and combined:
-            combined[-1] = f"{combined[-1].rstrip(' .!?？')} и {piece.strip().rstrip('.!?？')}"
-        else:
-            combined.append(piece)
-    cleaned = combined
     if len(cleaned) > 24:
         # Keep every request, but combine the tail into one final ordered unit to
         # bound per-turn memory searches and prevent unbounded preprocessing time.
@@ -1501,9 +1320,8 @@ def build_interpretation(
             "rendering_guidance": [
                 "Always preserve a concise explanatory text answer.",
                 "Use a structured table for a clear comparison when the answer has comparable attributes.",
-                "Use a diagram for workflows/architecture/sequences and for simple requested shapes or objects when intent.wants_diagram=true. Emit a concrete payload.svg, drawing elements, geometry, or nodes/edges; do not only describe the intended drawing.",
-                "Use a formula renderer for mathematical notation; use a numeric graph only when a function or grounded numeric data can define it.",
-                "For explanatory requests that explicitly ask for broad/all renderers, a graph may be a grounded concept network (representation=network, nodes and edges) built only from relationships stated in the answer; never invent numeric measurements.",
+                "Use a diagram only for explicit schema/diagram/blueprint/technical-drawing intent or workflows/architecture/sequences. Ordinary requests to draw/create/show a picture or illustration must use C_APRIL_IMAGES_GENERATOR (Images 2.0), unless the request explicitly asks for a diagram, blueprint, technical drawing, or graph. Emit a concrete payload.svg, drawing elements, geometry, or nodes/edges; do not only describe the intended drawing.",
+                "Use a formula renderer for mathematical notation; use a graph only when a function or grounded numeric data can define it.",
                 "For graph requests, follow intent.graph_policy: trends/time-ordered values use line; categorical comparisons use bar; choose only among those 2D types unless explicit 3D intent or real 3D source data supports 3D.",
                 "Never turn 2D x/y data into a 3D chart by inventing a zero z-axis; true 3D requires explicit XYZ values, a real surface grid/function of x and y, or structured spatial objects.",
                 "Use code, link, file, image, and gallery renderers only when the response contains matching valid payloads and the request/context supports them.",
