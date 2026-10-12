@@ -690,6 +690,44 @@ def _context_signature(text: Any) -> dict[str, Any]:
     }
 
 
+def _has_explicit_topic_introduction(text: str) -> bool:
+    """Return true when a request explicitly introduces a subject instead of only referring back.
+
+    A named-content request such as “continue further; tell me about Ramanujan's life”
+    must not be classified as a continuation merely because the preface contains “continue”.
+    Pure anaphoric phrases such as “tell me about him/that” remain continuations.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    pattern = re.compile(
+        r"\b(?:расскажи(?:те)?|рассказать|напиши(?:те)?|написать|опиши(?:те)?|описать|"
+        r"объясни(?:те)?|объяснить|изложи(?:те)?|представь(?:те)?|дай|покажи(?:те)?|"
+        r"tell|describe|explain|write|give)\b"
+        r".{0,100}?\b(?:про|об|обо|о|about|on)\s+"
+        r"(?!его\b|её\b|ее\b|него\b|нее\b|ней\b|ним\b|них\b|ему\b|ей\b|"
+        r"их\b|это\b|этом\b|эту\b|эти\b|тот\b|та\b|те\b|таком\b|такое\b|"
+        r"him\b|her\b|them\b|it\b|that\b|this\b|those\b|these\b)"
+        r"[а-яa-z0-9]",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return bool(pattern.search(low))
+
+
+def _is_short_continuation_preface(text: str) -> bool:
+    """Identify a brief praise/transition fragment that is not a standalone task."""
+    low, tokens = _semantic_normalize(text)
+    if len(tokens) > 8 or not tokens or "?" in low:
+        return False
+    has_continue = any(root in low for root in (
+        "продолж", "дальше", "continue", "resume", "продолжим", "продолжать",
+    ))
+    has_acknowledgement = any(token.startswith((
+        "молод", "хорош", "отлич", "спасибо", "great", "good", "well", "thanks",
+    )) for token in tokens)
+    return has_continue and (has_acknowledgement or set(tokens).issubset({
+        "теперь", "дальше", "продолжим", "продолжать", "продолжай", "далее", "now", "continue", "further",
+    })) and not _has_explicit_topic_introduction(text)
+
+
 def interpret_request_semantics(text: str) -> dict[str, Any]:
     """Infer request intent and retrieval direction before splitting into tasks.
 
@@ -716,6 +754,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     ) or "к чему мы пришли" in low or "what did we conclude" in low
     plan_action = _semantic_group_hit(tokens, "plan_action")
     continuation_action = _semantic_group_hit(tokens, "continuation_action")
+    explicit_topic_introduction = _has_explicit_topic_introduction(source)
     past_reference = _semantic_group_hit(tokens, "past_reference")
     future_reference = _semantic_group_hit(tokens, "future_reference")
     today_reference = _semantic_group_hit(tokens, "today_reference")
@@ -787,7 +826,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
             reason = "dialogue_reference_detected_semantically"
         relation_hint = "HISTORY_LOOKUP"
         time_scope = "TODAY" if today_reference else ("RECENT_WINDOW" if recent_reference else ("PAST_DIALOGUE" if past_reference else ("FUTURE_PLAN_CONTEXT" if temporal_future else "AVAILABLE_HISTORY")))
-    elif continuation_action or (any(token in token_set for token in {"это", "этого", "этом", "тот", "та", "ту", "там", "дальше", "прежнему", "прежней"}) and not temporal_future):
+    elif (continuation_action or (any(token in token_set for token in {"это", "этого", "этом", "тот", "та", "ту", "там", "дальше", "прежнему", "прежней"}) and not temporal_future)) and not explicit_topic_introduction:
         primary_intent = "TOPIC_CONTINUATION"
         direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
         topic_reference = "PREVIOUS_OR_ACTIVE_TOPIC"
@@ -822,7 +861,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         search_scope = "CURRENT_DIALOGUE"
         intent_score = 0
         relation_hint = "NEW"
-        reason = "no_prior_dialogue_intent_detected"
+        reason = "explicit_topic_introduction_overrides_continuation" if explicit_topic_introduction and (continuation_action or any(token in token_set for token in {"дальше", "прежнему", "прежней", "resume", "continue"})) else "no_prior_dialogue_intent_detected"
 
     # A compact feature vector makes routing inspectable; values are deterministic
     # feature activations, not neural embeddings or calibrated probabilities.
@@ -1042,6 +1081,11 @@ def _split_request_sequence(text: str) -> list[str]:
     # Never collapse repeated steps: repetition can be intentional, and the output
     # sequence must stay one-to-one with the user's requested order.
     cleaned = [re.sub(r"\s+", " ", part).strip() for part in parts if part.strip()]
+    if (len(cleaned) > 1 and _is_short_continuation_preface(cleaned[0])
+            and _has_explicit_topic_introduction(cleaned[1])):
+        # “Good, continue further” is a transition, not a retrieval task, when the
+        # same message immediately introduces a different named subject.
+        cleaned = cleaned[1:]
     if len(cleaned) > 24:
         # Keep every request, but combine the tail into one final ordered unit to
         # bound per-turn memory searches and prevent unbounded preprocessing time.
@@ -1063,7 +1107,18 @@ def build_question_sequence(
     sequence: list[dict[str, Any]] = []
     parent = dict(parent_interpretation or interpret_request_semantics(text))
     pieces = _split_request_sequence(text)
+    parent_introduces_subject = _has_explicit_topic_introduction(text)
+    subject_intro_seen = False
     for index, item in enumerate(pieces, start=1):
+        item_introduces_subject = _has_explicit_topic_introduction(item)
+        item_has_anaphor = bool(re.search(
+            r"\b(?:его|её|ее|он|она|они|ним|нему|него|ней|них|ему|ей|их|him|her|them|he|she|his|their)\b",
+            item.lower().replace("ё", "е"), flags=re.IGNORECASE,
+        ))
+        inherits_current_request_subject = bool(
+            parent_introduces_subject and subject_intro_seen and item_has_anaphor
+            and not item_introduces_subject
+        )
         # Per-question output signals must use the same semantic enhancement as
         # the turn-level contract. Without this, INTERPRETATION could request a
         # diagram while REQUEST_SEQUENCE still tells Provider to return text only.
@@ -1136,7 +1191,11 @@ def build_question_sequence(
             "context_signature": item_semantics.get("context_signature") or _context_signature(item),
             "parent_context_dependency": bool(item_semantics.get("parent_context_dependency")),
             "parent_intent": item_semantics.get("parent_intent", ""),
+            "introduces_current_request_subject": item_introduces_subject,
+            "inherits_current_request_subject": inherits_current_request_subject,
         })
+        if item_introduces_subject:
+            subject_intro_seen = True
     return sequence
 
 
