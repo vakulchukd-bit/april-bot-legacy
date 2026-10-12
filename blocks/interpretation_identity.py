@@ -287,6 +287,23 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     if workflow_or_architecture and "diagram" not in outputs:
         outputs.append("diagram")
 
+    # Table intent may use Russian inverted word order or an adjective between
+    # the verb and noun ("таблицу покажи периодическую", "покажи периодическую
+    # таблицу"). Detect the requested renderer before generic visual-action
+    # inference, so "show the table" can never accidentally invoke Images 2.0.
+    table_noun = r"(?:\btable\b|\bтаблиц\w*)"
+    table_action = (
+        r"(?:\b(?:show|display|build|create|make|prepare|construct|render|generate|draw|list|provide|present)\b|"
+        r"покаж\w*|отобраз\w*|постро\w*|созда\w*|сдела\w*|подготов\w*|сформир\w*|"
+        r"состав\w*|вывед\w*|представ\w*|нарис\w*)"
+    )
+    table_request = bool(
+        re.search(table_action + r".{0,60}" + table_noun, low, flags=re.IGNORECASE)
+        or re.search(table_noun + r".{0,60}" + table_action, low, flags=re.IGNORECASE)
+    )
+    if table_request and "table" not in outputs:
+        outputs.append("table")
+
     # Semantic drawing policy: ordinary requests to draw/create/show a picture
     # go to Images Generator. Diagram is reserved for explicit schematic,
     # blueprint, technical drawing, or measured-drawing intent. Graphs remain
@@ -878,9 +895,44 @@ _TASK_OR_QUESTION_START = _TASK_CONNECTORS + r"(?:" + _TASK_START_WORDS + r"|ч�
 
 
 def _split_explicit_tasks(text: str) -> list[str]:
-    """Split a text span at clear task-start boundaries while preserving its words."""
+    """Split clear task starts without separating an object from its inverted verb.
+
+    Russian often places the object before the imperative ("таблицу покажи",
+    "картинку нарисуй"). Treating that verb as a new task loses the object and
+    can accidentally route a table request to Images Generator.
+    """
     source = _LEADING_TASK_CONNECTOR.sub("", str(text or "").strip(), count=1)
-    return [piece.strip() for piece in _TASK_START_PATTERN.split(source) if piece.strip()]
+    if not source:
+        return []
+
+    object_before_verb = re.compile(
+        r"(?:таблиц\w*|картинк\w*|изображен\w*|иллюстрац\w*|фотографи\w*|фото|"
+        r"диаграмм\w*|схем\w*|черт[её]ж\w*|график\w*|формул\w*|уравнен\w*|код)\s*$",
+        flags=re.IGNORECASE,
+    )
+    explicit_connectors = re.compile(
+        r"^(?:и|а также|а потом|и потом|а теперь|и еще|и ещё|а еще|а ещё|и дополнительно|"
+        r"затем|потом|также|отдельно|после этого|кроме того|and then|then|also|additionally)\s*",
+        flags=re.IGNORECASE,
+    )
+
+    pieces: list[str] = []
+    last_end = 0
+    for match in _TASK_START_PATTERN.finditer(source):
+        prefix = source[last_end:match.start()].strip()
+        boundary = match.group(0).strip()
+        has_connector = bool(explicit_connectors.match(boundary))
+        if prefix and not has_connector and object_before_verb.search(prefix):
+            # Keep object + inverted imperative in one semantic clause.
+            continue
+        if prefix:
+            pieces.append(prefix)
+        last_end = match.end()
+
+    tail = source[last_end:].strip()
+    if tail:
+        pieces.append(tail)
+    return pieces or [source]
 
 
 def _split_request_sequence(text: str) -> list[str]:
