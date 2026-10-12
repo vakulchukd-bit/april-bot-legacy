@@ -264,7 +264,9 @@ def _detect_requested_outputs(text: str) -> list[str]:
         low,
     ))
     has_graph_action = bool(re.search(
-        r"\b(?:build|create|show|draw|plot|make|visualize|visualise|построй|постройте|построить|создай|создайте|создать|покажи|покажите|показать|нарисуй|нарисуйте|нарисовать|сделай|сделайте|сделать|визуализируй|визуализируйте|визуализировать|побудуй|побудуйте)\b",
+        # Stem matching catches inflected forms like "построим", "построила",
+        # and polite/imperative variants without depending on exact endings.
+        r"\b(?:build|create|show|draw|plot|make|visualize|visualise|постро\w*|созда\w*|покаж\w*|нарис\w*|сдела\w*|визуализир\w*|побуд\w*)\b",
         low,
     ))
     if has_graph_noun and has_graph_action and "graph" not in result:
@@ -344,7 +346,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     # a separate mathematical/data visualization route.
     visual_action = bool(re.search(
         r"(?<![\w\u0080-\uffff])(?:draw(?:ing)?|show|display|create|make|render|visuali[sz]e|"
-        r"нарис\w*|покаж\w*|отобраз\w*|изобраз\w*|созда\w*|сдела\w*|визуализир\w*)(?![\w\u0080-\uffff])",
+        r"нарис\w*|покаж\w*|отобраз\w*|изобраз\w*|постро\w*|побуд\w*|созда\w*|сдела\w*|визуализир\w*)(?![\w\u0080-\uffff])",
         low,
     ))
     explicit_diagram_intent = bool(re.search(
