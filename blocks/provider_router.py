@@ -2356,6 +2356,64 @@ def _normalize_memory_sections(raw_sections: Any, answer: str) -> list[dict[str,
     return extracted
 
 
+def _has_concrete_image_source(value: Any, key_hint: str = "", depth: int = 0) -> bool:
+    """Return True only when an image/gallery block carries a usable visual source.
+
+    An empty `type=image` shell is not a renderable artifact. Keeping it in the
+    canonical list makes Web mount a blank GalleryBlock before the real image
+    artifact arrives, which can look like a flicker or like an image inside text.
+    """
+    if depth > 7 or value is None:
+        return False
+
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return False
+        lowered = candidate[:512].lower()
+        if (
+            lowered.startswith((
+                "data:image/", "blob:", "https://", "http://", "/api/v1/images/",
+                "/api/images/", "/images/", "/uploads/", "april-cache://",
+                "april_cached_visual://", "feather-asset://",
+            ))
+            or re.search(r"<svg(?:\s|>)", candidate[:1024], re.IGNORECASE)
+            or re.search(r"(?:^|\s)[^\s<>\"']+\.(?:png|jpe?g|webp|gif|avif|svg)(?:[?#]\S*)?$", candidate, re.IGNORECASE)
+        ):
+            return True
+        if key_hint.lower() in {"base64", "image_base64", "imagebase64", "data"} and len(candidate) >= 256:
+            return bool(re.fullmatch(r"[A-Za-z0-9+/=\s]+", candidate))
+        return False
+
+    if isinstance(value, (list, tuple)):
+        return any(_has_concrete_image_source(item, key_hint, depth + 1) for item in value)
+
+    if not isinstance(value, dict):
+        return False
+
+    media_keys = {
+        "src", "url", "image_url", "imageurl", "asset_url", "asseturl",
+        "image_asset_url", "imageasseturl", "uri", "data_uri", "datauri",
+        "image_data_uri", "imagedatauri", "image_base64", "imagebase64",
+        "base64", "svg", "svg_content", "svgcontent", "image", "images",
+        "gallery", "items", "sources", "source", "media", "visual", "visuals",
+        "payload", "data", "artifact", "artifacts", "content",
+        "asset_name", "image_asset_name", "asset_path", "image_asset_path",
+    }
+    for key, child in value.items():
+        normalized_key = str(key).replace("-", "_").lower()
+        if normalized_key not in media_keys:
+            continue
+        if normalized_key in {"asset_name", "image_asset_name", "asset_path", "image_asset_path"}:
+            name = str(child or "").strip()
+            if name and re.search(r"\.(?:png|jpe?g|webp|gif|avif|svg)(?:[?#].*)?$", name, re.IGNORECASE):
+                return True
+            continue
+        if _has_concrete_image_source(child, normalized_key, depth + 1):
+            return True
+    return False
+
+
 def normalize_render_blocks(
     value: Any,
     answer: str,
@@ -2398,6 +2456,17 @@ def normalize_render_blocks(
                 item.setdefault("language", "text")
                 if not _text(item.get("filename")):
                     item["filename"] = "generated-code.txt"
+
+        # Do not mount an image renderer that has no raster/vector/cache source.
+        # A request to generate an image belongs to the artifact pipeline, not to
+        # an empty GalleryBlock; the generator will append the concrete image block.
+        if block_type in {"image", "gallery"} and not _has_concrete_image_source(item):
+            _log_json("EMPTY_IMAGE_RENDER_BLOCK_DROPPED", {
+                "block_type": block_type,
+                "keys": sorted(str(key) for key in item.keys())[:20],
+                "reason": "no_concrete_visual_source",
+            })
+            continue
 
         # Do not pass an empty visible text block to Web.
         if block_type in {"text", "markdown"}:
