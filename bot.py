@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import hashlib
+import hmac
 import base64
 import json
 import os
@@ -20,6 +21,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from blocks.input_reader import parse_json_payload, parse_multipart_payload
 from blocks.voice_reader import transcribe_voice_bytes
@@ -373,6 +375,7 @@ def _handle_payload(
             conversation_id=conversation_id or dialog_id,
             dialog_id=dialog_id,
             message_id=message_id,
+            resume_message_id=_text(data.get("resume_message_id")),
             interpretation_id=_text(data.get("interpretation_id")),
             visual_context=visual_context,
             attachments=attachment_meta,
@@ -535,6 +538,137 @@ def _handle_voice_stream(
     write_event({"type": "answer", "status": status, "data": payload})
 
 
+def _history_json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+    return {}
+
+
+def _history_item(row: dict[str, Any]) -> dict[str, Any]:
+    request_data = _history_json_dict(row.get("structured_request"))
+    response_data = _history_json_dict(row.get("structured_response"))
+    intent = request_data.get("intent") if isinstance(request_data.get("intent"), dict) else {}
+    goal = _text(request_data.get("goal") or intent.get("user_goal") or intent.get("goal"))
+    user_text = _text(row.get("user_text"))
+    created_at = float(row.get("created_at") or 0.0)
+    stable_memory_key = _text(row.get("message_id")) or f"legacy-memory-{_text(row.get('id'))}"
+    return {
+        "id": stable_memory_key,
+        # Legacy rows without a message_id still receive a deterministic lookup
+        # key based on their existing dialogue_memory primary key.
+        "message_id": stable_memory_key,
+        "user_id": _text(row.get("user_id")),
+        "dialog_id": _text(row.get("dialog_id")),
+        "conversation_id": _text(row.get("conversation_id")),
+        "title": (goal or user_text or "Сохранённый диалог").strip()[:140],
+        "user_text": user_text,
+        "april_text": _text(row.get("april_text")),
+        "created_at": created_at,
+        "turn_index": int(row.get("turn_index") or 0),
+        "structured_response": response_data,
+    }
+
+
+def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str, Any]]:
+    """Expose only the authenticated user's canonical 12-hour dialogue memory."""
+    if not user_id:
+        return 400, {"success": False, "error": "USER_ID_REQUIRED"}
+
+    try:
+        rows = get_dialogue_pairs(user_id, refresh=True, limit=0)
+        items = [_history_item(row) for row in rows if isinstance(row, dict)]
+        items.sort(key=lambda item: (item["created_at"], item["turn_index"], item["id"]))
+        # get_dialogue_pairs enforces the same rolling 12-hour policy as the
+        # dialogue engine. Do not query or create a parallel history store here.
+        if not message_id:
+            history = []
+            for item in reversed(items):
+                history.append({key: item[key] for key in (
+                    "id", "message_id", "dialog_id", "conversation_id", "title",
+                    "user_text", "april_text", "created_at", "turn_index"
+                )})
+            return 200, {
+                "success": True,
+                "user_id": user_id,
+                "window_hours": 12,
+                "count": len(history),
+                "history": history,
+                "canonical_route": CANONICAL_CHAT_ROUTE,
+            }
+
+        target_index = next((i for i, item in enumerate(items) if item["message_id"] == message_id), None)
+        if target_index is None:
+            return 404, {"success": False, "error": "HISTORY_ENTRY_NOT_FOUND"}
+        target = items[target_index]
+        target_dialog = target["dialog_id"]
+        target_conversation = target["conversation_id"]
+        target_sort = (target["created_at"], target["turn_index"], target["id"])
+        selected_rows = []
+        for item in items:
+            if (item["created_at"], item["turn_index"], item["id"]) > target_sort:
+                break
+            # Empty legacy IDs are not enough to safely merge unrelated rows.
+            if target_dialog and item["dialog_id"] != target_dialog:
+                continue
+            if target_conversation and item["conversation_id"] != target_conversation:
+                continue
+            if not target_dialog and not target_conversation and item["message_id"] != message_id:
+                continue
+            selected_rows.append(item)
+
+        messages = []
+        for item in selected_rows:
+            timestamp = item["created_at"]
+            stamp_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(timestamp)) if timestamp else ""
+            stamp_time = time.strftime("%H:%M", time.localtime(timestamp)) if timestamp else ""
+            structured_response = item["structured_response"]
+            scene_contract = structured_response.get("scene_contract") if isinstance(structured_response.get("scene_contract"), dict) else {}
+            user_id_value = item["message_id"] or f"memory-{item['turn_index']}"
+            messages.append({
+                "id": f"{user_id_value}:user",
+                "role": "user",
+                "content": item["user_text"],
+                "time": stamp_time,
+                "created_at": stamp_iso,
+                "message_id": item["message_id"],
+                "dialog_id": item["dialog_id"],
+                "conversation_id": item["conversation_id"],
+            })
+            messages.append({
+                "id": f"{user_id_value}:april",
+                "role": "assistant",
+                "content": _text(structured_response.get("answer") or structured_response.get("content") or item["april_text"]),
+                "summary": _text(structured_response.get("summary")),
+                "scene_contract": scene_contract,
+                "render_blocks": structured_response.get("render_blocks") if isinstance(structured_response.get("render_blocks"), list) else [],
+                "time": stamp_time,
+                "created_at": stamp_iso,
+                "message_id": item["message_id"],
+                "dialog_id": item["dialog_id"],
+                "conversation_id": item["conversation_id"],
+            })
+
+        return 200, {
+            "success": True,
+            "user_id": user_id,
+            "window_hours": 12,
+            "target": {key: target[key] for key in (
+                "id", "message_id", "dialog_id", "conversation_id", "title", "created_at"
+            )},
+            "messages": messages,
+            "canonical_route": CANONICAL_CHAT_ROUTE,
+        }
+    except Exception as exc:
+        print(f"[APRIL_HISTORY] READ_ERROR type={type(exc).__name__}", flush=True)
+        return 503, {"success": False, "error": "HISTORY_UNAVAILABLE"}
+
+
 class AprilHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "AprilBotRU/3.0"
@@ -561,7 +695,24 @@ class AprilHandler(BaseHTTPRequestHandler):
         self._send_json(204, {})
 
     def do_GET(self) -> None:
-        self._send_json(200, {"success": True, "service": "april-bot", "canonical_route": CANONICAL_CHAT_ROUTE, "route_version": CANONICAL_ROUTE_VERSION})
+        parsed = urlsplit(self.path)
+        if parsed.path == CANONICAL_CHAT_ROUTE:
+            query = parse_qs(parsed.query, keep_blank_values=False)
+            if query.get("mode", [""])[0] == "history":
+                expected_token = _text(os.getenv("APRIL_HISTORY_API_TOKEN"))
+                received_token = _text(self.headers.get("X-April-History-Token"))
+                if not expected_token or not received_token or not hmac.compare_digest(expected_token, received_token):
+                    self._send_json(403, {"success": False, "error": "HISTORY_ACCESS_DENIED"})
+                    return
+                user_id = _text(query.get("user_id", [""])[0])
+                message_id = _text(query.get("message_id", [""])[0])
+                status, payload = _history_payload(user_id, message_id)
+                self._send_json(status, payload)
+                return
+        if parsed.path == "/" or parsed.path == CANONICAL_CHAT_ROUTE:
+            self._send_json(200, {"success": True, "service": "april-bot", "canonical_route": CANONICAL_CHAT_ROUTE, "route_version": CANONICAL_ROUTE_VERSION})
+            return
+        self._send_json(404, {"success": False, "error": "NOT_FOUND"})
 
     def do_POST(self) -> None:
         # Existing April Web authentication bridge. Keep account identity in the
