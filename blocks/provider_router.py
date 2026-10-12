@@ -72,6 +72,9 @@ Always treat these sections as structured input:
    Never let the top-level DIALOGUE_RELATION override per-step relation. Resolve task dependencies
    in sequence order and preserve step_index order in the answer and render_blocks.
    If one subtask needs clarification, answer the other clear subtasks and ask only about that part.
+   A step marked inherits_current_request_subject=true (compact p=true) inherits only the subject explicitly
+   introduced in CURRENT_REQUEST. Resolve its pronouns against that subject and do not pull prior-history
+   pairs or structured values for the inherited step. A NEW step still does not inherit unrelated history.
 6. C_ARTIFACT_RENDER_PLAN and MCDOWELL_KATEX_PRESENTATION_POLICY
 7. SCENE_CONTRACT / OUTPUT_BUDGET_POLICY
 8. PROTECTED_STRUCTURED_DATA (only selected exact graph/table/math data)
@@ -202,8 +205,8 @@ its concise summary and selected anchor rather than full previous answers. If CL
 exists, honor its original_request and treat CURRENT_REQUEST as a clarification reply, not a replacement
 intent. For status topic_not_found or needs_more_detail, apologize briefly and say no clear match was found in saved history,
 without claiming the topic definitely never came up; don't repeat old options, and ask for a couple of concrete hints. Keep any resolved topic active.
-Use compact section maps to know what was already covered and how to deepen it. Do not repeat answered sections verbatim. If PROTECTED_STRUCTURED_DATA is present, preserve only its selected source values exactly; compress ordinary explanation and history as usual. On NEW, answer independently. For each REQUEST_SEQUENCE item, prefer its own dialogue_search relation/context (or compact r/c fields) over the top-level relation. A NEW item must not inherit another item's context. If one item needs clarification, answer all clear items and ask only about the unresolved item. Use topic history only when
-HISTORY_REQUEST=true. For HISTORY_REQUEST=true with a named subject/task, use matching DIALOGUE_TOPIC_INDEX, DIALOGUE_HISTORY_TOPICS, and CONTINUATION_CONTEXT as factual evidence even though the relation can remain NEW. Ask for hints only if no matching stored entry/pair is supplied. Enumerate a topic list only when the user asks for a general history overview. For multi-section
+Use compact section maps to know what was already covered and how to deepen it. Do not repeat answered sections verbatim. If PROTECTED_STRUCTURED_DATA is present, preserve only its selected source values exactly; compress ordinary explanation and history as usual. On NEW, answer independently. For each REQUEST_SEQUENCE item, prefer its own dialogue_search relation/context (or compact r/c fields) over the top-level relation. A NEW item must not inherit another item's prior-history context. When compact flag p=true, inherit only the explicit subject from CURRENT_REQUEST and do not import prior records or structured values for that item. If one item needs clarification, answer all clear items and ask only about the unresolved item. Use topic history only when
+HISTORY_REQUEST=true. For HISTORY_REQUEST=true with a named subject/task, use matching DIALOGUE_TOPIC_INDEX, DIALOGUE_HISTORY_TOPICS, and CONTINUATION_CONTEXT as factual evidence even though the relation can remain NEW. Ask for hints only if no matching stored entry/pair is supplied. Enumerate a topic list only when the user asks for a general history overview. For REQUEST_SEQUENCE items marked p=true, resolve pronouns from the explicit subject in CURRENT_REQUEST, without importing prior-history context. For multi-section
 explanations, use user-visible Markdown headings and put the same ordered heading/summary map in
 dialogue_memory_record.sections.
 Analyze each supplied image/screenshot from pixels and each supplied file from actual content. Keep
@@ -1292,6 +1295,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "q": _semantic_compress(item.get("request"), max(8, share)),
                 "o": outputs,
                 "r": task_search.get("relation", "NEW"),
+                "p": bool(item.get("inherits_current_request_subject")),
                 "c": search_min,
             })
         identity_min = {k: v for k, v in (data.get("AUTHENTICATED_IDENTITY") or {}).items() if v}
@@ -1492,6 +1496,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     "q": _semantic_compress(item.get("request"), tiny_topic_budget),
                     "o": (item.get("output_types") or ["text"])[0] if isinstance(item.get("output_types") or ["text"], list) and len(item.get("output_types") or ["text"]) == 1 else (item.get("output_types") or ["text"]),
                     "r": ((item.get("dialogue_search") or {}).get("relation", "NEW") if isinstance(item.get("dialogue_search"), dict) else "NEW"),
+                    "p": bool(item.get("inherits_current_request_subject")),
                     "c": {
                         "relation": ((item.get("dialogue_search") or {}).get("relation", "NEW") if isinstance(item.get("dialogue_search"), dict) else "NEW"),
                         "topic": _semantic_compress(((item.get("dialogue_search") or {}).get("topic", "") if isinstance(item.get("dialogue_search"), dict) else ""), max(4, tiny_topic_budget)),
