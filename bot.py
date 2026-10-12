@@ -25,7 +25,13 @@ from urllib.parse import parse_qs, urlsplit
 from blocks.input_reader import parse_json_payload, parse_multipart_payload
 from blocks.voice_reader import transcribe_voice_bytes
 from core.executor import execute
-from blocks.state_manager import get_dialogue_pairs
+from blocks.state_manager import (
+    get_dialogue_pairs,
+    _topic_label,
+    _row_subject_tokens,
+    _subject_overlap,
+    _topic_query_overlap,
+)
 from storage import find_or_create_user, init_db, is_authenticated_user
 
 HOST = os.getenv("HOST", "0.0.0.0")
@@ -583,8 +589,12 @@ def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str,
 
     try:
         rows = get_dialogue_pairs(user_id, refresh=True, limit=0)
-        items = [_history_item(row) for row in rows if isinstance(row, dict)]
-        items.sort(key=lambda item: (item["created_at"], item["turn_index"], item["id"]))
+        records = [(_history_item(row), row) for row in rows if isinstance(row, dict)]
+        records.sort(key=lambda pair: (
+            pair[0]["created_at"], pair[0]["turn_index"], pair[0]["id"]
+        ))
+        items = [item for item, _row in records]
+        source_by_id = {item["message_id"]: row for item, row in records}
         # get_dialogue_pairs enforces the same rolling 12-hour policy as the
         # dialogue engine. Do not query or create a parallel history store here.
         if not message_id:
@@ -607,21 +617,42 @@ def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str,
         if target_index is None:
             return 404, {"success": False, "error": "HISTORY_ENTRY_NOT_FOUND"}
         target = items[target_index]
-        target_dialog = target["dialog_id"]
-        target_conversation = target["conversation_id"]
-        target_sort = (target["created_at"], target["turn_index"], target["id"])
-        selected_rows = []
-        for item in items:
-            if (item["created_at"], item["turn_index"], item["id"]) > target_sort:
-                break
-            # Empty legacy IDs are not enough to safely merge unrelated rows.
-            if target_dialog and item["dialog_id"] != target_dialog:
+        target_row = source_by_id.get(message_id, {})
+        target_topic = _topic_label(target_row) if target_row else (target.get("title") or target.get("user_text") or "")
+        target_subjects = _row_subject_tokens(target_row) if target_row else set()
+
+        # A dialog_id can span the full 12-hour session; using it as a restore
+        # boundary was the source of the 158-message payload. Restore the selected
+        # topic vector instead: target + at most three strongly related prior pairs.
+        vector_candidates = []
+        for index, item in enumerate(items[:target_index]):
+            candidate_row = source_by_id.get(item["message_id"], {})
+            if not candidate_row:
                 continue
-            if target_conversation and item["conversation_id"] != target_conversation:
-                continue
-            if not target_dialog and not target_conversation and item["message_id"] != message_id:
-                continue
-            selected_rows.append(item)
+            candidate_topic = _topic_label(candidate_row)
+            topic_score = _topic_query_overlap(target_topic, candidate_topic)
+            subject_score = _subject_overlap(target_subjects, _row_subject_tokens(candidate_row))
+            score = max(topic_score, subject_score * 0.85)
+            if topic_score >= 0.35 or subject_score >= 0.30:
+                vector_candidates.append((score, index, item))
+
+        vector_candidates.sort(key=lambda value: (value[0], value[2]["created_at"], value[2]["turn_index"]), reverse=True)
+        selected_ids = {target["message_id"]}
+        selected_ids.update(item["message_id"] for _score, _index, item in vector_candidates[:3])
+        selected_rows = [item for item in items[:target_index + 1] if item["message_id"] in selected_ids]
+        # No reliable topic vector? Continue from the clicked pair alone. Never
+        # inflate it into every saved row sharing the broad session identifier.
+        if not selected_rows:
+            selected_rows = [target]
+
+        _apr_timing_log(
+            "history_restore_context",
+            user_key=_apr_diag_ref(user_id),
+            target_key=_apr_diag_ref(message_id),
+            method="topic_vector" if len(selected_rows) > 1 else "selected_pair_anchor",
+            selected_pairs=len(selected_rows),
+            window_pairs=len(items),
+        )
 
         messages = []
         for item in selected_rows:
