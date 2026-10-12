@@ -27,7 +27,7 @@ from blocks.input_reader import parse_json_payload, parse_multipart_payload
 from blocks.voice_reader import transcribe_voice_bytes
 from core.executor import execute
 from blocks.state_manager import get_dialogue_pairs
-from storage import find_or_create_user, init_db
+from storage import find_or_create_user, init_db, is_authenticated_user
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "10000"))
@@ -579,6 +579,8 @@ def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str,
     """Expose only the authenticated user's canonical 12-hour dialogue memory."""
     if not user_id:
         return 400, {"success": False, "error": "USER_ID_REQUIRED"}
+    if not is_authenticated_user(user_id):
+        return 401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
 
     try:
         rows = get_dialogue_pairs(user_id, refresh=True, limit=0)
@@ -699,14 +701,24 @@ class AprilHandler(BaseHTTPRequestHandler):
         if parsed.path == CANONICAL_CHAT_ROUTE:
             query = parse_qs(parsed.query, keep_blank_values=False)
             if query.get("mode", [""])[0] == "history":
-                expected_token = _text(os.getenv("APRIL_HISTORY_API_TOKEN"))
+                # Vercel derives this purpose-specific credential from the
+                # existing NEXTAUTH_SECRET. It must be configured in both
+                # services; no separate history token or client-side secret exists.
+                next_auth_secret = _text(os.getenv("NEXTAUTH_SECRET"))
+                expected_token = (
+                    hmac.new(next_auth_secret.encode("utf-8"), b"april-history-proxy-v1", hashlib.sha256).hexdigest()
+                    if next_auth_secret else ""
+                )
                 received_token = _text(self.headers.get("X-April-History-Token"))
                 if not expected_token or not received_token or not hmac.compare_digest(expected_token, received_token):
                     self._send_json(403, {"success": False, "error": "HISTORY_ACCESS_DENIED"})
                     return
-                user_id = _text(query.get("user_id", [""])[0])
-                message_id = _text(query.get("message_id", [""])[0])
+                user_id = _text(self.headers.get("X-April-User-Id"))
+                message_id = _text(self.headers.get("X-April-Message-Id"))
+                _apr_timing_log("history_request", user_key=_apr_diag_ref(user_id), has_message_id=bool(message_id))
                 status, payload = _history_payload(user_id, message_id)
+                _apr_timing_log("history_response", user_key=_apr_diag_ref(user_id), status=status,
+                                count=int(payload.get("count") or 0), message_count=len(payload.get("messages") or []))
                 self._send_json(status, payload)
                 return
         if parsed.path == "/" or parsed.path == CANONICAL_CHAT_ROUTE:
