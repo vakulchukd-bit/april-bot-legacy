@@ -224,6 +224,42 @@ def _detect_requested_outputs(text: str) -> list[str]:
     if _detect_image_modification(low) and "image" not in result:
         result.append("image")
 
+    # Natural-language renderer lists are frequently spoken as nouns rather than
+    # command phrases (for example: "картинки, ссылки, визуализация, рендеры
+    # всех опытов"). Treat that combined list as an output request, but do not
+    # trigger image generation for a bare mention of a picture in isolation.
+    has_visual_bundle_context = bool(re.search(
+        r"(?:визуализац\w*|рендер\w*|покаж\w*|изобраз\w*|нарис\w*|"
+        r"create|show|visuali[sz]\w*|render\w*)",
+        low,
+    ))
+    has_picture_noun = bool(re.search(
+        r"(?:картинк\w*|изображен\w*|иллюстрац\w*|\bpictures?\b|\bimages?\b|\billustrations?\b)",
+        low,
+    ))
+    if has_visual_bundle_context and has_picture_noun and "image" not in result:
+        result.append("image")
+
+    # Explicit requests for source links commonly occur as "ссылки на его
+    # открытия" or "links to the discoveries" rather than "дай ссылку".
+    if re.search(r"(?:ссылк\w*|\blinks?\b|\bsources?\b)", low) and re.search(
+        r"(?:\bна\s+\w+|\bto\s+\w+|\bof\s+\w+|открыт\w*|источник\w*|source)",
+        low,
+    ) and "link" not in result:
+        result.append("link")
+
+    # A renderer/experiment phrase is a structured visual request, even when
+    # speech recognition omitted an imperative such as "визуализируй".
+    if re.search(
+        r"(?:рендер\w*\s+(?:всех|кажд\w*)\s+(?:опыт\w*|эксперимент\w*)|"
+        r"(?:всех|все)\s+(?:опыт\w*|эксперимент\w*)\s+.{0,40}рендер\w*|"
+        r"визуализац\w*.{0,50}рендер\w*|рендер\w*.{0,50}визуализац\w*)",
+        low,
+    ):
+        for output in ("diagram", "graph"):
+            if output not in result:
+                result.append(output)
+
     # Common compound requests say "build a table and graph" only once. Recognize
     # the chart noun together with an explicit construction/visualization verb.
     has_graph_noun = bool(re.search(
@@ -310,6 +346,8 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         r"(?:во\s+всех\s+рендер(?:ах|ерах)|всеми\s+рендер(?:ами|ерами)|"
         r"по\s+всем\s+рендер(?:ам|ерам)|все\s+(?:доступные\s+)?рендер(?:ы|а)|"
         r"все\s+виды\s+(?:визуализац\w*|отображен\w*)|"
+        r"рендер\w*\s+(?:всех|кажд\w*)\s+(?:опыт\w*|эксперимент\w*)|"
+        r"(?:визуализац\w*.{0,50}рендер\w*|рендер\w*.{0,50}визуализац\w*)|"
         r"\ball\s+(?:available\s+)?renderers\b|\bin\s+every\s+renderer\b|"
         r"\buse\s+all\s+renderers\b|\ball\s+rendering\s+formats\b)",
         low,
@@ -943,9 +981,22 @@ _TASK_OR_QUESTION_START = _TASK_CONNECTORS + r"(?:" + _TASK_START_WORDS + r"|ч�
 
 
 def _split_explicit_tasks(text: str) -> list[str]:
-    """Split a text span at clear task-start boundaries while preserving its words."""
+    """Split at clear task starts, binding trailing adverb + verb phrases together."""
     source = _LEADING_TASK_CONNECTOR.sub("", str(text or "").strip(), count=1)
-    return [piece.strip() for piece in _TASK_START_PATTERN.split(source) if piece.strip()]
+    pieces = [piece.strip() for piece in _TASK_START_PATTERN.split(source) if piece.strip()]
+    merged: list[str] = []
+    index = 0
+    detail_tail = re.compile(r"(?:подробн\w*|поподробн\w*|детальн\w*|в\s+деталях)[,\s.!?—–-]*$", re.IGNORECASE)
+    trailing_verb = re.compile(r"^(?:расскажи(?:те)?|объясни(?:те)?|поясни(?:те)?|рассказать|explain|describe)[.!?]*$", re.IGNORECASE)
+    while index < len(pieces):
+        current = pieces[index]
+        if index + 1 < len(pieces) and detail_tail.search(current) and trailing_verb.fullmatch(pieces[index + 1]):
+            merged.append(f"{current.rstrip()} {pieces[index + 1].strip()}")
+            index += 2
+            continue
+        merged.append(current)
+        index += 1
+    return merged
 
 
 def _split_request_sequence(text: str) -> list[str]:
@@ -967,6 +1018,14 @@ def _split_request_sequence(text: str) -> list[str]:
         "",
         source,
         count=1,
+        flags=re.IGNORECASE,
+    )
+    # Spoken emphasis at the very end is not a separate subtask; keep the full
+    # request while preventing "Всё-всё-всё" from receiving its own memory search.
+    source = re.sub(
+        r"\s+(?:все|всё)(?:[-\s]+(?:все|всё)){1,5}[.!?？,;:—–-]*\s*$",
+        "",
+        source,
         flags=re.IGNORECASE,
     )
 
@@ -1032,6 +1091,12 @@ def _split_request_sequence(text: str) -> list[str]:
     # Never collapse repeated steps: repetition can be intentional, and the output
     # sequence must stay one-to-one with the user's requested order.
     cleaned = [re.sub(r"\s+", " ", part).strip() for part in parts if part.strip()]
+    filler_only = re.compile(
+        r"^(?:все|всё)(?:[-\s]+(?:все|всё)){1,5}[.!?？,;:—–-]*$|"
+        r"^(?:подробнее|поподробнее|все подробности|that's all)[.!?？,;:—–-]*$",
+        flags=re.IGNORECASE,
+    )
+    cleaned = [part for part in cleaned if not filler_only.fullmatch(part)]
 
     # The action-oriented splitter can cut just before a verb and leave the
     # step label alone, e.g. "Третье," + "визуализируй...". Bind that label to
@@ -1437,7 +1502,8 @@ def build_interpretation(
                 "Always preserve a concise explanatory text answer.",
                 "Use a structured table for a clear comparison when the answer has comparable attributes.",
                 "Use a diagram for workflows/architecture/sequences and for simple requested shapes or objects when intent.wants_diagram=true. Emit a concrete payload.svg, drawing elements, geometry, or nodes/edges; do not only describe the intended drawing.",
-                "Use a formula renderer for mathematical notation; use a graph only when a function or grounded numeric data can define it.",
+                "Use a formula renderer for mathematical notation; use a numeric graph only when a function or grounded numeric data can define it.",
+                "For explanatory requests that explicitly ask for broad/all renderers, a graph may be a grounded concept network (representation=network, nodes and edges) built only from relationships stated in the answer; never invent numeric measurements.",
                 "For graph requests, follow intent.graph_policy: trends/time-ordered values use line; categorical comparisons use bar; choose only among those 2D types unless explicit 3D intent or real 3D source data supports 3D.",
                 "Never turn 2D x/y data into a 3D chart by inventing a zero z-axis; true 3D requires explicit XYZ values, a real surface grid/function of x and y, or structured spatial objects.",
                 "Use code, link, file, image, and gallery renderers only when the response contains matching valid payloads and the request/context supports them.",
