@@ -2001,6 +2001,7 @@ def search_dialogue_context(
     *,
     dialog_id: str = "",
     conversation_id: str = "",
+    resume_message_id: str = "",
     limit: int = 12,
     has_image: bool = False,
     has_file: bool = False,
@@ -2017,6 +2018,11 @@ def search_dialogue_context(
     uid = _uid(user_id)
     state = hydrate(uid)
     all_rows = [row for row in (state.get("dialogue_pairs") or []) if isinstance(row, dict) and not _is_failed_provider_row(row)]
+    resume_key = _text(resume_message_id)
+    resume_anchor_row = next((row for row in all_rows if (
+        _text(row.get("message_id")) == resume_key
+        or (resume_key.startswith("legacy-memory-") and resume_key == f"legacy-memory-{_text(row.get('id'))}")
+    )), None) if resume_key else None
     reference_followup = _looks_like_referential_followup(query)
     query_interpretation = dict(query_interpretation or {})
     history_request = bool(query_interpretation.get("history_request")) or _is_history_request(query)
@@ -2032,6 +2038,8 @@ def search_dialogue_context(
         query_key=_apr_diag_ref(query),
         history_request=history_request,
         semantic_intent=interpreted_intent,
+        resume_anchor_requested=bool(resume_key),
+        resume_anchor_found=bool(resume_anchor_row),
         search_direction=interpreted_direction,
         time_scope=_text(query_interpretation.get("time_scope")),
         search_scope=_text(query_interpretation.get("search_scope")),
@@ -2534,6 +2542,30 @@ def search_dialogue_context(
                 prompt_text = _clarification_prompt(section_query, clarification_options, language if language in {"ru", "uk", "en"} else "ru")
                 pending_for_next_turn["prompt"] = prompt_text
 
+    if resume_anchor_row:
+        # The History selection is explicit, so it outranks inference for this
+        # one request. Keep every row in all_rows available for normal history
+        # search, but give Provider the exact clicked pair as its continuation anchor.
+        anchor = _candidate_score(
+            query,
+            resume_anchor_row,
+            dialog_id=str(dialog_id or resume_anchor_row.get("dialog_id") or ""),
+            reference_followup=True,
+            query_modalities=query_modalities,
+        )
+        relation = "CONTINUE"
+        active_topic = _text(anchor.get("topic")) or _topic_label(resume_anchor_row) or active_topic
+        selected_for_context = [_compact_pair(anchor)]
+        selected_section = {}
+        section_anchor_overridden = True
+        clarification_needed = False
+        clarification_options = []
+        pending_for_next_turn = {}
+        clarification_resolution = {}
+        # Keep the chosen pair first in the candidate list while leaving the
+        # remaining 12-hour candidates available for broader memory retrieval.
+        matches = [anchor] + [item for item in matches if _text(item.get("message_id")) != _text(anchor.get("message_id"))]
+
     if section_anchor_overridden and anchor:
         active_topic = _text(anchor.get("topic")) or active_topic
         selected_for_context = [_compact_pair(anchor)]
@@ -2557,7 +2589,8 @@ def search_dialogue_context(
         "candidate_count": len(matches),
         "relation": relation,
         "reason": (
-            "clarification_resolved" if clarification_resolution and _text(clarification_resolution.get("status")).startswith("resolved")
+            "explicit_history_resume" if resume_anchor_row
+            else "clarification_resolved" if clarification_resolution and _text(clarification_resolution.get("status")).startswith("resolved")
             else "clarification_researched" if clarification_resolution
             else "clarification_pending" if clarification_needed
             else "history_request" if history_request
@@ -2566,7 +2599,7 @@ def search_dialogue_context(
             else "new_request" if relation == "NEW"
             else "semantic_memory_match"
         ),
-        "relation_confidence": round(float((anchor or best or {}).get("score") or (0.60 if relation == "CONTINUE" else 0.0)), 6),
+        "relation_confidence": 1.0 if resume_anchor_row else round(float((anchor or best or {}).get("score") or (0.60 if relation == "CONTINUE" else 0.0)), 6),
         "continuation_marker": marker,
         "referential_followup": reference_followup,
         "history_request": history_request,
@@ -2597,6 +2630,7 @@ def search_dialogue_context(
         clarification_status=_text(clarification_resolution.get("status")),
         selected_message_keys=[_apr_diag_ref(x.get("message_id")) for x in selected_for_context if isinstance(x, dict) and x.get("message_id")],
         anchor_message_key=_apr_diag_ref((result.get("anchor") or {}).get("message_id") if isinstance(result.get("anchor"), dict) else ""),
+        resume_anchor_requested=bool(resume_key), resume_anchor_found=bool(resume_anchor_row),
         query_subject_terms=sorted(query_subjects)[:10], active_subject_conflict=bool(active_subject_conflict),
         semantic_subject_switch=bool(semantic_subject_switch),
         top_candidate_alignment=[{
@@ -2614,6 +2648,7 @@ def prepare_dialogue_context(
     *,
     dialog_id: str = "",
     conversation_id: str = "",
+    resume_message_id: str = "",
     limit: int = 12,
     has_image: bool = False,
     has_file: bool = False,
@@ -2627,6 +2662,7 @@ def prepare_dialogue_context(
         query,
         dialog_id=dialog_id,
         conversation_id=conversation_id,
+        resume_message_id=resume_message_id,
         limit=limit,
         has_image=has_image,
         has_file=has_file,
