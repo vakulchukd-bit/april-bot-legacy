@@ -2627,47 +2627,218 @@ def _is_redundant_schematic_paragraph(paragraph: str) -> bool:
         return False
     return bool(re.search(r"(?:→|➜|->|-->|\bзатем\b|\bпосле\s+него\b|\bчерез\b)", text, re.IGNORECASE))
 
-def _strip_rendered_segments(text: str, rendered_types: set[str]) -> str:
-    """Keep the narrative concise when exact structures are displayed separately."""
+def _rendered_link_urls(render_blocks: Any) -> set[str]:
+    """Return URLs which are definitely represented by a visible link renderer."""
+    urls: set[str] = set()
+    if not isinstance(render_blocks, list):
+        return urls
+
+    for block in render_blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = _scene_block_type(block)
+        if block_type not in {"link", "file"}:
+            continue
+        payload = _payload_for_render_block(block, block_type)
+        candidates: List[Any] = [payload.get("url"), payload.get("href"), block.get("url"), block.get("href")]
+        for key in ("links", "items", "sources"):
+            values = payload.get(key)
+            if isinstance(values, list):
+                for item in values:
+                    if isinstance(item, dict):
+                        candidates.extend((item.get("url"), item.get("href")))
+                    elif isinstance(item, str):
+                        candidates.append(item)
+        for candidate in candidates:
+            value = str(candidate or "").strip().rstrip(".,;:!?)\"'}]")
+            if value.startswith(("http://", "https://")):
+                urls.add(value)
+                urls.add(value.rstrip("/"))
+    return urls
+
+
+def _strip_rendered_link_urls(text: str, render_blocks: Any) -> str:
+    """Remove only URL strings already carried by a visible link renderer.
+
+    Human-readable labels and surrounding explanation are retained. Inline and
+    fenced code are protected because URLs inside code are source content, not
+    prose citations.
+    """
+    rendered_urls = _rendered_link_urls(render_blocks)
+    if not rendered_urls or not text:
+        return text
+
+    def is_rendered_url(raw: str) -> bool:
+        value = str(raw or "").strip().rstrip(".,;:!?)\"'}]")
+        return value in rendered_urls or value.rstrip("/") in rendered_urls
+
+    # Split off code first, and only process the non-code segments.
+    segments = re.split(r"(```[\s\S]*?```|`[^`\n]*`)", str(text))
+    for index in range(0, len(segments), 2):
+        prose = segments[index]
+
+        def markdown_link(match: re.Match[str]) -> str:
+            label, url = match.group(1), match.group(2)
+            if not is_rendered_url(url):
+                return match.group(0)
+            label = label.strip()
+            return "" if is_rendered_url(label) else label
+
+        prose = re.sub(r"\[([^\]]{1,300})\]\((https?://[^\s)]+)\)", markdown_link, prose, flags=re.IGNORECASE)
+
+        def bare_url(match: re.Match[str]) -> str:
+            raw = match.group(0)
+            return "" if is_rendered_url(raw) else raw
+
+        prose = re.sub(r"https?://[^\s<>\]\[()]+", bare_url, prose, flags=re.IGNORECASE)
+        # Remove list markers left with no content; preserve list items whose
+        # labels/descriptions remain after the URL itself is moved to the card.
+        prose_lines = []
+        for line in prose.splitlines():
+            if re.fullmatch(r"\s*(?:[-*•]|\d+[.)])\s*", line):
+                continue
+            prose_lines.append(line)
+        segments[index] = "\n".join(prose_lines)
+
+    cleaned = "".join(segments)
+    cleaned = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _strip_rendered_segments(
+    text: str,
+    rendered_types: set[str],
+    render_blocks: Any = None,
+) -> str:
+    """Keep narrative text while moving already-rendered structures to typed blocks.
+
+    A fragment is removed only when a concrete matching renderer exists. This
+    prevents the renderer path from deleting unrelated explanation or examples.
+    """
     cleaned = str(text or "")
     if not cleaned or not rendered_types:
         return cleaned.strip()
+
     if "table" in rendered_types:
-        table = _markdown_table_payload(cleaned)
-        cleaned = _strip_first_markdown_table(cleaned, table)
+        # Match Markdown data to an actual TableBlock payload before removing it.
+        # The source-derived fallback is retained for legacy payloads that expose
+        # a table type but omit its normalized columns/rows.
+        expected_tables: List[Dict[str, Any]] = []
+        if isinstance(render_blocks, list):
+            for block in render_blocks:
+                if not isinstance(block, dict) or _scene_block_type(block) != "table":
+                    continue
+                payload = _payload_for_render_block(block, "table")
+                columns = payload.get("columns") or payload.get("headers")
+                rows = payload.get("rows") or payload.get("data")
+                if isinstance(columns, list) and columns and isinstance(rows, list) and rows:
+                    normalized_rows = []
+                    for row in rows:
+                        if isinstance(row, (list, tuple)):
+                            normalized_rows.append([str(value).strip() for value in row])
+                    if normalized_rows:
+                        expected_tables.append({
+                            "columns": [str(value).strip() for value in columns],
+                            "headers": [str(value).strip() for value in columns],
+                            "rows": normalized_rows,
+                        })
+        if not expected_tables:
+            source_table = _markdown_table_payload(cleaned)
+            if source_table:
+                expected_tables = [source_table]
+        for table in expected_tables:
+            updated = _strip_first_markdown_table(cleaned, table)
+            if updated != cleaned:
+                cleaned = updated
+
     if "diagram" in rendered_types:
         match = re.search(r"```\s*mermaid\s*\n([\s\S]*?)\n```", cleaned, re.IGNORECASE)
         if match and _mermaid_payload(match.group(1).strip()):
-            cleaned = cleaned.replace(match.group(0), "", 1)
+            # Only remove the Mermaid source when a concrete DiagramRenderer is
+            # present in this scene; its explanatory prose remains untouched.
+            if not isinstance(render_blocks, list) or any(
+                isinstance(block, dict) and _scene_block_type(block) == "diagram"
+                and _has_render_payload("diagram", _payload_for_render_block(block, "diagram"), block)
+                for block in render_blocks
+            ):
+                cleaned = cleaned.replace(match.group(0), "", 1)
         else:
-            # If the ASCII wiring sketch has been promoted to a proper DiagramRenderer
-            # block, its fenced text copy must not remain in the narrative/code card.
             schematic_payload = _electrical_schematic_payload(cleaned)
-            if schematic_payload:
+            if schematic_payload and (not isinstance(render_blocks, list) or any(
+                isinstance(block, dict) and _scene_block_type(block) == "diagram"
+                and _has_render_payload("diagram", _payload_for_render_block(block, "diagram"), block)
+                for block in render_blocks
+            )):
                 sketch = re.search(r"```(?:text|plain|plaintext)?\s*\n([\s\S]*?)\n```", cleaned, re.IGNORECASE)
                 if sketch:
                     cleaned = cleaned.replace(sketch.group(0), "", 1)
                 paragraphs = re.split(r"\n\s*\n", cleaned)
                 paragraphs = [paragraph for paragraph in paragraphs if not _is_redundant_schematic_paragraph(paragraph)]
                 cleaned = "\n\n".join(paragraphs)
+
     if "graph" in rendered_types:
-        # A line chart's ASCII bars/axis labels are not source code once its values
-        # have been promoted to a typed GraphBlock. Keep the surrounding explanation.
-        for chart in list(re.finditer(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", cleaned)):
-            if _is_ascii_line_chart_fence(chart.group(2)):
-                cleaned = cleaned.replace(chart.group(0), "", 1)
-                break
+        # Only remove an ASCII chart when the graph renderer was built from this
+        # exact chart source; otherwise keep the source text rather than risk loss.
+        graph_from_same_answer = False
+        if isinstance(render_blocks, list):
+            for block in render_blocks:
+                if not isinstance(block, dict) or _scene_block_type(block) != "graph":
+                    continue
+                payload = _payload_for_render_block(block, "graph")
+                if str(payload.get("source") or "") == "same_turn_ascii_chart_values":
+                    graph_from_same_answer = True
+                    break
+        if graph_from_same_answer:
+            for chart in list(re.finditer(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", cleaned)):
+                if _is_ascii_line_chart_fence(chart.group(2)):
+                    cleaned = cleaned.replace(chart.group(0), "", 1)
+                    break
+
     if "code" in rendered_types:
-        match = re.search(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", cleaned)
-        if match and match.group(1).strip().lower() not in {"mermaid", "diagram"}:
-            cleaned = cleaned.replace(match.group(0), "", 1)
+        rendered_code: List[str] = []
+        if isinstance(render_blocks, list):
+            for block in render_blocks:
+                if not isinstance(block, dict) or _scene_block_type(block) != "code":
+                    continue
+                payload = _payload_for_render_block(block, "code")
+                value = payload.get("code") or payload.get("content") or block.get("code")
+                if isinstance(value, str) and value.strip():
+                    rendered_code.append(value.strip().replace("\r\n", "\n"))
+        for match in list(re.finditer(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", cleaned)):
+            if match.group(1).strip().lower() in {"mermaid", "diagram"}:
+                continue
+            fence_content = match.group(2).strip().replace("\r\n", "\n")
+            if rendered_code and fence_content in rendered_code:
+                cleaned = cleaned.replace(match.group(0), "", 1)
+
     if "formula" in rendered_types:
-        match = re.search(r"\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)", cleaned)
-        if match:
-            cleaned = cleaned.replace(match.group(0), "", 1)
+        rendered_formulas: set[str] = set()
+        if isinstance(render_blocks, list):
+            for block in render_blocks:
+                if not isinstance(block, dict) or _scene_block_type(block) != "formula":
+                    continue
+                payload = _payload_for_render_block(block, "formula")
+                values = payload.get("formulas") or payload.get("latex_formulas")
+                if isinstance(values, list):
+                    for value in values:
+                        formula = value.get("latex") if isinstance(value, dict) else value
+                        if isinstance(formula, str) and formula.strip():
+                            rendered_formulas.add(formula.strip())
+                for key in ("formula", "latex", "equation", "expression"):
+                    value = payload.get(key)
+                    if isinstance(value, str) and value.strip():
+                        rendered_formulas.add(value.strip())
+        formula_pattern = re.compile(r"\\\[([\s\S]*?)\\\]|\\\(([\s\S]*?)\\\)")
+        for match in list(formula_pattern.finditer(cleaned)):
+            formula = (match.group(1) or match.group(2) or "").strip()
+            if rendered_formulas and formula in rendered_formulas:
+                cleaned = cleaned.replace(match.group(0), "", 1)
+
+    if "link" in rendered_types:
+        cleaned = _strip_rendered_link_urls(cleaned, render_blocks)
+
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
-
 
 def _number_for_render(value: Any) -> Optional[float]:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -3341,7 +3512,7 @@ def prepare_render_blocks_for_room_dispatch(
             if not isinstance(item, dict) or str(item.get("type") or "").lower() not in {"text", "markdown"}:
                 continue
             original_text = str(item.get("content") or item.get("text") or "")
-            cleaned_text = _strip_rendered_segments(original_text, rendered_types)
+            cleaned_text = _strip_rendered_segments(original_text, rendered_types, result)
             if original_text.strip() and not cleaned_text.strip():
                 # Do not produce an empty text bubble if the entire source answer
                 # was a table/code/diagram; the structured renderer now owns it.
@@ -3356,11 +3527,16 @@ def prepare_render_blocks_for_room_dispatch(
                     cleaned_text = "Формула представлена отдельным блоком." if cyrillic else "The formula is shown in a separate block."
             item["content"] = cleaned_text
             item["text"] = cleaned_text
+            payload = item.get("payload")
+            if isinstance(payload, dict):
+                for key in ("content", "text", "markdown", "display_text"):
+                    if isinstance(payload.get(key), str):
+                        payload[key] = cleaned_text
 
     # Preserve a substantial narrative alongside visual artifacts. The current
     # full answer is the source of truth; the 60% threshold protects against a
     # renderer-cleanup pass accidentally replacing prose with a one-line caption.
-    canonical_text = _strip_rendered_segments(source_answer, rendered_types).strip()
+    canonical_text = _strip_rendered_segments(source_answer, rendered_types, result).strip()
     text_indices = [
         index for index, item in enumerate(result)
         if isinstance(item, dict) and str(item.get("type") or "").lower() in {"text", "markdown", "message", "message_text"}
@@ -3490,7 +3666,52 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
         graph_policy=active_task.get("graph_policy"),
     )
     visible_types = {str(item.get("type") or "").lower() for item in blocks if isinstance(item, dict)}
-    answer = _strip_rendered_segments(answer, visible_types)
+    source_answer = answer
+    answer = _strip_rendered_segments(answer, visible_types, blocks)
+
+    # Critical integrity step: the old code cleaned the local `answer` string,
+    # but left the original full answer inside the existing MessageTextBlock.
+    # RenderMessage consumes render_blocks, so the table/code/URL stayed in the
+    # text block and then appeared again in its dedicated renderer. Write the
+    # cleaned narrative back into the visible text block(s), updating every text
+    # alias together so a legacy `text`/`markdown` field cannot reintroduce it.
+    text_keys = ("content", "text", "markdown", "display_text")
+    for block in blocks:
+        if not isinstance(block, dict) or _scene_block_type(block) not in {"text", "markdown", "message", "message_text"}:
+            continue
+        block_source_text = _scene_text(block)
+        if not block_source_text:
+            continue
+        if block_source_text.strip() == source_answer.strip():
+            cleaned_text = answer
+        else:
+            # A shorter text section may contain a renderable fragment too. Clean
+            # only exact structures which have a corresponding concrete renderer.
+            cleaned_text = _strip_rendered_segments(block_source_text, visible_types, blocks)
+        present_text_keys = [key for key in text_keys if isinstance(block.get(key), str)]
+        for key in (present_text_keys or ["content"]):
+            block[key] = cleaned_text
+        # `prepare_render_blocks_for_room_dispatch()` also hydrates text into the
+        # block's payload. Keep that canonical payload synchronized with the
+        # visible fields; otherwise a viewer reading payload.content could still
+        # receive the old Markdown table/code/URLs after the top-level text was
+        # cleaned.
+        payload = block.get("payload")
+        if isinstance(payload, dict):
+            payload_text_keys = [key for key in text_keys if isinstance(payload.get(key), str)]
+            for key in payload_text_keys:
+                payload[key] = cleaned_text
+
+    # Empty text shells must not mount in Web. The structured renderer remains;
+    # useful prose is preserved in `answer` and restored below when necessary.
+    blocks = [
+        block for block in blocks
+        if isinstance(block, dict)
+        and (
+            _scene_block_type(block) not in {"text", "markdown", "message", "message_text"}
+            or bool(_scene_text(block))
+        )
+    ]
     if answer and not any(_scene_block_type(b) in {"text", "markdown", "formula"} and _scene_text(b) for b in blocks if isinstance(b, dict)):
         blocks.insert(0, {
             "type": "text",
