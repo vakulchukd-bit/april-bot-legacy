@@ -117,9 +117,12 @@ def _compact_question_search(
     def compact_pair(item: Any) -> dict[str, Any]:
         if not isinstance(item, dict):
             return {}
-        # Keep per-question retrieval semantic and bounded. The lossless structured
-        # payload is intentionally not copied into every sub-search; Provider gets
-        # it only through State Manager's top-level selected-source lane.
+        # Keep per-question retrieval semantic and bounded. Carry the selected
+        # source's lossless structure as an internal hand-off to Provider's
+        # _select_protected_structured_data(). Provider extracts it into the single
+        # top-level PROTECTED_STRUCTURED_DATA lane before prompt compaction; the
+        # REQUEST_SEQUENCE serializer later removes this sidecar, so it is not
+        # duplicated into every model-facing subtask.
         sections = []
         for section in (item.get("sections") or [])[:4]:
             if not isinstance(section, dict):
@@ -130,7 +133,7 @@ def _compact_question_search(
                 "order": section.get("order"),
                 "message_id": _text(section.get("message_id"))[:120],
             })
-        return {
+        compact = {
             "topic": _text(item.get("topic"))[:100],
             "user": _text(item.get("user"))[:180],
             "april": _text(item.get("april"))[:240],
@@ -138,6 +141,18 @@ def _compact_question_search(
             "message_id": _text(item.get("message_id"))[:120],
             "same_dialog": bool(item.get("same_dialog")),
         }
+        # Do not reconstruct structured data from clipped text. Preserve the exact
+        # source payload (including its source_message_id/checksum) only when it is
+        # a real, value-bearing structure; Provider will validate/route it by source.
+        protected = item.get("protected_structured_data")
+        if (
+            isinstance(protected, dict)
+            and isinstance(protected.get("items"), list)
+            and protected.get("items")
+            and _text(protected.get("source_answer"))
+        ):
+            compact["protected_structured_data"] = protected
+        return compact
 
     anchor = context.get("anchor") if isinstance(context.get("anchor"), dict) else {}
     section = context.get("selected_section") if isinstance(context.get("selected_section"), dict) else {}
