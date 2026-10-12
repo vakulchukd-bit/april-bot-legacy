@@ -9,6 +9,7 @@ No separate botru_transport/translation route or file exists.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import hashlib
 import base64
 import json
@@ -496,12 +497,30 @@ def _handle_voice_stream(
     })
 
     # Continue on the same canonical route; no second Web request is created.
+    # The canonical pipeline can take longer than an intermediary's idle-stream
+    # timeout (especially when Images 2.0 is involved). Run it in one worker and
+    # emit JSON progress frames while it works so the client/proxy sees activity.
+    # The frontend intentionally ignores unknown event types and still consumes
+    # the same final {type:"answer"} SceneContract payload.
     answer_started = time.perf_counter()
-    status, payload = _handle_payload(
-        routed_data,
-        attachments,
-        voice_transcript=transcript,
-    )
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="april-voice-answer") as pool:
+        pending = pool.submit(
+            _handle_payload,
+            routed_data,
+            attachments,
+            voice_transcript=transcript,
+        )
+        while True:
+            try:
+                status, payload = pending.result(timeout=6.0)
+                break
+            except FutureTimeoutError:
+                write_event({
+                    "type": "progress",
+                    "stage": "processing",
+                    "canonical_route": CANONICAL_CHAT_ROUTE,
+                    "flow_id": identity["flow_id"],
+                })
     answer_ms = round((time.perf_counter() - answer_started) * 1000, 1)
     scene_contract = payload.get("scene_contract") if isinstance(payload, dict) else {}
     scene_metadata = scene_contract.get("metadata") if isinstance(scene_contract, dict) else {}
@@ -661,29 +680,46 @@ class AprilHandler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
 
-                def write_event(event: dict[str, Any]) -> None:
+                client_disconnected = False
+
+                def write_event(event: dict[str, Any]) -> bool:
+                    nonlocal client_disconnected
+                    if client_disconnected:
+                        return False
                     chunk = (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-                    self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii"))
-                    self.wfile.write(chunk)
-                    self.wfile.write(b"\r\n")
-                    self.wfile.flush()
+                    try:
+                        self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii"))
+                        self.wfile.write(chunk)
+                        self.wfile.write(b"\r\n")
+                        self.wfile.flush()
+                        return True
+                    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
+                        client_disconnected = True
+                        print("[APRIL_VOICE] stage=client_disconnected during_ndjson_stream=true", flush=True)
+                        return False
 
                 try:
                     _handle_voice_stream(data, attachments, write_event)
                 except Exception as exc:
-                    traceback.print_exc()
-                    write_event({
-                        "type": "answer",
-                        "status": 500,
-                        "data": {
-                            "success": False,
-                            "error": _text(str(exc)) or "VOICE_FAILED",
-                            "canonical_route": CANONICAL_CHAT_ROUTE,
-                        },
-                    })
+                    if not client_disconnected:
+                        traceback.print_exc()
+                        write_event({
+                            "type": "answer",
+                            "status": 500,
+                            "data": {
+                                "success": False,
+                                "error": _text(str(exc)) or "VOICE_FAILED",
+                                "canonical_route": CANONICAL_CHAT_ROUTE,
+                            },
+                        })
                 finally:
-                    self.wfile.write(b"0\r\n\r\n")
-                    self.wfile.flush()
+                    if not client_disconnected:
+                        try:
+                            self.wfile.write(b"0\r\n\r\n")
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
+                            client_disconnected = True
+                            print("[APRIL_VOICE] stage=client_disconnected while_closing_ndjson=true", flush=True)
                 return
 
             handler_started = time.perf_counter()
