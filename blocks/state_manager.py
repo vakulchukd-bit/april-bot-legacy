@@ -2543,9 +2543,10 @@ def search_dialogue_context(
                 pending_for_next_turn["prompt"] = prompt_text
 
     if resume_anchor_row:
-        # The History selection is explicit, so it outranks inference for this
-        # one request. Keep every row in all_rows available for normal history
-        # search, but give Provider the exact clicked pair as its continuation anchor.
+        # A deliberate History-card click is authoritative for this turn. Preserve
+        # the exact clicked message as the anchor, then attach only rows belonging
+        # to its topic vector. A broad dialog_id may cover the entire 12-hour window
+        # and must never be treated as proof that every row is relevant.
         anchor = _candidate_score(
             query,
             resume_anchor_row,
@@ -2556,15 +2557,54 @@ def search_dialogue_context(
         relation = "CONTINUE"
         active_topic = _text(anchor.get("topic")) or _topic_label(resume_anchor_row) or active_topic
         selected_for_context = [_compact_pair(anchor)]
+        anchor_subjects = set(anchor.get("subject_terms") or _row_subject_tokens(resume_anchor_row))
+        anchor_topic = _text(anchor.get("topic")) or _topic_label(resume_anchor_row)
+        related_vector = []
+        anchor_message_id = _text(anchor.get("message_id"))
+        # Re-score the 12-hour memory against the selected topic itself, not only
+        # against the next short user input (which may be just "continue" or "draw").
+        for candidate_row in all_rows:
+            candidate_message_id = _text(candidate_row.get("message_id"))
+            if not candidate_message_id or candidate_message_id == anchor_message_id or _row_is_pending_clarification(candidate_row):
+                continue
+            item = _candidate_score(
+                anchor_topic,
+                candidate_row,
+                dialog_id=str(dialog_id or resume_anchor_row.get("dialog_id") or ""),
+                reference_followup=True,
+                query_modalities=query_modalities,
+            )
+            item_subjects = set(item.get("subject_terms") or _row_subject_tokens(candidate_row))
+            subject_similarity = _subject_overlap(anchor_subjects, item_subjects)
+            item_topic = _text(item.get("topic")) or _topic_label(candidate_row)
+            topic_similarity = fuzz.token_set_ratio(anchor_topic.casefold(), item_topic.casefold()) / 100.0 if anchor_topic and item_topic else 0.0
+            query_similarity = _topic_query_overlap(anchor_topic, item_topic) if anchor_topic and item_topic else 0.0
+            similarity = max(topic_similarity, subject_similarity, query_similarity)
+            if topic_similarity >= 0.45 or query_similarity >= 0.35 or subject_similarity >= 0.30:
+                related_vector.append((similarity, float(candidate_row.get("created_at") or 0), item))
+        related_vector.sort(key=lambda value: (value[0], value[1]), reverse=True)
+        for _score, _created_at, item in related_vector[:3]:
+            selected_for_context.append(_compact_pair(item))
+        _apr_timing_log(
+            "history_resume_vector",
+            user_key=_apr_diag_ref(uid),
+            dialog_key=_apr_diag_ref(dialog_id),
+            anchor_message_key=_apr_diag_ref(anchor_message_id),
+            vector_candidates=len(related_vector),
+            selected_pairs=len(selected_for_context),
+            selection_method="topic_vector" if len(selected_for_context) > 1 else "selected_pair_anchor",
+        )
         selected_section = {}
-        section_anchor_overridden = True
+        # This is a message anchor, not a forced section; do not reset the vector
+        # selection below. The resume key remains active until the first accepted turn.
+        section_anchor_overridden = False
         clarification_needed = False
         clarification_options = []
         pending_for_next_turn = {}
         clarification_resolution = {}
         # Keep the chosen pair first in the candidate list while leaving the
-        # remaining 12-hour candidates available for broader memory retrieval.
-        matches = [anchor] + [item for item in matches if _text(item.get("message_id")) != _text(anchor.get("message_id"))]
+        # remaining 12-hour candidates available for normal cross-topic recall.
+        matches = [anchor] + [item for item in matches if _text(item.get("message_id")) != anchor_message_id]
 
     if section_anchor_overridden and anchor:
         active_topic = _text(anchor.get("topic")) or active_topic
@@ -2607,7 +2647,7 @@ def search_dialogue_context(
         "active_topic": active_topic,
         "anchor": _compact_pair(anchor) if relation == "CONTINUE" and anchor else {},
         "matches": matches[:max(1, int(limit or 12))] if matches else [],
-        "selected": selected_for_context[:4 if history_request else 2],
+        "selected": selected_for_context[:4 if (history_request or resume_anchor_row) else 2],
         "history_topics": history_topics,
         "topic_index": topic_index,
         "known_topic_count": len(topics),
