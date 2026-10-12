@@ -150,7 +150,7 @@ def _structured_payload(task: Dict[str, Any]) -> Dict[str, Any]:
     return {
         key: deepcopy(task[key])
         for key in (
-            "title", "description", "representation",
+            "title", "description", "representation", "x", "y",
             "series", "labels", "values", "x_values", "y_values",
             "x_axis", "y_axis", "x_label", "y_label",
             "x_domain", "y_domain", "legend", "annotations",
@@ -248,8 +248,10 @@ def _normalize_series(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     if result:
         return result
 
-    labels = _list(payload.get("labels") or payload.get("x_values"))
-    values = _list(payload.get("values") or payload.get("y_values"))
+    # Accept the common direct coordinate-array contract as well as the
+    # explicit x_values/y_values aliases. Preserve the source labels and values.
+    labels = _list(payload.get("labels") or payload.get("x_values") or payload.get("x"))
+    values = _list(payload.get("values") or payload.get("y_values") or payload.get("y"))
     if labels and values:
         pairs = []
         for x_value, y_value in zip(labels, values):
