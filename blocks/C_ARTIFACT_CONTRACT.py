@@ -2439,6 +2439,194 @@ def _strip_first_markdown_table(answer: str, expected: Dict[str, Any]) -> str:
     return answer
 
 
+def _electrical_schematic_payload(answer: str) -> Dict[str, Any]:
+    """Turn an explicit ASCII battery wiring sketch into a structural diagram.
+
+    Components and their order are read only from the fenced sketch returned in
+    this turn; the adapter does not add a component that the sketch did not show.
+    """
+    match = re.search(r"```(?:text|plain|plaintext)?\s*\n([\s\S]*?)\n```", str(answer or ""), re.IGNORECASE)
+    if not match:
+        return {}
+    drawing = match.group(1)
+    if not re.search(r"аккумулятор|battery", drawing, re.IGNORECASE):
+        return {}
+    if not re.search(r"(?:предохранител|\bF\d+\b)", drawing, re.IGNORECASE):
+        return {}
+    if not re.search(r"(?:выключател|\bS\d+\b)", drawing, re.IGNORECASE):
+        return {}
+    if not re.search(r"(?:двигател|мотор|лампоч|ламп[аыуе]|светодиод|\bM\d+\b|motor|lamp|bulb|LED)", drawing, re.IGNORECASE):
+        return {}
+
+    components: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for line in drawing.splitlines():
+        clean = line.strip()
+        if not clean:
+            continue
+        found: List[tuple[str, str]] = []
+        if re.search(r"(?:плюс\s+аккумулятора|аккумулятор(?:а)?\s*\(\s*\+|\+\s*12\s*в|positive\s+(?:battery|terminal))", clean, re.IGNORECASE):
+            found.append(("positive", "Плюс аккумулятора (+12 В)"))
+        if re.search(r"(?:предохранител|\bF\d+\b|fuse)", clean, re.IGNORECASE):
+            found.append(("fuse", "Предохранитель (F1)"))
+        if re.search(r"(?:выключател|\bS\d+\b|switch)", clean, re.IGNORECASE):
+            found.append(("switch", "Выключатель (S1)"))
+        if re.search(r"(?:двигател|мотор|лампоч|ламп[аыуе]|светодиод|\bM\d+\b|motor|lamp|bulb|LED)", clean, re.IGNORECASE):
+            if re.search(r"двигател|\bM\d+\b|motor", clean, re.IGNORECASE):
+                found.append(("load", "Электродвигатель 12 В"))
+            elif re.search(r"светодиод|\bLED\b", clean, re.IGNORECASE):
+                found.append(("load", "Светодиод"))
+            else:
+                found.append(("load", "Лампочка"))
+        if re.search(r"(?:минус\s+аккумулятора|аккумулятор(?:а)?\s*\(\s*-|negative\s+(?:battery|terminal)|-\s*12\s*в)", clean, re.IGNORECASE):
+            found.append(("negative", "Минус аккумулятора (−)"))
+        for key, label in found:
+            # ASCII art usually repeats each component's ID and its caption on
+            # adjacent lines. Keep one node per component in the drawn order.
+            if key in seen:
+                continue
+            seen.add(key)
+            components.append({"id": key, "label": label, "level": len(components)})
+
+    order = [item["id"] for item in components]
+    if len(components) < 4 or not {"positive", "fuse", "switch", "load", "negative"}.issubset(set(order)):
+        return {}
+    edges = [{"from": left["id"], "to": right["id"], "label": "подключение"}
+             for left, right in zip(components, components[1:])]
+    return {
+        "representation": "diagram",
+        "layout": "hierarchical",
+        "direction": "TB",
+        "title": "Схема подключения аккумулятора 12 В",
+        "description": "Компоненты расположены в том же порядке, что и в текстовой схеме.",
+        "nodes": components,
+        "edges": edges,
+        "source": "same_turn_ascii_electrical_schematic",
+    }
+
+
+def _is_ascii_line_chart_fence(text: str) -> bool:
+    """Identify a text-only line chart that should be represented by GraphBlock."""
+    value = str(text or "")
+    if not re.search(r"[┤│]", value):
+        return False
+    row_pattern = re.compile(
+        r"(?im)^\s*-?\d+(?:[.,]\d+)?\s*[┤│|]\s*.*?"
+        r"(?:понедельник|вторник|среда|четверг|пятница|суббота|воскресенье|"
+        r"\bпн\b|\bвт\b|\bср\b|\bчт\b|\bпт\b|\bсб\b|\bвс\b|"
+        r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)",
+        re.IGNORECASE,
+    )
+    return len(row_pattern.findall(value)) >= 2
+
+def _graph_payload_from_answer(answer: str, graph_policy: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Promote an explicit 2D ASCII chart or listed 3D spheres to GraphBlock data."""
+    text = str(answer or "")
+    policy = graph_policy if isinstance(graph_policy, dict) else {}
+    preferred = str(policy.get("preferred_representation") or "").strip().lower().replace("-", "_")
+    is_3d = preferred in {"scene3d", "scene_3d", "surface3d", "surface_3d", "scatter3d", "scatter_3d", "3d"} or bool(re.search(
+        r"(?:\b3\s*[- ]?d\b|\b3д\b|тр[её]хмерн\w*)", text, re.IGNORECASE
+    ))
+    if is_3d:
+        sphere_pattern = re.compile(
+            r"(?im)^\s*[-*•]?\s*(?:сфера|sphere)\s*(\d+)?\s*:\s*"
+            r"(?:центр|center)\s*\(([^)]{3,90})\)\s*,?\s*"
+            r"(?:радиус|radius)\s*[:=]?\s*([-+]?\d+(?:[.,]\d+)?)"
+        )
+        objects: List[Dict[str, Any]] = []
+        for index, match in enumerate(sphere_pattern.finditer(text), 1):
+            coordinates = [_number_for_render(part) for part in re.split(r"\s*[,;]\s*", match.group(2).strip())]
+            radius = _number_for_render(match.group(3))
+            if len(coordinates) != 3 or any(value is None for value in coordinates) or radius is None or radius <= 0:
+                continue
+            x, y, z = coordinates
+            sphere_number = match.group(1) or str(index)
+            objects.append({
+                "id": f"sphere-{sphere_number}",
+                "shape": "sphere",
+                "label": f"Сфера {sphere_number}",
+                "x": x, "y": y, "z": z,
+                "center": {"x": x, "y": y, "z": z},
+                "radius": radius,
+            })
+        if objects:
+            return {
+                "representation": "scene3d",
+                "graph_type": "scene3d",
+                "dimensions": 3,
+                "three_d": True,
+                "title": "3D-график: сферы",
+                "description": "Сферы построены по указанным центрам и радиусам.",
+                "objects_3d": objects,
+                "x_axis": {"title": "X"},
+                "y_axis": {"title": "Y"},
+                "z_axis": {"title": "Z"},
+                "source": "same_turn_answer_explicit_sphere_coordinates",
+            }
+        # An explicit 3D request without usable 3D data must not silently become 2D.
+        return {}
+
+    # Parse common ASCII trend charts (e.g. "20 ┤ ● Понедельник"). These values
+    # are verbatim values already written by the Provider, not generated data.
+    weekday_aliases = {
+        "понедельник": (0, "Понедельник"), "пн": (0, "Понедельник"),
+        "вторник": (1, "Вторник"), "вт": (1, "Вторник"),
+        "среда": (2, "Среда"), "ср": (2, "Среда"),
+        "четверг": (3, "Четверг"), "чт": (3, "Четверг"),
+        "пятница": (4, "Пятница"), "пт": (4, "Пятница"),
+        "суббота": (5, "Суббота"), "сб": (5, "Суббота"),
+        "воскресенье": (6, "Воскресенье"), "вс": (6, "Воскресенье"),
+    }
+    day_pattern = re.compile(r"(?<![\w])(" + "|".join(sorted(map(re.escape, weekday_aliases), key=len, reverse=True)) + r")(?![\w])", re.IGNORECASE)
+    found_points: Dict[int, Dict[str, Any]] = {}
+    for line in text.splitlines():
+        value_match = re.match(r"^\s*(-?\d+(?:[.,]\d+)?)\s*[┤│|]\s*(.*)$", line)
+        if not value_match:
+            continue
+        day_match = day_pattern.search(value_match.group(2))
+        if not day_match:
+            continue
+        day_key = day_match.group(1).lower()
+        day_index, day_label = weekday_aliases[day_key]
+        numeric_value = _number_for_render(value_match.group(1))
+        if numeric_value is not None:
+            found_points[day_index] = {"x": day_label, "y": numeric_value}
+    if len(found_points) >= 2:
+        points = [found_points[key] for key in sorted(found_points)]
+        xs = [point["x"] for point in points]
+        ys = [point["y"] for point in points]
+        title_match = re.search(r"(?im)^\s*(?:график|graph)\s+[^\n]{3,140}", text)
+        title = re.sub(r"[`*_]+", "", title_match.group(0)).strip().rstrip(":.;") if title_match else "График изменения значения"
+        axis_match = re.search(r"(?im)^\s*([^\n]{2,60}(?:грн|uah|цена|price)[^\n]{0,25})\s*$", text)
+        y_title = axis_match.group(1).strip() if axis_match else "Цена / значение"
+        return {
+            "representation": "line",
+            "chart_type": "line",
+            "graph_type": "line",
+            "title": title[:140],
+            "series": [{"label": "Значение", "type": "line", "points": points, "x": xs, "y": ys}],
+            "points": points,
+            "x_values": xs,
+            "y_values": ys,
+            "x_axis": {"title": "День недели"},
+            "y_axis": {"title": y_title[:80]},
+            "source": "same_turn_ascii_chart_values",
+        }
+    return {}
+
+
+def _is_redundant_schematic_paragraph(paragraph: str) -> bool:
+    text = str(paragraph or "").strip().lower()
+    if not text or not re.search(r"схем|подключени|wiring|schematic", text):
+        return False
+    terms = [
+        r"аккумулятор|батаре", r"предохранител|fuse", r"выключател|switch",
+        r"двигател|мотор|лампоч|ламп[аыуе]|светодиод|motor|lamp|bulb",
+    ]
+    if sum(bool(re.search(pattern, text, re.IGNORECASE)) for pattern in terms) < 3:
+        return False
+    return bool(re.search(r"(?:→|➜|->|-->|\bзатем\b|\bпосле\s+него\b|\bчерез\b)", text, re.IGNORECASE))
+
 def _strip_rendered_segments(text: str, rendered_types: set[str]) -> str:
     """Keep the narrative concise when exact structures are displayed separately."""
     cleaned = str(text or "")
@@ -2451,6 +2639,24 @@ def _strip_rendered_segments(text: str, rendered_types: set[str]) -> str:
         match = re.search(r"```\s*mermaid\s*\n([\s\S]*?)\n```", cleaned, re.IGNORECASE)
         if match and _mermaid_payload(match.group(1).strip()):
             cleaned = cleaned.replace(match.group(0), "", 1)
+        else:
+            # If the ASCII wiring sketch has been promoted to a proper DiagramRenderer
+            # block, its fenced text copy must not remain in the narrative/code card.
+            schematic_payload = _electrical_schematic_payload(cleaned)
+            if schematic_payload:
+                sketch = re.search(r"```(?:text|plain|plaintext)?\s*\n([\s\S]*?)\n```", cleaned, re.IGNORECASE)
+                if sketch:
+                    cleaned = cleaned.replace(sketch.group(0), "", 1)
+                paragraphs = re.split(r"\n\s*\n", cleaned)
+                paragraphs = [paragraph for paragraph in paragraphs if not _is_redundant_schematic_paragraph(paragraph)]
+                cleaned = "\n\n".join(paragraphs)
+    if "graph" in rendered_types:
+        # A line chart's ASCII bars/axis labels are not source code once its values
+        # have been promoted to a typed GraphBlock. Keep the surrounding explanation.
+        for chart in list(re.finditer(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", cleaned)):
+            if _is_ascii_line_chart_fence(chart.group(2)):
+                cleaned = cleaned.replace(chart.group(0), "", 1)
+                break
     if "code" in rendered_types:
         match = re.search(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", cleaned)
         if match and match.group(1).strip().lower() not in {"mermaid", "diagram"}:
@@ -2874,6 +3080,14 @@ def prepare_render_blocks_for_room_dispatch(
     code_match = re.search(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", source_answer)
     if code_match and code_match.group(1).strip().lower() in {"mermaid", "diagram"}:
         code_match = None
+    electrical_diagram_from_answer = _electrical_schematic_payload(source_answer) if "diagram" in requested else {}
+    if code_match and "graph" in requested and _is_ascii_line_chart_fence(code_match.group(2)):
+        # This code fence is a visual representation of the graph, not source code.
+        # Values are transferred to GraphBlock below; don't render it a second time.
+        code_match = None
+    if code_match and electrical_diagram_from_answer:
+        # The ASCII sketch is source evidence for the diagram, not a separate code artifact.
+        code_match = None
     formula_matches = re.findall(r"\\\[([\s\S]*?)\\\]|\\\((.*?)\\\)", source_answer)
     formulas_from_answer = [a or b for a, b in formula_matches if (a or b).strip()]
     # Also promote standalone equation lines that the Provider returned as plain
@@ -2937,6 +3151,11 @@ def prepare_render_blocks_for_room_dispatch(
                 if candidate_graph:
                     payload = candidate_graph
                     block["source_room"] = block.get("source_room") or "C_GRAPH_ROOM"
+            if "graph" in requested and not _has_render_payload("graph", payload):
+                candidate_graph = _graph_payload_from_answer(source_answer, interpreted_graph_policy)
+                if candidate_graph:
+                    payload = candidate_graph
+                    block["source_room"] = block.get("source_room") or "C_GRAPH_ROOM"
         elif block_type == "diagram" and not _has_render_payload("diagram", payload):
             source = str(payload.get("source") or payload.get("mermaid") or block.get("source") or block.get("mermaid") or "")
             if not source and mermaid_from_answer:
@@ -2944,6 +3163,9 @@ def prepare_render_blocks_for_room_dispatch(
             parsed = _mermaid_payload(source)
             if parsed:
                 payload = {**payload, **parsed}
+                block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
+            elif electrical_diagram_from_answer:
+                payload = {**payload, **deepcopy(electrical_diagram_from_answer)}
                 block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
             elif experiment_steps_from_answer:
                 payload = {**payload, **deepcopy(experiment_steps_from_answer)}
@@ -3041,6 +3263,8 @@ def prepare_render_blocks_for_room_dispatch(
         graph_payload = _graph_payload_from_table(table_from_answer) if table_from_answer else {}
         if not graph_payload and section_graph_from_answer:
             graph_payload = deepcopy(section_graph_from_answer)
+        if not graph_payload:
+            graph_payload = _graph_payload_from_answer(source_answer, interpreted_graph_policy)
         if graph_payload and interpreted_graph_policy:
             graph_payload_policy = graph_payload.get("graph_policy") if isinstance(graph_payload.get("graph_policy"), dict) else {}
             graph_payload["graph_policy"] = {**graph_payload_policy, **interpreted_graph_policy}
@@ -3080,9 +3304,10 @@ def prepare_render_blocks_for_room_dispatch(
                 "source_room": "C_LINK_ROOM",
             })
             existing_types.add("link")
-    if ("diagram" in requested or diagram_from_answer) and "diagram" not in existing_types:
-        if diagram_from_answer:
-            prepared.append({"type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "payload": diagram_from_answer, "source_room": "C_DIAGRAM_ROOM"})
+    if ("diagram" in requested or diagram_from_answer or electrical_diagram_from_answer) and "diagram" not in existing_types:
+        diagram_payload = diagram_from_answer or electrical_diagram_from_answer
+        if diagram_payload:
+            prepared.append({"type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "payload": diagram_payload, "source_room": "C_DIAGRAM_ROOM"})
             existing_types.add("diagram")
     if ("code" in requested or code_match) and "code" not in existing_types:
         if code_match:
@@ -3111,7 +3336,7 @@ def prepare_render_blocks_for_room_dispatch(
     # Keep only surrounding narrative in the text node to avoid rendering the
     # same content twice while still preserving explanatory prose.
     rendered_types = {str(item.get("type") or "").lower() for item in result if isinstance(item, dict)}
-    if rendered_types & {"table", "code", "diagram", "formula"}:
+    if rendered_types & {"table", "code", "diagram", "formula", "graph"}:
         for item in result:
             if not isinstance(item, dict) or str(item.get("type") or "").lower() not in {"text", "markdown"}:
                 continue
@@ -3135,7 +3360,7 @@ def prepare_render_blocks_for_room_dispatch(
     # Preserve a substantial narrative alongside visual artifacts. The current
     # full answer is the source of truth; the 60% threshold protects against a
     # renderer-cleanup pass accidentally replacing prose with a one-line caption.
-    canonical_text = source_answer.strip()
+    canonical_text = _strip_rendered_segments(source_answer, rendered_types).strip()
     text_indices = [
         index for index, item in enumerate(result)
         if isinstance(item, dict) and str(item.get("type") or "").lower() in {"text", "markdown", "message", "message_text"}
