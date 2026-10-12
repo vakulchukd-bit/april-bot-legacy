@@ -935,6 +935,7 @@ async def execute(
     conversation_id: str = "",
     dialog_id: str = "",
     message_id: str = "",
+    resume_message_id: str = "",
     interpretation_id: str = "",
     visual_context: list[dict[str, Any]] | None = None,
     attachments: list[dict[str, Any]] | None = None,
@@ -1055,6 +1056,8 @@ async def execute(
     search_kwargs = {
         "dialog_id": identity["dialog_id"],
         "conversation_id": identity["conversation_id"],
+        # Only set by a deliberate History-card click; this is a one-turn anchor.
+        "resume_message_id": _text(resume_message_id),
         "limit": 12,
         "has_image": bool(visual_context),
         "has_file": bool(file_inputs or file_contents),
