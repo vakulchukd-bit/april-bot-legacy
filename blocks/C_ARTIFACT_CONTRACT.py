@@ -2601,6 +2601,148 @@ def _experiment_steps_payload(answer: str) -> Dict[str, Any]:
     return {}
 
 
+def _section_outline_rows(answer: str, limit: int = 10) -> Dict[str, Any]:
+    """Extract a grounded section outline from this turn for table/network views.
+
+    Only headings and the first visible paragraph below them are reused. This is
+    a formatting transform over the current answer, not a knowledge-generation
+    step and not a lookup into dialogue history.
+    """
+    lines = str(answer or "").replace("\r", "").split("\n")
+    headings: List[Dict[str, str]] = []
+    current: Dict[str, Any] | None = None
+    in_fence = False
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or not line:
+            continue
+        match = re.match(r"^#{1,4}\s+(.+?)\s*$", line)
+        if match:
+            if current:
+                summary = re.sub(r"\s+", " ", " ".join(current.pop("_body", []))).strip()
+                current["summary"] = summary[:260]
+                headings.append(current)
+            current = {"heading": re.sub(r"[*_`]", "", match.group(1)).strip(), "_body": []}
+            continue
+        if current is None:
+            continue
+        if line.startswith(("|", "!", ">", "<")):
+            continue
+        # Ignore repeated decorative separators and preserve only answer prose.
+        if re.fullmatch(r"[-*_]{3,}", line):
+            continue
+        current["_body"].append(line)
+    if current:
+        summary = re.sub(r"\s+", " ", " ".join(current.pop("_body", []))).strip()
+        current["summary"] = summary[:260]
+        headings.append(current)
+
+    if not headings:
+        return {}
+    title = headings[0].get("heading", "")
+    # A single top-level title with no content is the graph root, not a data row.
+    rows = [item for item in headings if item.get("summary")]
+    if len(rows) < 2:
+        return {"title": title, "sections": rows} if rows else {}
+    rows = rows[:max(2, min(12, int(limit)))]
+    return {"title": title, "sections": rows}
+
+
+def _section_outline_table(outline: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a two-column table from visible answer headings and their summaries."""
+    sections = outline.get("sections") if isinstance(outline, dict) else []
+    if not isinstance(sections, list) or len(sections) < 2:
+        return {}
+    rows = [
+        [str(item.get("heading") or "Раздел")[:120], str(item.get("summary") or "")[:240]]
+        for item in sections if isinstance(item, dict) and str(item.get("heading") or "").strip() and str(item.get("summary") or "").strip()
+    ]
+    if len(rows) < 2:
+        return {}
+    return {
+        "title": str(outline.get("title") or "Структура ответа"),
+        "columns": ["Раздел", "Краткое содержание"],
+        "headers": ["Раздел", "Краткое содержание"],
+        "rows": rows,
+        "source": "same_turn_answer_section_outline",
+    }
+
+
+def _section_outline_graph(outline: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a non-numeric concept map from the answer's own section headings."""
+    sections = outline.get("sections") if isinstance(outline, dict) else []
+    if not isinstance(sections, list) or len(sections) < 2:
+        return {}
+    title = str(outline.get("title") or "Структура ответа").strip()[:140]
+    nodes = [{"id": "answer_topic", "label": title or "Тема ответа", "level": 0}]
+    edges = []
+    for index, item in enumerate(sections[:10], 1):
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("heading") or "").strip()
+        if not label:
+            continue
+        node_id = f"answer_section_{index}"
+        nodes.append({"id": node_id, "label": label[:100], "level": 1, "description": str(item.get("summary") or "")[:220]})
+        edges.append({"from": "answer_topic", "to": node_id, "label": "содержит раздел", "relation": "section_of"})
+    if len(nodes) < 3 or not edges:
+        return {}
+    return {
+        "representation": "network",
+        "graph_type": "network",
+        "chart_type": "network",
+        "title": f"Карта разделов: {title}"[:180],
+        "description": "Связи отражают только структуру текущего ответа, а не количественные измерения.",
+        "nodes": nodes,
+        "edges": edges,
+        "source": "same_turn_answer_section_outline",
+    }
+
+
+def _section_outline_diagram(outline: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a structural (not causal) diagram from the current answer headings."""
+    sections = outline.get("sections") if isinstance(outline, dict) else []
+    if not isinstance(sections, list) or len(sections) < 2:
+        return {}
+    title = str(outline.get("title") or "Структура ответа").strip()[:120]
+    nodes = [{"id": "answer_start", "label": title or "Тема", "level": 0}]
+    edges: List[Dict[str, Any]] = []
+    for index, item in enumerate(sections[:10], 1):
+        if not isinstance(item, dict):
+            continue
+        heading = str(item.get("heading") or "").strip()
+        if not heading:
+            continue
+        node_id = f"outline_section_{index}"
+        nodes.append({
+            "id": node_id,
+            "label": heading[:90],
+            "level": 1,
+            "description": str(item.get("summary") or "")[:180],
+        })
+        edges.append({
+            "from": "answer_start",
+            "to": node_id,
+            "label": "раздел ответа",
+            "relation": "outline_membership",
+        })
+    if len(nodes) < 3 or not edges:
+        return {}
+    return {
+        "representation": "diagram",
+        "layout": "hierarchical",
+        "direction": "TB",
+        "title": f"Структурная схема: {title}"[:160],
+        "description": "Показан порядок и состав разделов ответа; связи не обозначают причинно-следственные зависимости.",
+        "nodes": nodes,
+        "edges": edges,
+        "source": "same_turn_answer_section_outline",
+    }
+
+
 def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[str, Any]:
     """Merge structured payload sources with the explicit block payload winning.
 
@@ -2712,6 +2854,9 @@ def prepare_render_blocks_for_room_dispatch(
     requested = _render_requested_outputs(requested_outputs)
     interpreted_graph_policy = deepcopy(graph_policy) if isinstance(graph_policy, dict) else {}
     source_answer = str(answer or "")
+    section_outline = _section_outline_rows(source_answer)
+    section_table_from_answer = _section_outline_table(section_outline)
+    section_graph_from_answer = _section_outline_graph(section_outline)
     # The answer may already contain a structured representation even when the
     # user did not name its renderer explicitly. Reuse that evidence rather than
     # forcing a valid table/code/diagram to remain trapped inside a text block.
@@ -2725,6 +2870,26 @@ def prepare_render_blocks_for_room_dispatch(
         code_match = None
     formula_matches = re.findall(r"\\\[([\s\S]*?)\\\]|\\\((.*?)\\\)", source_answer)
     formulas_from_answer = [a or b for a, b in formula_matches if (a or b).strip()]
+    # Also promote standalone equation lines that the Provider returned as plain
+    # Markdown text. Values are extracted verbatim; no formula or measurement is invented.
+    equation_pattern = re.compile(
+        r"^\s*(?:[-*•]\s*)?([A-Za-zА-Яа-яΑ-ω][^\n]{0,100}?(?:=|≈|≠|≤|≥|∝|↔|→)[^\n]{1,150})\s*$"
+    )
+    for line in source_answer.splitlines():
+        clean_line = re.sub(r"[`*_]", "", line).strip()
+        equation_match = equation_pattern.match(clean_line)
+        if equation_match:
+            equation = equation_match.group(1).strip()
+            # Avoid converting ordinary prose containing a comparison into math.
+            if re.search(r"\d|[+*/^_]|\b(?:sin|cos|tan|sqrt|frac|mc|E|H|P|F|v|m|c)\b|[Α-ω]", equation, re.IGNORECASE):
+                if equation not in formulas_from_answer:
+                    formulas_from_answer.append(equation)
+        if len(formulas_from_answer) >= 12:
+            break
+    for math_match in re.finditer(r"\$\$([\s\S]+?)\$\$|(?<!\$)\$([^$\n]{1,180})\$(?!\$)", source_answer):
+        candidate = (math_match.group(1) or math_match.group(2) or "").strip()
+        if candidate and candidate not in formulas_from_answer:
+            formulas_from_answer.append(candidate)
     urls_from_answer = list(dict.fromkeys(re.findall(r"https?://[^\s<>\]\[()]+", source_answer, re.IGNORECASE)))
     # Explicit Markdown image embeds are already concrete visual evidence from
     # this answer. Promote them to the same gallery contract when the user asked
@@ -2837,6 +3002,18 @@ def prepare_render_blocks_for_room_dispatch(
             "source_room": "C_DIAGRAM_ROOM", "source": "same_turn_experiment_steps",
         })
         existing_types.add("diagram")
+    # For a broad educational answer without explicit experiment-step bullets,
+    # render the answer's own headings as a structure diagram. This is an index
+    # of the answer's sections, not an invented scientific process or causal model.
+    if "diagram" in requested and "diagram" not in existing_types:
+        outline_diagram = _section_outline_diagram(section_outline)
+        if outline_diagram and _has_render_payload("diagram", outline_diagram):
+            prepared.append({
+                "type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer",
+                "viewer": "DiagramRenderer", "payload": outline_diagram,
+                "source_room": "C_ARTIFACT_CONTRACT", "source": "same_turn_answer_section_outline",
+            })
+            existing_types.add("diagram")
     # A requested source gallery may be absent as a separate block even though
     # the same answer contains explicit Markdown image embeds. Reuse only those
     # URLs; never convert ordinary source links into guessed image URLs.
@@ -2850,11 +3027,14 @@ def prepare_render_blocks_for_room_dispatch(
 
     # A requested table may be absent as a block even though the model returned
     # its literal Markdown table. Promote that same table, without changing cells.
-    if ("table" in requested or table_from_answer) and "table" not in existing_types and table_from_answer and _has_render_payload("table", table_from_answer):
-        prepared.append({"type": "table", "artifact_type": "table", "renderer": "TableBlock", "viewer": "TableBlock", "payload": table_from_answer, "source_room": "C_TABLE_ROOM"})
+    table_candidate = table_from_answer or section_table_from_answer
+    if ("table" in requested or table_from_answer) and "table" not in existing_types and table_candidate and _has_render_payload("table", table_candidate):
+        prepared.append({"type": "table", "artifact_type": "table", "renderer": "TableBlock", "viewer": "TableBlock", "payload": table_candidate, "source_room": "C_TABLE_ROOM" if table_from_answer else "C_ARTIFACT_CONTRACT"})
         existing_types.add("table")
-    if "graph" in requested and "graph" not in existing_types and table_from_answer:
-        graph_payload = _graph_payload_from_table(table_from_answer)
+    if "graph" in requested and "graph" not in existing_types:
+        graph_payload = _graph_payload_from_table(table_from_answer) if table_from_answer else {}
+        if not graph_payload and section_graph_from_answer:
+            graph_payload = deepcopy(section_graph_from_answer)
         if graph_payload and interpreted_graph_policy:
             graph_payload_policy = graph_payload.get("graph_policy") if isinstance(graph_payload.get("graph_policy"), dict) else {}
             graph_payload["graph_policy"] = {**graph_payload_policy, **interpreted_graph_policy}
@@ -2945,6 +3125,70 @@ def prepare_render_blocks_for_room_dispatch(
                     cleaned_text = "Формула представлена отдельным блоком." if cyrillic else "The formula is shown in a separate block."
             item["content"] = cleaned_text
             item["text"] = cleaned_text
+
+    # Preserve a substantial narrative alongside visual artifacts. The current
+    # full answer is the source of truth; the 60% threshold protects against a
+    # renderer-cleanup pass accidentally replacing prose with a one-line caption.
+    canonical_text = source_answer.strip()
+    text_indices = [
+        index for index, item in enumerate(result)
+        if isinstance(item, dict) and str(item.get("type") or "").lower() in {"text", "markdown", "message", "message_text"}
+    ]
+    text_chars = sum(
+        len(str(result[index].get("content") or result[index].get("text") or result[index].get("markdown") or "").strip())
+        for index in text_indices
+    )
+    retention_target = int(len(canonical_text) * 0.60)
+    if canonical_text and text_chars < retention_target:
+        if text_indices:
+            target_index = max(text_indices, key=lambda idx: len(str(result[idx].get("content") or result[idx].get("text") or "")))
+            result[target_index]["content"] = canonical_text
+            result[target_index]["text"] = canonical_text
+            result[target_index]["text_integrity_repaired"] = True
+            action = "restored_full_answer_to_text_block"
+        else:
+            result.insert(0, {
+                "type": "text", "artifact_type": "text",
+                "renderer": "MessageTextBlock", "viewer": "MessageTextBlock",
+                "content": canonical_text, "text_integrity_repaired": True,
+            })
+            action = "inserted_full_answer_text_block"
+        text_chars = len(canonical_text)
+        try:
+            print("[APRIL_RENDER_TEXT_RETENTION] " + json.dumps({
+                "action": action,
+                "answer_chars": len(canonical_text),
+                "text_chars_after": text_chars,
+                "retention_ratio": round(text_chars / max(1, len(canonical_text)), 3),
+            }, ensure_ascii=False, separators=(",", ":")), flush=True)
+        except Exception:
+            pass
+
+    render_aliases = {"gallery": "image", "image_gallery": "image", "generated_image": "image", "svg": "diagram", "math": "formula", "latex": "formula", "chart": "graph", "plot": "graph", "links": "link", "hyperlink": "link"}
+    rendered_types = {
+        render_aliases.get(str(item.get("type") or item.get("artifact_type") or "").strip().lower(), str(item.get("type") or item.get("artifact_type") or "").strip().lower())
+        for item in result if isinstance(item, dict)
+    }
+    requested_visual = sorted(requested.intersection({"image", "gallery", "table", "graph", "diagram", "formula", "link", "code", "file"}))
+    present_visual = sorted(set(requested_visual).intersection(rendered_types))
+    missing_visual = sorted(set(requested_visual) - set(present_visual))
+    coverage = round(len(present_visual) / max(1, len(requested_visual)), 3) if requested_visual else 1.0
+    try:
+        print("[APRIL_RENDER_COVERAGE] " + json.dumps({
+            "requested_outputs": sorted(requested),
+            "requested_visual_outputs": requested_visual,
+            "rendered_types": sorted(rendered_types),
+            "rendered_requested_types": present_visual,
+            "missing_requested_types": missing_visual,
+            "requested_renderer_coverage": coverage,
+            "text_chars": text_chars,
+            "answer_chars": len(canonical_text),
+            "text_retention_ratio": round(text_chars / max(1, len(canonical_text)), 3) if canonical_text else 0.0,
+            "minimum_text_retention": 0.60,
+            "minimum_renderer_coverage": 0.50,
+        }, ensure_ascii=False, separators=(",", ":")), flush=True)
+    except Exception:
+        pass
     return result
 
 def _scene_payload_has_content(block_type: str, payload: Dict[str, Any], block: Dict[str, Any] | None = None) -> bool:
@@ -2986,8 +3230,27 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
             if artifact_id:
                 existing_artifact_ids.add(artifact_id)
 
-    # The answer is a single normal text node in the same scene, not a fallback.
+    # Executor carries the canonical answer in render_blocks, while MachineScene
+    # intentionally has no dedicated `answer` field. Read the scene envelope first,
+    # then recover the longest visible text block if the envelope is textless. Without
+    # this step, render extraction ran on an empty string and silently left all
+    # explanatory output trapped in the one provider text block.
     answer = _scene_text(scene)
+    if not answer:
+        metadata = scene.metadata if isinstance(scene.metadata, dict) else {}
+        answer = _scene_text(metadata)
+    if not answer:
+        text_candidates: List[str] = []
+        for candidate_block in blocks:
+            if not isinstance(candidate_block, dict):
+                continue
+            if _scene_block_type(candidate_block) not in {"text", "markdown", "message", "message_text"}:
+                continue
+            candidate_text = _scene_text(candidate_block)
+            if candidate_text:
+                text_candidates.append(candidate_text)
+        if text_candidates:
+            answer = max(text_candidates, key=len)
     active_task = scene.active_task if isinstance(scene.active_task, dict) else {}
     blocks = prepare_render_blocks_for_room_dispatch(
         blocks,
