@@ -1104,35 +1104,78 @@ async def execute(
             status="ok",
         )
     else:
-        aligned_normalized = len(normalized_sequence) == len(question_sequence)
+        current_request_subject_context: dict[str, Any] | None = None
+        # Use the same original-language clause that was classified. Equal list lengths
+        # do not guarantee that separately split normalized text is aligned item by item.
         for index, question_item in enumerate(question_sequence):
-            search_query = (
+            search_query = _text(question_item.get("request")) or (
                 _text(normalized_sequence[index].get("request"))
-                if aligned_normalized else _text(question_item.get("request"))
+                if index < len(normalized_sequence) else _text(current_text)
             )
             try:
+                inherits_subject = bool(question_item.get("inherits_current_request_subject"))
                 task_semantics = {
                     "schema": "april_request_semantics_v1",
                     "primary_intent": question_item.get("semantic_intent", "NEW_INFORMATION"),
                     "direction": question_item.get("search_direction", "ANSWER_NEW_REQUEST"),
                     "time_scope": question_item.get("time_scope", "UNSPECIFIED"),
                     "topic_reference": question_item.get("topic_reference", "UNSPECIFIED"),
-                    "requires_memory": question_item.get("requires_memory", False),
-                    "history_request": question_item.get("history_request", False),
-                    "search_scope": "ALL_DIALOGUE_HISTORY" if question_item.get("history_request") else (
+                    "requires_memory": False if inherits_subject else question_item.get("requires_memory", False),
+                    "history_request": False if inherits_subject else question_item.get("history_request", False),
+                    "search_scope": "CURRENT_REQUEST_SUBJECT" if inherits_subject else ("ALL_DIALOGUE_HISTORY" if question_item.get("history_request") else (
                         "TOPIC_OR_ACTIVE_CONTEXT" if question_item.get("requires_memory") else "CURRENT_DIALOGUE"
-                    ),
-                    "relation_hint": "HISTORY_LOOKUP" if question_item.get("history_request") else "CONTINUE" if question_item.get("requires_memory") else "NEW",
-                    "reason": question_item.get("semantic_reason", ""),
+                    )),
+                    "relation_hint": "NEW" if inherits_subject else ("HISTORY_LOOKUP" if question_item.get("history_request") else "CONTINUE" if question_item.get("requires_memory") else "NEW"),
+                    "reason": "pronoun_inherits_subject_from_current_request" if inherits_subject else question_item.get("semantic_reason", ""),
                     "features": {},
                     "context_signature": question_item.get("context_signature", {}),
                     "parent_context_dependency": bool(question_item.get("parent_context_dependency")),
                     "parent_intent": question_item.get("parent_intent", ""),
+                    "inherits_current_request_subject": inherits_subject,
                 }
-                task_context = prepare_dialogue_context(
-                    uid, search_query, query_interpretation=task_semantics, **search_kwargs
-                )
-                task_search = _compact_question_search(task_context, search_query, task_semantics)
+                if inherits_subject and current_request_subject_context:
+                    active_subject = _text(current_request_subject_context.get("active_topic") or search_query)[:140]
+                    task_context = {
+                        "window_hours": 12,
+                        "relation": "NEW",
+                        "relation_confidence": 0.0,
+                        "reason": "current_request_subject_inheritance",
+                        "active_topic": active_subject,
+                        "selected_pairs": [],
+                        "candidates": [],
+                        "matches": [],
+                        "history_topics": [],
+                        "topic_index": [],
+                        "known_topic_count": 0,
+                        "history_request": False,
+                        "requested_topic_count": 0,
+                        "topic_table_markdown": "",
+                        "anchor": {},
+                        "selected_section": {},
+                        "clarification_needed": False,
+                        "clarification_prompt": "",
+                        "pending_clarification": {},
+                        "clarification_resolution": {},
+                        "search": {"relation": "NEW", "total_pairs": 0, "candidate_count": 0},
+                    }
+                    task_search = _compact_question_search(task_context, search_query, task_semantics)
+                    task_search["inherits_current_request_subject"] = True
+                    task_search["reason"] = "pronoun_inherits_subject_from_current_request"
+                else:
+                    task_context = prepare_dialogue_context(
+                        uid, search_query, query_interpretation=task_semantics, **search_kwargs
+                    )
+                    if question_item.get("introduces_current_request_subject"):
+                        # Bind all anaphoric substeps to the first explicit topic clause.
+                        # When that clause is NEW, its literal request—not the previous
+                        # unrelated turn—owns active_topic. If it is CONTINUE, preserve
+                        # that same-topic anchor, but never search independently per pronoun.
+                        if _text(task_context.get("relation")).upper() == "NEW":
+                            task_context["active_topic"] = search_query[:140]
+                        current_request_subject_context = task_context
+                    task_search = _compact_question_search(task_context, search_query, task_semantics)
+                    if inherits_subject:
+                        task_search["inherits_current_request_subject"] = True
             except Exception as exc:
                 # A task-search failure must not discard the whole user request.
                 # Keep order/identity and allow other tasks to proceed independently.
@@ -1165,6 +1208,7 @@ async def execute(
                 selected_pairs=len(task_context.get("selected_pairs") or []) if isinstance(task_context, dict) else 0,
                 clarification_needed=bool(task_search.get("clarification_needed")),
                 status=task_search.get("status"),
+                context_source="current_request_subject" if question_item.get("inherits_current_request_subject") else "dialogue_memory",
                 semantic_intent=task_semantics.get("primary_intent"),
                 search_direction=task_semantics.get("direction"),
                 history_request=bool(task_context.get("history_request")) if isinstance(task_context, dict) else False,
