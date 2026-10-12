@@ -1659,14 +1659,28 @@ async def execute(
         )
         _apr_timing_log("image_generation", image_started, succeeded=bool(image_result))
         if image_result:
-            packaged["artifacts"].append(image_result.get("artifact") or image_result)
+            image_artifact = image_result.get("artifact") if isinstance(image_result.get("artifact"), dict) else image_result
+            packaged["artifacts"].append(image_artifact)
+            artifact_payload = image_artifact.get("payload") if isinstance(image_artifact.get("payload"), dict) else {}
+            image_items = image_artifact.get("images") if isinstance(image_artifact.get("images"), list) else artifact_payload.get("images", [])
+            image_items = image_items if isinstance(image_items, list) else []
+            # Put image data directly in the typed block payload. The contract still
+            # carries the artifact sidecar, but the Web gallery no longer depends on
+            # every renderer understanding a nested artifact envelope identically.
+            visible_image_payload = dict(artifact_payload)
+            if image_items:
+                visible_image_payload["images"] = image_items
+            for key in ("src", "url", "image", "image_data_uri", "image_base64", "title", "alt", "caption", "width", "height", "mime_type"):
+                if key not in visible_image_payload and image_artifact.get(key) not in (None, "", [], {}):
+                    visible_image_payload[key] = image_artifact[key]
             image_block = {
                 "type": "image",
                 "renderer": get_web_renderer_registration("image").get("renderer", "GalleryBlock"),
                 "viewer": get_web_renderer_registration("image").get("viewer", "GalleryBlock"),
                 "content": "",
-                "artifact": image_result.get("artifact") or {},
-                "images": (image_result.get("artifact") or {}).get("images", []),
+                "payload": visible_image_payload,
+                "artifact": image_artifact,
+                "images": image_items,
             }
             packaged["render_blocks"].append(image_block)
 
