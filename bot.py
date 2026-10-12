@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import hashlib
-import hmac
 import base64
 import json
 import os
@@ -701,18 +700,10 @@ class AprilHandler(BaseHTTPRequestHandler):
         if parsed.path == CANONICAL_CHAT_ROUTE:
             query = parse_qs(parsed.query, keep_blank_values=False)
             if query.get("mode", [""])[0] == "history":
-                # Vercel derives this purpose-specific credential from the
-                # existing NEXTAUTH_SECRET. It must be configured in both
-                # services; no separate history token or client-side secret exists.
-                next_auth_secret = _text(os.getenv("NEXTAUTH_SECRET"))
-                expected_token = (
-                    hmac.new(next_auth_secret.encode("utf-8"), b"april-history-proxy-v1", hashlib.sha256).hexdigest()
-                    if next_auth_secret else ""
-                )
-                received_token = _text(self.headers.get("X-April-History-Token"))
-                if not expected_token or not received_token or not hmac.compare_digest(expected_token, received_token):
-                    self._send_json(403, {"success": False, "error": "HISTORY_ACCESS_DENIED"})
-                    return
+                # April Web's same-origin API has already verified the NextAuth
+                # session and forwards its canonical April ID. Do not require a
+                # second shared token: the canonical memory reader independently
+                # checks that this ID belongs to a registered account in `users`.
                 user_id = _text(self.headers.get("X-April-User-Id"))
                 message_id = _text(self.headers.get("X-April-Message-Id"))
                 _apr_timing_log("history_request", user_key=_apr_diag_ref(user_id), has_message_id=bool(message_id))
