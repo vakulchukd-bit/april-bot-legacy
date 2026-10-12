@@ -526,7 +526,7 @@ WEB_RENDERER_REGISTRY = {
     "text": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "answer"]},
     "markdown": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "markdown"]},
     "formula": {"renderer": "FormulaRenderer", "viewer": "FormulaRenderer", "fallback_renderer": "", "payload_keys": ["formula", "formulas", "latex", "latex_formulas", "equation", "expression", "math", "markdown", "content"], "mode": "force_math"},
-    "graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["series", "datasets", "traces", "curves", "points", "data_points", "x_values", "y_values", "categories", "labels", "data_table", "matrix", "x_axis", "y_axis", "z_axis", "axes", "representation", "chart_type", "visualization", "graph_type", "plot_type", "fn", "function", "expression", "equation", "formula", "x_domain", "y_domain", "z_domain", "x_range", "y_range", "z_range", "domain", "surface", "surface_grid", "surface_function", "z_function", "z_expression", "grid_resolution", "spheres", "objects_3d", "objects", "shapes", "meshes", "geometry", "scene", "dimensions", "three_d", "show_curved_grid", "curved_grid"]},
+    "graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["series", "datasets", "traces", "curves", "points", "data_points", "x", "y", "x_values", "y_values", "categories", "labels", "data_table", "matrix", "x_axis", "y_axis", "z_axis", "axes", "representation", "chart_type", "visualization", "graph_type", "plot_type", "fn", "function", "expression", "equation", "formula", "x_domain", "y_domain", "z_domain", "x_range", "y_range", "z_range", "domain", "surface", "surface_grid", "surface_function", "z_function", "z_expression", "grid_resolution", "spheres", "objects_3d", "objects", "shapes", "meshes", "geometry", "scene", "dimensions", "three_d", "show_curved_grid", "curved_grid"]},
     "knowledge_graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "series", "points", "labels", "title", "description"]},
     "relation_graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "series", "points", "labels", "title", "description"]},
     "relations": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "title", "description"]},
@@ -2810,13 +2810,19 @@ def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[st
                 nested_geometry.get("spheres"),
             )
         )
+        representation = str(p.get("representation") or p.get("graph_type") or p.get("chart_type") or "").strip().lower().replace("-", "_").replace(" ", "_")
+        explicit_surface_expression = representation in {"surface3d", "surface_3d", "3d_surface", "surface", "mesh3d", "mesh_3d", "3d"} and bool(
+            p.get("equation") or p.get("expression") or p.get("formula") or p.get("fn")
+        )
         return bool(
             (isinstance(series, list) and any(isinstance(item, dict) and (item.get("points") or item.get("x") or item.get("y") or item.get("data") or item.get("values")) for item in series))
             or (isinstance(p.get("x_values"), list) and isinstance(p.get("y_values"), list) and min(len(p["x_values"]), len(p["y_values"])) >= 2)
+            or (isinstance(p.get("x"), list) and isinstance(p.get("y"), list) and min(len(p["x"]), len(p["y"])) >= 2)
             or (isinstance(p.get("points"), list) and len(p["points"]) >= 2)
             or (isinstance(p.get("nodes"), list) and bool(p["nodes"]) and isinstance(p.get("edges"), list) and bool(p.get("edges")))
             or bool(p.get("matrix") or p.get("data_table") or p.get("surface_grid") or p.get("z_values"))
             or bool(p.get("surface_function") or p.get("z_function") or p.get("z_expression"))
+            or explicit_surface_expression
             or has_nested_surface_expression
             or has_nested_3d_objects
             or bool(p.get("objects_3d") or p.get("spheres") or p.get("objects") or p.get("shapes") or p.get("meshes"))
