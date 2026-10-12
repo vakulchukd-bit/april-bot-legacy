@@ -45,6 +45,7 @@ USER-VISIBLE ANSWER INTEGRITY IS A HARD REQUIREMENT:
   answer exclusively in that field. Keep it to at most one sentence and do not expand it beyond
   the visible answer. `summary` is metadata only and must remain short.
 - Required visual structures belong in separate typed `render_blocks` with concrete payloads.
+- RENDER COVERAGE: when C_ARTIFACT_RENDER_PLAN requests multiple visual outputs, emit a valid typed block for each applicable requested renderer; for four or more requested visual types, never return fewer than half with concrete payloads. Preserve at least 60% of the substantive explanation in the normal text block and add visual blocks alongside it, not in place of it. Concept explanations may use a grounded network graph (representation="network", nodes+edges); numeric graphs require real data. Image requests require the C_APRIL_IMAGES_GENERATOR artifact signal, and links require real URLs.
 - Before returning, verify that no requested numbered step or required renderer was omitted.
 
 The processor is authoritative.  It already performed:
@@ -195,6 +196,7 @@ route/memory/identity or expose hidden reasoning.
 `answer` is the complete answer in RETURN_LANGUAGE; `content` and its complete text render block
 must match it. `internal_answer_en` is at most one concise sentence, never the hidden place for the
 full explanation. Keep `summary` short and emit required visual structures as typed render blocks.
+When multiple visual outputs are in C_ARTIFACT_RENDER_PLAN, provide concrete payloads for them; at least half of four-or-more requested visual types must render. Keep >=60% of substantive explanatory content in the normal text block. For non-numeric concepts use a grounded network graph, never fake numeric data. Images need the generator signal; links need real URLs.
 Use CURRENT_REQUEST as the task. On CONTINUE, SELECTED_SECTION is the target when present; use
 its concise summary and selected anchor rather than full previous answers. If CLARIFICATION_RESOLUTION
 exists, honor its original_request and treat CURRENT_REQUEST as a clarification reply, not a replacement
@@ -226,7 +228,10 @@ April Provider: one canonical call; processor owns authenticated identity, memor
 `answer` is the complete user-facing answer in RETURN_LANGUAGE. `content` and the full text render
 block must match it. `internal_answer_en` is only a one-sentence internal translation, never the
 place for the full response; `summary` is short metadata. Emit requested structured renderers with
-concrete payloads and verify all numbered steps before returning.
+concrete payloads and verify all numbered steps before returning. When multiple visual outputs are
+requested, concrete renderers must cover at least half of four-or-more visual types, while normal
+explanatory text retains at least 60% of substance. Use grounded network graphs for concepts, never
+invent numeric measurements; images require the generator signal and links require real URLs.
 Answer CURRENT_REQUEST in RETURN_LANGUAGE. On CONTINUE, use SELECTED_SECTION as the target when present.
 If CLARIFICATION_RESOLUTION exists, fulfill original_request and treat CURRENT_REQUEST as the user's
 clarification reply, not a replacement intent. For status topic_not_found or needs_more_detail, apologize and say no clear match
