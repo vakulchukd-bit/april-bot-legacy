@@ -212,6 +212,31 @@ def _detect_image_modification(text: str) -> bool:
     return any(_contains_marker(low, marker) for marker in _IMAGE_MODIFICATION_MARKERS)
 
 
+def _detect_image_generation_request(text: str) -> bool:
+    """Detect a picture as the requested output, not a picture used as context.
+
+    This intentionally checks the first visual object after the action. For
+    example, "нарисуй картинку со схемой" is an image-generation request, while
+    "нарисуй схему на картинке" remains a structured diagram request.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    if _detect_image_modification(low):
+        return True
+
+    action = r"(?:draw|show|display|create|make|generate|render|нарис\w*|покаж\w*|отобраз\w*|созда\w*|сдела\w*|сгенерир\w*|изобраз\w*)"
+    image_noun = r"(?:picture|image|illustration|photo|картинк(?:у|а|и)\b|изображени(?:е|я|и)\b|иллюстраци(?:ю|я|и)\b|фото\b)"
+    # Permit polite words and ordinary modifiers, but do not skip a preceding
+    # explicit schema/graph/table noun to reinterpret its object as an image.
+    filler = r"(?:(?!(?:схем\w*|диаграмм\w*|график\w*|таблиц\w*|черт[её]ж\w*)\b)[\w-]+\s+)"
+    forward = rf"(?<![\w\u0080-\uffff]){action}\b\s+(?:{filler}){{0,4}}{image_noun}"
+    # Support inverted Russian requests such as "картинку нарисуй". The
+    # accusative/nominative object forms deliberately exclude "на картинке".
+    reverse = rf"(?<![\w\u0080-\uffff]){image_noun}\s+(?:мне\s+|нам\s+)?{action}\b"
+    return bool(re.search(forward, low, flags=re.IGNORECASE) or re.search(reverse, low, flags=re.IGNORECASE))
+
+
 def _detect_requested_outputs(text: str) -> list[str]:
     result: list[str] = []
     low = _text(text).lower()
@@ -220,9 +245,17 @@ def _detect_requested_outputs(text: str) -> list[str]:
             result.append(output)
 
     # A plain image/photo mention is input context, not an output request.
-    # Image editing is an explicit generation operation.
-    if _detect_image_modification(low) and "image" not in result:
+    # The object-order-aware detector captures explicit image requests even
+    # when users insert "мне", an adjective, or other polite filler.
+    explicit_image_request = _detect_image_generation_request(low)
+    if explicit_image_request and "image" not in result:
         result.append("image")
+    if explicit_image_request:
+        # The requested output is the picture itself. Do not also classify
+        # words describing the picture (e.g. "картинку со схемой") as a
+        # separate schematic artifact. A scheme named before "на картинке"
+        # does not enter this branch and keeps the diagram route.
+        result = [kind for kind in result if kind != "diagram"]
 
     # Common compound requests say "build a table and graph" only once. Recognize
     # the chart noun together with an explicit construction/visualization verb.
@@ -265,6 +298,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     """
     low = _text(text).lower().replace("ё", "е")
     outputs = list(dict.fromkeys(explicit_outputs or ["text"]))
+    explicit_image_request = _detect_image_generation_request(low)
 
     comparison = bool(re.search(
         r"\b(?:compare|comparison|compare\s+with|versus|vs\.?|differences?\s+between|pros\s+and\s+cons)\b"
@@ -284,7 +318,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
 
     if comparison and "table" not in outputs:
         outputs.append("table")
-    if workflow_or_architecture and "diagram" not in outputs:
+    if workflow_or_architecture and not explicit_image_request and "diagram" not in outputs:
         outputs.append("diagram")
 
     # Table intent may use Russian inverted word order or an adjective between
@@ -323,7 +357,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         r"постро\w*\s+(?:график|поверхност))",
         low,
     ))
-    if visual_action and explicit_diagram_intent and "diagram" not in outputs:
+    if visual_action and explicit_diagram_intent and not explicit_image_request and "diagram" not in outputs:
         outputs.append("diagram")
     if (
         visual_action
@@ -333,6 +367,10 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         and not any(kind in outputs for kind in ("diagram", "graph", "table", "formula", "code", "file", "link"))
     ):
         outputs.append("image")
+    if explicit_image_request:
+        outputs = [kind for kind in outputs if kind != "diagram"]
+        if "image" not in outputs:
+            outputs.append("image")
     # Formula view only for a clearly mathematical request. Graphs remain explicit
     # unless the request asks to plot/visualize data or a function.
     if mathematical_function and bool(re.search(
