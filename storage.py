@@ -735,11 +735,51 @@ def create_user(email, name="", provider="google", provider_user_id=None):
 
 
 def find_or_create_user(email, name="", provider="google", provider_user_id=None):
-    existing = find_user_by_email(email)
+    """Create or restore an account only when the trusted provider identity matches."""
+    normalized_email = str(email or "").strip().lower()
+    normalized_provider = str(provider or "").strip().lower()
+    incoming_provider_id = str(provider_user_id or "").strip()
+    if not normalized_email or "@" not in normalized_email:
+        return None
+    if normalized_provider != "google" or not incoming_provider_id:
+        return None
+
+    existing = find_user_by_email(normalized_email)
     if existing:
+        stored_provider = str(existing.get("provider") or "").strip().lower()
+        stored_provider_id = str(existing.get("provider_user_id") or "").strip()
+        # Never attach another provider identity to an existing email row.
+        if stored_provider != normalized_provider:
+            return None
+        if stored_provider_id and stored_provider_id != incoming_provider_id:
+            return None
+        if not stored_provider_id:
+            conn = get_conn()
+            if not conn:
+                return None
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """UPDATE users SET provider_user_id = %s
+                               WHERE user_id = %s AND LOWER(provider) = %s
+                                 AND (provider_user_id IS NULL OR provider_user_id = '')""",
+                            (incoming_provider_id, str(existing.get("user_id") or ""), normalized_provider),
+                        )
+                existing = find_user_by_email(normalized_email)
+                if not existing or str(existing.get("provider_user_id") or "").strip() != incoming_provider_id:
+                    return None
+            finally:
+                conn.close()
         update_last_login(existing["user_id"])
         return existing
-    return create_user(email, name=name, provider=provider, provider_user_id=provider_user_id)
+
+    return create_user(
+        email=normalized_email,
+        name=name,
+        provider=normalized_provider,
+        provider_user_id=incoming_provider_id,
+    )
 
 
 def set_subscription(user_id, plan="premium"):
@@ -806,9 +846,13 @@ def get_user_plan(user_id):
                 if not user:
                     _ensure_user_defaults(cur, uid)
                     return "free"
-                if float(user.get("subscription_until") or 0) < now().timestamp():
+                plan = str(user.get("plan") or "free").strip().lower()
+                expires_at = float(user.get("subscription_until") or 0)
+                if expires_at <= now().timestamp():
                     return "free"
-                return str(user.get("plan") or "free")
+                # Entitlements are determined by the database, never by the
+                # client-supplied `package` field or an unrecognized DB value.
+                return plan if plan in {"lite", "premium"} else "free"
     finally:
         conn.close()
 
