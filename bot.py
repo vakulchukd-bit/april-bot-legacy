@@ -709,7 +709,23 @@ class AprilHandler(BaseHTTPRequestHandler):
     def _service_authorized(self) -> bool:
         expected = str(os.getenv("APRIL_WEB_TO_BOT_TOKEN", "")).strip()
         supplied = str(self.headers.get("X-April-Service-Token", "")).strip()
-        return len(expected) >= 32 and bool(supplied) and hmac.compare_digest(expected, supplied)
+        authorized = len(expected) >= 32 and bool(supplied) and hmac.compare_digest(expected, supplied)
+        if not authorized:
+            # Never print the credential. Compare short one-way fingerprints
+            # against APRIL_CANONICAL_AUTH_REJECTED in Vercel logs instead.
+            def fingerprint(value: str) -> str:
+                return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12] if value else "missing"
+            print("[APRIL_AUTH_DIAG] " + json.dumps({
+                "path": self.path.split("?", 1)[0],
+                "expected_present": bool(expected),
+                "expected_length": len(expected),
+                "expected_fingerprint": fingerprint(expected),
+                "supplied_present": bool(supplied),
+                "supplied_length": len(supplied),
+                "supplied_fingerprint": fingerprint(supplied),
+                "match": False,
+            }, separators=(",", ":")), flush=True)
+        return authorized
 
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         # RFC 9110: a 204 response must not advertise/contain a JSON body.  The
@@ -760,6 +776,7 @@ class AprilHandler(BaseHTTPRequestHandler):
         # canonical users table; never derive an April user ID from email.
         if self.path == "/api/users/find-or-create":
             if not self._service_authorized():
+                self.close_connection = True
                 self._send_json(401, {"success": False, "error": "REGISTRY_AUTH_REQUIRED"})
                 return
             try:
@@ -858,6 +875,10 @@ class AprilHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"success": False, "error": "NOT_FOUND", "canonical_route": CANONICAL_CHAT_ROUTE})
             return
         if not self._service_authorized():
+            # The chat request body has not been consumed yet. Close this
+            # keep-alive connection after replying so JSON bytes cannot be
+            # misinterpreted as a new HTTP request line (spurious 400 errors).
+            self.close_connection = True
             self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED", "canonical_route": CANONICAL_CHAT_ROUTE})
             return
         canonical_user_id = _text(self.headers.get("X-April-User-Id"))
