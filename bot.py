@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import hashlib
+import hmac
 import base64
 import json
 import os
@@ -32,7 +33,7 @@ from blocks.state_manager import (
     _subject_overlap,
     _topic_query_overlap,
 )
-from storage import find_or_create_user, init_db, is_authenticated_user
+from storage import find_or_create_user, get_user_plan, init_db, is_authenticated_user
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "10000"))
@@ -705,6 +706,11 @@ class AprilHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "AprilBotRU/3.0"
 
+    def _service_authorized(self) -> bool:
+        expected = str(os.getenv("APRIL_WEB_TO_BOT_TOKEN", "")).strip()
+        supplied = str(self.headers.get("X-April-Service-Token", "")).strip()
+        return len(expected) >= 32 and bool(supplied) and hmac.compare_digest(expected, supplied)
+
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         # RFC 9110: a 204 response must not advertise/contain a JSON body.  The
         # previous Content-Length: 2 with no bytes desynchronised HTTP/1.1 keep-alive
@@ -731,10 +737,11 @@ class AprilHandler(BaseHTTPRequestHandler):
         if parsed.path == CANONICAL_CHAT_ROUTE:
             query = parse_qs(parsed.query, keep_blank_values=False)
             if query.get("mode", [""])[0] == "history":
-                # April Web's same-origin API has already verified the NextAuth
-                # session and forwards its canonical April ID. Do not require a
-                # second shared token: the canonical memory reader independently
-                # checks that this ID belongs to a registered account in `users`.
+                # Both layers authenticate: Web verifies NextAuth, Bot verifies
+                # the service token and checks that the forwarded account exists.
+                if not self._service_authorized():
+                    self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                    return
                 user_id = _text(self.headers.get("X-April-User-Id"))
                 message_id = _text(self.headers.get("X-April-Message-Id"))
                 _apr_timing_log("history_request", user_key=_apr_diag_ref(user_id), has_message_id=bool(message_id))
@@ -752,6 +759,9 @@ class AprilHandler(BaseHTTPRequestHandler):
         # Existing April Web authentication bridge. Keep account identity in the
         # canonical users table; never derive an April user ID from email.
         if self.path == "/api/users/find-or-create":
+            if not self._service_authorized():
+                self._send_json(401, {"success": False, "error": "REGISTRY_AUTH_REQUIRED"})
+                return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 if length < 0 or length > 64 * 1024:
@@ -768,11 +778,16 @@ class AprilHandler(BaseHTTPRequestHandler):
                     return
 
                 email = _text(body.get("email")).lower()
-                provider = _text(body.get("provider"))
+                provider = _text(body.get("provider")).lower()
                 provider_user_id = _text(body.get("provider_user_id"))
-                name = _text(body.get("name"))
-                if not email or not provider or not provider_user_id:
-                    self._send_json(400, {"success": False, "error": "INVALID_REQUEST"})
+                name = _text(body.get("name"))[:200]
+                if (
+                    body.get("email_verified") is not True
+                    or not email or len(email) > 320 or "@" not in email
+                    or provider != "google"
+                    or not provider_user_id or len(provider_user_id) > 256
+                ):
+                    self._send_json(400, {"success": False, "error": "INVALID_VERIFIED_GOOGLE_IDENTITY"})
                     return
 
                 user = find_or_create_user(
@@ -792,6 +807,9 @@ class AprilHandler(BaseHTTPRequestHandler):
                 if not april_id or not user_id:
                     self._send_json(500, {"success": False, "error": "USER_ID_NOT_AVAILABLE"})
                     return
+                # Session/UI plan is only a mirror of the database entitlement.
+                # Expired or unknown plan values are always reported as Free.
+                active_plan = get_user_plan(user_id)
                 payload_user = {
                     "user_id": user_id,
                     "april_id": april_id,
@@ -800,8 +818,8 @@ class AprilHandler(BaseHTTPRequestHandler):
                     "email": _text(user.get("email") or email),
                     "name": _text(user.get("name") or name),
                     "provider": _text(user.get("provider") or provider),
-                    "plan": _text(user.get("plan") or "free"),
-                    "currentPlan": _text(user.get("plan") or "free"),
+                    "plan": active_plan,
+                    "currentPlan": active_plan,
                 }
                 self._send_json(200, {"success": True, "user": payload_user})
             except Exception as exc:
@@ -839,6 +857,16 @@ class AprilHandler(BaseHTTPRequestHandler):
         if self.path != CANONICAL_CHAT_ROUTE:
             self._send_json(404, {"success": False, "error": "NOT_FOUND", "canonical_route": CANONICAL_CHAT_ROUTE})
             return
+        if not self._service_authorized():
+            self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED", "canonical_route": CANONICAL_CHAT_ROUTE})
+            return
+        canonical_user_id = _text(self.headers.get("X-April-User-Id"))
+        if not canonical_user_id:
+            self._send_json(401, {"success": False, "error": "AUTHENTICATION_REQUIRED", "canonical_route": CANONICAL_CHAT_ROUTE})
+            return
+        if not is_authenticated_user(canonical_user_id):
+            self._send_json(401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED", "canonical_route": CANONICAL_CHAT_ROUTE})
+            return
         http_started = time.perf_counter()
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -852,6 +880,14 @@ class AprilHandler(BaseHTTPRequestHandler):
                 data, attachments = parse_multipart_payload(raw, content_type=content_type)
             else:
                 data, attachments = parse_json_payload(raw)
+            if not isinstance(data, dict):
+                self._send_json(400, {"success": False, "error": "INVALID_REQUEST", "canonical_route": CANONICAL_CHAT_ROUTE})
+                return
+            # Account ownership comes only from the authenticated Web session,
+            # never from browser-controlled JSON or multipart form fields.
+            data = dict(data)
+            data["user_id"] = canonical_user_id
+            data["april_id"] = canonical_user_id
             _apr_timing_log("http_request_parse", parse_started, body_bytes=length,
                 content_type=content_type.split(";", 1)[0], attachment_count=len(attachments or []),
                 input_chars=len(_text(data.get("text") or data.get("message") or data.get("content"))) if isinstance(data, dict) else 0)
@@ -859,9 +895,6 @@ class AprilHandler(BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
                 self.send_header("Transfer-Encoding", "chunked")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
-                self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS, GET")
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
 
