@@ -4,20 +4,14 @@ APRIL PostgreSQL storage — canonical minimal persistent storage.
 Persistent data policy:
   1. users     -> permanent authenticated/account/subscription state.
   2. payments  -> permanent payment history.
-  3. dialogue_memory -> authenticated users only, rolling UTC 12h dialogue.
+  3. dialogue_memory -> authenticated USER↔APRIL pairs with per-pair retention.
 
+The retention lifetime is recorded when each pair is saved: Free = 12 hours,
+Premium = 24 hours. A later plan change does not extend or shorten an existing
+pair. Legacy rows default to 12 hours; rows from a currently verifiable active Premium
+grant are backfilled to 24 hours on the first migration. Reads enforce expiry immediately
+and a background worker physically removes expired rows approximately once a minute.
 The old feedback/knowledge/memory_states stores are intentionally removed.
-Dialogue memory is stored as USER↔APRIL pairs only; no topics/entities/tasks are
-persisted in PostgreSQL.
-
-UTC rollover rule:
-  - PostgreSQL keeps the current fixed UTC 12h cycle.
-  - At a cycle boundary (00:00 or 12:00 UTC), the previous 12h segment is
-    reduced to its last 1h as a continuity seed.
-  - During the new cycle, the seed remains and the new pairs grow until the
-    next boundary.
-  - Cleanup is idempotent and runs on startup, on dialogue reads/writes, and
-    from a lightweight hourly UTC worker.
 """
 from __future__ import annotations
 
@@ -80,7 +74,7 @@ _ALLOWED_TABLE_COLUMNS = {
     "users": set(_USERS_COLUMNS),
     # Test grants are recorded for audit, but they are explicitly not paid payments.
     "payments": {"id", "user_id", "plan", "amount", "premium_id", "payment_status", "payment_source", "created_at"},
-    "dialogue_memory": {"id", "user_id", "created_at", "turn_index", "user_text", "april_text", "user_text_en", "april_text_en", "language", "relation", "pair_hash", "dialog_id", "conversation_id", "message_id", "interpretation_id", "structured_request", "structured_response"},
+    "dialogue_memory": {"id", "user_id", "created_at", "retention_hours", "turn_index", "user_text", "april_text", "user_text_en", "april_text_en", "language", "relation", "pair_hash", "dialog_id", "conversation_id", "message_id", "interpretation_id", "structured_request", "structured_response"},
 }
 
 
@@ -309,12 +303,28 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_created ON payments(user_id, created_at DESC)")
 
+                # Detect first-time retention migration before CREATE/ALTER adds the field.
+                # This lets us backfill currently-verifiable Premium rows once instead of
+                # running a correlated update on every request (init_db is called by both executors).
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = current_schema()
+                          AND table_name = 'dialogue_memory'
+                          AND column_name = 'retention_hours'
+                    ) AS has_retention_hours
+                    """
+                )
+                retention_column_preexisting = bool((cur.fetchone() or {}).get("has_retention_hours"))
+
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS dialogue_memory (
                         id BIGSERIAL PRIMARY KEY,
                         user_id TEXT NOT NULL,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        retention_hours INTEGER NOT NULL DEFAULT 12,
                         turn_index INTEGER NOT NULL,
                         user_text TEXT NOT NULL,
                         april_text TEXT NOT NULL,
@@ -333,6 +343,9 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS id BIGSERIAL")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS user_id TEXT")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
+                # Retention is attached to each saved pair, not to the user's
+                # current plan. Existing rows deliberately default to Free's 12h.
+                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS retention_hours INTEGER NOT NULL DEFAULT 12")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS turn_index INTEGER DEFAULT 0")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS user_text TEXT")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS april_text TEXT")
@@ -394,8 +407,31 @@ def init_db() -> None:
                 cur.execute("UPDATE users SET created_at=CURRENT_TIMESTAMP WHERE created_at IS NULL")
                 cur.execute("UPDATE users SET last_login_at=CURRENT_TIMESTAMP WHERE last_login_at IS NULL")
 
+                # Backfill once, only when this deployment first adds retention_hours.
+                # Current Premium rows can be identified from the canonical payments ledger;
+                # all other historical rows keep the migration default of 12 hours.
+                if not retention_column_preexisting:
+                    cur.execute(
+                        """
+                        UPDATE dialogue_memory AS d
+                        SET retention_hours = 24
+                        FROM users AS u
+                        WHERE u.user_id = d.user_id
+                          AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
+                          AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
+                          AND d.retention_hours = 12
+                          AND d.created_at >= (
+                              SELECT MAX(p.created_at)
+                              FROM payments AS p
+                              WHERE p.user_id = d.user_id
+                                AND LOWER(COALESCE(p.plan, '')) = 'premium'
+                                AND LOWER(COALESCE(p.payment_status, '')) IN ('paid', 'test_grant')
+                          )
+                          AND d.created_at <= to_timestamp(u.subscription_until)
+                        """
+                    )
+
         cleanup_dialogue_memory_utc()
-        cleanup_premium_dialogue_memory_utc()
     finally:
         conn.close()
 
@@ -414,56 +450,40 @@ def _start_cleanup_worker() -> None:
     def worker() -> None:
         while True:
             try:
-                current = now()
-                cycle = utc_cycle_start(current)
-                next_boundary = cycle + timedelta(hours=DIALOGUE_WINDOW_HOURS)
-                boundary_delay = max(30.0, (next_boundary - current).total_seconds() + 2.0)
-                # Premium's rolling 24-hour window is cleaned hourly; Free keeps
-                # its existing fixed 00:00/12:00 UTC rollover and one-hour seed.
-                time.sleep(min(boundary_delay, 3600.0))
+                # Every pair expires relative to its own created_at and saved
+                # retention_hours. Reads enforce the same deadline immediately;
+                # this worker physically removes expired rows within ~5 minutes.
+                time.sleep(60.0)
                 expired_subscriptions = expire_subscriptions_utc()
-                free_deleted = cleanup_dialogue_memory_utc()
-                premium_deleted = cleanup_premium_dialogue_memory_utc()
+                deleted = cleanup_dialogue_memory_utc()
                 if expired_subscriptions:
                     print(f"STATE: UTC SUBSCRIPTION EXPIRY switched_to_free={expired_subscriptions}")
-                if free_deleted:
-                    print(f"STATE: UTC FREE DIALOGUE ROLLOVER CLEANUP removed={free_deleted}")
-                if premium_deleted:
-                    print(f"STATE: UTC PREMIUM 24H CLEANUP removed={premium_deleted}")
+                if deleted:
+                    print(f"STATE: PER-MESSAGE DIALOGUE RETENTION CLEANUP removed={deleted}")
             except Exception as exc:
                 print(f"STATE: UTC DIALOGUE CLEANUP ERROR: {exc}")
-                time.sleep(300.0)
+                time.sleep(60.0)
 
     threading.Thread(target=worker, name="april-dialogue-utc-cleanup", daemon=True).start()
 
 
 def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | int | datetime | None = None) -> int:
-    """Apply the established 12-hour UTC rollover to Free users only.
-
-    Active Premium accounts are excluded here and cleaned by the separate rolling
-    24-hour Premium cleaner. This prevents a Free rollover at 00:00/12:00 UTC from
-    truncating a Premium user's memory.
-    """
+    """Delete each dialogue pair once its saved 12h/24h lifetime has elapsed."""
     conn = get_conn()
     if not conn:
         return 0
-    seed_start, current = dialogue_window_bounds(timestamp)
-    cutoff = seed_start
-    now_seconds = current.timestamp()
+    current = now() if timestamp is None else (
+        timestamp.astimezone(timezone.utc) if isinstance(timestamp, datetime)
+        else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
+    )
     try:
         with conn:
             with conn.cursor() as cur:
                 if user_id is None:
                     cur.execute(
                         """DELETE FROM dialogue_memory AS d
-                           WHERE d.created_at < %s
-                             AND NOT EXISTS (
-                               SELECT 1 FROM users AS u
-                               WHERE u.user_id = d.user_id
-                                 AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
-                                 AND COALESCE(u.subscription_until, 0) > %s
-                             )""",
-                        (cutoff, now_seconds),
+                           WHERE d.created_at + (GREATEST(12, LEAST(24, COALESCE(d.retention_hours, 12))) * INTERVAL '1 hour') <= %s""",
+                        (current,),
                     )
                     deleted = int(cur.rowcount or 0)
                 else:
@@ -472,14 +492,9 @@ def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | i
                         return 0
                     cur.execute(
                         """DELETE FROM dialogue_memory AS d
-                           WHERE d.user_id = %s AND d.created_at < %s
-                             AND NOT EXISTS (
-                               SELECT 1 FROM users AS u
-                               WHERE u.user_id = d.user_id
-                                 AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
-                                 AND COALESCE(u.subscription_until, 0) > %s
-                             )""",
-                        (uid, cutoff, now_seconds),
+                           WHERE d.user_id = %s
+                             AND d.created_at + (GREATEST(12, LEAST(24, COALESCE(d.retention_hours, 12))) * INTERVAL '1 hour') <= %s""",
+                        (uid, current),
                     )
                     deleted = int(cur.rowcount or 0)
                 return deleted
@@ -515,32 +530,8 @@ def expire_subscriptions_utc(timestamp: float | int | datetime | None = None) ->
 
 
 def cleanup_premium_dialogue_memory_utc(timestamp: float | int | datetime | None = None) -> int:
-    """Keep only the last 24 hours for currently active Premium accounts."""
-    conn = get_conn()
-    if not conn:
-        return 0
-    current = now() if timestamp is None else (
-        timestamp.astimezone(timezone.utc) if isinstance(timestamp, datetime)
-        else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
-    )
-    cutoff = current - timedelta(hours=PREMIUM_MEMORY_WINDOW_HOURS)
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """DELETE FROM dialogue_memory AS d
-                       USING users AS u
-                       WHERE d.user_id = u.user_id
-                         AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
-                         AND COALESCE(u.subscription_until, 0) > %s
-                         AND d.created_at < %s""",
-                    (current.timestamp(), cutoff),
-                )
-                return int(cur.rowcount or 0)
-    except psycopg2.errors.UndefinedTable:
-        return 0
-    finally:
-        conn.close()
+    """Backward-compatible alias for the canonical per-row expiry cleanup."""
+    return cleanup_dialogue_memory_utc(timestamp=timestamp)
 
 
 def _is_authenticated_cursor(cur, uid: str) -> bool:
@@ -573,6 +564,7 @@ def save_dialogue_pair(
     interpretation_id: str = "",
     structured_request: dict[str, Any] | None = None,
     structured_response: dict[str, Any] | None = None,
+    retention_hours: int = DIALOGUE_WINDOW_HOURS,
 ) -> bool:
     """Persist one authenticated USER↔APRIL pair and nothing else."""
     uid = str(user_id)
@@ -598,25 +590,22 @@ def save_dialogue_pair(
             with conn.cursor() as cur:
                 if not _is_authenticated_cursor(cur, uid):
                     return False
-                # Clean before insert so the database never accumulates stale memory.
-                seed_start, _ = dialogue_window_bounds(dt)
+                # Purge against wall-clock now, not the browser's send timestamp.
+                # The new pair still keeps the validated send timestamp as created_at.
+                cleanup_now = now()
                 cur.execute(
                     """DELETE FROM dialogue_memory AS d
-                       WHERE d.user_id = %s AND d.created_at < %s
-                         AND NOT EXISTS (
-                           SELECT 1 FROM users AS u
-                           WHERE u.user_id = d.user_id
-                             AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
-                             AND COALESCE(u.subscription_until, 0) > %s
-                         )""",
-                    (uid, seed_start, dt.timestamp()),
+                       WHERE d.user_id = %s
+                         AND d.created_at + (GREATEST(12, LEAST(24, COALESCE(d.retention_hours, 12))) * INTERVAL '1 hour') <= %s""",
+                    (uid, cleanup_now),
                 )
+                row_retention_hours = 24 if int(retention_hours or DIALOGUE_WINDOW_HOURS) >= 24 else 12
                 pair_hash = _pair_hash(uid, created_ts, int(turn_index or 0), user_value, april_value)
                 cur.execute(
                     """
                     INSERT INTO dialogue_memory
-                        (user_id, created_at, turn_index, user_text, april_text, user_text_en, april_text_en, language, relation, pair_hash, dialog_id, conversation_id, message_id, interpretation_id, structured_request, structured_response)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                        (user_id, created_at, retention_hours, turn_index, user_text, april_text, user_text_en, april_text_en, language, relation, pair_hash, dialog_id, conversation_id, message_id, interpretation_id, structured_request, structured_response)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
                     ON CONFLICT (pair_hash) DO UPDATE SET
                         user_text_en = EXCLUDED.user_text_en,
                         april_text_en = EXCLUDED.april_text_en,
@@ -625,7 +614,7 @@ def save_dialogue_pair(
                         interpretation_id = EXCLUDED.interpretation_id
                     """,
                     (
-                        uid, dt, int(turn_index or 0), user_value, april_value,
+                        uid, dt, row_retention_hours, int(turn_index or 0), user_value, april_value,
                         str(user_en or user_value), str(april_en or april_value),
                         str(language or "en"), str(relation or "NEW"), pair_hash,
                         str(dialog_id or ""), str(conversation_id or ""),
@@ -642,12 +631,15 @@ def save_dialogue_pair(
 
 
 def load_dialogue_pairs(user_id: Any, *, limit: int = 0, timestamp: float | int | datetime | None = None) -> list[dict[str, Any]]:
-    """Load authenticated dialogue pairs inside the current UTC seed+cycle window."""
+    """Load authenticated dialogue pairs whose own saved retention has not elapsed."""
     uid = str(user_id)
     conn = get_conn()
     if not conn:
         return []
-    seed_start, current = dialogue_window_bounds(timestamp)
+    current = now() if timestamp is None else (
+        timestamp.astimezone(timezone.utc) if isinstance(timestamp, datetime)
+        else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
+    )
     try:
         with conn:
             with conn.cursor() as cur:
@@ -655,16 +647,16 @@ def load_dialogue_pairs(user_id: Any, *, limit: int = 0, timestamp: float | int 
                     return []
                 cur.execute(
                     """
-                    SELECT id, user_id, created_at, turn_index, user_text, april_text, user_text_en, april_text_en,
+                    SELECT id, user_id, created_at, retention_hours, turn_index, user_text, april_text, user_text_en, april_text_en,
                            language, relation, dialog_id, conversation_id, message_id, interpretation_id,
                            structured_request, structured_response
                     FROM dialogue_memory
                     WHERE user_id = %s
-                      AND created_at >= %s
                       AND created_at <= %s
+                      AND created_at + (GREATEST(12, LEAST(24, COALESCE(retention_hours, 12))) * INTERVAL '1 hour') > %s
                     ORDER BY created_at ASC, turn_index ASC, id ASC
                     """,
-                    (uid, seed_start, current),
+                    (uid, current, current),
                 )
                 rows = [dict(row) for row in cur.fetchall()]
                 for row in rows:
