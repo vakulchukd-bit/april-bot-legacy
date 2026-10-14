@@ -159,12 +159,52 @@ def _is_authenticated_row(row: Any) -> bool:
     )
 
 
+def resolve_user_id(user_id: Any) -> str | None:
+    """Resolve either the internal user_id or public april_id to the DB key.
+
+    Legacy rows can have different values in these columns. Dialogue memory,
+    entitlements and payments are keyed by users.user_id, so all protected paths
+    must normalize to that key before reading or writing related records.
+    """
+    raw = str(user_id or "").strip()
+    if not raw:
+        return None
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT user_id
+                FROM users
+                WHERE user_id = %s OR april_id = %s
+                ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
+                LIMIT 1
+                """,
+                (raw, raw, raw),
+            )
+            row = cur.fetchone() or {}
+            resolved = str(row.get("user_id") or "").strip()
+            return resolved or None
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
 def is_authenticated_user(user_id: Any) -> bool:
-    """Only a registered auth-backed row may own persistent dialogue memory."""
+    """Only a registered auth-backed row may own persistent dialogue memory.
+
+    Accept a public April ID at the API boundary, but check the matching DB row
+    rather than assuming april_id and user_id are always identical.
+    """
+    raw = str(user_id or "").strip()
+    if not raw:
+        return False
     conn = get_conn()
     if not conn:
         return False
-    uid = str(user_id)
     try:
         with conn:
             with conn.cursor() as cur:
@@ -172,9 +212,11 @@ def is_authenticated_user(user_id: Any) -> bool:
                     """
                     SELECT user_id, email, provider
                     FROM users
-                    WHERE user_id = %s
+                    WHERE user_id = %s OR april_id = %s
+                    ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
+                    LIMIT 1
                     """,
-                    (uid,),
+                    (raw, raw, raw),
                 )
                 return _is_authenticated_row(cur.fetchone())
     except Exception:
@@ -887,6 +929,10 @@ def find_or_create_user(email, name="", provider="google", provider_user_id=None
 
 
 def set_subscription(user_id, plan="premium"):
+    # Legacy/public April IDs are accepted at entry points, but the canonical
+    # subscription row is always keyed by users.user_id.
+    resolved_user_id = resolve_user_id(user_id)
+    user_id = resolved_user_id or str(user_id or "").strip()
     if plan == "lite":
         days = LITE_DAYS
     elif plan == "premium":
@@ -920,6 +966,7 @@ def set_subscription(user_id, plan="premium"):
 
 def save_payment(user_id, plan):
     amount = LITE_PRICE if plan == "lite" else PREMIUM_PRICE if plan == "premium" else 0
+    user_id = resolve_user_id(user_id) or str(user_id or "").strip()
     conn = get_conn()
     if not conn:
         return
@@ -953,13 +1000,20 @@ def get_user_plan(user_id):
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT plan, subscription_until FROM users WHERE user_id = %s",
-                    (uid,),
+                    """
+                    SELECT user_id, plan, subscription_until
+                    FROM users
+                    WHERE user_id = %s OR april_id = %s
+                    ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
+                    LIMIT 1
+                    """,
+                    (uid, uid, uid),
                 )
                 user = cur.fetchone()
                 if not user:
                     _ensure_user_defaults(cur, uid)
                     return "free"
+                uid = str(user.get("user_id") or uid).strip()
                 plan = str(user.get("plan") or "free").strip().lower()
                 expires_at = float(user.get("subscription_until") or 0)
                 current_seconds = now().timestamp()
@@ -994,13 +1048,20 @@ def get_user_subscription_status(user_id):
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT user_id, april_id, email, provider, plan, subscription_until, premium_id "
-                    "FROM users WHERE user_id = %s",
-                    (uid,),
+                    """
+                    SELECT user_id, april_id, email, provider, plan, subscription_until, premium_id
+                    FROM users
+                    WHERE user_id = %s OR april_id = %s
+                    ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
+                    LIMIT 1
+                    """,
+                    (uid, uid, uid),
                 )
                 user = cur.fetchone()
                 if not _is_authenticated_row(user):
                     return None
+                # All linked records use the internal user_id as their key.
+                uid = str(user.get("user_id") or uid).strip()
 
                 now_seconds = now().timestamp()
                 until_seconds = float(user.get("subscription_until") or 0)
@@ -1064,12 +1125,22 @@ def activate_test_premium(user_id: Any, hours: int = PREMIUM_TEST_DURATION_HOURS
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT user_id, april_id, email, provider, premium_id FROM users WHERE user_id = %s FOR UPDATE",
-                    (uid,),
+                    """
+                    SELECT user_id, april_id, email, provider, premium_id
+                    FROM users
+                    WHERE user_id = %s OR april_id = %s
+                    ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
+                    LIMIT 1
+                    FOR UPDATE
+                    """,
+                    (uid, uid, uid),
                 )
                 user = cur.fetchone()
                 if not _is_authenticated_row(user):
                     return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+                # Normalize the inbound API identifier before updating users or
+                # writing the payments ledger so they always point to one row.
+                uid = str(user.get("user_id") or uid).strip()
                 identities = {
                     str(user.get("user_id") or "").strip().lower(),
                     str(user.get("april_id") or "").strip().lower(),
