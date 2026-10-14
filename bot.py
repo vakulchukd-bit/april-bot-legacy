@@ -19,6 +19,7 @@ import re
 import traceback
 import time
 import uuid
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -76,6 +77,25 @@ def _apr_diag_ref(value: Any) -> str:
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _resolve_message_timestamp(value: Any) -> tuple[datetime, str]:
+    """Accept a browser send-time only when it is close to server receipt time.
+
+    This preserves the user's actual local send moment for restored history while
+    preventing arbitrary client timestamps from extending or shortening retention.
+    """
+    current = datetime.now(timezone.utc)
+    raw = _text(value)
+    if raw:
+        try:
+            parsed = datetime.fromisoformat(raw[:-1] + "+00:00" if raw.endswith("Z") else raw)
+            parsed = parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+            if abs((current - parsed).total_seconds()) <= 300:
+                return parsed, "client_send_time"
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return current, "server_received_time"
 
 
 def _get_dialogue_pairs_for_plan(
@@ -284,10 +304,13 @@ def _handle_payload(
     identity_started = time.perf_counter()
     identity = _canonical_identity(data)
     uid = identity["user_id"]
+    message_created_at, timestamp_source = _resolve_message_timestamp(data.get("message_timestamp"))
     original = _text(data.get("text") or data.get("message") or data.get("content"))
     _apr_timing_log("request_identity", identity_started, user_key=_apr_diag_ref(uid),
         dialog_key=_apr_diag_ref(identity.get("dialog_id")), message_key=_apr_diag_ref(identity.get("message_id")),
         flow_key=_apr_diag_ref(identity.get("flow_id")), input_chars=len(original), attachment_count=len(attachments or []))
+    _apr_timing_log("message_timestamp_resolved", user_key=_apr_diag_ref(uid), source=timestamp_source,
+                    message_key=_apr_diag_ref(identity.get("message_id")))
     conversation_id = identity["conversation_id"]
     dialog_id = identity["dialog_id"]
     message_id = identity["message_id"]
@@ -441,6 +464,7 @@ def _handle_payload(
             file_contents=text_file_contents,
             translation=translation,
             user_display_name=user_display_name,
+            message_created_at=message_created_at,
         ))
         _apr_timing_log("executor_returned", executor_started, user_key=_apr_diag_ref(uid),
             message_key=_apr_diag_ref(message_id), result_type=type(result).__name__,
