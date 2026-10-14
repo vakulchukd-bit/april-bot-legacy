@@ -25,13 +25,21 @@ from urllib.parse import parse_qs, urlsplit
 
 from blocks.input_reader import parse_json_payload, parse_multipart_payload
 from blocks.voice_reader import transcribe_voice_bytes
-from core.executor import execute
+from core.executor import execute as execute_free
+from core.Premium_executor import execute as execute_premium
 from blocks.state_manager import (
-    get_dialogue_pairs,
-    _topic_label,
-    _row_subject_tokens,
-    _subject_overlap,
-    _topic_query_overlap,
+    get_dialogue_pairs as get_free_dialogue_pairs,
+    _topic_label as _free_topic_label,
+    _row_subject_tokens as _free_row_subject_tokens,
+    _subject_overlap as _free_subject_overlap,
+    _topic_query_overlap as _free_topic_query_overlap,
+)
+from blocks.Premium_state_manager import (
+    get_dialogue_pairs as get_premium_dialogue_pairs,
+    _topic_label as _premium_topic_label,
+    _row_subject_tokens as _premium_row_subject_tokens,
+    _subject_overlap as _premium_subject_overlap,
+    _topic_query_overlap as _premium_topic_query_overlap,
 )
 from storage import find_or_create_user, get_user_plan, init_db, is_authenticated_user
 
@@ -65,6 +73,18 @@ def _apr_diag_ref(value: Any) -> str:
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _get_dialogue_pairs_for_plan(
+    user_id: str,
+    *,
+    plan: str,
+    refresh: bool = False,
+    limit: int = 0,
+) -> list[dict[str, Any]]:
+    """Read the same canonical memory table through the selected plan's engine."""
+    reader = get_premium_dialogue_pairs if _text(plan).lower() == "premium" else get_free_dialogue_pairs
+    return reader(user_id, refresh=refresh, limit=limit)
 
 
 def _detect_language(text: str, requested: str = "") -> str:
@@ -273,6 +293,19 @@ def _handle_payload(
     if not conversation_id and not dialog_id:
         return _error("conversation_id or dialog_id required", 400)
 
+    # Plan is server-authoritative: derive the execution branch only from the
+    # authenticated account's active entitlement in PostgreSQL, never from JSON.
+    plan_started = time.perf_counter()
+    active_plan = _text(get_user_plan(uid)).lower() or "free"
+    is_premium = active_plan == "premium"
+    _apr_timing_log(
+        "plan_entitlement_resolved",
+        plan_started,
+        user_key=_apr_diag_ref(uid),
+        active_plan=active_plan,
+        processor="premium" if is_premium else "free",
+    )
+
     attachments = attachments or []
     input_normalization_started = time.perf_counter()
     try:
@@ -305,7 +338,7 @@ def _handle_payload(
                 # Use the last saved language for this exact authenticated dialog.
                 # This keeps an image-only upload in Russian/Ukrainian chats localised.
                 try:
-                    prior_pairs = get_dialogue_pairs(uid, refresh=True, limit=24)
+                    prior_pairs = _get_dialogue_pairs_for_plan(uid, plan=active_plan, refresh=True, limit=24)
                     for prior in reversed(prior_pairs):
                         if (
                             _text(prior.get("dialog_id")) == (dialog_id or conversation_id)
@@ -379,7 +412,16 @@ def _handle_payload(
         )[:80]
 
         executor_started = time.perf_counter()
-        result = asyncio.run(execute(
+        selected_executor = execute_premium if is_premium else execute_free
+        selected_executor_name = "Premium_executor" if is_premium else "executor"
+        _apr_timing_log(
+            "processor_selected",
+            user_key=_apr_diag_ref(uid),
+            active_plan=active_plan,
+            processor=selected_executor_name,
+            canonical_route=CANONICAL_CHAT_ROUTE,
+        )
+        result = asyncio.run(selected_executor(
             uid,
             text=original,
             internal_text=internal_text,
@@ -570,7 +612,8 @@ def _history_item(row: dict[str, Any]) -> dict[str, Any]:
     intent = request_data.get("intent") if isinstance(request_data.get("intent"), dict) else {}
     goal = _text(request_data.get("goal") or intent.get("user_goal") or intent.get("goal"))
     user_text = _text(row.get("user_text"))
-    created_at = float(row.get("created_at") or 0.0)
+    created_at_value = row.get("created_at") or 0.0
+    created_at = float(created_at_value.timestamp()) if hasattr(created_at_value, "timestamp") else float(created_at_value)
     stable_memory_key = _text(row.get("message_id")) or f"legacy-memory-{_text(row.get('id'))}"
     return {
         "id": stable_memory_key,
@@ -590,22 +633,31 @@ def _history_item(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str, Any]]:
-    """Expose only the authenticated user's canonical 12-hour dialogue memory."""
+    """Expose the authenticated user's canonical memory through their plan engine."""
     if not user_id:
         return 400, {"success": False, "error": "USER_ID_REQUIRED"}
     if not is_authenticated_user(user_id):
         return 401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
 
     try:
-        rows = get_dialogue_pairs(user_id, refresh=True, limit=0)
+        active_plan = _text(get_user_plan(user_id)).lower() or "free"
+        is_premium = active_plan == "premium"
+        window_hours = 24 if is_premium else 12
+        rows = _get_dialogue_pairs_for_plan(
+            user_id, plan=active_plan, refresh=True, limit=0
+        )
+        topic_label = _premium_topic_label if is_premium else _free_topic_label
+        row_subject_tokens = _premium_row_subject_tokens if is_premium else _free_row_subject_tokens
+        subject_overlap = _premium_subject_overlap if is_premium else _free_subject_overlap
+        topic_query_overlap = _premium_topic_query_overlap if is_premium else _free_topic_query_overlap
         records = [(_history_item(row), row) for row in rows if isinstance(row, dict)]
         records.sort(key=lambda pair: (
             pair[0]["created_at"], pair[0]["turn_index"], pair[0]["id"]
         ))
         items = [item for item, _row in records]
         source_by_id = {item["message_id"]: row for item, row in records}
-        # get_dialogue_pairs enforces the same rolling 12-hour policy as the
-        # dialogue engine. Do not query or create a parallel history store here.
+        # The selected plan engine enforces its 12h/24h memory policy against
+        # the same canonical dialogue_memory table; no parallel store is created.
         if not message_id:
             history = []
             for item in reversed(items):
@@ -616,7 +668,7 @@ def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str,
             return 200, {
                 "success": True,
                 "user_id": user_id,
-                "window_hours": 12,
+                "window_hours": window_hours,
                 "count": len(history),
                 "history": history,
                 "canonical_route": CANONICAL_CHAT_ROUTE,
@@ -627,10 +679,10 @@ def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str,
             return 404, {"success": False, "error": "HISTORY_ENTRY_NOT_FOUND"}
         target = items[target_index]
         target_row = source_by_id.get(message_id, {})
-        target_topic = _topic_label(target_row) if target_row else (target.get("title") or target.get("user_text") or "")
-        target_subjects = _row_subject_tokens(target_row) if target_row else set()
+        target_topic = topic_label(target_row) if target_row else (target.get("title") or target.get("user_text") or "")
+        target_subjects = row_subject_tokens(target_row) if target_row else set()
 
-        # A dialog_id can span the full 12-hour session; using it as a restore
+        # A dialog_id can span the plan's full memory window; using it as a restore
         # boundary was the source of the 158-message payload. Restore the selected
         # topic vector instead: target + at most three strongly related prior pairs.
         vector_candidates = []
@@ -638,9 +690,9 @@ def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str,
             candidate_row = source_by_id.get(item["message_id"], {})
             if not candidate_row:
                 continue
-            candidate_topic = _topic_label(candidate_row)
-            topic_score = _topic_query_overlap(target_topic, candidate_topic)
-            subject_score = _subject_overlap(target_subjects, _row_subject_tokens(candidate_row))
+            candidate_topic = topic_label(candidate_row)
+            topic_score = topic_query_overlap(target_topic, candidate_topic)
+            subject_score = subject_overlap(target_subjects, row_subject_tokens(candidate_row))
             score = max(topic_score, subject_score * 0.85)
             if topic_score >= 0.35 or subject_score >= 0.30:
                 vector_candidates.append((score, index, item))
@@ -698,7 +750,7 @@ def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str,
         return 200, {
             "success": True,
             "user_id": user_id,
-            "window_hours": 12,
+            "window_hours": window_hours,
             "target": {key: target[key] for key in (
                 "id", "message_id", "dialog_id", "conversation_id", "title", "created_at"
             )},
