@@ -26,6 +26,7 @@ import math
 import os
 import random
 import re
+import secrets
 import threading
 import json
 import time
@@ -51,6 +52,9 @@ DIALOGUE_WINDOW_HOURS = 12
 DIALOGUE_SEED_HOURS = 1
 DIALOGUE_WINDOW_SECONDS = DIALOGUE_WINDOW_HOURS * 3600
 DIALOGUE_SEED_SECONDS = DIALOGUE_SEED_HOURS * 3600
+PREMIUM_MEMORY_WINDOW_HOURS = 24
+PREMIUM_MEMORY_WINDOW_SECONDS = PREMIUM_MEMORY_WINDOW_HOURS * 3600
+PREMIUM_TEST_DURATION_HOURS = 24
 
 _USERS_COLUMNS = (
     "user_id",
@@ -61,6 +65,7 @@ _USERS_COLUMNS = (
     "provider_user_id",
     "plan",
     "subscription_until",
+    "premium_id",
     "warned",
     "messages_today",
     "images_today",
@@ -205,6 +210,7 @@ def init_db() -> None:
                         provider_user_id TEXT,
                         plan TEXT NOT NULL DEFAULT 'free',
                         subscription_until DOUBLE PRECISION NOT NULL DEFAULT 0,
+                        premium_id TEXT,
                         warned BOOLEAN NOT NULL DEFAULT FALSE,
                         messages_today INTEGER NOT NULL DEFAULT 0,
                         images_today INTEGER NOT NULL DEFAULT 0,
@@ -222,6 +228,7 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS provider_user_id TEXT")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS plan TEXT DEFAULT 'free'")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_until DOUBLE PRECISION DEFAULT 0")
+                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS premium_id TEXT")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS warned BOOLEAN DEFAULT FALSE")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS messages_today INTEGER DEFAULT 0")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS images_today INTEGER DEFAULT 0")
@@ -231,6 +238,7 @@ def init_db() -> None:
 
                 cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_april_id ON users(april_id) WHERE april_id IS NOT NULL AND april_id <> ''")
                 cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL AND email <> ''")
+                cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_premium_id ON users(premium_id) WHERE premium_id IS NOT NULL AND premium_id <> ''")
 
                 cur.execute(
                     """
@@ -336,6 +344,7 @@ def init_db() -> None:
                 cur.execute("UPDATE users SET last_login_at=CURRENT_TIMESTAMP WHERE last_login_at IS NULL")
 
         cleanup_dialogue_memory_utc()
+        cleanup_premium_dialogue_memory_utc()
     finally:
         conn.close()
 
@@ -357,11 +366,19 @@ def _start_cleanup_worker() -> None:
                 current = now()
                 cycle = utc_cycle_start(current)
                 next_boundary = cycle + timedelta(hours=DIALOGUE_WINDOW_HOURS)
-                delay = max(30.0, (next_boundary - current).total_seconds() + 2.0)
-                time.sleep(delay)
-                deleted = cleanup_dialogue_memory_utc()
-                if deleted:
-                    print(f"STATE: UTC DIALOGUE ROLLOVER CLEANUP removed={deleted}")
+                boundary_delay = max(30.0, (next_boundary - current).total_seconds() + 2.0)
+                # Premium's rolling 24-hour window is cleaned hourly; Free keeps
+                # its existing fixed 00:00/12:00 UTC rollover and one-hour seed.
+                time.sleep(min(boundary_delay, 3600.0))
+                expired_subscriptions = expire_subscriptions_utc()
+                free_deleted = cleanup_dialogue_memory_utc()
+                premium_deleted = cleanup_premium_dialogue_memory_utc()
+                if expired_subscriptions:
+                    print(f"STATE: UTC SUBSCRIPTION EXPIRY switched_to_free={expired_subscriptions}")
+                if free_deleted:
+                    print(f"STATE: UTC FREE DIALOGUE ROLLOVER CLEANUP removed={free_deleted}")
+                if premium_deleted:
+                    print(f"STATE: UTC PREMIUM 24H CLEANUP removed={premium_deleted}")
             except Exception as exc:
                 print(f"STATE: UTC DIALOGUE CLEANUP ERROR: {exc}")
                 time.sleep(300.0)
@@ -370,34 +387,105 @@ def _start_cleanup_worker() -> None:
 
 
 def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | int | datetime | None = None) -> int:
-    """Delete rows older than the retained one-hour continuity seed.
+    """Apply the established 12-hour UTC rollover to Free users only.
 
-    The cutoff is derived exclusively from UTC fixed 12h boundaries, not from
-    user session start time. At 00:00/12:00 UTC, this deletes the previous 11h
-    and leaves exactly the immediately preceding hour. The current cycle then
-    grows until the next boundary.
+    Active Premium accounts are excluded here and cleaned by the separate rolling
+    24-hour Premium cleaner. This prevents a Free rollover at 00:00/12:00 UTC from
+    truncating a Premium user's memory.
     """
     conn = get_conn()
     if not conn:
         return 0
-    seed_start, _current = dialogue_window_bounds(timestamp)
+    seed_start, current = dialogue_window_bounds(timestamp)
     cutoff = seed_start
+    now_seconds = current.timestamp()
     try:
         with conn:
             with conn.cursor() as cur:
                 if user_id is None:
-                    cur.execute("DELETE FROM dialogue_memory WHERE created_at < %s", (cutoff,))
+                    cur.execute(
+                        """DELETE FROM dialogue_memory AS d
+                           WHERE d.created_at < %s
+                             AND NOT EXISTS (
+                               SELECT 1 FROM users AS u
+                               WHERE u.user_id = d.user_id
+                                 AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
+                                 AND COALESCE(u.subscription_until, 0) > %s
+                             )""",
+                        (cutoff, now_seconds),
+                    )
                     deleted = int(cur.rowcount or 0)
                 else:
                     uid = str(user_id)
                     if not _is_authenticated_cursor(cur, uid):
                         return 0
                     cur.execute(
-                        "DELETE FROM dialogue_memory WHERE user_id = %s AND created_at < %s",
-                        (uid, cutoff),
+                        """DELETE FROM dialogue_memory AS d
+                           WHERE d.user_id = %s AND d.created_at < %s
+                             AND NOT EXISTS (
+                               SELECT 1 FROM users AS u
+                               WHERE u.user_id = d.user_id
+                                 AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
+                                 AND COALESCE(u.subscription_until, 0) > %s
+                             )""",
+                        (uid, cutoff, now_seconds),
                     )
                     deleted = int(cur.rowcount or 0)
                 return deleted
+    except psycopg2.errors.UndefinedTable:
+        return 0
+    finally:
+        conn.close()
+
+
+def expire_subscriptions_utc(timestamp: float | int | datetime | None = None) -> int:
+    """Persist expired timed entitlements as Free, while retaining Premium ID."""
+    conn = get_conn()
+    if not conn:
+        return 0
+    current = now() if timestamp is None else (
+        timestamp.astimezone(timezone.utc) if isinstance(timestamp, datetime)
+        else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
+    )
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE users SET plan = 'free'
+                       WHERE LOWER(COALESCE(plan, 'free')) IN ('lite', 'premium')
+                         AND COALESCE(subscription_until, 0) <= %s""",
+                    (current.timestamp(),),
+                )
+                return int(cur.rowcount or 0)
+    except psycopg2.errors.UndefinedTable:
+        return 0
+    finally:
+        conn.close()
+
+
+def cleanup_premium_dialogue_memory_utc(timestamp: float | int | datetime | None = None) -> int:
+    """Keep only the last 24 hours for currently active Premium accounts."""
+    conn = get_conn()
+    if not conn:
+        return 0
+    current = now() if timestamp is None else (
+        timestamp.astimezone(timezone.utc) if isinstance(timestamp, datetime)
+        else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
+    )
+    cutoff = current - timedelta(hours=PREMIUM_MEMORY_WINDOW_HOURS)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """DELETE FROM dialogue_memory AS d
+                       USING users AS u
+                       WHERE d.user_id = u.user_id
+                         AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
+                         AND COALESCE(u.subscription_until, 0) > %s
+                         AND d.created_at < %s""",
+                    (current.timestamp(), cutoff),
+                )
+                return int(cur.rowcount or 0)
     except psycopg2.errors.UndefinedTable:
         return 0
     finally:
@@ -462,8 +550,15 @@ def save_dialogue_pair(
                 # Clean before insert so the database never accumulates stale memory.
                 seed_start, _ = dialogue_window_bounds(dt)
                 cur.execute(
-                    "DELETE FROM dialogue_memory WHERE user_id = %s AND created_at < %s",
-                    (uid, seed_start),
+                    """DELETE FROM dialogue_memory AS d
+                       WHERE d.user_id = %s AND d.created_at < %s
+                         AND NOT EXISTS (
+                           SELECT 1 FROM users AS u
+                           WHERE u.user_id = d.user_id
+                             AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
+                             AND COALESCE(u.subscription_until, 0) > %s
+                         )""",
+                    (uid, seed_start, dt.timestamp()),
                 )
                 pair_hash = _pair_hash(uid, created_ts, int(turn_index or 0), user_value, april_value)
                 cur.execute(
@@ -848,7 +943,12 @@ def get_user_plan(user_id):
                     return "free"
                 plan = str(user.get("plan") or "free").strip().lower()
                 expires_at = float(user.get("subscription_until") or 0)
-                if expires_at <= now().timestamp():
+                current_seconds = now().timestamp()
+                if plan in {"lite", "premium"} and expires_at <= current_seconds:
+                    cur.execute(
+                        "UPDATE users SET plan = 'free' WHERE user_id = %s AND plan = %s",
+                        (uid, plan),
+                    )
                     return "free"
                 # Entitlements are determined by the database, never by the
                 # client-supplied `package` field or an unrecognized DB value.
@@ -875,7 +975,7 @@ def get_user_subscription_status(user_id):
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT user_id, april_id, email, provider, plan, subscription_until "
+                    "SELECT user_id, april_id, email, provider, plan, subscription_until, premium_id "
                     "FROM users WHERE user_id = %s",
                     (uid,),
                 )
@@ -887,6 +987,8 @@ def get_user_subscription_status(user_id):
                 until_seconds = float(user.get("subscription_until") or 0)
                 raw_plan = str(user.get("plan") or "free").strip().lower()
                 plan = raw_plan if raw_plan in {"lite", "premium"} and until_seconds > now_seconds else "free"
+                if raw_plan in {"lite", "premium"} and plan == "free":
+                    cur.execute("UPDATE users SET plan = 'free' WHERE user_id = %s", (uid,))
 
                 # A payment-history flag is informational only. A test grant does not
                 # create fake financial history, and this value never grants access.
@@ -900,11 +1002,83 @@ def get_user_subscription_status(user_id):
                 return {
                     "user_id": uid,
                     "april_id": str(user.get("april_id") or uid),
+                    "premium_id": str(user.get("premium_id") or "") or None,
                     "plan": plan,
                     "subscription_until": int(until_seconds * 1000) if plan in {"lite", "premium"} else None,
                     "remaining_seconds": max(0, int(until_seconds - now_seconds)) if plan in {"lite", "premium"} else 0,
                     "has_premium_history": has_premium_history,
                 }
+    finally:
+        conn.close()
+
+
+def _premium_test_enabled() -> bool:
+    return str(os.getenv("APRIL_PREMIUM_TEST_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _new_premium_id() -> str:
+    return "APR-PRM-" + secrets.token_hex(5).upper()
+
+
+def activate_test_premium(user_id: Any, hours: int = PREMIUM_TEST_DURATION_HOURS) -> dict[str, Any]:
+    """Grant a 24-hour test entitlement only to explicitly allowlisted auth users.
+
+    It never writes to payments. The Premium ID is stored once in the canonical
+    users row and is retained after expiry so a later activation reuses that ID.
+    """
+    uid = str(user_id or "").strip()
+    if not uid:
+        return {"success": False, "error": "USER_ID_REQUIRED"}
+    if not _premium_test_enabled():
+        return {"success": False, "error": "PREMIUM_TEST_MODE_DISABLED"}
+    allowed = {
+        entry.strip().lower()
+        for entry in str(os.getenv("APRIL_PREMIUM_TEST_ALLOWLIST", "")).split(",")
+        if entry.strip()
+    }
+    if not allowed:
+        return {"success": False, "error": "PREMIUM_TEST_ALLOWLIST_EMPTY"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT user_id, april_id, email, provider, premium_id FROM users WHERE user_id = %s FOR UPDATE",
+                    (uid,),
+                )
+                user = cur.fetchone()
+                if not _is_authenticated_row(user):
+                    return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+                identities = {
+                    str(user.get("user_id") or "").strip().lower(),
+                    str(user.get("april_id") or "").strip().lower(),
+                    str(user.get("email") or "").strip().lower(),
+                }
+                if not identities.intersection(allowed):
+                    return {"success": False, "error": "PREMIUM_TEST_USER_NOT_ALLOWED"}
+                premium_id = str(user.get("premium_id") or "").strip()
+                if not premium_id:
+                    for _ in range(5):
+                        candidate = _new_premium_id()
+                        cur.execute("SELECT 1 FROM users WHERE premium_id = %s", (candidate,))
+                        if not cur.fetchone():
+                            premium_id = candidate
+                            break
+                    if not premium_id:
+                        return {"success": False, "error": "PREMIUM_ID_GENERATION_FAILED"}
+                expires_at = now().timestamp() + max(1, min(int(hours), 24)) * 3600
+                cur.execute(
+                    "UPDATE users SET premium_id = %s, plan = 'premium', subscription_until = %s, warned = FALSE WHERE user_id = %s",
+                    (premium_id, expires_at, uid),
+                )
+        status = get_user_subscription_status(uid)
+        if not status:
+            return {"success": False, "error": "SUBSCRIPTION_STATUS_UNAVAILABLE"}
+        return {"success": True, **status}
+    except psycopg2.errors.UndefinedColumn:
+        return {"success": False, "error": "PREMIUM_SCHEMA_MIGRATION_REQUIRED"}
     finally:
         conn.close()
 
