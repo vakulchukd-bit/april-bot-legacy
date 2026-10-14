@@ -371,6 +371,13 @@ def _handle_payload(
             "stage": "bot.ru",
         }
 
+        # The display name is a user preference supplied by April Web. The
+        # authenticated account ID above remains authoritative and is never
+        # taken from this field.
+        user_display_name = _text(
+            data.get("display_name") or data.get("user_display_name") or data.get("name")
+        )[:80]
+
         executor_started = time.perf_counter()
         result = asyncio.run(execute(
             uid,
@@ -388,6 +395,7 @@ def _handle_payload(
             file_inputs=file_inputs,
             file_contents=text_file_contents,
             translation=translation,
+            user_display_name=user_display_name,
         ))
         _apr_timing_log("executor_returned", executor_started, user_key=_apr_diag_ref(uid),
             message_key=_apr_diag_ref(message_id), result_type=type(result).__name__,
