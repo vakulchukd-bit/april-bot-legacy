@@ -885,10 +885,24 @@ class AprilHandler(BaseHTTPRequestHandler):
                 return
             result = activate_test_premium(user_id, hours=24)
             if result.get("success"):
+                # Confirm that the committed entitlement is immediately visible to
+                # the exact same plan resolver used by /api/v1/chat. This verifies
+                # that the next message is routed to Premium_executor, not Free.
+                active_plan = _text(get_user_plan(user_id)).lower() or "free"
+                if active_plan != "premium":
+                    _apr_timing_log(
+                        "subscription_test_activation_plan_verification_failed",
+                        user_key=_apr_diag_ref(user_id),
+                        active_plan=active_plan,
+                    )
+                    self._send_json(503, {"success": False, "error": "PREMIUM_ENTITLEMENT_NOT_VISIBLE"})
+                    return
                 _apr_timing_log(
                     "subscription_test_activation_success",
                     user_key=_apr_diag_ref(user_id),
                     premium_key=_apr_diag_ref(result.get("premium_id")),
+                    active_plan=active_plan,
+                    processor="Premium_executor",
                     remaining_seconds=result.get("remaining_seconds", 0),
                 )
                 self._send_json(200, result)
