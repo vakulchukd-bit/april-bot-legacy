@@ -2364,11 +2364,24 @@ def search_dialogue_context(
     # A named subject change in a self-contained new request is a new task even
     # when old and new requests share the same verbs/output format. Referential
     # corrections remain eligible for retrieval from the matching older context.
+    # An explicitly named subject in a self-contained request wins over nearby
+    # anaphora ("Раскажи про Коперника ... как он выглядел"). A pronoun inside
+    # the same request must not drag an unrelated old pair into the context.
+    self_contained_subject_switch = bool(
+        active_subject_conflict
+        and query_subjects
+        and len(_semantic_tokens(query)) >= 4
+        and interpreted_intent == "NEW_INFORMATION"
+        and not history_request
+        and not new_topic_request
+    )
     semantic_subject_switch = bool(
         active_subject_conflict
-        and interpreted_intent == "NEW_INFORMATION"
-        and not reference_followup
-        and not _continuation_marker(query)
+        and (self_contained_subject_switch or (
+            interpreted_intent == "NEW_INFORMATION"
+            and not reference_followup
+            and not _continuation_marker(query)
+        ))
         and not history_request
         and not new_topic_request
     )
