@@ -942,6 +942,7 @@ async def execute(
     file_inputs: list[dict[str, Any]] | None = None,
     file_contents: list[dict[str, Any]] | None = None,
     translation: dict[str, Any] | None = None,
+    message_created_at: Any = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     pipeline_started = time.perf_counter()
@@ -1992,6 +1993,7 @@ async def execute(
         uid,
         original or current_text,
         answer,
+        created_at=message_created_at,
         turn_index=turn_index,
         user_en=current_text,
         april_en=_text(raw.get("internal_answer_en")) or answer,
