@@ -126,12 +126,11 @@ def _uid(user_id: Any) -> str:
 
 def _prune(state: dict[str, Any], now_value: float | None = None) -> None:
     stamp = float(now_value if now_value is not None else time.time())
-    cutoff = stamp - DIALOGUE_WINDOW_SECONDS
     pairs = [
         deepcopy(row)
         for row in (state.get("dialogue_pairs") or [])
         if isinstance(row, dict)
-        and float(row.get("created_at") or 0) >= cutoff
+        and _row_is_live(row, stamp, DIALOGUE_WINDOW_HOURS)
     ]
     pairs.sort(
         key=lambda x: (
@@ -256,10 +255,11 @@ def continue_topic(
 
 
 def append_pair(user_id: Any, row: dict[str, Any]) -> dict[str, Any]:
-    """Append one already-persisted pair and enforce the rolling 12h window."""
+    """Append one persisted pair and enforce the pair's saved lifetime."""
     state = get_state(user_id)
     item = deepcopy(row or {})
     item.setdefault("created_at", time.time())
+    item.setdefault("retention_hours", 12)
     with _LOCK:
         pairs = [
             x for x in state.get("dialogue_pairs", [])
@@ -283,13 +283,25 @@ def append_pair(user_id: Any, row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _prune_copy(pairs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    cutoff = time.time() - DIALOGUE_WINDOW_SECONDS
+    stamp = time.time()
     return [
         deepcopy(row)
         for row in pairs
         if isinstance(row, dict)
-        and float(row.get("created_at") or 0) >= cutoff
+        and _row_is_live(row, stamp, DIALOGUE_WINDOW_HOURS)
     ]
+
+
+def _row_is_live(row: dict[str, Any], stamp: float, fallback_hours: int) -> bool:
+    """Use lifetime captured when the pair was saved; legacy rows default to 12h."""
+    try:
+        created = float(row.get("created_at") or 0)
+        raw_hours = row.get("retention_hours")
+        hours = int(raw_hours) if raw_hours is not None else 12
+        hours = 24 if hours >= 24 else 12
+        return bool(created > 0 and created <= stamp and stamp < created + hours * 3600)
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def set_relation(user_id: Any, relation: str, **metadata: Any) -> None:
