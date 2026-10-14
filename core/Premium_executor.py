@@ -42,7 +42,7 @@ from blocks.Premium_interpretation_identity import (
 )
 from blocks.Premium_provider_router import generate_text
 from blocks.text_module import package_provider_response
-from Premium_stat_manager import (
+from blocks.Premium_state_manager import (
     init_db,
     is_authenticated_user,
     save_dialogue_pair,
@@ -2022,7 +2022,7 @@ async def execute(
             "display_language": display_language,
             "internal_language": "en",
             "translation": translation or {},
-            "memory_window_hours": 12,
+            "memory_window_hours": 24,
             "memory_relation": dialogue_context.get("relation"),
             "memory_pair_count": int(dialogue_context.get("search", {}).get("total_pairs") or 0),
             "memory_selected_count": len(dialogue_context.get("selected_pairs") or []),
