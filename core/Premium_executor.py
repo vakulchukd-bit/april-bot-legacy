@@ -128,15 +128,15 @@ def _compact_question_search(
             if not isinstance(section, dict):
                 continue
             sections.append({
-                "heading": _text(section.get("heading"))[:80],
-                "summary": _text(section.get("summary"))[:150],
+                "heading": _text(section.get("heading"))[:160],
+                "summary": _text(section.get("summary"))[:300],
                 "order": section.get("order"),
                 "message_id": _text(section.get("message_id"))[:120],
             })
         compact = {
-            "topic": _text(item.get("topic"))[:100],
-            "user": _text(item.get("user"))[:180],
-            "april": _text(item.get("april"))[:240],
+            "topic": _text(item.get("topic"))[:200],
+            "user": _text(item.get("user"))[:360],
+            "april": _text(item.get("april"))[:480],
             "sections": sections,
             "message_id": _text(item.get("message_id"))[:120],
             "same_dialog": bool(item.get("same_dialog")),
@@ -164,9 +164,9 @@ def _compact_question_search(
         if not isinstance(item, dict):
             continue
         options.append({
-            "topic": _text(item.get("topic"))[:90],
-            "heading": _text(item.get("heading"))[:90],
-            "summary": _text(item.get("summary"))[:140],
+            "topic": _text(item.get("topic"))[:180],
+            "heading": _text(item.get("heading"))[:180],
+            "summary": _text(item.get("summary"))[:280],
             "message_id": _text(item.get("message_id"))[:120],
         })
     semantics = dict(semantics or {})
@@ -176,9 +176,9 @@ def _compact_question_search(
         topic_index = [
             {
                 "number": item.get("number"),
-                "topic": _text(item.get("topic"))[:100],
-                "summary": _text(item.get("summary"))[:160],
-                "last_question": _text(item.get("last_question"))[:100],
+                "topic": _text(item.get("topic"))[:200],
+                "summary": _text(item.get("summary"))[:320],
+                "last_question": _text(item.get("last_question"))[:200],
                 "message_id": _text(item.get("message_id"))[:120],
             }
             for item in (context.get("topic_index") or [])[:4] if isinstance(item, dict)
@@ -186,9 +186,9 @@ def _compact_question_search(
     history_topics = [
         {
             "number": item.get("number"),
-            "topic": _text(item.get("topic"))[:100],
-            "summary": _text(item.get("summary"))[:160],
-            "last_question": _text(item.get("last_question"))[:100],
+            "topic": _text(item.get("topic"))[:200],
+            "summary": _text(item.get("summary"))[:320],
+            "last_question": _text(item.get("last_question"))[:200],
             "message_id": _text(item.get("message_id"))[:120],
         }
         for item in (context.get("history_topics") or [])[:4] if isinstance(item, dict)
@@ -203,24 +203,24 @@ def _compact_question_search(
         "history_topics": history_topics,
         "topic_index": topic_index,
         "confidence": round(float(context.get("relation_confidence") or 0.0), 4),
-        "reason": _text(context.get("reason"))[:80],
-        "topic": (_text(context.get("active_topic")) or _text(query))[:120],
+        "reason": _text(context.get("reason"))[:160],
+        "topic": (_text(context.get("active_topic")) or _text(query))[:240],
         "anchor": {
-            "topic": _text(anchor.get("topic"))[:100],
-            "user": _text(anchor.get("user"))[:180],
-            "april": _text(anchor.get("april"))[:240],
+            "topic": _text(anchor.get("topic"))[:200],
+            "user": _text(anchor.get("user"))[:360],
+            "april": _text(anchor.get("april"))[:480],
             "message_id": _text(anchor.get("message_id"))[:120],
         } if anchor else {},
         "selected_section": {
-            "topic": _text(section.get("topic"))[:100],
-            "heading": _text(section.get("heading"))[:90],
-            "summary": _text(section.get("summary"))[:180],
+            "topic": _text(section.get("topic"))[:200],
+            "heading": _text(section.get("heading"))[:180],
+            "summary": _text(section.get("summary"))[:360],
             "order": section.get("order"),
             "message_id": _text(section.get("message_id"))[:120],
         } if section else {},
         "selected_pairs": pairs,
         "clarification_needed": bool(context.get("clarification_needed")),
-        "clarification_prompt": _text(context.get("clarification_prompt"))[:280],
+        "clarification_prompt": _text(context.get("clarification_prompt"))[:560],
         "clarification_options": options,
     }
 
