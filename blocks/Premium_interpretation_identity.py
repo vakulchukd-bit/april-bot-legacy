@@ -348,10 +348,31 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         low,
     ))
     mathematical_function = bool(re.search(
-        r"\b(?:function|exponential|exponent|equation|derivative|integral|sin|cos|tan|cot)\b"
-        r"|(?:функци\w*|экспонент\w*|уравнен\w*|производн\w*|интеграл\w*|синус\w*|косинус\w*|тангенс\w*|тригонометр\w*)",
+        r"\b(?:function|exponential|exponent|equation|derivative|integral|sin|cos|tan|cot|formula)\b"
+        r"|(?:функци\w*|экспонент\w*|уравнен\w*|производн\w*|интеграл\w*|синус\w*|косинус\w*|тангенс\w*|тригонометр\w*|формул\w*|теорем\w*)",
         low,
     ))
+    formula_cue = bool(re.search(
+        r"(?:формул\w*|уравнен\w*|formula\w*|equation\w*|mass[- ]energy)", low
+    ))
+    application_cue = bool(re.search(
+        r"(?:пример\w*|где\s+примен\w*|применен\w*|использован\w*|област\w*\s+применен\w*|"
+        r"application\w*|use\s+cases?|used\s+in|examples?)", low
+    ))
+    appearance_cue = bool(re.search(
+        r"(?:как\s+(?:он|она|они)\s+выгляд\w*|как\s+выгляд\w*|внешност\w*|портрет\w*|"
+        r"what\s+(?:did|does)\s+.{0,60}\s+look\s+like|appearance|portrait)", low
+    ))
+
+    # Semantic contract: formula language requests a FormulaRenderer, applications/examples
+    # request a populated TableBlock, and an explicit appearance question requests an
+    # illustrative image. These cues are independent and cumulative, not exclusive.
+    if formula_cue and "formula" not in outputs:
+        outputs.append("formula")
+    if application_cue and "table" not in outputs:
+        outputs.append("table")
+    if appearance_cue and "image" not in outputs:
+        outputs.append("image")
 
     if comparison and "table" not in outputs:
         outputs.append("table")
@@ -1616,10 +1637,13 @@ def build_interpretation(
             "answer_sequence_in_order": True,
             "premium_render_budget": {
                 "total_output_tokens": 12000,
-                "render_payload_tokens": 4000,
-                "explanation_and_answer_tokens": 8000,
+                "render_payload_tokens": 4800,
+                "explanation_and_answer_tokens": 7200,
+                "visual_share_percent": 40,
+                "text_share_percent": 60,
                 "render_budget_included_in_total": True,
                 "renderer_selection": "explicit_request_then_semantic_value",
+                "scene_order": "interleave_explanation_and_visual_by_step_index",
             },
             "presentation_contract": {
                 "mcdowell_required": True,
@@ -1630,7 +1654,8 @@ def build_interpretation(
             },
             "rendering_guidance": [
                 "Always preserve a complete explanatory text answer and answer every REQUEST_SEQUENCE item in order.",
-                "Premium output budget is 12000 tokens total; reserve up to 4000 of those tokens for concrete render payloads and keep the remaining answer concise but complete. The render allocation is inside, not in addition to, the total.",
+                "Premium output ceiling is exactly 12000 tokens per complete answer attempt; target 7200 tokens for explanatory text (60%) and 4800 for concrete visual/render payloads (40%), both inside the same total. Do not fill the cap for its own sake.",
+                "Interleave each request step's explanatory text with its own formula/table/diagram/graph/image render blocks using step_index; do not group all visuals at the end.",
                 "Use a structured table for a clear comparison when the answer has comparable attributes. A table payload must contain real headers/columns and at least one populated row; do not emit empty TableBlock shells or put a whole list of values into one cell when each item can be a row/cell.",
                 "For composite requests, preserve every requested output independently (for example, table AND photograph/image); never treat one renderer as replacing another.",
                 "For substantial explanations, choose a useful additional table, diagram, graph, formula, code block, grounded link, or image when it materially improves understanding; never invent data or label a generated illustration as an authentic photograph.",
