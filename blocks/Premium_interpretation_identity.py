@@ -833,7 +833,7 @@ def _has_explicit_topic_introduction(text: str) -> bool:
     """
     low = _text(text).lower().replace("ё", "е")
     pattern = re.compile(
-        r"\b(?:расскажи(?:те)?|рассказать|напиши(?:те)?|написать|опиши(?:те)?|описать|"
+        r"\b(?:рас{1,2}каж\w*|рас{1,2}каз\w*|рассказать|напиши(?:те)?|написать|опиши(?:те)?|описать|"
         r"объясни(?:те)?|объяснить|изложи(?:те)?|представь(?:те)?|дай|покажи(?:те)?|"
         r"tell|describe|explain|write|give)\b"
         r".{0,100}?\b(?:про|об|обо|о|about|on)\s+"
@@ -1251,8 +1251,11 @@ def build_question_sequence(
             item.lower().replace("ё", "е"), flags=re.IGNORECASE,
         ))
         inherits_current_request_subject = bool(
-            parent_introduces_subject and subject_intro_seen and item_has_anaphor
+            parent_introduces_subject
+            and index > 1
+            and item_has_anaphor
             and not item_introduces_subject
+            and (subject_intro_seen or _has_explicit_topic_introduction(" ".join(pieces[:index - 1])))
         )
         # Per-question output signals must use the same semantic enhancement as
         # the turn-level contract. Without this, INTERPRETATION could request a
