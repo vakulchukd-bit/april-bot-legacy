@@ -50,7 +50,7 @@ from blocks.Premium_state_manager import (
 )
 
 
-PROCESSOR_VERSION = "april_premium_exkrutor_single_route_v1_structured_source_scope"
+PROCESSOR_VERSION = "april_premium_exkrutor_single_route_v2_scene_budget_recovery"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -462,9 +462,9 @@ def _build_scene(
         },
         result_event={
             "status": "complete",
-            "provider_calls": 0 if bool((response.metadata or {}).get("local_clarification")) else 1,
-            "provider_retries": 0,
-            "provider_output_limit": "model_native_no_application_cap",
+            "provider_calls": 0 if bool((response.metadata or {}).get("local_clarification")) else 1 + int((response.metadata or {}).get("provider_retries", 0)),
+            "provider_retries": int((response.metadata or {}).get("provider_retries", 0)),
+            "provider_output_limit": str((response.metadata or {}).get("provider_output_limit") or 12000),
             "canonical_route": CANONICAL_ROUTE,
         },
         blocks=list(response.render_blocks or []),
@@ -1673,6 +1673,8 @@ async def execute(
         input_tokens=(provider_meta_for_log.get("usage") or {}).get("input_tokens"),
         output_tokens=(provider_meta_for_log.get("usage") or {}).get("output_tokens"),
         provider_fallback=bool(provider_meta_for_log.get("provider_fallback")),
+        provider_retries=provider_meta_for_log.get("provider_retries", 0),
+        provider_output_limit=provider_meta_for_log.get("provider_output_limit", 12000),
         local_clarification=bool(provider_meta_for_log.get("local_clarification")))
 
     raw = provider_packet.get("machine_response") if isinstance(provider_packet, dict) else None
@@ -1745,8 +1747,28 @@ async def execute(
             for key in ("src", "url", "image", "image_data_uri", "image_base64", "title", "alt", "caption", "width", "height", "mime_type"):
                 if key not in visible_image_payload and image_artifact.get(key) not in (None, "", [], {}):
                     visible_image_payload[key] = image_artifact[key]
+            image_step_index = 1
+            image_step_title = "Illustration"
+            request_structure = interpretation.get("request_structure") if isinstance(interpretation.get("request_structure"), dict) else {}
+            question_sequence = request_structure.get("question_sequence") if isinstance(request_structure.get("question_sequence"), list) else []
+            if not question_sequence:
+                intent_interpretation = (interpretation.get("intent") or {}).get("interpretation") if isinstance(interpretation.get("intent"), dict) else {}
+                nested_structure = intent_interpretation.get("request_structure") if isinstance(intent_interpretation, dict) else {}
+                question_sequence = nested_structure.get("question_sequence") if isinstance(nested_structure, dict) and isinstance(nested_structure.get("question_sequence"), list) else []
+            for question in question_sequence:
+                if not isinstance(question, dict):
+                    continue
+                question_outputs = question.get("output_types") or question.get("outputs") or []
+                if isinstance(question_outputs, str):
+                    question_outputs = [question_outputs]
+                if any(str(value).lower() == "image" for value in question_outputs):
+                    image_step_index = int(question.get("step_index") or 1)
+                    image_step_title = _text(question.get("title") or question.get("request") or "Illustration")[:100]
+                    break
             image_block = {
                 "type": "image",
+                "step_index": image_step_index,
+                "step_title": image_step_title,
                 "renderer": get_web_renderer_registration("image").get("renderer", "GalleryBlock"),
                 "viewer": get_web_renderer_registration("image").get("viewer", "GalleryBlock"),
                 "content": "",
@@ -1757,6 +1779,22 @@ async def execute(
             packaged["render_blocks"].append(image_block)
 
     normalized_blocks = list(packaged["render_blocks"] or [])
+    # Preserve stable model ordering within each request step while ensuring that
+    # a generated image is placed beside its matching explanation, not appended to
+    # the end of a multi-question scene regardless of its semantic step.
+    def _safe_block_step_index(block: Any) -> int:
+        try:
+            return max(1, int(block.get("step_index") or 1)) if isinstance(block, dict) else 1
+        except (TypeError, ValueError, OverflowError):
+            return 1
+
+    indexed_blocks = list(enumerate(normalized_blocks))
+    indexed_blocks.sort(key=lambda pair: (_safe_block_step_index(pair[1]), pair[0]))
+    normalized_blocks = [block for _, block in indexed_blocks]
+    for scene_index, block in enumerate(normalized_blocks):
+        if isinstance(block, dict):
+            block.setdefault("step_index", 1)
+            block["sequence_index"] = scene_index
     if not normalized_blocks:
         normalized_blocks = [
             {
@@ -1787,6 +1825,8 @@ async def execute(
             ),
             "provider_fallback": bool(provider_metadata.get("provider_fallback")),
             "provider_error_code": _text(provider_metadata.get("provider_error_code")),
+            "provider_retries": int(provider_metadata.get("provider_retries") or 0),
+            "provider_output_limit": provider_metadata.get("provider_output_limit") or 12000,
         },
     )
 
