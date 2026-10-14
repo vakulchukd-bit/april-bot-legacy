@@ -311,6 +311,10 @@ _SEMANTIC_ALIASES = {
     "окрас": "цвет", "окраса": "цвет", "окрасом": "цвет",
     "породы": "порода", "породой": "порода", "породе": "порода",
     "фотографии": "фото", "фотографию": "фото", "фотографией": "фото",
+    # Participant-name wording is a semantic alias, so "Как меня зовут?" can
+    # match persisted summaries phrased as "Имя пользователя: …".
+    "зовут": "имя", "имени": "имя", "именем": "имя", "имена": "имя", "именах": "имя",
+    "называюсь": "имя", "называешься": "имя", "называют": "имя",
 }
 
 _STOP_WORDS = {
@@ -359,6 +363,23 @@ def _semantic_tokens(value: Any) -> set[str]:
 # subject signature prevents different datasets (oil, bananas, cabbage, etc.) from
 # being merged just because they all discuss prices, tables or graphs.
 _CONTEXT_GENERIC_TERMS = {
+    # Dialog participant references, self-corrections and memory operations are
+    # conversational relations, not topical entities. Their words remain available
+    # to retrieval; only the subject-conflict calculation ignores them.
+    "я", "меня", "мне", "мной", "мой", "моя", "мое", "моё", "мои", "моих", "моему",
+    "ты", "тебя", "тебе", "тобой", "твой", "твоя", "твое", "твоё", "твои", "твоих",
+    "мы", "нас", "нам", "нами", "наш", "наша", "наше", "наши", "вы", "вас", "вам",
+    "i", "me", "my", "mine", "myself", "you", "your", "yours", "yourself", "we", "us", "our", "ours",
+    "имя", "имени", "именем", "зовут", "называют", "называюсь", "называешься",
+    "помнить", "помню", "помнишь", "помнил", "помнила", "помним", "запомнить", "запомни",
+    "напомнить", "напомнил", "напомнила", "напомни", "вспомнить", "вспомни",
+    "потерял", "потеряла", "потеряли", "забыл", "забыла", "забыли", "контекст", "контексте",
+    "случилось", "произошло", "произошел", "произошёл", "произошла", "диалог", "разговор", "беседа",
+    "напиши", "написать", "напишите", "опиши", "описать", "опишите", "расскажи", "расскажите",
+    "объясни", "объяснить", "объясните", "поясни", "пояснить", "покажи", "построй", "создай",
+    "сделай", "вычисли", "рассчитай", "сравни", "найди", "проверь", "проанализируй", "приведи",
+    "перечисли", "продолжи", "продолжим", "дальше", "далее", "есть", "какие", "какая", "какой",
+    "должен", "должна", "должно", "должны", "был", "была", "были", "нет",
     "покажи", "показать", "покажите", "построй", "построить", "постройте", "сделай",
     "сделать", "сделайте", "создай", "создать", "создайте", "исправь", "исправить",
     "данные", "данных", "значение", "значения", "число", "числа", "точка", "точки",
@@ -390,14 +411,97 @@ def _subject_family(token: Any) -> str:
     value = _text(token).lower().replace("ё", "е")
     return value[:5] if len(value) >= 5 else value
 
+_CONTEXT_NON_TOPICAL_ROOTS = (
+    "называ", "зовут", "помн", "запом", "напом", "вспом", "потер", "забыл",
+    "контекст", "случил", "произош", "диалог", "разговор", "бесед", "обращ",
+    "напиш", "опиш", "расскаж", "объясн", "поясн", "покаж", "постро", "созда",
+    "сдела", "вычисл", "рассчит", "сравн", "найд", "проверь", "проанализ", "привед",
+    "перечисл", "продолж", "дальш", "должн", "каки", "был",
+    "формул", "график", "таблиц", "диаграмм", "уравнен", "данн", "значен",
+)
+
+_PARTICIPANT_SPEAKER_WORDS = {
+    "я", "меня", "мне", "мной", "мой", "моя", "мое", "моё", "мои", "моего", "моей",
+    "i", "me", "my", "mine", "myself", "мені", "мій", "моя", "моє", "мої",
+}
+_PARTICIPANT_INTERLOCUTOR_WORDS = {
+    "ты", "тебя", "тебе", "тобой", "твой", "твоя", "твое", "твоё", "твои", "твоего", "твоей",
+    "you", "your", "yours", "yourself", "тобі", "твоїй", "твій", "твоє", "твої",
+}
+
+
+def _is_non_topical_subject_term(token: str) -> bool:
+    if token in _CONTEXT_GENERIC_TERMS:
+        return True
+    return any(len(root) >= 5 and token.startswith(root) for root in _CONTEXT_NON_TOPICAL_ROOTS)
+
+
+def _contains_named_value(text: Any) -> bool:
+    """Detect a likely proper-name value without treating sentence starts as names."""
+    value = _text(text)
+    for match in re.finditer(r"(?<![\w])[А-ЯЁA-Z][а-яёa-z]{2,}(?![\w])", value):
+        prefix = value[:match.start()].rstrip()
+        # Sentence-initial capitalization is not evidence of a name; capitalized
+        # words after a comma, colon or a relational phrase may be.
+        if not prefix or re.search(r"[.!?…]\s*$", prefix):
+            continue
+        return True
+    return False
+
+
+def _participant_alignment(query: str, row: dict[str, Any]) -> int:
+    """Return factual evidence for the person referred to by a subjectless query.
+
+    Only a stored turn that actually contains a likely name value on the appropriate
+    participant side is preferred. A previous answer that merely says the name is
+    missing therefore cannot outrank a turn that records the name itself.
+    """
+    if _subject_tokens(query):
+        return 0
+    q_tokens = _tokens(query)
+    q_speaker = bool(q_tokens & _PARTICIPANT_SPEAKER_WORDS)
+    q_interlocutor = bool(q_tokens & _PARTICIPANT_INTERLOCUTOR_WORDS)
+    if q_speaker == q_interlocutor:
+        return 0
+
+    user_text = _text(row.get("user_text") or row.get("user_text_en"))
+    april_text = _text(row.get("april_text") or row.get("april_text_en"))
+    memory_summary = _compact_memory_summary(row)
+    all_tokens = _semantic_tokens(" ".join((
+        user_text, _text(row.get("user_text_en")), april_text,
+        _text(row.get("april_text_en")), memory_summary, _row_attachment_evidence(row),
+    )))
+    query_tokens = _semantic_tokens(query)
+    if not query_tokens or not _concept_overlap(query_tokens, all_tokens):
+        return 0
+
+    user_tokens = _tokens(user_text)
+    april_tokens = _tokens(april_text)
+    user_has_value = _contains_named_value(user_text)
+    april_has_value = _contains_named_value(april_text)
+    user_speaker = bool(user_tokens & _PARTICIPANT_SPEAKER_WORDS)
+    user_interlocutor = bool(user_tokens & _PARTICIPANT_INTERLOCUTOR_WORDS)
+    april_speaker = bool(april_tokens & _PARTICIPANT_SPEAKER_WORDS)
+    april_interlocutor = bool(april_tokens & _PARTICIPANT_INTERLOCUTOR_WORDS)
+
+    if q_speaker:
+        # The user's first-person statements and April's second-person answers both
+        # describe the authenticated user. A name-less deferral is not a fact source.
+        supports_target = (user_speaker and user_has_value) or (april_interlocutor and april_has_value)
+    else:
+        # User's second-person questions and April's first-person answers describe April.
+        supports_target = (user_interlocutor and user_has_value) or (april_speaker and april_has_value)
+    return 1 if supports_target else 0
+
+
 def _subject_tokens(value: Any) -> set[str]:
     """Approximate subject/entity signature, excluding task, format and unit words."""
     result = set()
     for token in _semantic_tokens(value):
-        if token.isdigit() or token in _CONTEXT_GENERIC_TERMS or len(token) < 4:
+        if token.isdigit() or _is_non_topical_subject_term(token) or len(token) < 4:
             continue
         family = _subject_family(token)
-        if family and family not in _CONTEXT_GENERIC_TERMS:
+        if family and not _is_non_topical_subject_term(family):
             result.add(family)
     return result
 
@@ -502,9 +606,15 @@ def _query_context_signature(query: str, interpretation: dict[str, Any] | None =
     if isinstance(supplied, dict):
         terms = supplied.get("subject_terms")
         if isinstance(terms, list):
+            cleaned_terms = {
+                _subject_family(item)
+                for item in terms
+                if _text(item) and not _is_non_topical_subject_term(_text(item).lower().replace("ё", "е"))
+            }
             return {
                 **supplied,
-                "subject_terms": sorted({_subject_family(item) for item in terms if _text(item)}),
+                "subject_terms": sorted(term for term in cleaned_terms if not _is_non_topical_subject_term(term)),
+                "has_explicit_subject": bool(cleaned_terms),
             }
     subjects = _subject_tokens(query)
     refs = _semantic_tokens(query) & _CONTEXT_REFERENCE_TERMS
@@ -1258,7 +1368,8 @@ def _candidate_score(
     user_tokens = _semantic_tokens(user)
     answer_tokens = _semantic_tokens(april)
     attachment_evidence = _row_attachment_evidence(row)
-    candidate_text = " ".join(x for x in (user, user_en, april, april_en, attachment_evidence) if x)
+    memory_summary = _compact_memory_summary(row)
+    candidate_text = " ".join(x for x in (user, user_en, april, april_en, memory_summary, attachment_evidence) if x)
     candidate_tokens = _semantic_tokens(candidate_text)
 
     lexical = fuzz.token_set_ratio(
@@ -1348,6 +1459,7 @@ def _candidate_score(
         "subject_terms": sorted(row_subjects)[:12],
         "subject_overlap": round(subject_overlap, 6),
         "subject_mismatch": bool(subject_mismatch),
+        "participant_alignment": _participant_alignment(query, row),
         "numeric_anchor_overlap": round(numeric_anchor_overlap, 6),
         "source_data_alignment": round(source_data_alignment, 6),
         "structured_data_richness": int(data_richness),
@@ -2113,7 +2225,13 @@ def search_dialogue_context(
     candidate_started = time.perf_counter()
     matches = [_candidate_score(query, row, dialog_id=str(dialog_id or ""), reference_followup=reference_followup, query_modalities=query_modalities)
                for row in rows]
-    matches.sort(key=lambda item: (float(item["score"]), float(item["recency"]), int(item["turn_index"])), reverse=True)
+    # For participant-centered, subjectless questions, first rank factual evidence
+    # written from the relevant speaker perspective; use the existing relevance and
+    # recency ordering for all other turns. No fixed score gate is introduced.
+    matches.sort(key=lambda item: (
+        int(item.get("participant_alignment") or 0) if not query_subjects else 0,
+        float(item["score"]), float(item["recency"]), int(item["turn_index"])
+    ), reverse=True)
     _apr_timing_log("candidate_score_rank", candidate_started, candidates_scored=len(rows), matches=len(matches))
 
     # Build the index once and share it between topic ranking, pair selection and Provider.
@@ -2172,12 +2290,14 @@ def search_dialogue_context(
             explicit_topic_hits.append((row_rank, row))
     explicit_topic_hits.sort(key=lambda item: (item[0], float(item[1].get("created_at") or 0)), reverse=True)
 
+    # Treat the ranked match as contextual when it contains actual semantic evidence,
+    # rather than requiring a fixed hand-chosen score cutoff. Subject conflict remains
+    # the safeguard against pulling an unrelated topic into a self-contained request.
     same_dialog_semantic = bool(best and not best.get("subject_mismatch") and (
-        (best.get("same_dialog") and (
-            float(best.get("entity_overlap") or 0) >= 0.18
-            or float(best.get("context") or 0) >= 0.16
-            or float(best.get("semantic") or 0) >= 0.52
-        )) or float(best.get("entity_overlap") or 0) >= 0.28
+        (best.get("same_dialog") and any(
+            float(best.get(field) or 0) > 0
+            for field in ("entity_overlap", "context", "semantic", "answer_overlap", "user_overlap", "subject_overlap")
+        )) or float(best.get("entity_overlap") or 0) > 0
     ))
     marker = _continuation_marker(query)
     short_contextual = len(_tokens(query)) <= 12 and _text(query).lower().startswith(("а ", "и ", "ну ", "так ")) and (
@@ -2196,6 +2316,11 @@ def search_dialogue_context(
         # A numbered section reference is a history pointer even when it contains
         # no topic nouns (e.g. "пункт 8"). Search memory instead of classifying it NEW.
         continuation = True
+    elif latest_same_dialog and not query_subjects:
+        # A turn with no independent topical subject is context-dependent by default.
+        # Resolve it against the recent dialogue instead of making the user repeat
+        # the missing subject or requiring a special continuation word.
+        continuation = True
     elif latest_same_dialog and reference_followup:
         continuation = True
     elif latest_same_dialog and (marker or short_contextual) and len(_tokens(query)) <= 14:
@@ -2203,8 +2328,6 @@ def search_dialogue_context(
     elif explicit_topic_hits and (reference_followup or _is_section_request(query) or _looks_like_topic_correction(query)):
         continuation = True
     elif same_dialog_semantic and not semantic_subject_switch:
-        continuation = True
-    elif best and float(best.get("score") or 0) >= 0.60 and not semantic_subject_switch:
         continuation = True
     relation = "CONTINUE" if continuation else "NEW"
 
@@ -2305,7 +2428,33 @@ def search_dialogue_context(
         # globally, or handed back to normal dialogue. It must not create another
         # local clarification from the old options.
     elif relation == "CONTINUE" and rows:
-        if explicit_topic_hits:
+        if not query_subjects and latest_same_dialog:
+            # For an underspecified turn, prefer role-aligned evidence when available.
+            # Otherwise compare the actual topical evidence with the active turn; if
+            # neither gives a clear relative preference, stay on the active turn.
+            role_aligned = best if best and int(best.get("participant_alignment") or 0) > 0 else None
+            if role_aligned:
+                anchor = role_aligned
+            else:
+                def _context_evidence(item: dict[str, Any] | None) -> float:
+                    if not isinstance(item, dict):
+                        return 0.0
+                    return max(
+                        float(item.get("context") or 0),
+                        float(item.get("entity_overlap") or 0),
+                        float(item.get("user_overlap") or 0),
+                        float(item.get("answer_overlap") or 0),
+                        float(item.get("subject_overlap") or 0),
+                        float(item.get("direction") or 0),
+                        float(item.get("numeric_anchor_overlap") or 0),
+                    )
+                best_evidence = _context_evidence(best)
+                active_evidence = _context_evidence(latest_same_dialog)
+                if best and best_evidence > active_evidence:
+                    anchor = best
+                else:
+                    anchor = latest_same_dialog
+        elif explicit_topic_hits:
             chosen_global = explicit_topic_hits[0][1]
             anchor = _candidate_score(query, chosen_global, dialog_id=str(dialog_id or ""), reference_followup=reference_followup, query_modalities=query_modalities)
         elif latest_same_dialog and (reference_followup or marker or short_contextual or _is_section_request(query)):
@@ -2340,7 +2489,11 @@ def search_dialogue_context(
         anchor_subjects = set((anchor or {}).get("subject_terms") or [])
         anchor_has_values = bool(int((anchor or {}).get("structured_data_richness") or 0) >= 8)
         related_candidates = []
-        for item in matches:
+        # A role-aligned factual record is sufficient for a participant-centered
+        # lookup. Do not dilute it with neighboring turns that may only report a
+        # prior failure to recall that fact (e.g. "I don't see your name").
+        related_context_candidates = [] if int((anchor or {}).get("participant_alignment") or 0) > 0 else matches
+        for item in related_context_candidates:
             if item.get("is_pending_clarification"):
                 continue
             if not item.get("message_id") or _text(item.get("message_id")) == _text((anchor or {}).get("message_id")):
@@ -2635,6 +2788,7 @@ def search_dialogue_context(
             else "clarification_pending" if clarification_needed
             else "history_request" if history_request
             else "named_topic_match" if explicit_topic_hits
+            else "underspecified_turn_context" if relation == "CONTINUE" and anchor and not query_subjects
             else "active_topic_default" if relation == "CONTINUE" and anchor
             else "new_request" if relation == "NEW"
             else "semantic_memory_match"
@@ -2676,6 +2830,7 @@ def search_dialogue_context(
         top_candidate_alignment=[{
             "message_key": _apr_diag_ref(x.get("message_id")), "score": x.get("score"),
             "subject_overlap": x.get("subject_overlap"), "subject_mismatch": x.get("subject_mismatch"),
+            "participant_alignment": x.get("participant_alignment"),
             "numeric_anchor_overlap": x.get("numeric_anchor_overlap"),
             "source_data_alignment": x.get("source_data_alignment"),
             "structured_data_richness": x.get("structured_data_richness"),
