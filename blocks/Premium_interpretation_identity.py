@@ -226,7 +226,7 @@ def _detect_image_generation_request(text: str) -> bool:
         return True
 
     action = r"(?:draw|show|display|create|make|generate|render|нарис\w*|покаж\w*|отобраз\w*|созда\w*|сдела\w*|сгенерир\w*|изобраз\w*)"
-    image_noun = r"(?:picture|image|illustration|photo|картинк(?:у|а|и)\b|изображени(?:е|я|и)\b|иллюстраци(?:ю|я|и)\b|фото\b)"
+    image_noun = r"(?:picture|image|illustration|photo|картинк\w*|изображени\w*|иллюстраци\w*|фотк\w*|фото\b|фотограф\w*|снимк\w*)"
     # Permit polite words and ordinary modifiers, but do not skip a preceding
     # explicit schema/graph/table noun to reinterpret its object as an image.
     filler = r"(?:(?!(?:схем\w*|диаграмм\w*|график\w*|таблиц\w*|черт[её]ж\w*)\b)[\w-]+\s+)"
@@ -234,7 +234,41 @@ def _detect_image_generation_request(text: str) -> bool:
     # Support inverted Russian requests such as "картинку нарисуй". The
     # accusative/nominative object forms deliberately exclude "на картинке".
     reverse = rf"(?<![\w\u0080-\uffff]){image_noun}\s+(?:мне\s+|нам\s+)?{action}\b"
-    return bool(re.search(forward, low, flags=re.IGNORECASE) or re.search(reverse, low, flags=re.IGNORECASE))
+
+    # Composite requests commonly put an explicit renderer first and the image
+    # second: "покажи таблицу и его фотку". The earlier object-order guard kept
+    # this from becoming an image request at all. Preserve both outputs instead
+    # of making the table and photo mutually exclusive.
+    structured_noun = r"(?:\btable\b|таблиц\w*|\bgraph\b|\bchart\b|график\w*|диаграмм\w*|схем\w*|примеры|\bexamples?\b)"
+    coordinated_after = rf"(?<![\w\u0080-\uffff]){action}\b.{{0,100}}{structured_noun}.{{0,48}}(?:и|and|plus|а также).{{0,28}}{image_noun}"
+
+    # In a follow-up, people frequently omit the verb because the operation is
+    # obvious from the preceding turn: "А фотку его и таблица каличная — сделай
+    # красивей". Accept this elliptical image target only when it is coordinated
+    # with another requested output and an actual edit/beautify action.
+    photo_noun = r"(?:фотк\w*|фото\b|фотограф\w*|снимк\w*|picture\w*|photo\w*|image\w*)"
+    possessive = r"(?:его|ее|её|их|мой|моя|мое|мои|наш|наша|наше|наши|his|her|their|my|our)"
+    coordinated_before = rf"(?<![\w\u0080-\uffff])(?:а\s+|и\s+|еще\s+|ещё\s+|also\s+)?{photo_noun}\s+(?:{possessive}\s+)?(?:.{0,48})?(?:и|and|а также).{{0,60}}(?:таблиц\w*|\btable\b|график\w*|диаграмм\w*).{{0,60}}(?:сдела\w*|улучш\w*|исправ\w*|оформ\w*|красив\w*|make\b|improve\b|beautif\w*)"
+    return bool(
+        re.search(forward, low, flags=re.IGNORECASE)
+        or re.search(reverse, low, flags=re.IGNORECASE)
+        or re.search(coordinated_after, low, flags=re.IGNORECASE)
+        or re.search(coordinated_before, low, flags=re.IGNORECASE)
+    )
+
+
+def _has_drawable_subject(text: str) -> bool:
+    """True when a visual verb has a concrete drawable object, not just style words."""
+    low = _text(text).lower().replace("ё", "е")
+    drawable_objects = (
+        r"(?:\bcat\b|\bdog\b|\bperson\b|\bportrait\b|\blandscape\b|\bhouse\b|"
+        r"\btree\b|\bflower\b|\bcar\b|\bship\b|\bplanet\b|\bdinosaur\w*\b|"
+        r"\bduck\b|\bmap\b|\bavatar\b|\bcharacter\b|\bobject\b|\bmodel\b|"
+        r"кот\w*|собак\w*|человек\w*|портрет\w*|пейзаж\w*|дом\w*|дерев\w*|цвет\w*|"
+        r"машин\w*|корабл\w*|планет\w*|динозавр\w*|утк\w*|карт\w*|аватар\w*|"
+        r"персонаж\w*|объект\w*|макет\w*|модель\w*|предмет\w*|иллюстрац\w*)"
+    )
+    return bool(re.search(drawable_objects, low, flags=re.IGNORECASE))
 
 
 def _detect_requested_outputs(text: str) -> list[str]:
@@ -296,7 +330,8 @@ def _detect_requested_outputs(text: str) -> list[str]:
 def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[str]:
     """Add only high-confidence structured views implied by the user's task.
 
-    This never infers image generation, invented data, or external-source URLs.
+    Image output is inferred only by the object-aware request detector, never by a
+    generic style verb alone; this does not invent data or external-source URLs.
     """
     low = _text(text).lower().replace("ё", "е")
     outputs = list(dict.fromkeys(explicit_outputs or ["text"]))
@@ -367,6 +402,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         and not explicit_graph_intent
         and "image" not in outputs
         and not any(kind in outputs for kind in ("diagram", "graph", "table", "formula", "code", "file", "link"))
+        and _has_drawable_subject(low)
     ):
         outputs.append("image")
     if explicit_image_request:
@@ -534,7 +570,22 @@ def _detect_task(
 ) -> str:
     low = _text(text).lower()
     if wants_image:
-        return "generate_image"
+        # Image output is additive in a compound request. Do not let one photo
+        # request replace a biography/explanation/table/diagram with an image-only task.
+        asks_for_explanation = bool(re.search(
+            r"(?:расскаж\w*|объясн\w*|напиш\w*|опиш\w*|привед\w*|перечисл\w*|сравн\w*|разбер\w*|проанализир\w*|"
+            r"\btell\b|\bexplain\b|\bwrite\b|\bdescribe\b|\blist\b|\bcompare\b|\banaly[sz]e\b)",
+            low,
+            re.IGNORECASE,
+        ))
+        asks_for_other_renderer = bool(re.search(
+            r"(?:таблиц\w*|\btable\b|график\w*|диаграмм\w*|схем\w*|черт[её]ж\w*|"
+            r"формул\w*|уравнен\w*|код\w*|\bcode\b|ссылк\w*|\blink\b|презентац\w*|\breport\b|\bexamples?\b|пример\w*)",
+            low,
+            re.IGNORECASE,
+        ))
+        if not asks_for_explanation and not asks_for_other_renderer:
+            return "generate_image"
 
     explicit_visual_analysis = any(
         token in low
@@ -1168,6 +1219,7 @@ def build_question_sequence(
     """
     sequence: list[dict[str, Any]] = []
     parent = dict(parent_interpretation or interpret_request_semantics(text))
+    parent_outputs = _enhance_requested_outputs(text, _detect_requested_outputs(text))
     pieces = _split_request_sequence(text)
     parent_introduces_subject = _has_explicit_topic_introduction(text)
     subject_intro_seen = False
@@ -1185,6 +1237,28 @@ def build_question_sequence(
         # the turn-level contract. Without this, INTERPRETATION could request a
         # diagram while REQUEST_SEQUENCE still tells Provider to return text only.
         outputs = _enhance_requested_outputs(item, _detect_requested_outputs(item))
+        # When a single turn is split into clauses, an ellipsis such as "his photo
+        # and the table is ugly—make it prettier" can leave the visual noun in one
+        # child and the operation in the next. Bind the turn-level renderer intent to
+        # the child that actually names that visual object; do not attach it to a
+        # generic style-only child such as "make it prettier".
+        item_low = item.lower().replace("ё", "е")
+        output_object_patterns = {
+            "image": r"(?:фотк\w*|фото\b|фотограф\w*|снимк\w*|картинк\w*|изображени\w*|иллюстрац\w*|\bphoto\w*|\bimage\w*|\bpicture\w*)",
+            "table": r"(?:таблиц\w*|\btable\b)",
+            "graph": r"(?:график\w*|диаграмм\w*|\bgraph\b|\bchart\b|\bplot\b)",
+            "diagram": r"(?:схем\w*|чертеж\w*|диаграмм\w*|\bdiagram\b|\bflowchart\b|\bschematic\b)",
+            "formula": r"(?:формул\w*|уравнен\w*|\bformula\b|\bequation\b|\blatex\b)",
+            "code": r"(?:код\w*|скрипт\w*|\bcode\b|\bscript\b)",
+            "link": r"(?:ссылк\w*|\blink\b|\burl\b)",
+            "file": r"(?:файл\w*|документ\w*|\bfile\b|\bdocument\b)",
+        }
+        for parent_output in parent_outputs:
+            pattern = output_object_patterns.get(parent_output)
+            if pattern and parent_output not in outputs and re.search(pattern, item_low, flags=re.IGNORECASE):
+                outputs.append(parent_output)
+        if "text" not in outputs:
+            outputs.insert(0, "text")
         item_semantics = interpret_request_semantics(item)
         # Restore omitted subjects in compact follow-on questions from the parent
         # intent: “... and what decisions did we reach?” is a prior-decision query
@@ -1320,8 +1394,24 @@ def build_interpretation(
         for item in attachments
     )
 
+    # Derive output requirements both from the complete user turn and from each
+    # explicitly separated sub-request. This prevents an image/table/graph request
+    # from disappearing when the splitter assigns it to a child clause.
+    question_sequence = build_question_sequence(
+        original or text,
+        parent_interpretation=request_semantics,
+    )
     detected_outputs = _detect_requested_outputs(original or text)
     requested_outputs = _enhance_requested_outputs(original or text, detected_outputs)
+    for sequence_item in question_sequence:
+        if not isinstance(sequence_item, dict):
+            continue
+        for output_type in sequence_item.get("output_types") or []:
+            normalized_output = _text(output_type).lower()
+            if normalized_output and normalized_output not in requested_outputs:
+                requested_outputs.append(normalized_output)
+    if "text" not in requested_outputs:
+        requested_outputs.insert(0, "text")
     routing_capabilities = _infer_routing_capabilities(original or text)
     wants_image = "image" in requested_outputs
     wants_file = "file" in requested_outputs
@@ -1443,6 +1533,7 @@ def build_interpretation(
             "requested_outputs": requested_outputs,
             "wants_image": wants_image,
             "explicit_generation_request": wants_image,
+            "adaptive_visual_policy": True,
             "wants_file": wants_file,
             "wants_links": wants_links,
             "wants_code": "code" in requested_outputs,
@@ -1521,8 +1612,15 @@ def build_interpretation(
             "clarification_resolution": dict(memory.get("clarification_resolution") or {}),
             "topic_index": [dict(item) for item in (memory.get("topic_index") or []) if isinstance(item, dict)][:10],
             "asset_task_map": asset_task_map,
-            "question_sequence": _build_question_sequence(original or text),
+            "question_sequence": question_sequence,
             "answer_sequence_in_order": True,
+            "premium_render_budget": {
+                "total_output_tokens": 12000,
+                "render_payload_tokens": 4000,
+                "explanation_and_answer_tokens": 8000,
+                "render_budget_included_in_total": True,
+                "renderer_selection": "explicit_request_then_semantic_value",
+            },
             "presentation_contract": {
                 "mcdowell_required": True,
                 "katex_required_for_math": True,
@@ -1531,8 +1629,11 @@ def build_interpretation(
                 "renderer_signal_source": "C_ARTIFACT_CONTRACT",
             },
             "rendering_guidance": [
-                "Always preserve a concise explanatory text answer.",
-                "Use a structured table for a clear comparison when the answer has comparable attributes.",
+                "Always preserve a complete explanatory text answer and answer every REQUEST_SEQUENCE item in order.",
+                "Premium output budget is 12000 tokens total; reserve up to 4000 of those tokens for concrete render payloads and keep the remaining answer concise but complete. The render allocation is inside, not in addition to, the total.",
+                "Use a structured table for a clear comparison when the answer has comparable attributes. A table payload must contain real headers/columns and at least one populated row; do not emit empty TableBlock shells or put a whole list of values into one cell when each item can be a row/cell.",
+                "For composite requests, preserve every requested output independently (for example, table AND photograph/image); never treat one renderer as replacing another.",
+                "For substantial explanations, choose a useful additional table, diagram, graph, formula, code block, grounded link, or image when it materially improves understanding; never invent data or label a generated illustration as an authentic photograph.",
                 "Use a diagram only for explicit schema/diagram/blueprint/technical-drawing intent or workflows/architecture/sequences. Ordinary requests to draw/create/show a picture or illustration must use C_APRIL_IMAGES_GENERATOR (Images 2.0), unless the request explicitly asks for a diagram, blueprint, technical drawing, or graph. Emit a concrete payload.svg, drawing elements, geometry, or nodes/edges; do not only describe the intended drawing.",
                 "Use a formula renderer for mathematical notation; use a graph only when a function or grounded numeric data can define it.",
                 "For graph requests, follow intent.graph_policy: trends/time-ordered values use line; categorical comparisons use bar; choose only among those 2D types unless explicit 3D intent or real 3D source data supports 3D.",
