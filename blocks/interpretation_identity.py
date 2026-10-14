@@ -624,6 +624,23 @@ def _semantic_group_hit(tokens: list[str], group: str) -> bool:
 
 _CONTEXT_SIGNATURE_GENERIC = {
     # Operations, presentation forms, units and generic data words are not subjects.
+    # Participant pronouns and discourse-management wording describe the relation
+    # between turns, not a new external subject. Keep them in the full request for
+    # semantic interpretation, but exclude them from the topical signature.
+    "я", "меня", "мне", "мной", "мой", "моя", "мое", "моё", "мои", "моих", "моему",
+    "ты", "тебя", "тебе", "тобой", "твой", "твоя", "твое", "твоё", "твои", "твоих",
+    "мы", "нас", "нам", "нами", "наш", "наша", "наше", "наши", "вы", "вас", "вам",
+    "i", "me", "my", "mine", "myself", "you", "your", "yours", "yourself", "we", "us", "our", "ours",
+    "имя", "имени", "именем", "зовут", "называют", "называюсь", "называешься",
+    "помнить", "помню", "помнишь", "помнил", "помнила", "помним", "запомнить", "запомни",
+    "напомнить", "напомнил", "напомнила", "напомни", "вспомнить", "вспомни",
+    "потерял", "потеряла", "потеряли", "забыл", "забыла", "забыли", "контекст", "контексте",
+    "случилось", "произошло", "произошел", "произошёл", "произошла", "диалог", "разговор", "беседа",
+    "напиши", "написать", "напишите", "опиши", "описать", "опишите", "расскажи", "расскажите",
+    "объясни", "объяснить", "объясните", "поясни", "пояснить", "покажи", "построй", "создай",
+    "сделай", "вычисли", "рассчитай", "сравни", "найди", "проверь", "проанализируй", "приведи",
+    "перечисли", "продолжи", "продолжим", "дальше", "далее", "есть", "какие", "какая", "какой",
+    "должен", "должна", "должно", "должны", "был", "была", "были", "нет",
     "покажи", "показать", "покажите", "построй", "построить", "постройте",
     "сделай", "сделать", "сделайте", "создай", "создать", "исправь", "исправить",
     "данные", "данных", "значение", "значения", "число", "числа", "точка", "точки",
@@ -655,13 +672,57 @@ _CONTEXT_OUTPUT_TERMS = {
     "image": {"image", "picture", "photo", "картинк", "изображен", "фото"},
 }
 
+_CONTEXT_SIGNATURE_DISCOURSE_ROOTS = (
+    "называ", "зовут", "помн", "запом", "напом", "вспом", "потер", "забыл",
+    "контекст", "случил", "произош", "диалог", "разговор", "бесед", "обращ",
+    "напиш", "опиш", "расскаж", "объясн", "поясн", "покаж", "постро", "созда",
+    "сдела", "вычисл", "рассчит", "сравн", "найд", "проверь", "проанализ", "привед",
+    "перечисл", "продолж", "дальш", "должн", "каки", "был",
+    "формул", "график", "таблиц", "диаграмм", "уравнен", "данн", "значен",
+)
+
+_PARTICIPANT_SPEAKER_WORDS = {
+    "я", "меня", "мне", "мной", "мой", "моя", "мое", "моё", "мои", "мой", "моего", "моей", "моей",
+    "i", "me", "my", "mine", "myself", "мені", "мій", "моя", "моє", "мої",
+}
+_PARTICIPANT_INTERLOCUTOR_WORDS = {
+    "ты", "тебя", "тебе", "тобой", "твой", "твоя", "твое", "твоё", "твои", "твоего", "твоей",
+    "you", "your", "yours", "yourself", "тобі", "тебе", "твій", "твоя", "твоє", "твої",
+}
+_PARTICIPANT_SHARED_WORDS = {"мы", "нас", "нам", "нами", "наш", "наша", "наше", "наши", "we", "us", "our", "ours"}
+
+
+def _is_context_signature_generic(token: str) -> bool:
+    if token in _CONTEXT_SIGNATURE_GENERIC:
+        return True
+    return any(len(root) >= 5 and token.startswith(root) for root in _CONTEXT_SIGNATURE_DISCOURSE_ROOTS)
+
+
+def _participant_reference_profile(tokens: list[str]) -> dict[str, bool]:
+    token_set = set(tokens)
+    speaker = bool(token_set & _PARTICIPANT_SPEAKER_WORDS)
+    interlocutor = bool(token_set & _PARTICIPANT_INTERLOCUTOR_WORDS)
+    shared = bool(token_set & _PARTICIPANT_SHARED_WORDS)
+    return {
+        "speaker_reference": speaker,
+        "interlocutor_reference": interlocutor,
+        "shared_reference": shared,
+        "single_participant_reference": bool(speaker) != bool(interlocutor),
+    }
+
+
 def _context_signature(text: Any) -> dict[str, Any]:
-    """Build an advisory subject/action signature without routing on fixed phrases."""
+    """Build an advisory subject/action signature without routing on fixed phrases.
+
+    The signature separates topical content from discourse relations. Pronouns and
+    references to remembering/the current conversation remain in the original request
+    but do not masquerade as external subject changes.
+    """
     _, tokens = _semantic_normalize(text)
     token_set = set(tokens)
     subjects = set()
     for token in tokens:
-        if not token or token.isdigit() or token in _CONTEXT_SIGNATURE_GENERIC:
+        if not token or token.isdigit() or _is_context_signature_generic(token):
             continue
         if len(token) < 4:
             continue
@@ -685,6 +746,7 @@ def _context_signature(text: Any) -> dict[str, Any]:
         "has_explicit_subject": bool(subjects),
         "reference_strength": round(min(1.0, len(reference_hits) / max(2.0, len(token_set) * 0.35)), 3),
         "reference_terms": sorted(reference_hits)[:8],
+        "participant_references": _participant_reference_profile(tokens),
         "output_forms": output_forms,
         "numeric_anchors": numbers,
     }
