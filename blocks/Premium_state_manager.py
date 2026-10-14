@@ -2554,7 +2554,7 @@ def search_dialogue_context(
     self_contained_subject_switch = bool(
         active_subject_conflict
         and query_subjects
-        and len(_semantic_tokens(query)) >= 5
+        and len(_semantic_tokens(query)) >= 4
         and not history_request
         and not new_topic_request
     )
