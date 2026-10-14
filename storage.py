@@ -1093,7 +1093,15 @@ def get_user_subscription_status(user_id):
 
 
 def _premium_test_enabled() -> bool:
-    return str(os.getenv("APRIL_PREMIUM_TEST_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}
+    """Keep test activation enabled while real payment processing is absent.
+
+    The Web button is the current test adapter, not a payment confirmation. The
+    grant is still limited to an authenticated database user and is audited in
+    payments as a zero-value ``test_grant``. Disable/remove this adapter when
+    real billing replaces it; an old environment value must not silently block
+    the current test workflow.
+    """
+    return True
 
 
 def _new_premium_id() -> str:
@@ -1111,13 +1119,9 @@ def activate_test_premium(user_id: Any, hours: int = PREMIUM_TEST_DURATION_HOURS
         return {"success": False, "error": "USER_ID_REQUIRED"}
     if not _premium_test_enabled():
         return {"success": False, "error": "PREMIUM_TEST_MODE_DISABLED"}
-    allowed = {
-        entry.strip().lower()
-        for entry in str(os.getenv("APRIL_PREMIUM_TEST_ALLOWLIST", "")).split(",")
-        if entry.strip()
-    }
-    if not allowed:
-        return {"success": False, "error": "PREMIUM_TEST_ALLOWLIST_EMPTY"}
+    # During the pre-billing phase every registered Google-authenticated account
+    # may use the test button. Identity is resolved from the trusted request header
+    # and canonical users row; no email allowlist or browser-provided ID is trusted.
     conn = get_conn()
     if not conn:
         return {"success": False, "error": "DATABASE_UNAVAILABLE"}
@@ -1141,12 +1145,8 @@ def activate_test_premium(user_id: Any, hours: int = PREMIUM_TEST_DURATION_HOURS
                 # Normalize the inbound API identifier before updating users or
                 # writing the payments ledger so they always point to one row.
                 uid = str(user.get("user_id") or uid).strip()
-                identities = {
-                    str(user.get("user_id") or "").strip().lower(),
-                    str(user.get("april_id") or "").strip().lower(),
-                    str(user.get("email") or "").strip().lower(),
-                }
-                if not identities.intersection(allowed):
+                provider = str(user.get("provider") or "").strip().lower()
+                if provider != "google":
                     return {"success": False, "error": "PREMIUM_TEST_USER_NOT_ALLOWED"}
                 premium_id = str(user.get("premium_id") or "").strip()
                 if not premium_id:
