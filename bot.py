@@ -954,9 +954,18 @@ class AprilHandler(BaseHTTPRequestHandler):
                 if not april_id or not user_id:
                     self._send_json(500, {"success": False, "error": "USER_ID_NOT_AVAILABLE"})
                     return
-                # Session/UI plan is only a mirror of the database entitlement.
-                # Expired or unknown plan values are always reported as Free.
+                # Session/UI values are only a mirror of the database entitlement.
+                # Expired or unknown plan values are always reported as Free. Keep
+                # the separate Premium ID and millisecond expiry in both naming
+                # conventions because NextAuth consumes this registry payload.
                 active_plan = get_user_plan(user_id)
+                premium_id = _text(user.get("premium_id")) or None
+                until_seconds = float(user.get("subscription_until") or 0)
+                subscription_until = (
+                    int(until_seconds * 1000)
+                    if active_plan in {"lite", "premium"} and until_seconds > 0
+                    else None
+                )
                 payload_user = {
                     "user_id": user_id,
                     "april_id": april_id,
@@ -967,6 +976,10 @@ class AprilHandler(BaseHTTPRequestHandler):
                     "provider": _text(user.get("provider") or provider),
                     "plan": active_plan,
                     "currentPlan": active_plan,
+                    "premium_id": premium_id,
+                    "premiumId": premium_id,
+                    "subscription_until": subscription_until,
+                    "subscriptionUntil": subscription_until,
                 }
                 self._send_json(200, {"success": True, "user": payload_user})
             except Exception as exc:
