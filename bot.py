@@ -43,7 +43,7 @@ from blocks.Premium_state_manager import (
 )
 from storage import (
     activate_test_premium, find_or_create_user, get_user_plan,
-    get_user_subscription_status, init_db, is_authenticated_user,
+    get_user_subscription_status, init_db, is_authenticated_user, resolve_user_id,
 )
 
 HOST = os.getenv("HOST", "0.0.0.0")
@@ -842,9 +842,10 @@ class AprilHandler(BaseHTTPRequestHandler):
                 if not self._service_authorized():
                     self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
                     return
-                user_id = _text(self.headers.get("X-April-User-Id"))
+                supplied_user_id = _text(self.headers.get("X-April-User-Id"))
+                user_id = resolve_user_id(supplied_user_id) or ""
                 message_id = _text(self.headers.get("X-April-Message-Id"))
-                _apr_timing_log("history_request", user_key=_apr_diag_ref(user_id), has_message_id=bool(message_id))
+                _apr_timing_log("history_request", user_key=_apr_diag_ref(user_id or supplied_user_id), has_message_id=bool(message_id))
                 status, payload = _history_payload(user_id, message_id)
                 _apr_timing_log("history_response", user_key=_apr_diag_ref(user_id), status=status,
                                 count=int(payload.get("count") or 0), message_count=len(payload.get("messages") or []))
@@ -1024,12 +1025,19 @@ class AprilHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED", "canonical_route": CANONICAL_CHAT_ROUTE})
             return
-        canonical_user_id = _text(self.headers.get("X-April-User-Id"))
-        if not canonical_user_id:
+        supplied_april_id = _text(self.headers.get("X-April-User-Id"))
+        if not supplied_april_id:
             self._send_json(401, {"success": False, "error": "AUTHENTICATION_REQUIRED", "canonical_route": CANONICAL_CHAT_ROUTE})
             return
-        if not is_authenticated_user(canonical_user_id):
+        if not is_authenticated_user(supplied_april_id):
             self._send_json(401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED", "canonical_route": CANONICAL_CHAT_ROUTE})
+            return
+        # `april_id` is the public account identifier; dialogue, plan and payment
+        # tables are keyed by `users.user_id`. Normalize once at the only chat
+        # ingress so the Free/Premium router and all linked stores share one key.
+        canonical_user_id = resolve_user_id(supplied_april_id)
+        if not canonical_user_id:
+            self._send_json(503, {"success": False, "error": "USER_ID_RESOLUTION_FAILED", "canonical_route": CANONICAL_CHAT_ROUTE})
             return
         http_started = time.perf_counter()
         try:
@@ -1051,7 +1059,7 @@ class AprilHandler(BaseHTTPRequestHandler):
             # never from browser-controlled JSON or multipart form fields.
             data = dict(data)
             data["user_id"] = canonical_user_id
-            data["april_id"] = canonical_user_id
+            data["april_id"] = supplied_april_id
             _apr_timing_log("http_request_parse", parse_started, body_bytes=length,
                 content_type=content_type.split(";", 1)[0], attachment_count=len(attachments or []),
                 input_chars=len(_text(data.get("text") or data.get("message") or data.get("content"))) if isinstance(data, dict) else 0)
