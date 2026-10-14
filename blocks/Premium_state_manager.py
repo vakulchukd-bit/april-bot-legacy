@@ -15,7 +15,7 @@ import re
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 import psycopg2
@@ -88,7 +88,6 @@ def load_dialogue_pairs(
     if not uid or not is_authenticated_user(uid):
         return []
     current = _as_utc(timestamp)
-    cutoff = current - timedelta(hours=PREMIUM_MEMORY_WINDOW_HOURS)
     conn = get_conn()
     if not conn:
         return []
@@ -98,15 +97,17 @@ def load_dialogue_pairs(
                 return []
             cur.execute(
                 """
-                SELECT id, user_id, created_at, turn_index, user_text, april_text,
+                SELECT id, user_id, created_at, retention_hours, turn_index, user_text, april_text,
                        user_text_en, april_text_en, language, relation, dialog_id,
                        conversation_id, message_id, interpretation_id,
                        structured_request, structured_response
                 FROM dialogue_memory
-                WHERE user_id = %s AND created_at >= %s AND created_at <= %s
+                WHERE user_id = %s
+                  AND created_at <= %s
+                  AND created_at + (GREATEST(12, LEAST(24, COALESCE(retention_hours, 12))) * INTERVAL '1 hour') > %s
                 ORDER BY created_at ASC, turn_index ASC, id ASC
                 """,
-                (uid, cutoff, current),
+                (uid, current, current),
             )
             rows = [dict(row) for row in cur.fetchall()]
             for row in rows:
@@ -153,13 +154,18 @@ def save_dialogue_pair(
     try:
         with conn:
             with conn.cursor() as cur:
-                if not _active_premium_cursor(cur, uid, now()):
+                # Entitlement is checked against server time, never the client-supplied
+                # message timestamp. The latter is only the record's display/retention origin.
+                save_now = now()
+                if not _active_premium_cursor(cur, uid, save_now):
                     return False
-                cutoff = dt - timedelta(hours=PREMIUM_MEMORY_WINDOW_HOURS)
-                # Clean only this Premium user's rows. Free users are not touched.
+                # Purge by wall-clock time; created_at remains the validated send time.
+                cleanup_now = save_now
                 cur.execute(
-                    "DELETE FROM dialogue_memory WHERE user_id = %s AND created_at < %s",
-                    (uid, cutoff),
+                    """DELETE FROM dialogue_memory
+                       WHERE user_id = %s
+                         AND created_at + (GREATEST(12, LEAST(24, COALESCE(retention_hours, 12))) * INTERVAL '1 hour') <= %s""",
+                    (uid, cleanup_now),
                 )
                 pair_hash = hashlib.sha256(
                     f"{uid}|{int(dt.timestamp() * 1000)}|{int(turn_index)}|{user_value}|{april_value}".encode("utf-8")
@@ -167,11 +173,11 @@ def save_dialogue_pair(
                 cur.execute(
                     """
                     INSERT INTO dialogue_memory
-                      (user_id, created_at, turn_index, user_text, april_text,
+                      (user_id, created_at, retention_hours, turn_index, user_text, april_text,
                        user_text_en, april_text_en, language, relation, pair_hash,
                        dialog_id, conversation_id, message_id, interpretation_id,
                        structured_request, structured_response)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                    VALUES (%s, %s, 24, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
                     ON CONFLICT (pair_hash) DO UPDATE SET
                       user_text_en = EXCLUDED.user_text_en,
                       april_text_en = EXCLUDED.april_text_en,
@@ -306,12 +312,11 @@ def _uid(user_id: Any) -> str:
 
 def _prune(state: dict[str, Any], now_value: float | None = None) -> None:
     stamp = float(now_value if now_value is not None else time.time())
-    cutoff = stamp - DIALOGUE_WINDOW_SECONDS
     pairs = [
         deepcopy(row)
         for row in (state.get("dialogue_pairs") or [])
         if isinstance(row, dict)
-        and float(row.get("created_at") or 0) >= cutoff
+            and _row_is_live(row, stamp, DIALOGUE_WINDOW_HOURS)
     ]
     pairs.sort(
         key=lambda x: (
@@ -439,6 +444,7 @@ def append_pair(user_id: Any, row: dict[str, Any]) -> dict[str, Any]:
     state = get_state(user_id)
     item = deepcopy(row or {})
     item.setdefault("created_at", time.time())
+    item.setdefault("retention_hours", 24)
     with _LOCK:
         pairs = [
             x for x in state.get("dialogue_pairs", [])
@@ -462,13 +468,25 @@ def append_pair(user_id: Any, row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _prune_copy(pairs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    cutoff = time.time() - DIALOGUE_WINDOW_SECONDS
+    stamp = time.time()
     return [
         deepcopy(row)
         for row in pairs
         if isinstance(row, dict)
-        and float(row.get("created_at") or 0) >= cutoff
+        and _row_is_live(row, stamp, DIALOGUE_WINDOW_HOURS)
     ]
+
+
+def _row_is_live(row: dict[str, Any], stamp: float, fallback_hours: int) -> bool:
+    """Honor the lifetime saved for this pair; legacy rows default to 12h."""
+    try:
+        created = float(row.get("created_at") or 0)
+        raw_hours = row.get("retention_hours")
+        hours = int(raw_hours) if raw_hours is not None else 12
+        hours = 24 if hours >= 24 else 12
+        return bool(created > 0 and created <= stamp and stamp < created + hours * 3600)
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def set_relation(user_id: Any, relation: str, **metadata: Any) -> None:
