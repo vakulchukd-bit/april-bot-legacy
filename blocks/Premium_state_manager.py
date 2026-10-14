@@ -2546,14 +2546,22 @@ def search_dialogue_context(
     best = matches[0] if matches else None
     active_subjects = set(latest_same_dialog.get("subject_terms") or []) if latest_same_dialog else set()
     active_subject_conflict = _subject_conflicts(query_subjects, active_subjects)
-    # A named subject change in a self-contained new request is a new task even
-    # when old and new requests share the same verbs/output format. Referential
-    # corrections remain eligible for retrieval from the matching older context.
+    # Anaphora inside a complete message (for example, "Расскажи об Эйнштейне
+    # ... где применяются его открытия") refers to the subject named in that same
+    # message, not necessarily to the previous turn. A sufficiently detailed,
+    # self-contained request with a conflicting subject must therefore switch topic
+    # even if the generic referential-follow-up detector sees a pronoun such as "его".
+    self_contained_subject_switch = bool(
+        active_subject_conflict
+        and query_subjects
+        and len(_semantic_tokens(query)) >= 5
+        and not history_request
+        and not new_topic_request
+    )
     semantic_subject_switch = bool(
         active_subject_conflict
-        and interpreted_intent == "NEW_INFORMATION"
-        and not reference_followup
-        and not _continuation_marker(query)
+        and (interpreted_intent == "NEW_INFORMATION" or self_contained_subject_switch)
+        and (self_contained_subject_switch or (not reference_followup and not _continuation_marker(query)))
         and not history_request
         and not new_topic_request
     )
@@ -2631,7 +2639,7 @@ def search_dialogue_context(
         continuation = True
     elif latest_same_dialog and marker and len(_tokens(query)) <= 14 and not semantic_subject_switch:
         continuation = True
-    elif explicit_topic_hits and (reference_followup or _is_section_request(query) or _looks_like_topic_correction(query)):
+    elif explicit_topic_hits and not semantic_subject_switch and (reference_followup or _is_section_request(query) or _looks_like_topic_correction(query)):
         continuation = True
     elif same_dialog_semantic and not semantic_subject_switch:
         continuation = True
@@ -3075,7 +3083,7 @@ def search_dialogue_context(
     topic_table_md = "\n".join(topic_table_lines)
 
     result = {
-        "engine": "premium_state_manager_topic_section_search_v6_recovery",
+        "engine": "premium_state_manager_topic_section_search_v7_self_contained_subject_switch",
         "authenticated": True,
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "dialog_id": str(dialog_id or ""),
@@ -3084,6 +3092,7 @@ def search_dialogue_context(
         "context_signature": context_signature,
         "active_subject_conflict": bool(active_subject_conflict),
         "semantic_subject_switch": bool(semantic_subject_switch),
+        "self_contained_subject_switch": bool(self_contained_subject_switch),
         "total_pairs": len(rows),
         "candidate_count": len(matches),
         "relation": relation,
