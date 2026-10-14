@@ -857,6 +857,58 @@ def get_user_plan(user_id):
         conn.close()
 
 
+def get_user_subscription_status(user_id):
+    """Return the database-backed entitlement details for an authenticated account.
+
+    Timestamps in storage are Unix seconds. The Web profile contract converts the
+    expiry to milliseconds because it compares it with Date.now(). Test activation
+    deliberately does not write a row to ``payments``; only verified provider events
+    should be recorded as payments when a real billing adapter is added.
+    """
+    uid = str(user_id or "").strip()
+    if not uid:
+        return None
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT user_id, april_id, email, provider, plan, subscription_until "
+                    "FROM users WHERE user_id = %s",
+                    (uid,),
+                )
+                user = cur.fetchone()
+                if not _is_authenticated_row(user):
+                    return None
+
+                now_seconds = now().timestamp()
+                until_seconds = float(user.get("subscription_until") or 0)
+                raw_plan = str(user.get("plan") or "free").strip().lower()
+                plan = raw_plan if raw_plan in {"lite", "premium"} and until_seconds > now_seconds else "free"
+
+                # A payment-history flag is informational only. A test grant does not
+                # create fake financial history, and this value never grants access.
+                cur.execute(
+                    "SELECT EXISTS(SELECT 1 FROM payments WHERE user_id = %s AND plan = 'premium') AS found",
+                    (uid,),
+                )
+                history_row = cur.fetchone() or {}
+                has_premium_history = bool(history_row.get("found"))
+
+                return {
+                    "user_id": uid,
+                    "april_id": str(user.get("april_id") or uid),
+                    "plan": plan,
+                    "subscription_until": int(until_seconds * 1000) if plan in {"lite", "premium"} else None,
+                    "remaining_seconds": max(0, int(until_seconds - now_seconds)) if plan in {"lite", "premium"} else 0,
+                    "has_premium_history": has_premium_history,
+                }
+    finally:
+        conn.close()
+
+
 def check_subscription(user_id):
     return get_user_plan(user_id) in {"lite", "premium"}
 
