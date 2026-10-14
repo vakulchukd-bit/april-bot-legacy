@@ -78,7 +78,8 @@ _USERS_COLUMNS = (
 
 _ALLOWED_TABLE_COLUMNS = {
     "users": set(_USERS_COLUMNS),
-    "payments": {"id", "user_id", "plan", "amount", "created_at"},
+    # Test grants are recorded for audit, but they are explicitly not paid payments.
+    "payments": {"id", "user_id", "plan", "amount", "premium_id", "payment_status", "payment_source", "created_at"},
     "dialogue_memory": {"id", "user_id", "created_at", "turn_index", "user_text", "april_text", "user_text_en", "april_text_en", "language", "relation", "pair_hash", "dialog_id", "conversation_id", "message_id", "interpretation_id", "structured_request", "structured_response"},
 }
 
@@ -247,6 +248,9 @@ def init_db() -> None:
                         user_id TEXT NOT NULL,
                         plan TEXT NOT NULL,
                         amount INTEGER NOT NULL DEFAULT 0,
+                        premium_id TEXT,
+                        payment_status TEXT NOT NULL DEFAULT 'paid',
+                        payment_source TEXT NOT NULL DEFAULT 'legacy',
                         created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
                     )
                     """
@@ -255,6 +259,11 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS user_id TEXT")
                 cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS plan TEXT")
                 cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS amount INTEGER DEFAULT 0")
+                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS premium_id TEXT")
+                # Existing payment rows remain historical paid records. Test grants are
+                # inserted explicitly as payment_status='test_grant' with amount=0.
+                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_status TEXT NOT NULL DEFAULT 'paid'")
+                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_source TEXT NOT NULL DEFAULT 'legacy'")
                 cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_created ON payments(user_id, created_at DESC)")
 
@@ -918,8 +927,18 @@ def save_payment(user_id, plan):
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO payments (user_id, plan, amount) VALUES (%s,%s,%s)",
-                    (str(user_id), plan, amount),
+                    "SELECT premium_id FROM users WHERE user_id = %s",
+                    (str(user_id),),
+                )
+                user = cur.fetchone() or {}
+                premium_id = str(user.get("premium_id") or "").strip() or None
+                cur.execute(
+                    """
+                    INSERT INTO payments
+                        (user_id, plan, amount, premium_id, payment_status, payment_source)
+                    VALUES (%s, %s, %s, %s, 'paid', 'provider')
+                    """,
+                    (str(user_id), plan, amount, premium_id),
                 )
     finally:
         conn.close()
@@ -962,8 +981,8 @@ def get_user_subscription_status(user_id):
 
     Timestamps in storage are Unix seconds. The Web profile contract converts the
     expiry to milliseconds because it compares it with Date.now(). Test activation
-    deliberately does not write a row to ``payments``; only verified provider events
-    should be recorded as payments when a real billing adapter is added.
+    writes an auditable zero-value ``test_grant`` row to ``payments``; that row is
+    explicitly excluded from paid-payment history and never grants access by itself.
     """
     uid = str(user_id or "").strip()
     if not uid:
@@ -990,10 +1009,10 @@ def get_user_subscription_status(user_id):
                 if raw_plan in {"lite", "premium"} and plan == "free":
                     cur.execute("UPDATE users SET plan = 'free' WHERE user_id = %s", (uid,))
 
-                # A payment-history flag is informational only. A test grant does not
-                # create fake financial history, and this value never grants access.
+                # A payment-history flag counts only paid transactions. Test-grant
+                # audit rows are intentionally excluded and never grant access by themselves.
                 cur.execute(
-                    "SELECT EXISTS(SELECT 1 FROM payments WHERE user_id = %s AND plan = 'premium') AS found",
+                    "SELECT EXISTS(SELECT 1 FROM payments WHERE user_id = %s AND plan = 'premium' AND payment_status = 'paid') AS found",
                     (uid,),
                 )
                 history_row = cur.fetchone() or {}
@@ -1023,8 +1042,8 @@ def _new_premium_id() -> str:
 def activate_test_premium(user_id: Any, hours: int = PREMIUM_TEST_DURATION_HOURS) -> dict[str, Any]:
     """Grant a 24-hour test entitlement only to explicitly allowlisted auth users.
 
-    It never writes to payments. The Premium ID is stored once in the canonical
-    users row and is retained after expiry so a later activation reuses that ID.
+    The Premium ID is stored once in the canonical users row, copied into a
+    zero-value test-grant ledger row, and retained after expiry for reuse.
     """
     uid = str(user_id or "").strip()
     if not uid:
@@ -1072,6 +1091,18 @@ def activate_test_premium(user_id: Any, hours: int = PREMIUM_TEST_DURATION_HOURS
                 cur.execute(
                     "UPDATE users SET premium_id = %s, plan = 'premium', subscription_until = %s, warned = FALSE WHERE user_id = %s",
                     (premium_id, expires_at, uid),
+                )
+                # Keep a trace of each test activation in the same payment ledger,
+                # keyed by the canonical April user ID and the exact Premium ID.
+                # Zero amount + test_grant status prevent it from being mistaken
+                # for a real payment or counted as paid subscription history.
+                cur.execute(
+                    """
+                    INSERT INTO payments
+                        (user_id, plan, amount, premium_id, payment_status, payment_source)
+                    VALUES (%s, 'premium', 0, %s, 'test_grant', 'test_activation')
+                    """,
+                    (uid, premium_id),
                 )
         status = get_user_subscription_status(uid)
         if not status:
