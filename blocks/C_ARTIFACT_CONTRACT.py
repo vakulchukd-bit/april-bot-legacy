@@ -2709,17 +2709,19 @@ def _strip_rendered_segments(
     text: str,
     rendered_types: set[str],
     render_blocks: Any = None,
+    suppress_unrequested_table: bool = False,
 ) -> str:
-    """Keep narrative text while moving already-rendered structures to typed blocks.
+    """Keep narrative text while moving or suppressing structured fragments.
 
-    A fragment is removed only when a concrete matching renderer exists. This
-    prevents the renderer path from deleting unrelated explanation or examples.
+    Unrequested Markdown tables may also be removed when a concrete requested
+    GraphBlock already represents their values. This prevents duplicate output
+    without discarding the data needed to construct the graph.
     """
     cleaned = str(text or "")
     if not cleaned or not rendered_types:
         return cleaned.strip()
 
-    if "table" in rendered_types:
+    if "table" in rendered_types or suppress_unrequested_table:
         # Match Markdown data to an actual TableBlock payload before removing it.
         # The source-derived fallback is retained for legacy payloads that expose
         # a table type but omit its normalized columns/rows.
@@ -3427,7 +3429,11 @@ def prepare_render_blocks_for_room_dispatch(
     # A requested table may be absent as a block even though the model returned
     # its literal Markdown table. Promote that same table, without changing cells.
     table_candidate = table_from_answer or section_table_from_answer
-    if ("table" in requested or table_from_answer) and "table" not in existing_types and table_candidate and _has_render_payload("table", table_candidate):
+    # A Markdown table may be useful as source data for a requested graph, but it
+    # must not become a second standalone TableBlock unless the user requested a
+    # table too. Keep the parsed table available above for graph-data extraction.
+    allow_answer_table_block = "table" in requested or (bool(table_from_answer) and "graph" not in requested)
+    if allow_answer_table_block and "table" not in existing_types and table_candidate and _has_render_payload("table", table_candidate):
         prepared.append({"type": "table", "artifact_type": "table", "renderer": "TableBlock", "viewer": "TableBlock", "payload": table_candidate, "source_room": "C_TABLE_ROOM" if table_from_answer else "C_ARTIFACT_CONTRACT"})
         existing_types.add("table")
     if "graph" in requested and "graph" not in existing_types:
@@ -3503,6 +3509,19 @@ def prepare_render_blocks_for_room_dispatch(
         seen.add(signature)
         result.append(block)
 
+    # If the user asked for a graph but not a table, the graph owns the requested
+    # visual output. Do not expose a second table merely because the model included
+    # Markdown rows in its prose. The parsed rows above remain available for graph
+    # construction; explicit graph+table requests are unaffected.
+    suppress_unrequested_table = "graph" in requested and "table" not in requested and any(
+        isinstance(item, dict)
+        and _scene_block_type(item) == "graph"
+        and _has_render_payload("graph", _payload_for_render_block(item, "graph"), item)
+        for item in result
+    )
+    if suppress_unrequested_table:
+        result = [item for item in result if not (isinstance(item, dict) and _scene_block_type(item) == "table")]
+
     # The visual representation now owns its exact table/code/diagram/math body.
     # Keep only surrounding narrative in the text node to avoid rendering the
     # same content twice while still preserving explanatory prose.
@@ -3512,7 +3531,7 @@ def prepare_render_blocks_for_room_dispatch(
             if not isinstance(item, dict) or str(item.get("type") or "").lower() not in {"text", "markdown"}:
                 continue
             original_text = str(item.get("content") or item.get("text") or "")
-            cleaned_text = _strip_rendered_segments(original_text, rendered_types, result)
+            cleaned_text = _strip_rendered_segments(original_text, rendered_types, result, suppress_unrequested_table=suppress_unrequested_table)
             if original_text.strip() and not cleaned_text.strip():
                 # Do not produce an empty text bubble if the entire source answer
                 # was a table/code/diagram; the structured renderer now owns it.
@@ -3536,7 +3555,7 @@ def prepare_render_blocks_for_room_dispatch(
     # Preserve a substantial narrative alongside visual artifacts. The current
     # full answer is the source of truth; the 60% threshold protects against a
     # renderer-cleanup pass accidentally replacing prose with a one-line caption.
-    canonical_text = _strip_rendered_segments(source_answer, rendered_types, result).strip()
+    canonical_text = _strip_rendered_segments(source_answer, rendered_types, result, suppress_unrequested_table=suppress_unrequested_table).strip()
     text_indices = [
         index for index, item in enumerate(result)
         if isinstance(item, dict) and str(item.get("type") or "").lower() in {"text", "markdown", "message", "message_text"}
@@ -3666,8 +3685,18 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
         graph_policy=active_task.get("graph_policy"),
     )
     visible_types = {str(item.get("type") or "").lower() for item in blocks if isinstance(item, dict)}
+    requested_outputs = _render_requested_outputs(active_task.get("requested_outputs"))
+    suppress_unrequested_table = "graph" in requested_outputs and "table" not in requested_outputs and any(
+        isinstance(item, dict)
+        and _scene_block_type(item) == "graph"
+        and _has_render_payload("graph", _payload_for_render_block(item, "graph"), item)
+        for item in blocks
+    )
     source_answer = answer
-    answer = _strip_rendered_segments(answer, visible_types, blocks)
+    answer = _strip_rendered_segments(
+        answer, visible_types, blocks,
+        suppress_unrequested_table=suppress_unrequested_table,
+    )
 
     # Critical integrity step: the old code cleaned the local `answer` string,
     # but left the original full answer inside the existing MessageTextBlock.
@@ -3687,7 +3716,7 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
         else:
             # A shorter text section may contain a renderable fragment too. Clean
             # only exact structures which have a corresponding concrete renderer.
-            cleaned_text = _strip_rendered_segments(block_source_text, visible_types, blocks)
+            cleaned_text = _strip_rendered_segments(block_source_text, visible_types, blocks, suppress_unrequested_table=suppress_unrequested_table)
         present_text_keys = [key for key in text_keys if isinstance(block.get(key), str)]
         for key in (present_text_keys or ["content"]):
             block[key] = cleaned_text
