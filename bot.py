@@ -41,7 +41,10 @@ from blocks.Premium_state_manager import (
     _subject_overlap as _premium_subject_overlap,
     _topic_query_overlap as _premium_topic_query_overlap,
 )
-from storage import find_or_create_user, get_user_plan, init_db, is_authenticated_user
+from storage import (
+    activate_test_premium, find_or_create_user, get_user_plan,
+    get_user_subscription_status, init_db, is_authenticated_user,
+)
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "10000"))
@@ -810,6 +813,27 @@ class AprilHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
+        if parsed.path == "/api/subscription/status":
+            if not self._service_authorized():
+                self.close_connection = True
+                self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                return
+            user_id = _text(self.headers.get("X-April-User-Id"))
+            if not user_id:
+                self._send_json(400, {"success": False, "error": "USER_ID_REQUIRED"})
+                return
+            if not _text(os.getenv("DATABASE_URL")):
+                self._send_json(503, {"success": False, "error": "DATABASE_UNAVAILABLE"})
+                return
+            if not is_authenticated_user(user_id):
+                self._send_json(401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"})
+                return
+            status = get_user_subscription_status(user_id)
+            if not status:
+                self._send_json(503, {"success": False, "error": "SUBSCRIPTION_STATUS_UNAVAILABLE"})
+                return
+            self._send_json(200, {"success": True, **status})
+            return
         if parsed.path == CANONICAL_CHAT_ROUTE:
             query = parse_qs(parsed.query, keep_blank_values=False)
             if query.get("mode", [""])[0] == "history":
@@ -832,6 +856,52 @@ class AprilHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"success": False, "error": "NOT_FOUND"})
 
     def do_POST(self) -> None:
+        parsed_path = urlsplit(self.path).path
+        if parsed_path == "/api/subscription/test-activate":
+            if not self._service_authorized():
+                self.close_connection = True
+                self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                return
+            user_id = _text(self.headers.get("X-April-User-Id"))
+            if not user_id:
+                self._send_json(400, {"success": False, "error": "USER_ID_REQUIRED"})
+                return
+            # Consume and validate the small bridge body; identity and access are
+            # derived only from trusted headers + the authenticated DB row.
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length < 0 or length > 64 * 1024:
+                    self.close_connection = True
+                    self._send_json(413, {"success": False, "error": "REQUEST_BODY_TOO_LARGE"})
+                    return
+                raw = self.rfile.read(length)
+                body = json.loads(raw.decode("utf-8") or "{}") if raw else {}
+                if not isinstance(body, dict):
+                    self._send_json(400, {"success": False, "error": "INVALID_REQUEST"})
+                    return
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                self._send_json(400, {"success": False, "error": "INVALID_JSON"})
+                return
+            result = activate_test_premium(user_id, hours=24)
+            if result.get("success"):
+                _apr_timing_log(
+                    "subscription_test_activation_success",
+                    user_key=_apr_diag_ref(user_id),
+                    premium_key=_apr_diag_ref(result.get("premium_id")),
+                    remaining_seconds=result.get("remaining_seconds", 0),
+                )
+                self._send_json(200, result)
+                return
+            error = _text(result.get("error") or "PREMIUM_ACTIVATION_FAILED")
+            status_code = 503 if error in {
+                "DATABASE_UNAVAILABLE", "SUBSCRIPTION_STATUS_UNAVAILABLE", "PREMIUM_SCHEMA_MIGRATION_REQUIRED"
+            } else 401 if error == "AUTHENTICATED_USER_REQUIRED" else 403 if error in {
+                "PREMIUM_TEST_MODE_DISABLED", "PREMIUM_TEST_ALLOWLIST_EMPTY", "PREMIUM_TEST_USER_NOT_ALLOWED"
+            } else 400
+            _apr_timing_log("subscription_test_activation_failed", user_key=_apr_diag_ref(user_id), error=error)
+            self._send_json(status_code, result)
+            return
+
         # Existing April Web authentication bridge. Keep account identity in the
         # canonical users table; never derive an April user ID from email.
         if self.path == "/api/users/find-or-create":
