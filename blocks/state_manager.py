@@ -11,6 +11,7 @@ from copy import deepcopy
 import hashlib
 import re
 import json
+import math
 import threading
 import time
 import uuid
@@ -628,6 +629,109 @@ def _query_context_signature(query: str, interpretation: dict[str, Any] | None =
     }
 
 
+def _hot_branch_followup_candidate(
+    query: str,
+    interpretation: dict[str, Any] | None,
+    latest_row: dict[str, Any] | None,
+    *,
+    query_subjects: set[str] | None = None,
+    reference_followup: bool = False,
+    marker: bool = False,
+    has_attachment: bool = False,
+    history_request: bool = False,
+    new_topic_request: bool = False,
+) -> bool:
+    """Conservatively test whether an underspecified turn may continue the hot branch.
+
+    This is an advisory gate, not a word-trigger or a persistent anchor. It uses
+    the existing interpretation metadata, topical evidence and recency of the
+    authenticated active dialogue. A clear new request, history lookup, attachment
+    task or a message with its own output/data specification bypasses this check.
+    """
+    text = _text(query)
+    if not text or not isinstance(latest_row, dict):
+        return False
+    if history_request or new_topic_request or has_attachment:
+        return False
+
+    profile = interpretation if isinstance(interpretation, dict) else {}
+    signature = profile.get("context_signature") if isinstance(profile.get("context_signature"), dict) else {}
+    features = profile.get("features") if isinstance(profile.get("features"), dict) else {}
+    subjects = set(query_subjects or _subject_tokens(text))
+    tokens = _tokens(text)
+    output_forms = signature.get("output_forms") if isinstance(signature.get("output_forms"), list) else []
+    numeric_anchors = signature.get("numeric_anchors") if isinstance(signature.get("numeric_anchors"), list) else []
+    has_question = bool(features.get("interrogative")) or "?" in text or "？" in text
+
+    # Respect an upstream semantic/pragmatic classification when one is supplied;
+    # older callers do not provide these optional fields, so the rest stays safe.
+    pragmatic_value = " ".join(_text(profile.get(key)) for key in (
+        "speech_act", "communicative_act", "pragmatic_intent", "message_function",
+    )).lower().replace("ё", "е")
+    pragmatic_followup = any(term in pragmatic_value for term in (
+        "reaction", "acknowledg", "agreement", "disagreement", "negation",
+        "emotion", "evaluation", "referential", "ellipsis", "continuation",
+        "реакц", "подтвержд", "несоглас", "отрицан", "эмоц", "оценк",
+        "отсылк", "эллипсис", "продолж",
+    ))
+
+    # A short fragment with no requested output, data or self-contained question
+    # is only a *candidate* for the active branch, not proof of continuation.
+    # More than one independent subject usually signals a separately named topic.
+    structurally_underspecified = (
+        len(tokens) <= 5
+        and len(subjects) <= 1
+        and not output_forms
+        and not numeric_anchors
+        and not has_question
+    )
+    if not (reference_followup or marker or pragmatic_followup or structurally_underspecified):
+        return False
+
+    # Direct semantic/referential evidence is stronger than recency. Reuse the same
+    # scoring vocabulary as the normal search instead of introducing phrase triggers.
+    scoring_row = dict(latest_row)
+    scoring_row.setdefault("user_text", _text(latest_row.get("user")))
+    scoring_row.setdefault("user_text_en", _text(latest_row.get("user_en")))
+    scoring_row.setdefault("april_text", _text(latest_row.get("april")))
+    scoring_row.setdefault("april_text_en", _text(latest_row.get("april_en")))
+    candidate = _candidate_score(
+        text, scoring_row,
+        dialog_id=_text(latest_row.get("dialog_id")),
+        reference_followup=reference_followup,
+    )
+    semantic_fit = max(
+        float(candidate.get("context") or 0),
+        float(candidate.get("entity_overlap") or 0),
+        float(candidate.get("answer_overlap") or 0),
+        float(candidate.get("user_overlap") or 0),
+        float(candidate.get("subject_overlap") or 0),
+    )
+    if reference_followup or marker or pragmatic_followup:
+        return not bool(candidate.get("subject_mismatch")) and (semantic_fit > 0.0 or structurally_underspecified)
+    if not structurally_underspecified:
+        return False
+
+    # Recency is a soft fallback for a human reaction/fragment immediately after an
+    # exchange. It decays quickly so a later standalone phrase cannot stay attached
+    # to a completed task merely because that task is still in the 12-hour memory.
+    try:
+        created_at = float(latest_row.get("created_at") or 0.0)
+    except (TypeError, ValueError):
+        created_at = 0.0
+    age_seconds = max(0.0, time.time() - created_at) if created_at else float("inf")
+    proximity = math.exp(-age_seconds / 240.0) if math.isfinite(age_seconds) else 0.0
+    assistant_text = _text(
+        latest_row.get("april_text") or latest_row.get("april_text_en")
+        or latest_row.get("april") or latest_row.get("april_en")
+    )
+    open_question = "?" in assistant_text or "？" in assistant_text
+    # An unanswered assistant question is a strong discourse link even after a pause.
+    if open_question and len(tokens) <= 8:
+        return True
+    return semantic_fit >= 0.18 or proximity >= 0.58
+
+
 def _continuation_marker(query: str) -> bool:
     low = _text(query).lower().replace("ё", "е")
     if not low:
@@ -755,77 +859,6 @@ def _looks_like_asset_reference(query: str) -> bool:
 def _looks_like_new_topic(query: str) -> bool:
     low = _text(query).lower().replace("ё", "е")
     return any(marker.replace("ё", "е") in low for marker in _NEW_TOPIC_MARKERS)
-
-
-def _is_underspecified_short_turn(
-    query: str,
-    query_interpretation: dict[str, Any] | None,
-    query_subjects: set[str],
-) -> bool:
-    """Detect a low-information conversational turn without phrase-specific triggers.
-
-    This is only an eligibility check for the hot-branch fallback, never proof that
-    a turn continues the current topic. Clear questions, task requests, topic
-    introductions, output requests, numeric constraints and explicit references
-    continue to use the normal retrieval path.
-    """
-    text = _text(query)
-    tokens = _tokens(text)
-    if not tokens or len(tokens) > 7 or "?" in text or "？" in text:
-        return False
-    if _looks_like_new_topic(text) or _looks_like_referential_followup(text) or _is_section_request(text):
-        return False
-
-    semantics = query_interpretation if isinstance(query_interpretation, dict) else {}
-    features = semantics.get("features") if isinstance(semantics.get("features"), dict) else {}
-    if any(bool(features.get(name)) for name in (
-        "dialogue_action", "recall_action", "decision_action", "plan_action",
-        "continuation_action", "past_reference", "future_reference", "today_reference",
-        "recent_reference", "interrogative",
-    )):
-        return False
-
-    signature = semantics.get("context_signature") if isinstance(semantics.get("context_signature"), dict) else {}
-    if signature.get("output_forms") or signature.get("numeric_anchors"):
-        return False
-
-    # Do not reinterpret a syntactically explicit request as a vague social turn.
-    # These are broad action roots, used only to exclude clear tasks from fallback.
-    action_roots = (
-        "сдела", "постро", "нарис", "созда", "напиш", "реши", "реша", "посчита",
-        "рассчита", "вычисл", "объясн", "расскаж", "покаж", "найд", "сравн",
-        "перевед", "сгенериру", "подбер", "исправ", "draw", "build", "create",
-        "write", "solve", "calculate", "explain", "show", "compare", "generate",
-        "translate", "fix", "стоп", "хватит", "прекрат", "отмен", "stop", "cancel",
-    )
-    normalized_tokens = [token.lower().replace("ё", "е") for token in tokens]
-    if any(any(token.startswith(root) for root in action_roots) for token in normalized_tokens):
-        return False
-
-    try:
-        from blocks.interpretation_identity import _has_explicit_topic_introduction
-        if _has_explicit_topic_introduction(text):
-            return False
-    except Exception:
-        # The search must remain available if the optional semantic helper is absent.
-        pass
-
-    # A tiny subject signature is not enough to call a message a new topic; it is
-    # only a reason to test the active branch when the previous assistant turn
-    # appears to be awaiting a response.
-    return len(query_subjects) <= 1
-
-
-def _assistant_turn_invites_response(text: Any) -> bool:
-    """Return true only when the last assistant sentence is visibly a question."""
-    answer = _text(text)
-    if not answer:
-        return False
-    tail = answer[-420:].rstrip()
-    # Ignore trailing spaces/emojis/closing quotes while preserving the question mark.
-    while tail and tail[-1] not in "?？" and not tail[-1].isalnum() and tail[-1] != "_":
-        tail = tail[:-1].rstrip()
-    return tail.endswith("?") or tail.endswith("？")
 
 
 def _concept_overlap(query_tokens: set[str], candidate_tokens: set[str]) -> float:
@@ -2374,58 +2407,36 @@ def search_dialogue_context(
     short_contextual = len(_tokens(query)) <= 12 and _text(query).lower().startswith(("а ", "и ", "ну ", "так ")) and (
         reference_followup or marker or len(_semantic_tokens(query)) == 0
     )
+    hot_branch_candidate = _hot_branch_followup_candidate(
+        query, query_interpretation, latest_same_dialog,
+        query_subjects=query_subjects, reference_followup=reference_followup,
+        marker=marker, has_attachment=bool(query_modalities),
+        history_request=history_request, new_topic_request=new_topic_request,
+    )
     continuation = False
     has_new_attachment = bool(query_modalities)
     explicit_attachment_followup = has_new_attachment and reference_followup
-    ambiguous_short_turn = _is_underspecified_short_turn(query, query_interpretation, query_subjects)
-    hot_branch_open_question = _assistant_turn_invites_response((latest_same_dialog or {}).get("april"))
-    # The hot-branch fallback is deliberately narrow: normal 12-hour retrieval did
-    # not identify a named topic, the message is structurally incomplete, no explicit
-    # task/topic/asset was supplied, and the last assistant turn ended in a question.
-    # This is a one-turn candidate, not a persistent anchor or a new memory rule.
-    hot_branch_continuation = bool(
-        ambiguous_short_turn
-        and hot_branch_open_question
-        and latest_same_dialog
-        and not same_dialog_semantic
-        and not explicit_topic_hits
-        and not pending_clarification
-        and not history_request
-        and not new_topic_request
-        and not has_new_attachment
-        and not reference_followup
-    )
     if pending_clarification and not new_topic_request:
         continuation = True
     elif history_request or new_topic_request:
         continuation = False
     elif has_new_attachment and not explicit_attachment_followup:
         continuation = False
-    elif hot_branch_continuation:
-        continuation = True
     elif _is_section_request(query) and _explicit_section_number(query) is not None and rows:
         # A numbered section reference is a history pointer even when it contains
         # no topic nouns (e.g. "пункт 8"). Search memory instead of classifying it NEW.
         continuation = True
-    elif latest_same_dialog and not query_subjects and (
-        reference_followup or marker or short_contextual or hot_branch_open_question
-    ):
-        # Subjectless messages are not automatically continuations. Continue only
-        # when there is a reference/transition signal or an immediately relevant
-        # assistant question; otherwise allow a new turn to start normally.
+    elif hot_branch_candidate and not semantic_subject_switch:
+        # Only ambiguous turns that pass the hot-branch relevance check may continue
+        # by default. Missing subject words alone are not enough to force CONTINUE.
         continuation = True
-    elif latest_same_dialog and reference_followup:
+    elif latest_same_dialog and reference_followup and not semantic_subject_switch:
         continuation = True
-    elif latest_same_dialog and (marker or short_contextual) and len(_tokens(query)) <= 14:
+    elif latest_same_dialog and marker and len(_tokens(query)) <= 14 and not semantic_subject_switch:
         continuation = True
     elif explicit_topic_hits and (reference_followup or _is_section_request(query) or _looks_like_topic_correction(query)):
         continuation = True
-    elif same_dialog_semantic and not semantic_subject_switch and not (
-        ambiguous_short_turn and not hot_branch_continuation and not explicit_topic_hits
-    ):
-        # A weak lexical match must not pin a low-information social/fragment turn
-        # to an old branch when the active turn is not awaiting a response and the
-        # 12-hour topic search found no explicit match.
+    elif same_dialog_semantic and not semantic_subject_switch:
         continuation = True
     relation = "CONTINUE" if continuation else "NEW"
 
@@ -2526,13 +2537,7 @@ def search_dialogue_context(
         # globally, or handed back to normal dialogue. It must not create another
         # local clarification from the old options.
     elif relation == "CONTINUE" and rows:
-        if hot_branch_continuation and latest_same_dialog:
-            # Keep the branch's own topic/section summary, while restoring the tail
-            # of April's actual last turn so its pending question is not lost in the
-            # compact memory summary. Do not pull value-heavy artifacts for this
-            # generic ambiguous turn; explicit asset requests use the normal path.
-            anchor = latest_same_dialog
-        elif not query_subjects and latest_same_dialog:
+        if not query_subjects and latest_same_dialog:
             # For an underspecified turn, prefer role-aligned evidence when available.
             # Otherwise compare the actual topical evidence with the active turn; if
             # neither gives a clear relative preference, stay on the active turn.
@@ -2588,16 +2593,7 @@ def search_dialogue_context(
         )
     elif relation == "CONTINUE":
         if anchor:
-            compact_anchor = _compact_pair(anchor)
-            if hot_branch_continuation:
-                last_assistant_text = _text(anchor.get("april") or anchor.get("april_text"))
-                if last_assistant_text:
-                    compact_anchor["april"] = last_assistant_text[-230:]
-                # A vague conversational turn should not re-send old charts/files or
-                # other large protected payloads merely because its branch is checked.
-                compact_anchor["protected_structured_data"] = {}
-                compact_anchor["attachment_evidence"] = ""
-            selected_for_context.append(compact_anchor)
+            selected_for_context.append(_compact_pair(anchor))
         # At most one corroborating pair; never forward a pile of unrelated turns.
         anchor_subjects = set((anchor or {}).get("subject_terms") or [])
         anchor_has_values = bool(int((anchor or {}).get("structured_data_richness") or 0) >= 8)
@@ -2605,9 +2601,7 @@ def search_dialogue_context(
         # A role-aligned factual record is sufficient for a participant-centered
         # lookup. Do not dilute it with neighboring turns that may only report a
         # prior failure to recall that fact (e.g. "I don't see your name").
-        related_context_candidates = [] if (
-            hot_branch_continuation or int((anchor or {}).get("participant_alignment") or 0) > 0
-        ) else matches
+        related_context_candidates = [] if int((anchor or {}).get("participant_alignment") or 0) > 0 else matches
         for item in related_context_candidates:
             if item.get("is_pending_clarification"):
                 continue
@@ -2903,25 +2897,15 @@ def search_dialogue_context(
             else "clarification_pending" if clarification_needed
             else "history_request" if history_request
             else "named_topic_match" if explicit_topic_hits
-            else "hot_branch_candidate_continuation" if hot_branch_continuation
+            else "hot_branch_ambiguous_followup" if relation == "CONTINUE" and anchor and hot_branch_candidate
             else "underspecified_turn_context" if relation == "CONTINUE" and anchor and not query_subjects
             else "active_topic_default" if relation == "CONTINUE" and anchor
             else "new_request" if relation == "NEW"
             else "semantic_memory_match"
         ),
-        "relation_confidence": (
-            1.0 if resume_anchor_row
-            else 0.35 if hot_branch_continuation
-            else round(float((anchor or best or {}).get("score") or (0.60 if relation == "CONTINUE" else 0.0)), 6)
-        ),
+        "relation_confidence": 1.0 if resume_anchor_row else round(float((anchor or best or {}).get("score") or (0.60 if relation == "CONTINUE" else 0.0)), 6),
         "continuation_marker": marker,
         "referential_followup": reference_followup,
-        "ambiguous_short_turn": ambiguous_short_turn,
-        "hot_branch_check": {
-            "eligible": bool(ambiguous_short_turn),
-            "assistant_question_open": bool(hot_branch_open_question),
-            "selected": bool(hot_branch_continuation),
-        },
         "history_request": history_request,
         "requested_topic_count": history_limit,
         "active_topic": active_topic,
@@ -2953,9 +2937,7 @@ def search_dialogue_context(
         resume_anchor_requested=bool(resume_key), resume_anchor_found=bool(resume_anchor_row),
         query_subject_terms=sorted(query_subjects)[:10], active_subject_conflict=bool(active_subject_conflict),
         semantic_subject_switch=bool(semantic_subject_switch),
-        ambiguous_short_turn=bool(ambiguous_short_turn),
-        hot_branch_question_open=bool(hot_branch_open_question),
-        hot_branch_selected=bool(hot_branch_continuation),
+        hot_branch_candidate=bool(hot_branch_candidate),
         top_candidate_alignment=[{
             "message_key": _apr_diag_ref(x.get("message_id")), "score": x.get("score"),
             "subject_overlap": x.get("subject_overlap"), "subject_mismatch": x.get("subject_mismatch"),
