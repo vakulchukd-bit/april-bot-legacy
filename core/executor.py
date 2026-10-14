@@ -1320,6 +1320,15 @@ async def execute(
         identity=identity,
         semantic_interpretation=semantic_interpretation,
     )
+    # Bind the user's preferred display name to the already-authenticated ID.
+    # This is prompt metadata only: it does not alter stored message text,
+    # dialogue identity, history, or the canonical chat route.
+    user_display_name = _text(kwargs.get("user_display_name"))[:80]
+    if user_display_name:
+        identity_context = interpretation.setdefault("identity", {})
+        if isinstance(identity_context, dict):
+            identity_context["display_name"] = user_display_name
+
     request_structure = interpretation.setdefault("request_structure", {})
     request_structure["question_sequence"] = question_sequence
     request_structure["answer_sequence_in_order"] = True
