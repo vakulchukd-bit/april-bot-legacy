@@ -1006,14 +1006,14 @@ def _is_history_request(query: str) -> bool:
         return False
 
 
-def _history_topic_limit(query: str, default: int = 7) -> int:
+def _history_topic_limit(query: str, default: int = 10) -> int:
     """Use the requested upper bound; “from 5 to 10 topics” means up to ten."""
     _, maximum = extract_topic_count_bounds(query, default=default)
     return max(1, min(10, int(maximum or default)))
 
 
-def _history_topic_minimum(query: str, default: int = 1) -> int:
-    minimum, _ = extract_topic_count_bounds(query, default=7)
+def _history_topic_minimum(query: str, default: int = 5) -> int:
+    minimum, _ = extract_topic_count_bounds(query, default=10)
     return max(1, min(10, int(minimum or default)))
 
 
@@ -2075,6 +2075,9 @@ _HISTORY_QUERY_NOISE = _SECTION_TOPIC_NOISE | {
     "вопросе", "вопросы", "какие", "какую", "какой", "какое", "что", "чем",
     "мы", "нам", "наше", "наши", "наш", "нашу", "мне", "мои", "мой",
     "последних", "последние", "час", "часа", "часов", "минут", "минуты", "дней", "дня", "недели",
+    "назад", "хоть", "примерно", "около", "время", "времени", "помни", "помниш", "помнишь", "вспоминаешь",
+    "list", "topic", "topics", "show", "history", "conversation", "conversations", "talked", "talking", "discuss", "discussed",
+    "тем", "темами", "темах", "топик", "топика", "топики", "топиков", "диалогов", "разговоров", "обсуждении", "обсуждение",
     "сегодняшний", "утром", "вечером", "ночью", "период", "периода", "время", "времени",
     "октября", "ноября", "декабря", "января", "февраля", "марта", "апреля", "мая", "июня",
     "июля", "августа", "сентября", "monday", "tuesday", "wednesday", "thursday", "friday",
@@ -2101,7 +2104,16 @@ def _fuzzy_token_overlap(query_tokens: set[str], candidate_tokens: set[str]) -> 
         ):
             matched += 1
             continue
-        if len(query_token) >= 5 and any(fuzz.ratio(query_token, candidate) >= 76 for candidate in candidate_list if len(candidate) >= 5):
+        if len(query_token) >= 5 and any(
+            len(candidate) >= 5 and (
+                fuzz.ratio(query_token, candidate) >= 76
+                # Compare the first five characters as well as the full inflected
+                # form. This tolerates one leading typo plus a Russian case ending
+                # (e.g. "ыизику" -> "физика") without dropping the topic entirely.
+                or fuzz.ratio(query_token[:5], candidate[:5]) >= 76
+            )
+            for candidate in candidate_list
+        ):
             matched += 1
     return matched / max(1, len(query_tokens))
 
@@ -2138,7 +2150,7 @@ def _rank_history_topics(query: str, topics: list[dict[str, Any]], limit: int, *
     bounded = [dict(item) for item in topics if isinstance(item, dict)]
     tokens = _history_query_topic_tokens(query)
     if not tokens:
-        return bounded[:max(1, min(10, int(limit or 7)))] if fallback else []
+        return bounded[:max(1, min(10, int(limit or 10)))] if fallback else []
     ranked: list[tuple[float, float, dict[str, Any]]] = []
     for item in bounded:
         candidate_tokens = _semantic_tokens(_history_topic_text(item))
@@ -2151,9 +2163,9 @@ def _rank_history_topics(query: str, topics: list[dict[str, Any]], limit: int, *
     if not ranked:
         # Broad history overview may fall back to recent topics; a normal request
         # must not receive unrelated topics merely because no semantic match exists.
-        return bounded[:max(1, min(10, int(limit or 7)))] if fallback else []
+        return bounded[:max(1, min(10, int(limit or 10)))] if fallback else []
     ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
-    return [dict(item) for _, _, item in ranked[:max(1, min(10, int(limit or 7)))]]
+    return [dict(item) for _, _, item in ranked[:max(1, min(10, int(limit or 10)))]]
 
 
 def _select_history_context_pairs(
@@ -2162,7 +2174,7 @@ def _select_history_context_pairs(
     topic_index: list[dict[str, Any]],
     all_rows: list[dict[str, Any]],
     *,
-    requested_topic_count: int = 7,
+    requested_topic_count: int = 10,
 ) -> tuple[list[dict[str, Any]], str, int]:
     """Select grounded pairs for history recall even though its relation remains NEW."""
     tokens = _history_query_topic_tokens(query)
@@ -2724,9 +2736,9 @@ def search_dialogue_context(
     # Build the index once and share it between topic ranking, pair selection and Provider.
     topics = _build_topic_index(all_rows)
     requested_limit = query_interpretation.get("requested_topic_count")
-    history_limit = max(1, min(10, int(requested_limit or _history_topic_limit(query, 7))))
+    history_limit = max(1, min(10, int(requested_limit or _history_topic_limit(query, 10))))
     history_minimum = max(1, min(history_limit, int(
-        query_interpretation.get("minimum_topic_count") or _history_topic_minimum(query, 1)
+        query_interpretation.get("minimum_topic_count") or _history_topic_minimum(query, 5)
     )))
 
     # Bind every pair and value-bearing structured asset to the topic in which it
@@ -2772,8 +2784,16 @@ def search_dialogue_context(
     # History recall may show up to ten distinct topics; normal requests receive
     # only semantically matching topics. Broad history requests fall back to
     # recency ordering after the explicit temporal filter has narrowed the rows.
-    topic_index = _rank_history_topics(query, topics, 10, fallback=history_request)
-    history_topics = _rank_history_topics(query, topics, history_limit, fallback=history_request) if history_request else []
+    history_query_tokens = _history_query_topic_tokens(query)
+    broad_history_overview = bool(
+        history_request and (
+            query_interpretation.get("history_inventory_request")
+            or _text(query_interpretation.get("primary_intent")).upper() == "HISTORY_SUMMARY"
+            or not history_query_tokens
+        )
+    )
+    topic_index = _rank_history_topics(query, topics, 10, fallback=broad_history_overview)
+    history_topics = _rank_history_topics(query, topics, history_limit, fallback=broad_history_overview) if history_request else []
 
     latest_same_dialog = max((item for item in matches if bool(item.get("same_dialog"))),
         key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)), default=None)
@@ -3598,7 +3618,7 @@ def prepare_dialogue_context(
         "history_request": bool(context.get("history_request")),
         "contextual_history_match": bool(context.get("contextual_history_match")),
         "matched_topic_count": int(context.get("matched_topic_count") or 0),
-        "requested_topic_count": int(context.get("requested_topic_count") or 7),
+        "requested_topic_count": int(context.get("requested_topic_count") or 10),
         "minimum_topic_count": int(context.get("minimum_topic_count") or 0),
         "time_window": deepcopy(context.get("time_window") or {}),
         "time_filter": deepcopy(context.get("time_filter") or {}),
