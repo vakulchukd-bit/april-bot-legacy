@@ -785,13 +785,32 @@ def _is_history_request(query: str) -> bool:
 
 def _history_topic_limit(query: str, default: int = 7) -> int:
     low = _text(query).lower().replace("ё", "е")
-    match = re.search(r"\b(10|[1-9])\b", low)
+    number_pattern = r"(10|[1-5])"
+    unit_pattern = r"(?:диалог\w*|разговор\w*|сообщен\w*|тем\w*|пункт\w*|раздел\w*)"
+    match = re.search(rf"\bпоследн\w*\s+(?:из\s+)?{number_pattern}\b", low)
+    if not match:
+        match = re.search(rf"\b{number_pattern}\s+(?:последн\w*\s+)?{unit_pattern}\b", low)
     if match:
-        return max(1, min(10, int(match.group(1))))
+        return max(1, min(5, int(match.group(1))))
     for word, count in _HISTORY_COUNT_WORDS.items():
-        if re.search(rf"\b{word}\b", low):
-            return count
-    return default
+        word_pattern = re.escape(word)
+        if re.search(rf"\bпоследн\w*\s+(?:из\s+)?{word_pattern}\b", low) or re.search(
+            rf"\b{word_pattern}\s+(?:последн\w*\s+)?{unit_pattern}\b", low
+        ):
+            return max(1, min(5, count))
+    return max(1, min(5, default or 5))
+
+
+def _asks_for_oldest_history(query: str) -> bool:
+    """Recognize requests for the oldest retained items, not the latest ones."""
+    low = re.sub(r"\s+", " ", _text(query).lower().replace("ё", "е")).strip()
+    oldest = bool(re.search(
+        r"\b(?:самые\s+первые|первые\s+(?:диалог\w*|разговор\w*|сообщен\w*|тем\w*)|"
+        r"самые\s+стар\w*|старейш\w*|давние\s+диалог\w*|перед\s+удален\w*|"
+        r"которые\s+скоро\s+удал\w*)\b", low
+    ))
+    has_history_object = bool(re.search(r"\b(?:диалог\w*|разговор\w*|сообщен\w*|истори\w*|тем\w*)\b", low))
+    return oldest and has_history_object
 
 
 def _domain_terms(text: str) -> set[str]:
@@ -1759,7 +1778,11 @@ _SECTION_TOPIC_NOISE = _SECTION_QUERY_NOISE | {
 _HISTORY_QUERY_NOISE = _SECTION_TOPIC_NOISE | {
     "говорил", "говорила", "говорили", "говорились", "общались", "обсуждали",
     "обсуждение", "обсуждении", "разговор", "разговора", "разговоре", "речь",
-    "история", "истории", "диалог", "диалога", "диалоге", "общение", "общения",
+    "разговоры", "разговоров", "разговорам", "разговорами", "разговорах",
+    "история", "истории", "историю", "историей", "истории", "диалог", "диалога", "диалоге",
+    "диалоги", "диалогов", "диалогам", "диалогами", "диалогах", "общение", "общения",
+    "переписка", "переписки", "переписку", "перепиской", "сообщение", "сообщения",
+    "сообщений", "сообщениям", "сообщениями", "сообщениях",
     "сегодня", "вчера", "позавчера", "сейчас", "раньше", "тогда", "недавно",
     "время", "времен", "последнее", "последний", "последнюю", "последней",
     "последние", "последних", "последнего", "последнюю", "итак", "вообще", "вообщем",
@@ -1771,7 +1794,11 @@ _HISTORY_QUERY_NOISE = _SECTION_TOPIC_NOISE | {
     "семь", "восемь", "девять", "десять", "полтора", "полторы", "говорим",
     "говорить", "говорю", "говорят", "говоришь", "общаемся", "обсуждаем",
     "прошлый", "прошлая", "прошлое", "прошлую", "предыдущий", "предыдущая",
-    "предыдущее", "предыдущую", "напомни", "вспомни", "помнишь", "помним",
+    "предыдущее", "предыдущую", "первые", "первый", "первая", "первое", "первых",
+    "самые", "старые", "старый", "старая", "ранние", "давние", "последние",
+    "последних", "покажи", "покажите", "скажи", "скажите", "назови", "назовите",
+    "перечисли", "перечислите", "дай", "дайте", "выведи", "найди", "найдите",
+    "напомни", "вспомни", "помнишь", "помним",
     "вспомнить", "напомнить", "сказать", "расскажи", "расскажите", "кратко",
     "краткий", "содержание", "содержании", "тема", "темы", "тему", "вопрос",
     "вопросе", "вопросы", "какие", "какую", "какой", "какое", "что", "чем",
@@ -2109,38 +2136,69 @@ def _select_temporal_history_pairs(
     topic_status = "topic_match_found" if constrained else ("topic_not_confirmed" if topic_tokens else "not_applicable")
 
     if in_window:
-        target_midpoint = (float(spec.get("target_start_ts") or start) + float(spec.get("target_end_ts") or end)) / 2.0
-        in_window.sort(key=lambda item: (
-            abs(float(item.get("created_at") or 0) - target_midpoint),
-            -float(item.get("score") or 0),
-        ))
-        chosen = in_window[:3]
-        status = "matched_requested_window" if constrained or not topic_tokens else "matched_window_topic_unconfirmed"
         matched_count = len(in_window)
-        instruction = "Use only the returned dialogue pairs as factual evidence for this time request."
+        target_midpoint = (float(spec.get("target_start_ts") or start) + float(spec.get("target_end_ts") or end)) / 2.0
+        if _text(spec.get("kind")) in {"recent_period", "daypart"}:
+            # Period requests should read like a compact timeline, oldest first.
+            in_window.sort(key=lambda item: float(item.get("created_at") or 0))
+        else:
+            in_window.sort(key=lambda item: (
+                abs(float(item.get("created_at") or 0) - target_midpoint),
+                -float(item.get("score") or 0),
+            ))
+            # Select the five nearest records, then show them chronologically.
+            in_window = sorted(
+                in_window[:5], key=lambda item: float(item.get("created_at") or 0)
+            )
+        chosen = in_window[:5]
+        status = "matched_requested_window" if constrained or not topic_tokens else "matched_window_topic_unconfirmed"
+        instruction = "Use the supplied saved dialogue summaries and pairs as factual evidence. Show no more than five, in chronological order."
     else:
-        # Topic is an explicit constraint: nearest prior/next matching-topic records
-        # take precedence. If no subject match was found at all, nearest records by
-        # time are still returned, but metadata forbids claiming a topic match.
-        before = [item for item in candidates if float(item.get("created_at") or 0) < start]
-        after = [item for item in candidates if float(item.get("created_at") or 0) > end]
-        previous = max(before, key=lambda item: float(item.get("created_at") or 0), default=None)
-        following = min(after, key=lambda item: float(item.get("created_at") or 0), default=None)
-        chosen = []
-        if previous:
-            chosen.append(previous)
-        if following and (not previous or _text(following.get("message_id")) != _text(previous.get("message_id"))):
-            chosen.append(following)
-        if not chosen:
-            # This happens when the target is beyond the retained edge. Return the
-            # closest retained record(s) and let the response disclose the gap.
-            chosen = sorted(candidates, key=lambda item: abs(float(item.get("created_at") or 0) - ((start + end) / 2.0)))[:2]
-        status = "nearest_topic_dialogues_outside_window" if constrained else "empty_window_nearest_dialogues"
-        matched_count = 0
-        instruction = (
-            "No saved dialogue exists inside the requested time window. Name the nearest returned dialogue(s), "
-            "state whether each is before or after the requested interval and the approximate gap; never present them as if they were inside it."
-        )
+        # A point or clock-time search first widens the neighborhood to +/- two
+        # hours. These are explicitly labelled as neighboring records, never as
+        # exact hits. This is more useful than jumping straight to distant records.
+        target_start = float(spec.get("target_start_ts") or start)
+        target_end = float(spec.get("target_end_ts") or end)
+        nearby_start = target_start - 120 * 60
+        nearby_end = target_end + 120 * 60
+        nearby = [item for item in candidates if nearby_start <= float(item.get("created_at") or 0) <= nearby_end]
+        if nearby:
+            midpoint = (target_start + target_end) / 2.0
+            nearby.sort(key=lambda item: (
+                abs(float(item.get("created_at") or 0) - midpoint),
+                -float(item.get("created_at") or 0),
+            ))
+            chosen = sorted(nearby[:5], key=lambda item: float(item.get("created_at") or 0))
+            status = "nearby_window_dialogues"
+            matched_count = 0
+            instruction = (
+                "No saved dialogue is inside the exact requested interval. Show the nearby dialogue(s) found within about two hours, "
+                "state that they are neighboring rather than exact matches, and use each time label. Do not say the history is empty."
+            )
+        else:
+            # Topic is an explicit constraint: nearest prior/next matching-topic
+            # records take precedence. If none is nearby, the nearest saved records
+            # are returned with an explicit before/after gap label.
+            before = [item for item in candidates if float(item.get("created_at") or 0) < start]
+            after = [item for item in candidates if float(item.get("created_at") or 0) > end]
+            previous = max(before, key=lambda item: float(item.get("created_at") or 0), default=None)
+            following = min(after, key=lambda item: float(item.get("created_at") or 0), default=None)
+            chosen = []
+            if previous:
+                chosen.append(previous)
+            if following and (not previous or _text(following.get("message_id")) != _text(previous.get("message_id"))):
+                chosen.append(following)
+            if not chosen:
+                # This happens when the target is beyond the retained edge. Return
+                # the closest retained record(s), and disclose their actual distance.
+                chosen = sorted(candidates, key=lambda item: abs(float(item.get("created_at") or 0) - ((start + end) / 2.0)))[:2]
+            status = "nearest_topic_dialogues_outside_window" if constrained else "empty_window_nearest_dialogues"
+            matched_count = 0
+            instruction = (
+                "No saved dialogue exists inside or within about two hours of the requested interval. Say so clearly, "
+                "then describe the nearest returned dialogue(s), whether each is before or after the interval, and the approximate gap. "
+                "Never present a neighboring pair as if it occurred inside the requested interval."
+            )
 
     selected: list[dict[str, Any]] = []
     selected_dialogue_times = []
@@ -2155,6 +2213,8 @@ def _select_temporal_history_pairs(
         selected.append(pair)
         selected_dialogue_times.append({
             "topic": _text(item.get("topic"))[:100],
+            "user": _text(item.get("user") or item.get("user_text"))[:120],
+            "summary": _compact_memory_summary(item)[:150],
             "message_id": _text(item.get("message_id")),
             "relation": relation,
             "time_label": label,
@@ -2171,6 +2231,7 @@ def _select_temporal_history_pairs(
         "topic_terms": sorted(topic_tokens)[:8],
         "dialogues_in_window": matched_count,
         "selected_count": len(selected),
+        "nearby_tolerance_minutes": 120 if status == "nearby_window_dialogues" else 0,
         "selected_dialogues": selected_dialogue_times,
         "instruction": instruction,
     }
@@ -2194,7 +2255,7 @@ def _rank_history_topics(query: str, topics: list[dict[str, Any]], limit: int, *
     bounded = [dict(item) for item in topics if isinstance(item, dict)]
     tokens = _history_query_topic_tokens(query)
     if not tokens:
-        return bounded[:max(1, min(10, int(limit or 7)))] if fallback else []
+        return bounded[:max(1, min(5, int(limit or 5)))] if fallback else []
     ranked: list[tuple[float, float, dict[str, Any]]] = []
     for item in bounded:
         candidate_tokens = _semantic_tokens(_history_topic_text(item))
@@ -2207,9 +2268,9 @@ def _rank_history_topics(query: str, topics: list[dict[str, Any]], limit: int, *
     if not ranked:
         # Broad history overview may fall back to recent topics; a normal request
         # must not receive unrelated topics merely because no semantic match exists.
-        return bounded[:max(1, min(10, int(limit or 7)))] if fallback else []
+        return bounded[:max(1, min(5, int(limit or 5)))] if fallback else []
     ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
-    return [dict(item) for _, _, item in ranked[:max(1, min(10, int(limit or 7)))]]
+    return [dict(item) for _, _, item in ranked[:max(1, min(5, int(limit or 5)))]]
 
 
 def _select_history_context_pairs(
@@ -2218,7 +2279,7 @@ def _select_history_context_pairs(
     topic_index: list[dict[str, Any]],
     all_rows: list[dict[str, Any]],
     *,
-    requested_topic_count: int = 7,
+    requested_topic_count: int = 5,
 ) -> tuple[list[dict[str, Any]], str, int]:
     """Select grounded pairs for history recall even though its relation remains NEW."""
     tokens = _history_query_topic_tokens(query)
@@ -2248,7 +2309,7 @@ def _select_history_context_pairs(
             ranked.append((relevance, float(item.get("created_at") or 0), item))
         matched_count = len(ranked)
         ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
-        # Return up to four evidence pairs for the named topic; deduplicate exact message IDs.
+        # Return up to five evidence pairs for the named topic; deduplicate exact message IDs.
         seen_ids: set[str] = set()
         for _, _, item in ranked:
             message_id = _text(item.get("message_id"))
@@ -2257,33 +2318,47 @@ def _select_history_context_pairs(
             if message_id:
                 seen_ids.add(message_id)
             selected.append(_compact_pair(item))
-            if len(selected) >= 4:
+            if len(selected) >= 5:
                 break
 
         if not selected:
             # Secondary bridge: a topic-index entry may identify the matching turn
             # even if the old row's text/translation fields differ from the new query.
-            topic_ranked = _rank_history_topics(query, topic_index, 4)
+            topic_ranked = _rank_history_topics(query, topic_index, 5, fallback=False)
             row_by_id = {_text(row.get("message_id")): row for row in all_rows if _text(row.get("message_id"))}
             for topic in topic_ranked:
                 row = row_by_id.get(_text(topic.get("message_id")))
                 if row:
                     selected.append(_compact_pair(_candidate_score(query, row, dialog_id="")))
-                    if len(selected) >= 3:
+                    if len(selected) >= 5:
                         break
             if selected:
                 method = "subject_topic_index_fallback"
     else:
-        # Broad recall: use representatives of the latest distinct topics, not
-        # arbitrary pairs with high recency-weighted similarity to the word 'today'.
-        row_by_id = {_text(row.get("message_id")): row for row in all_rows if _text(row.get("message_id"))}
-        for topic in topic_index[:min(4, max(1, requested_topic_count))]:
-            row = row_by_id.get(_text(topic.get("message_id")))
-            if row is None:
-                continue
-            selected.append(_compact_pair(_candidate_score(query, row, dialog_id="")))
-        if not selected:
-            selected = [_compact_pair(item) for item in eligible[:min(3, max(1, requested_topic_count))]]
+        # Broad recall must actually return the latest (or explicitly oldest)
+        # retained dialogue pairs. A topic-index representative can be older than
+        # the latest five saved turns and was the reason overview queries appeared
+        # to return only a vague fragment.
+        ordered = sorted(
+            eligible,
+            key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)),
+        )
+        count = max(1, min(5, int(requested_topic_count or 5)))
+        if _asks_for_oldest_history(query):
+            chosen = ordered[:count]
+        else:
+            chosen = ordered[-count:]
+        now_value = time.time()
+        for item in chosen:
+            pair = _compact_pair(item)
+            created_at = float(item.get("created_at") or 0)
+            if created_at > 0:
+                age_minutes = max(0, int(round((now_value - created_at) / 60.0)))
+                pair["history_age_minutes"] = age_minutes
+                pair["history_time_label"] = f"сохранён примерно {_format_history_duration(age_minutes)} назад"
+            selected.append(pair)
+        method = "oldest_dialogue_pairs" if _asks_for_oldest_history(query) else "latest_dialogue_pairs"
+        matched_count = len(selected)
 
     return selected, method, matched_count
 
@@ -2738,10 +2813,28 @@ def search_dialogue_context(
 
     # Build the index once and share it between topic ranking, pair selection and Provider.
     topics = _build_topic_index(all_rows)
+    if history_request and _asks_for_oldest_history(query):
+        topics = sorted(topics, key=lambda item: float(item.get("last_at") or 0))
     history_limit = _history_topic_limit(query, 7)
-    # History recall may show an overview; normal requests receive only semantically matched topics.
-    topic_index = _rank_history_topics(query, topics, 10, fallback=history_request)
-    history_topics = _rank_history_topics(query, topics, history_limit) if history_request else []
+    # A genuinely broad recall may fall back to a recent/oldest overview. A named
+    # topic must not be replaced with unrelated recent topics when it has no match.
+    history_topic_tokens = _history_query_topic_tokens(query)
+    broad_history_request = history_request and not history_topic_tokens
+    topic_index = _rank_history_topics(query, topics, 10, fallback=broad_history_request)
+    history_topics = _rank_history_topics(
+        query, topics, history_limit, fallback=broad_history_request
+    ) if history_request else []
+    # History overviews need usable, dated entries, not only a topic count.
+    # Attach a stable relative-age label before the data leaves State Manager.
+    now_for_history_labels = time.time()
+    for topic in history_topics:
+        if not isinstance(topic, dict):
+            continue
+        last_at = float(topic.get("last_at") or 0)
+        if last_at > 0:
+            age_minutes = max(0, int(round((now_for_history_labels - last_at) / 60.0)))
+            topic["history_age_minutes"] = age_minutes
+            topic["history_age_label"] = f"примерно {_format_history_duration(age_minutes)} назад"
 
     latest_same_dialog = max((item for item in matches if bool(item.get("same_dialog"))),
         key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)), default=None)
@@ -3419,7 +3512,7 @@ def search_dialogue_context(
         "active_topic": active_topic,
         "anchor": _compact_pair(anchor) if relation == "CONTINUE" and anchor else {},
         "matches": matches[:max(1, int(limit or 12))] if matches else [],
-        "selected": selected_for_context[:4 if (history_request or resume_anchor_row) else 2],
+        "selected": selected_for_context[:5 if (history_request or resume_anchor_row) else 2],
         "history_topics": history_topics,
         "history_time_search": history_time_search,
         "topic_index": topic_index,
@@ -3501,7 +3594,7 @@ def prepare_dialogue_context(
         "history_time_search": deepcopy(context.get("history_time_search") or {}),
         "contextual_history_match": bool(context.get("contextual_history_match")),
         "matched_topic_count": int(context.get("matched_topic_count") or 0),
-        "requested_topic_count": int(context.get("requested_topic_count") or 7),
+        "requested_topic_count": int(context.get("requested_topic_count") or 5),
         "topic_table_markdown": _text(context.get("topic_table_markdown")),
         "anchor": deepcopy(context.get("anchor") or {}),
         "selected_section": deepcopy(context.get("selected_section") or {}),
