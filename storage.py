@@ -476,28 +476,55 @@ def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | i
         timestamp.astimezone(timezone.utc) if isinstance(timestamp, datetime)
         else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
     )
+    expired_pairs: list[tuple[str, str]] = []
     try:
         with conn:
             with conn.cursor() as cur:
+                if user_id is None:
+                    cur.execute(
+                        """SELECT user_id, message_id FROM dialogue_memory AS d
+                           WHERE d.created_at + (GREATEST(12, LEAST(24, COALESCE(d.retention_hours, 12))) * INTERVAL '1 hour') <= %s""",
+                        (current,),
+                    )
+                else:
+                    uid = str(user_id)
+                    if not _is_authenticated_cursor(cur, uid):
+                        return 0
+                    cur.execute(
+                        """SELECT user_id, message_id FROM dialogue_memory AS d
+                           WHERE d.user_id = %s
+                             AND d.created_at + (GREATEST(12, LEAST(24, COALESCE(d.retention_hours, 12))) * INTERVAL '1 hour') <= %s""",
+                        (uid, current),
+                    )
+                expired_pairs = [
+                    (str(row.get("user_id") or ""), str(row.get("message_id") or ""))
+                    for row in cur.fetchall()
+                    if str(row.get("user_id") or "").strip() and str(row.get("message_id") or "").strip()
+                ]
                 if user_id is None:
                     cur.execute(
                         """DELETE FROM dialogue_memory AS d
                            WHERE d.created_at + (GREATEST(12, LEAST(24, COALESCE(d.retention_hours, 12))) * INTERVAL '1 hour') <= %s""",
                         (current,),
                     )
-                    deleted = int(cur.rowcount or 0)
                 else:
-                    uid = str(user_id)
-                    if not _is_authenticated_cursor(cur, uid):
-                        return 0
                     cur.execute(
                         """DELETE FROM dialogue_memory AS d
                            WHERE d.user_id = %s
                              AND d.created_at + (GREATEST(12, LEAST(24, COALESCE(d.retention_hours, 12))) * INTERVAL '1 hour') <= %s""",
-                        (uid, current),
+                        (str(user_id), current),
                     )
-                    deleted = int(cur.rowcount or 0)
-                return deleted
+                deleted = int(cur.rowcount or 0)
+        # Remove physical files only after the database transaction commits.
+        # Import lazily so Free's normal storage startup does not depend on Premium.
+        if expired_pairs:
+            try:
+                from blocks.premium_asset_store import delete_message_assets
+                for expired_uid, expired_mid in expired_pairs:
+                    delete_message_assets(expired_uid, expired_mid)
+            except Exception as exc:
+                print(f"STATE: PREMIUM ASSET CLEANUP ERROR: {exc}")
+        return deleted
     except psycopg2.errors.UndefinedTable:
         return 0
     finally:
