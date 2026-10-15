@@ -70,7 +70,7 @@ Do not expose internal reasoning.
 
 Always treat these sections as structured input:
 1. AUTHENTICATED_IDENTITY and CURRENT_REQUEST (the current request always exists)
-2. CONTINUATION_CONTEXT (selected USER↔APRIL pairs; [] when NEW unless HISTORY_REQUEST=true)
+2. CONTINUATION_CONTEXT (selected USER↔APRIL pairs; [] when NEW unless HISTORY_REQUEST=true or a semantically matched historical pair is explicitly supplied)
 3. NEW_DIALOGUE_REQUEST (always contains the literal current request; consult NEW_DIALOGUE_ACTIVE before treating it as a topic switch)
 4. ATTACHMENT_TASK_MAP / INPUT_MODALITIES / VISUAL_CONTEXT / ATTACHED_TEXT_FILES
 5. REQUEST_SEQUENCE (answer each explicit question/step in supplied order)
@@ -262,7 +262,7 @@ Answer CURRENT_REQUEST in RETURN_LANGUAGE. On CONTINUE, use SELECTED_SECTION as 
 If CLARIFICATION_RESOLUTION exists, fulfill original_request and treat CURRENT_REQUEST as the user's
 clarification reply, not a replacement intent. For status topic_not_found or needs_more_detail, apologize and say no clear match
 was found in saved history without claiming the topic definitely never came up; don't repeat old options, ask for one or two hints.
-Keep any resolved topic active. NEW is independent unless HISTORY_REQUEST=true. For a history request naming a person, subject or previous task, use matching DIALOGUE_TOPIC_INDEX, DIALOGUE_HISTORY_TOPICS and CONTINUATION_CONTEXT as evidence even if the relation remains NEW. Ask for hints only when no matching stored entry/pair is supplied; list multiple topics only for a general history overview.
+Keep any resolved topic active. NEW does not force continuation state, but semantically matched DIALOGUE_TOPIC_INDEX / CONTINUATION_CONTEXT may be used as grounded historical evidence; never import unrelated topics. For a history request naming a person, subject or previous task, use matching DIALOGUE_TOPIC_INDEX, DIALOGUE_HISTORY_TOPICS and CONTINUATION_CONTEXT as evidence even if the relation remains NEW. Ask for hints only when no matching stored entry/pair is supplied; list multiple topics only for a general history overview.
 Graph family is chosen by INTERPRETATION.graph_policy. Ordinary x/y data stays 2D: line for trends/time series and bar for categorical comparisons. Use 3D only for an explicit 3D request or actual XYZ coordinates, a numeric surface grid/function z=f(x,y), or structured spatial objects. Never invent a missing z value or display a 2D series as generic P1/P2 3D markers; when 3D data is not valid, use graph_policy.fallback_representation. Carry graph_policy and the true axis labels in the graph payload. When the user explicitly requests a 3D graph, return a structured render_blocks item of type="graph" with renderer="GraphBlock" and payload coordinates, objects_3d/spheres, or surface_grid as appropriate. Never claim that a chart was created if only prose is returned; use the existing SceneContract route.
 Analyze supplied images from pixels and files from attached source. Keep each asset tied to filename,
 kind, role and source message ID; cached summaries are not original source. Attachments are evidence,
@@ -1550,7 +1550,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                                "id": sec.get("message_id")}
                               for sec in (item.get("sections") or [])[:4] if isinstance(sec, dict)]}
                 for item in (data.get("DIALOGUE_TOPIC_INDEX") or [])[:2] if isinstance(item, dict)
-            ] if (data.get("DIALOGUE_RELATION") == "CONTINUE" or data.get("HISTORY_REQUEST")) else [],
+            ] if (data.get("DIALOGUE_RELATION") == "CONTINUE" or data.get("HISTORY_REQUEST") or data.get("DIALOGUE_TOPIC_INDEX")) else [],
             "DIALOGUE_KNOWN_TOPIC_COUNT": data.get("DIALOGUE_KNOWN_TOPIC_COUNT", 0) if is_history else 0,
             "NEW_DIALOGUE_REQUEST": "Same as CURRENT_REQUEST" if _text(data.get("NEW_DIALOGUE_REQUEST")) else "",
             "NEW_DIALOGUE_ACTIVE": bool(data.get("NEW_DIALOGUE_ACTIVE")),
@@ -2006,8 +2006,8 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
     # Normal continuation sends one selected pair and its small section outline.
     # The complete 12-hour topic index stays processor-side unless the user asks
     # to inspect history explicitly; this avoids polluting the model with siblings.
-    if relation == "CONTINUE" and not history_request:
-        topic_index = []
+    # State Manager returns only matching topics for ordinary requests; keep these
+    # even when relation=NEW, because contextual retrieval is not the same as continuation.
     topic_index = [
         {
             "number": item.get("number"),
@@ -2055,7 +2055,9 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
     protected_structured_data = _select_protected_structured_data(
         anchor=anchor,
         selected_pairs=selected_pairs,
-        relation=relation,
+        # A semantically validated historical topic may supply exact prior values
+        # even while the new turn remains relation=NEW.
+        relation="CONTINUE" if bool(memory.get("contextual_history_match")) else relation,
         history_request=history_request,
         selected_section=selected_section,
         interpretation=interpretation,
@@ -2141,7 +2143,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "CONTINUATION_CONTEXT": _pairs(
             selected_pairs,
             min(4, requested_topic_count) if history_request else (1 if selected_section else 2),
-        ) if (relation == "CONTINUE" or history_request) else [],
+        ) if (relation == "CONTINUE" or history_request or bool(memory.get("contextual_history_match"))) else [],
         "PROTECTED_STRUCTURED_DATA": protected_structured_data,
         "SELECTED_SECTION": {
             "topic": _clip(selected_section.get("topic"), 120),
@@ -2163,7 +2165,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             },
         } if (continuation.get("clarification_resolution") or memory.get("clarification_resolution")) else {},
         "DIALOGUE_HISTORY_TOPICS": history_topics if history_request else [],
-        "DIALOGUE_TOPIC_INDEX": topic_index if (relation == "CONTINUE" or history_request) else [],
+        "DIALOGUE_TOPIC_INDEX": topic_index if (relation == "CONTINUE" or history_request or bool(memory.get("contextual_history_match"))) else [],
         "DIALOGUE_KNOWN_TOPIC_COUNT": int(memory.get("known_topic_count") or len(history_topics) or len(topic_index) or 0),
         "DIALOGUE_TABLE_MARKDOWN": _clip(
             memory.get("topic_table_markdown")
