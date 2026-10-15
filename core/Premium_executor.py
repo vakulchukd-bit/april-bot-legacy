@@ -182,10 +182,10 @@ def _compact_question_search(
     history_request = bool(context.get("history_request") or semantics.get("history_request"))
     topic_index = []
     requested_topic_count = max(1, min(10, int(
-        semantics.get("requested_topic_count") or context.get("requested_topic_count") or 7
+        semantics.get("requested_topic_count") or context.get("requested_topic_count") or 10
     )))
     minimum_topic_count = max(1, min(requested_topic_count, int(
-        semantics.get("minimum_topic_count") or context.get("minimum_topic_count") or 1
+        semantics.get("minimum_topic_count") or context.get("minimum_topic_count") or min(5, requested_topic_count)
     )))
     if history_request:
         topic_index = [
@@ -1290,8 +1290,8 @@ async def execute(
                 int(dialogue_context.get("known_topic_count") or 0),
                 int(history_context.get("known_topic_count") or 0),
             )
-            dialogue_context["requested_topic_count"] = int(history_context.get("requested_topic_count") or 7)
-            dialogue_context["minimum_topic_count"] = int(history_context.get("minimum_topic_count") or 1)
+            dialogue_context["requested_topic_count"] = int(history_context.get("requested_topic_count") or 10)
+            dialogue_context["minimum_topic_count"] = int(history_context.get("minimum_topic_count") or 5)
             dialogue_context["time_window"] = dict(history_context.get("time_window") or {})
             dialogue_context["time_filter"] = dict(history_context.get("time_filter") or {})
             dialogue_context["topic_table_markdown"] = _text(history_context.get("topic_table_markdown") or dialogue_context.get("topic_table_markdown"))
@@ -1312,8 +1312,8 @@ async def execute(
                 "topic_index": [],
                 "known_topic_count": 0,
                 "history_request": False,
-                "requested_topic_count": 7,
-                "minimum_topic_count": 1,
+                "requested_topic_count": 10,
+                "minimum_topic_count": 5,
                 "time_window": {},
                 "time_filter": {},
                 "topic_table_markdown": "",
@@ -1466,8 +1466,8 @@ async def execute(
             "known_topic_count": int(dialogue_context.get("known_topic_count") or 0) if (dialogue_context.get("history_request") or dialogue_context.get("contextual_history_match")) else 0,
             "contextual_history_match": bool(dialogue_context.get("contextual_history_match")),
             "history_request": bool(dialogue_context.get("history_request")),
-            "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 7) if dialogue_context.get("history_request") else 0,
-            "minimum_topic_count": int(dialogue_context.get("minimum_topic_count") or 1) if dialogue_context.get("history_request") else 0,
+            "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 10) if dialogue_context.get("history_request") else 0,
+            "minimum_topic_count": int(dialogue_context.get("minimum_topic_count") or 5) if dialogue_context.get("history_request") else 0,
             "time_window": dict(dialogue_context.get("time_window") or {}),
             "time_filter": dict(dialogue_context.get("time_filter") or {}),
             "topic_table_markdown": (dialogue_context.get("topic_table_markdown") or "") if dialogue_context.get("history_request") else "",
@@ -1525,8 +1525,8 @@ async def execute(
                 "topic_index": (dialogue_context.get("topic_index") or []) if dialogue_context.get("history_request") else [],
                 "known_topic_count": int(dialogue_context.get("known_topic_count") or 0) if dialogue_context.get("history_request") else 0,
                 "history_request": bool(dialogue_context.get("history_request")),
-                "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 7) if dialogue_context.get("history_request") else 0,
-                "minimum_topic_count": int(dialogue_context.get("minimum_topic_count") or 1) if dialogue_context.get("history_request") else 0,
+                "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 10) if dialogue_context.get("history_request") else 0,
+                "minimum_topic_count": int(dialogue_context.get("minimum_topic_count") or 5) if dialogue_context.get("history_request") else 0,
                 "time_window": dict(dialogue_context.get("time_window") or {}),
                 "time_filter": dict(dialogue_context.get("time_filter") or {}),
                 "topic_table_markdown": (dialogue_context.get("topic_table_markdown") or "") if dialogue_context.get("history_request") else "",
@@ -1757,7 +1757,116 @@ async def execute(
             options=len(pending.get("options") or []), active_topic=topic_name,
             original_request_chars=len(_text(pending.get("original_request"))))
     else:
-        provider_packet = await generate_text(request)
+        try:
+            provider_packet = await generate_text(request)
+        except Exception as exc:
+            # A history search already has authenticated, database-backed evidence.
+            # If only the Provider/compaction layer fails, show that evidence locally
+            # rather than returning HTTP 500 and an empty chat bubble. Ordinary NEW
+            # questions still raise normally; this is not a generic model fallback.
+            history_fallback_allowed = bool(
+                dialogue_context.get("history_request")
+                or dialogue_context.get("contextual_history_match")
+            )
+            if not history_fallback_allowed:
+                raise
+
+            found_topics = [dict(item) for item in (
+                dialogue_context.get("history_topics") or dialogue_context.get("topic_index") or []
+            ) if isinstance(item, dict)]
+            found_pairs = [dict(item) for item in (dialogue_context.get("selected_pairs") or []) if isinstance(item, dict)]
+            topic_count = int(dialogue_context.get("known_topic_count") or len(found_topics) or 0)
+            explicit_window = dialogue_context.get("time_window") or {}
+            time_filter = dialogue_context.get("time_filter") or {}
+            overview_request = str(semantic_interpretation.get("primary_intent") or "").upper() == "HISTORY_SUMMARY"
+            overview_request = overview_request or bool(semantic_interpretation.get("history_inventory_request"))
+
+            if not found_topics and not found_pairs:
+                if topic_count > 0:
+                    fallback_answer = (
+                        f"В сохранённой истории не нашёл однозначного совпадения по запросу «{current_text[:160]}». "
+                        "Не буду подменять тему случайными записями. Уточни, пожалуйста, одну-две детали темы."
+                    )
+                    memory_topic = "Поиск темы в истории"
+                    memory_summary = "В сохранённой истории есть записи, но поиск не подтвердил тематическое совпадение."
+                elif bool(time_filter.get("applied")) or bool(explicit_window.get("has_constraint")):
+                    fallback_answer = "В сохранённой истории за указанный период записей не найдено."
+                    memory_topic = "Проверка истории по времени"
+                    memory_summary = "Поиск по сохранённой истории за указанный период выполнен; записей не найдено."
+                else:
+                    fallback_answer = "В сохранённой истории за доступный период записей нет."
+                    memory_topic = "Проверка истории диалога"
+                    memory_summary = "Поиск по сохранённой истории выполнен; записей не найдено."
+            elif overview_request:
+                visible_topics = found_topics[:max(1, min(10, int(dialogue_context.get("requested_topic_count") or 10)))]
+                lines = [f"В доступной истории найдено тем: {len(visible_topics)}."]
+                for index, item in enumerate(visible_topics, 1):
+                    name = str(item.get("topic") or item.get("last_question") or "Тема без названия").strip()
+                    summary = str(item.get("summary") or "").strip()
+                    lines.append(f"{index}. **{name}**" + (f" — {summary}" if summary else ""))
+                if topic_count > len(visible_topics):
+                    lines.append(f"Показано {len(visible_topics)} наиболее релевантных/свежих тем из {topic_count} найденных.")
+                fallback_answer = "\n\n".join(lines)
+                memory_topic = "Обзор сохранённой истории"
+                memory_summary = f"Локально сформирован обзор {len(visible_topics)} тем из сохранённой истории."
+            else:
+                anchor_topic = ""
+                anchor_summary = ""
+                if found_topics:
+                    anchor_topic = str(found_topics[0].get("topic") or found_topics[0].get("last_question") or "").strip()
+                    anchor_summary = str(found_topics[0].get("summary") or "").strip()
+                if found_pairs:
+                    pair = found_pairs[0]
+                    anchor_topic = str(pair.get("topic") or anchor_topic or "Найденная тема").strip()
+                    pair_summary = str(pair.get("memory_summary") or pair.get("summary") or "").strip()
+                    anchor_summary = anchor_summary or pair_summary
+                    user_line = str(pair.get("user") or pair.get("user_text") or "").strip()
+                    april_line = str(pair.get("april") or pair.get("april_text") or "").strip()
+                    body_parts = [f"Нашёл запись в истории по теме **{anchor_topic}**."]
+                    if user_line:
+                        body_parts.append(f"**Твой запрос:** {user_line}")
+                    if april_line:
+                        body_parts.append(f"**Ответ April:** {april_line}")
+                    elif anchor_summary:
+                        body_parts.append(anchor_summary)
+                    fallback_answer = "\n\n".join(body_parts)
+                else:
+                    fallback_answer = f"Нашёл связанную тему в истории: **{anchor_topic or 'тема без названия'}**."
+                    if anchor_summary:
+                        fallback_answer += f"\n\n{anchor_summary}"
+                memory_topic = (anchor_topic or "Найденная запись истории")[:180]
+                memory_summary = (anchor_summary or fallback_answer)[:500]
+
+            provider_packet = {"machine_response": {
+                "answer": fallback_answer,
+                "content": fallback_answer,
+                "summary": fallback_answer[:180],
+                "render_blocks": [{
+                    "type": "text",
+                    "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
+                    "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
+                    "content": fallback_answer,
+                }],
+                "artifacts": [],
+                "metadata": {
+                    "identity": identity,
+                    "dialogue_memory_record": {
+                        "topic": memory_topic,
+                        "summary": memory_summary,
+                        "sections": [],
+                        "entities": [],
+                    },
+                    "local_history_fallback": True,
+                    "provider_calls": 0,
+                    "fallback_reason": type(exc).__name__,
+                },
+                "internal_answer_en": fallback_answer,
+            }}
+            _apr_timing_log(
+                "history_fallback_ready", provider_started,
+                fallback_reason=type(exc).__name__, history_topics=len(found_topics),
+                selected_pairs=len(found_pairs), answer_chars=len(fallback_answer),
+            )
         provider_ms = round((time.perf_counter() - provider_started) * 1000, 1)
     provider_machine = provider_packet.get("machine_response") if isinstance(provider_packet, dict) else {}
     provider_machine = provider_machine if isinstance(provider_machine, dict) else {}
