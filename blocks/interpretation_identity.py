@@ -564,6 +564,8 @@ _HISTORY_MARKERS = (
     "что мы обсуждали", "что обсуждали", "какие темы", "напомни темы",
     "напомни о чем", "напомни о чём", "история диалога", "история разговора",
     "наши темы", "о чем шла речь", "о чём шла речь",
+    "последняя тема", "последнюю тему", "последний диалог", "последний разговор",
+    "в последнее время", "за последнее время", "назови последнюю тему",
 )
 _HISTORY_COUNTS = {
     "один": 1, "одну": 1, "два": 2, "две": 2, "три": 3, "четыре": 4,
@@ -679,9 +681,6 @@ _CONTEXT_SIGNATURE_DISCOURSE_ROOTS = (
     "напиш", "опиш", "расскаж", "объясн", "поясн", "покаж", "постро", "созда",
     "сдела", "вычисл", "рассчит", "сравн", "найд", "проверь", "проанализ", "привед",
     "перечисл", "продолж", "дальш", "должн", "каки", "был",
-    # A continuation request about the prior answer refers to the active turn;
-    # these labels describe discourse position, not a new topical subject.
-    "предыдущ", "прошл", "раньше", "ранее", "ответ",
     "формул", "график", "таблиц", "диаграмм", "уравнен", "данн", "значен",
 )
 
@@ -732,24 +731,6 @@ def _context_signature(text: Any) -> dict[str, Any]:
             continue
         # A small morphological stem keeps inflected Russian nouns aligned.
         subjects.add(token[:5] if len(token) >= 5 else token)
-
-    # A short acknowledgement followed by a request to continue is a pragmatic
-    # response to the active turn, not an independent topic such as "thanks" or
-    # "honesty". Remove only the acknowledgement vocabulary in that discourse
-    # shape; keep any actual named subject (for example, "continue with algebra").
-    if _is_short_continuation_preface(text):
-        acknowledgement_roots = (
-            # Compare stem prefixes because subject tokens are normalized to
-            # their first five characters in _context_signature().
-            "очен", "честн", "спаси", "спасиб", "благо", "благодар",
-            "хорош", "отлич", "понрав", "интерес", "прият", "молод",
-            "рад", "ясн", "понят", "конечн", "great", "good", "thanks",
-            "thank", "honest", "glad", "nice",
-        )
-        subjects = {
-            subject for subject in subjects
-            if not any(subject.startswith(root) for root in acknowledgement_roots)
-        }
     reference_hits = token_set & _CONTEXT_SIGNATURE_REFERENCES
     # Output form is metadata only; it does not decide whether memory is reused.
     output_forms = []
@@ -881,10 +862,6 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     continuation_action = _semantic_group_hit(tokens, "continuation_action")
     explicit_topic_introduction = _has_explicit_topic_introduction(source)
     answer_followup = _looks_like_previous_answer_followup(source)
-    # Treat a short positive acknowledgement plus a continuation request as one
-    # communicative act. It should inherit the active branch rather than be scored
-    # as a new topic because words like "honest" or "thanks" look topical lexically.
-    acknowledgement_with_continuation = _is_short_continuation_preface(source)
     past_reference = _semantic_group_hit(tokens, "past_reference")
     future_reference = _semantic_group_hit(tokens, "future_reference")
     today_reference = _semantic_group_hit(tokens, "today_reference")
@@ -900,12 +877,17 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     imperative_recall = bool(token_set & {"напомни", "вспомни", "перечисли", "перескажи", "восстанови", "найди", "вернись", "покажи", "remind", "recall", "remember", "summarize"})
     temporal_past = past_reference or today_reference or recent_reference or bool(token_set & {"вчера", "сегодня", "утром", "вечером", "yesterday", "today"})
     temporal_future = future_reference or bool(token_set & {"завтра", "будем", "буду", "будущем", "tomorrow", "will"})
-    explicit_discussion_question = dialogue_action and interrogative and (
-        self_reference or temporal_past or recall_action or any(term in low for term in (
+    explicit_time_reference = bool(re.search(
+        r"\b(?:(?:\d+|один|одна|одно|одну|два|две|пару|три|четыре|пять|полчаса|полторы?)\s*(?:-|–|—|до)?\s*)?(?:минут\w*|мин\b|час\w*|ч\b|дн\w*|сутк\w*|полчаса)\s*(?:назад|тому назад)\b|\b(?:в|около|примерно в)\s*\d{1,2}[:.]\d{2}\b",
+        low,
+    ))
+    explicit_last_topic_reference = any(marker.replace("ё", "е") in low for marker in _HISTORY_MARKERS if "последн" in marker or "последнее время" in marker or "за последнее время" in marker)
+    explicit_discussion_question = (dialogue_action and interrogative and (
+        self_reference or temporal_past or recall_action or explicit_time_reference or any(term in low for term in (
             "о чем", "про что", "что обсуждали", "что было в диалоге", "что было в разговоре",
             "what did we discuss", "what were we talking", "what happened in our conversation",
         ))
-    )
+    )) or (explicit_time_reference and (interrogative or dialogue_action or self_reference)) or explicit_last_topic_reference
     decision_recall = decision_action and (interrogative or recall_action) and (self_reference or temporal_past or dialogue_action or past_reference)
     plan_past_form = any(token.startswith(root) for token in tokens for root in ("заплан", "планировали", "планировал", "собирались", "собирался", "намеревались"))
     plan_recall = plan_action and (interrogative or recall_action or imperative_recall) and (
@@ -956,17 +938,6 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
             reason = "dialogue_reference_detected_semantically"
         relation_hint = "HISTORY_LOOKUP"
         time_scope = "TODAY" if today_reference else ("RECENT_WINDOW" if recent_reference else ("PAST_DIALOGUE" if past_reference else ("FUTURE_PLAN_CONTEXT" if temporal_future else "AVAILABLE_HISTORY")))
-    elif acknowledgement_with_continuation:
-        primary_intent = "TOPIC_CONTINUATION"
-        direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
-        topic_reference = "PREVIOUS_OR_ACTIVE_TOPIC"
-        time_scope = "ACTIVE_DIALOGUE"
-        requires_memory = True
-        history_request = False
-        search_scope = "TOPIC_OR_ACTIVE_CONTEXT"
-        intent_score = 3 + int(continuation_action)
-        relation_hint = "CONTINUE"
-        reason = "acknowledgement_with_continuation_request"
     elif answer_followup:
         primary_intent = "TOPIC_CONTINUATION"
         direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
@@ -1023,7 +994,6 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "decision_action": bool(decision_action),
         "plan_action": bool(plan_action),
         "continuation_action": bool(continuation_action),
-        "acknowledgement_with_continuation": bool(acknowledgement_with_continuation),
         "answer_followup": bool(answer_followup),
         "self_reference": bool(self_reference),
         "past_reference": bool(past_reference),
@@ -1587,6 +1557,7 @@ def build_interpretation(
                 "pending_clarification": dict(memory.get("pending_clarification") or {}),
                 "clarification_resolution": dict(memory.get("clarification_resolution") or {}),
                 "history_topics": history_topics,
+                "history_time_search": dict(memory.get("history_time_search") or {}),
                 "known_topic_count": int(memory.get("known_topic_count") or len(history_topics)),
                 "restored_assets": [
                     {
@@ -1627,6 +1598,7 @@ def build_interpretation(
             "history_request": history_request,
             "history_count": history_count if history_request else 0,
             "history_topics": history_topics,
+            "history_time_search": dict(memory.get("history_time_search") or {}),
             "topic_table_markdown": _text(memory.get("topic_table_markdown")),
             "new_dialogue_request": original or text,
             "new_dialogue_active": relation != "CONTINUE" and not history_request,
