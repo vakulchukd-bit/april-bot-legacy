@@ -165,6 +165,24 @@ def get_state(user_id: Any) -> dict[str, Any]:
         return state
 
 
+
+def purge_user_state(user_ids: Any) -> int:
+    """Remove process-local Free dialogue snapshots for the supplied identities."""
+    if isinstance(user_ids, (str, bytes)):
+        values = [str(user_ids).strip()]
+    else:
+        try:
+            values = [str(value or "").strip() for value in user_ids]
+        except TypeError:
+            values = [str(user_ids or "").strip()]
+    removed = 0
+    with _LOCK:
+        for uid in set(value for value in values if value):
+            if _STATES.pop(uid, None) is not None:
+                removed += 1
+    return removed
+
+
 def hydrate(
     user_id: Any,
     rows: list[dict[str, Any]] | None = None,
