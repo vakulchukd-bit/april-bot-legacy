@@ -1008,11 +1008,13 @@ def find_or_create_user(email, name="", provider="google", provider_user_id=None
 
 
 def delete_april_account(user_id: Any) -> dict[str, Any]:
-    """Permanently delete the authenticated user's April-side account data.
+    """Delete all April-side data linked to an authenticated account.
 
-    This intentionally touches only April's PostgreSQL tables. It does not call
-    Google APIs, revoke Google OAuth, or delete anything from the user's Google
-    account. All related table changes run in one transaction.
+    The lookup starts from the trusted April ID forwarded by April Web. We then
+    close over every identity value stored on the matched users row(s): internal
+    user_id, public april_id, Google provider_user_id, email and Premium ID.
+    Those aliases are used to remove legacy rows and file sidecars as well.
+    Google itself is never contacted and the user's Google account is untouched.
     """
     raw = str(user_id or "").strip()
     if not raw:
@@ -1023,13 +1025,46 @@ def delete_april_account(user_id: Any) -> dict[str, Any]:
         return {"success": False, "error": "DATABASE_UNAVAILABLE"}
 
     try:
+        identity_rows: dict[str, dict[str, Any]] = {}
+        owner_ids: set[str] = {raw}
+        email_ids: set[str] = set()
+        provider_ids: set[str] = set()
+        premium_ids: set[str] = set()
+
+        def absorb_identity(row: dict[str, Any]) -> bool:
+            """Add one linked account row and all of its identity aliases."""
+            changed = False
+            canonical = str(row.get("user_id") or "").strip()
+            if canonical and canonical not in identity_rows:
+                identity_rows[canonical] = dict(row)
+                changed = True
+            aliases = (
+                (owner_ids, row.get("user_id")),
+                (owner_ids, row.get("april_id")),
+                (owner_ids, row.get("provider_user_id")),
+                (owner_ids, row.get("email")),
+                (owner_ids, row.get("premium_id")),
+                (email_ids, str(row.get("email") or "").strip().lower()),
+                (provider_ids, row.get("provider_user_id")),
+                (premium_ids, row.get("premium_id")),
+            )
+            for target, value in aliases:
+                normalized = str(value or "").strip()
+                if target is email_ids:
+                    normalized = normalized.lower()
+                if normalized and normalized not in target:
+                    target.add(normalized)
+                    changed = True
+            return changed
+
         with conn:
             with conn.cursor() as cur:
-                # Lock the account row while resolving and deleting it. This
-                # prevents the identity from changing during the deletion.
+                # Resolve the signed-in account first. Do not delete by email or
+                # Google ID supplied by the client; the starting value must be a
+                # known April identity from the trusted server-to-server header.
                 cur.execute(
                     """
-                    SELECT user_id, april_id, email, provider, premium_id
+                    SELECT user_id, april_id, email, provider, provider_user_id, premium_id
                     FROM users
                     WHERE user_id = %s OR april_id = %s
                     ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
@@ -1038,64 +1073,134 @@ def delete_april_account(user_id: Any) -> dict[str, Any]:
                     """,
                     (raw, raw, raw),
                 )
-                row = cur.fetchone() or {}
-                if not row:
+                primary_row = cur.fetchone()
+                if not primary_row:
                     return {"success": False, "error": "ACCOUNT_NOT_FOUND"}
-                if not _is_authenticated_row(row):
+                if not _is_authenticated_row(primary_row):
                     return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+                absorb_identity(dict(primary_row))
 
-                canonical_id = str(row.get("user_id") or "").strip()
-                public_id = str(row.get("april_id") or "").strip()
-                premium_id = str(row.get("premium_id") or "").strip()
-                account_ids = list(dict.fromkeys(
-                    value for value in (canonical_id, public_id, raw) if value
-                ))
+                # Follow identity links until no additional user row is found.
+                # This also removes legacy duplicate registry rows, should an old
+                # deployment have stored the same Google identity under more than
+                # one April ID. The loop is bounded to fail closed on bad data.
+                for _ in range(20):
+                    before = (
+                        len(identity_rows), len(owner_ids), len(email_ids),
+                        len(provider_ids), len(premium_ids),
+                    )
+                    cur.execute(
+                        """
+                        SELECT user_id, april_id, email, provider, provider_user_id, premium_id
+                        FROM users
+                        WHERE user_id = ANY(%s)
+                           OR april_id = ANY(%s)
+                           OR LOWER(COALESCE(email, '')) = ANY(%s)
+                           OR provider_user_id = ANY(%s)
+                           OR premium_id = ANY(%s)
+                        FOR UPDATE
+                        """,
+                        (
+                            list(owner_ids), list(owner_ids), list(email_ids),
+                            list(provider_ids), list(premium_ids),
+                        ),
+                    )
+                    for linked_row in cur.fetchall():
+                        absorb_identity(dict(linked_row))
+                    after = (
+                        len(identity_rows), len(owner_ids), len(email_ids),
+                        len(provider_ids), len(premium_ids),
+                    )
+                    if after == before:
+                        break
+                else:
+                    raise RuntimeError("APRIL_ACCOUNT_IDENTITY_GRAPH_TOO_LARGE")
 
-                # Premium binary uploads and generated files are stored outside
-                # PostgreSQL under hashed per-user directories. Remove all known
-                # ID variants before committing database deletion. If cleanup fails,
-                # keep the account row so the same request can safely be retried.
+                # All IDs remain internal to this transaction. These include the
+                # Google provider ID and email only as aliases inside April; no
+                # request is made to Google, and no Google-side data is changed.
+                account_ids = sorted(owner_ids)
+                all_user_ids = sorted(
+                    value for value in {
+                        str(row.get("user_id") or "").strip()
+                        for row in identity_rows.values()
+                    } if value
+                )
+                premium_id_values = sorted(premium_ids)
+
+                # Remove disk-backed Premium uploads/generated assets for every
+                # known alias before committing removal of the corresponding rows.
+                # If any deletion fails, the account row remains for a safe retry.
                 try:
                     from blocks.premium_asset_store import delete_user_assets
                     for asset_owner_id in account_ids:
                         if not delete_user_assets(asset_owner_id):
                             return {"success": False, "error": "ACCOUNT_ASSETS_DELETE_FAILED"}
                 except Exception as exc:
-                    print(f"[APRIL_ACCOUNT_DELETE] ASSET_CLEANUP_FAILED type={type(exc).__name__}", flush=True)
+                    print(
+                        f"[APRIL_ACCOUNT_DELETE] ASSET_CLEANUP_FAILED type={type(exc).__name__}",
+                        flush=True,
+                    )
                     return {"success": False, "error": "ACCOUNT_ASSETS_DELETE_FAILED"}
 
-                # History rows contain the user's prompts, April's answers,
-                # structured requests/responses and persisted render metadata.
-                # Delete both canonical and legacy ID variants for completeness;
-                # the users FK also has ON DELETE CASCADE as a final safeguard.
+                # Every saved prompt/answer, dialogue and interpretation ID, and
+                # structured_request/structured_response (formulas, tables, charts,
+                # render contracts and metadata) lives on these owner rows. Delete
+                # expired and live rows alike; the 12/24-hour TTL does not apply to
+                # a deliberate account deletion.
                 cur.execute(
                     "DELETE FROM dialogue_memory WHERE user_id = ANY(%s)",
                     (account_ids,),
                 )
                 dialogue_rows = int(cur.rowcount or 0)
 
-                # April's internal billing/entitlement ledger is part of the
-                # April account. Google Play records/subscriptions, if any, are
-                # managed by Google and are not touched by this transaction.
+                # Remove all account-side payment/entitlement records, including
+                # legacy rows keyed by an alias and rows tied to a Premium ID.
                 cur.execute(
                     """
                     DELETE FROM payments
                     WHERE user_id = ANY(%s)
-                       OR (%s <> '' AND premium_id = %s)
+                       OR premium_id = ANY(%s)
                     """,
-                    (account_ids, premium_id, premium_id),
+                    (account_ids, premium_id_values),
                 )
                 payment_rows = int(cur.rowcount or 0)
 
-                cur.execute("DELETE FROM users WHERE user_id = %s", (canonical_id,))
-                if int(cur.rowcount or 0) != 1:
+                # Deleting every linked registry row removes April IDs, Google
+                # provider mappings, emails, Premium IDs and subscription state.
+                cur.execute(
+                    "DELETE FROM users WHERE user_id = ANY(%s)",
+                    (all_user_ids,),
+                )
+                user_rows = int(cur.rowcount or 0)
+                if user_rows != len(all_user_ids):
                     raise RuntimeError("APRIL_ACCOUNT_DELETE_ROW_COUNT_MISMATCH")
+
+        # PostgreSQL has committed. Drop Free and Premium process-local dialogue
+        # snapshots too, so the deleted structured memory is not retained in RAM.
+        cache_entries_removed = 0
+        try:
+            from blocks.state_manager import purge_user_state as purge_free_state
+            from blocks.Premium_state_manager import purge_user_state as purge_premium_state
+            cache_entries_removed += int(purge_free_state(account_ids) or 0)
+            cache_entries_removed += int(purge_premium_state(account_ids) or 0)
+        except Exception as exc:
+            # The database is already deleted; normal reads still require a live
+            # users row, but log cache invalidation failures for operational review.
+            print(
+                f"[APRIL_ACCOUNT_DELETE] CACHE_PURGE_FAILED type={type(exc).__name__}",
+                flush=True,
+            )
 
         return {
             "success": True,
             "deleted": True,
+            "deleted_user_rows": user_rows,
             "deleted_dialogue_rows": dialogue_rows,
             "deleted_payment_rows": payment_rows,
+            "checked_asset_owner_ids": len(account_ids),
+            "purged_dialogue_cache_entries": cache_entries_removed,
+            "google_account_deleted": False,
         }
     except Exception as exc:
         print(f"[APRIL_ACCOUNT_DELETE] FAILED type={type(exc).__name__}", flush=True)
