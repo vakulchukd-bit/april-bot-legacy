@@ -16,11 +16,13 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import psycopg2
 from rapidfuzz import fuzz
 from storage import get_conn, is_authenticated_user as _is_authenticated_user, now, cleanup_dialogue_memory_utc as _cleanup_dialogue_memory_utc
+from blocks.Premium_interpretation_identity import extract_temporal_window, extract_topic_count_bounds, intersect_retention_window
 
 
 
@@ -196,6 +198,11 @@ def save_dialogue_pair(
                         json.dumps(structured_response or {}, ensure_ascii=False, default=str),
                     ),
                 )
+                # A write invalidates the process-local hydration snapshot. The next
+                # turn must see this canonical row, while multi-part searches inside
+                # the current request can still reuse the unchanged snapshot.
+                with _LOCK:
+                    _HYDRATED_AT.pop(uid, None)
                 return True
     except psycopg2.errors.UndefinedTable:
         return False
@@ -211,6 +218,12 @@ DIALOGUE_WINDOW_SECONDS = PREMIUM_MEMORY_WINDOW_SECONDS
 
 _LOCK = threading.RLock()
 _STATES: dict[str, dict[str, Any]] = {}
+# A short process-local snapshot avoids re-reading and re-hydrating the same full
+# 24-hour history for every clause in one compound request. It is not a second
+# persistence layer: PostgreSQL dialogue_memory remains canonical, and writes
+# invalidate this snapshot immediately.
+_HYDRATE_CACHE_SECONDS = 30.0
+_HYDRATED_AT: dict[str, float] = {}
 
 
 def _apr_timing_log(stage: str, started: float | None = None, **fields: Any) -> None:
@@ -343,10 +356,31 @@ def get_state(user_id: Any) -> dict[str, Any]:
 def hydrate(
     user_id: Any,
     rows: list[dict[str, Any]] | None = None,
+    *,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Refresh in-memory state from the canonical PostgreSQL dialogue store."""
     hydrate_started = time.perf_counter()
     uid = _uid(user_id)
+    cache_now = time.time()
+    if rows is None and not force:
+        with _LOCK:
+            cached_state = _STATES.get(uid)
+            cached_at = float(_HYDRATED_AT.get(uid) or 0.0)
+            if cached_state is not None and cached_at and cache_now - cached_at <= _HYDRATE_CACHE_SECONDS:
+                # Filter expired rows cheaply without cloning the potentially large
+                # structured_response payloads. Nothing in the current search mutates
+                # the payload contents except derived topic annotations.
+                cached_state["dialogue_pairs"] = [
+                    row for row in (cached_state.get("dialogue_pairs") or [])
+                    if isinstance(row, dict) and _row_is_live(row, cache_now, DIALOGUE_WINDOW_HOURS)
+                ]
+                _apr_timing_log(
+                    "hydrate_cache_hit", hydrate_started,
+                    user_key=_apr_diag_ref(uid), retained_pairs=len(cached_state["dialogue_pairs"]),
+                    cache_age_ms=round((cache_now - cached_at) * 1000, 2),
+                )
+                return cached_state
     load_started = time.perf_counter()
     load_source = "provided_rows" if rows is not None else "postgres_load_dialogue_pairs"
     if rows is None:
@@ -354,16 +388,27 @@ def hydrate(
     _apr_timing_log("history_rows_loaded", load_started, user_key=_apr_diag_ref(uid),
         source=load_source, rows_loaded=len(rows or []))
 
-    state = get_state(uid)
+    # Avoid get_state() here: it prunes/deep-copies the previous payload before
+    # hydrate immediately overwrites it, then a second prune deep-copies the large
+    # structured responses again. Premium history can contain image/table payloads;
+    # copy each newly-loaded row once and prune without another full payload clone.
+    stamp = time.time()
+    live_rows = [
+        deepcopy(row) for row in (rows or [])
+        if isinstance(row, dict) and _row_is_live(row, stamp, DIALOGUE_WINDOW_HOURS)
+    ]
+    live_rows.sort(key=lambda x: (float(x.get("created_at") or 0), int(x.get("turn_index") or 0)))
     with _LOCK:
-        state["dialogue_pairs"] = [
-            deepcopy(row) for row in (rows or []) if isinstance(row, dict)
-        ]
-        _prune(state)
-        state["last_activity"] = time.time()
-        state["updated_at"] = state["last_activity"]
+        state = _STATES.get(uid)
+        if state is None:
+            state = _new_state(uid)
+            _STATES[uid] = state
+        state["dialogue_pairs"] = live_rows
+        state["last_activity"] = stamp
+        state["updated_at"] = stamp
+        _HYDRATED_AT[uid] = stamp
         _apr_timing_log("hydrate_complete", hydrate_started, user_key=_apr_diag_ref(uid),
-            retained_pairs=len(state.get("dialogue_pairs") or []))
+            retained_pairs=len(live_rows))
         return state
 
 
@@ -371,7 +416,7 @@ def refresh_state(
     user_id: Any,
     rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    return hydrate(user_id, rows)
+    return hydrate(user_id, rows, force=True)
 
 
 def set_language(user_id: Any, language: str) -> None:
@@ -397,7 +442,7 @@ def get_dialogue_pairs(
     authenticated-user and UTC-window policy. ``limit`` returns the most recent
     pairs while preserving chronological order.
     """
-    state = hydrate(user_id) if refresh else get_state(user_id)
+    state = hydrate(user_id, force=True) if refresh else get_state(user_id)
     pairs = deepcopy(state.get("dialogue_pairs") or [])
     if limit and len(pairs) > int(limit):
         pairs = pairs[-int(limit):]
@@ -465,6 +510,7 @@ def append_pair(user_id: Any, row: dict[str, Any]) -> dict[str, Any]:
         )
         state["last_activity"] = time.time()
         state["updated_at"] = time.time()
+        _HYDRATED_AT.pop(_uid(user_id), None)
         return deepcopy(state)
 
 
@@ -577,7 +623,9 @@ _CONTEXT_GENERIC_TERMS = {
     "напиши", "написать", "напишите", "опиши", "описать", "опишите", "расскажи", "расскажите",
     "объясни", "объяснить", "объясните", "поясни", "пояснить", "покажи", "построй", "создай",
     "решил", "решила", "решили", "научно", "пошагово", "решать",
-    "сделай", "вычисли", "рассчитай", "сравни", "найди", "проверь", "проанализируй", "приведи",
+    "давай", "можешь", "может", "могу", "можно", "можем", "хочу", "хочешь", "нужно", "надо",
+    "окей", "okay", "хорошо", "пожалуйста", "please", "работать", "работаем", "работай",
+    "перенеси", "перенести", "перенос", "сделай", "вычисли", "рассчитай", "сравни", "найди", "проверь", "проанализируй", "приведи",
     "перечисли", "продолжи", "продолжим", "дальше", "далее", "есть", "какие", "какая", "какой",
     "должен", "должна", "должно", "должны", "был", "была", "были", "нет",
     "покажи", "показать", "покажите", "построй", "построить", "постройте", "сделай",
@@ -616,7 +664,8 @@ _CONTEXT_NON_TOPICAL_ROOTS = (
     "контекст", "случил", "произош", "диалог", "разговор", "бесед", "обращ",
     "напиш", "опиш", "расскаж", "объясн", "поясн", "покаж", "постро", "созда",
     "сдела", "вычисл", "рассчит", "сравн", "найд", "проверь", "проанализ", "привед",
-    "перечисл", "продолж", "дальш", "должн", "каки", "был",
+    "перечисл", "продолж", "дальш", "должн", "каки", "был", "работ", "перенес", "перенос",
+    "можеш", "может", "могу", "давай", "хочет", "хотел", "сможет", "сможешь", "просит", "попрос",
     "формул", "график", "таблиц", "диаграмм", "уравнен", "данн", "значен",
 )
 
@@ -958,14 +1007,14 @@ def _is_history_request(query: str) -> bool:
 
 
 def _history_topic_limit(query: str, default: int = 7) -> int:
-    low = _text(query).lower().replace("ё", "е")
-    match = re.search(r"\b(10|[1-9])\b", low)
-    if match:
-        return max(1, min(10, int(match.group(1))))
-    for word, count in _HISTORY_COUNT_WORDS.items():
-        if re.search(rf"\b{word}\b", low):
-            return count
-    return default
+    """Use the requested upper bound; “from 5 to 10 topics” means up to ten."""
+    _, maximum = extract_topic_count_bounds(query, default=default)
+    return max(1, min(10, int(maximum or default)))
+
+
+def _history_topic_minimum(query: str, default: int = 1) -> int:
+    minimum, _ = extract_topic_count_bounds(query, default=7)
+    return max(1, min(10, int(minimum or default)))
 
 
 def _domain_terms(text: str) -> set[str]:
@@ -1297,6 +1346,9 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "last_at": float(row.get("created_at") or 0),
                 "last_question": _text(row.get("user_text"))[:360],
                 "message_id": _text(row.get("message_id")),
+                "origin_message_id": _text(row.get("message_id")),
+                "origin_turn": int(row.get("turn_index") or 0),
+                "message_ids": [_text(row.get("message_id"))] if _text(row.get("message_id")) else [],
                 "dialog_id": _text(row.get("dialog_id")),
                 "conversation_id": _text(row.get("conversation_id")),
                 "modalities": sorted(_row_modalities(row)),
@@ -1312,6 +1364,9 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             group["modalities"] = sorted(set(group.get("modalities") or []) | _row_modalities(row))
             group["pair_count"] = int(group.get("pair_count") or 0) + 1
             group["message_id"] = _text(row.get("message_id")) or group.get("message_id")
+            row_message_id = _text(row.get("message_id"))
+            if row_message_id and row_message_id not in (group.get("message_ids") or []):
+                group.setdefault("message_ids", []).append(row_message_id)
             group["summary"] = _merge_compact_summaries(group.get("summary"), _compact_memory_summary(row), 640)
             group["sections"] = merge_sections(group.get("sections") or [], row_sections, _text(row.get("message_id")))
 
@@ -1333,6 +1388,7 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "subject_terms": sorted(set(found.get("subject_terms") or []) | set(item.get("subject_terms") or [])),
                     "sections": merge_sections(found.get("sections") or [], item.get("sections") or [], _text(item.get("message_id"))),
                     "pair_count": int(found.get("pair_count") or 0) + int(item.get("pair_count") or 0),
+                    "message_ids": list(dict.fromkeys((found.get("message_ids") or []) + (item.get("message_ids") or []))),
                 })
         else:
             deduped.append(item)
@@ -1340,15 +1396,32 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     deduped.sort(key=lambda item: float(item.get("last_at") or 0), reverse=True)
     visible = []
     for idx, item in enumerate(deduped[:30], 1):
+        origin_message_id = _text(item.get("origin_message_id") or item.get("message_id"))
+        topic_id_seed = f"{origin_message_id}|{_text(item.get('topic')).casefold()}|{item.get('first_at', 0)}"
+        topic_id = "topic-" + hashlib.sha256(topic_id_seed.encode("utf-8")).hexdigest()[:16]
+        sections = []
+        for section in (item.get("sections") or [])[:10]:
+            if not isinstance(section, dict):
+                continue
+            normalized_section = dict(section)
+            normalized_section["topic_id"] = topic_id
+            normalized_section["topic_origin_message_id"] = origin_message_id
+            normalized_section["source_message_id"] = _text(section.get("message_id"))
+            sections.append(normalized_section)
         visible.append({
             "number": idx,
+            "topic_id": topic_id,
             "topic": _text(item.get("topic"))[:240],
             "summary": _text(item.get("summary"))[:440],
-            "sections": [dict(section) for section in (item.get("sections") or [])[:10] if isinstance(section, dict)],
+            "sections": sections,
             "turns": f"{item.get('start_turn', 0)}-{item.get('end_turn', 0)}",
             "last_question": _text(item.get("last_question"))[:280],
             "pair_count": int(item.get("pair_count") or 0),
+            "first_at": item.get("first_at"),
             "last_at": item.get("last_at"),
+            "origin_message_id": origin_message_id,
+            "origin_turn": int(item.get("origin_turn") or item.get("start_turn") or 0),
+            "message_ids": list(dict.fromkeys(_text(x) for x in (item.get("message_ids") or []) if _text(x)))[:40],
             "message_id": _text(item.get("message_id")),
             "dialog_id": _text(item.get("dialog_id")),
             "conversation_id": _text(item.get("conversation_id")),
@@ -1729,6 +1802,13 @@ def _candidate_score(
     subject_mismatch = _subject_conflicts(query_subjects, row_subjects)
     numeric_anchor_overlap = _query_numeric_overlap(query, row, query_subjects)
     protected_data = _protected_structured_data_from_row(row)
+    if protected_data and _text(row.get("topic_id")):
+        # Preserve the exact originating message while binding the payload to the
+        # topic and time range where it entered the dialogue.
+        protected_data["topic_id"] = _text(row.get("topic_id"))
+        protected_data["topic_origin_message_id"] = _text(row.get("topic_origin_message_id"))
+        protected_data["source_message_id"] = _text(row.get("message_id"))
+        protected_data["topic_origin_at"] = row.get("topic_origin_at")
     data_richness = _structured_data_richness(protected_data)
     source_data_alignment = _source_data_alignment(row, protected_data=protected_data) if data_richness else 0.0
 
@@ -1811,6 +1891,11 @@ def _candidate_score(
         "conversation_id": str(row.get("conversation_id") or ""),
         "interpretation_id": str(row.get("interpretation_id") or ""),
         "topic": _topic_label(row),
+        "topic_id": _text(row.get("topic_id")),
+        "topic_origin_message_id": _text(row.get("topic_origin_message_id")),
+        "topic_origin_at": row.get("topic_origin_at"),
+        "topic_last_at": row.get("topic_last_at"),
+        "topic_summary": _text(row.get("topic_summary"))[:440],
         "sections": _dialogue_section_map(row),
         "is_pending_clarification": _row_is_pending_clarification(row),
         "memory_summary": _compact_memory_summary(row),
@@ -1924,11 +2009,25 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
     modalities = set(item.get("row_modalities") or [])
     has_asset = bool(modalities & {"image", "file", "text_file", "voice"})
     evidence = (_text(item.get("attachment_evidence")) or _row_attachment_evidence(item))[:1800] if has_asset else ""
+    topic_id = _text(item.get("topic_id"))
+    origin_message_id = _text(item.get("topic_origin_message_id") or item.get("origin_message_id") or item.get("message_id"))
+    source_message_id = _text(item.get("message_id"))
+    for section in sections:
+        if isinstance(section, dict):
+            section["topic_id"] = topic_id
+            section["topic_origin_message_id"] = origin_message_id
+            section["source_message_id"] = _text(section.get("message_id") or source_message_id)
     return {
         "turn": item.get("turn_index"),
         "user": _text(item.get("user") or item.get("user_text"))[:360],
         "april": outline[:440],
         "topic": _text(item.get("topic"))[:200],
+        "topic_id": _text(item.get("topic_id")),
+        "topic_origin_message_id": _text(item.get("topic_origin_message_id")),
+        "origin_message_id": origin_message_id,
+        "topic_origin_at": item.get("topic_origin_at"),
+        "topic_last_at": item.get("topic_last_at"),
+        "source_message_id": _text(item.get("message_id")),
         "sections": sections,
         "score": item.get("score"),
         "same_dialog": bool(item.get("same_dialog")),
@@ -1975,6 +2074,11 @@ _HISTORY_QUERY_NOISE = _SECTION_TOPIC_NOISE | {
     "краткий", "содержание", "содержании", "тема", "темы", "тему", "вопрос",
     "вопросе", "вопросы", "какие", "какую", "какой", "какое", "что", "чем",
     "мы", "нам", "наше", "наши", "наш", "нашу", "мне", "мои", "мой",
+    "последних", "последние", "час", "часа", "часов", "минут", "минуты", "дней", "дня", "недели",
+    "сегодняшний", "утром", "вечером", "ночью", "период", "периода", "время", "времени",
+    "октября", "ноября", "декабря", "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "monday", "tuesday", "wednesday", "thursday", "friday",
+    "saturday", "sunday", "hours", "hour", "minutes", "minute", "yesterday", "today", "last",
 }
 _SECTION_REQUEST_MARKERS = (
     "подроб", "применен", "раздел", "пункт", "часть", "расскажи больше", "объясни подробнее",
@@ -2004,7 +2108,7 @@ def _fuzzy_token_overlap(query_tokens: set[str], candidate_tokens: set[str]) -> 
 
 def _topic_query_overlap(query: str, topic: str) -> float:
     """Overlap only on topic-bearing words, not generic continuation vocabulary."""
-    query_tokens = _semantic_tokens(query) - _SECTION_TOPIC_NOISE
+    query_tokens = _semantic_tokens(query) - _SECTION_TOPIC_NOISE - _CONTEXT_GENERIC_TERMS
     topic_tokens = _topic_tokens(topic)
     return _fuzzy_token_overlap(query_tokens, topic_tokens) if query_tokens else 0.0
 
@@ -2473,10 +2577,6 @@ def search_dialogue_context(
     state = hydrate(uid)
     all_rows = [row for row in (state.get("dialogue_pairs") or []) if isinstance(row, dict) and not _is_failed_provider_row(row)]
     resume_key = _text(resume_message_id)
-    resume_anchor_row = next((row for row in all_rows if (
-        _text(row.get("message_id")) == resume_key
-        or (resume_key.startswith("legacy-memory-") and resume_key == f"legacy-memory-{_text(row.get('id'))}")
-    )), None) if resume_key else None
     reference_followup = _looks_like_referential_followup(query)
     query_interpretation = dict(query_interpretation or {})
     history_request = bool(query_interpretation.get("history_request")) or _is_history_request(query)
@@ -2484,7 +2584,48 @@ def search_dialogue_context(
     interpreted_direction = _text(query_interpretation.get("direction"))
     interpreted_intent = _text(query_interpretation.get("primary_intent"))
     context_signature = _query_context_signature(query, query_interpretation)
-    query_subjects = set(context_signature.get("subject_terms") or _subject_tokens(query))
+    # An explicitly empty subject signature is meaningful: it says the request is
+    # referential (“these data”, “continue it”), not a new named subject. Do not
+    # repopulate it with generic task words such as “move”, “data”, or “table”.
+    supplied_subjects = context_signature.get("subject_terms")
+    query_subjects = set(supplied_subjects) if isinstance(supplied_subjects, list) else _subject_tokens(query)
+
+    # Resolve a text-specified period into an actual filter over the authenticated
+    # Premium memory. This preserves the 24-hour product retention cap and uses
+    # local civil time for “today/morning/14:00”, with timestamps normalized to UTC.
+    search_now_ts = time.time()
+    parsed_window = query_interpretation.get("time_window") if isinstance(query_interpretation.get("time_window"), dict) else {}
+    if not parsed_window.get("has_constraint") or not isinstance(parsed_window.get("start_at"), (int, float)) or not isinstance(parsed_window.get("end_at"), (int, float)):
+        parsed_window = extract_temporal_window(query, reference_ts=search_now_ts)
+    should_apply_time_filter = bool(
+        parsed_window.get("has_constraint")
+        and not resume_key
+        and (
+            history_request
+            or bool(query_interpretation.get("requires_memory"))
+            or bool(query_interpretation.get("history_inventory_request"))
+            or interpreted_intent in {"HISTORY_RECALL", "HISTORY_SEARCH", "HISTORY_SUMMARY", "TOPIC_CONTINUATION", "PRIOR_DECISION_RECALL", "PLAN_RECALL"}
+        )
+    )
+    time_filter = intersect_retention_window(
+        parsed_window, now_ts=search_now_ts, retention_seconds=DIALOGUE_WINDOW_SECONDS
+    ) if should_apply_time_filter else {
+        "applied": False, "empty": False, "start_at": None, "end_at": None, "source": "none"
+    }
+    if time_filter.get("applied"):
+        if time_filter.get("empty"):
+            all_rows = []
+        else:
+            lower = float(time_filter["start_at"])
+            upper = float(time_filter["end_at"])
+            all_rows = [
+                row for row in all_rows
+                if lower <= float(row.get("created_at") or 0.0) < upper
+            ]
+    resume_anchor_row = next((row for row in all_rows if (
+        _text(row.get("message_id")) == resume_key
+        or (resume_key.startswith("legacy-memory-") and resume_key == f"legacy-memory-{_text(row.get('id'))}")
+    )), None) if resume_key else None
     _apr_timing_log(
         "memory_intent_received",
         user_key=_apr_diag_ref(uid),
@@ -2497,6 +2638,10 @@ def search_dialogue_context(
         search_direction=interpreted_direction,
         time_scope=_text(query_interpretation.get("time_scope")),
         search_scope=_text(query_interpretation.get("search_scope")),
+        temporal_filter_requested=bool(parsed_window.get("has_constraint")),
+        temporal_filter_applied=bool(time_filter.get("applied")),
+        temporal_filter_source=_text(time_filter.get("source")),
+        temporal_rows_after_filter=len(all_rows),
     )
 
     scope_started = time.perf_counter()
@@ -2578,10 +2723,57 @@ def search_dialogue_context(
 
     # Build the index once and share it between topic ranking, pair selection and Provider.
     topics = _build_topic_index(all_rows)
-    history_limit = _history_topic_limit(query, 7)
-    # History recall may show an overview; normal requests receive only semantically matched topics.
+    requested_limit = query_interpretation.get("requested_topic_count")
+    history_limit = max(1, min(10, int(requested_limit or _history_topic_limit(query, 7))))
+    history_minimum = max(1, min(history_limit, int(
+        query_interpretation.get("minimum_topic_count") or _history_topic_minimum(query, 1)
+    )))
+
+    # Bind every pair and value-bearing structured asset to the topic in which it
+    # originated. Exact message ids remain the source of truth; topic ids are an
+    # index identity and never replace source provenance.
+    topic_by_message_id: dict[str, dict[str, Any]] = {}
+    for topic in topics:
+        for source_id in list(topic.get("message_ids") or []) + [topic.get("message_id"), topic.get("origin_message_id")]:
+            normalized_id = _text(source_id)
+            if normalized_id:
+                topic_by_message_id[normalized_id] = topic
+    for row in all_rows:
+        topic = topic_by_message_id.get(_text(row.get("message_id")))
+        if not topic:
+            continue
+        row["topic_id"] = _text(topic.get("topic_id"))
+        row["topic_origin_message_id"] = _text(topic.get("origin_message_id"))
+        row["topic_origin_at"] = topic.get("first_at")
+        row["topic_last_at"] = topic.get("last_at")
+        row["topic_summary"] = _text(topic.get("summary"))[:440]
+    for match in matches:
+        topic = topic_by_message_id.get(_text(match.get("message_id")))
+        if not topic:
+            continue
+        match.update({
+            "topic_id": _text(topic.get("topic_id")),
+            "topic_origin_message_id": _text(topic.get("origin_message_id")),
+            "topic_origin_at": topic.get("first_at"),
+            "topic_last_at": topic.get("last_at"),
+            "topic_summary": _text(topic.get("summary"))[:440],
+        })
+        for section in match.get("sections") or []:
+            if isinstance(section, dict):
+                section["topic_id"] = _text(topic.get("topic_id"))
+                section["topic_origin_message_id"] = _text(topic.get("origin_message_id"))
+        protected = match.get("protected_structured_data")
+        if isinstance(protected, dict) and protected:
+            protected["topic_id"] = _text(topic.get("topic_id"))
+            protected["topic_origin_message_id"] = _text(topic.get("origin_message_id"))
+            protected["source_message_id"] = _text(match.get("message_id"))
+            protected["topic_origin_at"] = topic.get("first_at")
+
+    # History recall may show up to ten distinct topics; normal requests receive
+    # only semantically matching topics. Broad history requests fall back to
+    # recency ordering after the explicit temporal filter has narrowed the rows.
     topic_index = _rank_history_topics(query, topics, 10, fallback=history_request)
-    history_topics = _rank_history_topics(query, topics, history_limit) if history_request else []
+    history_topics = _rank_history_topics(query, topics, history_limit, fallback=history_request) if history_request else []
 
     latest_same_dialog = max((item for item in matches if bool(item.get("same_dialog"))),
         key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)), default=None)
@@ -3186,11 +3378,101 @@ def search_dialogue_context(
         active_topic = _text(anchor.get("topic")) or active_topic
         selected_for_context = [_compact_pair(anchor)]
 
-    topic_table_lines = ["| # | Тема | Последний запрос | Ходы |", "|---:|---|---|---:|"]
-    for item in (history_topics or topic_index[:min(3, len(topic_index))]):
-        topic_table_lines.append(f"| {item['number']} | {str(item['topic']).replace('|', '/')} | {str(item['last_question']).replace('|', '/')} | {item['turns']} |")
+    def _attach_topic_provenance(record: Any) -> Any:
+        """Bind a selected pair/section to the topic and source message it came from."""
+        if not isinstance(record, dict):
+            return record
+        source_id = _text(record.get("source_message_id") or record.get("message_id"))
+        matching_topic = None
+        matching_section = None
+        for topic in topic_index:
+            if not isinstance(topic, dict):
+                continue
+            topic_message_ids = {_text(item) for item in (topic.get("message_ids") or []) if _text(item)}
+            topic_message_ids.update({_text(topic.get("message_id")), _text(topic.get("origin_message_id"))})
+            section_match = next((section for section in (topic.get("sections") or [])
+                                  if isinstance(section, dict) and source_id and source_id in {
+                                      _text(section.get("source_message_id")), _text(section.get("message_id"))
+                                  }), None)
+            if (source_id and source_id in topic_message_ids) or section_match:
+                matching_topic, matching_section = topic, section_match
+                break
+        if matching_topic:
+            topic_id_value = _text(matching_topic.get("topic_id"))
+            origin_id_value = _text(matching_topic.get("origin_message_id"))
+            if topic_id_value and not _text(record.get("topic_id")):
+                record["topic_id"] = topic_id_value
+            # _compact_pair historically defaulted origin_message_id to the current
+            # message. Replace that fallback when the topic index knows the true root.
+            if origin_id_value and (not _text(record.get("origin_message_id")) or _text(record.get("origin_message_id")) == source_id):
+                record["origin_message_id"] = origin_id_value
+            if origin_id_value and (not _text(record.get("topic_origin_message_id")) or _text(record.get("topic_origin_message_id")) == source_id):
+                record["topic_origin_message_id"] = origin_id_value
+            if matching_topic.get("origin_turn") is not None and record.get("origin_turn") in (None, "", 0):
+                record["origin_turn"] = matching_topic.get("origin_turn")
+            if source_id and not _text(record.get("source_message_id")):
+                record["source_message_id"] = source_id
+            if matching_section:
+                record.setdefault("section_heading", matching_section.get("heading"))
+                record.setdefault("section_summary", matching_section.get("summary"))
+                record.setdefault("section_order", matching_section.get("order"))
+        nested_sections = record.get("sections")
+        if isinstance(nested_sections, list):
+            for section in nested_sections:
+                if not isinstance(section, dict):
+                    continue
+                section_source = _text(section.get("source_message_id") or section.get("message_id"))
+                for topic in topic_index:
+                    if not isinstance(topic, dict):
+                        continue
+                    found = next((source for source in (topic.get("sections") or [])
+                                  if isinstance(source, dict) and section_source and section_source in {
+                                      _text(source.get("source_message_id")), _text(source.get("message_id"))
+                                  }), None)
+                    if found:
+                        if not _text(section.get("topic_id")):
+                            section["topic_id"] = topic.get("topic_id")
+                        if not _text(section.get("topic_origin_message_id")):
+                            section["topic_origin_message_id"] = topic.get("origin_message_id")
+                        if not _text(section.get("source_message_id")):
+                            section["source_message_id"] = section_source
+                        if not _text(section.get("heading")):
+                            section["heading"] = found.get("heading")
+                        if not _text(section.get("summary")):
+                            section["summary"] = found.get("summary")
+                        break
+        return record
+
+    for selected_pair in selected_for_context:
+        _attach_topic_provenance(selected_pair)
+    _attach_topic_provenance(selected_section)
+    if clarification_options:
+        clarification_options = [_attach_topic_provenance(dict(option)) for option in clarification_options]
+
+    def _topic_time_label(value: Any) -> str:
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc).astimezone(ZoneInfo("Europe/Kyiv")).strftime("%d.%m.%Y %H:%M")
+        except (TypeError, ValueError, OverflowError, OSError):
+            return "—"
+
+    topic_table_lines = [
+        "| # | Тема | Описание | Последний запрос | Обновлено (Киев) | Источник | Ходы |",
+        "|---:|---|---|---|---|---|---:|",
+    ]
+    topic_table_source = history_topics if history_request and history_topics else topic_index[:min(3, len(topic_index))]
+    for item in topic_table_source[:history_limit if history_request else 3]:
+        topic = str(item.get("topic") or "—").replace("|", "/").replace("\n", " ")
+        summary = str(item.get("summary") or "—").replace("|", "/").replace("\n", " ")[:180]
+        last_question = str(item.get("last_question") or "—").replace("|", "/").replace("\n", " ")[:140]
+        last_at = _topic_time_label(item.get("last_at"))
+        origin_turn = item.get("origin_turn") or "—"
+        topic_table_lines.append(
+            f"| {item.get('number', '—')} | {topic} | {summary} | {last_question} | {last_at} | ход {origin_turn} | {item.get('turns', '—')} |"
+        )
     topic_table_md = "\n".join(topic_table_lines)
 
+    anchor_payload = _compact_pair(anchor) if relation == "CONTINUE" and anchor else {}
+    _attach_topic_provenance(anchor_payload)
     result = {
         "engine": "premium_state_manager_topic_section_search_v8_semantic_history_handoff",
         "authenticated": True,
@@ -3227,8 +3509,11 @@ def search_dialogue_context(
         "contextual_history_match": contextual_history_match,
         "matched_topic_count": len(topic_index) if (history_request or contextual_history_match or relation == "CONTINUE") else 0,
         "requested_topic_count": history_limit,
+        "minimum_topic_count": history_minimum if history_request else 0,
+        "time_window": parsed_window if parsed_window.get("has_constraint") else {},
+        "time_filter": time_filter,
         "active_topic": active_topic,
-        "anchor": _compact_pair(anchor) if relation == "CONTINUE" and anchor else {},
+        "anchor": anchor_payload,
         "matches": matches[:max(1, int(limit or 12))] if matches else [],
         "selected": selected_for_context[:4 if (history_request or resume_anchor_row) else 2],
         "history_topics": history_topics,
@@ -3249,6 +3534,9 @@ def search_dialogue_context(
         dialog_key=_apr_diag_ref(dialog_id), conversation_key=_apr_diag_ref(conversation_id),
         relation=relation, reason=result["reason"], total_pairs=len(rows), candidates=len(matches),
         selected_pairs=len(selected_for_context), topic_index_count=len(topic_index),
+        temporal_filter_applied=bool(time_filter.get("applied")),
+        temporal_filter_empty=bool(time_filter.get("empty")),
+        temporal_range_start=time_filter.get("start_at"), temporal_range_end=time_filter.get("end_at"),
         contextual_history_match=contextual_history_match, history_selection_method=history_selection_method,
         selected_section_heading=_text(selected_section.get("heading")), clarification_needed=clarification_needed,
         clarification_status=_text(clarification_resolution.get("status")),
@@ -3311,6 +3599,9 @@ def prepare_dialogue_context(
         "contextual_history_match": bool(context.get("contextual_history_match")),
         "matched_topic_count": int(context.get("matched_topic_count") or 0),
         "requested_topic_count": int(context.get("requested_topic_count") or 7),
+        "minimum_topic_count": int(context.get("minimum_topic_count") or 0),
+        "time_window": deepcopy(context.get("time_window") or {}),
+        "time_filter": deepcopy(context.get("time_filter") or {}),
         "topic_table_markdown": _text(context.get("topic_table_markdown")),
         "anchor": deepcopy(context.get("anchor") or {}),
         "selected_section": deepcopy(context.get("selected_section") or {}),
