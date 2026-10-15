@@ -390,6 +390,7 @@ _CONTEXT_GENERIC_TERMS = {
     "случилось", "произошло", "произошел", "произошёл", "произошла", "диалог", "разговор", "беседа",
     "напиши", "написать", "напишите", "опиши", "описать", "опишите", "расскажи", "расскажите",
     "объясни", "объяснить", "объясните", "поясни", "пояснить", "покажи", "построй", "создай",
+    "решил", "решила", "решили", "научно", "пошагово", "решать",
     "сделай", "вычисли", "рассчитай", "сравни", "найди", "проверь", "проанализируй", "приведи",
     "перечисли", "продолжи", "продолжим", "дальше", "далее", "есть", "какие", "какая", "какой",
     "должен", "должна", "должно", "должны", "был", "была", "были", "нет",
@@ -1803,12 +1804,12 @@ def _history_topic_text(item: dict[str, Any]) -> str:
     ))
 
 
-def _rank_history_topics(query: str, topics: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+def _rank_history_topics(query: str, topics: list[dict[str, Any]], limit: int, *, fallback: bool = True) -> list[dict[str, Any]]:
     """Prefer matching topics for a subject-specific recall; keep recency order for broad recall."""
     bounded = [dict(item) for item in topics if isinstance(item, dict)]
     tokens = _history_query_topic_tokens(query)
     if not tokens:
-        return bounded[:max(1, min(10, int(limit or 7)))]
+        return bounded[:max(1, min(10, int(limit or 7)))] if fallback else []
     ranked: list[tuple[float, float, dict[str, Any]]] = []
     for item in bounded:
         candidate_tokens = _semantic_tokens(_history_topic_text(item))
@@ -1819,9 +1820,9 @@ def _rank_history_topics(query: str, topics: list[dict[str, Any]], limit: int) -
         score = 0.78 * overlap + 0.22 * phrase
         ranked.append((score, float(item.get("last_at") or 0), item))
     if not ranked:
-        # Preserve a usable overview if no topic label matches. The selected-pair
-        # search still checks all rows, so this fallback must not imply no history exists.
-        return bounded[:max(1, min(10, int(limit or 7)))]
+        # Broad history overview may fall back to recent topics; a normal request
+        # must not receive unrelated topics merely because no semantic match exists.
+        return bounded[:max(1, min(10, int(limit or 7)))] if fallback else []
     ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
     return [dict(item) for _, _, item in ranked[:max(1, min(10, int(limit or 7)))]]
 
@@ -2353,7 +2354,8 @@ def search_dialogue_context(
     # Build the index once and share it between topic ranking, pair selection and Provider.
     topics = _build_topic_index(all_rows)
     history_limit = _history_topic_limit(query, 7)
-    topic_index = _rank_history_topics(query, topics, 10) if history_request else topics[:10]
+    # History recall may show an overview; normal requests receive only semantically matched topics.
+    topic_index = _rank_history_topics(query, topics, 10, fallback=history_request)
     history_topics = _rank_history_topics(query, topics, history_limit) if history_request else []
 
     latest_same_dialog = max((item for item in matches if bool(item.get("same_dialog"))),
@@ -2450,6 +2452,12 @@ def search_dialogue_context(
     elif _is_section_request(query) and _explicit_section_number(query) is not None and rows:
         # A numbered section reference is a history pointer even when it contains
         # no topic nouns (e.g. "пункт 8"). Search memory instead of classifying it NEW.
+        continuation = True
+    elif (
+        latest_same_dialog
+        and bool(query_interpretation.get("requires_memory"))
+        and _text(query_interpretation.get("topic_reference")) == "PREVIOUS_ASSISTANT_ANSWER"
+    ):
         continuation = True
     elif hot_branch_candidate and not semantic_subject_switch:
         # Only ambiguous turns that pass the hot-branch relevance check may continue
@@ -2644,6 +2652,7 @@ def search_dialogue_context(
     selected_for_context: list[dict[str, Any]] = []
     history_selection_method = "not_history_request"
     history_matched_count = 0
+    contextual_history_match = False
     if history_request:
         selected_for_context, history_selection_method, history_matched_count = _select_history_context_pairs(
             query, matches, topic_index, all_rows, requested_topic_count=history_limit
@@ -2706,6 +2715,27 @@ def search_dialogue_context(
         if related_candidates:
             related_candidates.sort(key=lambda pair: pair[0], reverse=True)
             selected_for_context.append(_compact_pair(related_candidates[0][1]))
+
+    # A NEW request may still name a topic retained from an earlier dialogue.
+    # Keep relation=NEW (no forced continuation), but pass one grounded pair when
+    # the topic index confirms a strong topical match.
+    if relation == "NEW" and not history_request and not selected_for_context and topic_index:
+        lookup_tokens = _history_query_topic_tokens(query)
+        top_topic = topic_index[0]
+        topic_tokens = _semantic_tokens(_history_topic_text(top_topic))
+        topic_overlap = _fuzzy_token_overlap(lookup_tokens, topic_tokens) if lookup_tokens else 0.0
+        has_distinctive_query = len(lookup_tokens) >= 2 or any(len(token) >= 7 for token in lookup_tokens)
+        if topic_overlap >= 0.50 and has_distinctive_query:
+            topic_message_id = _text(top_topic.get("message_id"))
+            source_row = next((row for row in all_rows if _text(row.get("message_id")) == topic_message_id), None)
+            if source_row is not None:
+                matched_pair = _candidate_score(
+                    query, source_row, dialog_id=str(dialog_id or ""),
+                    reference_followup=True, query_modalities=query_modalities,
+                )
+                selected_for_context = [_compact_pair(matched_pair)]
+                contextual_history_match = True
+                history_selection_method = "semantic_topic_index_match"
 
     selected_section: dict[str, Any] = {}
     section_anchor_overridden = False
@@ -2942,7 +2972,7 @@ def search_dialogue_context(
     topic_table_md = "\n".join(topic_table_lines)
 
     result = {
-        "engine": "state_manager_topic_section_search_v7_semantic_relevance_gate",
+        "engine": "state_manager_topic_section_search_v8_semantic_history_handoff",
         "authenticated": True,
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "dialog_id": str(dialog_id or ""),
@@ -2961,6 +2991,7 @@ def search_dialogue_context(
             else "clarification_researched" if clarification_resolution
             else "clarification_pending" if clarification_needed
             else "history_request" if history_request
+            else "semantic_history_match" if contextual_history_match
             else "self_contained_new_information" if self_contained_new_information
             else "named_topic_match" if explicit_topic_hits and relation == "CONTINUE"
             else "hot_branch_ambiguous_followup" if relation == "CONTINUE" and anchor and hot_branch_candidate
@@ -2973,6 +3004,8 @@ def search_dialogue_context(
         "continuation_marker": marker,
         "referential_followup": reference_followup,
         "history_request": history_request,
+        "contextual_history_match": contextual_history_match,
+        "matched_topic_count": len(topic_index) if (history_request or contextual_history_match or relation == "CONTINUE") else 0,
         "requested_topic_count": history_limit,
         "active_topic": active_topic,
         "anchor": _compact_pair(anchor) if relation == "CONTINUE" and anchor else {},
@@ -2996,6 +3029,7 @@ def search_dialogue_context(
         dialog_key=_apr_diag_ref(dialog_id), conversation_key=_apr_diag_ref(conversation_id),
         relation=relation, reason=result["reason"], total_pairs=len(rows), candidates=len(matches),
         selected_pairs=len(selected_for_context), topic_index_count=len(topic_index),
+        contextual_history_match=contextual_history_match, history_selection_method=history_selection_method,
         selected_section_heading=_text(selected_section.get("heading")), clarification_needed=clarification_needed,
         clarification_status=_text(clarification_resolution.get("status")),
         selected_message_keys=[_apr_diag_ref(x.get("message_id")) for x in selected_for_context if isinstance(x, dict) and x.get("message_id")],
@@ -3054,6 +3088,8 @@ def prepare_dialogue_context(
         "topic_index": deepcopy(context.get("topic_index") or []),
         "known_topic_count": int(context.get("known_topic_count") or 0),
         "history_request": bool(context.get("history_request")),
+        "contextual_history_match": bool(context.get("contextual_history_match")),
+        "matched_topic_count": int(context.get("matched_topic_count") or 0),
         "requested_topic_count": int(context.get("requested_topic_count") or 7),
         "topic_table_markdown": _text(context.get("topic_table_markdown")),
         "anchor": deepcopy(context.get("anchor") or {}),
