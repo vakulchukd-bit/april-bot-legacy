@@ -1383,22 +1383,23 @@ async def execute(
             "relation_confidence": dialogue_context["relation_confidence"],
             "selected_pairs": (
                 dialogue_context.get("selected_pairs") or []
-                if (dialogue_context.get("relation") == "CONTINUE" or dialogue_context.get("history_request"))
+                if (dialogue_context.get("relation") == "CONTINUE" or dialogue_context.get("history_request") or dialogue_context.get("contextual_history_match"))
                 else []
             ),
-            # Search candidates and the full search trace are internal diagnostics,
-            # never model context. Only explicit history overview needs the index.
+            # Search candidates/full trace stay internal. Pass only the ranked
+            # relevant topic index on a semantic hit, or the broader index for explicit history overview.
             "selected_section": (
                 dialogue_context.get("selected_section") or {}
-                if (dialogue_context.get("relation") == "CONTINUE" or dialogue_context.get("history_request"))
+                if (dialogue_context.get("relation") == "CONTINUE" or dialogue_context.get("history_request") or dialogue_context.get("contextual_history_match"))
                 else {}
             ),
             "clarification_needed": bool(dialogue_context.get("clarification_needed")),
             "pending_clarification": dialogue_context.get("pending_clarification") or {},
             "clarification_resolution": dialogue_context.get("clarification_resolution") or {},
             "history_topics": (dialogue_context.get("history_topics") or []) if dialogue_context.get("history_request") else [],
-            "topic_index": (dialogue_context.get("topic_index") or []) if dialogue_context.get("history_request") else [],
-            "known_topic_count": int(dialogue_context.get("known_topic_count") or 0) if dialogue_context.get("history_request") else 0,
+            "topic_index": (dialogue_context.get("topic_index") or []) if (dialogue_context.get("history_request") or dialogue_context.get("contextual_history_match") or dialogue_context.get("relation") == "CONTINUE") else [],
+            "known_topic_count": int(dialogue_context.get("known_topic_count") or 0) if (dialogue_context.get("history_request") or dialogue_context.get("contextual_history_match")) else 0,
+            "contextual_history_match": bool(dialogue_context.get("contextual_history_match")),
             "history_request": bool(dialogue_context.get("history_request")),
             "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 7) if dialogue_context.get("history_request") else 0,
             "topic_table_markdown": (dialogue_context.get("topic_table_markdown") or "") if dialogue_context.get("history_request") else "",
