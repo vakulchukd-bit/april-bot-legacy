@@ -223,6 +223,93 @@ class AprilImagesGenerator:
         return text[:limit]
 
     @classmethod
+    def _compact_visual_plan(cls, value: Any, *, _depth: int = 0) -> dict[str, Any]:
+        """Extract only visual-direction fields; never copy answer/content/history JSON."""
+        if _depth > 4 or not isinstance(value, dict):
+            return {}
+        allowed = {
+            "image_prompt", "visual_prompt", "visual_generation_prompt", "image_description",
+            "visual_description", "scene_prompt", "scene", "subject", "composition", "setting",
+            "foreground", "background", "objects", "clothing", "facial_features", "camera",
+            "lighting", "color_palette", "palette", "aspect_ratio", "negative_prompt",
+            "visual_constraints", "image_spec", "visual_spec", "render_profile",
+        }
+        excluded = {"answer", "content", "summary", "internal_answer_en", "internal_request_en",
+                    "dialogue_memory_record"}
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            name = str(key).lower()
+            if name in excluded:
+                continue
+            if name in allowed and item not in (None, "", [], {}):
+                if isinstance(item, (str, int, float, bool)):
+                    result[name] = item
+                elif isinstance(item, dict):
+                    nested = cls._compact_visual_plan(item, _depth=_depth + 1)
+                    if nested:
+                        result[name] = nested
+                elif isinstance(item, list):
+                    clean_items = []
+                    for child in item[:12]:
+                        if isinstance(child, (str, int, float, bool)):
+                            clean_items.append(child)
+                        elif isinstance(child, dict):
+                            nested = cls._compact_visual_plan(child, _depth=_depth + 1)
+                            if nested:
+                                clean_items.append(nested)
+                    if clean_items:
+                        result[name] = clean_items
+                continue
+            if isinstance(item, dict) and _depth < 4:
+                nested = cls._compact_visual_plan(item, _depth=_depth + 1)
+                if nested:
+                    result[name] = nested
+            elif isinstance(item, list) and _depth < 4:
+                nested_items = []
+                for child in item[:12]:
+                    if isinstance(child, dict):
+                        nested = cls._compact_visual_plan(child, _depth=_depth + 1)
+                        if nested:
+                            nested_items.append(nested)
+                if nested_items:
+                    result[name] = nested_items
+        return result
+
+    @classmethod
+    def _appearance_excerpt(cls, raw_plan: Any, request_anchor: str) -> str:
+        """Extract only a relevant appearance/portrait section, never the full answer."""
+        request_low = cls._safe_text(request_anchor).lower().replace("ё", "е")
+        if not re.search(r"(?:выгляд\w*|внешност\w*|портрет\w*|лиц\w*|appearance|portrait|look(?:ed)? like)", request_low):
+            return ""
+        if not isinstance(raw_plan, dict):
+            return ""
+        answer = cls._safe_text(raw_plan.get("answer") or raw_plan.get("content") or "")
+        if not answer:
+            return ""
+        lines = answer.splitlines()
+        heading_pattern = re.compile(
+            r"^\s*(?:#{1,6}\s*)?(?:\*\*)?[^\n]*(?:как\s+[^\n]*выглядел|внешност|портрет|appearance|physical description|look(?:ed)? like)[^\n]*(?:\*\*)?\s*$",
+            re.IGNORECASE,
+        )
+        start = next((i for i, line in enumerate(lines) if heading_pattern.search(line)), None)
+        excerpt_lines: list[str] = []
+        if start is not None:
+            for line in lines[start + 1:]:
+                if re.match(r"^\s*#{1,6}\s+", line) or re.match(r"^\s*\*\*[^*]{2,100}\*\*\s*$", line):
+                    break
+                excerpt_lines.append(line)
+        if not excerpt_lines:
+            appearance_terms = re.compile(
+                r"(?:ус\w*|бород\w*|волос\w*|лоб\w*|нос\w*|лиц\w*|глаз\w*|одежд\w*|сюртук\w*|beard|moustache|hair|forehead|face|clothing|coat)",
+                re.IGNORECASE,
+            )
+            paragraphs = re.split(r"\n\s*\n", answer)
+            excerpt_lines = [para for para in paragraphs if appearance_terms.search(para)][:2]
+        excerpt = re.sub(r"\s+", " ", " ".join(excerpt_lines)).strip()
+        excerpt = re.sub(r"\*\*|__|`", "", excerpt)
+        return excerpt[:900]
+
+    @classmethod
     def _dialogue_generation_prompt_for_history(cls, spec: dict[str, Any]) -> str:
         """Preserve the former full generator prompt as 12-hour dialogue evidence.
 
@@ -252,14 +339,14 @@ class AprilImagesGenerator:
                 parts.append(f"OpenAI visual constraints: {encoded_context}")
 
         if isinstance(raw_plan, dict):
-            nontrivial_keys = {
-                str(key) for key in raw_plan.keys()
-                if str(key) not in {"description", "prompt", "visual_prompt", "image_prompt"}
-            }
-            if nontrivial_keys:
-                encoded_plan = cls._compact_json(raw_plan, 8_000)
-                if encoded_plan:
-                    parts.append(f"OpenAI structured visual plan: {encoded_plan}")
+            compact_plan = cls._compact_visual_plan(raw_plan)
+            encoded_plan = cls._compact_json(compact_plan, 1_600) if compact_plan else ""
+            if encoded_plan:
+                parts.append(f"OpenAI structured visual specification: {encoded_plan}")
+            else:
+                appearance = cls._appearance_excerpt(raw_plan, request_anchor)
+                if appearance:
+                    parts.append(f"Relevant appearance facts from the answer: {appearance}")
 
         parts.append(
             "Render the supplied visual content faithfully. Do not replace the requested subject, "
@@ -291,14 +378,14 @@ class AprilImagesGenerator:
             parts.append(f"OpenAI visual meaning: {plan_semantic}")
 
         if isinstance(raw_plan, dict):
-            nontrivial_keys = {
-                str(key) for key in raw_plan.keys()
-                if str(key) not in {"description", "prompt", "visual_prompt", "image_prompt"}
-            }
-            if nontrivial_keys:
-                encoded_plan = cls._compact_json(raw_plan, 6_000)
-                if encoded_plan:
-                    parts.append(f"OpenAI structured visual plan: {encoded_plan}")
+            compact_plan = cls._compact_visual_plan(raw_plan)
+            encoded_plan = cls._compact_json(compact_plan, 1_600) if compact_plan else ""
+            if encoded_plan:
+                parts.append(f"OpenAI structured visual specification: {encoded_plan}")
+            else:
+                appearance = cls._appearance_excerpt(raw_plan, request_anchor)
+                if appearance:
+                    parts.append(f"Relevant appearance facts from the answer: {appearance}")
 
         parts.append(
             "Render the supplied visual content faithfully. Do not replace the requested subject, "
