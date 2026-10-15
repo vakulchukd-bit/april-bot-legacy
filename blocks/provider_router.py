@@ -114,12 +114,12 @@ For NEW, answer independently and do not let old context override the request.
 
 For a history_request, use DIALOGUE_HISTORY_TOPICS / DIALOGUE_TABLE_MARKDOWN as an index over
 the retained dialogue. Never claim that the dialogue is unavailable when the index contains
-topics. Show the requested number of topics, clamped to 10. Default to 7 when the user does
+topics. Show the requested number of topics, capped at five. Default to five when the user does
 not specify a number. The user may then name a topic or give a hint and April should continue
 from the corresponding anchor/pairs. Keep the hidden remainder known to the processor; do not
 invent topics that are not in the supplied index.
 For targeted history requests naming a person, subject, or earlier task, prioritize matching DIALOGUE_TOPIC_INDEX entries and CONTINUATION_CONTEXT evidence even when DIALOGUE_RELATION is NEW. Do not ask the user to repeat information when a matching stored pair is supplied. Enumerate multiple topics only for a general overview/list request.
-TEMPORAL HISTORY RULE: When DIALOGUE_HISTORY_TIME_SEARCH.requested=true, this deterministic time-scoped result has priority over DIALOGUE_HISTORY_TOPICS, DIALOGUE_TOPIC_INDEX and DIALOGUE_TABLE_MARKDOWN. Do not replace a time request with a generic list of recent topics; use the returned USER↔APRIL pair(s) and their time labels. A status of matched_requested_window or matched_window_topic_unconfirmed means the returned pairs belong to the requested interval (with the stated tolerance); the latter means the named subject was not confirmed. For empty_window_nearest_dialogues or nearest_topic_dialogues_outside_window, explicitly say that no saved dialogue was found inside the requested interval, then describe the nearest returned pair(s) and state whether each was before or after the interval and the approximate gap using history_time_label/history_gap_minutes. Never present a neighboring pair as though it occurred in the requested interval. For no_saved_dialogues, say that no pair exists in the retained memory for that time; do not invent a topic. When topic_constraint=true, follow topic_match_found and topic_terms; if no matching subject was confirmed, disclose that instead of asserting it was the named topic. Never ask the user to repeat hints when selected pairs have already been supplied.
+TEMPORAL HISTORY RULE: When DIALOGUE_HISTORY_TIME_SEARCH.requested=true, this deterministic time-scoped result has priority over DIALOGUE_HISTORY_TOPICS, DIALOGUE_TOPIC_INDEX and DIALOGUE_TABLE_MARKDOWN. Do not replace a time request with a generic list of recent topics; use the returned dialogue summaries and time labels, showing no more than five. A status of matched_requested_window or matched_window_topic_unconfirmed means the returned pairs belong to the requested interval (with the stated tolerance); the latter means the named subject was not confirmed. For nearby_window_dialogues, say that no saved dialogue was inside the exact interval but related-time records were found within about two hours; describe those records with their labels and do not claim they are exact matches. For empty_window_nearest_dialogues or nearest_topic_dialogues_outside_window, explicitly say that no saved dialogue was found inside or near the requested interval, then describe the nearest returned pair(s) and state whether each was before or after the interval and the approximate gap using history_time_label/history_gap_minutes. Never present a neighboring pair as though it occurred in the requested interval. For no_saved_dialogues, say that no pair exists in the retained memory for that time; do not invent a topic. When topic_constraint=true, follow topic_match_found and topic_terms; if no matching subject was confirmed, disclose that instead of asserting it was the named topic. Never ask the user to repeat hints when selected pairs have already been supplied.
 
 For each newly supplied image/screenshot, inspect the actual pixels and record a concise grounded analysis: main subject, relevant visible details, text only when legible, uncertainty, and context. Never invent details that the pixels do not support. For a recalled asset with CACHED_ASSET_ANALYSIS, use that sidecar for ordinary follow-ups and do not restart with a generic image description. Inspect recalled original bytes only when they are actually supplied and the current question needs details beyond the sidecar. If multiple images are supplied, keep them labelled by filename/role and compare only when asked. An input image is NOT a request to generate an image.
 For each newly supplied or explicitly reattached file, read the actual input_file or ATTACHED_TEXT_FILES content. For source code, describe its real purpose, entry points, key functions, data flow and concrete problems visible in the source; cite filenames/function names rather than giving a generic description. If only a cached asset summary is supplied, use it for continuity and do not claim to have reread the original file. An input file is NOT a request to create/export a file.
@@ -1390,6 +1390,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
 
     def build_minimal(current_budget: int, topic_budget: int, summary_budget: int, pair_limit: int) -> dict[str, Any]:
         seq = []
+        history_item_limit = max(1, min(5, int(data.get("HISTORY_TOPIC_COUNT") or 5))) if is_history else 0
         share = min(MAX_TOPIC_PROMPT_TOKENS - 24, topic_budget, max(28, (current_budget + 300) // max(1, len(original_sequence))))
         for idx, item in enumerate(original_sequence):
             if not isinstance(item, dict):
@@ -1501,21 +1502,42 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             })
         topics_min = []
         if is_history:
-            for item in original_topics[:10]:
+            for item in original_topics[:history_item_limit]:
                 if isinstance(item, dict):
                     topics_min.append({
                         "n": item.get("number"),
                         "t": _semantic_compress(item.get("topic"), max(10, summary_budget // 2)),
                         "s": _semantic_compress(item.get("summary"), max(12, summary_budget)),
                         "q": _semantic_compress(item.get("last_question"), max(12, summary_budget // 2)),
+                        "age": _semantic_compress(item.get("history_age_label"), 8),
                         "turns": item.get("turns"),
-                        "sections": [
-                            {"h": _semantic_compress(sec.get("heading"), max(8, summary_budget // 2)),
-                             "s": _semantic_compress(sec.get("summary"), max(12, summary_budget // 2)),
-                             "id": sec.get("message_id")}
-                            for sec in (item.get("sections") or [])[:4] if isinstance(sec, dict)
-                        ],
                     })
+        raw_time_search = data.get("DIALOGUE_HISTORY_TIME_SEARCH") if isinstance(data.get("DIALOGUE_HISTORY_TIME_SEARCH"), dict) else {}
+        temporal_selected = []
+        for item in (raw_time_search.get("selected_dialogues") or [])[:5]:
+            if not isinstance(item, dict):
+                continue
+            temporal_selected.append({
+                "topic": _semantic_compress(item.get("topic"), max(10, summary_budget // 2)),
+                "user": _semantic_compress(item.get("user"), max(12, summary_budget)),
+                "summary": _semantic_compress(item.get("summary"), max(12, summary_budget)),
+                "relation": item.get("relation"),
+                "time_label": _semantic_compress(item.get("time_label"), max(14, summary_budget)),
+                "age_minutes": item.get("age_minutes"),
+                "gap_minutes": item.get("gap_minutes"),
+                "offset_from_target_minutes": item.get("offset_from_target_minutes"),
+            })
+        time_search_min = {
+            key: raw_time_search.get(key)
+            for key in (
+                "requested", "kind", "requested_phrase", "target_description", "tolerance_minutes",
+                "nearby_tolerance_minutes", "status", "topic_constraint", "topic_match_found",
+                "topic_terms", "dialogues_in_window", "selected_count", "instruction",
+            )
+            if raw_time_search.get(key) not in (None, "", [], {})
+        }
+        if temporal_selected:
+            time_search_min["selected_dialogues"] = temporal_selected
         # One canonical asset manifest replaces duplicate VISUAL_CONTEXT,
         # ATTACHMENT_TASK_MAP and ATTACHED_TEXT_FILES metadata lists.
         assets_min = []
@@ -1562,7 +1584,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 },
             } if data.get("CLARIFICATION_RESOLUTION") else {},
             "DIALOGUE_HISTORY_TOPICS": topics_min,
-            "DIALOGUE_HISTORY_TIME_SEARCH": data.get("DIALOGUE_HISTORY_TIME_SEARCH") or {},
+            "DIALOGUE_HISTORY_TIME_SEARCH": time_search_min,
             "DIALOGUE_TOPIC_INDEX": [
                 {"n": item.get("number"), "t": _semantic_compress(item.get("topic"), max(8, summary_budget // 2)),
                  "s": _semantic_compress(item.get("summary"), max(12, summary_budget)),
@@ -1727,13 +1749,16 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
 
     # Drop only redundant indexes and explanatory metadata before trimming any request text.
     optional_shrinks = [
+        # For a history request, the topic list is the requested answer data.
+        # Drop duplicate indexes and presentation metadata before any real history.
         ("DIALOGUE_TABLE_MARKDOWN", ""),
-        ("DIALOGUE_HISTORY_TOPICS", []),
         ("DIALOGUE_TOPIC_INDEX", []),
         ("DIALOGUE_KNOWN_TOPIC_COUNT", 0),
         ("SELECTED_ROOMS", []),
         ("REQUESTED_RENDERING_GUIDANCE", []),
     ]
+    if not is_history:
+        optional_shrinks.insert(1, ("DIALOGUE_HISTORY_TOPICS", []))
     for key, value in optional_shrinks:
         if total <= MAX_PROMPT_TOKENS:
             break
@@ -1992,8 +2017,8 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
     selected_pairs = continuation.get("selected_pairs") or memory.get("selected_pairs") or []
     new_dialogue = dialogue.get("new_dialogue") if isinstance(dialogue.get("new_dialogue"), dict) else {}
     history_request = bool(structured_intent.get("history_request") or memory.get("history_request") or request_input.get("history_request"))
-    requested_topic_count = int(structured_intent.get("history_count") or memory.get("requested_topic_count") or 7)
-    requested_topic_count = max(1, min(10, requested_topic_count))
+    requested_topic_count = int(structured_intent.get("history_count") or memory.get("requested_topic_count") or 5)
+    requested_topic_count = max(1, min(5, requested_topic_count))
     render_plan = routing.get("render_plan") if isinstance(routing.get("render_plan"), list) else []
     mcdowell = (routing.get("provider_context_plan") or {}).get("mcdowell")
     if not isinstance(mcdowell, dict):
@@ -2010,6 +2035,8 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "summary": _clip(item.get("summary"), 180),
             "last_question": _clip(item.get("last_question"), 120),
             "turns": item.get("turns"),
+            "history_age_minutes": item.get("history_age_minutes"),
+            "history_age_label": _clip(item.get("history_age_label"), 60),
             "sections": [
                 {"heading": _clip(sec.get("heading"), 90), "summary": _clip(sec.get("summary"), 130),
                  "order": sec.get("order"), "message_id": sec.get("message_id")}
@@ -2040,7 +2067,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         key: raw_history_time_search.get(key)
         for key in (
             "requested", "kind", "requested_phrase", "target_description",
-            "tolerance_minutes", "time_basis", "status", "topic_constraint",
+            "tolerance_minutes", "nearby_tolerance_minutes", "time_basis", "status", "topic_constraint",
             "topic_match_found", "topic_terms", "dialogues_in_window",
             "selected_count", "selected_dialogues", "instruction",
         )
@@ -2052,10 +2079,10 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         history_time_search["selected_dialogues"] = [
             {
                 key: item.get(key)
-                for key in ("topic", "relation", "time_label", "age_minutes", "gap_minutes", "offset_from_target_minutes")
+                for key in ("topic", "user", "summary", "relation", "time_label", "age_minutes", "gap_minutes", "offset_from_target_minutes")
                 if item.get(key) not in (None, "", [], {})
             }
-            for item in history_time_search["selected_dialogues"][:3]
+            for item in history_time_search["selected_dialogues"][:5]
             if isinstance(item, dict)
         ]
     if history_time_search.get("instruction"):
@@ -2087,11 +2114,11 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         for item in topic_index if isinstance(item, dict)
     ][:2 if relation == "CONTINUE" else 5]
 
-    def _pairs(rows: Any, limit: int = 4) -> list[dict[str, Any]]:
+    def _pairs(rows: Any, limit: int = 5) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         if not isinstance(rows, list):
             return result
-        for item in rows[-limit:]:
+        for item in rows[:limit]:
             if not isinstance(item, dict):
                 continue
             result.append({
@@ -2210,7 +2237,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         },
         "CONTINUATION_CONTEXT": _pairs(
             selected_pairs,
-            min(4, requested_topic_count) if history_request else (1 if selected_section else 2),
+            min(5, requested_topic_count) if history_request else (1 if selected_section else 2),
         ) if (relation == "CONTINUE" or history_request or bool(memory.get("contextual_history_match"))) else [],
         "PROTECTED_STRUCTURED_DATA": protected_structured_data,
         "SELECTED_SECTION": {
