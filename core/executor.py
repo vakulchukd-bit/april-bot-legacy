@@ -34,12 +34,46 @@ from blocks.C_ARTIFACT_CONTRACT import (
     list_registered_rooms,
 )
 from blocks.dialog_identity import resolve_dialog_identity, assert_identity_match
-from blocks.interpretation_identity import (
-    build_interpretation_identity,
-    build_interpretation,
-    build_question_sequence,
-    interpret_request_semantics,
-)
+# Import the interpretation module itself instead of importing every symbol
+# by name. This keeps startup compatible with a deployment where an older copy
+# of interpretation_identity.py is present and lacks the identity helper.
+from blocks import interpretation_identity as _interpretation_identity
+
+build_interpretation = _interpretation_identity.build_interpretation
+build_question_sequence = _interpretation_identity.build_question_sequence
+interpret_request_semantics = _interpretation_identity.interpret_request_semantics
+
+
+def build_interpretation_identity(**kwargs):
+    """Use the canonical identity builder, with a boot-safe legacy fallback.
+
+    Older deployed copies of blocks/interpretation_identity.py may not expose
+    build_interpretation_identity yet. Do not let that optional helper prevent
+    the canonical /api/v1/chat processor from starting.
+    """
+    builder = getattr(_interpretation_identity, "build_interpretation_identity", None)
+    if callable(builder):
+        return builder(**kwargs)
+
+    # Compatibility fallback only; the canonical builder above remains the
+    # source of truth whenever it is available.
+    april_id = str(kwargs.get("april_id") or kwargs.get("user_id") or "").strip()
+    dialog_id = str(kwargs.get("dialog_id") or kwargs.get("conversation_id") or "").strip()
+    conversation_id = str(kwargs.get("conversation_id") or dialog_id).strip()
+    message_id = str(kwargs.get("message_id") or "").strip()
+    if not april_id or not dialog_id or not conversation_id or not message_id:
+        raise ValueError("april_id, dialog_id, conversation_id and message_id are required")
+    result = {
+        "interpretation_id": str(kwargs.get("interpretation_id") or f"interp_{uuid.uuid4().hex}"),
+        "dialog_id": dialog_id,
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "april_id": april_id,
+    }
+    flow_id = str(kwargs.get("flow_id") or "").strip()
+    if flow_id:
+        result["flow_id"] = flow_id
+    return result
 from blocks.provider_router import generate_text
 from blocks.state_manager import prepare_dialogue_context
 from blocks.text_module import package_provider_response
