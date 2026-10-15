@@ -468,7 +468,13 @@ def _start_cleanup_worker() -> None:
 
 
 def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | int | datetime | None = None) -> int:
-    """Delete each dialogue pair once its saved 12h/24h lifetime has elapsed."""
+    """Expire per-message memory; active Premium rows retain the full 24-hour window.
+
+    This backfills the retention field for still-live rows when a previously 12-hour
+    user becomes Premium or a deployment changes the plan without recreating the
+    retention column. It is conditional on active Premium entitlement and therefore
+    does not extend Free accounts' 12-hour memory.
+    """
     conn = get_conn()
     if not conn:
         return 0
@@ -480,6 +486,39 @@ def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | i
     try:
         with conn:
             with conn.cursor() as cur:
+                # Preserve all still-live history for an active Premium user for
+                # 24 hours even when those rows were written before the Premium
+                # retention policy was applied. Do not revive already-expired rows.
+                if user_id is None:
+                    cur.execute(
+                        """UPDATE dialogue_memory AS d
+                           SET retention_hours = 24
+                           FROM users AS u
+                           WHERE u.user_id = d.user_id
+                             AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
+                             AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM %s)
+                             AND COALESCE(d.retention_hours, 12) < 24
+                             AND d.created_at + INTERVAL '24 hours' > %s
+                             AND d.created_at <= %s""",
+                        (current, current, current),
+                    )
+                else:
+                    uid = str(user_id)
+                    if not _is_authenticated_cursor(cur, uid):
+                        return 0
+                    cur.execute(
+                        """UPDATE dialogue_memory AS d
+                           SET retention_hours = 24
+                           FROM users AS u
+                           WHERE d.user_id = %s
+                             AND u.user_id = d.user_id
+                             AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
+                             AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM %s)
+                             AND COALESCE(d.retention_hours, 12) < 24
+                             AND d.created_at + INTERVAL '24 hours' > %s
+                             AND d.created_at <= %s""",
+                        (uid, current, current, current),
+                    )
                 if user_id is None:
                     cur.execute(
                         """SELECT user_id, message_id FROM dialogue_memory AS d
@@ -621,12 +660,32 @@ def save_dialogue_pair(
                 # The new pair still keeps the validated send timestamp as created_at.
                 cleanup_now = now()
                 cur.execute(
+                    "SELECT LOWER(COALESCE(plan, 'free')) AS plan, COALESCE(subscription_until, 0) AS subscription_until FROM users WHERE user_id = %s",
+                    (uid,),
+                )
+                plan_row = cur.fetchone() or {}
+                active_premium = (
+                    str(plan_row.get("plan") or "free").lower() == "premium"
+                    and float(plan_row.get("subscription_until") or 0) > cleanup_now.timestamp()
+                ) if isinstance(plan_row, dict) else False
+                if active_premium:
+                    # Rows written by a previous 12-hour path may still be live
+                    # under the Premium 24-hour entitlement; promote before pruning.
+                    cur.execute(
+                        """UPDATE dialogue_memory AS d SET retention_hours = 24
+                           WHERE d.user_id = %s
+                             AND COALESCE(d.retention_hours, 12) < 24
+                             AND d.created_at + INTERVAL '24 hours' > %s
+                             AND d.created_at <= %s""",
+                        (uid, cleanup_now, cleanup_now),
+                    )
+                cur.execute(
                     """DELETE FROM dialogue_memory AS d
                        WHERE d.user_id = %s
                          AND d.created_at + (GREATEST(12, LEAST(24, COALESCE(d.retention_hours, 12))) * INTERVAL '1 hour') <= %s""",
                     (uid, cleanup_now),
                 )
-                row_retention_hours = 24 if int(retention_hours or DIALOGUE_WINDOW_HOURS) >= 24 else 12
+                row_retention_hours = 24 if active_premium or int(retention_hours or DIALOGUE_WINDOW_HOURS) >= 24 else 12
                 pair_hash = _pair_hash(uid, created_ts, int(turn_index or 0), user_value, april_value)
                 cur.execute(
                     """
