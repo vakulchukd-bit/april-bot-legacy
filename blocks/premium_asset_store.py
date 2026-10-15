@@ -174,10 +174,16 @@ def delete_message_assets(user_id: Any, message_id: Any) -> None:
         pass
 
 
-def delete_user_assets(user_id: Any) -> None:
+def delete_user_assets(user_id: Any) -> bool:
+    """Delete every persisted Premium asset owned by a user; safe to retry."""
     uid = str(user_id or "").strip()
-    if uid:
-        try:
-            shutil.rmtree(_root() / _safe_component(uid), ignore_errors=True)
-        except Exception:
-            pass
+    if not uid:
+        return False
+    try:
+        # Do not create the storage root merely because an account was deleted.
+        folder = _DEFAULT_ROOT / _safe_component(uid)
+        if folder.exists():
+            shutil.rmtree(folder)
+        return not folder.exists()
+    except Exception:
+        return False
