@@ -2127,6 +2127,35 @@ def extract_temporal_window(
         center = reference - timedelta(hours=1)
         return _result(center - timedelta(minutes=30), center + timedelta(minutes=30), source="relative_ago_point", timezone_name=timezone_name, reference=reference)
 
+    # Spoken-number rolling durations: “за последние пять часов”, “за три дня”.
+    # Keep this separate from “пять часов назад”, which is a point-in-time query.
+    word_duration = re.search(
+        r"\b(?:за\s+|в\s+течение\s+(?:последн\w*\s+)?|последн\w*\s+|past\s+|last\s+)"
+        r"(один|одна|одно|одну|два|две|двух|три|трех|трёх|четыре|четырех|четырёх|"
+        r"пять|пяти|шесть|шести|семь|семи|восемь|восьми|девять|девяти|десять|десяти)\s+"
+        r"(секунд\w*|минут\w*|час\w*|годин\w*|дн\w*|день|дня|дней|доба\w*|days?|hours?|minutes?)\b",
+        low,
+    )
+    if word_duration:
+        number_words = {
+            "один": 1, "одна": 1, "одно": 1, "одну": 1,
+            "два": 2, "две": 2, "двух": 2, "три": 3, "трех": 3, "трёх": 3,
+            "четыре": 4, "четырех": 4, "четырёх": 4, "пять": 5, "пяти": 5,
+            "шесть": 6, "шести": 6, "семь": 7, "семи": 7, "восемь": 8,
+            "восьми": 8, "девять": 9, "девяти": 9, "десять": 10, "десяти": 10,
+        }
+        amount = number_words[word_duration.group(1)]
+        unit = word_duration.group(2)
+        if unit.startswith(("секунд",)):
+            delta = timedelta(seconds=amount)
+        elif unit.startswith("минут") or unit.startswith("minute"):
+            delta = timedelta(minutes=amount)
+        elif unit.startswith(("час", "годин", "hour")):
+            delta = timedelta(hours=amount)
+        else:
+            delta = timedelta(days=amount)
+        return _result(reference - delta, reference, source="relative_duration_spoken_number", timezone_name=timezone_name, reference=reference)
+
     # Relative rolling durations, including intervals longer than the 24-hour
     # product retention window (the state manager intersects both windows).
     rel = re.search(
