@@ -431,7 +431,17 @@ _CONTEXT_NON_TOPICAL_ROOTS = (
     "напиш", "опиш", "расскаж", "объясн", "поясн", "покаж", "постро", "созда",
     "сдела", "вычисл", "рассчит", "сравн", "найд", "проверь", "проанализ", "привед",
     "перечисл", "продолж", "дальш", "должн", "каки", "был",
+    # Discourse pointers are not independent topic names in a continuation request.
+    "предыдущ", "прошл", "раньше", "ранее", "ответ", "тем",
     "формул", "график", "таблиц", "диаграмм", "уравнен", "данн", "значен",
+)
+
+_CONTINUATION_DISCOURSE_ROOTS = (
+    "продолж", "continue", "resume", "вернись", "возвращ", "предыдущ", "прошл",
+    "раньше", "ранее", "ответ", "тем", "очен", "честн", "спасиб", "благодар",
+    "хорош", "отлич", "понрав", "интерес", "прият", "молод", "рад", "ясн",
+    "понят", "конечн", "ладно", "давай", "пожалу", "просто", "вперед",
+    "great", "good", "thanks", "thank", "honest", "glad", "nice", "please", "kindly",
 )
 
 _PARTICIPANT_SPEAKER_WORDS = {
@@ -448,6 +458,94 @@ def _is_non_topical_subject_term(token: str) -> bool:
     if token in _CONTEXT_GENERIC_TERMS:
         return True
     return any(len(root) >= 5 and token.startswith(root) for root in _CONTEXT_NON_TOPICAL_ROOTS)
+
+
+def _is_discourse_only_continuation(
+    query: str,
+    interpretation: dict[str, Any] | None,
+    *,
+    history_request: bool = False,
+    new_topic_request: bool = False,
+    has_attachment: bool = False,
+) -> bool:
+    """Recognize a continuation whose wording contains no independent subject.
+
+    This is based on the interpreted communicative act and remaining content
+    words, not a single mandatory phrase. A named subject such as "algebra"
+    remains meaningful and continues through ordinary topic matching.
+    """
+    profile = interpretation if isinstance(interpretation, dict) else {}
+    intent = _text(profile.get("primary_intent")).upper()
+    direction = _text(profile.get("direction")).upper()
+    relation_hint = _text(profile.get("relation_hint")).upper()
+    features = profile.get("features") if isinstance(profile.get("features"), dict) else {}
+    continuation_intent = (
+        intent in {"TOPIC_CONTINUATION", "ANSWER_FOLLOWUP"}
+        or direction == "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
+        or (relation_hint == "CONTINUE" and bool(profile.get("requires_memory")))
+        or bool(features.get("acknowledgement_with_continuation"))
+    )
+    if not continuation_intent or history_request or new_topic_request or has_attachment:
+        return False
+
+    informative = set()
+    for token in _semantic_tokens(query):
+        if _is_non_topical_subject_term(token):
+            continue
+        if any(len(root) >= 4 and token.startswith(root) for root in _CONTINUATION_DISCOURSE_ROOTS):
+            continue
+        if len(token) < 4:
+            continue
+        informative.add(_subject_family(token))
+    return not informative
+
+
+def _is_assistant_recovery_response(row: dict[str, Any] | None) -> bool:
+    """Detect a saved assistant turn that deferred continuation instead of answering.
+
+    Prefer explicit saved state when present. The fallback combines uncertainty
+    with a request for a hint, so it identifies a response act rather than matching
+    the current user's wording.
+    """
+    if not isinstance(row, dict):
+        return False
+    response = _parse_json(row.get("structured_response"))
+    metadata = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
+    record = response.get("dialogue_memory_record")
+    if not isinstance(record, dict):
+        record = metadata.get("dialogue_memory_record") if isinstance(metadata.get("dialogue_memory_record"), dict) else {}
+    if any(bool(source.get(key)) for source in (response, metadata, record) for key in (
+        "clarification_needed", "awaiting_topic_hint", "continuation_deferred",
+    )):
+        return True
+
+    summary = _text(record.get("summary")) if isinstance(record, dict) else ""
+    answer = " ".join((
+        _text(row.get("april_text") or row.get("april")),
+        _text(row.get("april_text_en") or row.get("april_en")),
+        _text(response.get("answer")), _text(response.get("content")),
+        summary, _text(row.get("memory_summary")),
+    )).lower().replace("ё", "е")
+    answer = re.sub(r"\s+", " ", answer)
+    if not answer:
+        return False
+    uncertainty = any(term in answer for term in (
+        "не вижу, о какой", "не вижу, что именно", "не нашлось ясного совпад",
+        "не нашла ясного совпад", "не удалось найти совпад", "не могу определить, какую тему",
+        "i cannot tell which topic", "i can't tell which topic", "could not identify the topic",
+        "couldn't identify the topic", "no clear match was found",
+    ))
+    asks_for_hint = any(term in answer for term in (
+        "подсказ", "подскажи", "последнее сообщение", "пару слов", "одно-два слова",
+        "1–2 слова", "1-2 слова", "напомни, о чем", "напомни, о чём", "hint",
+        "last message", "a few words", "one or two words", "which topic",
+    ))
+    defers_until_ready = any(term in answer for term in (
+        "напиши, когда будешь готов продолжить", "напиши когда будешь готов продолжить",
+        "когда будешь готов продолжить", "write when you're ready to continue",
+        "let me know when you're ready to continue",
+    ))
+    return bool((uncertainty and asks_for_hint) or defers_until_ready)
 
 
 def _contains_named_value(text: Any) -> bool:
@@ -2260,6 +2358,17 @@ def search_dialogue_context(
     interpreted_intent = _text(query_interpretation.get("primary_intent"))
     context_signature = _query_context_signature(query, query_interpretation)
     query_subjects = set(context_signature.get("subject_terms") or _subject_tokens(query))
+    discourse_only_continuation = _is_discourse_only_continuation(
+        query, query_interpretation,
+        history_request=history_request,
+        new_topic_request=new_topic_request,
+        has_attachment=bool(has_image or has_file or has_voice),
+    )
+    if discourse_only_continuation:
+        # Courtesy words and phrases such as "previous answer" describe the
+        # conversational link. Do not let them masquerade as a topic noun.
+        context_signature = {**context_signature, "subject_terms": [], "has_explicit_subject": False}
+        query_subjects = set()
     _apr_timing_log(
         "memory_intent_received",
         user_key=_apr_diag_ref(uid),
@@ -2272,6 +2381,7 @@ def search_dialogue_context(
         search_direction=interpreted_direction,
         time_scope=_text(query_interpretation.get("time_scope")),
         search_scope=_text(query_interpretation.get("search_scope")),
+        discourse_only_continuation=discourse_only_continuation,
     )
 
     scope_started = time.perf_counter()
@@ -2361,6 +2471,32 @@ def search_dialogue_context(
     latest_same_dialog = max((item for item in matches if bool(item.get("same_dialog"))),
         key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)), default=None)
     best = matches[0] if matches else None
+    recovered_after_repair_prompt = False
+    if discourse_only_continuation and latest_same_dialog and _is_assistant_recovery_response(latest_same_dialog):
+        latest_id = _text(latest_same_dialog.get("message_id"))
+        previous_rows = sorted(
+            [row for row in all_rows if isinstance(row, dict)
+             and _text(row.get("message_id")) != latest_id
+             and (not dialog_id or not _text(row.get("dialog_id")) or _text(row.get("dialog_id")) == _text(dialog_id))
+             and not _row_is_pending_clarification(row)
+             and not _is_assistant_recovery_response(row)],
+            key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
+            reverse=True,
+        )
+        if previous_rows:
+            # The newest assistant turn was a clarification loop, not the topic's
+            # answer. Recover the nearest prior substantive turn for this follow-up.
+            latest_same_dialog = _candidate_score(
+                query, previous_rows[0], dialog_id=str(dialog_id or ""),
+                reference_followup=True, query_modalities=query_modalities,
+            )
+            recovered_after_repair_prompt = True
+            _apr_timing_log(
+                "active_branch_recovered_after_repair_prompt",
+                user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
+                previous_message_key=_apr_diag_ref(latest_id),
+                restored_message_key=_apr_diag_ref(latest_same_dialog.get("message_id")),
+            )
     active_subjects = set(latest_same_dialog.get("subject_terms") or []) if latest_same_dialog else set()
     active_subject_conflict = _subject_conflicts(query_subjects, active_subjects)
     # A named subject change in a self-contained new request is a new task even
@@ -2609,8 +2745,12 @@ def search_dialogue_context(
         # globally, or handed back to normal dialogue. It must not create another
         # local clarification from the old options.
     elif relation == "CONTINUE" and rows:
-        if not query_subjects and latest_same_dialog:
-            # For an underspecified turn, prefer role-aligned evidence when available.
+        if discourse_only_continuation and latest_same_dialog:
+            # No independent subject was supplied: prefer the live branch, not an
+            # older topic that happens to share discourse words such as "thanks".
+            anchor = latest_same_dialog
+        elif not query_subjects and latest_same_dialog:
+            # For other underspecified turns, prefer role-aligned evidence when available.
             # Otherwise compare the actual topical evidence with the active turn; if
             # neither gives a clear relative preference, stay on the active turn.
             role_aligned = best if best and int(best.get("participant_alignment") or 0) > 0 else None
@@ -2992,8 +3132,10 @@ def search_dialogue_context(
             else "clarification_pending" if clarification_needed
             else "history_request" if history_request
             else "semantic_history_match" if contextual_history_match
+            else "active_branch_recovered_after_clarification" if recovered_after_repair_prompt and relation == "CONTINUE" and anchor
             else "self_contained_new_information" if self_contained_new_information
             else "named_topic_match" if explicit_topic_hits and relation == "CONTINUE"
+            else "implicit_active_branch_continuation" if discourse_only_continuation and relation == "CONTINUE" and anchor
             else "hot_branch_ambiguous_followup" if relation == "CONTINUE" and anchor and hot_branch_candidate
             else "underspecified_turn_context" if relation == "CONTINUE" and anchor and not query_subjects
             else "active_topic_default" if relation == "CONTINUE" and anchor
@@ -3003,6 +3145,8 @@ def search_dialogue_context(
         "relation_confidence": 1.0 if resume_anchor_row else round(float((anchor or best or {}).get("score") or (0.60 if relation == "CONTINUE" else 0.0)), 6),
         "continuation_marker": marker,
         "referential_followup": reference_followup,
+        "discourse_only_continuation": discourse_only_continuation,
+        "recovered_after_repair_prompt": recovered_after_repair_prompt,
         "history_request": history_request,
         "contextual_history_match": contextual_history_match,
         "matched_topic_count": len(topic_index) if (history_request or contextual_history_match or relation == "CONTINUE") else 0,
