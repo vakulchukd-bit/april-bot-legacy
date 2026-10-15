@@ -165,7 +165,9 @@ def _compact_question_search(
 
     anchor = context.get("anchor") if isinstance(context.get("anchor"), dict) else {}
     section = context.get("selected_section") if isinstance(context.get("selected_section"), dict) else {}
-    pairs = [compact_pair(item) for item in (context.get("selected_pairs") or [])[:2]]
+    # Preserve the five evidence pairs selected by Premium history search. The
+    # previous two-pair cap discarded valid temporal/topic matches before the model.
+    pairs = [compact_pair(item) for item in (context.get("selected_pairs") or [])[:5]]
     pairs = [item for item in pairs if item]
     pending = context.get("pending_clarification") if isinstance(context.get("pending_clarification"), dict) else {}
     options = []
