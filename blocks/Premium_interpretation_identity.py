@@ -965,7 +965,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     explicit_topic_inventory = bool(re.search(
         r"(?:последн\w*\s+тем\w*|какие\s+тем\w*|список\s+тем\w*|"
         r"тем\w*.{0,28}(?:из\s+истори\w*|мы\s+обсужда\w*|мы\s+говорил\w*)|"
-        r"(?:покаж\w*|перечисл\w*|вывед\w*|напомн\w*|list|show|summariz\w*).{0,36}"
+        r"(?:покаж\w*|перечисл\w*|вывед\w*|напомн\w*|найт\w*|найд\w*|ищ\w*|search|find|locate|list|show|summariz\w*).{0,36}"
         r"(?:тем\w*|topics?|history|conversations?))",
         low, re.IGNORECASE,
     ))
@@ -987,7 +987,9 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "история", "истории", "историю", "истории", "диалог", "диалога", "диалоге", "разговор", "разговора",
         "час", "часа", "часов", "минут", "минуты", "минуту", "дней", "дня", "день", "назад", "хоть",
         "примерно", "около", "последний", "последнюю", "последнего", "сейчас", "сегодня", "вчера",
-        "последн", "только", "покажи", "показать", "выведи", "перечисли", "напомни", "дай", "мне", "можешь",
+        "утра", "утром", "ранку", "вечера", "вечером", "вечора", "дня", "днем", "днём", "ночью", "ночі",
+        "найти", "найди", "ищи", "можешь", "пожалуйста", "темы", "диалоги", "разговоры",
+        "последн", "только", "покажи", "показать", "выведи", "перечисли", "напомни", "дай", "мне",
         "the", "what", "were", "we", "did", "do", "our", "about", "talking", "talked", "discuss", "discussed",
         "conversation", "conversations", "history", "topic", "topics", "list", "show", "me", "last", "hour", "hours", "ago",
     }
@@ -2176,8 +2178,8 @@ def extract_temporal_window(
         end_date = _parse_date(datetime_range.group(4), reference)
         sh, sm, eh, em = (int(datetime_range.group(i)) for i in (2, 3, 5, 6))
         if start_date and end_date and all((h <= 23 and m <= 59) for h, m in ((sh, sm), (eh, em))):
-            start = datetime.combine(start_date.date(), time(sh, sm), tzinfo=zone)
-            end = datetime.combine(end_date.date(), time(eh, em), tzinfo=zone)
+            start = datetime.combine(start_date.date(), datetime_time(sh, sm), tzinfo=zone)
+            end = datetime.combine(end_date.date(), datetime_time(eh, em), tzinfo=zone)
             return _result(start, end, source="explicit_datetime_range", timezone_name=timezone_name, reference=reference)
 
     # Explicit ISO / numeric date ranges. End dates are inclusive; make the
@@ -2259,6 +2261,12 @@ def extract_temporal_window(
     clock_date = _relative_clock_date(low, reference, zone)
     explicit_iso_for_clock = re.search(r"(?<!\d)(\d{4}-\d{1,2}-\d{1,2})(?!\d)", low)
     explicit_num_for_clock = re.search(r"(?<!\d)(\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)(?!\d)", low)
+    if explicit_num_for_clock and re.fullmatch(r"\d{1,2}-\d{1,2}", explicit_num_for_clock.group(1)):
+        short_pair = explicit_num_for_clock.group(0)
+        pair_end = explicit_num_for_clock.end()
+        following = low[pair_end:pair_end + 20]
+        if re.match(r"\s*(?:утра|ранку|вечера|вечора|дня|днем|ночью|ночі|час\w*|годин\w*)\b", following):
+            explicit_num_for_clock = None
     explicit_month_for_clock = re.search(rf"\b(\d{{1,2}})\s+({month_pattern})(?:\s+(\d{{4}}))?\b", low)
     clock_date_start = _parse_date(explicit_iso_for_clock.group(1), reference) if explicit_iso_for_clock else (
         _parse_date(explicit_num_for_clock.group(1), reference) if explicit_num_for_clock else None
@@ -2288,13 +2296,24 @@ def extract_temporal_window(
         before = low[max(0, clock_range.start() - 20):clock_range.start()]
         has_clock_colon = ":" in matched
         has_time_word = bool(re.search(r"\b(?:час\w*|годин\w*|утра|ранку|дня|вечера|вечор\w*|ночью|ночі|am|pm|o'clock|hours?)\b", before + " " + after))
-        nearby_day_word = bool(re.search(r"\b(?:тем\w*|топик\w*|topics?)\b", after))
-        if has_clock_colon or (has_time_word and not nearby_day_word):
+        # A nearby word such as “темы” must not cancel a clear clock marker;
+        # bare numeric ranges like “от 5 до 10 тем” still have no time word.
+        if has_clock_colon or has_time_word:
             h1, m1 = int(clock_range.group(1)), int(clock_range.group(2) or 0)
             h2, m2 = int(clock_range.group(3)), int(clock_range.group(4) or 0)
+            daypart_text = f"{before} {after}"
+            is_pm = bool(re.search(r"\b(?:вечера|вечером|вечора|вечор\w*|дня|днем|днём|пополудни|afternoon|evening|pm)\b", daypart_text))
+            is_morning = bool(re.search(r"\b(?:утра|утром|ранку|morning|am)\b", daypart_text))
+            is_night = bool(re.search(r"\b(?:ночью|ночі|night)\b", daypart_text))
+            if is_pm:
+                h1 = h1 + 12 if 1 <= h1 <= 11 else h1
+                h2 = h2 + 12 if 1 <= h2 <= 11 else h2
+            elif is_morning and not is_night:
+                h1 = 0 if h1 == 12 else h1
+                h2 = 0 if h2 == 12 else h2
             if h1 <= 23 and h2 <= 23 and m1 <= 59 and m2 <= 59:
-                start = datetime.combine(clock_date, time(h1, m1), tzinfo=zone)
-                end = datetime.combine(clock_date, time(h2, m2), tzinfo=zone)
+                start = datetime.combine(clock_date, datetime_time(h1, m1), tzinfo=zone)
+                end = datetime.combine(clock_date, datetime_time(h2, m2), tzinfo=zone)
                 if end <= start:
                     end += timedelta(days=1)
                 return _result(start, end, source="clock_range", timezone_name=timezone_name, reference=reference)
@@ -2372,12 +2391,12 @@ def extract_temporal_window(
         elif re.search(r"\b(?:вечером|вечера|вечор\w*|evening)\b", low):
             part = (17, 22)
         elif re.search(r"\b(?:ночью|ночі|ночью|night|overnight)\b", low):
-            start = datetime.combine(day, time(22, 0), tzinfo=zone)
+            start = datetime.combine(day, datetime_time(22, 0), tzinfo=zone)
             end = start + timedelta(hours=7)
             return _result(start, end, source="day_part", timezone_name=timezone_name, reference=reference)
         if part:
-            start = datetime.combine(day, time(part[0], 0), tzinfo=zone)
-            end = datetime.combine(day, time(part[1], 0), tzinfo=zone)
+            start = datetime.combine(day, datetime_time(part[0], 0), tzinfo=zone)
+            end = datetime.combine(day, datetime_time(part[1], 0), tzinfo=zone)
             return _result(start, end, source="day_part", timezone_name=timezone_name, reference=reference)
         # Bare yesterday/today/weekday bounds are whole local days.
         if day_offset != 0 or re.search(r"\b(?:сегодня|today)\b", low):
@@ -2388,7 +2407,7 @@ def extract_temporal_window(
     if single_clock:
         h, m = int(single_clock.group(1)), int(single_clock.group(2))
         if h <= 23 and m <= 59:
-            centre = datetime.combine(clock_date, time(h, m), tzinfo=zone)
+            centre = datetime.combine(clock_date, datetime_time(h, m), tzinfo=zone)
             return _result(centre - timedelta(minutes=30), centre + timedelta(minutes=30), source="approximate_clock", timezone_name=timezone_name, reference=reference)
 
     return _empty(timezone_name, reference)
