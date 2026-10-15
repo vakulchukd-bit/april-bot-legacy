@@ -140,6 +140,11 @@ def _compact_question_search(
             "sections": sections,
             "message_id": _text(item.get("message_id"))[:120],
             "same_dialog": bool(item.get("same_dialog")),
+            "created_at": item.get("created_at"),
+            "history_time_relation": _text(item.get("history_time_relation"))[:48],
+            "history_time_label": _text(item.get("history_time_label"))[:140],
+            "history_age_minutes": item.get("history_age_minutes"),
+            "history_gap_minutes": item.get("history_gap_minutes"),
         }
         # Do not reconstruct structured data from clipped text. Preserve the exact
         # source payload (including its source_message_id/checksum) only when it is
@@ -171,8 +176,10 @@ def _compact_question_search(
         })
     semantics = dict(semantics or {})
     history_request = bool(context.get("history_request") or semantics.get("history_request"))
+    history_time_search = context.get("history_time_search") if isinstance(context.get("history_time_search"), dict) else {}
+    temporal_history_lookup = bool(history_time_search.get("requested"))
     topic_index = []
-    if history_request:
+    if history_request and not temporal_history_lookup:
         topic_index = [
             {
                 "number": item.get("number"),
@@ -192,7 +199,7 @@ def _compact_question_search(
             "message_id": _text(item.get("message_id"))[:120],
         }
         for item in (context.get("history_topics") or [])[:4] if isinstance(item, dict)
-    ] if history_request else []
+    ] if history_request and not temporal_history_lookup else []
     return {
         "status": "ready",
         "relation": _text(context.get("relation") or "NEW").upper(),
@@ -201,6 +208,7 @@ def _compact_question_search(
         "search_direction": _text(semantics.get("direction") or ("SEARCH_DIALOGUE_HISTORY" if history_request else "ANSWER_NEW_REQUEST")),
         "time_scope": _text(semantics.get("time_scope") or "UNSPECIFIED"),
         "history_topics": history_topics,
+        "history_time_search": history_time_search,
         "topic_index": topic_index,
         "confidence": round(float(context.get("relation_confidence") or 0.0), 4),
         "reason": _text(context.get("reason"))[:80],
@@ -949,6 +957,13 @@ async def execute(
     uid = _text(user_id)
     original = _text(text)
     current_text = _text(internal_text or original)
+    try:
+        user_utc_offset_minutes = kwargs.get("user_utc_offset_minutes")
+        user_utc_offset_minutes = int(float(user_utc_offset_minutes)) if user_utc_offset_minutes is not None else None
+        if user_utc_offset_minutes is not None and not (-14 * 60 <= user_utc_offset_minutes <= 14 * 60):
+            user_utc_offset_minutes = None
+    except (TypeError, ValueError, OverflowError):
+        user_utc_offset_minutes = None
     if not uid:
         raise ValueError("USER_ID_REQUIRED")
     file_inputs = [
@@ -1014,6 +1029,8 @@ async def execute(
     memory_started = time.perf_counter()
     semantic_started = time.perf_counter()
     semantic_interpretation = interpret_request_semantics(original or current_text)
+    if user_utc_offset_minutes is not None:
+        semantic_interpretation["user_utc_offset_minutes"] = user_utc_offset_minutes
     _apr_timing_log(
         "semantic_preinterpretation", semantic_started,
         user_key=_apr_diag_ref(uid),
@@ -1033,6 +1050,8 @@ async def execute(
         original or current_text, parent_interpretation=semantic_interpretation
     )
     normalized_semantics = interpret_request_semantics(current_text)
+    if user_utc_offset_minutes is not None:
+        normalized_semantics["user_utc_offset_minutes"] = user_utc_offset_minutes
     normalized_sequence = build_question_sequence(
         current_text, parent_interpretation=normalized_semantics
     )
@@ -1080,6 +1099,7 @@ async def execute(
             "reason": semantic_interpretation.get("reason"),
             "features": semantic_interpretation.get("features", {}),
             "context_signature": semantic_interpretation.get("context_signature", {}),
+            "user_utc_offset_minutes": user_utc_offset_minutes,
         }
         dialogue_context = prepare_dialogue_context(
             uid, current_text, query_interpretation=single_semantics, **search_kwargs
@@ -1133,6 +1153,7 @@ async def execute(
                     "parent_context_dependency": bool(question_item.get("parent_context_dependency")),
                     "parent_intent": question_item.get("parent_intent", ""),
                     "inherits_current_request_subject": inherits_subject,
+                    "user_utc_offset_minutes": user_utc_offset_minutes,
                 }
                 if inherits_subject and current_request_subject_context:
                     active_subject = _text(current_request_subject_context.get("active_topic") or search_query)[:140]
@@ -1225,8 +1246,16 @@ async def execute(
         history_context = next((ctx for ctx in question_contexts if isinstance(ctx, dict) and ctx.get("history_request")), None)
         if history_context:
             dialogue_context["history_available_for_request"] = True
+            # A compound/voice request can split its opening acknowledgement from
+            # the actual history question. The first task may have no selected
+            # pairs; promote the history task's grounded retrieval into the single
+            # top-level provider context instead of forwarding an empty memory.
+            dialogue_context["history_request"] = True
             dialogue_context["history_topics"] = list(history_context.get("history_topics") or [])
             dialogue_context["topic_index"] = list(history_context.get("topic_index") or dialogue_context.get("topic_index") or [])
+            dialogue_context["selected_pairs"] = list(history_context.get("selected_pairs") or dialogue_context.get("selected_pairs") or [])
+            dialogue_context["history_time_search"] = dict(history_context.get("history_time_search") or {})
+            dialogue_context["contextual_history_match"] = bool(history_context.get("contextual_history_match") or dialogue_context.get("contextual_history_match"))
             dialogue_context["known_topic_count"] = max(
                 int(dialogue_context.get("known_topic_count") or 0),
                 int(history_context.get("known_topic_count") or 0),
@@ -1397,6 +1426,7 @@ async def execute(
             "pending_clarification": dialogue_context.get("pending_clarification") or {},
             "clarification_resolution": dialogue_context.get("clarification_resolution") or {},
             "history_topics": (dialogue_context.get("history_topics") or []) if dialogue_context.get("history_request") else [],
+            "history_time_search": dialogue_context.get("history_time_search") or {},
             "topic_index": (dialogue_context.get("topic_index") or []) if (dialogue_context.get("history_request") or dialogue_context.get("contextual_history_match") or dialogue_context.get("relation") == "CONTINUE") else [],
             "known_topic_count": int(dialogue_context.get("known_topic_count") or 0) if (dialogue_context.get("history_request") or dialogue_context.get("contextual_history_match")) else 0,
             "contextual_history_match": bool(dialogue_context.get("contextual_history_match")),
@@ -1454,6 +1484,7 @@ async def execute(
                 "pending_clarification": dialogue_context.get("pending_clarification") or {},
                 "clarification_resolution": dialogue_context.get("clarification_resolution") or {},
                 "history_topics": (dialogue_context.get("history_topics") or []) if dialogue_context.get("history_request") else [],
+                "history_time_search": dialogue_context.get("history_time_search") or {},
                 "topic_index": (dialogue_context.get("topic_index") or []) if dialogue_context.get("history_request") else [],
                 "known_topic_count": int(dialogue_context.get("known_topic_count") or 0) if dialogue_context.get("history_request") else 0,
                 "history_request": bool(dialogue_context.get("history_request")),
