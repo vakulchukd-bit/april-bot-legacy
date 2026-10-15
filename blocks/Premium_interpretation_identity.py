@@ -710,6 +710,7 @@ _CONTEXT_SIGNATURE_GENERIC = {
     "случилось", "произошло", "произошел", "произошёл", "произошла", "диалог", "разговор", "беседа",
     "напиши", "написать", "напишите", "опиши", "описать", "опишите", "расскажи", "расскажите",
     "объясни", "объяснить", "объясните", "поясни", "пояснить", "покажи", "построй", "создай",
+    "решил", "решила", "решили", "научно", "пошагово", "решать",
     "сделай", "вычисли", "рассчитай", "сравни", "найди", "проверь", "проанализируй", "приведи",
     "перечисли", "продолжи", "продолжим", "дальше", "далее", "есть", "какие", "какая", "какой",
     "должен", "должна", "должно", "должны", "был", "была", "были", "нет",
@@ -862,6 +863,47 @@ def _is_short_continuation_preface(text: str) -> bool:
     })) and not _has_explicit_topic_introduction(text)
 
 
+def _looks_like_previous_answer_followup(text: str) -> bool:
+    """Recognise explanation requests whose object is the answer just given.
+
+    This is deliberately conservative: an explicit new subject is not treated as
+    a previous-answer reference. These cues allow memory retrieval without relying
+    on a literal "remember/history" trigger.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    patterns = (
+        r"\bкак\s+(?:ты|вы)\s+(?:решил\w*|посчитал\w*|вычислил\w*|рассчитал\w*|"
+        r"получил\w*|вывел\w*|доказал\w*|обосновал\w*)\b",
+        r"\bкак\s+получил\w*\s+(?:этот\s+|такой\s+)?результат\b",
+        r"\bпочему\s+(?:ты|вы)\s+(?:так|это)\b",
+        r"\b(?:explain|walk\s+me\s+through)\s+(?:that|this|it|the\s+result)\b",
+    )
+    if any(re.search(pattern, low) for pattern in patterns):
+        return True
+    # A standalone qualifier may refer to the previous answer, but an explicitly
+    # supplied new object must be answered independently.
+    explicit_subject = re.search(
+        r"\b(?:математик\w*|экспонент\w*|функци\w*|уравнен\w*|формул\w*|"
+        r"задач\w*|пример\w*|числ\w*|график\w*|таблиц\w*|физик\w*|"
+        r"истор\w*|коперник\w*|эйнштейн\w*|photosynthesis|equation|formula|"
+        r"function|exponent|example|problem|number|graph|table|physics)\b",
+        low,
+    )
+    if explicit_subject:
+        return False
+    # Very short qualifier-only follow-ups have no explicit object of their own.
+    tokens = _semantic_normalize(low)[1]
+    qualifier_only = re.fullmatch(
+        r"\s*(?:а\s+)?(?:объясни|объясните|поясни|поясните|распиши|разбери|"
+        r"докажи|покажи|explain|elaborate)\s+(?:мне\s+)?"
+        r"(?:это|так|научно|пошагово|подробнее|почему|как|scientifically|step\s+by\s+step)\s*[.!?]*\s*",
+        low,
+    )
+    return bool(qualifier_only and len(tokens) <= 5)
+
+
 def interpret_request_semantics(text: str) -> dict[str, Any]:
     """Infer request intent and retrieval direction before splitting into tasks.
 
@@ -889,6 +931,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     plan_action = _semantic_group_hit(tokens, "plan_action")
     continuation_action = _semantic_group_hit(tokens, "continuation_action")
     explicit_topic_introduction = _has_explicit_topic_introduction(source)
+    answer_followup = _looks_like_previous_answer_followup(source)
     past_reference = _semantic_group_hit(tokens, "past_reference")
     future_reference = _semantic_group_hit(tokens, "future_reference")
     today_reference = _semantic_group_hit(tokens, "today_reference")
@@ -960,6 +1003,17 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
             reason = "dialogue_reference_detected_semantically"
         relation_hint = "HISTORY_LOOKUP"
         time_scope = "TODAY" if today_reference else ("RECENT_WINDOW" if recent_reference else ("PAST_DIALOGUE" if past_reference else ("FUTURE_PLAN_CONTEXT" if temporal_future else "AVAILABLE_HISTORY")))
+    elif answer_followup:
+        primary_intent = "TOPIC_CONTINUATION"
+        direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
+        topic_reference = "PREVIOUS_ASSISTANT_ANSWER"
+        time_scope = "ACTIVE_DIALOGUE"
+        requires_memory = True
+        history_request = False
+        search_scope = "TOPIC_OR_ACTIVE_CONTEXT"
+        intent_score = 3 + int(interrogative)
+        relation_hint = "CONTINUE"
+        reason = "previous_answer_explanation_followup"
     elif (continuation_action or (any(token in token_set for token in {"это", "этого", "этом", "тот", "та", "ту", "там", "дальше", "прежнему", "прежней"}) and not temporal_future)) and not explicit_topic_introduction:
         primary_intent = "TOPIC_CONTINUATION"
         direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
@@ -1005,6 +1059,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "decision_action": bool(decision_action),
         "plan_action": bool(plan_action),
         "continuation_action": bool(continuation_action),
+        "answer_followup": bool(answer_followup),
         "self_reference": bool(self_reference),
         "past_reference": bool(past_reference),
         "today_reference": bool(today_reference),
@@ -1158,6 +1213,8 @@ def _split_request_sequence(text: str) -> list[str]:
     source = _text(text)
     if not source:
         return []
+    if _looks_like_previous_answer_followup(source):
+        return [source]
 
     # A detailed 3D-scene prompt is one artifact task with many constraints, not
     # a collection of independent questions. Keep its formula, object counts,
@@ -1284,6 +1341,25 @@ def build_question_sequence(
         if "text" not in outputs:
             outputs.insert(0, "text")
         item_semantics = interpret_request_semantics(item)
+        if (
+            parent.get("requires_memory")
+            and parent.get("topic_reference") == "PREVIOUS_ASSISTANT_ANSWER"
+            and not item_introduces_subject
+        ):
+            item_semantics = {
+                **item_semantics,
+                "primary_intent": "TOPIC_CONTINUATION",
+                "direction": "RESUME_OR_RETRIEVE_ACTIVE_TOPIC",
+                "topic_reference": "PREVIOUS_ASSISTANT_ANSWER",
+                "time_scope": parent.get("time_scope", "ACTIVE_DIALOGUE"),
+                "requires_memory": True,
+                "history_request": False,
+                "search_scope": "TOPIC_OR_ACTIVE_CONTEXT",
+                "relation_hint": "CONTINUE",
+                "parent_context_dependency": True,
+                "parent_intent": parent.get("primary_intent", "TOPIC_CONTINUATION"),
+                "reason": "answer_followup_clause_inherited_parent_context",
+            }
         # Restore omitted subjects in compact follow-on questions from the parent
         # intent: “... and what decisions did we reach?” is a prior-decision query
         # even when the child clause itself omits “we discussed this earlier”.
@@ -1629,7 +1705,7 @@ def build_interpretation(
             "topic_table_markdown": _text(memory.get("topic_table_markdown")),
             "new_dialogue_request": original or text,
             "new_dialogue_active": relation != "CONTINUE" and not history_request,
-            "continuation_context": selected_pairs if (relation == "CONTINUE" or history_request) else [],
+            "continuation_context": selected_pairs if (relation == "CONTINUE" or history_request or bool(memory.get("contextual_history_match"))) else [],
             "selected_section": dict(memory.get("selected_section") or {}),
             "clarification_needed": bool(memory.get("clarification_needed")),
             "pending_clarification": dict(memory.get("pending_clarification") or {}),
