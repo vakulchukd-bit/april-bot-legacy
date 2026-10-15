@@ -121,8 +121,7 @@ For NEW, answer independently and do not let old context override the request.
 
 For a history_request, use DIALOGUE_HISTORY_TOPICS / DIALOGUE_TABLE_MARKDOWN as an index over
 the retained dialogue. Never claim that the dialogue is unavailable when the index contains
-topics. Show the requested number of topics, clamped to 10. Default to 7 when the user does
-not specify a number. The user may then name a topic or give a hint and April should continue
+topics. If the supplied index is empty, say that no records are available in the retained history and do not invent topics. Show up to 10 topics by default, ordered by relevance for a named subject or by recency for a general overview. For an overview, show all available topics up to 10; when at least five exist, show at least five. The user may then name a topic or give a hint and April should continue
 from the corresponding anchor/pairs. Keep the hidden remainder known to the processor; do not
 invent topics that are not in the supplied index. For a range such as “от 5 до 10 тем”, show
 up to HISTORY_TOPIC_COUNT=10 and at least HISTORY_TOPIC_MINIMUM=5 when that many distinct topics
@@ -246,7 +245,7 @@ exists, honor its original_request and treat CURRENT_REQUEST as a clarification 
 intent. For status topic_not_found or needs_more_detail, apologize briefly and say no clear match was found in saved history,
 without claiming the topic definitely never came up; don't repeat old options, and ask for a couple of concrete hints. Keep any resolved topic active.
 Use compact section maps to know what was already covered and how to deepen it. Do not repeat answered sections verbatim. If PROTECTED_STRUCTURED_DATA is present, preserve only its selected source values exactly; compress ordinary explanation and history as usual. If PROTECTED_CURRENT_INPUT is present, read the separately labeled PROTECTED_CURRENT_INPUT_SOURCE input_text part as the lossless authoritative source for the current structured/numeric request: preserve all values/rows/coordinates/formulas/order and never recreate missing data from a summary. That source body is outside the structured-card compaction budget but still counts toward actual API input usage. On NEW, answer independently. For each REQUEST_SEQUENCE item, prefer its own dialogue_search relation/context (or compact r/c fields) over the top-level relation. A NEW item must not inherit another item's prior-history context. When compact flag p=true, inherit only the explicit subject from CURRENT_REQUEST and do not import prior records or structured values for that item. If one item needs clarification, answer all clear items and ask only about the unresolved item. Use topic history only when
-HISTORY_REQUEST=true. For HISTORY_REQUEST=true with a named subject/task, use matching DIALOGUE_TOPIC_INDEX, DIALOGUE_HISTORY_TOPICS, and CONTINUATION_CONTEXT as factual evidence even though the relation can remain NEW. Honor HISTORY_TOPIC_MINIMUM and HISTORY_TOPIC_COUNT, reporting the actual smaller count if fewer distinct entries exist; use HISTORY_TIME_WINDOW as the requested scope after Premium's 24-hour retention cap. Preserve topic_id/origin_message_id/source_message_id bindings when resuming a topic or restoring its table, graph, image or other saved data. Ask for hints only if no matching stored entry/pair is supplied. Enumerate a topic list only when the user asks for a general history overview. For REQUEST_SEQUENCE items marked p=true, resolve pronouns from the explicit subject in CURRENT_REQUEST, without importing prior-history context. For multi-section
+HISTORY_REQUEST=true. For HISTORY_REQUEST=true with a named subject/task, use matching DIALOGUE_TOPIC_INDEX, DIALOGUE_HISTORY_TOPICS, and CONTINUATION_CONTEXT as factual evidence even though the relation can remain NEW. Honor HISTORY_TOPIC_MINIMUM and HISTORY_TOPIC_COUNT; default to up to 10 topics, show at least five when five or more distinct entries exist, and report the actual smaller count when fewer exist. Never invent topics. Use HISTORY_TIME_WINDOW as the requested scope after Premium's 24-hour retention cap. Preserve topic_id/origin_message_id/source_message_id bindings when resuming a topic or restoring its table, graph, image or other saved data. Ask for hints only if no matching stored entry/pair is supplied. Enumerate a topic list only when the user asks for a general history overview. For REQUEST_SEQUENCE items marked p=true, resolve pronouns from the explicit subject in CURRENT_REQUEST, without importing prior-history context. For multi-section
 explanations, use user-visible Markdown headings and put the same ordered heading/summary map in
 dialogue_memory_record.sections.
 Analyze each supplied image/screenshot from pixels and each supplied file from actual content. Keep
@@ -1479,6 +1478,21 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     original_map = data.get("ATTACHMENT_TASK_MAP") if isinstance(data.get("ATTACHMENT_TASK_MAP"), list) else []
     original_topics = data.get("DIALOGUE_HISTORY_TOPICS") if isinstance(data.get("DIALOGUE_HISTORY_TOPICS"), list) else []
     original_pairs = data.get("CONTINUATION_CONTEXT") if isinstance(data.get("CONTINUATION_CONTEXT"), list) else []
+    # This value is used by the nested minimal-card builder below. It must be
+    # resolved here (outside that nested function) so prompt compression cannot
+    # crash on a valid history request when the full prompt exceeds its budget.
+    try:
+        requested_topic_count = max(1, min(10, int(
+            data.get("HISTORY_TOPIC_COUNT") or (len(original_topics) if original_topics else 10)
+        ))) if is_history else 0
+    except (TypeError, ValueError, OverflowError):
+        requested_topic_count = 10 if is_history else 0
+    try:
+        minimum_topic_count = max(1, min(requested_topic_count, int(
+            data.get("HISTORY_TOPIC_MINIMUM") or min(5, requested_topic_count)
+        ))) if is_history else 0
+    except (TypeError, ValueError, OverflowError):
+        minimum_topic_count = min(5, requested_topic_count) if is_history else 0
 
     # Keep at least the identifying metadata for each supplied attachment/image.
     asset_rows = []
@@ -1527,8 +1541,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "semantic_intent": task_search.get("semantic_intent", ""),
                 "search_direction": task_search.get("search_direction", ""),
                 "time_scope": task_search.get("time_scope", "UNSPECIFIED"),
-                "requested_topic_count": max(1, min(10, int(task_search.get("requested_topic_count") or requested_topic_count or 7))) if task_search.get("history_request") else 0,
-                "minimum_topic_count": max(1, min(10, int(task_search.get("minimum_topic_count") or 1))) if task_search.get("history_request") else 0,
+                "requested_topic_count": max(1, min(10, int(task_search.get("requested_topic_count") or requested_topic_count or 10))) if task_search.get("history_request") else 0,
+                "minimum_topic_count": max(1, min(10, int(task_search.get("minimum_topic_count") or min(5, requested_topic_count or 10)))) if task_search.get("history_request") else 0,
                 "time_window": task_search.get("time_window") or {},
                 "time_filter": task_search.get("time_filter") or {},
                 "history_topics": [
@@ -1538,7 +1552,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                      "message_id": topic.get("message_id"), "topic_id": topic.get("topic_id"),
                      "origin_message_id": topic.get("origin_message_id"), "first_at": topic.get("first_at"),
                      "last_at": topic.get("last_at")}
-                    for topic in (task_search.get("history_topics") or [])[:max(1, min(10, int(task_search.get("requested_topic_count") or requested_topic_count or 7)))] if isinstance(topic, dict)
+                    for topic in (task_search.get("history_topics") or [])[:max(1, min(10, int(task_search.get("requested_topic_count") or requested_topic_count or 10)))] if isinstance(topic, dict)
                 ] if task_search.get("history_request") else [],
                 "topic_index": [
                     {"topic": _semantic_compress(topic.get("topic"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
@@ -1546,7 +1560,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                      "message_id": topic.get("message_id"), "topic_id": topic.get("topic_id"),
                      "origin_message_id": topic.get("origin_message_id"), "first_at": topic.get("first_at"),
                      "last_at": topic.get("last_at")}
-                    for topic in (task_search.get("topic_index") or [])[:max(1, min(10, int(task_search.get("requested_topic_count") or requested_topic_count or 7)))] if isinstance(topic, dict)
+                    for topic in (task_search.get("topic_index") or [])[:max(1, min(10, int(task_search.get("requested_topic_count") or requested_topic_count or 10)))] if isinstance(topic, dict)
                 ] if task_search.get("history_request") else [],
                 "topic": _semantic_compress(task_search.get("topic"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
                 "reason": _semantic_compress(task_search.get("reason"), max(_scaled_prompt_tokens(8), summary_budget // 3)),
@@ -1667,7 +1681,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "DIALOGUE_RELATION": data.get("DIALOGUE_RELATION") or "NEW",
             "HISTORY_REQUEST": is_history,
             "HISTORY_TOPIC_COUNT": data.get("HISTORY_TOPIC_COUNT", 0) if is_history else 0,
-            "HISTORY_TOPIC_MINIMUM": data.get("HISTORY_TOPIC_MINIMUM", 0) if is_history else 0,
+            "HISTORY_TOPIC_MINIMUM": minimum_topic_count if is_history else 0,
             "HISTORY_TIME_WINDOW": (data.get("HISTORY_TIME_WINDOW") or {}) if is_history else {},
             "DIALOGUE_ANCHOR": anchor_min,
             "CONTINUATION_CONTEXT": pairs_min,
@@ -1730,7 +1744,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "render_payload_token_budget": PREMIUM_RENDER_TOKEN_BUDGET,
                 "explanation_answer_token_budget": PREMIUM_TEXT_TOKEN_BUDGET,
                 "render_budget_included_in_total": True,
-                "requested_topic_count": max(1, len(original_sequence)),
+                "requested_topic_count": requested_topic_count if is_history else max(1, len(original_sequence)),
                 "preserve_all_requested_topics": True,
                 "complete_answer_required": True,
                 "single_provider_call": False,
@@ -2135,9 +2149,9 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
     selected_pairs = continuation.get("selected_pairs") or memory.get("selected_pairs") or []
     new_dialogue = dialogue.get("new_dialogue") if isinstance(dialogue.get("new_dialogue"), dict) else {}
     history_request = bool(structured_intent.get("history_request") or memory.get("history_request") or request_input.get("history_request"))
-    requested_topic_count = int(structured_intent.get("history_count") or memory.get("requested_topic_count") or 7)
+    requested_topic_count = int(structured_intent.get("history_count") or memory.get("requested_topic_count") or 10)
     requested_topic_count = max(1, min(10, requested_topic_count))
-    minimum_topic_count = int(structured_intent.get("history_count_minimum") or memory.get("minimum_topic_count") or 1)
+    minimum_topic_count = int(structured_intent.get("history_count_minimum") or memory.get("minimum_topic_count") or min(5, requested_topic_count))
     minimum_topic_count = max(1, min(requested_topic_count, minimum_topic_count))
     history_time_window = structured_intent.get("time_window") or memory.get("time_window") or {}
     if not isinstance(history_time_window, dict):
