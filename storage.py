@@ -1006,6 +1006,103 @@ def find_or_create_user(email, name="", provider="google", provider_user_id=None
     )
 
 
+
+def delete_april_account(user_id: Any) -> dict[str, Any]:
+    """Permanently delete the authenticated user's April-side account data.
+
+    This intentionally touches only April's PostgreSQL tables. It does not call
+    Google APIs, revoke Google OAuth, or delete anything from the user's Google
+    account. All related table changes run in one transaction.
+    """
+    raw = str(user_id or "").strip()
+    if not raw:
+        return {"success": False, "error": "USER_ID_REQUIRED"}
+
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # Lock the account row while resolving and deleting it. This
+                # prevents the identity from changing during the deletion.
+                cur.execute(
+                    """
+                    SELECT user_id, april_id, email, provider, premium_id
+                    FROM users
+                    WHERE user_id = %s OR april_id = %s
+                    ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
+                    LIMIT 1
+                    FOR UPDATE
+                    """,
+                    (raw, raw, raw),
+                )
+                row = cur.fetchone() or {}
+                if not row:
+                    return {"success": False, "error": "ACCOUNT_NOT_FOUND"}
+                if not _is_authenticated_row(row):
+                    return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+
+                canonical_id = str(row.get("user_id") or "").strip()
+                public_id = str(row.get("april_id") or "").strip()
+                premium_id = str(row.get("premium_id") or "").strip()
+                account_ids = list(dict.fromkeys(
+                    value for value in (canonical_id, public_id, raw) if value
+                ))
+
+                # Premium binary uploads and generated files are stored outside
+                # PostgreSQL under hashed per-user directories. Remove all known
+                # ID variants before committing database deletion. If cleanup fails,
+                # keep the account row so the same request can safely be retried.
+                try:
+                    from blocks.premium_asset_store import delete_user_assets
+                    for asset_owner_id in account_ids:
+                        if not delete_user_assets(asset_owner_id):
+                            return {"success": False, "error": "ACCOUNT_ASSETS_DELETE_FAILED"}
+                except Exception as exc:
+                    print(f"[APRIL_ACCOUNT_DELETE] ASSET_CLEANUP_FAILED type={type(exc).__name__}", flush=True)
+                    return {"success": False, "error": "ACCOUNT_ASSETS_DELETE_FAILED"}
+
+                # History rows contain the user's prompts, April's answers,
+                # structured requests/responses and persisted render metadata.
+                # Delete both canonical and legacy ID variants for completeness;
+                # the users FK also has ON DELETE CASCADE as a final safeguard.
+                cur.execute(
+                    "DELETE FROM dialogue_memory WHERE user_id = ANY(%s)",
+                    (account_ids,),
+                )
+                dialogue_rows = int(cur.rowcount or 0)
+
+                # April's internal billing/entitlement ledger is part of the
+                # April account. Google Play records/subscriptions, if any, are
+                # managed by Google and are not touched by this transaction.
+                cur.execute(
+                    """
+                    DELETE FROM payments
+                    WHERE user_id = ANY(%s)
+                       OR (%s <> '' AND premium_id = %s)
+                    """,
+                    (account_ids, premium_id, premium_id),
+                )
+                payment_rows = int(cur.rowcount or 0)
+
+                cur.execute("DELETE FROM users WHERE user_id = %s", (canonical_id,))
+                if int(cur.rowcount or 0) != 1:
+                    raise RuntimeError("APRIL_ACCOUNT_DELETE_ROW_COUNT_MISMATCH")
+
+        return {
+            "success": True,
+            "deleted": True,
+            "deleted_dialogue_rows": dialogue_rows,
+            "deleted_payment_rows": payment_rows,
+        }
+    except Exception as exc:
+        print(f"[APRIL_ACCOUNT_DELETE] FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "ACCOUNT_DELETE_FAILED"}
+    finally:
+        conn.close()
+
 def set_subscription(user_id, plan="premium"):
     # Legacy/public April IDs are accepted at entry points, but the canonical
     # subscription row is always keyed by users.user_id.
