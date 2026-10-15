@@ -12,9 +12,12 @@ import hashlib
 import re
 import json
 import math
+import os
 import threading
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Any
 
 from rapidfuzz import fuzz
@@ -71,6 +74,15 @@ _HISTORY_MARKERS = (
     "история диалога",
     "история разговора",
     "наши темы",
+    "последняя тема",
+    "последнюю тему",
+    "последний диалог",
+    "последний разговор",
+    "в последнее время",
+    "за последнее время",
+    "что было час назад",
+    "что было минут",
+    "что было несколько часов назад",
     "что было в диалоге",
     "о чем шла речь",
     "о чём шла речь",
@@ -431,17 +443,7 @@ _CONTEXT_NON_TOPICAL_ROOTS = (
     "напиш", "опиш", "расскаж", "объясн", "поясн", "покаж", "постро", "созда",
     "сдела", "вычисл", "рассчит", "сравн", "найд", "проверь", "проанализ", "привед",
     "перечисл", "продолж", "дальш", "должн", "каки", "был",
-    # Discourse pointers are not independent topic names in a continuation request.
-    "предыдущ", "прошл", "раньше", "ранее", "ответ", "тем",
     "формул", "график", "таблиц", "диаграмм", "уравнен", "данн", "значен",
-)
-
-_CONTINUATION_DISCOURSE_ROOTS = (
-    "продолж", "continue", "resume", "вернись", "возвращ", "предыдущ", "прошл",
-    "раньше", "ранее", "ответ", "тем", "очен", "честн", "спасиб", "благодар",
-    "хорош", "отлич", "понрав", "интерес", "прият", "молод", "рад", "ясн",
-    "понят", "конечн", "ладно", "давай", "пожалу", "просто", "вперед",
-    "great", "good", "thanks", "thank", "honest", "glad", "nice", "please", "kindly",
 )
 
 _PARTICIPANT_SPEAKER_WORDS = {
@@ -458,94 +460,6 @@ def _is_non_topical_subject_term(token: str) -> bool:
     if token in _CONTEXT_GENERIC_TERMS:
         return True
     return any(len(root) >= 5 and token.startswith(root) for root in _CONTEXT_NON_TOPICAL_ROOTS)
-
-
-def _is_discourse_only_continuation(
-    query: str,
-    interpretation: dict[str, Any] | None,
-    *,
-    history_request: bool = False,
-    new_topic_request: bool = False,
-    has_attachment: bool = False,
-) -> bool:
-    """Recognize a continuation whose wording contains no independent subject.
-
-    This is based on the interpreted communicative act and remaining content
-    words, not a single mandatory phrase. A named subject such as "algebra"
-    remains meaningful and continues through ordinary topic matching.
-    """
-    profile = interpretation if isinstance(interpretation, dict) else {}
-    intent = _text(profile.get("primary_intent")).upper()
-    direction = _text(profile.get("direction")).upper()
-    relation_hint = _text(profile.get("relation_hint")).upper()
-    features = profile.get("features") if isinstance(profile.get("features"), dict) else {}
-    continuation_intent = (
-        intent in {"TOPIC_CONTINUATION", "ANSWER_FOLLOWUP"}
-        or direction == "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
-        or (relation_hint == "CONTINUE" and bool(profile.get("requires_memory")))
-        or bool(features.get("acknowledgement_with_continuation"))
-    )
-    if not continuation_intent or history_request or new_topic_request or has_attachment:
-        return False
-
-    informative = set()
-    for token in _semantic_tokens(query):
-        if _is_non_topical_subject_term(token):
-            continue
-        if any(len(root) >= 4 and token.startswith(root) for root in _CONTINUATION_DISCOURSE_ROOTS):
-            continue
-        if len(token) < 4:
-            continue
-        informative.add(_subject_family(token))
-    return not informative
-
-
-def _is_assistant_recovery_response(row: dict[str, Any] | None) -> bool:
-    """Detect a saved assistant turn that deferred continuation instead of answering.
-
-    Prefer explicit saved state when present. The fallback combines uncertainty
-    with a request for a hint, so it identifies a response act rather than matching
-    the current user's wording.
-    """
-    if not isinstance(row, dict):
-        return False
-    response = _parse_json(row.get("structured_response"))
-    metadata = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
-    record = response.get("dialogue_memory_record")
-    if not isinstance(record, dict):
-        record = metadata.get("dialogue_memory_record") if isinstance(metadata.get("dialogue_memory_record"), dict) else {}
-    if any(bool(source.get(key)) for source in (response, metadata, record) for key in (
-        "clarification_needed", "awaiting_topic_hint", "continuation_deferred",
-    )):
-        return True
-
-    summary = _text(record.get("summary")) if isinstance(record, dict) else ""
-    answer = " ".join((
-        _text(row.get("april_text") or row.get("april")),
-        _text(row.get("april_text_en") or row.get("april_en")),
-        _text(response.get("answer")), _text(response.get("content")),
-        summary, _text(row.get("memory_summary")),
-    )).lower().replace("ё", "е")
-    answer = re.sub(r"\s+", " ", answer)
-    if not answer:
-        return False
-    uncertainty = any(term in answer for term in (
-        "не вижу, о какой", "не вижу, что именно", "не нашлось ясного совпад",
-        "не нашла ясного совпад", "не удалось найти совпад", "не могу определить, какую тему",
-        "i cannot tell which topic", "i can't tell which topic", "could not identify the topic",
-        "couldn't identify the topic", "no clear match was found",
-    ))
-    asks_for_hint = any(term in answer for term in (
-        "подсказ", "подскажи", "последнее сообщение", "пару слов", "одно-два слова",
-        "1–2 слова", "1-2 слова", "напомни, о чем", "напомни, о чём", "hint",
-        "last message", "a few words", "one or two words", "which topic",
-    ))
-    defers_until_ready = any(term in answer for term in (
-        "напиши, когда будешь готов продолжить", "напиши когда будешь готов продолжить",
-        "когда будешь готов продолжить", "write when you're ready to continue",
-        "let me know when you're ready to continue",
-    ))
-    return bool((uncertainty and asks_for_hint) or defers_until_ready)
 
 
 def _contains_named_value(text: Any) -> bool:
@@ -1799,6 +1713,11 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
     evidence = (_text(item.get("attachment_evidence")) or _row_attachment_evidence(item))[:900] if has_asset else ""
     return {
         "turn": item.get("turn_index"),
+        "created_at": float(item.get("created_at") or 0) if item.get("created_at") else None,
+        "history_time_relation": _text(item.get("history_time_relation")),
+        "history_time_label": _text(item.get("history_time_label"))[:140],
+        "history_age_minutes": item.get("history_age_minutes"),
+        "history_gap_minutes": item.get("history_gap_minutes"),
         "user": _text(item.get("user") or item.get("user_text"))[:180],
         "april": outline[:220],
         "topic": _text(item.get("topic"))[:100],
@@ -1842,6 +1761,15 @@ _HISTORY_QUERY_NOISE = _SECTION_TOPIC_NOISE | {
     "обсуждение", "обсуждении", "разговор", "разговора", "разговоре", "речь",
     "история", "истории", "диалог", "диалога", "диалоге", "общение", "общения",
     "сегодня", "вчера", "позавчера", "сейчас", "раньше", "тогда", "недавно",
+    "время", "времен", "последнее", "последний", "последнюю", "последней",
+    "последние", "последних", "последнего", "последнюю", "итак", "вообще", "вообщем",
+    "назови", "назвать", "назад", "тому", "час", "часа", "часов", "ч", "минут", "минуту",
+    "минуты", "минутой", "день", "дня", "дней", "сутки", "суток",
+    "полчаса", "примерно", "около", "приблизительно", "утра", "вечера",
+    "ночью", "днем", "днём", "вечером", "утром", "в", "один", "одна", "одно",
+    "одну", "два", "две", "пару", "пара", "три", "четыре", "пять", "шесть",
+    "семь", "восемь", "девять", "десять", "полтора", "полторы", "говорим",
+    "говорить", "говорю", "говорят", "говоришь", "общаемся", "обсуждаем",
     "прошлый", "прошлая", "прошлое", "прошлую", "предыдущий", "предыдущая",
     "предыдущее", "предыдущую", "напомни", "вспомни", "помнишь", "помним",
     "вспомнить", "напомнить", "сказать", "расскажи", "расскажите", "кратко",
@@ -1888,6 +1816,365 @@ def _history_query_topic_tokens(query: str) -> set[str]:
         token for token in (_semantic_tokens(query) - _HISTORY_QUERY_NOISE)
         if not token.isdigit() and len(token) > 2
     }
+
+
+_HISTORY_TIME_NUMBERS = {
+    "ноль": 0, "один": 1, "одна": 1, "одно": 1, "одну": 1,
+    "два": 2, "две": 2, "пару": 2, "пара": 2,
+    "три": 3, "четыре": 4, "пять": 5, "шесть": 6, "семь": 7,
+    "восемь": 8, "девять": 9, "десять": 10, "полтора": 1.5,
+    "полторы": 1.5,
+}
+def _history_time_number(raw: str | None) -> float | None:
+    value = _text(raw).lower().replace("ё", "е")
+    if not value:
+        return None
+    if value.isdigit():
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return _HISTORY_TIME_NUMBERS.get(value)
+
+
+def _format_history_duration(minutes: float) -> str:
+    """Format a time gap for user-facing explanation without assuming a timezone."""
+    total = max(0, int(round(abs(float(minutes)))))
+    days, rem = divmod(total, 1440)
+    hours, mins = divmod(rem, 60)
+    bits = []
+    if days:
+        bits.append(f"{days} дн.")
+    if hours:
+        bits.append(f"{hours} ч.")
+    if mins or not bits:
+        bits.append(f"{mins} мин.")
+    return " ".join(bits)
+
+
+def _history_local_now(now_value: float, utc_offset_minutes: int | None) -> tuple[datetime, str]:
+    """Resolve wall-clock references in the client's zone or configured app default.
+
+    April Premium already uses Europe/Kyiv as the project's default civil timezone;
+    Free follows the same default but accepts a client offset when the Web sends it.
+    Deployments serving another primary timezone can override APRIL_DEFAULT_TIMEZONE.
+    """
+    if utc_offset_minutes is not None:
+        try:
+            zone = timezone(timedelta(minutes=int(utc_offset_minutes)))
+            return datetime.fromtimestamp(now_value, tz=zone), "client_offset"
+        except (TypeError, ValueError, OverflowError, OSError):
+            pass
+    zone_name = (os.getenv("APRIL_DEFAULT_TIMEZONE") or "Europe/Kyiv").strip() or "Europe/Kyiv"
+    try:
+        zone = ZoneInfo(zone_name)
+        return datetime.fromtimestamp(now_value, tz=zone), f"default_timezone:{zone_name}"
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return datetime.fromtimestamp(now_value).astimezone(), "process_local_fallback"
+
+
+def _parse_history_time_reference(
+    query: str,
+    *,
+    now_ts: float | None = None,
+    utc_offset_minutes: int | None = None,
+) -> dict[str, Any]:
+    """Resolve a stated history time to an epoch interval in the retained memory.
+
+    Relative expressions are timezone-independent. Clock-only expressions use a
+    supplied client UTC offset when available and otherwise APRIL_DEFAULT_TIMEZONE
+    (Europe/Kyiv by default, matching the existing Premium temporal layer). The normal
+    search tolerance is +/- 30 minutes around a point/range.
+    """
+    low = re.sub(r"\s+", " ", _text(query).lower().replace("ё", "е")).strip()
+    if not low:
+        return {}
+    now_value = float(now_ts if now_ts is not None else time.time())
+    tolerance = 30 * 60
+
+    unit_pattern = r"(?:минут\w*|мин|час\w*|ч\b|дн\w*|сут\w*)"
+    number_pattern = r"(?:\d+|один|одна|одно|одну|два|две|пару|пара|три|четыре|пять|шесть|семь|восемь|девять|десять|полтора|полторы)"
+
+    # Ranges like "два-три часа назад" define an interval, not one guessed instant.
+    range_match = re.search(
+        rf"({number_pattern})\s*(?:-|–|—|до)\s*({number_pattern})\s*({unit_pattern})\s*(?:назад|тому назад)",
+        low,
+    )
+    if range_match:
+        # Group numbers are duplicated by the reusable fragments; retrieve them
+        # from the full match to avoid depending on regex group numbering.
+        nums = [range_match.group(1), range_match.group(2)]
+        unit_word = re.search(r"минут\w*|\bмин\b|час\w*|\bч\b|дн\w*|сут\w*", range_match.group(0))
+        first = _history_time_number(nums[0]) if nums else None
+        second = _history_time_number(nums[1]) if len(nums) > 1 else None
+        unit = _text(unit_word.group(0)) if unit_word else "час"
+        multiplier = 60 if unit.startswith("мин") else 86400 if unit.startswith(("дн", "сут")) else 3600
+        if first is not None and second is not None:
+            low_distance, high_distance = sorted((first, second))
+            # “2–3 hours ago” spans [now-3h, now-2h], widened by the tolerance.
+            target_start = now_value - high_distance * multiplier
+            target_end = now_value - low_distance * multiplier
+            return {
+                "requested": True, "kind": "relative_range",
+                "requested_phrase": range_match.group(0),
+                "target_start_ts": target_start, "target_end_ts": target_end,
+                "window_start_ts": target_start - tolerance,
+                "window_end_ts": target_end + tolerance,
+                "tolerance_minutes": 30,
+                "target_description": f"между {_format_history_duration(low_distance * multiplier / 60)} и {_format_history_duration(high_distance * multiplier / 60)} назад",
+            }
+
+    # Point expressions: "час назад", "два часа назад", "15 минут назад".
+    point_pattern = re.search(
+        rf"(?:(?P<num>\d+|один|одна|одно|одну|два|две|пару|пара|три|четыре|пять|шесть|семь|восемь|девять|десять|полтора|полторы)\s*)?(?P<unit>полчаса|пол\s+часа|минут\w*|мин\b|час\w*|\bч\b|дн\w*|сут\w*)\s*(?:назад|тому назад)",
+        low,
+    )
+    if point_pattern:
+        unit_word = point_pattern.group("unit")
+        if unit_word.startswith("пол"):
+            amount = 0.5
+            multiplier = 3600
+        else:
+            amount = _history_time_number(point_pattern.group("num"))
+            if amount is None:
+                amount = 1.0
+            multiplier = 60 if unit_word.startswith("мин") else 86400 if unit_word.startswith(("дн", "сут")) else 3600
+        distance = amount * multiplier
+        target = now_value - distance
+        return {
+            "requested": True, "kind": "relative_point",
+            "requested_phrase": point_pattern.group(0),
+            "target_start_ts": target, "target_end_ts": target,
+            "window_start_ts": target - tolerance, "window_end_ts": target + tolerance,
+            "tolerance_minutes": 30,
+            "target_description": f"примерно {_format_history_duration(distance / 60)} назад",
+        }
+
+    # Period requests such as "за последний час" mean [now-duration, now],
+    # rather than a point centred one hour in the past.
+    period_match = re.search(
+        rf"(?:за\s+)?последн\w*\s+(?:(?P<num>\d+|один|одна|одно|одну|два|две|пару|пара|три|четыре|пять|шесть|семь|восемь|девять|десять)\s*)?(?P<unit>минут\w*|час\w*|дн\w*|сут\w*)",
+        low,
+    )
+    if period_match:
+        amount = _history_time_number(period_match.group("num")) or 1.0
+        unit_word = period_match.group("unit")
+        multiplier = 60 if unit_word.startswith("мин") else 86400 if unit_word.startswith(("дн", "сут")) else 3600
+        start = now_value - amount * multiplier
+        return {
+            "requested": True, "kind": "recent_period",
+            "requested_phrase": period_match.group(0),
+            "target_start_ts": start, "target_end_ts": now_value,
+            "window_start_ts": start, "window_end_ts": now_value,
+            "tolerance_minutes": 0,
+            "target_description": f"за последние {_format_history_duration(amount * multiplier / 60)}",
+        }
+
+    # Clock time. Explicit calendar-day words must override the default rule
+    # that rolls a future-looking clock time back to yesterday.
+    explicit_day_offset = -2 if re.search(r"\bпозавчера\b", low) else (-1 if re.search(r"\bвчера\b", low) else 0)
+    # Use a client timezone offset when one is provided. In legacy callers with
+    # no offset, use process-local time and mark that basis in metadata.
+    hour_match = re.search(
+        r"(?:\bв\s+|около\s+|примерно\s+в\s+)(\d{1,2})(?:\s*(?:час(?:а|ов)?))?\s*(утра|вечера|дня|днем|днём|ночи)\b",
+        low,
+    )
+    if hour_match:
+        hour = int(hour_match.group(1))
+        daypart_word = hour_match.group(2)
+        if 0 <= hour <= 23:
+            if daypart_word == "вечера" or daypart_word in {"дня", "днем", "днём"}:
+                hour = hour + 12 if hour < 12 else hour
+            elif daypart_word == "ночи" and hour == 12:
+                hour = 0
+            elif daypart_word == "утра" and hour == 12:
+                hour = 0
+            local_now, time_basis = _history_local_now(now_value, utc_offset_minutes)
+            candidate = local_now.replace(hour=hour, minute=0, second=0, microsecond=0)
+            if explicit_day_offset:
+                candidate += timedelta(days=explicit_day_offset)
+            elif candidate.timestamp() > now_value + tolerance:
+                candidate -= timedelta(days=1)
+            target = candidate.timestamp()
+            return {
+                "requested": True, "kind": "clock_point",
+                "requested_phrase": hour_match.group(0),
+                "target_start_ts": target, "target_end_ts": target,
+                "window_start_ts": target - tolerance, "window_end_ts": target + tolerance,
+                "tolerance_minutes": 30, "time_basis": time_basis,
+                "target_description": f"примерно в {hour:02d}:00",
+            }
+    clock_match = re.search(r"(?:\bв\s+|около\s+|примерно\s+в\s+)(\d{1,2})[:.](\d{2})\b", low)
+    if clock_match:
+        hour, minute = int(clock_match.group(1)), int(clock_match.group(2))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            local_now, time_basis = _history_local_now(now_value, utc_offset_minutes)
+            candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if explicit_day_offset:
+                candidate += timedelta(days=explicit_day_offset)
+            elif candidate.timestamp() > now_value + tolerance:
+                candidate -= timedelta(days=1)
+            target = candidate.timestamp()
+            return {
+                "requested": True, "kind": "clock_point",
+                "requested_phrase": clock_match.group(0),
+                "target_start_ts": target, "target_end_ts": target,
+                "window_start_ts": target - tolerance, "window_end_ts": target + tolerance,
+                "tolerance_minutes": 30, "time_basis": time_basis,
+                "target_description": f"примерно в {hour:02d}:{minute:02d}",
+            }
+
+    # Dayparts use a bounded interval; only records still in the canonical retention
+    # window can be returned, so older requests transparently fall back to nearest rows.
+    daypart = None
+    if "сегодня утром" in low or re.search(r"\bутром\b", low):
+        daypart = (4, 12, "сегодня утром")
+    elif "сегодня днем" in low or "сегодня днём" in low or re.search(r"\bднем\b|\bднём\b", low):
+        daypart = (12, 17, "сегодня днём")
+    elif "сегодня вечером" in low or re.search(r"\bвечером\b", low):
+        daypart = (17, 23, "сегодня вечером")
+    if daypart:
+        local_now, time_basis = _history_local_now(now_value, utc_offset_minutes)
+        day = local_now.date() + timedelta(days=explicit_day_offset)
+        day_name = "позавчера" if explicit_day_offset == -2 else "вчера" if explicit_day_offset == -1 else "сегодня"
+        label = f"{day_name} {daypart[2].replace('сегодня ', '')}"
+        start_dt = local_now.replace(year=day.year, month=day.month, day=day.day, hour=daypart[0], minute=0, second=0, microsecond=0)
+        end_dt = local_now.replace(year=day.year, month=day.month, day=day.day, hour=daypart[1], minute=0, second=0, microsecond=0)
+        return {
+            "requested": True, "kind": "daypart", "requested_phrase": label,
+            "target_start_ts": start_dt.timestamp(), "target_end_ts": end_dt.timestamp(),
+            "window_start_ts": start_dt.timestamp(), "window_end_ts": min(end_dt.timestamp(), now_value),
+            "tolerance_minutes": 0, "time_basis": time_basis, "target_description": label,
+        }
+    return {}
+
+
+def _history_time_gap_label(created_at: float, spec: dict[str, Any], now_ts: float) -> tuple[str, str, int, int]:
+    start = float(spec.get("window_start_ts") or 0)
+    end = float(spec.get("window_end_ts") or 0)
+    target_start = float(spec.get("target_start_ts") or start)
+    target_end = float(spec.get("target_end_ts") or end)
+    midpoint = (target_start + target_end) / 2.0
+    age_minutes = int(round((now_ts - created_at) / 60.0))
+    delta_minutes = int(round((created_at - midpoint) / 60.0))
+    if start <= created_at <= end:
+        relation = "inside_requested_window"
+        gap_minutes = 0
+        label = "внутри указанного временного промежутка"
+    elif created_at < start:
+        relation = "before_requested_window"
+        gap_minutes = int(round((start - created_at) / 60.0))
+        label = f"примерно за {_format_history_duration(gap_minutes)} до указанного промежутка"
+    else:
+        relation = "after_requested_window"
+        gap_minutes = int(round((created_at - end) / 60.0))
+        label = f"примерно через {_format_history_duration(gap_minutes)} после указанного промежутка"
+    age_label = f"сам диалог сохранён примерно {_format_history_duration(age_minutes)} назад"
+    return relation, f"{label}; {age_label}", gap_minutes, delta_minutes
+
+
+def _select_temporal_history_pairs(
+    query: str,
+    matches: list[dict[str, Any]],
+    all_rows: list[dict[str, Any]],
+    spec: dict[str, Any],
+    *,
+    now_ts: float | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], int]:
+    """Select records in a requested time window; otherwise return nearest neighbors."""
+    now_value = float(now_ts if now_ts is not None else time.time())
+    usable = [item for item in matches if isinstance(item, dict)
+              and not item.get("is_pending_clarification") and float(item.get("created_at") or 0) > 0]
+    usable.sort(key=lambda item: float(item.get("created_at") or 0))
+    if not usable:
+        meta = {**spec, "status": "no_saved_dialogues", "dialogues_in_window": 0,
+                "selected_dialogues": [], "instruction": "No dialogue pair exists in retained memory; say so clearly and do not invent a topic."}
+        return [], meta, 0
+
+    topic_tokens = _history_query_topic_tokens(query)
+    topic_hits: list[dict[str, Any]] = []
+    if topic_tokens:
+        for item in usable:
+            candidate_text = " ".join((_text(item.get("topic")), _text(item.get("user")),
+                                       _text(item.get("user_en")), _text(item.get("april")),
+                                       _text(item.get("april_en")), _text(item.get("memory_summary"))))
+            overlap = _fuzzy_token_overlap(topic_tokens, _semantic_tokens(candidate_text))
+            if overlap >= 0.34 or (len(topic_tokens) == 1 and overlap > 0):
+                topic_hits.append(item)
+    constrained = bool(topic_tokens and topic_hits)
+    candidates = topic_hits if constrained else usable
+    start = float(spec.get("window_start_ts") or 0)
+    end = float(spec.get("window_end_ts") or 0)
+    in_window = [item for item in candidates if start <= float(item.get("created_at") or 0) <= end]
+    topic_status = "topic_match_found" if constrained else ("topic_not_confirmed" if topic_tokens else "not_applicable")
+
+    if in_window:
+        target_midpoint = (float(spec.get("target_start_ts") or start) + float(spec.get("target_end_ts") or end)) / 2.0
+        in_window.sort(key=lambda item: (
+            abs(float(item.get("created_at") or 0) - target_midpoint),
+            -float(item.get("score") or 0),
+        ))
+        chosen = in_window[:3]
+        status = "matched_requested_window" if constrained or not topic_tokens else "matched_window_topic_unconfirmed"
+        matched_count = len(in_window)
+        instruction = "Use only the returned dialogue pairs as factual evidence for this time request."
+    else:
+        # Topic is an explicit constraint: nearest prior/next matching-topic records
+        # take precedence. If no subject match was found at all, nearest records by
+        # time are still returned, but metadata forbids claiming a topic match.
+        before = [item for item in candidates if float(item.get("created_at") or 0) < start]
+        after = [item for item in candidates if float(item.get("created_at") or 0) > end]
+        previous = max(before, key=lambda item: float(item.get("created_at") or 0), default=None)
+        following = min(after, key=lambda item: float(item.get("created_at") or 0), default=None)
+        chosen = []
+        if previous:
+            chosen.append(previous)
+        if following and (not previous or _text(following.get("message_id")) != _text(previous.get("message_id"))):
+            chosen.append(following)
+        if not chosen:
+            # This happens when the target is beyond the retained edge. Return the
+            # closest retained record(s) and let the response disclose the gap.
+            chosen = sorted(candidates, key=lambda item: abs(float(item.get("created_at") or 0) - ((start + end) / 2.0)))[:2]
+        status = "nearest_topic_dialogues_outside_window" if constrained else "empty_window_nearest_dialogues"
+        matched_count = 0
+        instruction = (
+            "No saved dialogue exists inside the requested time window. Name the nearest returned dialogue(s), "
+            "state whether each is before or after the requested interval and the approximate gap; never present them as if they were inside it."
+        )
+
+    selected: list[dict[str, Any]] = []
+    selected_dialogue_times = []
+    for item in chosen:
+        pair = _compact_pair(item)
+        created = float(item.get("created_at") or 0)
+        relation, label, gap_minutes, delta_minutes = _history_time_gap_label(created, spec, now_value)
+        pair["history_time_relation"] = relation
+        pair["history_time_label"] = label
+        pair["history_age_minutes"] = int(round((now_value - created) / 60.0))
+        pair["history_gap_minutes"] = gap_minutes
+        selected.append(pair)
+        selected_dialogue_times.append({
+            "topic": _text(item.get("topic"))[:100],
+            "message_id": _text(item.get("message_id")),
+            "relation": relation,
+            "time_label": label,
+            "age_minutes": pair["history_age_minutes"],
+            "gap_minutes": gap_minutes,
+            "offset_from_target_minutes": delta_minutes,
+        })
+
+    meta = {
+        **spec,
+        "status": status,
+        "topic_constraint": bool(topic_tokens),
+        "topic_match_found": constrained,
+        "topic_terms": sorted(topic_tokens)[:8],
+        "dialogues_in_window": matched_count,
+        "selected_count": len(selected),
+        "selected_dialogues": selected_dialogue_times,
+        "instruction": instruction,
+    }
+    return selected, meta, matched_count
 
 
 def _history_topic_text(item: dict[str, Any]) -> str:
@@ -2358,17 +2645,6 @@ def search_dialogue_context(
     interpreted_intent = _text(query_interpretation.get("primary_intent"))
     context_signature = _query_context_signature(query, query_interpretation)
     query_subjects = set(context_signature.get("subject_terms") or _subject_tokens(query))
-    discourse_only_continuation = _is_discourse_only_continuation(
-        query, query_interpretation,
-        history_request=history_request,
-        new_topic_request=new_topic_request,
-        has_attachment=bool(has_image or has_file or has_voice),
-    )
-    if discourse_only_continuation:
-        # Courtesy words and phrases such as "previous answer" describe the
-        # conversational link. Do not let them masquerade as a topic noun.
-        context_signature = {**context_signature, "subject_terms": [], "has_explicit_subject": False}
-        query_subjects = set()
     _apr_timing_log(
         "memory_intent_received",
         user_key=_apr_diag_ref(uid),
@@ -2381,7 +2657,6 @@ def search_dialogue_context(
         search_direction=interpreted_direction,
         time_scope=_text(query_interpretation.get("time_scope")),
         search_scope=_text(query_interpretation.get("search_scope")),
-        discourse_only_continuation=discourse_only_continuation,
     )
 
     scope_started = time.perf_counter()
@@ -2471,32 +2746,6 @@ def search_dialogue_context(
     latest_same_dialog = max((item for item in matches if bool(item.get("same_dialog"))),
         key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)), default=None)
     best = matches[0] if matches else None
-    recovered_after_repair_prompt = False
-    if discourse_only_continuation and latest_same_dialog and _is_assistant_recovery_response(latest_same_dialog):
-        latest_id = _text(latest_same_dialog.get("message_id"))
-        previous_rows = sorted(
-            [row for row in all_rows if isinstance(row, dict)
-             and _text(row.get("message_id")) != latest_id
-             and (not dialog_id or not _text(row.get("dialog_id")) or _text(row.get("dialog_id")) == _text(dialog_id))
-             and not _row_is_pending_clarification(row)
-             and not _is_assistant_recovery_response(row)],
-            key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
-            reverse=True,
-        )
-        if previous_rows:
-            # The newest assistant turn was a clarification loop, not the topic's
-            # answer. Recover the nearest prior substantive turn for this follow-up.
-            latest_same_dialog = _candidate_score(
-                query, previous_rows[0], dialog_id=str(dialog_id or ""),
-                reference_followup=True, query_modalities=query_modalities,
-            )
-            recovered_after_repair_prompt = True
-            _apr_timing_log(
-                "active_branch_recovered_after_repair_prompt",
-                user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
-                previous_message_key=_apr_diag_ref(latest_id),
-                restored_message_key=_apr_diag_ref(latest_same_dialog.get("message_id")),
-            )
     active_subjects = set(latest_same_dialog.get("subject_terms") or []) if latest_same_dialog else set()
     active_subject_conflict = _subject_conflicts(query_subjects, active_subjects)
     # A named subject change in a self-contained new request is a new task even
@@ -2745,12 +2994,8 @@ def search_dialogue_context(
         # globally, or handed back to normal dialogue. It must not create another
         # local clarification from the old options.
     elif relation == "CONTINUE" and rows:
-        if discourse_only_continuation and latest_same_dialog:
-            # No independent subject was supplied: prefer the live branch, not an
-            # older topic that happens to share discourse words such as "thanks".
-            anchor = latest_same_dialog
-        elif not query_subjects and latest_same_dialog:
-            # For other underspecified turns, prefer role-aligned evidence when available.
+        if not query_subjects and latest_same_dialog:
+            # For an underspecified turn, prefer role-aligned evidence when available.
             # Otherwise compare the actual topical evidence with the active turn; if
             # neither gives a clear relative preference, stay on the active turn.
             role_aligned = best if best and int(best.get("participant_alignment") or 0) > 0 else None
@@ -2792,11 +3037,35 @@ def search_dialogue_context(
     selected_for_context: list[dict[str, Any]] = []
     history_selection_method = "not_history_request"
     history_matched_count = 0
+    history_time_search: dict[str, Any] = {}
     contextual_history_match = False
     if history_request:
-        selected_for_context, history_selection_method, history_matched_count = _select_history_context_pairs(
-            query, matches, topic_index, all_rows, requested_topic_count=history_limit
+        time_spec = _parse_history_time_reference(
+            query,
+            now_ts=time.time(),
+            utc_offset_minutes=query_interpretation.get("user_utc_offset_minutes")
+            if isinstance(query_interpretation.get("user_utc_offset_minutes"), (int, float)) else None,
         )
+        if time_spec:
+            selected_for_context, history_time_search, history_matched_count = _select_temporal_history_pairs(
+                query, matches, all_rows, time_spec, now_ts=time.time()
+            )
+            history_selection_method = "temporal_window" if history_time_search.get("status", "").startswith("matched") else "temporal_nearest_fallback"
+            _apr_timing_log(
+                "history_time_window_selection",
+                user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
+                query_key=_apr_diag_ref(query), requested_phrase=history_time_search.get("requested_phrase"),
+                target_description=history_time_search.get("target_description"),
+                status=history_time_search.get("status"),
+                time_window_minutes=history_time_search.get("tolerance_minutes"),
+                dialogues_in_window=history_time_search.get("dialogues_in_window", 0),
+                selected_pairs=len(selected_for_context),
+                selected_relations=[x.get("relation") for x in (history_time_search.get("selected_dialogues") or [])],
+            )
+        else:
+            selected_for_context, history_selection_method, history_matched_count = _select_history_context_pairs(
+                query, matches, topic_index, all_rows, requested_topic_count=history_limit
+            )
         _apr_timing_log(
             "history_pair_selection",
             user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
@@ -3132,10 +3401,8 @@ def search_dialogue_context(
             else "clarification_pending" if clarification_needed
             else "history_request" if history_request
             else "semantic_history_match" if contextual_history_match
-            else "active_branch_recovered_after_clarification" if recovered_after_repair_prompt and relation == "CONTINUE" and anchor
             else "self_contained_new_information" if self_contained_new_information
             else "named_topic_match" if explicit_topic_hits and relation == "CONTINUE"
-            else "implicit_active_branch_continuation" if discourse_only_continuation and relation == "CONTINUE" and anchor
             else "hot_branch_ambiguous_followup" if relation == "CONTINUE" and anchor and hot_branch_candidate
             else "underspecified_turn_context" if relation == "CONTINUE" and anchor and not query_subjects
             else "active_topic_default" if relation == "CONTINUE" and anchor
@@ -3145,8 +3412,6 @@ def search_dialogue_context(
         "relation_confidence": 1.0 if resume_anchor_row else round(float((anchor or best or {}).get("score") or (0.60 if relation == "CONTINUE" else 0.0)), 6),
         "continuation_marker": marker,
         "referential_followup": reference_followup,
-        "discourse_only_continuation": discourse_only_continuation,
-        "recovered_after_repair_prompt": recovered_after_repair_prompt,
         "history_request": history_request,
         "contextual_history_match": contextual_history_match,
         "matched_topic_count": len(topic_index) if (history_request or contextual_history_match or relation == "CONTINUE") else 0,
@@ -3156,6 +3421,7 @@ def search_dialogue_context(
         "matches": matches[:max(1, int(limit or 12))] if matches else [],
         "selected": selected_for_context[:4 if (history_request or resume_anchor_row) else 2],
         "history_topics": history_topics,
+        "history_time_search": history_time_search,
         "topic_index": topic_index,
         "known_topic_count": len(topics),
         "topic_table_markdown": topic_table_md,
@@ -3232,6 +3498,7 @@ def prepare_dialogue_context(
         "topic_index": deepcopy(context.get("topic_index") or []),
         "known_topic_count": int(context.get("known_topic_count") or 0),
         "history_request": bool(context.get("history_request")),
+        "history_time_search": deepcopy(context.get("history_time_search") or {}),
         "contextual_history_match": bool(context.get("contextual_history_match")),
         "matched_topic_count": int(context.get("matched_topic_count") or 0),
         "requested_topic_count": int(context.get("requested_topic_count") or 7),
