@@ -1284,6 +1284,7 @@ async def execute(
         history_context = next((ctx for ctx in question_contexts if isinstance(ctx, dict) and ctx.get("history_request")), None)
         if history_context:
             dialogue_context["history_available_for_request"] = True
+            dialogue_context["history_request"] = True
             dialogue_context["history_topics"] = list(history_context.get("history_topics") or [])
             dialogue_context["topic_index"] = list(history_context.get("topic_index") or dialogue_context.get("topic_index") or [])
             dialogue_context["known_topic_count"] = max(
@@ -1717,6 +1718,22 @@ async def execute(
         file_content_chars=sum(len(_text(x.get("content"))) for x in (file_contents or []) if isinstance(x, dict)))
 
     provider_started = time.perf_counter()
+    time_filter = dialogue_context.get("time_filter") if isinstance(dialogue_context.get("time_filter"), dict) else {}
+    time_window = dialogue_context.get("time_window") if isinstance(dialogue_context.get("time_window"), dict) else {}
+    temporal_history_lookup = bool(
+        dialogue_context.get("history_request")
+        or semantic_interpretation.get("history_request")
+        or semantic_interpretation.get("history_inventory_request")
+    )
+    temporal_gap = bool(
+        temporal_history_lookup
+        and time_filter.get("applied")
+        and not time_filter.get("empty")
+        and int(time_filter.get("matched_rows") or 0) == 0
+    )
+    temporal_empty_window = bool(temporal_history_lookup and time_filter.get("applied") and time_filter.get("empty"))
+    temporal_outside_retention = bool(temporal_empty_window and time_filter.get("empty_reason") == "outside_retention")
+    temporal_future_period = bool(temporal_empty_window and time_filter.get("empty_reason") == "future_period")
     if bool(dialogue_context.get("clarification_needed")):
         # This is a deterministic UI-facing clarification, not a provider fallback.
         # The original request and options are persisted in dialogue_memory_record,
@@ -1756,6 +1773,138 @@ async def execute(
         _apr_timing_log("local_clarification_ready", provider_started,
             options=len(pending.get("options") or []), active_topic=topic_name,
             original_request_chars=len(_text(pending.get("original_request"))))
+    elif temporal_gap or temporal_empty_window:
+        # Window labels originate from the parsed Kyiv-local interval. Show the
+        # exact empty interval first; adjacent records are explicitly marked as outside.
+        raw_label = _text(time_filter.get("label") or time_window.get("label"))
+        if " — " in raw_label:
+            left, right = raw_label.split(" — ", 1)
+            def _pretty_clock(value: str) -> str:
+                try:
+                    from datetime import datetime
+                    return datetime.strptime(value.strip(), "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
+                except (TypeError, ValueError):
+                    return value.strip()
+            raw_label = f"{_pretty_clock(left)} — {_pretty_clock(right)}"
+        if temporal_outside_retention:
+            fallback_answer = (
+                f"Указанный период ({raw_label or 'запрошенное время'}) не пересекается с доступным "
+                "24-часовым окном Premium. Поэтому я не могу подтвердить, какие диалоги были именно в это время."
+            )
+            memory_topic = "Поиск истории вне 24-часового окна"
+            memory_summary = "Запрошенный период не пересекается с доступным 24-часовым окном Premium."
+        elif temporal_future_period:
+            fallback_answer = (
+                f"Период ({raw_label or 'указанное время'}) ещё не наступил по Киеву. "
+                "В сохранённой истории пока нет диалогов за это время."
+            )
+            memory_topic = "Поиск истории за будущий период"
+            memory_summary = "Запрошенный период ещё не наступил; исторических записей за него пока быть не может."
+        elif temporal_empty_window:
+            fallback_answer = (
+                f"Период ({raw_label or 'указанное время'}) не пересекается с прошедшими записями "
+                "в доступном 24-часовом окне Premium."
+            )
+            memory_topic = "Поиск истории по времени"
+            memory_summary = fallback_answer
+        else:
+            fallback_answer = (
+                f"Проверила сохранённую историю за {raw_label or 'указанный период'} по Киеву: "
+                "внутри этого интервала записей не нашлось."
+            )
+            neighbors = time_filter.get("neighbors") if isinstance(time_filter.get("neighbors"), dict) else {}
+            neighbor_lines = []
+            for side, title in (("before", "Ближайшая запись до интервала"), ("after", "Ближайшая запись после интервала")):
+                item = neighbors.get(side) if isinstance(neighbors.get(side), dict) else None
+                if not item:
+                    continue
+                topic = _text(item.get("topic")) or "Тема без названия"
+                at_label = _text(item.get("time_label")) or "время неизвестно"
+                summary = _text(item.get("summary")) or _text(item.get("user"))
+                line = f"**{title} — {at_label}:** {topic}."
+                if summary and summary.casefold() != topic.casefold():
+                    line += f" {summary[:240]}"
+                neighbor_lines.append(line)
+            if neighbor_lines:
+                fallback_answer += "\n\nРядом по времени сохранились такие записи:\n\n" + "\n\n".join(neighbor_lines)
+                fallback_answer += "\n\nЭто записи рядом с указанным временем, а не диалоги внутри самого интервала."
+            else:
+                fallback_answer += " В доступной 24-часовой истории нет и соседних записей до или после него."
+            memory_topic = "Поиск истории по времени"
+            memory_summary = fallback_answer[:500]
+
+        # Show nearby retained evidence for every empty temporal window, including
+        # old/future ranges. These are never presented as matches within the range.
+        neighbors = time_filter.get("neighbors") if isinstance(time_filter.get("neighbors"), dict) else {}
+        neighbor_lines = []
+        if temporal_outside_retention:
+            neighbor_titles = {
+                "before": "Ближайшая доступная запись до указанного периода (в пределах последних 24 часов)",
+                "after": "Ближайшая доступная запись после указанного периода (в пределах последних 24 часов)",
+            }
+        elif temporal_future_period:
+            neighbor_titles = {
+                "before": "Последняя доступная запись перед будущим периодом",
+                "after": "Ближайшая доступная запись после будущего периода",
+            }
+        else:
+            neighbor_titles = {
+                "before": "Ближайшая запись до интервала",
+                "after": "Ближайшая запись после интервала",
+            }
+        for side in ("before", "after"):
+            item = neighbors.get(side) if isinstance(neighbors.get(side), dict) else None
+            if not item:
+                continue
+            topic = _text(item.get("topic")) or "Тема без названия"
+            at_label = _text(item.get("time_label")) or "время неизвестно"
+            summary = _text(item.get("summary")) or _text(item.get("user"))
+            line = f"**{neighbor_titles[side]} — {at_label}:** {topic}."
+            if summary and summary.casefold() != topic.casefold():
+                line += f" {summary[:240]}"
+            neighbor_lines.append(line)
+        if neighbor_lines:
+            if temporal_outside_retention or temporal_future_period:
+                fallback_answer += "\n\nБлижайшие записи, которые доступны в сохранённой истории:\n\n" + "\n\n".join(neighbor_lines)
+                fallback_answer += "\n\nЭти записи приведены только как ориентир и не подтверждают наличие диалога внутри указанного периода."
+            elif temporal_empty_window:
+                fallback_answer += "\n\nБлижайшие доступные записи:\n\n" + "\n\n".join(neighbor_lines)
+                fallback_answer += "\n\nЭто записи за пределами указанного интервала, а не диалоги внутри него."
+        elif temporal_empty_window:
+            fallback_answer += "\n\nВ доступной истории Premium за последние 24 часа нет соседних записей, которые можно было бы показать для сравнения."
+
+        provider_packet = {"machine_response": {
+            "answer": fallback_answer,
+            "content": fallback_answer,
+            "summary": fallback_answer[:180],
+            "render_blocks": [{
+                "type": "text",
+                "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
+                "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
+                "content": fallback_answer,
+            }],
+            "artifacts": [],
+            "metadata": {
+                "identity": identity,
+                "dialogue_memory_record": {
+                    "topic": memory_topic,
+                    "summary": memory_summary,
+                    "sections": [],
+                    "entities": [],
+                },
+                "local_temporal_history_fallback": True,
+                "provider_calls": 0,
+            },
+            "internal_answer_en": fallback_answer,
+        }}
+        provider_ms = 0.0
+        _apr_timing_log(
+            "temporal_gap_response_ready", provider_started,
+            matched_rows=int(time_filter.get("matched_rows") or 0),
+            neighbor_sides=sum(1 for side in (time_filter.get("neighbors") or {}).values() if isinstance(side, dict)),
+            outside_retention=temporal_outside_retention,
+            answer_chars=len(fallback_answer), provider_calls=0,
+        )
     else:
         try:
             provider_packet = await generate_text(request)
