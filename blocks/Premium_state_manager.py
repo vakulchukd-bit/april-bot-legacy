@@ -20,7 +20,7 @@ from typing import Any
 
 import psycopg2
 from rapidfuzz import fuzz
-from storage import get_conn, is_authenticated_user as _is_authenticated_user, now
+from storage import get_conn, is_authenticated_user as _is_authenticated_user, now, cleanup_dialogue_memory_utc as _cleanup_dialogue_memory_utc
 
 
 
@@ -148,6 +148,13 @@ def save_dialogue_pair(
     if not uid or not user_value or not april_value:
         return False
     dt = _as_utc(created_at)
+    # Run the canonical expiry path first so any file sidecars are removed together
+    # with their expired dialogue rows. The asset store is Premium-only and is not
+    # a second memory database.
+    try:
+        _cleanup_dialogue_memory_utc(user_id=uid)
+    except Exception:
+        pass
     conn = get_conn()
     if not conn:
         return False
@@ -159,14 +166,8 @@ def save_dialogue_pair(
                 save_now = now()
                 if not _active_premium_cursor(cur, uid, save_now):
                     return False
-                # Purge by wall-clock time; created_at remains the validated send time.
-                cleanup_now = save_now
-                cur.execute(
-                    """DELETE FROM dialogue_memory
-                       WHERE user_id = %s
-                         AND created_at + (GREATEST(12, LEAST(24, COALESCE(retention_hours, 12))) * INTERVAL '1 hour') <= %s""",
-                    (uid, cleanup_now),
-                )
+                # Expired rows were removed by the canonical cleanup path above;
+                # do not bypass its file-sidecar cleanup with a direct DELETE here.
                 pair_hash = hashlib.sha256(
                     f"{uid}|{int(dt.timestamp() * 1000)}|{int(turn_index)}|{user_value}|{april_value}".encode("utf-8")
                 ).hexdigest()
@@ -1193,6 +1194,27 @@ def _topic_tokens(label: str) -> set[str]:
     return _semantic_tokens(label)
 
 
+def _merge_compact_summaries(existing: Any, incoming: Any, limit: int = 640) -> str:
+    """Accumulate distinct grounded summary fragments instead of replacing history with the last turn."""
+    old = re.sub(r"\s+", " ", _text(existing)).strip()
+    new = re.sub(r"\s+", " ", _text(incoming)).strip()
+    if not old:
+        return new[:limit]
+    if not new or new.casefold() in old.casefold():
+        return old[:limit]
+    if old.casefold() in new.casefold():
+        return new[:limit]
+    # Split on sentence boundaries where possible; preserve chronology and avoid repeats.
+    fragments: list[str] = []
+    for source in (old, new):
+        for part in re.split(r"(?<=[.!?])\s+|\s*\|\s*", source):
+            part = part.strip(" ;,.")
+            if part and not any(part.casefold() == prior.casefold() for prior in fragments):
+                fragments.append(part)
+    result = "; ".join(fragments)
+    return result[:limit].rstrip(" ;,")
+
+
 def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build a 24-hour topic/section index from the canonical persisted pairs.
 
@@ -1225,11 +1247,19 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "order": int(section.get("order") or len(merged) + 1),
                 "message_id": _text(section.get("message_id") or message_id),
             }
+            for hierarchy_key in ("section_id", "parent_id", "parent_heading", "parent_section_id"):
+                if _text(section.get(hierarchy_key)):
+                    item[hierarchy_key] = _text(section.get(hierarchy_key))[:180]
             if key in positions:
-                # Update the meaning with the newest grounded description but keep
-                # the stable heading position from the original explanation.
+                # Keep a stable section identity and accumulate new information;
+                # do not erase useful details merely because the last answer was short.
                 pos = positions[key]
-                item["order"] = merged[pos].get("order") or item["order"]
+                previous = merged[pos]
+                item["order"] = previous.get("order") or item["order"]
+                item["summary"] = _merge_compact_summaries(previous.get("summary"), item.get("summary"), 480)
+                for hierarchy_key in ("section_id", "parent_id", "parent_heading", "parent_section_id"):
+                    if not item.get(hierarchy_key) and previous.get(hierarchy_key):
+                        item[hierarchy_key] = previous[hierarchy_key]
                 merged[pos] = item
             else:
                 positions[key] = len(merged)
@@ -1282,7 +1312,7 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             group["modalities"] = sorted(set(group.get("modalities") or []) | _row_modalities(row))
             group["pair_count"] = int(group.get("pair_count") or 0) + 1
             group["message_id"] = _text(row.get("message_id")) or group.get("message_id")
-            group["summary"] = _compact_memory_summary(row) or group.get("summary", "")
+            group["summary"] = _merge_compact_summaries(group.get("summary"), _compact_memory_summary(row), 640)
             group["sections"] = merge_sections(group.get("sections") or [], row_sections, _text(row.get("message_id")))
 
     deduped: list[dict[str, Any]] = []
@@ -1299,7 +1329,7 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 found.update({
                     "end_turn": item.get("end_turn"), "last_at": item.get("last_at"),
                     "last_question": item.get("last_question"), "message_id": item.get("message_id"),
-                    "summary": item.get("summary") or found.get("summary"),
+                    "summary": _merge_compact_summaries(found.get("summary"), item.get("summary"), 640),
                     "subject_terms": sorted(set(found.get("subject_terms") or []) | set(item.get("subject_terms") or [])),
                     "sections": merge_sections(found.get("sections") or [], item.get("sections") or [], _text(item.get("message_id"))),
                     "pair_count": int(found.get("pair_count") or 0) + int(item.get("pair_count") or 0),
@@ -1814,7 +1844,17 @@ def _dialogue_section_map(row: dict[str, Any], limit: int = 8) -> list[dict[str,
                     order = int(item.get("order") or len(sections) + 1)
                 except (TypeError, ValueError):
                     order = len(sections) + 1
-                sections.append({"heading": heading, "summary": summary, "order": order})
+                section_row = {"heading": heading, "summary": summary, "order": order}
+                parent_heading = _text(item.get("parent_heading") or item.get("parent_section"))[:180]
+                parent_id = _text(item.get("parent_id") or item.get("parent_section_id"))[:120]
+                section_id = _text(item.get("section_id") or item.get("id"))[:120]
+                if parent_heading:
+                    section_row["parent_heading"] = parent_heading
+                if parent_id:
+                    section_row["parent_id"] = parent_id
+                if section_id:
+                    section_row["section_id"] = section_id
+                sections.append(section_row)
     if sections:
         return sections
 
