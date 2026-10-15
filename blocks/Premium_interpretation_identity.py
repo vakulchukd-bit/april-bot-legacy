@@ -1880,7 +1880,7 @@ __all__ = [
 
 
 # Temporal parsing is embedded here to keep Premium logic inside existing modules.
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, time as datetime_time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 _DEFAULT_TIMEZONE = "Europe/Kyiv"
@@ -1998,7 +1998,7 @@ def _parse_date(value: str, reference: datetime) -> datetime | None:
     for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%y", "%d/%m/%y"):
         try:
             d = datetime.strptime(raw, fmt).date()
-            return datetime.combine(d, time.min, tzinfo=reference.tzinfo)
+            return datetime.combine(d, datetime_time.min, tzinfo=reference.tzinfo)
         except ValueError:
             continue
     # Day/month without a year uses the reference year; a year boundary is fixed
@@ -2006,7 +2006,7 @@ def _parse_date(value: str, reference: datetime) -> datetime | None:
     for fmt in ("%d.%m", "%d/%m", "%d-%m"):
         try:
             d = datetime.strptime(raw, fmt).date().replace(year=reference.year)
-            return datetime.combine(d, time.min, tzinfo=reference.tzinfo)
+            return datetime.combine(d, datetime_time.min, tzinfo=reference.tzinfo)
         except ValueError:
             continue
     return None
@@ -2094,7 +2094,7 @@ def extract_temporal_window(
         days = 1 if unit in {"сутки", "суток", "день", "дня", "day"} else 7 if unit in {"неделю", "недели", "week"} else 30 if unit in {"месяц", "месяца", "month"} else 365
         return _result(reference - timedelta(days=days), reference, source="named_duration", timezone_name=timezone_name, reference=reference)
     if re.search(r"\b(?:с\s+начала\s+дня|с\s+начала\s+сегодня|since\s+start\s+of\s+day)\b", low):
-        start = datetime.combine(reference.date(), time.min, tzinfo=zone)
+        start = datetime.combine(reference.date(), datetime_time.min, tzinfo=zone)
         return _result(start, reference, source="day_start", timezone_name=timezone_name, reference=reference)
 
     # Explicit date-time bounds preserve the clock supplied on each endpoint,
@@ -2269,8 +2269,8 @@ def extract_temporal_window(
         end_date = week_start + timedelta(days=end_day)
         if end_date < start_date:
             end_date += timedelta(days=7)
-        start = datetime.combine(start_date, time.min, tzinfo=zone)
-        end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=zone)
+        start = datetime.combine(start_date, datetime_time.min, tzinfo=zone)
+        end = datetime.combine(end_date + timedelta(days=1), datetime_time.min, tzinfo=zone)
         return _result(start, end, source="weekday_range", timezone_name=timezone_name, reference=reference)
 
     # Day-relative expressions, with optional part-of-day restrictions.
@@ -2296,7 +2296,7 @@ def extract_temporal_window(
 
     if day_offset is not None:
         day = (reference + timedelta(days=day_offset)).date()
-        start = datetime.combine(day, time.min, tzinfo=zone)
+        start = datetime.combine(day, datetime_time.min, tzinfo=zone)
         end = start + timedelta(days=1)
         part = None
         if re.search(r"\b(?:утром|утра|ранку|morning|morning time)\b", low):
