@@ -654,7 +654,7 @@ def _semantic_normalize(text: Any) -> tuple[str, list[str]]:
 
 _SEMANTIC_ROOTS = {
     "dialogue_action": ("говор", "обсужд", "разговар", "разговор", "обща", "общен", "перепис", "упомин", "затраг", "диалог", "реч", "dialogue", "conversation", "discuss", "talk", "talked", "talking", "chat", "communicat", "speech"),
-    "recall_action": ("напом", "вспом", "припомн", "восстанов", "remember", "recall", "remind", "summariz", "перескаж", "перечисл"),
+    "recall_action": ("напом", "вспом", "припомн", "помни", "восстанов", "remember", "recall", "remind", "summariz", "перескаж", "перечисл"),
     "decision_action": ("решил", "решен", "вывод", "итог", "договор", "результат", "concluded", "decided", "decision", "outcome"),
     "plan_action": ("план", "заплан", "собира", "намер", "предусмотр", "planned", "plan", "schedule"),
     "continuation_action": ("продолж", "вернись", "возвращ", "останов", "resume", "continue", "return to"),
@@ -666,7 +666,7 @@ _SEMANTIC_ROOTS = {
 
 _SEMANTIC_FUZZY_FORMS = {
     "dialogue_action": ("говорили", "говорил", "обсуждали", "обсудили", "разговаривали", "общались", "переписывались", "общение", "разговор", "discussed", "discussion", "talked", "talking", "conversation", "communicate"),
-    "recall_action": ("напомни", "напомнить", "вспомни", "вспомнить", "припомни", "восстанови", "summarize", "remember", "recall"),
+    "recall_action": ("напомни", "напомнить", "вспомни", "вспомнить", "припомни", "помнишь", "помниш", "помнить", "вспоминаешь", "восстанови", "summarize", "remember", "recall"),
     "decision_action": ("решили", "решились", "выводы", "итоги", "договорились", "результаты", "decided", "concluded"),
     "plan_action": ("планировали", "запланировали", "собирались", "намеревались", "planned", "schedule"),
     "past_reference": ("предыдущий", "предыдущем", "прошлый", "прошлом", "раньше", "yesterday", "previous", "earlier"),
@@ -934,7 +934,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
             "time_scope": "UNSPECIFIED", "topic_reference": "UNSPECIFIED",
             "requires_memory": False, "history_request": False, "search_scope": "CURRENT_DIALOGUE",
             "time_window": extract_temporal_window(""),
-            "requested_topic_count": 7, "minimum_topic_count": 1,
+            "requested_topic_count": 10, "minimum_topic_count": 5,
             "intent_score": 0, "features": {}, "reason": "empty_request",
         }
 
@@ -956,15 +956,47 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     # 24-hour window; a time phrase is metadata, not a standalone history trigger.
     time_window = extract_temporal_window(source)
     has_explicit_time_window = bool(time_window.get("has_constraint"))
-    minimum_topic_count, requested_topic_count = extract_topic_count_bounds(source, default=7)
-    history_inventory_request = bool(
-        has_explicit_time_window
-        and re.search(
-            r"\b(?:тем\w*|топик\w*|диалог\w*|разговор\w*|перепис\w*|обсужд\w*|"
-            r"истори\w*|запрос\w*|topics?|conversations?|chats?|discussion\w*|history)\b",
-            low, re.IGNORECASE,
-        )
+    minimum_topic_count, requested_topic_count = extract_topic_count_bounds(source, default=10)
+    history_reference_words = bool(re.search(
+        r"\b(?:тем\w*|топик\w*|диалог\w*|разговор\w*|перепис\w*|говорил\w*|"
+        r"обсужд\w*|истори\w*|запрос\w*|topics?|conversations?|chats?|discussion\w*|history)\b",
+        low, re.IGNORECASE,
+    ))
+    explicit_topic_inventory = bool(re.search(
+        r"(?:последн\w*\s+тем\w*|какие\s+тем\w*|список\s+тем\w*|"
+        r"тем\w*.{0,28}(?:из\s+истори\w*|мы\s+обсужда\w*|мы\s+говорил\w*)|"
+        r"(?:покаж\w*|перечисл\w*|вывед\w*|напомн\w*|list|show|summariz\w*).{0,36}"
+        r"(?:тем\w*|topics?|history|conversations?))",
+        low, re.IGNORECASE,
+    ))
+    # Identify an unnamed time-scoped overview separately from a lookup for a
+    # particular subject. Strip discourse/time words first, so "physics ... 2h ago"
+    # remains targeted while "what did we discuss 2h ago" becomes an inventory.
+    subject_probe = low
+    subject_probe = re.sub(
+        r"\b(?:\d{1,3}\s*(?:секунд\w*|сек\.?|минут\w*|мин\.?|час\w*|годин\w*|дн\w*|доба\w*|день|дня|дней|days?|hours?|hrs?|minutes?|mins?|seconds?)\s+назад|"
+        r"(?:хоть\s+|около\s+|примерно\s+|в\s+районе\s+)?час(?:а)?\s+назад|пол\s*часа\s+назад|"
+        r"за\s+последн\w*\s+\d+\s*(?:час\w*|минут\w*|дн\w*)|"
+        r"последн\w*\s+тем\w*|какие\s+тем\w*|список\s+тем\w*)\b",
+        " ", subject_probe, flags=re.IGNORECASE,
     )
+    generic_history_words = {
+        "о", "об", "чем", "чём", "что", "мы", "наш", "наши", "нас", "нам", "говорили", "говорил",
+        "обсуждали", "обсуждали", "разговаривали", "помнишь", "помниш", "помним", "помни", "вспомни",
+        "напомни", "напомнить", "последние", "последних", "тема", "темы", "тему", "тем", "тематик",
+        "история", "истории", "историю", "истории", "диалог", "диалога", "диалоге", "разговор", "разговора",
+        "час", "часа", "часов", "минут", "минуты", "минуту", "дней", "дня", "день", "назад", "хоть",
+        "примерно", "около", "последний", "последнюю", "последнего", "сейчас", "сегодня", "вчера",
+        "последн", "только", "покажи", "показать", "выведи", "перечисли", "напомни", "дай", "мне", "можешь",
+        "the", "what", "were", "we", "did", "do", "our", "about", "talking", "talked", "discuss", "discussed",
+        "conversation", "conversations", "history", "topic", "topics", "list", "show", "me", "last", "hour", "hours", "ago",
+    }
+    subject_tokens = [token for token in re.findall(r"[\w\u0080-\uffff]+", subject_probe.lower())
+                      if len(token) > 2 and token not in generic_history_words and not token.isdigit()]
+    time_scoped_overview = bool(
+        has_explicit_time_window and history_reference_words and not subject_tokens
+    )
+    history_inventory_request = bool(explicit_topic_inventory or time_scoped_overview)
 
     self_reference = bool(token_set & {"мы", "нас", "нам", "наш", "наша", "наши", "наше", "we", "our", "us"}) or any(
         token.startswith(("наш", "наша", "наши")) for token in tokens
@@ -1141,13 +1173,13 @@ def _is_history_request(text: str) -> bool:
 
 def _history_count(text: str) -> int:
     """Return the upper bound for list requests such as “от 5 до 10 тем”."""
-    _, maximum = extract_topic_count_bounds(text, default=7)
-    return max(1, min(10, int(maximum or 7)))
+    _, maximum = extract_topic_count_bounds(text, default=10)
+    return max(1, min(10, int(maximum or 10)))
 
 
 def _history_count_minimum(text: str) -> int:
-    minimum, _ = extract_topic_count_bounds(text, default=7)
-    return max(1, min(10, int(minimum or 1)))
+    minimum, _ = extract_topic_count_bounds(text, default=10)
+    return max(1, min(10, int(minimum or 5)))
 
 
 def _select_history_topics(memory: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1162,11 +1194,12 @@ def _select_history_topics(memory: dict[str, Any]) -> list[dict[str, Any]]:
 def _select_continuation_pairs(memory: dict[str, Any]) -> list[dict[str, Any]]:
     relation = _text(memory.get("relation")).upper()
     history_request = bool(memory.get("history_request"))
+    contextual_history_match = bool(memory.get("contextual_history_match"))
     pairs = memory.get("selected_pairs")
-    # HISTORY_RECALL intentionally remains relation=NEW, but its selected evidence
-    # must still reach the Provider. Relation controls topic continuation, not whether
-    # authenticated history evidence may be attached to the current request.
-    if (relation != "CONTINUE" and not history_request) or not isinstance(pairs, list):
+    # HISTORY_RECALL and named-topic semantic matches can both remain relation=NEW.
+    # Relation controls active-topic state, not whether grounded user history can be
+    # attached to answer this request.
+    if (relation != "CONTINUE" and not history_request and not contextual_history_match) or not isinstance(pairs, list):
         return []
     limit = 6 if history_request else 2
     return [dict(item) for item in pairs if isinstance(item, dict)][:limit]
@@ -1619,8 +1652,8 @@ def build_interpretation(
         or bool(request_semantics.get("history_request"))
         or _is_history_request(original or text)
     )
-    history_count = max(1, min(10, int(memory.get("requested_topic_count") or request_semantics.get("requested_topic_count") or _history_count(original or text) or 7)))
-    history_count_minimum = max(1, min(history_count, int(memory.get("minimum_topic_count") or request_semantics.get("minimum_topic_count") or _history_count_minimum(original or text) or 1)))
+    history_count = max(1, min(10, int(memory.get("requested_topic_count") or request_semantics.get("requested_topic_count") or _history_count(original or text) or 10)))
+    history_count_minimum = max(1, min(history_count, int(memory.get("minimum_topic_count") or request_semantics.get("minimum_topic_count") or _history_count_minimum(original or text) or min(5, history_count))))
     history_topics = _select_history_topics(memory)[:history_count]
 
     # Referential questions such as "а про него еще?" are resolved by the
@@ -2057,7 +2090,40 @@ def extract_temporal_window(
     if ago:
         amount, unit = max(1, int(ago.group(1))), ago.group(2)
         delta = timedelta(seconds=amount) if unit.startswith(("сек", "second", "sec")) else timedelta(minutes=amount) if unit.startswith(("мин", "minute", "min")) else timedelta(hours=amount) if unit.startswith(("час", "годин", "hour", "hr")) else timedelta(days=amount)
-        return _result(reference - delta, reference, source="relative_ago", timezone_name=timezone_name, reference=reference)
+        # "N hours ago" names a point in time, not the full interval from then
+        # until now. Search a small neighborhood around that point. Rolling
+        # phrases such as "last N hours" are handled by the separate duration rule.
+        center = reference - delta
+        radius = timedelta(minutes=10) if unit.startswith(("сек", "second", "sec", "мин", "minute", "min")) else timedelta(minutes=30) if unit.startswith(("час", "годин", "hour", "hr")) else timedelta(minutes=90)
+        return _result(center - radius, center + radius, source="relative_ago_point", timezone_name=timezone_name, reference=reference)
+
+    # Common conversational equivalents: "an hour ago", "two hours ago",
+    # including filler words and spelled-out Russian numerals.
+    if re.search(r"\bпол\s*часа\s+назад\b", low):
+        center = reference - timedelta(minutes=30)
+        return _result(center - timedelta(minutes=15), center + timedelta(minutes=15), source="relative_ago_point", timezone_name=timezone_name, reference=reference)
+    word_ago = re.search(
+        r"\b(один|одна|одно|одну|два|две|двух|три|тр[её]х|четыре|четыр[её]х|"
+        r"пять|пяти|шесть|шести|семь|семи|восемь|восьми|девять|девяти|десять|десяти)\s+"
+        r"(час\w*|годин\w*|hour\w*|hr\w*|минут\w*|minute\w*|min\w*|день|дня|дней|дн\w*)\s+назад\b",
+        low,
+    )
+    if word_ago:
+        number_words = {
+            "один": 1, "одна": 1, "одно": 1, "одну": 1, "два": 2, "две": 2, "двух": 2,
+            "три": 3, "трех": 3, "трёх": 3, "четыре": 4, "четырех": 4, "четырёх": 4,
+            "пять": 5, "пяти": 5, "шесть": 6, "шести": 6, "семь": 7, "семи": 7,
+            "восемь": 8, "восьми": 8, "девять": 9, "девяти": 9, "десять": 10, "десяти": 10,
+        }
+        amount = number_words.get(word_ago.group(1), 1)
+        unit = word_ago.group(2)
+        delta = timedelta(minutes=amount) if unit.startswith(("минут", "minute", "min")) else timedelta(days=amount) if unit.startswith(("день", "дня", "дней", "дн")) else timedelta(hours=amount)
+        center = reference - delta
+        radius = timedelta(minutes=10) if unit.startswith(("минут", "minute", "min")) else timedelta(minutes=90) if unit.startswith(("день", "дня", "дней", "дн")) else timedelta(minutes=30)
+        return _result(center - radius, center + radius, source="relative_ago_point", timezone_name=timezone_name, reference=reference)
+    if re.search(r"\b(?:около\s+|примерно\s+|хоть\s+|в\s+районе\s+)?час(?:а)?\s+назад\b", low):
+        center = reference - timedelta(hours=1)
+        return _result(center - timedelta(minutes=30), center + timedelta(minutes=30), source="relative_ago_point", timezone_name=timezone_name, reference=reference)
 
     # Relative rolling durations, including intervals longer than the 24-hour
     # product retention window (the state manager intersects both windows).
@@ -2362,7 +2428,7 @@ _TOPIC_NUMBER_WORDS = {
 }
 
 
-def extract_topic_count_bounds(text: Any, default: int = 7) -> tuple[int, int]:
+def extract_topic_count_bounds(text: Any, default: int = 10) -> tuple[int, int]:
     """Return (minimum, maximum) requested history topic count, clamped to 1–10."""
     low = re.sub(r"\s+", " ", str(text or "").lower().replace("ё", "е")).strip()
     topic_word = r"(?:тем\w*|топик\w*|диалог\w*|разговор\w*|topic\w*|conversation\w*)"
@@ -2390,6 +2456,8 @@ def extract_topic_count_bounds(text: Any, default: int = 7) -> tuple[int, int]:
     for word, value in _TOPIC_NUMBER_WORDS.items():
         if re.search(rf"\b{re.escape(word)}\s+{topic_word}\b", low):
             return value, value
-    bounded = max(1, min(10, int(default or 7)))
-    return 1, bounded
+    bounded = max(1, min(10, int(default or 10)))
+    # General history overview: list at least five only when five distinct topics
+    # exist, and never ask the model to fabricate entries when fewer are available.
+    return min(5, bounded), bounded
 
