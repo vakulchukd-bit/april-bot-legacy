@@ -133,6 +133,9 @@ def _compact_question_search(
                 "summary": _text(section.get("summary"))[:300],
                 "order": section.get("order"),
                 "message_id": _text(section.get("message_id"))[:120],
+                "source_message_id": _text(section.get("source_message_id") or section.get("message_id"))[:120],
+                "topic_id": _text(section.get("topic_id") or item.get("topic_id"))[:100],
+                "topic_origin_message_id": _text(section.get("topic_origin_message_id") or item.get("origin_message_id"))[:120],
             })
         compact = {
             "topic": _text(item.get("topic"))[:200],
@@ -140,6 +143,11 @@ def _compact_question_search(
             "april": _text(item.get("april"))[:480],
             "sections": sections,
             "message_id": _text(item.get("message_id"))[:120],
+            "topic_id": _text(item.get("topic_id"))[:100],
+            "origin_message_id": _text(item.get("origin_message_id") or item.get("topic_origin_message_id"))[:120],
+            "origin_turn": item.get("origin_turn"),
+            "first_at": item.get("first_at") or item.get("topic_origin_at"),
+            "last_at": item.get("last_at") or item.get("topic_last_at"),
             "same_dialog": bool(item.get("same_dialog")),
         }
         # Do not reconstruct structured data from clipped text. Preserve the exact
@@ -173,6 +181,12 @@ def _compact_question_search(
     semantics = dict(semantics or {})
     history_request = bool(context.get("history_request") or semantics.get("history_request"))
     topic_index = []
+    requested_topic_count = max(1, min(10, int(
+        semantics.get("requested_topic_count") or context.get("requested_topic_count") or 7
+    )))
+    minimum_topic_count = max(1, min(requested_topic_count, int(
+        semantics.get("minimum_topic_count") or context.get("minimum_topic_count") or 1
+    )))
     if history_request:
         topic_index = [
             {
@@ -181,8 +195,26 @@ def _compact_question_search(
                 "summary": _text(item.get("summary"))[:320],
                 "last_question": _text(item.get("last_question"))[:200],
                 "message_id": _text(item.get("message_id"))[:120],
+                "topic_id": _text(item.get("topic_id"))[:100],
+                "origin_message_id": _text(item.get("origin_message_id"))[:120],
+                "origin_turn": item.get("origin_turn"),
+                "first_at": item.get("first_at"),
+                "last_at": item.get("last_at"),
+                "pair_count": item.get("pair_count") or item.get("turns"),
+                "sections": [
+                    {
+                        "heading": _text(sec.get("heading"))[:100],
+                        "summary": _text(sec.get("summary"))[:160],
+                        "order": sec.get("order"),
+                        "message_id": _text(sec.get("message_id"))[:120],
+                        "source_message_id": _text(sec.get("source_message_id") or sec.get("message_id"))[:120],
+                        "topic_id": _text(sec.get("topic_id") or item.get("topic_id"))[:100],
+                        "topic_origin_message_id": _text(sec.get("topic_origin_message_id") or item.get("origin_message_id"))[:120],
+                    }
+                    for sec in (item.get("sections") or [])[:4] if isinstance(sec, dict)
+                ],
             }
-            for item in (context.get("topic_index") or [])[:4] if isinstance(item, dict)
+            for item in (context.get("topic_index") or [])[:requested_topic_count] if isinstance(item, dict)
         ]
     history_topics = [
         {
@@ -191,13 +223,23 @@ def _compact_question_search(
             "summary": _text(item.get("summary"))[:320],
             "last_question": _text(item.get("last_question"))[:200],
             "message_id": _text(item.get("message_id"))[:120],
+            "topic_id": _text(item.get("topic_id"))[:100],
+            "origin_message_id": _text(item.get("origin_message_id"))[:120],
+            "origin_turn": item.get("origin_turn"),
+            "first_at": item.get("first_at"),
+            "last_at": item.get("last_at"),
+            "pair_count": item.get("pair_count") or item.get("turns"),
         }
-        for item in (context.get("history_topics") or [])[:4] if isinstance(item, dict)
+        for item in (context.get("history_topics") or [])[:requested_topic_count] if isinstance(item, dict)
     ] if history_request else []
     return {
         "status": "ready",
         "relation": _text(context.get("relation") or "NEW").upper(),
         "history_request": history_request,
+        "requested_topic_count": requested_topic_count if history_request else 0,
+        "minimum_topic_count": minimum_topic_count if history_request else 0,
+        "time_window": context.get("time_window") if isinstance(context.get("time_window"), dict) else {},
+        "time_filter": context.get("time_filter") if isinstance(context.get("time_filter"), dict) else {},
         "semantic_intent": _text(semantics.get("primary_intent") or ("HISTORY_RECALL" if history_request else "NEW_INFORMATION")),
         "search_direction": _text(semantics.get("direction") or ("SEARCH_DIALOGUE_HISTORY" if history_request else "ANSWER_NEW_REQUEST")),
         "time_scope": _text(semantics.get("time_scope") or "UNSPECIFIED"),
@@ -218,6 +260,9 @@ def _compact_question_search(
             "summary": _text(section.get("summary"))[:360],
             "order": section.get("order"),
             "message_id": _text(section.get("message_id"))[:120],
+            "source_message_id": _text(section.get("source_message_id") or section.get("message_id"))[:120],
+            "topic_id": _text(section.get("topic_id"))[:100],
+            "topic_origin_message_id": _text(section.get("topic_origin_message_id"))[:120],
         } if section else {},
         "selected_pairs": pairs,
         "clarification_needed": bool(context.get("clarification_needed")),
@@ -1076,6 +1121,11 @@ async def execute(
             "topic_reference": semantic_interpretation.get("topic_reference"),
             "requires_memory": semantic_interpretation.get("requires_memory"),
             "history_request": semantic_interpretation.get("history_request"),
+            "history_inventory_request": semantic_interpretation.get("history_inventory_request"),
+            "has_explicit_time_window": semantic_interpretation.get("has_explicit_time_window"),
+            "time_window": semantic_interpretation.get("time_window") or {},
+            "requested_topic_count": semantic_interpretation.get("requested_topic_count"),
+            "minimum_topic_count": semantic_interpretation.get("minimum_topic_count"),
             "search_scope": semantic_interpretation.get("search_scope"),
             "relation_hint": semantic_interpretation.get("relation_hint"),
             "reason": semantic_interpretation.get("reason"),
@@ -1124,6 +1174,11 @@ async def execute(
                     "topic_reference": question_item.get("topic_reference", "UNSPECIFIED"),
                     "requires_memory": False if inherits_subject else question_item.get("requires_memory", False),
                     "history_request": False if inherits_subject else question_item.get("history_request", False),
+                    "history_inventory_request": False if inherits_subject else question_item.get("history_request", False),
+                    "has_explicit_time_window": bool(question_item.get("has_explicit_time_window")),
+                    "time_window": question_item.get("time_window") if isinstance(question_item.get("time_window"), dict) else {},
+                    "requested_topic_count": question_item.get("requested_topic_count"),
+                    "minimum_topic_count": question_item.get("minimum_topic_count"),
                     "search_scope": "CURRENT_REQUEST_SUBJECT" if inherits_subject else ("ALL_DIALOGUE_HISTORY" if question_item.get("history_request") else (
                         "TOPIC_OR_ACTIVE_CONTEXT" if question_item.get("requires_memory") else "CURRENT_DIALOGUE"
                     )),
@@ -1138,7 +1193,7 @@ async def execute(
                 if inherits_subject and current_request_subject_context:
                     active_subject = _text(current_request_subject_context.get("active_topic") or search_query)[:140]
                     task_context = {
-                        "window_hours": 12,
+                        "window_hours": 24,
                         "relation": "NEW",
                         "relation_confidence": 0.0,
                         "reason": "current_request_subject_inheritance",
@@ -1151,6 +1206,9 @@ async def execute(
                         "known_topic_count": 0,
                         "history_request": False,
                         "requested_topic_count": 0,
+                        "minimum_topic_count": 0,
+                        "time_window": {},
+                        "time_filter": {},
                         "topic_table_markdown": "",
                         "anchor": {},
                         "selected_section": {},
@@ -1233,6 +1291,9 @@ async def execute(
                 int(history_context.get("known_topic_count") or 0),
             )
             dialogue_context["requested_topic_count"] = int(history_context.get("requested_topic_count") or 7)
+            dialogue_context["minimum_topic_count"] = int(history_context.get("minimum_topic_count") or 1)
+            dialogue_context["time_window"] = dict(history_context.get("time_window") or {})
+            dialogue_context["time_filter"] = dict(history_context.get("time_filter") or {})
             dialogue_context["topic_table_markdown"] = _text(history_context.get("topic_table_markdown") or dialogue_context.get("topic_table_markdown"))
         if not dialogue_context:
             # Do not fall back to a whole-message retrieval if one per-question
@@ -1240,7 +1301,7 @@ async def execute(
             # relation with a mixed CONTINUE/NEW decision. Keep the canonical
             # request alive with an empty, correctly-shaped memory context.
             dialogue_context = {
-                "window_hours": 12,
+                "window_hours": 24,
                 "relation": "NEW",
                 "relation_confidence": 0.0,
                 "reason": "per_question_search_unavailable",
@@ -1252,6 +1313,9 @@ async def execute(
                 "known_topic_count": 0,
                 "history_request": False,
                 "requested_topic_count": 7,
+                "minimum_topic_count": 1,
+                "time_window": {},
+                "time_filter": {},
                 "topic_table_markdown": "",
                 "anchor": {},
                 "selected_section": {},
@@ -1379,7 +1443,7 @@ async def execute(
             "display_language": display_language,
         },
         memory={
-            "window_hours": 12,
+            "window_hours": int(dialogue_context.get("window_hours") or 24),
             "relation": dialogue_context["relation"],
             "relation_confidence": dialogue_context["relation_confidence"],
             "selected_pairs": (
@@ -1403,6 +1467,9 @@ async def execute(
             "contextual_history_match": bool(dialogue_context.get("contextual_history_match")),
             "history_request": bool(dialogue_context.get("history_request")),
             "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 7) if dialogue_context.get("history_request") else 0,
+            "minimum_topic_count": int(dialogue_context.get("minimum_topic_count") or 1) if dialogue_context.get("history_request") else 0,
+            "time_window": dict(dialogue_context.get("time_window") or {}),
+            "time_filter": dict(dialogue_context.get("time_filter") or {}),
             "topic_table_markdown": (dialogue_context.get("topic_table_markdown") or "") if dialogue_context.get("history_request") else "",
             "anchor": (
                 dialogue_context.get("anchor") or {}
@@ -1459,6 +1526,9 @@ async def execute(
                 "known_topic_count": int(dialogue_context.get("known_topic_count") or 0) if dialogue_context.get("history_request") else 0,
                 "history_request": bool(dialogue_context.get("history_request")),
                 "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 7) if dialogue_context.get("history_request") else 0,
+                "minimum_topic_count": int(dialogue_context.get("minimum_topic_count") or 1) if dialogue_context.get("history_request") else 0,
+                "time_window": dict(dialogue_context.get("time_window") or {}),
+                "time_filter": dict(dialogue_context.get("time_filter") or {}),
                 "topic_table_markdown": (dialogue_context.get("topic_table_markdown") or "") if dialogue_context.get("history_request") else "",
                 "anchor": (
                     dialogue_context.get("anchor") or {}
