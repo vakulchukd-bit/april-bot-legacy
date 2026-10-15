@@ -1999,6 +1999,32 @@ def _compact_memory_summary(row: dict[str, Any]) -> str:
     return re.sub(r"\s+", " ", summary)[:440]
 
 
+def _temporal_neighbor(item: dict[str, Any], side: str) -> dict[str, Any]:
+    """Create a small, factual descriptor for the closest retained pair near a time gap."""
+    try:
+        created_at = float(item.get("created_at") or 0.0)
+    except (TypeError, ValueError):
+        created_at = 0.0
+    try:
+        at_label = datetime.fromtimestamp(created_at, tz=timezone.utc).astimezone(
+            ZoneInfo("Europe/Kyiv")
+        ).strftime("%d.%m.%Y %H:%M") if created_at > 0 else "время неизвестно"
+    except (TypeError, ValueError, OverflowError, OSError):
+        at_label = "время неизвестно"
+    topic = _topic_label(item) or _text(item.get("user_text") or item.get("user"))[:120] or "Тема без названия"
+    user_text = _text(item.get("user") or item.get("user_text"))[:220]
+    summary = _compact_memory_summary(item)[:300]
+    return {
+        "side": side,
+        "created_at": created_at or None,
+        "time_label": at_label,
+        "topic": topic[:180],
+        "user": user_text,
+        "summary": summary,
+        "message_id": _text(item.get("message_id"))[:120],
+    }
+
+
 def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
     sections = _dialogue_section_map(item)
     # Do not feed the previous long explanation back into the next prompt. Retain
@@ -2588,6 +2614,9 @@ def search_dialogue_context(
     uid = _uid(user_id)
     state = hydrate(uid)
     all_rows = [row for row in (state.get("dialogue_pairs") or []) if isinstance(row, dict) and not _is_failed_provider_row(row)]
+    # Keep this authenticated, already-pruned Premium 24h set for honest nearest-neighbor
+    # lookup if an explicitly requested time interval contains no saved dialogue pairs.
+    retained_rows = list(all_rows)
     resume_key = _text(resume_message_id)
     reference_followup = _looks_like_referential_followup(query)
     query_interpretation = dict(query_interpretation or {})
@@ -2625,15 +2654,54 @@ def search_dialogue_context(
         "applied": False, "empty": False, "start_at": None, "end_at": None, "source": "none"
     }
     if time_filter.get("applied"):
+        time_filter["matched_rows"] = 0
+        time_filter["neighbors"] = {"before": None, "after": None}
+        time_filter["retention_hours"] = DIALOGUE_WINDOW_HOURS
         if time_filter.get("empty"):
+            # Distinguish old requests from future times: both have no searchable rows,
+            # but only the former is outside Premium's retained 24-hour window.
+            requested_start = float(time_filter.get("requested_start_at") or parsed_window.get("start_at") or 0.0)
+            requested_end = float(time_filter.get("requested_end_at") or parsed_window.get("end_at") or 0.0)
+            retention_start = search_now_ts - DIALOGUE_WINDOW_SECONDS
+            if requested_start > search_now_ts:
+                time_filter["empty_reason"] = "future_period"
+            elif requested_end <= retention_start:
+                time_filter["empty_reason"] = "outside_retention"
+            else:
+                time_filter["empty_reason"] = "no_past_overlap"
             all_rows = []
+            time_filter["outside_retention_window"] = time_filter["empty_reason"] == "outside_retention"
+            # Even when the requested interval does not overlap retained history,
+            # provide the closest *available* record on either side. This never
+            # widens the Premium window: candidates still come only from retained_rows.
+            before_rows = [row for row in retained_rows if float(row.get("created_at") or 0.0) < requested_start]
+            after_rows = [row for row in retained_rows if float(row.get("created_at") or 0.0) >= requested_end]
+            before_row = max(before_rows, key=lambda row: float(row.get("created_at") or 0.0), default=None)
+            after_row = min(after_rows, key=lambda row: float(row.get("created_at") or 0.0), default=None)
+            time_filter["neighbors"] = {
+                "before": _temporal_neighbor(before_row, "before") if before_row else None,
+                "after": _temporal_neighbor(after_row, "after") if after_row else None,
+            }
         else:
             lower = float(time_filter["start_at"])
             upper = float(time_filter["end_at"])
             all_rows = [
-                row for row in all_rows
+                row for row in retained_rows
                 if lower <= float(row.get("created_at") or 0.0) < upper
             ]
+            time_filter["matched_rows"] = len(all_rows)
+            time_filter["outside_retention_window"] = False
+            if not all_rows:
+                # Exact interval is empty: return the nearest retained record on each
+                # side as clearly labelled neighbors, never as matches inside the range.
+                before_rows = [row for row in retained_rows if float(row.get("created_at") or 0.0) < lower]
+                after_rows = [row for row in retained_rows if float(row.get("created_at") or 0.0) >= upper]
+                before_row = max(before_rows, key=lambda row: float(row.get("created_at") or 0.0), default=None)
+                after_row = min(after_rows, key=lambda row: float(row.get("created_at") or 0.0), default=None)
+                time_filter["neighbors"] = {
+                    "before": _temporal_neighbor(before_row, "before") if before_row else None,
+                    "after": _temporal_neighbor(after_row, "after") if after_row else None,
+                }
     resume_anchor_row = next((row for row in all_rows if (
         _text(row.get("message_id")) == resume_key
         or (resume_key.startswith("legacy-memory-") and resume_key == f"legacy-memory-{_text(row.get('id'))}")
@@ -2654,6 +2722,9 @@ def search_dialogue_context(
         temporal_filter_applied=bool(time_filter.get("applied")),
         temporal_filter_source=_text(time_filter.get("source")),
         temporal_rows_after_filter=len(all_rows),
+        temporal_match_count=time_filter.get("matched_rows"),
+        temporal_neighbor_sides=sum(1 for side in (time_filter.get("neighbors") or {}).values() if isinstance(side, dict)),
+        temporal_outside_retention=bool(time_filter.get("outside_retention_window")),
     )
 
     scope_started = time.perf_counter()
@@ -3556,7 +3627,10 @@ def search_dialogue_context(
         selected_pairs=len(selected_for_context), topic_index_count=len(topic_index),
         temporal_filter_applied=bool(time_filter.get("applied")),
         temporal_filter_empty=bool(time_filter.get("empty")),
-        temporal_range_start=time_filter.get("start_at"), temporal_range_end=time_filter.get("end_at"),
+        temporal_range_start=(time_filter.get("requested_start_at") if time_filter.get("empty") else time_filter.get("start_at")),
+        temporal_range_end=(time_filter.get("requested_end_at") if time_filter.get("empty") else time_filter.get("end_at")),
+        temporal_empty_reason=_text(time_filter.get("empty_reason")),
+        temporal_neighbor_sides=sum(1 for side in (time_filter.get("neighbors") or {}).values() if isinstance(side, dict)),
         contextual_history_match=contextual_history_match, history_selection_method=history_selection_method,
         selected_section_heading=_text(selected_section.get("heading")), clarification_needed=clarification_needed,
         clarification_status=_text(clarification_resolution.get("status")),
