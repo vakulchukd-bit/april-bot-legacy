@@ -1279,6 +1279,42 @@ async def execute(
         # ordered task as the legacy turn anchor. All other per-task relation and
         # history results travel in REQUEST_SEQUENCE; no second dialogue is made.
         dialogue_context = dict(question_contexts[0] if question_contexts else {})
+        # A turn-level continuation can contain a short acknowledgement followed by
+        # the real named-topic request. If the acknowledgement was split into its own
+        # task, do not let its empty context hide a later, grounded topic-vector match.
+        if (
+            bool(semantic_interpretation.get("requires_memory"))
+            and not bool(semantic_interpretation.get("history_request"))
+            and not (dialogue_context.get("selected_pairs") or [])
+        ):
+            continuation_candidates = []
+            for item, context in zip(question_sequence, question_contexts):
+                if not isinstance(context, dict) or not (context.get("selected_pairs") or []):
+                    continue
+                is_continuation = (
+                    _text(item.get("semantic_intent")).upper() == "TOPIC_CONTINUATION"
+                    or bool(item.get("requires_memory"))
+                    or _text(context.get("relation")).upper() == "CONTINUE"
+                )
+                if is_continuation:
+                    continuation_candidates.append((
+                        1 if _text(context.get("relation")).upper() == "CONTINUE" else 0,
+                        float(context.get("relation_confidence") or 0),
+                        len(context.get("selected_pairs") or []),
+                        context,
+                    ))
+            if continuation_candidates:
+                continuation_candidates.sort(key=lambda entry: entry[:3], reverse=True)
+                dialogue_context = dict(continuation_candidates[0][3])
+                _apr_timing_log(
+                    "continuation_context_promoted",
+                    user_key=_apr_diag_ref(uid),
+                    dialog_key=_apr_diag_ref(identity.get("dialog_id")),
+                    message_key=_apr_diag_ref(identity.get("message_id")),
+                    selected_pairs=len(dialogue_context.get("selected_pairs") or []),
+                    relation=dialogue_context.get("relation"),
+                    reason=dialogue_context.get("reason"),
+                )
         # Keep the legacy first-question anchor, but do not lose history topics when
         # a history-recall item appears later in a compound request.
         history_context = next((ctx for ctx in question_contexts if isinstance(ctx, dict) and ctx.get("history_request")), None)
