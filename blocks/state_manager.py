@@ -1837,6 +1837,125 @@ def _topic_query_overlap(query: str, topic: str) -> float:
     return _fuzzy_token_overlap(query_tokens, topic_tokens) if query_tokens else 0.0
 
 
+# Discourse around returning to a subject is not itself the subject. This separate
+# vocabulary is intentionally used only by the second-stage topic-vector search so
+# the existing general recall and entity ranking keep their established behavior.
+_TOPIC_REFERENCE_NOISE = _SECTION_TOPIC_NOISE | {
+    "хорошо", "тогда", "остановился", "остановилась", "остановились", "остановится",
+    "останавливались", "хотел", "хотела", "хотели", "чтобы", "развей", "развейте",
+    "развить", "разверни", "разверните", "тему", "темы", "тема", "мы", "ты", "вы",
+    "на", "чем", "как", "бы", "мне", "нам", "вам", "наш", "наша", "наше", "наши",
+    "нашем", "нашей", "нашего", "обсуждали", "обсуждал", "обсуждала", "обсуждение",
+    "обсуждения", "говорили", "говорил", "говорила", "говорим", "разговор", "разговора",
+    "предыдущий", "предыдущая", "предыдущем", "предыдущую", "прежний", "прежняя",
+    "прежнем", "актуальный", "актуальная", "актуальную", "именно", "пожалуйста",
+    "где", "что", "кто", "когда", "почему", "зачем",
+}
+
+
+def _topic_reference_query_tokens(query: str) -> set[str]:
+    """Extract the named subject from a continuation sentence, not its discourse."""
+    discourse_roots = (
+        "продолж", "развей", "разверни", "разверните", "останов", "обсужд",
+        "хотел", "хорош", "говорил", "говорила", "говорили",
+    )
+    return {
+        token for token in (_semantic_tokens(query) - _TOPIC_REFERENCE_NOISE)
+        if not token.isdigit() and len(token) > 2
+        and not any(token.startswith(root) for root in discourse_roots)
+    }
+
+
+def _rank_topic_vector_candidates(
+    query: str,
+    rows: list[dict[str, Any]],
+    *,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Second-stage search inside retained history by topic, section and content.
+
+    Unlike the active-turn ranker, this searches *all* retained rows. It favors the
+    user's named topic/section over recency, while requiring more than a single weak
+    word overlap so a recent history-list answer cannot masquerade as a topic match.
+    """
+    query_tokens = _topic_reference_query_tokens(query)
+    if not query_tokens:
+        return []
+    query_subjects = _subject_tokens(query)
+    ranked: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or _row_is_pending_clarification(row):
+            continue
+        # A history-list answer may mention the exact target topic in its summary
+        # ("math overview, algebra, ..."). It is evidence about the lookup, not the
+        # underlying topic branch, so never let it become the continuation anchor.
+        row_user_text = _text(row.get("user_text") or row.get("user_text_en"))
+        if row_user_text and _is_history_request(row_user_text):
+            continue
+        topic = _topic_label(row)
+        sections = _dialogue_section_map(row)
+        section_text = " ".join(
+            f"{_text(section.get('heading'))} {_text(section.get('summary'))}"
+            for section in sections if isinstance(section, dict)
+        )
+        summary = _compact_memory_summary(row)
+        searchable = " ".join((
+            topic, _row_subject_text(row), _text(row.get("user_text")),
+            _text(row.get("user_text_en")), summary, section_text,
+        ))
+        content_tokens = _semantic_tokens(searchable)
+        topic_tokens = _topic_tokens(topic)
+        section_tokens = _semantic_tokens(section_text)
+        content_overlap = _fuzzy_token_overlap(query_tokens, content_tokens)
+        topic_overlap = _fuzzy_token_overlap(query_tokens, topic_tokens)
+        section_overlap = _fuzzy_token_overlap(query_tokens, section_tokens) if section_tokens else 0.0
+        subject_overlap = _subject_overlap(query_subjects, _row_subject_tokens(row))
+
+        # A single matching word in a long assistant answer is not enough. A strong
+        # match in either the topic label or an indexed section heading is valid;
+        # this lets a named subtopic lead back to its parent overview even when the
+        # original user prompt used a broader heading.
+        if max(topic_overlap, section_overlap) < 0.50 and content_overlap < 0.75:
+            continue
+        score = (
+            0.50 * topic_overlap
+            + 0.25 * section_overlap
+            + 0.20 * content_overlap
+            + 0.05 * subject_overlap
+        )
+        if score < 0.34:
+            continue
+        ranked.append({
+            "row": row,
+            "score": round(score, 6),
+            "topic_overlap": round(topic_overlap, 6),
+            "section_overlap": round(section_overlap, 6),
+            "content_overlap": round(content_overlap, 6),
+            "subject_overlap": round(subject_overlap, 6),
+            "topic": topic,
+            "created_at": float(row.get("created_at") or 0),
+            "message_id": _text(row.get("message_id")),
+        })
+    ranked.sort(key=lambda item: (
+        float(item.get("score") or 0),
+        float(item.get("topic_overlap") or 0),
+        float(item.get("content_overlap") or 0),
+        float(item.get("created_at") or 0),
+    ), reverse=True)
+
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in ranked:
+        row_id = _text(item.get("message_id")) or f"{item.get('created_at')}|{item.get('topic')}"
+        if row_id in seen:
+            continue
+        seen.add(row_id)
+        output.append(item)
+        if len(output) >= max(1, min(8, int(limit or 8))):
+            break
+    return output
+
+
 def _history_query_topic_tokens(query: str) -> set[str]:
     """Extract subject-bearing words from a history request, excluding recall wording and times."""
     return {
@@ -2990,6 +3109,26 @@ def search_dialogue_context(
         relation = "NEW"
         continuation = False
 
+    # Stage two: when the user asks to resume a topic, search inside the retained
+    # history by its named topic/subtopic/section instead of defaulting to the newest
+    # turn. Do not apply this to independent new-information requests or broad history
+    # listings; those keep the original routing rules.
+    topic_vector_hits: list[dict[str, Any]] = []
+    wants_topic_resume = bool(
+        not history_request
+        and not self_contained_new_information
+        and not new_topic_request
+        and (
+            interpreted_intent == "TOPIC_CONTINUATION"
+            or interpreted_direction == "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
+            or reference_followup
+            or explicit_prior_pointer
+            or marker
+        )
+    )
+    if wants_topic_resume:
+        topic_vector_hits = _rank_topic_vector_candidates(query, all_rows, limit=8)
+
     # Resolve the anchor. Short referential requests with no explicit topic always
     # begin at the latest active turn; section ranking happens inside that topic.
     anchor: dict[str, Any] | None = None
@@ -3087,7 +3226,16 @@ def search_dialogue_context(
         # globally, or handed back to normal dialogue. It must not create another
         # local clarification from the old options.
     elif relation == "CONTINUE" and rows:
-        if not query_subjects and latest_same_dialog:
+        if topic_vector_hits:
+            # A confidently named topic beats the most recent turn even when the
+            # latest turn was a history lookup or an unrelated side branch.
+            vector_row = topic_vector_hits[0].get("row")
+            if isinstance(vector_row, dict):
+                anchor = _candidate_score(
+                    query, vector_row, dialog_id=str(dialog_id or ""),
+                    reference_followup=True, query_modalities=query_modalities,
+                )
+        elif not query_subjects and latest_same_dialog:
             # For an underspecified turn, prefer role-aligned evidence when available.
             # Otherwise compare the actual topical evidence with the active turn; if
             # neither gives a clear relative preference, stay on the active turn.
@@ -3167,16 +3315,46 @@ def search_dialogue_context(
             selection_method=history_selection_method, topic_index_count=len(topic_index),
         )
     elif relation == "CONTINUE":
-        if anchor:
-            selected_for_context.append(_compact_pair(anchor))
-        # At most one corroborating pair; never forward a pile of unrelated turns.
+        if topic_vector_hits and anchor:
+            # Keep the exact topic match first, then a small set of history rows that
+            # match the same topic vector. This is the requested "search inside the
+            # found history": a named topic may have an overview followed by sections
+            # or later subtopic turns, so one isolated latest pair is insufficient.
+            seen_vector_ids: set[str] = set()
+            for hit in topic_vector_hits:
+                hit_row = hit.get("row") if isinstance(hit, dict) else None
+                if not isinstance(hit_row, dict):
+                    continue
+                message_id = _text(hit_row.get("message_id"))
+                if message_id and message_id in seen_vector_ids:
+                    continue
+                if message_id:
+                    seen_vector_ids.add(message_id)
+                scored_hit = _candidate_score(
+                    query, hit_row, dialog_id=str(dialog_id or ""),
+                    reference_followup=True, query_modalities=query_modalities,
+                )
+                selected_for_context.append(_compact_pair(scored_hit))
+                if len(selected_for_context) >= 3:
+                    break
+            if not selected_for_context:
+                selected_for_context.append(_compact_pair(anchor))
+            history_selection_method = "named_topic_section_vector"
+            contextual_history_match = True
+        else:
+            if anchor:
+                selected_for_context.append(_compact_pair(anchor))
+        # At most one corroborating pair in the ordinary active-turn path; the
+        # named-topic vector above is separately limited to three grounded records.
         anchor_subjects = set((anchor or {}).get("subject_terms") or [])
         anchor_has_values = bool(int((anchor or {}).get("structured_data_richness") or 0) >= 8)
         related_candidates = []
         # A role-aligned factual record is sufficient for a participant-centered
         # lookup. Do not dilute it with neighboring turns that may only report a
         # prior failure to recall that fact (e.g. "I don't see your name").
-        related_context_candidates = [] if int((anchor or {}).get("participant_alignment") or 0) > 0 else matches
+        related_context_candidates = [] if (
+            topic_vector_hits or int((anchor or {}).get("participant_alignment") or 0) > 0
+        ) else matches
         for item in related_context_candidates:
             if item.get("is_pending_clarification"):
                 continue
@@ -3474,7 +3652,7 @@ def search_dialogue_context(
     topic_table_md = "\n".join(topic_table_lines)
 
     result = {
-        "engine": "state_manager_topic_section_search_v8_semantic_history_handoff",
+        "engine": "state_manager_topic_section_search_v9_named_topic_vector",
         "authenticated": True,
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "dialog_id": str(dialog_id or ""),
@@ -3493,6 +3671,7 @@ def search_dialogue_context(
             else "clarification_researched" if clarification_resolution
             else "clarification_pending" if clarification_needed
             else "history_request" if history_request
+            else "named_topic_vector_match" if history_selection_method == "named_topic_section_vector"
             else "semantic_history_match" if contextual_history_match
             else "self_contained_new_information" if self_contained_new_information
             else "named_topic_match" if explicit_topic_hits and relation == "CONTINUE"
@@ -3507,12 +3686,17 @@ def search_dialogue_context(
         "referential_followup": reference_followup,
         "history_request": history_request,
         "contextual_history_match": contextual_history_match,
+        "history_selection_method": history_selection_method,
+        "continuation_context_limit": 3 if history_selection_method == "named_topic_section_vector" else 2,
+        "topic_vector_candidate_count": len(topic_vector_hits),
         "matched_topic_count": len(topic_index) if (history_request or contextual_history_match or relation == "CONTINUE") else 0,
         "requested_topic_count": history_limit,
         "active_topic": active_topic,
         "anchor": _compact_pair(anchor) if relation == "CONTINUE" and anchor else {},
         "matches": matches[:max(1, int(limit or 12))] if matches else [],
-        "selected": selected_for_context[:5 if (history_request or resume_anchor_row) else 2],
+        "selected": selected_for_context[:5 if (history_request or resume_anchor_row) else (
+            3 if history_selection_method == "named_topic_section_vector" else 2
+        )],
         "history_topics": history_topics,
         "history_time_search": history_time_search,
         "topic_index": topic_index,
@@ -3542,6 +3726,16 @@ def search_dialogue_context(
         semantic_subject_switch=bool(semantic_subject_switch),
         self_contained_new_information=bool(self_contained_new_information),
         hot_branch_candidate=bool(hot_branch_candidate),
+        topic_vector_candidate_count=len(topic_vector_hits),
+        topic_vector_top=[{
+            "message_key": _apr_diag_ref(x.get("message_id")),
+            "topic": _text(x.get("topic"))[:80],
+            "score": x.get("score"),
+            "topic_overlap": x.get("topic_overlap"),
+            "section_overlap": x.get("section_overlap"),
+            "content_overlap": x.get("content_overlap"),
+            "subject_overlap": x.get("subject_overlap"),
+        } for x in topic_vector_hits[:3]],
         top_candidate_alignment=[{
             "message_key": _apr_diag_ref(x.get("message_id")), "score": x.get("score"),
             "subject_overlap": x.get("subject_overlap"), "subject_mismatch": x.get("subject_mismatch"),
@@ -3593,6 +3787,9 @@ def prepare_dialogue_context(
         "history_request": bool(context.get("history_request")),
         "history_time_search": deepcopy(context.get("history_time_search") or {}),
         "contextual_history_match": bool(context.get("contextual_history_match")),
+        "history_selection_method": _text(context.get("history_selection_method")),
+        "continuation_context_limit": int(context.get("continuation_context_limit") or 2),
+        "topic_vector_candidate_count": int(context.get("topic_vector_candidate_count") or 0),
         "matched_topic_count": int(context.get("matched_topic_count") or 0),
         "requested_topic_count": int(context.get("requested_topic_count") or 5),
         "topic_table_markdown": _text(context.get("topic_table_markdown")),
