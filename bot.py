@@ -1007,8 +1007,11 @@ class AprilHandler(BaseHTTPRequestHandler):
                 _apr_timing_log(
                     "account_delete_success",
                     user_key=_apr_diag_ref(user_id),
+                    deleted_user_rows=int(result.get("deleted_user_rows") or 0),
                     deleted_dialogue_rows=int(result.get("deleted_dialogue_rows") or 0),
                     deleted_payment_rows=int(result.get("deleted_payment_rows") or 0),
+                    checked_asset_owner_ids=int(result.get("checked_asset_owner_ids") or 0),
+                    purged_dialogue_cache_entries=int(result.get("purged_dialogue_cache_entries") or 0),
                     external_identity="google_untouched",
                 )
                 self._send_json(200, {"success": True, "deleted": True})
