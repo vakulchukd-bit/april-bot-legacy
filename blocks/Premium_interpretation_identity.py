@@ -17,6 +17,7 @@ import re
 
 
 
+
 def _apr_timing_log(stage: str, started: float | None = None, **fields: Any) -> None:
     """Low-overhead diagnostic timing; logging must never affect the request path."""
     try:
@@ -713,6 +714,15 @@ _CONTEXT_SIGNATURE_GENERIC = {
     "решил", "решила", "решили", "научно", "пошагово", "решать",
     "сделай", "вычисли", "рассчитай", "сравни", "найди", "проверь", "проанализируй", "приведи",
     "перечисли", "продолжи", "продолжим", "дальше", "далее", "есть", "какие", "какая", "какой",
+    # Request-management verbs are not topic entities. Excluding their common
+    # inflections prevents short clauses like “можешь перенести эти данные?”
+    # from becoming a fake topic named “можес/перенес”.
+    "давай", "можешь", "можес", "может", "могу", "можно", "можете", "сможешь",
+    "работать", "работаем", "работай", "перенеси", "перенести", "перенос",
+    "окей", "okay", "пожалуйста", "please", "хочу", "хочешь", "нужно", "надо",
+    "вчера", "сегодня", "позавчера", "утром", "вечером", "ночью", "днем", "днём",
+    "час", "часа", "часов", "минут", "неделю", "недели", "месяце", "годе",
+    "последних", "последние", "раньше", "недавно", "сегодняшний", "октября", "января",
     "должен", "должна", "должно", "должны", "был", "была", "были", "нет",
     "покажи", "показать", "покажите", "построй", "построить", "постройте",
     "сделай", "сделать", "сделайте", "создай", "создать", "исправь", "исправить",
@@ -751,6 +761,9 @@ _CONTEXT_SIGNATURE_DISCOURSE_ROOTS = (
     "напиш", "опиш", "расскаж", "объясн", "поясн", "покаж", "постро", "созда",
     "сдела", "вычисл", "рассчит", "сравн", "найд", "проверь", "проанализ", "привед",
     "перечисл", "продолж", "дальш", "должн", "каки", "был",
+    "работ", "перенес", "перенос", "можеш", "может", "могу", "давай",
+    "хотел", "хочет", "хочеш", "сможет", "сможеш", "попрос", "пожалуй",
+    "вчера", "сегодня", "позавчера", "утром", "вечером", "ночью", "недавно", "последн",
     "формул", "график", "таблиц", "диаграмм", "уравнен", "данн", "значен",
 )
 
@@ -920,6 +933,8 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
             "primary_intent": "NEW_INFORMATION", "direction": "ANSWER_NEW_REQUEST",
             "time_scope": "UNSPECIFIED", "topic_reference": "UNSPECIFIED",
             "requires_memory": False, "history_request": False, "search_scope": "CURRENT_DIALOGUE",
+            "time_window": extract_temporal_window(""),
+            "requested_topic_count": 7, "minimum_topic_count": 1,
             "intent_score": 0, "features": {}, "reason": "empty_request",
         }
 
@@ -936,6 +951,20 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     future_reference = _semantic_group_hit(tokens, "future_reference")
     today_reference = _semantic_group_hit(tokens, "today_reference")
     recent_reference = _semantic_group_hit(tokens, "recent_reference")
+    # Explicit dates, ranges and rolling durations are parsed once into a UTC
+    # interval. The state manager intersects that interval with Premium's retained
+    # 24-hour window; a time phrase is metadata, not a standalone history trigger.
+    time_window = extract_temporal_window(source)
+    has_explicit_time_window = bool(time_window.get("has_constraint"))
+    minimum_topic_count, requested_topic_count = extract_topic_count_bounds(source, default=7)
+    history_inventory_request = bool(
+        has_explicit_time_window
+        and re.search(
+            r"\b(?:тем\w*|топик\w*|диалог\w*|разговор\w*|перепис\w*|обсужд\w*|"
+            r"истори\w*|запрос\w*|topics?|conversations?|chats?|discussion\w*|history)\b",
+            low, re.IGNORECASE,
+        )
+    )
 
     self_reference = bool(token_set & {"мы", "нас", "нам", "наш", "наша", "наши", "наше", "we", "our", "us"}) or any(
         token.startswith(("наш", "наша", "наши")) for token in tokens
@@ -969,6 +998,10 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         or decision_recall
         or plan_recall
         or (past_reference and (dialogue_action or decision_action or plan_action) and (interrogative or imperative_recall))
+        # Inventory requests are history retrieval even when they omit “remember”,
+        # “we discussed”, or another fixed recall marker: e.g. “list topics from
+        # 14:00 to 16:00” or “show 5–10 conversations from the last 4 hours”.
+        or history_inventory_request
     ) and not future_topic_question
 
     if history_recall:
@@ -986,11 +1019,11 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
             direction = "SEARCH_PRIOR_PLANS"
             topic_reference = "PRIOR_PLAN"
             reason = "plan_terms_with_prior_or_future_context"
-        elif any(term in low for term in ("кратко", "содержание", "перечисли", "какие темы", "список тем", "summarize", "list topics")):
+        elif history_inventory_request or any(term in low for term in ("кратко", "содержание", "перечисли", "какие темы", "список тем", "summarize", "list topics")):
             primary_intent = "HISTORY_SUMMARY"
             direction = "SEARCH_AND_SUMMARIZE_HISTORY"
             topic_reference = "DIALOGUE_HISTORY"
-            reason = "summary_or_topic_list_requested"
+            reason = "time_bounded_topic_inventory" if history_inventory_request else "summary_or_topic_list_requested"
         elif any(term in low for term in ("конкрет", "фрагмент", "найди", "где мы", "какое сообщение", "find the part", "specific message")):
             primary_intent = "HISTORY_SEARCH"
             direction = "SEARCH_DIALOGUE_HISTORY"
@@ -1002,7 +1035,10 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
             topic_reference = "TODAY_DIALOGUE" if today_reference else ("PREVIOUS_DIALOGUE" if past_reference or recent_reference else "DIALOGUE_HISTORY")
             reason = "dialogue_reference_detected_semantically"
         relation_hint = "HISTORY_LOOKUP"
-        time_scope = "TODAY" if today_reference else ("RECENT_WINDOW" if recent_reference else ("PAST_DIALOGUE" if past_reference else ("FUTURE_PLAN_CONTEXT" if temporal_future else "AVAILABLE_HISTORY")))
+        time_scope = (
+            "EXPLICIT_TIME_WINDOW" if has_explicit_time_window else
+            ("TODAY" if today_reference else ("RECENT_WINDOW" if recent_reference else ("PAST_DIALOGUE" if past_reference else ("FUTURE_PLAN_CONTEXT" if temporal_future else "AVAILABLE_HISTORY"))))
+        )
     elif answer_followup:
         primary_intent = "TOPIC_CONTINUATION"
         direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
@@ -1014,7 +1050,11 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         intent_score = 3 + int(interrogative)
         relation_hint = "CONTINUE"
         reason = "previous_answer_explanation_followup"
-    elif (continuation_action or (any(token in token_set for token in {"это", "этого", "этом", "тот", "та", "ту", "там", "дальше", "прежнему", "прежней"}) and not temporal_future)) and not explicit_topic_introduction:
+    elif (continuation_action or (any(token in token_set for token in {
+        "это", "этого", "этой", "этом", "эти", "этих", "этими", "этим",
+        "тот", "та", "ту", "те", "тех", "такие", "таких", "такими",
+        "там", "дальше", "прежнему", "прежней", "ранее", "предыдущий",
+    }) and not temporal_future)) and not explicit_topic_introduction:
         primary_intent = "TOPIC_CONTINUATION"
         direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
         topic_reference = "PREVIOUS_OR_ACTIVE_TOPIC"
@@ -1069,10 +1109,14 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     }
     return {
         "schema": "april_request_semantics_v1",
-        "method": "rules_fuzzy_lexical_v1",
         "primary_intent": primary_intent,
         "direction": direction,
         "time_scope": time_scope,
+        "time_window": time_window,
+        "has_explicit_time_window": has_explicit_time_window,
+        "requested_topic_count": requested_topic_count,
+        "minimum_topic_count": minimum_topic_count,
+        "history_inventory_request": history_inventory_request,
         "topic_reference": topic_reference,
         "requires_memory": bool(requires_memory),
         "history_request": bool(history_request),
@@ -1096,14 +1140,14 @@ def _is_history_request(text: str) -> bool:
 
 
 def _history_count(text: str) -> int:
-    low = _text(text).lower().replace("ё", "е")
-    match = re.search(r"\b(10|[1-9])\b", low)
-    if match:
-        return max(1, min(10, int(match.group(1))))
-    for word, count in _HISTORY_COUNTS.items():
-        if re.search(rf"\b{word}\b", low):
-            return count
-    return 7
+    """Return the upper bound for list requests such as “от 5 до 10 тем”."""
+    _, maximum = extract_topic_count_bounds(text, default=7)
+    return max(1, min(10, int(maximum or 7)))
+
+
+def _history_count_minimum(text: str) -> int:
+    minimum, _ = extract_topic_count_bounds(text, default=7)
+    return max(1, min(10, int(minimum or 1)))
 
 
 def _select_history_topics(memory: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1272,6 +1316,16 @@ def _split_request_sequence(text: str) -> list[str]:
     # Never collapse repeated steps: repetition can be intentional, and the output
     # sequence must stay one-to-one with the user's requested order.
     cleaned = [re.sub(r"\s+", " ", part).strip() for part in parts if part.strip()]
+    # Modal openers (“Можешь…”, “Можно…”, ASR typo “Можес…”, “Could you…”) are
+    # the beginning of the following task, not independent tasks. Merge them before
+    # semantic search so one user sentence performs one memory lookup rather than
+    # burning time on an empty-prefix search.
+    if len(cleaned) > 1 and re.fullmatch(
+        r"(?:можешь|можете|можес|может|можно|сможешь|сможете|пожалуйста|давай|давайте|окей|okay|"
+        r"could\s+you|can\s+you|please)[,.!?…\s]*",
+        cleaned[0], flags=re.IGNORECASE,
+    ):
+        cleaned = [f"{cleaned[0].strip(' ,.!?…')} {cleaned[1]}".strip()] + cleaned[2:]
     if (len(cleaned) > 1 and _is_short_continuation_preface(cleaned[0])
             and _has_explicit_topic_introduction(cleaned[1])):
         # “Good, continue further” is a transition, not a retrieval task, when the
@@ -1341,6 +1395,32 @@ def build_question_sequence(
         if "text" not in outputs:
             outputs.insert(0, "text")
         item_semantics = interpret_request_semantics(item)
+        parent_window = parent.get("time_window") if isinstance(parent.get("time_window"), dict) else {}
+        if parent_window.get("has_constraint") and not (item_semantics.get("time_window") or {}).get("has_constraint"):
+            item_semantics["time_window"] = parent_window
+            item_semantics["has_explicit_time_window"] = True
+            item_semantics["time_scope"] = parent.get("time_scope", "EXPLICIT_TIME_WINDOW")
+        if parent.get("history_request") and not item_introduces_subject:
+            # A decomposed clause can omit the temporal/history words that made the
+            # whole request unambiguous. Preserve that parent context for dependent
+            # follow-ups without forcing it onto a separately introduced new subject.
+            _, inherited_tokens = _semantic_normalize(item)
+            inherited_set = set(inherited_tokens)
+            context_words = {
+                "это", "этого", "этой", "этом", "них", "ним", "нему", "истории",
+                "темы", "диалоги", "обсуждение", "список", "сводка", "выводы", "итоги",
+                "topics", "history", "conversations", "summary", "them", "those", "these",
+            }
+            if item_semantics.get("history_request") or item_semantics.get("requires_memory") or inherited_set.intersection(context_words) or len(inherited_set) <= 5:
+                item_semantics["history_request"] = True
+                item_semantics["requires_memory"] = True
+                item_semantics["search_scope"] = "ALL_DIALOGUE_HISTORY"
+                item_semantics["relation_hint"] = "HISTORY_LOOKUP"
+                item_semantics["primary_intent"] = "HISTORY_SUMMARY" if parent.get("primary_intent") == "HISTORY_SUMMARY" else item_semantics.get("primary_intent", "HISTORY_RECALL")
+                item_semantics["direction"] = "SEARCH_AND_SUMMARIZE_HISTORY" if item_semantics["primary_intent"] == "HISTORY_SUMMARY" else "SEARCH_DIALOGUE_HISTORY"
+                item_semantics["reason"] = "parent_history_context_inherited"
+                item_semantics["requested_topic_count"] = parent.get("requested_topic_count", _history_count(text))
+                item_semantics["minimum_topic_count"] = parent.get("minimum_topic_count", _history_count_minimum(text))
         if (
             parent.get("requires_memory")
             and parent.get("topic_reference") == "PREVIOUS_ASSISTANT_ANSWER"
@@ -1420,6 +1500,10 @@ def build_question_sequence(
             "semantic_intent": item_semantics.get("primary_intent", "NEW_INFORMATION"),
             "search_direction": item_semantics.get("direction", "ANSWER_NEW_REQUEST"),
             "time_scope": item_semantics.get("time_scope", "UNSPECIFIED"),
+            "time_window": item_semantics.get("time_window") if isinstance(item_semantics.get("time_window"), dict) else {},
+            "has_explicit_time_window": bool(item_semantics.get("has_explicit_time_window")),
+            "requested_topic_count": max(1, min(10, int(item_semantics.get("requested_topic_count") or _history_count(item)))) if item_semantics.get("history_request") else 0,
+            "minimum_topic_count": max(1, min(10, int(item_semantics.get("minimum_topic_count") or _history_count_minimum(item)))) if item_semantics.get("history_request") else 0,
             "topic_reference": item_semantics.get("topic_reference", "UNSPECIFIED"),
             "requires_memory": bool(item_semantics.get("requires_memory")),
             "history_request": bool(item_semantics.get("history_request")),
@@ -1535,7 +1619,8 @@ def build_interpretation(
         or bool(request_semantics.get("history_request"))
         or _is_history_request(original or text)
     )
-    history_count = max(1, min(10, int(memory.get("requested_topic_count") or _history_count(original or text) or 7)))
+    history_count = max(1, min(10, int(memory.get("requested_topic_count") or request_semantics.get("requested_topic_count") or _history_count(original or text) or 7)))
+    history_count_minimum = max(1, min(history_count, int(memory.get("minimum_topic_count") or request_semantics.get("minimum_topic_count") or _history_count_minimum(original or text) or 1)))
     history_topics = _select_history_topics(memory)[:history_count]
 
     # Referential questions such as "а про него еще?" are resolved by the
@@ -1644,6 +1729,8 @@ def build_interpretation(
             "wants_table": "table" in requested_outputs,
             "history_request": history_request,
             "history_count": history_count if history_request else 0,
+            "history_count_minimum": history_count_minimum if history_request else 0,
+            "time_window": request_semantics.get("time_window") if history_request else {},
             "semantic_intent": _text(request_semantics.get("primary_intent") or "NEW_INFORMATION"),
             "search_direction": _text(request_semantics.get("direction") or "ANSWER_NEW_REQUEST"),
             "semantic_reason": _text(request_semantics.get("reason")),
@@ -1790,3 +1877,519 @@ __all__ = [
     "interpret_request_semantics",
     "assert_same_identity",
 ]
+
+
+# Temporal parsing is embedded here to keep Premium logic inside existing modules.
+from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+_DEFAULT_TIMEZONE = "Europe/Kyiv"
+
+_WEEKDAY_NAMES = {
+    "понедельник": 0, "понедельника": 0, "понедельнику": 0, "понедельнике": 0,
+    "понеділок": 0, "понеділка": 0, "понеділку": 0, "monday": 0,
+    "вторник": 1, "вторника": 1, "вторнику": 1, "вівторок": 1, "вівторка": 1, "вівторку": 1, "tuesday": 1,
+    "среда": 2, "среду": 2, "среды": 2, "среде": 2, "середа": 2, "середу": 2, "середи": 2, "середі": 2, "wednesday": 2,
+    "четверг": 3, "четверга": 3, "четвергу": 3, "четверге": 3, "четвер": 3, "четверга": 3, "четвергу": 3, "thursday": 3,
+    "пятница": 4, "пятницу": 4, "пятницы": 4, "пятнице": 4, "п’ятниця": 4, "п’ятницю": 4, "пятниця": 4, "пятницю": 4, "friday": 4,
+    "суббота": 5, "субботу": 5, "субботы": 5, "субботе": 5, "субота": 5, "суботу": 5, "суботи": 5, "saturday": 5,
+    "воскресенье": 6, "воскресенья": 6, "воскресенью": 6, "неділя": 6, "неділю": 6, "неділі": 6, "sunday": 6,
+}
+
+
+def _weekday_reference(low: str) -> tuple[int, re.Match[str]] | None:
+    """Return a weekday only when wording marks it as a temporal reference.
+
+    A bare subject word like “пятницы” in a request to format a calendar is not a
+    time filter. Phrases such as “в пятницу”, “за прошлую среду”, and “last Monday” are.
+    """
+    names = "|".join(sorted((re.escape(name) for name in _WEEKDAY_NAMES), key=len, reverse=True))
+    pattern = re.compile(
+        rf"\b(?:в|во|за|на|по|с|от|from|on|last|this|past|previous|"
+        rf"прошл\w*|предыдущ\w*|последн\w*|эт\w*|минул\w*)"
+        rf"(?:\s+(?:прошл\w*|предыдущ\w*|последн\w*|эт\w*|минул\w*|this|last|previous))?"
+        rf"\s+(?P<weekday>{names})\b"
+    )
+    match = pattern.search(low)
+    if not match:
+        return None
+    return _WEEKDAY_NAMES[match.group("weekday")], match
+
+
+_MONTHS = {
+    "января": 1, "январь": 1, "січня": 1, "січень": 1, "january": 1, "jan": 1,
+    "февраля": 2, "февраль": 2, "лютого": 2, "лютий": 2, "february": 2, "feb": 2,
+    "марта": 3, "март": 3, "березня": 3, "березень": 3, "march": 3, "mar": 3,
+    "апреля": 4, "апрель": 4, "квітня": 4, "квітень": 4, "april": 4, "apr": 4,
+    "мая": 5, "май": 5, "травня": 5, "травень": 5, "may": 5,
+    "июня": 6, "июнь": 6, "червня": 6, "червень": 6, "june": 6, "jun": 6,
+    "июля": 7, "июль": 7, "липня": 7, "липень": 7, "july": 7, "jul": 7,
+    "августа": 8, "август": 8, "серпня": 8, "серпень": 8, "august": 8, "aug": 8,
+    "сентября": 9, "сентябрь": 9, "вересня": 9, "вересень": 9, "september": 9, "sep": 9,
+    "октября": 10, "октябрь": 10, "жовтня": 10, "жовтень": 10, "october": 10, "oct": 10,
+    "ноября": 11, "ноябрь": 11, "листопада": 11, "листопад": 11, "november": 11, "nov": 11,
+    "декабря": 12, "декабрь": 12, "грудня": 12, "грудень": 12, "december": 12, "dec": 12,
+}
+
+
+def _tz(name: str | None = None):
+    try:
+        return ZoneInfo(name or _DEFAULT_TIMEZONE)
+    except (ZoneInfoNotFoundError, ValueError):
+        return timezone.utc
+
+
+def _reference_local(reference_ts: float | int | None, timezone_name: str | None) -> datetime:
+    zone = _tz(timezone_name)
+    if reference_ts is None:
+        return datetime.now(zone)
+    return datetime.fromtimestamp(float(reference_ts), tz=zone)
+
+
+def _local_epoch(value: datetime) -> float:
+    return value.astimezone(timezone.utc).timestamp()
+
+
+def _result(start: datetime, end: datetime, *, source: str, timezone_name: str | None,
+            reference: datetime) -> dict[str, Any]:
+    zone = _tz(timezone_name)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=zone)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=zone)
+    start_utc = start.astimezone(timezone.utc)
+    end_utc = end.astimezone(timezone.utc)
+    if end_utc < start_utc:
+        return _empty(timezone_name, reference)
+    return {
+        "has_constraint": True,
+        "start_at": start_utc.timestamp(),
+        "end_at": end_utc.timestamp(),
+        "start_utc": start_utc.isoformat(),
+        "end_utc": end_utc.isoformat(),
+        "start_local": start.astimezone(zone).isoformat(),
+        "end_local": end.astimezone(zone).isoformat(),
+        "timezone": getattr(zone, "key", "UTC"),
+        "source": source,
+        "label": f"{start.astimezone(zone).strftime('%Y-%m-%d %H:%M')} — {end.astimezone(zone).strftime('%Y-%m-%d %H:%M')}",
+        "reference_at": _local_epoch(reference),
+    }
+
+
+def _empty(timezone_name: str | None, reference: datetime) -> dict[str, Any]:
+    zone = _tz(timezone_name)
+    return {
+        "has_constraint": False,
+        "start_at": None,
+        "end_at": None,
+        "start_utc": "",
+        "end_utc": "",
+        "start_local": "",
+        "end_local": "",
+        "timezone": getattr(zone, "key", "UTC"),
+        "source": "none",
+        "label": "",
+        "reference_at": _local_epoch(reference),
+    }
+
+
+def _parse_date(value: str, reference: datetime) -> datetime | None:
+    raw = value.strip().lower().replace("ё", "е")
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%y", "%d/%m/%y"):
+        try:
+            d = datetime.strptime(raw, fmt).date()
+            return datetime.combine(d, time.min, tzinfo=reference.tzinfo)
+        except ValueError:
+            continue
+    # Day/month without a year uses the reference year; a year boundary is fixed
+    # by the range parser if the resulting end precedes the start.
+    for fmt in ("%d.%m", "%d/%m", "%d-%m"):
+        try:
+            d = datetime.strptime(raw, fmt).date().replace(year=reference.year)
+            return datetime.combine(d, time.min, tzinfo=reference.tzinfo)
+        except ValueError:
+            continue
+    return None
+
+
+def _relative_clock_date(low: str, reference: datetime, zone: Any) -> datetime.date:
+    """Resolve a date modifier used alongside a clock range or a single clock."""
+    if re.search(r"\b(?:позавчера|the day before yesterday)\b", low):
+        return (reference - timedelta(days=2)).date()
+    if re.search(r"\b(?:вчера|yesterday)\b", low):
+        return (reference - timedelta(days=1)).date()
+    if re.search(r"\b(?:сегодня|today)\b", low):
+        return reference.date()
+    weekday = _weekday_reference(low)
+    if weekday is not None:
+        named_weekday, _ = weekday
+        days_back = (reference.weekday() - named_weekday) % 7
+        if days_back == 0 and re.search(r"\b(?:прошл\w*|предыдущ\w*|last|previous)\b", low):
+            days_back = 7
+        return (reference - timedelta(days=days_back)).date()
+    return reference.date()
+
+
+def extract_temporal_window(
+    text: Any,
+    *,
+    reference_ts: float | int | None = None,
+    timezone_name: str | None = None,
+) -> dict[str, Any]:
+    """Parse explicit time/date bounds from a user request.
+
+    Supported examples include “за последние 3 часа”, “с 14:00 до 16:30”,
+    “между 9 и 11 часами”, “вчера утром”, “с 14.10.2026 по 15.10.2026”,
+    “с 14 по 15 октября”, “сегодня”, and weekday references. Unspecified time means
+    no temporal filter; callers must not interpret that as an empty interval.
+    """
+    source_text = str(text or "").strip()
+    low = re.sub(r"\s+", " ", source_text.lower().replace("ё", "е").replace("’", "'").replace("ʼ", "'")).strip()
+    reference = _reference_local(reference_ts, timezone_name)
+    zone = _tz(timezone_name)
+    if not low:
+        return _empty(timezone_name, reference)
+
+    ago = re.search(
+        r"\b(\d{1,3})\s*(секунд\w*|сек\.?|минут\w*|мин\.?|час\w*|годин\w*|дн\w*|доба\w*|день|дня|дней|days?|hours?|hrs?|minutes?|mins?|seconds?)\s+назад\b",
+        low,
+    )
+    if ago:
+        amount, unit = max(1, int(ago.group(1))), ago.group(2)
+        delta = timedelta(seconds=amount) if unit.startswith(("сек", "second", "sec")) else timedelta(minutes=amount) if unit.startswith(("мин", "minute", "min")) else timedelta(hours=amount) if unit.startswith(("час", "годин", "hour", "hr")) else timedelta(days=amount)
+        return _result(reference - delta, reference, source="relative_ago", timezone_name=timezone_name, reference=reference)
+
+    # Relative rolling durations, including intervals longer than the 24-hour
+    # product retention window (the state manager intersects both windows).
+    rel = re.search(
+        r"\b(?:за\s+|в\s+течение\s+(?:последн\w*\s+)?|последн\w*\s+|past\s+|last\s+)"
+        r"(\d{1,3})\s*(секунд\w*|сек\.?|минут\w*|мин\.?|час\w*|годин\w*|дн\w*|доба\w*|день|дня|дней|days?|hours?|hrs?|minutes?|mins?|seconds?)\b",
+        low,
+    )
+    if rel:
+        amount = max(1, int(rel.group(1)))
+        unit = rel.group(2)
+        if unit.startswith(("сек", "second", "sec")):
+            delta = timedelta(seconds=amount)
+        elif unit.startswith(("мин", "minute", "min")):
+            delta = timedelta(minutes=amount)
+        elif unit.startswith(("час", "годин", "hour", "hr")):
+            delta = timedelta(hours=amount)
+        else:
+            delta = timedelta(days=amount)
+        return _result(reference - delta, reference, source="relative_duration", timezone_name=timezone_name, reference=reference)
+    if re.search(r"\b(?:последний час|за час|за последний час|последний 1 час|last hour|past hour)\b", low):
+        return _result(reference - timedelta(hours=1), reference, source="relative_duration", timezone_name=timezone_name, reference=reference)
+    if re.search(r"\b(?:полчаса|пол\s+часа|half an hour|last 30 minutes)\b", low):
+        return _result(reference - timedelta(minutes=30), reference, source="relative_duration", timezone_name=timezone_name, reference=reference)
+
+    # Natural durations without a number, and “N units ago” wording.
+    named_duration = re.search(
+        r"\b(?:за\s+|в\s+течение\s+|последн\w*\s+|past\s+|last\s+)?"
+        r"(сутки|суток|день|дня|неделю|недели|месяц|месяца|год|года|day|week|month|year)\b",
+        low,
+    )
+    if named_duration and re.search(r"\b(?:за|последн\w*|прошл\w*|past|last|в\s+течение)\b", low):
+        unit = named_duration.group(1)
+        days = 1 if unit in {"сутки", "суток", "день", "дня", "day"} else 7 if unit in {"неделю", "недели", "week"} else 30 if unit in {"месяц", "месяца", "month"} else 365
+        return _result(reference - timedelta(days=days), reference, source="named_duration", timezone_name=timezone_name, reference=reference)
+    if re.search(r"\b(?:с\s+начала\s+дня|с\s+начала\s+сегодня|since\s+start\s+of\s+day)\b", low):
+        start = datetime.combine(reference.date(), time.min, tzinfo=zone)
+        return _result(start, reference, source="day_start", timezone_name=timezone_name, reference=reference)
+
+    # Explicit date-time bounds preserve the clock supplied on each endpoint,
+    # e.g. “с 14.10.2026 15:00 до 15.10.2026 18:30”.
+    date_pat = r"(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)"
+    datetime_range = re.search(
+        rf"\b(?:с|з|із|від|от|from)\s*({date_pat})\s+(?:в\s*)?(\d{{1,2}}):(\d{{2}})\s*"
+        rf"(?:по|до|[-–—]|to|through)\s*({date_pat})\s+(?:в\s*)?(\d{{1,2}}):(\d{{2}})\b",
+        low,
+    )
+    if datetime_range:
+        start_date = _parse_date(datetime_range.group(1), reference)
+        end_date = _parse_date(datetime_range.group(4), reference)
+        sh, sm, eh, em = (int(datetime_range.group(i)) for i in (2, 3, 5, 6))
+        if start_date and end_date and all((h <= 23 and m <= 59) for h, m in ((sh, sm), (eh, em))):
+            start = datetime.combine(start_date.date(), time(sh, sm), tzinfo=zone)
+            end = datetime.combine(end_date.date(), time(eh, em), tzinfo=zone)
+            return _result(start, end, source="explicit_datetime_range", timezone_name=timezone_name, reference=reference)
+
+    # Explicit ISO / numeric date ranges. End dates are inclusive; make the
+    # interval's end exclusive by advancing to midnight after the final day.
+    date_range = re.search(rf"\b(?:с|з|із|від|от|from)\s*({date_pat})\s*(?:по|до|[-–—]|to|through)\s*({date_pat})\b", low)
+    if date_range:
+        start = _parse_date(date_range.group(1), reference)
+        end = _parse_date(date_range.group(2), reference)
+        if start and end:
+            if end < start and not re.search(r"\d{4}", date_range.group(2)):
+                end = end.replace(year=end.year + 1)
+            end += timedelta(days=1)
+            return _result(start, end, source="explicit_date_range", timezone_name=timezone_name, reference=reference)
+
+    # Month-name ranges allow the month to be stated on each endpoint, including
+    # cross-month bounds such as “с 28 сентября по 3 октября 2026”.
+    month_pattern = "|".join(sorted((re.escape(m) for m in _MONTHS), key=len, reverse=True))
+    month_first_range = re.search(
+        rf"\b(?:from|between)\s+({month_pattern})\s+(\d{{1,2}})(?:,?\s+(\d{{4}}))?\s+"
+        rf"(?:to|through|[-–—])\s+({month_pattern})\s+(\d{{1,2}})(?:,?\s+(\d{{4}}))?\b",
+        low,
+    )
+    if month_first_range:
+        month1, day1 = _MONTHS[month_first_range.group(1)], int(month_first_range.group(2))
+        month2, day2 = _MONTHS[month_first_range.group(4)], int(month_first_range.group(5))
+        inferred_year = int(month_first_range.group(6) or reference.year)
+        year1 = int(month_first_range.group(3) or inferred_year)
+        year2 = int(month_first_range.group(6) or year1)
+        try:
+            start = datetime(year1, month1, day1, tzinfo=zone)
+            end_start = datetime(year2, month2, day2, tzinfo=zone)
+            if end_start < start and not month_first_range.group(6):
+                end_start = end_start.replace(year=end_start.year + 1)
+            return _result(start, end_start + timedelta(days=1), source="month_name_range", timezone_name=timezone_name, reference=reference)
+        except ValueError:
+            pass
+
+    month_to_month = re.search(
+        rf"\b(?:с|з|із|від|от|from)\s*(\d{{1,2}})\s+({month_pattern})(?:\s+(\d{{4}}))?\s*"
+        rf"(?:по|до|[-–—]|to|through)\s*(\d{{1,2}})\s+({month_pattern})(?:\s+(\d{{4}}))?\b",
+        low,
+    )
+    if month_to_month:
+        day1, month1 = int(month_to_month.group(1)), _MONTHS[month_to_month.group(2)]
+        inferred_year = int(month_to_month.group(6) or reference.year)
+        year1 = int(month_to_month.group(3) or inferred_year)
+        day2, month2 = int(month_to_month.group(4)), _MONTHS[month_to_month.group(5)]
+        year2 = int(month_to_month.group(6) or year1)
+        try:
+            start = datetime(year1, month1, day1, tzinfo=zone)
+            end_start = datetime(year2, month2, day2, tzinfo=zone)
+            if end_start < start and not month_to_month.group(6):
+                end_start = end_start.replace(year=end_start.year + 1)
+            return _result(start, end_start + timedelta(days=1), source="month_name_range", timezone_name=timezone_name, reference=reference)
+        except ValueError:
+            pass
+
+    # Compact Russian/English ranges: “с 14 по 15 октября [2026]”.
+    month_range = re.search(
+        rf"\b(?:с|з|із|від|от|from)\s*(\d{{1,2}})\s*(?:по|до|[-–—]|to|through)\s*(\d{{1,2}})\s+({month_pattern})(?:\s+(\d{{4}}))?\b",
+        low,
+    )
+    if month_range:
+        first_day, last_day = int(month_range.group(1)), int(month_range.group(2))
+        month = _MONTHS[month_range.group(3)]
+        year = int(month_range.group(4) or reference.year)
+        try:
+            start = datetime(year, month, first_day, tzinfo=zone)
+            end = datetime(year, month, last_day, tzinfo=zone) + timedelta(days=1)
+            if end < start and not month_range.group(4):
+                start = start.replace(year=year - 1)
+                end = end.replace(year=year - 1)
+            return _result(start, end, source="month_name_range", timezone_name=timezone_name, reference=reference)
+        except ValueError:
+            pass
+
+    # If a specific date accompanies a clock range, use that date instead of
+    # silently interpreting the clock range as today.
+    clock_date = _relative_clock_date(low, reference, zone)
+    explicit_iso_for_clock = re.search(r"(?<!\d)(\d{4}-\d{1,2}-\d{1,2})(?!\d)", low)
+    explicit_num_for_clock = re.search(r"(?<!\d)(\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)(?!\d)", low)
+    explicit_month_for_clock = re.search(rf"\b(\d{{1,2}})\s+({month_pattern})(?:\s+(\d{{4}}))?\b", low)
+    clock_date_start = _parse_date(explicit_iso_for_clock.group(1), reference) if explicit_iso_for_clock else (
+        _parse_date(explicit_num_for_clock.group(1), reference) if explicit_num_for_clock else None
+    )
+    if clock_date_start is None and explicit_month_for_clock:
+        try:
+            clock_date_start = datetime(
+                int(explicit_month_for_clock.group(3) or reference.year),
+                _MONTHS[explicit_month_for_clock.group(2)], int(explicit_month_for_clock.group(1)),
+                tzinfo=zone,
+            )
+        except ValueError:
+            clock_date_start = None
+    if clock_date_start is not None:
+        clock_date = clock_date_start.date()
+
+    # Clock range. Bare numeric ranges such as “от 5 до 10 тем” are not times;
+    # require HH:MM, a time-of-day marker, or an hour-unit word.
+    clock_range = re.search(
+        r"\b(?:с|от|между|from|between)\s*(\d{1,2})(?::(\d{2}))?\s*"
+        r"(?:до|по|и|[-–—]|to|and)\s*(\d{1,2})(?::(\d{2}))?",
+        low,
+    )
+    if clock_range:
+        matched = clock_range.group(0)
+        after = low[clock_range.end():clock_range.end() + 30]
+        before = low[max(0, clock_range.start() - 20):clock_range.start()]
+        has_clock_colon = ":" in matched
+        has_time_word = bool(re.search(r"\b(?:час\w*|годин\w*|утра|ранку|дня|вечера|вечор\w*|ночью|ночі|am|pm|o'clock|hours?)\b", before + " " + after))
+        nearby_day_word = bool(re.search(r"\b(?:тем\w*|топик\w*|topics?)\b", after))
+        if has_clock_colon or (has_time_word and not nearby_day_word):
+            h1, m1 = int(clock_range.group(1)), int(clock_range.group(2) or 0)
+            h2, m2 = int(clock_range.group(3)), int(clock_range.group(4) or 0)
+            if h1 <= 23 and h2 <= 23 and m1 <= 59 and m2 <= 59:
+                start = datetime.combine(clock_date, time(h1, m1), tzinfo=zone)
+                end = datetime.combine(clock_date, time(h2, m2), tzinfo=zone)
+                if end <= start:
+                    end += timedelta(days=1)
+                return _result(start, end, source="clock_range", timezone_name=timezone_name, reference=reference)
+
+    # A single date; date ranges were handled above so this cannot swallow one end.
+    iso_date = re.search(r"(?<!\d)(\d{4}-\d{1,2}-\d{1,2})(?!\d)", low)
+    numeric_date = re.search(r"(?<!\d)(\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)(?!\d)", low)
+    month_date = re.search(rf"\b(\d{{1,2}})\s+({month_pattern})(?:\s+(\d{{4}}))?\b", low)
+    date_start = _parse_date(iso_date.group(1), reference) if iso_date else (_parse_date(numeric_date.group(1), reference) if numeric_date else None)
+    if month_date:
+        try:
+            date_start = datetime(
+                int(month_date.group(3) or reference.year), _MONTHS[month_date.group(2)],
+                int(month_date.group(1)), tzinfo=zone,
+            )
+        except ValueError:
+            pass
+    if date_start:
+        return _result(date_start, date_start + timedelta(days=1), source="explicit_date", timezone_name=timezone_name, reference=reference)
+
+    # Weekday ranges such as “с понедельника по пятницу”. A bare weekday noun
+    # elsewhere in the user request is not treated as a temporal filter.
+    weekday_names = "|".join(sorted((re.escape(name) for name in _WEEKDAY_NAMES), key=len, reverse=True))
+    weekday_range = re.search(
+        rf"\b(?:с|от|from)\s+(?:(?:прошл\w*|предыдущ\w*|эт\w*|last|previous|this)\s+)?"
+        rf"(?P<start>{weekday_names})\s+(?:по|до|[-–—]|to|through)\s+"
+        rf"(?:(?:прошл\w*|предыдущ\w*|эт\w*|last|previous|this)\s+)?"
+        rf"(?P<end>{weekday_names})\b",
+        low,
+    )
+    if weekday_range:
+        start_day = _WEEKDAY_NAMES[weekday_range.group("start")]
+        end_day = _WEEKDAY_NAMES[weekday_range.group("end")]
+        week_start = reference.date() - timedelta(days=reference.weekday())
+        if re.search(r"\b(?:прошл\w*|предыдущ\w*|last|previous)\b", weekday_range.group(0)):
+            week_start -= timedelta(days=7)
+        start_date = week_start + timedelta(days=start_day)
+        end_date = week_start + timedelta(days=end_day)
+        if end_date < start_date:
+            end_date += timedelta(days=7)
+        start = datetime.combine(start_date, time.min, tzinfo=zone)
+        end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=zone)
+        return _result(start, end, source="weekday_range", timezone_name=timezone_name, reference=reference)
+
+    # Day-relative expressions, with optional part-of-day restrictions.
+    day_offset = 0
+    if re.search(r"\b(?:позавчера|the day before yesterday)\b", low):
+        day_offset = -2
+    elif re.search(r"\b(?:вчера|yesterday)\b", low):
+        day_offset = -1
+    elif re.search(r"\b(?:сегодня|сегодняшн\w*|today)\b", low):
+        day_offset = 0
+    else:
+        # Weekday names mean the most recent matching local day (today if named
+        # weekday equals today), which is useful for “what did we discuss Monday?”.
+        weekday_match = _weekday_reference(low)
+        if weekday_match is not None:
+            weekday, _ = weekday_match
+            days_back = (reference.weekday() - weekday) % 7
+            if days_back == 0 and re.search(r"\b(?:прошл\w*|предыдущ\w*|last|previous)\b", low):
+                days_back = 7
+            day_offset = -days_back
+        else:
+            day_offset = None
+
+    if day_offset is not None:
+        day = (reference + timedelta(days=day_offset)).date()
+        start = datetime.combine(day, time.min, tzinfo=zone)
+        end = start + timedelta(days=1)
+        part = None
+        if re.search(r"\b(?:утром|утра|ранку|morning|morning time)\b", low):
+            part = (5, 12)
+        elif re.search(r"\b(?:днем|днём|дня|пополудни|afternoon|noon)\b", low):
+            part = (12, 17)
+        elif re.search(r"\b(?:вечером|вечера|вечор\w*|evening)\b", low):
+            part = (17, 22)
+        elif re.search(r"\b(?:ночью|ночі|ночью|night|overnight)\b", low):
+            start = datetime.combine(day, time(22, 0), tzinfo=zone)
+            end = start + timedelta(hours=7)
+            return _result(start, end, source="day_part", timezone_name=timezone_name, reference=reference)
+        if part:
+            start = datetime.combine(day, time(part[0], 0), tzinfo=zone)
+            end = datetime.combine(day, time(part[1], 0), tzinfo=zone)
+            return _result(start, end, source="day_part", timezone_name=timezone_name, reference=reference)
+        # Bare yesterday/today/weekday bounds are whole local days.
+        if day_offset != 0 or re.search(r"\b(?:сегодня|today)\b", low):
+            return _result(start, end, source="relative_day", timezone_name=timezone_name, reference=reference)
+
+    # Explicit clock plus approximate language, without a range.
+    single_clock = re.search(r"\b(?:в|около|around|at)\s*(\d{1,2}):(\d{2})\b", low)
+    if single_clock:
+        h, m = int(single_clock.group(1)), int(single_clock.group(2))
+        if h <= 23 and m <= 59:
+            centre = datetime.combine(clock_date, time(h, m), tzinfo=zone)
+            return _result(centre - timedelta(minutes=30), centre + timedelta(minutes=30), source="approximate_clock", timezone_name=timezone_name, reference=reference)
+
+    return _empty(timezone_name, reference)
+
+
+def intersect_retention_window(window: dict[str, Any], *, now_ts: float, retention_seconds: int) -> dict[str, Any]:
+    """Intersect a parsed range with the product's retained-memory interval."""
+    if not isinstance(window, dict) or not window.get("has_constraint"):
+        return {"applied": False, "empty": False, "start_at": None, "end_at": None, "source": "none"}
+    try:
+        start = float(window["start_at"])
+        end = float(window["end_at"])
+    except (KeyError, TypeError, ValueError):
+        return {"applied": False, "empty": False, "start_at": None, "end_at": None, "source": "invalid"}
+    clipped_start = max(start, float(now_ts) - max(1, int(retention_seconds)))
+    clipped_end = min(end, float(now_ts))
+    return {
+        "applied": True,
+        "empty": clipped_end <= clipped_start,
+        "start_at": clipped_start,
+        "end_at": clipped_end,
+        "source": str(window.get("source") or "explicit"),
+        "label": str(window.get("label") or ""),
+        "timezone": str(window.get("timezone") or _DEFAULT_TIMEZONE),
+        "requested_start_at": start,
+        "requested_end_at": end,
+    }
+
+_TOPIC_NUMBER_WORDS = {
+    "один": 1, "одну": 1, "одна": 1, "одного": 1,
+    "два": 2, "две": 2, "двух": 2,
+    "три": 3, "трех": 3, "трёх": 3,
+    "четыре": 4, "четырех": 4, "четырёх": 4,
+    "пять": 5, "пяти": 5, "шесть": 6, "шести": 6,
+    "семь": 7, "семи": 7, "восемь": 8, "восьми": 8,
+    "девять": 9, "девяти": 9, "десять": 10, "десяти": 10,
+}
+
+
+def extract_topic_count_bounds(text: Any, default: int = 7) -> tuple[int, int]:
+    """Return (minimum, maximum) requested history topic count, clamped to 1–10."""
+    low = re.sub(r"\s+", " ", str(text or "").lower().replace("ё", "е")).strip()
+    topic_word = r"(?:тем\w*|топик\w*|диалог\w*|разговор\w*|topic\w*|conversation\w*)"
+    # A numeric range is accepted only when it clearly modifies a topic/record count,
+    # so date ranges and time ranges cannot be mistaken for “5–10 topics”.
+    numeric_range = re.search(
+        rf"\b(?:(?:от|from)\s*)?(\d{{1,2}})\s*(?:до|to|[-–—]|и|and)\s*(\d{{1,2}})\s*{topic_word}\b", low
+    )
+    if numeric_range:
+        first, second = int(numeric_range.group(1)), int(numeric_range.group(2))
+        if 1 <= first <= 10 and 1 <= second <= 10:
+            return min(first, second), max(first, second)
+    words = "|".join(sorted((re.escape(word) for word in _TOPIC_NUMBER_WORDS), key=len, reverse=True))
+    word_range = re.search(
+        rf"\b(?:от\s*)?({words})\s+(?:до|и)\s+({words})\s+{topic_word}\b", low
+    )
+    if word_range:
+        first, second = _TOPIC_NUMBER_WORDS[word_range.group(1)], _TOPIC_NUMBER_WORDS[word_range.group(2)]
+        return min(first, second), max(first, second)
+
+    single = re.search(rf"\b(10|[1-9])\s*{topic_word}\b", low)
+    if single:
+        value = int(single.group(1))
+        return value, value
+    for word, value in _TOPIC_NUMBER_WORDS.items():
+        if re.search(rf"\b{re.escape(word)}\s+{topic_word}\b", low):
+            return value, value
+    bounded = max(1, min(10, int(default or 7)))
+    return 1, bounded
+
