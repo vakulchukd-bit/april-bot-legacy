@@ -119,6 +119,7 @@ not specify a number. The user may then name a topic or give a hint and April sh
 from the corresponding anchor/pairs. Keep the hidden remainder known to the processor; do not
 invent topics that are not in the supplied index.
 For targeted history requests naming a person, subject, or earlier task, prioritize matching DIALOGUE_TOPIC_INDEX entries and CONTINUATION_CONTEXT evidence even when DIALOGUE_RELATION is NEW. Do not ask the user to repeat information when a matching stored pair is supplied. Enumerate multiple topics only for a general overview/list request.
+TEMPORAL HISTORY RULE: When DIALOGUE_HISTORY_TIME_SEARCH.requested=true, this deterministic time-scoped result has priority over DIALOGUE_HISTORY_TOPICS, DIALOGUE_TOPIC_INDEX and DIALOGUE_TABLE_MARKDOWN. Do not replace a time request with a generic list of recent topics; use the returned USER↔APRIL pair(s) and their time labels. A status of matched_requested_window or matched_window_topic_unconfirmed means the returned pairs belong to the requested interval (with the stated tolerance); the latter means the named subject was not confirmed. For empty_window_nearest_dialogues or nearest_topic_dialogues_outside_window, explicitly say that no saved dialogue was found inside the requested interval, then describe the nearest returned pair(s) and state whether each was before or after the interval and the approximate gap using history_time_label/history_gap_minutes. Never present a neighboring pair as though it occurred in the requested interval. For no_saved_dialogues, say that no pair exists in the retained memory for that time; do not invent a topic. When topic_constraint=true, follow topic_match_found and topic_terms; if no matching subject was confirmed, disclose that instead of asserting it was the named topic. Never ask the user to repeat hints when selected pairs have already been supplied.
 
 For each newly supplied image/screenshot, inspect the actual pixels and record a concise grounded analysis: main subject, relevant visible details, text only when legible, uncertainty, and context. Never invent details that the pixels do not support. For a recalled asset with CACHED_ASSET_ANALYSIS, use that sidecar for ordinary follow-ups and do not restart with a generic image description. Inspect recalled original bytes only when they are actually supplied and the current question needs details beyond the sidecar. If multiple images are supplied, keep them labelled by filename/role and compare only when asked. An input image is NOT a request to generate an image.
 For each newly supplied or explicitly reattached file, read the actual input_file or ATTACHED_TEXT_FILES content. For source code, describe its real purpose, entry points, key functions, data flow and concrete problems visible in the source; cite filenames/function names rather than giving a generic description. If only a cached asset summary is supplied, use it for continuity and do not claim to have reread the original file. An input file is NOT a request to create/export a file.
@@ -1178,6 +1179,11 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                         "user": _semantic_compress(pair.get("user"), 45),
                         "april": _semantic_compress(pair.get("april"), 60),
                         "message_id": pair.get("message_id"),
+                        "created_at": pair.get("created_at"),
+                        "history_time_relation": pair.get("history_time_relation"),
+                        "history_time_label": pair.get("history_time_label"),
+                        "history_age_minutes": pair.get("history_age_minutes"),
+                        "history_gap_minutes": pair.get("history_gap_minutes"),
                         "sections": [
                             {"heading": _semantic_compress(sec.get("heading"), 14),
                              "summary": _semantic_compress(sec.get("summary"), 24),
@@ -1316,6 +1322,11 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "score": item.get("score"),
                 "same_dialog": item.get("same_dialog"),
                 "message_id": item.get("message_id"),
+                "created_at": item.get("created_at"),
+                "history_time_relation": item.get("history_time_relation"),
+                "history_time_label": item.get("history_time_label"),
+                "history_age_minutes": item.get("history_age_minutes"),
+                "history_gap_minutes": item.get("history_gap_minutes"),
             })
         data["CONTINUATION_CONTEXT"] = compact_pairs
         data["DIALOGUE_ANCHOR"]["attachment_evidence"] = "" if isinstance(data.get("DIALOGUE_ANCHOR"), dict) else ""
@@ -1394,6 +1405,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "semantic_intent": task_search.get("semantic_intent", ""),
                 "search_direction": task_search.get("search_direction", ""),
                 "time_scope": task_search.get("time_scope", "UNSPECIFIED"),
+                "history_time_search": task_search.get("history_time_search") or {},
                 "history_topics": [
                     {"topic": _semantic_compress(topic.get("topic"), max(8, summary_budget // 2)),
                      "summary": _semantic_compress(topic.get("summary"), max(12, summary_budget)),
@@ -1426,6 +1438,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                      "user": _semantic_compress(pair.get("user"), max(8, summary_budget // 2)),
                      "april": _semantic_compress(pair.get("april"), max(12, summary_budget)),
                      "message_id": pair.get("message_id"),
+                     "history_time_relation": pair.get("history_time_relation"),
+                     "history_time_label": pair.get("history_time_label"),
+                     "history_age_minutes": pair.get("history_age_minutes"),
+                     "history_gap_minutes": pair.get("history_gap_minutes"),
                      "sections": [{"heading": _semantic_compress(sec.get("heading"), max(8, summary_budget // 2)),
                                    "summary": _semantic_compress(sec.get("summary"), max(12, summary_budget // 2)),
                                    "order": sec.get("order")} for sec in (pair.get("sections") or [])[:2] if isinstance(sec, dict)]}
@@ -1470,6 +1486,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "user": _semantic_compress(item.get("user"), max(12, summary_budget // 2)),
                 "april": _semantic_compress(item.get("april"), max(12, summary_budget)),
                 "topic": _semantic_compress(item.get("topic"), max(8, summary_budget // 3)),
+                "history_time_relation": item.get("history_time_relation"),
+                "history_time_label": item.get("history_time_label"),
+                "history_age_minutes": item.get("history_age_minutes"),
+                "history_gap_minutes": item.get("history_gap_minutes"),
                 "sections": [
                     {"h": _semantic_compress(sec.get("heading"), max(8, summary_budget // 3)),
                      "s": _semantic_compress(sec.get("summary"), max(12, summary_budget // 2)),
@@ -1542,6 +1562,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 },
             } if data.get("CLARIFICATION_RESOLUTION") else {},
             "DIALOGUE_HISTORY_TOPICS": topics_min,
+            "DIALOGUE_HISTORY_TIME_SEARCH": data.get("DIALOGUE_HISTORY_TIME_SEARCH") or {},
             "DIALOGUE_TOPIC_INDEX": [
                 {"n": item.get("number"), "t": _semantic_compress(item.get("topic"), max(8, summary_budget // 2)),
                  "s": _semantic_compress(item.get("summary"), max(12, summary_budget)),
@@ -2003,6 +2024,48 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
     selected_section = continuation.get("selected_section") or memory.get("selected_section") or {}
     if not isinstance(selected_section, dict):
         selected_section = {}
+
+    # The temporal recall result comes from StateManager's grounded search.
+    # Resolve it from the canonical memory envelope first, with the existing
+    # interpretation context as a compatibility fallback for older callers.
+    raw_history_time_search = (
+        memory.get("history_time_search")
+        or continuation.get("history_time_search")
+        or dialogue.get("history_time_search")
+        or {}
+    )
+    if not isinstance(raw_history_time_search, dict):
+        raw_history_time_search = {}
+    history_time_search = {
+        key: raw_history_time_search.get(key)
+        for key in (
+            "requested", "kind", "requested_phrase", "target_description",
+            "tolerance_minutes", "time_basis", "status", "topic_constraint",
+            "topic_match_found", "topic_terms", "dialogues_in_window",
+            "selected_count", "selected_dialogues", "instruction",
+        )
+        if raw_history_time_search.get(key) not in (None, "", [], {})
+    }
+    if isinstance(history_time_search.get("topic_terms"), list):
+        history_time_search["topic_terms"] = [str(value)[:50] for value in history_time_search["topic_terms"][:8]]
+    if isinstance(history_time_search.get("selected_dialogues"), list):
+        history_time_search["selected_dialogues"] = [
+            {
+                key: item.get(key)
+                for key in ("topic", "relation", "time_label", "age_minutes", "gap_minutes", "offset_from_target_minutes")
+                if item.get(key) not in (None, "", [], {})
+            }
+            for item in history_time_search["selected_dialogues"][:3]
+            if isinstance(item, dict)
+        ]
+    if history_time_search.get("instruction"):
+        history_time_search["instruction"] = _clip(history_time_search["instruction"], 420)
+    temporal_history_lookup = bool(history_time_search.get("requested"))
+    if temporal_history_lookup:
+        history_topics = []
+        topic_index = []
+    # A clock/relative-time request has its own selected pairs; don't dilute it
+    # with a generic overview of every topic retained in the 12-hour memory.
     # Normal continuation sends one selected pair and its small section outline.
     # The complete 12-hour topic index stays processor-side unless the user asks
     # to inspect history explicitly; this avoids polluting the model with siblings.
@@ -2046,6 +2109,11 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
                 "score": item.get("score"),
                 "same_dialog": bool(item.get("same_dialog")),
                 "message_id": item.get("message_id"),
+                "created_at": item.get("created_at"),
+                "history_time_relation": item.get("history_time_relation"),
+                "history_time_label": item.get("history_time_label"),
+                "history_age_minutes": item.get("history_age_minutes"),
+                "history_gap_minutes": item.get("history_gap_minutes"),
                 "attachment_evidence": _clip(item.get("attachment_evidence"), 1800),
             })
         return result
@@ -2132,7 +2200,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         },
         "DIALOGUE_RELATION": relation,
         "HISTORY_REQUEST": history_request,
-        "HISTORY_TOPIC_COUNT": requested_topic_count if history_request else 0,
+        "HISTORY_TOPIC_COUNT": requested_topic_count if history_request and not temporal_history_lookup else 0,
         "DIALOGUE_ANCHOR": {
             "topic": _clip(anchor.get("topic"), 120),
             "user": _clip(anchor.get("user"), 220),
@@ -2165,9 +2233,10 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             },
         } if (continuation.get("clarification_resolution") or memory.get("clarification_resolution")) else {},
         "DIALOGUE_HISTORY_TOPICS": history_topics if history_request else [],
+        "DIALOGUE_HISTORY_TIME_SEARCH": history_time_search if history_request else {},
         "DIALOGUE_TOPIC_INDEX": topic_index if (relation == "CONTINUE" or history_request or bool(memory.get("contextual_history_match"))) else [],
-        "DIALOGUE_KNOWN_TOPIC_COUNT": int(memory.get("known_topic_count") or len(history_topics) or len(topic_index) or 0),
-        "DIALOGUE_TABLE_MARKDOWN": _clip(
+        "DIALOGUE_KNOWN_TOPIC_COUNT": 0 if temporal_history_lookup else int(memory.get("known_topic_count") or len(history_topics) or len(topic_index) or 0),
+        "DIALOGUE_TABLE_MARKDOWN": "" if temporal_history_lookup else _clip(
             memory.get("topic_table_markdown")
             or (dialogue.get("continuation_context") or {}).get("topic_table_markdown")
             or "",
