@@ -79,6 +79,30 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _resolve_user_utc_offset_minutes(data: dict[str, Any]) -> int | None:
+    """Return a client UTC offset only when supplied explicitly or encoded in ISO time."""
+    try:
+        explicit = data.get("user_utc_offset_minutes")
+        if explicit is not None and str(explicit).strip() != "":
+            offset = int(float(explicit))
+            if -14 * 60 <= offset <= 14 * 60:
+                return offset
+    except (TypeError, ValueError, OverflowError):
+        pass
+    raw = _text(data.get("message_timestamp"))
+    match = re.search(r"([+-])(\d{2}):(\d{2})$", raw)
+    if not match or raw.endswith("Z"):
+        return None
+    try:
+        hours, minutes = int(match.group(2)), int(match.group(3))
+        if hours > 14 or minutes > 59:
+            return None
+        offset = hours * 60 + minutes
+        return offset if match.group(1) == "+" else -offset
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _resolve_message_timestamp(value: Any) -> tuple[datetime, str]:
     """Accept a browser send-time only when it is close to server receipt time.
 
@@ -305,6 +329,7 @@ def _handle_payload(
     identity = _canonical_identity(data)
     uid = identity["user_id"]
     message_created_at, timestamp_source = _resolve_message_timestamp(data.get("message_timestamp"))
+    user_utc_offset_minutes = _resolve_user_utc_offset_minutes(data)
     original = _text(data.get("text") or data.get("message") or data.get("content"))
     _apr_timing_log("request_identity", identity_started, user_key=_apr_diag_ref(uid),
         dialog_key=_apr_diag_ref(identity.get("dialog_id")), message_key=_apr_diag_ref(identity.get("message_id")),
@@ -465,6 +490,7 @@ def _handle_payload(
             translation=translation,
             user_display_name=user_display_name,
             message_created_at=message_created_at,
+            user_utc_offset_minutes=user_utc_offset_minutes,
         ))
         _apr_timing_log("executor_returned", executor_started, user_key=_apr_diag_ref(uid),
             message_key=_apr_diag_ref(message_id), result_type=type(result).__name__,
