@@ -805,6 +805,26 @@ def _looks_like_previous_answer_followup(text: str) -> bool:
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
+
+    # A message can name its subject and still be an explicit return to an older
+    # branch. Keep such a request whole: splitting "continue the math overview,
+    # where did we stop, and expand it" into separate clauses can discard the
+    # named topic before memory retrieval reaches the Provider.
+    explicit_prior_topic_pointer = bool(re.search(
+        r"\b(?:на\s+ч[её]м\s+мы\s+остановил\w*|где\s+мы\s+остановил\w*|"
+        r"к\s+чему\s+мы\s+пришл\w*|как\s+мы\s+обсуждал\w*|"
+        r"что\s+мы\s+обсуждал\w*|как\s+раньше\s+обсуждал\w*|"
+        r"вернись\s+к\s+(?:предыдущ\w*|прежн\w*|обсужд\w*)|"
+        r"как\s+(?:ты\s+)?хотел\w*,?\s+чтобы\s+мы\s+продолжил\w*)\b",
+        low,
+    ))
+    explicit_resume_action = bool(re.search(
+        r"\b(?:продолж\w*|развей\w*|разверни\w*|возобнови\w*|вернись\s+к)\b",
+        low,
+    ))
+    if explicit_prior_topic_pointer and explicit_resume_action:
+        return True
+
     patterns = (
         r"\bкак\s+(?:ты|вы)\s+(?:решил\w*|посчитал\w*|вычислил\w*|рассчитал\w*|"
         r"получил\w*|вывел\w*|доказал\w*|обосновал\w*)\b",
@@ -1094,7 +1114,12 @@ def _select_continuation_pairs(memory: dict[str, Any]) -> list[dict[str, Any]]:
     # authenticated history evidence may be attached to the current request.
     if (relation != "CONTINUE" and not history_request) or not isinstance(pairs, list):
         return []
-    limit = 5 if history_request else 2
+    if history_request:
+        limit = 5
+    elif _text(memory.get("history_selection_method")) == "named_topic_section_vector":
+        limit = max(2, min(3, int(memory.get("continuation_context_limit") or 3)))
+    else:
+        limit = 2
     return [dict(item) for item in pairs if isinstance(item, dict)][:limit]
 
 
