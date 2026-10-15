@@ -42,6 +42,7 @@ from blocks.Premium_interpretation_identity import (
 )
 from blocks.Premium_provider_router import generate_text
 from blocks.text_module import package_provider_response
+from blocks.premium_asset_store import save_asset as _save_premium_asset, load_message_assets as _load_premium_assets, decode_data_uri as _decode_asset_data_uri
 from blocks.Premium_state_manager import (
     init_db,
     is_authenticated_user,
@@ -735,9 +736,9 @@ def _restore_selected_assets(
     # had no saved asset, fall back through ranked dialogue pairs one at a time.
     # This prevents a later unrelated file from being sent alongside a cat photo.
     message_ids = list(dict.fromkeys(message_ids))[:8]
-    # Canonical dialogue memory contains searchable text/metadata, not binary
-    # sidecars. Historical raw bytes are therefore not rehydrated from a second table.
-    rows = []
+    # Binary sidecars are scoped to the same message row as dialogue_memory.
+    # Only the selected topic/turn IDs are read; no global asset scan is performed.
+    rows = _load_premium_assets(uid, message_ids)
     restored_meta: list[dict[str, Any]] = []
     import base64
     for asset in rows:
@@ -1920,8 +1921,70 @@ async def execute(
     safe_visual_context["items"] = safe_visual_items
     safe_visual_context["has_input_images"] = bool(safe_visual_items)
 
+    # Save original user inputs under the exact turn where they were uploaded.
+    # The file bytes stay on disk; only small references enter dialogue_memory.
+    persisted_input_refs: list[dict[str, Any]] = []
+    seen_input_keys: set[tuple[str, str, str]] = set()
+    for item in (visual_context or []):
+        if not isinstance(item, dict) or item.get("recalled_from_memory"):
+            continue
+        decoded = _decode_asset_data_uri(item.get("image_url") or item.get("data_uri"))
+        if not decoded:
+            continue
+        raw_bytes, mime = decoded
+        filename = _text(item.get("filename") or f"uploaded-image-{identity['message_id'][-8:]}.png")
+        dedupe = (filename, hashlib.sha256(raw_bytes).hexdigest(), "user_input")
+        if dedupe in seen_input_keys:
+            continue
+        seen_input_keys.add(dedupe)
+        ref = _save_premium_asset(uid, identity["message_id"], filename=filename, content=raw_bytes,
+            mime_type=_text(item.get("mime_type") or mime), kind="image", asset_role="user_input",
+            metadata={"source_type": _text(item.get("source_type") or "user_upload"),
+                      "analysis_summary": _text(item.get("analysis_summary"))[:1200],
+                      "analysis_key_details": item.get("analysis_key_details") if isinstance(item.get("analysis_key_details"), list) else []})
+        if ref:
+            persisted_input_refs.append(ref)
+    for item in (file_inputs or []):
+        if not isinstance(item, dict) or item.get("recalled_from_memory"):
+            continue
+        decoded = _decode_asset_data_uri(item.get("file_data") or item.get("data_uri"))
+        if not decoded:
+            continue
+        raw_bytes, mime = decoded
+        filename = _text(item.get("filename") or f"uploaded-file-{identity['message_id'][-8:]}.bin")
+        dedupe = (filename, hashlib.sha256(raw_bytes).hexdigest(), "user_input")
+        if dedupe in seen_input_keys:
+            continue
+        seen_input_keys.add(dedupe)
+        ref = _save_premium_asset(uid, identity["message_id"], filename=filename, content=raw_bytes,
+            mime_type=_text(item.get("mime_type") or mime), kind="file", asset_role="user_input",
+            metadata={"source_type": "user_upload", "analysis_summary": _text(item.get("analysis_summary"))[:1200]})
+        if ref:
+            persisted_input_refs.append(ref)
+    for item in (file_contents or []):
+        if not isinstance(item, dict) or item.get("recalled_from_memory"):
+            continue
+        body = _text(item.get("content"))
+        if not body:
+            continue
+        filename = _text(item.get("filename") or f"uploaded-text-{identity['message_id'][-8:]}.txt")
+        raw_bytes = body.encode("utf-8")
+        dedupe = (filename, hashlib.sha256(raw_bytes).hexdigest(), "user_input")
+        if dedupe in seen_input_keys:
+            continue
+        seen_input_keys.add(dedupe)
+        ref = _save_premium_asset(uid, identity["message_id"], filename=filename, content=raw_bytes,
+            mime_type=_text(item.get("mime_type") or "text/plain"), kind="text_file", asset_role="user_input",
+            metadata={"source_type": "user_upload_text", "analysis_summary": _text(item.get("analysis_summary"))[:1200],
+                      "reader_truncated": bool(item.get("reader_truncated")), "source_chars": int(item.get("source_chars") or len(body))})
+        if ref:
+            persisted_input_refs.append(ref)
+    for ref in persisted_input_refs:
+        attachment_refs.append({key: ref.get(key) for key in ("asset_id", "filename", "kind", "mime_type", "asset_role", "output_type", "message_id", "storage_key", "size_bytes", "sha256", "metadata") if ref.get(key) is not None})
+
     output_asset_persist_started = time.perf_counter()
     generated_asset_saved = False
+    output_asset_refs: list[dict[str, Any]] = []
     if image_result:
         # The generator returns validated raw bytes as well as a scene artifact.
         # Persist raw bytes first; artifact fields are the compatibility fallback.
@@ -1933,14 +1996,20 @@ async def execute(
             generated_image = _image_payload_bytes(image_result.get("artifact") or image_result)
         if generated_image:
             generated_bytes, generated_mime = generated_image
-            # Keep generated image bytes in the live response/rendering path only.
-            # Persisting them to the removed dialogue_assets sidecar is disabled.
-            generated_asset_saved = False
+            generated_ref = _save_premium_asset(
+                uid, identity["message_id"],
+                filename=f"april-generated-{identity['message_id'][-10:]}.png",
+                content=generated_bytes, mime_type=generated_mime, kind="image",
+                asset_role="april_output", output_type="image",
+                metadata={"source_type": "april_generated", "prompt": _text((image_result or {}).get("prompt"))[:1200]},
+            )
+            if generated_ref:
+                generated_asset_saved = True
+                output_asset_refs.append(generated_ref)
 
     # Save code/file output as a separately versioned asset paired to this turn.
     # A visible CodeBlock remains in SceneContract; this binary/text asset lets
     # later CONTINUE requests retrieve the exact source rather than its summary.
-    output_asset_refs: list[dict[str, Any]] = []
     requested_outputs = set(str(x).lower() for x in (interpretation.get("intent") or {}).get("requested_outputs", []))
     should_persist_code = bool((interpretation.get("intent") or {}).get("wants_code") or (interpretation.get("intent") or {}).get("wants_file"))
     if should_persist_code:
@@ -1958,11 +2027,12 @@ async def execute(
                 continue
             seen_source_hashes.add(source_hash)
             filename = _text(block.get("filename")) or f"april-output-{identity['message_id'][-10:]}-{block_index}.{extension}"
-            # The CodeBlock remains in SceneContract and structured_response;
-            # no second binary/text asset table is written.
-            saved_output = False
-            if saved_output:
-                output_asset_refs.append({"filename": filename, "kind": "text_file", "asset_role": "april_output", "output_type": "code", "message_id": identity["message_id"], "sha256": source_hash, "language": language})
+            saved_ref = _save_premium_asset(uid, identity["message_id"], filename=filename, content=code_bytes,
+                mime_type="text/plain", kind="text_file", asset_role="april_output", output_type="code",
+                metadata={"source_type": "april_generated", "language": language})
+            if saved_ref:
+                saved_ref["metadata"] = {**(saved_ref.get("metadata") or {}), "language": language}
+                output_asset_refs.append(saved_ref)
 
         # Persist explicit file artifacts as actual bytes/text, not only as a
         # caption in JSONB. Do not duplicate an already-saved CodeBlock.
@@ -2000,11 +2070,12 @@ async def execute(
             source_hash = hashlib.sha256(file_bytes).hexdigest()
             if source_hash in seen_source_hashes:
                 continue
-            # File artifact content remains in the live provider/SceneContract
-            # response; do not persist a duplicate sidecar row.
-            saved_output = False
-            if saved_output:
-                output_asset_refs.append({"filename": filename, "kind": "text_file" if mime.startswith("text/") else "file", "asset_role": "april_output", "output_type": "file", "message_id": identity["message_id"], "sha256": source_hash})
+            saved_ref = _save_premium_asset(uid, identity["message_id"], filename=filename, content=file_bytes,
+                mime_type=mime, kind="text_file" if (mime.startswith("text/") or text_content) else "file",
+                asset_role="april_output", output_type="file",
+                metadata={"source_type": "april_generated"})
+            if saved_ref:
+                output_asset_refs.append(saved_ref)
 
     _apr_timing_log("output_asset_persist", output_asset_persist_started,
         generated_asset_saved=generated_asset_saved, output_asset_refs=len(output_asset_refs))
@@ -2048,7 +2119,7 @@ async def execute(
         "generated_asset_saved": generated_asset_saved,
         "asset_refs": {
             "source_inputs": attachment_refs,
-            "april_outputs": output_asset_refs + ([{"filename": f"april-generated-{identity['message_id']}.png", "kind": "image", "asset_role": "april_output", "output_type": "image", "message_id": identity["message_id"]}] if generated_asset_saved else []),
+            "april_outputs": output_asset_refs,
         },
         "dialogue_memory_record": (response.metadata or {}).get("dialogue_memory_record", {}),
     })
