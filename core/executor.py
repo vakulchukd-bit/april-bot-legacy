@@ -161,7 +161,9 @@ def _compact_question_search(
 
     anchor = context.get("anchor") if isinstance(context.get("anchor"), dict) else {}
     section = context.get("selected_section") if isinstance(context.get("selected_section"), dict) else {}
-    pairs = [compact_pair(item) for item in (context.get("selected_pairs") or [])[:2]]
+    # History lookup can legitimately return five neighboring/sorted saved pairs;
+    # ordinary continuation remains bounded by State Manager to one or two pairs.
+    pairs = [compact_pair(item) for item in (context.get("selected_pairs") or [])[:5]]
     pairs = [item for item in pairs if item]
     pending = context.get("pending_clarification") if isinstance(context.get("pending_clarification"), dict) else {}
     options = []
@@ -188,7 +190,7 @@ def _compact_question_search(
                 "last_question": _text(item.get("last_question"))[:100],
                 "message_id": _text(item.get("message_id"))[:120],
             }
-            for item in (context.get("topic_index") or [])[:4] if isinstance(item, dict)
+            for item in (context.get("topic_index") or [])[:5] if isinstance(item, dict)
         ]
     history_topics = [
         {
@@ -197,8 +199,10 @@ def _compact_question_search(
             "summary": _text(item.get("summary"))[:160],
             "last_question": _text(item.get("last_question"))[:100],
             "message_id": _text(item.get("message_id"))[:120],
+            "history_age_minutes": item.get("history_age_minutes"),
+            "history_age_label": _text(item.get("history_age_label"))[:60],
         }
-        for item in (context.get("history_topics") or [])[:4] if isinstance(item, dict)
+        for item in (context.get("history_topics") or [])[:5] if isinstance(item, dict)
     ] if history_request and not temporal_history_lookup else []
     return {
         "status": "ready",
@@ -1260,7 +1264,7 @@ async def execute(
                 int(dialogue_context.get("known_topic_count") or 0),
                 int(history_context.get("known_topic_count") or 0),
             )
-            dialogue_context["requested_topic_count"] = int(history_context.get("requested_topic_count") or 7)
+            dialogue_context["requested_topic_count"] = int(history_context.get("requested_topic_count") or 5)
             dialogue_context["topic_table_markdown"] = _text(history_context.get("topic_table_markdown") or dialogue_context.get("topic_table_markdown"))
         if not dialogue_context:
             # Do not fall back to a whole-message retrieval if one per-question
@@ -1279,7 +1283,7 @@ async def execute(
                 "topic_index": [],
                 "known_topic_count": 0,
                 "history_request": False,
-                "requested_topic_count": 7,
+                "requested_topic_count": 5,
                 "topic_table_markdown": "",
                 "anchor": {},
                 "selected_section": {},
@@ -1431,7 +1435,7 @@ async def execute(
             "known_topic_count": int(dialogue_context.get("known_topic_count") or 0) if (dialogue_context.get("history_request") or dialogue_context.get("contextual_history_match")) else 0,
             "contextual_history_match": bool(dialogue_context.get("contextual_history_match")),
             "history_request": bool(dialogue_context.get("history_request")),
-            "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 7) if dialogue_context.get("history_request") else 0,
+            "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 5) if dialogue_context.get("history_request") else 0,
             "topic_table_markdown": (dialogue_context.get("topic_table_markdown") or "") if dialogue_context.get("history_request") else "",
             "anchor": (
                 dialogue_context.get("anchor") or {}
@@ -1488,7 +1492,7 @@ async def execute(
                 "topic_index": (dialogue_context.get("topic_index") or []) if dialogue_context.get("history_request") else [],
                 "known_topic_count": int(dialogue_context.get("known_topic_count") or 0) if dialogue_context.get("history_request") else 0,
                 "history_request": bool(dialogue_context.get("history_request")),
-                "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 7) if dialogue_context.get("history_request") else 0,
+                "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 5) if dialogue_context.get("history_request") else 0,
                 "topic_table_markdown": (dialogue_context.get("topic_table_markdown") or "") if dialogue_context.get("history_request") else "",
                 "anchor": (
                     dialogue_context.get("anchor") or {}
