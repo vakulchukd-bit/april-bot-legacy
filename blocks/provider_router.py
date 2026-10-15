@@ -935,6 +935,108 @@ def _protected_data_checksum_valid(value: Any) -> bool:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest() == expected
 
 
+def _requires_prior_structured_payload(
+    current_request: Any, relation: str = "NEW", history_request: bool = False
+) -> bool:
+    """Select saved typed data only for a data-targeting continuation/history request.
+
+    Explicit pointers are useful evidence, but should not be the only evidence:
+    after State Manager has semantically validated CONTINUE, a short follow-up such
+    as "а координаты?" can legitimately refer to the selected prior result.
+    Self-contained new requests are expected to be gated to relation=NEW upstream.
+    """
+    query = _text(current_request).lower().replace("ё", "е")
+    if not query:
+        return False
+    has_data_target = bool(re.search(
+        r"(?:таблиц\w*|строк\w*|столб(?:ец|ц)\w*|ряд\w*|график\w*|диаграмм\w*|координат\w*|"
+        r"значени\w*|данн\w*|формул\w*|уравнен\w*|расчет\w*|вычислен\w*|"
+        r"матриц\w*|csv|json|массив\w*|решен\w*|шаги?\s+решен\w*|"
+        r"\btable\w*|\brows?\b|\bcolumns?\b|\bgraph\w*|\bcharts?\b|\bplots?\b|"
+        r"\bcoordinates?\b|\bvalues?\b|\bdata\b|\bformulas?\b|\bequations?\b|"
+        r"\bcalculat\w*|\bsolutions?\b|\bmatrices\b|\bmatrix\b|\barrays?\b)",
+        query,
+    ))
+    if not has_data_target:
+        return False
+    has_prior_pointer = bool(re.search(
+        r"(?:\bэту\b|\bэтот\b|\bэта\b|\bэти\b|\bту\b|\bтот\b|\bта\b|\bте\b|"
+        r"\bтой\b|\bэтой\b|\bпредыдущ\w*\b|\bпрошл\w*\b|\bпрежн\w*\b|\bсохранен\w*\b|"
+        r"\bиз\s+истории\b|\bкак\s+раньше\b|\bкак\s+выше\b|\bвыше\b|\bте\s+же\b|"
+        r"\bпо\s+этим\b|\bпо\s+тем\b|\bзначения\s+из\b|\bданные\s+из\b|"
+        r"\bверни\w*\b|\bвосстанови\w*\b|\bповтори\w*\b|\bснова\b|"
+        r"\bеще\s+раз\b|\bпродолжи\w*\b|\bдобавь\w*\b|\bизмени\w*\b|"
+        r"\bисправь\w*\b|\bдоработай\w*\b|\bобнови\w*\b|"
+        r"\bthis\b|\bthese\b|\bthat\b|\bthose\b|\bprevious\w*\b|\blast\b|"
+        r"\bearlier\b|\bsaved\b|\bfrom\s+history\b|\bas\s+before\b|\bas\s+above\b|"
+        r"\bthe\s+same\b|\breturn\w*\b|\brestore\w*\b|\brepeat\w*\b|\bagain\b|"
+        r"\bcontinue\w*\b|\badd\w*\b|\bchange\w*\b|\bfix\w*\b|\bupdate\w*\b)",
+        query,
+    ))
+    return has_prior_pointer or _text(relation).upper() == "CONTINUE" or bool(history_request)
+
+
+def _prior_structured_kind_targets(current_request: Any) -> set[str]:
+    """Infer only the kinds of saved structures explicitly requested by the user."""
+    query = _text(current_request).lower().replace("ё", "е")
+    targets: set[str] = set()
+    has_table_target = bool(re.search(r"(?:таблиц\w*|строк\w*|столб(?:ец|ц)\w*|ряд\w*|\btable\w*|\brows?\b|\bcolumns?\b|\brow\b|\bcolumn\b)", query))
+    has_graph_target = bool(re.search(r"(?:график\w*|диаграмм\w*|построен\w*|крив\w*|\bgraph\w*|\bcharts?\b|\bplots?\b)", query))
+    if has_table_target:
+        targets.add("table")
+    # Bare "coordinates/points" usually means graph data, except when the user
+    # explicitly asks for a table containing those coordinates.
+    if has_graph_target or (not has_table_target and re.search(r"(?:координат\w*|точк\w*|\bcoordinates?\b|\bpoints?\b)", query)):
+        targets.add("graph")
+    if re.search(r"(?:формул\w*|уравнен\w*|выражен\w*|экспонент\w*|\bformula\w*|\bequation\w*|\bexpression\w*|\bexponential\w*)", query):
+        targets.add("formula")
+    if re.search(r"(?:решен\w*|вычислен\w*|расчет\w*|расчёт\w*|шаг\w*\s+решен\w*|математическ\w*\s+задач\w*|\bsolution\w*|\bcalculat\w*|\bderivation\w*|\bmath\s+problem\w*)", query):
+        targets.add("solution")
+    if re.search(r"(?:данн\w*|значени\w*|массив\w*|матриц\w*|csv|json|\bdata\b|\bvalues?\b|\barrays?\b|\bmatrix\b)", query) and not targets:
+        targets.update({"graph", "table", "formula", "solution"})
+    return targets
+
+
+def _structured_item_has_exact_values(item: Any) -> bool:
+    """Reject empty renderer shells while retaining exact typed data."""
+    if not isinstance(item, dict):
+        return False
+    kind = _text(item.get("kind")).lower()
+    data = item.get("data") if isinstance(item.get("data"), dict) else {}
+    if not data or data.get("source_room_plan"):
+        return False
+
+    def nonempty_key(keys: set[str]) -> bool:
+        stack: list[Any] = [data]
+        visited = 0
+        while stack and visited < 5000:
+            value = stack.pop()
+            visited += 1
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if str(key).lower() in keys and child not in (None, "", [], {}):
+                        if isinstance(child, (list, dict, str)):
+                            if len(child) > 0:
+                                return True
+                        else:
+                            return True
+                    if isinstance(child, (dict, list)):
+                        stack.append(child)
+            elif isinstance(value, list):
+                stack.extend(value)
+        return False
+
+    if kind == "table":
+        return nonempty_key({"rows", "cells", "matrix", "data_rows"})
+    if kind == "graph":
+        return nonempty_key({"points", "data_points", "series", "datasets", "traces", "x_values", "y_values", "expression", "expressions", "equation", "function"})
+    if kind == "formula":
+        return nonempty_key({"formula", "formulas", "latex", "latex_formulas", "equation", "equations", "expression", "expressions"})
+    if kind == "solution":
+        return nonempty_key({"solution_steps", "steps", "derivation", "calculations", "given_values", "known_values", "unknowns", "formula", "equation", "latex"})
+    return False
+
+
 def _select_protected_structured_data(
     anchor: Any,
     selected_pairs: Any,
@@ -942,9 +1044,12 @@ def _select_protected_structured_data(
     history_request: bool,
     selected_section: Any,
     interpretation: Any = None,
+    current_request: Any = "",
 ) -> list[dict[str, Any]]:
-    """Pass one exact payload for the selected continuation, never all search steps."""
+    """Pass exact history data only for an explicit prior-structure reference."""
     relation = _text(relation).upper()
+    if not _requires_prior_structured_payload(current_request, relation, history_request):
+        return []
     focused_history = bool(
         history_request
         and isinstance(selected_section, dict)
@@ -990,19 +1095,42 @@ def _select_protected_structured_data(
         if isinstance(selected_pairs, list):
             sources.extend(item for item in selected_pairs if isinstance(item, dict))
 
+    requested_kinds = _prior_structured_kind_targets(current_request)
     seen_sources: set[str] = set()
     for source in sources:
         protected = source.get("protected_structured_data")
         if not isinstance(protected, dict):
             continue
         items = protected.get("items")
-        if not isinstance(items, list) or not items or not _text(protected.get("source_answer")):
+        if not isinstance(items, list) or not items:
             continue
         source_id = _text(protected.get("source_message_id") or source.get("message_id"))
         if not source_id or source_id in seen_sources:
             continue
         seen_sources.add(source_id)
-        return [protected]
+
+        # Forward only concrete, requested data types, not every structure from
+        # the same old answer. A generic "show those data" request is the only
+        # case where more than one kind can be selected implicitly.
+        selected_items = [
+            item for item in items
+            if isinstance(item, dict)
+            and (not requested_kinds or _text(item.get("kind")).lower() in requested_kinds)
+            and _structured_item_has_exact_values(item)
+        ]
+        if not selected_items:
+            continue
+        slim: dict[str, Any] = {
+            "schema": "april_protected_structured_data_v1",
+            "source_message_id": source_id,
+            "items": selected_items,
+        }
+        # The selected typed payload is the lossless source of truth. Do not
+        # duplicate its owning prose/whole answer, including for solutions: exact
+        # steps, equations and known values are required in the selected node itself.
+        canonical = json.dumps(slim, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        slim["sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return [slim]
     return []
 
 
@@ -1931,6 +2059,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         history_request=history_request,
         selected_section=selected_section,
         interpretation=interpretation,
+        current_request=current,
     )
 
     modality_lines = {
@@ -2351,6 +2480,19 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         source_protected_batches = source_protected_batches if isinstance(source_protected_batches, list) else []
         has_external_protected = isinstance(external_manifest, dict) and bool(external_manifest.get("exact_payload_external"))
         validated_protected_batches = source_protected_batches if has_external_protected else protected_batches
+        external_text_parts = [
+            _text(part.get("text")) for part in content[1:]
+            if isinstance(part, dict) and part.get("type") == "input_text" and _text(part.get("text"))
+        ]
+        external_text_token_estimate = sum(_estimate_tokens(part) for part in external_text_parts)
+        full_text_input_token_estimate = (
+            _estimate_tokens(selected_system_prompt) + _estimate_tokens(text) + external_text_token_estimate
+        )
+        protected_source_parts = [
+            part for part in external_text_parts
+            if ("PROTECTED_STRUCTURED_DATA_SOURCE" in part or "PROTECTED_CURRENT_INPUT_SOURCE" in part)
+        ]
+        protected_source_token_estimate = sum(_estimate_tokens(part) for part in protected_source_parts)
         diagnostics_out.update({
             "protected_structured_data_batches": len(validated_protected_batches),
             "protected_structured_data_items": sum(
@@ -2377,7 +2519,15 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "system_plus_card_token_estimate": _estimate_tokens(selected_system_prompt) + _estimate_tokens(text),
             "system_plus_card_and_labels_estimate": card_token_estimate,
             "compression_reduction_percent": round(max(0, 1 - (card_token_estimate / max(1, _estimate_tokens(SYSTEM_PROMPT) + source_card_token_estimate))) * 100, 1),
-            "prompt_budget_met_by_estimate": card_token_estimate <= MAX_PROMPT_TOKENS,
+            "card_budget_met_by_estimate": card_token_estimate <= MAX_PROMPT_TOKENS,
+            "full_text_input_token_estimate_including_external_parts": full_text_input_token_estimate,
+            "external_text_payload_token_estimate": external_text_token_estimate,
+            "protected_lossless_source_token_estimate": protected_source_token_estimate,
+            "prompt_budget_met_by_estimate": full_text_input_token_estimate <= MAX_PROMPT_TOKENS,
+            "full_text_estimate_over_budget": full_text_input_token_estimate > MAX_PROMPT_TOKENS,
+            "lossless_source_budget_exception": bool(
+                protected_source_parts or text_file_diagnostics or file_diagnostics or image_diagnostics
+            ),
             "compression_stage": compression_stage,
             "field_breakdown": field_diagnostics,
             "duplicate_field_groups": duplicate_field_groups,
@@ -2393,7 +2543,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "input_text_parts": sum(1 for part in content if part.get("type") == "input_text"),
             "input_image_parts": sum(1 for part in content if part.get("type") == "input_image"),
             "input_file_parts": sum(1 for part in content if part.get("type") == "input_file"),
-            "note": "1800-token compaction budget applies to system prompt + structured card + reserved labels. If needed, exact selected historical structures are externalized losslessly as PROTECTED_STRUCTURED_DATA_SOURCE; all source/attachment payloads count toward actual API usage.",
+            "note": "Compaction budget covers system prompt + structured card + reserved labels. Exact current-task data and explicitly referenced saved structures may be sent as lossless source parts; their token estimate is reported separately and may exceed the card budget only as a deliberate data-preservation exception. API usage remains authoritative.",
         })
     return result
 
