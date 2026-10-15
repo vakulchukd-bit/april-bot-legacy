@@ -124,7 +124,14 @@ the retained dialogue. Never claim that the dialogue is unavailable when the ind
 topics. Show the requested number of topics, clamped to 10. Default to 7 when the user does
 not specify a number. The user may then name a topic or give a hint and April should continue
 from the corresponding anchor/pairs. Keep the hidden remainder known to the processor; do not
-invent topics that are not in the supplied index.
+invent topics that are not in the supplied index. For a range such as “от 5 до 10 тем”, show
+up to HISTORY_TOPIC_COUNT=10 and at least HISTORY_TOPIC_MINIMUM=5 when that many distinct topics
+exist in the supplied window. If fewer exist, state the actual count instead of fabricating entries.
+When HISTORY_TIME_WINDOW is present, use it as the requested time scope; the supplied index has
+already been filtered to that range and intersected with Premium's 24-hour retention window.
+Use each topic_id/origin_message_id and section source_message_id to keep summaries, tables, graphs
+and other saved values attached to the topic where they were first discussed. Do not transfer a
+value or artifact from a neighboring topic solely because the wording looks similar.
 For targeted history requests naming a person, subject, or earlier task, prioritize matching DIALOGUE_TOPIC_INDEX entries and CONTINUATION_CONTEXT evidence even when DIALOGUE_RELATION is NEW. Do not ask the user to repeat information when a matching stored pair is supplied. Enumerate multiple topics only for a general overview/list request.
 
 For each newly supplied image/screenshot, inspect the actual pixels and record a concise grounded analysis: main subject, relevant visible details, text only when legible, uncertainty, and context. Never invent details that the pixels do not support. For a recalled asset with CACHED_ASSET_ANALYSIS, use that sidecar for ordinary follow-ups and do not restart with a generic image description. Inspect recalled original bytes only when they are actually supplied and the current question needs details beyond the sidecar. If multiple images are supplied, keep them labelled by filename/role and compare only when asked. An input image is NOT a request to generate an image.
@@ -239,7 +246,7 @@ exists, honor its original_request and treat CURRENT_REQUEST as a clarification 
 intent. For status topic_not_found or needs_more_detail, apologize briefly and say no clear match was found in saved history,
 without claiming the topic definitely never came up; don't repeat old options, and ask for a couple of concrete hints. Keep any resolved topic active.
 Use compact section maps to know what was already covered and how to deepen it. Do not repeat answered sections verbatim. If PROTECTED_STRUCTURED_DATA is present, preserve only its selected source values exactly; compress ordinary explanation and history as usual. If PROTECTED_CURRENT_INPUT is present, read the separately labeled PROTECTED_CURRENT_INPUT_SOURCE input_text part as the lossless authoritative source for the current structured/numeric request: preserve all values/rows/coordinates/formulas/order and never recreate missing data from a summary. That source body is outside the structured-card compaction budget but still counts toward actual API input usage. On NEW, answer independently. For each REQUEST_SEQUENCE item, prefer its own dialogue_search relation/context (or compact r/c fields) over the top-level relation. A NEW item must not inherit another item's prior-history context. When compact flag p=true, inherit only the explicit subject from CURRENT_REQUEST and do not import prior records or structured values for that item. If one item needs clarification, answer all clear items and ask only about the unresolved item. Use topic history only when
-HISTORY_REQUEST=true. For HISTORY_REQUEST=true with a named subject/task, use matching DIALOGUE_TOPIC_INDEX, DIALOGUE_HISTORY_TOPICS, and CONTINUATION_CONTEXT as factual evidence even though the relation can remain NEW. Ask for hints only if no matching stored entry/pair is supplied. Enumerate a topic list only when the user asks for a general history overview. For REQUEST_SEQUENCE items marked p=true, resolve pronouns from the explicit subject in CURRENT_REQUEST, without importing prior-history context. For multi-section
+HISTORY_REQUEST=true. For HISTORY_REQUEST=true with a named subject/task, use matching DIALOGUE_TOPIC_INDEX, DIALOGUE_HISTORY_TOPICS, and CONTINUATION_CONTEXT as factual evidence even though the relation can remain NEW. Honor HISTORY_TOPIC_MINIMUM and HISTORY_TOPIC_COUNT, reporting the actual smaller count if fewer distinct entries exist; use HISTORY_TIME_WINDOW as the requested scope after Premium's 24-hour retention cap. Preserve topic_id/origin_message_id/source_message_id bindings when resuming a topic or restoring its table, graph, image or other saved data. Ask for hints only if no matching stored entry/pair is supplied. Enumerate a topic list only when the user asks for a general history overview. For REQUEST_SEQUENCE items marked p=true, resolve pronouns from the explicit subject in CURRENT_REQUEST, without importing prior-history context. For multi-section
 explanations, use user-visible Markdown headings and put the same ordered heading/summary map in
 dialogue_memory_record.sections.
 Analyze each supplied image/screenshot from pixels and each supplied file from actual content. Keep
@@ -272,7 +279,7 @@ Answer CURRENT_REQUEST in RETURN_LANGUAGE. On CONTINUE, use SELECTED_SECTION as 
 If CLARIFICATION_RESOLUTION exists, fulfill original_request and treat CURRENT_REQUEST as the user's
 clarification reply, not a replacement intent. For status topic_not_found or needs_more_detail, apologize and say no clear match
 was found in saved history without claiming the topic definitely never came up; don't repeat old options, ask for one or two hints.
-Keep any resolved topic active. NEW does not force continuation state, but semantically matched DIALOGUE_TOPIC_INDEX / CONTINUATION_CONTEXT may be used as grounded historical evidence; never import unrelated topics. For a history request naming a person, subject or previous task, use matching DIALOGUE_TOPIC_INDEX, DIALOGUE_HISTORY_TOPICS and CONTINUATION_CONTEXT as evidence even if the relation remains NEW. Ask for hints only when no matching stored entry/pair is supplied; list multiple topics only for a general history overview.
+Keep any resolved topic active. NEW does not force continuation state, but semantically matched DIALOGUE_TOPIC_INDEX / CONTINUATION_CONTEXT may be used as grounded historical evidence; never import unrelated topics. For a history request, honor HISTORY_TIME_WINDOW and HISTORY_TOPIC_MINIMUM/HISTORY_TOPIC_COUNT (never invent topics); preserve topic_id/origin_message_id/source_message_id so associated data stays attached to its originating topic and section. For a history request naming a person, subject or previous task, use matching DIALOGUE_TOPIC_INDEX, DIALOGUE_HISTORY_TOPICS and CONTINUATION_CONTEXT as evidence even if the relation remains NEW. Ask for hints only when no matching stored entry/pair is supplied; list multiple topics only for a general history overview.
 Graph family is chosen by INTERPRETATION.graph_policy. Ordinary x/y data stays 2D: line for trends/time series and bar for categorical comparisons. Use 3D only for an explicit 3D request or actual XYZ coordinates, a numeric surface grid/function z=f(x,y), or structured spatial objects. Never invent a missing z value or display a 2D series as generic P1/P2 3D markers; when 3D data is not valid, use graph_policy.fallback_representation. Carry graph_policy and the true axis labels in the graph payload. When the user explicitly requests a 3D graph, return a structured render_blocks item of type="graph" with renderer="GraphBlock" and payload coordinates, objects_3d/spheres, or surface_grid as appropriate. Never claim that a chart was created if only prose is returned; use the existing SceneContract route.
 Analyze supplied images from pixels and files from attached source. Keep each asset tied to filename,
 kind, role and source message ID; cached summaries are not original source. Attachments are evidence,
@@ -1366,7 +1373,9 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     if not is_history:
         data["DIALOGUE_TABLE_MARKDOWN"] = ""
         data["DIALOGUE_HISTORY_TOPICS"] = []
-    data["DIALOGUE_TOPIC_INDEX"] = (data.get("DIALOGUE_TOPIC_INDEX") or [])[:3]
+    # Preserve up to the requested ten topic entries for an explicit history list.
+    # Ordinary continuation keeps a tighter index to avoid polluting the context.
+    data["DIALOGUE_TOPIC_INDEX"] = (data.get("DIALOGUE_TOPIC_INDEX") or [])[:10 if is_history else 3]
     data["DIALOGUE_KNOWN_TOPIC_COUNT"] = int(data.get("DIALOGUE_KNOWN_TOPIC_COUNT") or 0) if is_history else 0
     for key in ("DIALOGUE_TABLE_MARKDOWN",):
         if data.get(key):
@@ -1518,18 +1527,26 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "semantic_intent": task_search.get("semantic_intent", ""),
                 "search_direction": task_search.get("search_direction", ""),
                 "time_scope": task_search.get("time_scope", "UNSPECIFIED"),
+                "requested_topic_count": max(1, min(10, int(task_search.get("requested_topic_count") or requested_topic_count or 7))) if task_search.get("history_request") else 0,
+                "minimum_topic_count": max(1, min(10, int(task_search.get("minimum_topic_count") or 1))) if task_search.get("history_request") else 0,
+                "time_window": task_search.get("time_window") or {},
+                "time_filter": task_search.get("time_filter") or {},
                 "history_topics": [
                     {"topic": _semantic_compress(topic.get("topic"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
                      "summary": _semantic_compress(topic.get("summary"), max(_scaled_prompt_tokens(12), summary_budget)),
                      "last_question": _semantic_compress(topic.get("last_question"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
-                     "message_id": topic.get("message_id")}
-                    for topic in (task_search.get("history_topics") or [])[:3] if isinstance(topic, dict)
+                     "message_id": topic.get("message_id"), "topic_id": topic.get("topic_id"),
+                     "origin_message_id": topic.get("origin_message_id"), "first_at": topic.get("first_at"),
+                     "last_at": topic.get("last_at")}
+                    for topic in (task_search.get("history_topics") or [])[:max(1, min(10, int(task_search.get("requested_topic_count") or requested_topic_count or 7)))] if isinstance(topic, dict)
                 ] if task_search.get("history_request") else [],
                 "topic_index": [
                     {"topic": _semantic_compress(topic.get("topic"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
                      "summary": _semantic_compress(topic.get("summary"), max(_scaled_prompt_tokens(12), summary_budget)),
-                     "message_id": topic.get("message_id")}
-                    for topic in (task_search.get("topic_index") or [])[:3] if isinstance(topic, dict)
+                     "message_id": topic.get("message_id"), "topic_id": topic.get("topic_id"),
+                     "origin_message_id": topic.get("origin_message_id"), "first_at": topic.get("first_at"),
+                     "last_at": topic.get("last_at")}
+                    for topic in (task_search.get("topic_index") or [])[:max(1, min(10, int(task_search.get("requested_topic_count") or requested_topic_count or 7)))] if isinstance(topic, dict)
                 ] if task_search.get("history_request") else [],
                 "topic": _semantic_compress(task_search.get("topic"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
                 "reason": _semantic_compress(task_search.get("reason"), max(_scaled_prompt_tokens(8), summary_budget // 3)),
@@ -1605,7 +1622,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             })
         topics_min = []
         if is_history:
-            for item in original_topics[:10]:
+            for item in original_topics[:requested_topic_count]:
                 if isinstance(item, dict):
                     topics_min.append({
                         "n": item.get("number"),
@@ -1613,10 +1630,17 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                         "s": _semantic_compress(item.get("summary"), max(_scaled_prompt_tokens(12), summary_budget)),
                         "q": _semantic_compress(item.get("last_question"), max(_scaled_prompt_tokens(12), summary_budget // 2)),
                         "turns": item.get("turns"),
+                        "topic_id": item.get("topic_id"),
+                        "origin_message_id": item.get("origin_message_id") or item.get("topic_origin_message_id"),
+                        "origin_turn": item.get("origin_turn"),
+                        "first_at": item.get("first_at") or item.get("topic_origin_at"),
+                        "last_at": item.get("last_at") or item.get("topic_last_at"),
                         "sections": [
                             {"h": _semantic_compress(sec.get("heading"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
                              "s": _semantic_compress(sec.get("summary"), max(_scaled_prompt_tokens(12), summary_budget // 2)),
-                             "id": sec.get("message_id")}
+                             "id": sec.get("message_id"), "src": sec.get("source_message_id") or sec.get("message_id"),
+                             "topic_id": sec.get("topic_id") or item.get("topic_id"),
+                             "origin_id": sec.get("topic_origin_message_id") or item.get("origin_message_id") or item.get("topic_origin_message_id")}
                             for sec in (item.get("sections") or [])[:4] if isinstance(sec, dict)
                         ],
                     })
@@ -1643,6 +1667,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "DIALOGUE_RELATION": data.get("DIALOGUE_RELATION") or "NEW",
             "HISTORY_REQUEST": is_history,
             "HISTORY_TOPIC_COUNT": data.get("HISTORY_TOPIC_COUNT", 0) if is_history else 0,
+            "HISTORY_TOPIC_MINIMUM": data.get("HISTORY_TOPIC_MINIMUM", 0) if is_history else 0,
+            "HISTORY_TIME_WINDOW": (data.get("HISTORY_TIME_WINDOW") or {}) if is_history else {},
             "DIALOGUE_ANCHOR": anchor_min,
             "CONTINUATION_CONTEXT": pairs_min,
             "PROTECTED_STRUCTURED_DATA": data.get("PROTECTED_STRUCTURED_DATA") or [],
@@ -1653,6 +1679,9 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "summary": _semantic_compress((data.get("SELECTED_SECTION") or {}).get("summary"), max(_scaled_prompt_tokens(12), summary_budget)),
                 "order": (data.get("SELECTED_SECTION") or {}).get("order"),
                 "message_id": (data.get("SELECTED_SECTION") or {}).get("message_id"),
+                "source_message_id": (data.get("SELECTED_SECTION") or {}).get("source_message_id") or (data.get("SELECTED_SECTION") or {}).get("message_id"),
+                "topic_id": (data.get("SELECTED_SECTION") or {}).get("topic_id"),
+                "topic_origin_message_id": (data.get("SELECTED_SECTION") or {}).get("topic_origin_message_id") or (data.get("SELECTED_SECTION") or {}).get("origin_message_id"),
             } if data.get("SELECTED_SECTION") else {},
             "CLARIFICATION_RESOLUTION": {
                 "status": _text((data.get("CLARIFICATION_RESOLUTION") or {}).get("status"))[:40],
@@ -1670,11 +1699,15 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "DIALOGUE_TOPIC_INDEX": [
                 {"n": item.get("number"), "t": _semantic_compress(item.get("topic"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
                  "s": _semantic_compress(item.get("summary"), max(_scaled_prompt_tokens(12), summary_budget)),
+                 "id": item.get("topic_id"), "origin_id": item.get("origin_message_id"),
+                 "first_at": item.get("first_at"), "last_at": item.get("last_at"),
                  "sections": [{"h": _semantic_compress(sec.get("heading"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
                                "s": _semantic_compress(sec.get("summary"), max(_scaled_prompt_tokens(12), summary_budget // 2)),
-                               "id": sec.get("message_id")}
+                               "id": sec.get("message_id"), "src": sec.get("source_message_id") or sec.get("message_id"),
+                               "topic_id": sec.get("topic_id") or item.get("topic_id"),
+                               "origin_id": sec.get("topic_origin_message_id") or item.get("origin_message_id") or item.get("topic_origin_message_id")}
                               for sec in (item.get("sections") or [])[:4] if isinstance(sec, dict)]}
-                for item in (data.get("DIALOGUE_TOPIC_INDEX") or [])[:2] if isinstance(item, dict)
+                for item in (data.get("DIALOGUE_TOPIC_INDEX") or [])[:10 if is_history else (2 if data.get("DIALOGUE_RELATION") == "CONTINUE" else 5)] if isinstance(item, dict)
             ] if (data.get("DIALOGUE_RELATION") == "CONTINUE" or data.get("HISTORY_REQUEST") or data.get("DIALOGUE_TOPIC_INDEX")) else [],
             "DIALOGUE_KNOWN_TOPIC_COUNT": data.get("DIALOGUE_KNOWN_TOPIC_COUNT", 0) if is_history else 0,
             "NEW_DIALOGUE_REQUEST": "Same as CURRENT_REQUEST" if _text(data.get("NEW_DIALOGUE_REQUEST")) else "",
@@ -1830,15 +1863,20 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         external_label_cost = _estimate_tokens("PROTECTED_STRUCTURED_DATA_SOURCE exact JSON source payload")
         total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens)) + external_label_cost
 
-    # Drop only redundant indexes and explanatory metadata before trimming any request text.
-    optional_shrinks = [
-        ("DIALOGUE_TABLE_MARKDOWN", ""),
-        ("DIALOGUE_HISTORY_TOPICS", []),
-        ("DIALOGUE_TOPIC_INDEX", []),
+    # Drop redundant indexes and explanatory metadata before trimming request text.
+    # An explicit history inventory must keep its requested 5–10 topic records and
+    # source bindings even under compression; only ordinary turns may discard them.
+    optional_shrinks = [("DIALOGUE_TABLE_MARKDOWN", "")]
+    if not is_history:
+        optional_shrinks.extend([
+            ("DIALOGUE_HISTORY_TOPICS", []),
+            ("DIALOGUE_TOPIC_INDEX", []),
+        ])
+    optional_shrinks.extend([
         ("DIALOGUE_KNOWN_TOPIC_COUNT", 0),
         ("SELECTED_ROOMS", []),
         ("REQUESTED_RENDERING_GUIDANCE", []),
-    ]
+    ])
     for key, value in optional_shrinks:
         if total <= MAX_PROMPT_TOKENS:
             break
@@ -2099,6 +2137,16 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
     history_request = bool(structured_intent.get("history_request") or memory.get("history_request") or request_input.get("history_request"))
     requested_topic_count = int(structured_intent.get("history_count") or memory.get("requested_topic_count") or 7)
     requested_topic_count = max(1, min(10, requested_topic_count))
+    minimum_topic_count = int(structured_intent.get("history_count_minimum") or memory.get("minimum_topic_count") or 1)
+    minimum_topic_count = max(1, min(requested_topic_count, minimum_topic_count))
+    history_time_window = structured_intent.get("time_window") or memory.get("time_window") or {}
+    if not isinstance(history_time_window, dict):
+        history_time_window = {}
+    history_time_window = {
+        key: history_time_window.get(key)
+        for key in ("has_constraint", "start_utc", "end_utc", "start_local", "end_local", "timezone", "source", "label")
+        if key in history_time_window
+    }
     render_plan = routing.get("render_plan") if isinstance(routing.get("render_plan"), list) else []
     mcdowell = (routing.get("provider_context_plan") or {}).get("mcdowell")
     if not isinstance(mcdowell, dict):
@@ -2115,9 +2163,17 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "summary": _clip(item.get("summary"), 360),
             "last_question": _clip(item.get("last_question"), 240),
             "turns": item.get("turns"),
+            "topic_id": item.get("topic_id"),
+            "origin_message_id": item.get("origin_message_id") or item.get("topic_origin_message_id"),
+            "origin_turn": item.get("origin_turn"),
+            "first_at": item.get("first_at") or item.get("topic_origin_at"),
+            "last_at": item.get("last_at") or item.get("topic_last_at"),
             "sections": [
                 {"heading": _clip(sec.get("heading"), 180), "summary": _clip(sec.get("summary"), 260),
-                 "order": sec.get("order"), "message_id": sec.get("message_id")}
+                 "order": sec.get("order"), "message_id": sec.get("message_id"),
+                 "source_message_id": sec.get("source_message_id") or sec.get("message_id"),
+                 "topic_id": sec.get("topic_id") or item.get("topic_id"),
+                 "topic_origin_message_id": sec.get("topic_origin_message_id") or item.get("origin_message_id") or item.get("topic_origin_message_id")}
                 for sec in (item.get("sections") or [])[:6] if isinstance(sec, dict)
             ],
         }
@@ -2141,14 +2197,23 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "summary": _clip(item.get("summary"), 360),
             "last_question": _clip(item.get("last_question"), 220),
             "turns": item.get("turns"),
+            "topic_id": item.get("topic_id"),
+            "origin_message_id": item.get("origin_message_id") or item.get("topic_origin_message_id"),
+            "origin_turn": item.get("origin_turn"),
+            "first_at": item.get("first_at") or item.get("topic_origin_at"),
+            "last_at": item.get("last_at") or item.get("topic_last_at"),
+            "message_ids": list(item.get("message_ids") or [])[:40],
             "sections": [
                 {"heading": _clip(sec.get("heading"), 180), "summary": _clip(sec.get("summary"), 260),
-                 "order": sec.get("order"), "message_id": sec.get("message_id")}
+                 "order": sec.get("order"), "message_id": sec.get("message_id"),
+                 "source_message_id": sec.get("source_message_id") or sec.get("message_id"),
+                 "topic_id": sec.get("topic_id") or item.get("topic_id"),
+                 "topic_origin_message_id": sec.get("topic_origin_message_id") or item.get("origin_message_id") or item.get("topic_origin_message_id")}
                 for sec in (item.get("sections") or [])[:5] if isinstance(sec, dict)
             ],
         }
         for item in topic_index if isinstance(item, dict)
-    ][:2 if relation == "CONTINUE" else 5]
+    ][:requested_topic_count if history_request else (2 if relation == "CONTINUE" else 5)]
 
     def _pairs(rows: Any, limit: int = 4) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
@@ -2162,10 +2227,17 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
                 "user": _clip(item.get("user") or item.get("user_text"), 480),
                 "april": _clip(item.get("april") or item.get("april_text"), 360),
                 "topic": _clip(item.get("topic"), 200),
+                "topic_id": item.get("topic_id"),
+                "origin_message_id": item.get("origin_message_id") or item.get("topic_origin_message_id"),
+                "origin_turn": item.get("origin_turn"),
                 "sections": [
                     {"heading": _clip(sec.get("heading") or sec.get("h"), 180),
                      "summary": _clip(sec.get("summary") or sec.get("s"), 260),
-                     "order": sec.get("order", sec.get("n", section_index + 1))}
+                     "order": sec.get("order", sec.get("n", section_index + 1)),
+                     "message_id": sec.get("message_id"),
+                     "source_message_id": sec.get("source_message_id") or sec.get("message_id"),
+                     "topic_id": sec.get("topic_id") or item.get("topic_id"),
+                     "topic_origin_message_id": sec.get("topic_origin_message_id") or item.get("origin_message_id") or item.get("topic_origin_message_id")}
                     for section_index, sec in enumerate((item.get("sections") or [])[:8])
                     if isinstance(sec, dict)
                 ],
@@ -2260,6 +2332,8 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "DIALOGUE_RELATION": relation,
         "HISTORY_REQUEST": history_request,
         "HISTORY_TOPIC_COUNT": requested_topic_count if history_request else 0,
+        "HISTORY_TOPIC_MINIMUM": minimum_topic_count if history_request else 0,
+        "HISTORY_TIME_WINDOW": history_time_window if history_request else {},
         "DIALOGUE_ANCHOR": {
             "topic": _clip(anchor.get("topic"), 240),
             "user": _clip(anchor.get("user"), 440),
@@ -2278,6 +2352,9 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "summary": _clip(selected_section.get("summary"), 440),
             "order": selected_section.get("order"),
             "message_id": selected_section.get("message_id"),
+            "source_message_id": selected_section.get("source_message_id") or selected_section.get("message_id"),
+            "topic_id": selected_section.get("topic_id"),
+            "topic_origin_message_id": selected_section.get("topic_origin_message_id") or selected_section.get("origin_message_id"),
         } if selected_section else {},
         "CLARIFICATION_RESOLUTION": {
             "status": _clip((continuation.get("clarification_resolution") or memory.get("clarification_resolution") or {}).get("status"), 40),
