@@ -2465,6 +2465,45 @@ def search_dialogue_context(
         continuation = True
     relation = "CONTINUE" if continuation else "NEW"
 
+    # A detailed, self-contained NEW_INFORMATION request must not inherit a
+    # previous turn merely because lexical ranking found the same entity.  This
+    # is especially important when pronouns ("его", "она", "как он выглядел")
+    # refer to the subject introduced inside the current message itself.
+    low_query = _text(query).lower().replace("ё", "е")
+    explicit_prior_pointer = bool(re.search(
+        r"(?:\bподробнее\b|\bрасскажи\s+(?:мне\s+)?больше\b|\bпродолж\w*\b|"
+        r"\bдальше\b|\bеще\b|\bпредыдущ\w*\b|\bпрошл\w*\b|\bпрежн\w*\b|"
+        r"\bверни\w*\b|\bвосстанови\w*\b|\bповтори\w*\b|\bсохранен\w*\b|"
+        r"\bвернись\s+к\b|\bкак\s+(?:мы\s+)?обсуждали\b|"
+        r"\bиз\s+истории\b|\bкак\s+раньше\b|\bкак\s+выше\b|\bвыше\b|"
+        r"\bпо\s+этим\b|\bпо\s+прежним\s+значени\w*\b|\bпо\s+старым\s+значени\w*\b|"
+        r"\bте\s+же\b|\bэту\s+таблиц\w*\b|\bэта\s+таблиц\w*\b|"
+        r"\bэтот\s+график\b|\bэтот\s+уравнен\w*\b|\bэту\s+формул\w*\b|"
+        r"\bэту\s+задач\w*\b)",
+        low_query,
+    ))
+    self_contained_new_information = bool(
+        interpreted_intent == "NEW_INFORMATION"
+        and not bool(query_interpretation.get("requires_memory"))
+        and not history_request
+        and not resume_anchor_row
+        and not pending_clarification
+        and not new_topic_request
+        and not query_modalities
+        and len(_semantic_tokens(query)) >= 4
+        and len(low_query) >= 28
+        and not marker
+        and not _is_section_request(query)
+        and not _looks_like_topic_correction(query)
+        and not explicit_prior_pointer
+        and (bool(query_subjects) or not reference_followup)
+    )
+    if self_contained_new_information:
+        # Search results remain available for diagnostics/ranking, but are not a
+        # valid dialogue continuation and must not be forwarded to the Provider.
+        relation = "NEW"
+        continuation = False
+
     # Resolve the anchor. Short referential requests with no explicit topic always
     # begin at the latest active turn; section ranking happens inside that topic.
     anchor: dict[str, Any] | None = None
@@ -2903,7 +2942,7 @@ def search_dialogue_context(
     topic_table_md = "\n".join(topic_table_lines)
 
     result = {
-        "engine": "state_manager_topic_section_search_v6_recovery",
+        "engine": "state_manager_topic_section_search_v7_semantic_relevance_gate",
         "authenticated": True,
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "dialog_id": str(dialog_id or ""),
@@ -2912,6 +2951,7 @@ def search_dialogue_context(
         "context_signature": context_signature,
         "active_subject_conflict": bool(active_subject_conflict),
         "semantic_subject_switch": bool(semantic_subject_switch),
+        "self_contained_new_information": bool(self_contained_new_information),
         "total_pairs": len(rows),
         "candidate_count": len(matches),
         "relation": relation,
@@ -2921,7 +2961,8 @@ def search_dialogue_context(
             else "clarification_researched" if clarification_resolution
             else "clarification_pending" if clarification_needed
             else "history_request" if history_request
-            else "named_topic_match" if explicit_topic_hits
+            else "self_contained_new_information" if self_contained_new_information
+            else "named_topic_match" if explicit_topic_hits and relation == "CONTINUE"
             else "hot_branch_ambiguous_followup" if relation == "CONTINUE" and anchor and hot_branch_candidate
             else "underspecified_turn_context" if relation == "CONTINUE" and anchor and not query_subjects
             else "active_topic_default" if relation == "CONTINUE" and anchor
@@ -2962,6 +3003,7 @@ def search_dialogue_context(
         resume_anchor_requested=bool(resume_key), resume_anchor_found=bool(resume_anchor_row),
         query_subject_terms=sorted(query_subjects)[:10], active_subject_conflict=bool(active_subject_conflict),
         semantic_subject_switch=bool(semantic_subject_switch),
+        self_contained_new_information=bool(self_contained_new_information),
         hot_branch_candidate=bool(hot_branch_candidate),
         top_candidate_alignment=[{
             "message_key": _apr_diag_ref(x.get("message_id")), "score": x.get("score"),
