@@ -50,7 +50,7 @@ from storage import (
 )
 
 
-PROCESSOR_VERSION = "april_exkrutor_single_route_v10_structured_source_scope"
+PROCESSOR_VERSION = "april_exkrutor_single_route_v11_semantic_context_gate"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -1381,21 +1381,33 @@ async def execute(
             "window_hours": 12,
             "relation": dialogue_context["relation"],
             "relation_confidence": dialogue_context["relation_confidence"],
-            "selected_pairs": dialogue_context["selected_pairs"],
-            "candidates": dialogue_context["candidates"],
-            "selected_section": dialogue_context.get("selected_section") or {},
+            "selected_pairs": (
+                dialogue_context.get("selected_pairs") or []
+                if (dialogue_context.get("relation") == "CONTINUE" or dialogue_context.get("history_request"))
+                else []
+            ),
+            # Search candidates and the full search trace are internal diagnostics,
+            # never model context. Only explicit history overview needs the index.
+            "selected_section": (
+                dialogue_context.get("selected_section") or {}
+                if (dialogue_context.get("relation") == "CONTINUE" or dialogue_context.get("history_request"))
+                else {}
+            ),
             "clarification_needed": bool(dialogue_context.get("clarification_needed")),
             "pending_clarification": dialogue_context.get("pending_clarification") or {},
             "clarification_resolution": dialogue_context.get("clarification_resolution") or {},
-            "history_topics": dialogue_context.get("history_topics") or [],
-            "topic_index": dialogue_context.get("topic_index") or [],
-            "known_topic_count": int(dialogue_context.get("known_topic_count") or 0),
+            "history_topics": (dialogue_context.get("history_topics") or []) if dialogue_context.get("history_request") else [],
+            "topic_index": (dialogue_context.get("topic_index") or []) if dialogue_context.get("history_request") else [],
+            "known_topic_count": int(dialogue_context.get("known_topic_count") or 0) if dialogue_context.get("history_request") else 0,
             "history_request": bool(dialogue_context.get("history_request")),
-            "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 7),
-            "topic_table_markdown": dialogue_context.get("topic_table_markdown") or "",
-            "anchor": dialogue_context.get("anchor") or {},
+            "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 7) if dialogue_context.get("history_request") else 0,
+            "topic_table_markdown": (dialogue_context.get("topic_table_markdown") or "") if dialogue_context.get("history_request") else "",
+            "anchor": (
+                dialogue_context.get("anchor") or {}
+                if (dialogue_context.get("relation") == "CONTINUE" or dialogue_context.get("history_request"))
+                else {}
+            ),
             "restored_assets": restored_assets,
-            "search": dialogue_context["search"],
         },
         visual_context={
             "items": visual_context or [],
@@ -1427,18 +1439,30 @@ async def execute(
             "provider_context_plan": {
                 "relation": dialogue_context["relation"],
                 "current_request": current_text,
-                "selected_dialogue_chain": dialogue_context["selected_pairs"],
-                "selected_section": dialogue_context.get("selected_section") or {},
+                "selected_dialogue_chain": (
+                    dialogue_context.get("selected_pairs") or []
+                    if (dialogue_context.get("relation") == "CONTINUE" or dialogue_context.get("history_request"))
+                    else []
+                ),
+                "selected_section": (
+                    dialogue_context.get("selected_section") or {}
+                    if (dialogue_context.get("relation") == "CONTINUE" or dialogue_context.get("history_request"))
+                    else {}
+                ),
                 "clarification_needed": bool(dialogue_context.get("clarification_needed")),
                 "pending_clarification": dialogue_context.get("pending_clarification") or {},
                 "clarification_resolution": dialogue_context.get("clarification_resolution") or {},
-                "history_topics": dialogue_context.get("history_topics") or [],
-                "topic_index": dialogue_context.get("topic_index") or [],
-                "known_topic_count": int(dialogue_context.get("known_topic_count") or 0),
+                "history_topics": (dialogue_context.get("history_topics") or []) if dialogue_context.get("history_request") else [],
+                "topic_index": (dialogue_context.get("topic_index") or []) if dialogue_context.get("history_request") else [],
+                "known_topic_count": int(dialogue_context.get("known_topic_count") or 0) if dialogue_context.get("history_request") else 0,
                 "history_request": bool(dialogue_context.get("history_request")),
-                "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 7),
-                "topic_table_markdown": dialogue_context.get("topic_table_markdown") or "",
-                "anchor": dialogue_context.get("anchor") or {},
+                "requested_topic_count": int(dialogue_context.get("requested_topic_count") or 7) if dialogue_context.get("history_request") else 0,
+                "topic_table_markdown": (dialogue_context.get("topic_table_markdown") or "") if dialogue_context.get("history_request") else "",
+                "anchor": (
+                    dialogue_context.get("anchor") or {}
+                    if (dialogue_context.get("relation") == "CONTINUE" or dialogue_context.get("history_request"))
+                    else {}
+                ),
                 "restored_assets": restored_assets,
                 # Always carry the literal current request in the structured chain.
                 # This field is active as a topic switch only for NEW dialogue.
