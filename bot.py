@@ -45,6 +45,7 @@ from blocks.Premium_state_manager import (
 from storage import (
     activate_test_premium, find_or_create_user, get_user_plan,
     get_user_subscription_status, init_db, is_authenticated_user, resolve_user_id,
+    delete_april_account,
 )
 
 HOST = os.getenv("HOST", "0.0.0.0")
@@ -965,6 +966,58 @@ class AprilHandler(BaseHTTPRequestHandler):
             } else 400
             _apr_timing_log("subscription_test_activation_failed", user_key=_apr_diag_ref(user_id), error=error)
             self._send_json(status_code, result)
+            return
+
+        # April account deletion bridge. This endpoint is server-to-server only:
+        # the Web layer validates the current NextAuth session and forwards the
+        # session's April ID with the private service token. No Google APIs are
+        # called; only April's own PostgreSQL records are deleted.
+        if parsed_path == "/api/account/delete":
+            if not self._service_authorized():
+                self.close_connection = True
+                self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                return
+
+            user_id = _text(self.headers.get("X-April-User-Id"))
+            if not user_id:
+                self._send_json(400, {"success": False, "error": "USER_ID_REQUIRED"})
+                return
+            if not _text(os.getenv("DATABASE_URL")):
+                self._send_json(503, {"success": False, "error": "DATABASE_UNAVAILABLE"})
+                return
+
+            # Consume a small JSON body so the HTTP/1.1 connection stays in sync.
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length < 0 or length > 4096:
+                    self.close_connection = True
+                    self._send_json(413, {"success": False, "error": "REQUEST_BODY_TOO_LARGE"})
+                    return
+                raw = self.rfile.read(length) if length else b""
+                body = json.loads(raw.decode("utf-8") or "{}") if raw else {}
+                if not isinstance(body, dict):
+                    self._send_json(400, {"success": False, "error": "INVALID_REQUEST"})
+                    return
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                self._send_json(400, {"success": False, "error": "INVALID_JSON"})
+                return
+
+            result = delete_april_account(user_id)
+            if result.get("success") is True:
+                _apr_timing_log(
+                    "account_delete_success",
+                    user_key=_apr_diag_ref(user_id),
+                    deleted_dialogue_rows=int(result.get("deleted_dialogue_rows") or 0),
+                    deleted_payment_rows=int(result.get("deleted_payment_rows") or 0),
+                    external_identity="google_untouched",
+                )
+                self._send_json(200, {"success": True, "deleted": True})
+                return
+
+            error = _text(result.get("error") or "ACCOUNT_DELETE_FAILED")
+            status_code = 503 if error in {"DATABASE_UNAVAILABLE", "ACCOUNT_DELETE_FAILED", "ACCOUNT_ASSETS_DELETE_FAILED"} else 404 if error == "ACCOUNT_NOT_FOUND" else 401 if error == "AUTHENTICATED_USER_REQUIRED" else 400
+            _apr_timing_log("account_delete_failed", user_key=_apr_diag_ref(user_id), error=error)
+            self._send_json(status_code, {"success": False, "error": error})
             return
 
         # Existing April Web authentication bridge. Keep account identity in the
