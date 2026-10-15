@@ -1187,10 +1187,12 @@ def _new_premium_id() -> str:
 
 
 def activate_test_premium(user_id: Any, hours: int = PREMIUM_TEST_DURATION_HOURS) -> dict[str, Any]:
-    """Grant a 24-hour test entitlement only to explicitly allowlisted auth users.
+    """Grant or extend a 24-hour test Premium entitlement for an authenticated user.
 
     The Premium ID is stored once in the canonical users row, copied into a
-    zero-value test-grant ledger row, and retained after expiry for reuse.
+    zero-value test-grant ledger row, and retained after expiry for reuse. When
+    renewing an unexpired Lite/Premium plan, the new duration is added to its
+    existing expiry instead of discarding the unused time.
     """
     uid = str(user_id or "").strip()
     if not uid:
@@ -1208,7 +1210,7 @@ def activate_test_premium(user_id: Any, hours: int = PREMIUM_TEST_DURATION_HOURS
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT user_id, april_id, email, provider, premium_id
+                    SELECT user_id, april_id, email, provider, plan, subscription_until, premium_id
                     FROM users
                     WHERE user_id = %s OR april_id = %s
                     ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
@@ -1236,7 +1238,15 @@ def activate_test_premium(user_id: Any, hours: int = PREMIUM_TEST_DURATION_HOURS
                             break
                     if not premium_id:
                         return {"success": False, "error": "PREMIUM_ID_GENERATION_FAILED"}
-                expires_at = now().timestamp() + max(1, min(int(hours), 24)) * 3600
+                current_seconds = now().timestamp()
+                current_plan = str(user.get("plan") or "free").strip().lower()
+                current_expiry = float(user.get("subscription_until") or 0)
+                renewal_base = (
+                    current_expiry
+                    if current_plan in {"lite", "premium"} and current_expiry > current_seconds
+                    else current_seconds
+                )
+                expires_at = renewal_base + max(1, min(int(hours), 24)) * 3600
                 cur.execute(
                     "UPDATE users SET premium_id = %s, plan = 'premium', subscription_until = %s, warned = FALSE WHERE user_id = %s",
                     (premium_id, expires_at, uid),
