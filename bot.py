@@ -47,6 +47,8 @@ from storage import (
     get_user_subscription_status, init_db, is_authenticated_user, resolve_user_id,
     delete_april_account, load_dialogue_history_index, load_dialogue_history_details,
     get_admin_user_telemetry, touch_user_activity,
+    get_premium_support_status, send_premium_support_message,
+    list_premium_support_messages, reply_premium_support_message,
 )
 
 HOST = os.getenv("HOST", "0.0.0.0")
@@ -1000,6 +1002,35 @@ class AprilHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json(200, {"success": True, **telemetry})
                 return
+            if mode == "support":
+                if not self._service_authorized():
+                    self.close_connection = True
+                    self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                    return
+                supplied_user_id = _text(self.headers.get("X-April-User-Id"))
+                if not supplied_user_id:
+                    self._send_json(400, {"success": False, "error": "USER_ID_REQUIRED"})
+                    return
+                if not _text(os.getenv("DATABASE_URL")):
+                    self._send_json(503, {"success": False, "error": "DATABASE_UNAVAILABLE"})
+                    return
+                if not is_authenticated_user(supplied_user_id):
+                    self._send_json(401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"})
+                    return
+                expected_admin_id = _text(os.getenv("APRIL_SUPERADMIN_APRIL_ID", "APR-WMBS-8W4Y"))
+                if supplied_user_id == expected_admin_id:
+                    inbox = list_premium_support_messages(limit=100)
+                    if not inbox:
+                        self._send_json(503, {"success": False, "error": "SUPPORT_INBOX_UNAVAILABLE"})
+                        return
+                    self._send_json(200, inbox)
+                    return
+                status = get_premium_support_status(supplied_user_id)
+                if not status:
+                    self._send_json(503, {"success": False, "error": "SUPPORT_STATUS_UNAVAILABLE"})
+                    return
+                self._send_json(200, status)
+                return
             if mode == "history":
                 # Both layers authenticate: Web verifies NextAuth, Bot verifies
                 # the service token and checks that the forwarded account exists.
@@ -1032,7 +1063,67 @@ class AprilHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"success": False, "error": "NOT_FOUND"})
 
     def do_POST(self) -> None:
-        parsed_path = urlsplit(self.path).path
+        parsed = urlsplit(self.path)
+        parsed_path = parsed.path
+        if parsed_path == CANONICAL_CHAT_ROUTE and parse_qs(parsed.query, keep_blank_values=False).get("mode", [""])[0] == "support":
+            if not self._service_authorized():
+                self.close_connection = True
+                self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                return
+            user_id = _text(self.headers.get("X-April-User-Id"))
+            if not user_id:
+                self._send_json(400, {"success": False, "error": "USER_ID_REQUIRED"})
+                return
+            if not _text(os.getenv("DATABASE_URL")):
+                self._send_json(503, {"success": False, "error": "DATABASE_UNAVAILABLE"})
+                return
+            if not is_authenticated_user(user_id):
+                self._send_json(401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length < 0 or length > 64 * 1024:
+                    self.close_connection = True
+                    self._send_json(413, {"success": False, "error": "REQUEST_BODY_TOO_LARGE"})
+                    return
+                raw = self.rfile.read(length) if length else b""
+                body = json.loads(raw.decode("utf-8") or "{}") if raw else {}
+                if not isinstance(body, dict):
+                    self._send_json(400, {"success": False, "error": "INVALID_REQUEST"})
+                    return
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                self._send_json(400, {"success": False, "error": "INVALID_JSON"})
+                return
+
+            action = _text(body.get("support_action")).lower()
+            expected_admin_id = _text(os.getenv("APRIL_SUPERADMIN_APRIL_ID", "APR-WMBS-8W4Y"))
+            if action == "send":
+                if user_id == expected_admin_id:
+                    self._send_json(403, {"success": False, "error": "ADMIN_CANNOT_OPEN_SUPPORT_TICKET"})
+                    return
+                result = send_premium_support_message(user_id, body.get("message"), body.get("language"))
+                if result.get("success") is True:
+                    self._send_json(200, result)
+                    return
+                error = _text(result.get("error") or "SUPPORT_UNAVAILABLE")
+                status = 429 if error == "COOLDOWN_ACTIVE" else 403 if error == "PREMIUM_REQUIRED" else 401 if error == "AUTHENTICATED_USER_REQUIRED" else 503 if error in {"DATABASE_UNAVAILABLE", "SUPPORT_UNAVAILABLE", "SUPPORT_STATUS_UNAVAILABLE"} else 400
+                self._send_json(status, result)
+                return
+            if action == "reply":
+                if user_id != expected_admin_id:
+                    self._send_json(403, {"success": False, "error": "SUPERADMIN_REQUIRED"})
+                    return
+                result = reply_premium_support_message(body.get("message_id"), body.get("reply"), user_id)
+                if result.get("success") is True:
+                    self._send_json(200, result)
+                    return
+                error = _text(result.get("error") or "SUPPORT_UNAVAILABLE")
+                status = 403 if error == "SUPERADMIN_REQUIRED" else 404 if error == "SUPPORT_MESSAGE_NOT_FOUND" else 409 if error == "SUPPORT_MESSAGE_ALREADY_REPLIED" else 503 if error in {"DATABASE_UNAVAILABLE", "SUPPORT_UNAVAILABLE"} else 400
+                self._send_json(status, result)
+                return
+            self._send_json(400, {"success": False, "error": "INVALID_SUPPORT_ACTION"})
+            return
+
         if parsed_path == "/api/subscription/test-activate":
             if not self._service_authorized():
                 self.close_connection = True
