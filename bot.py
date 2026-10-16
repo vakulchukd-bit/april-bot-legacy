@@ -47,7 +47,8 @@ from storage import (
     get_user_subscription_status, init_db, is_authenticated_user, resolve_user_id,
     delete_april_account, load_dialogue_history_index, load_dialogue_history_details,
     get_admin_user_telemetry, touch_user_activity,
-    get_premium_support_status, send_premium_support_message,
+    get_premium_support_status, get_premium_support_message_detail,
+    mark_premium_support_message_read, send_premium_support_message,
     list_premium_support_messages, reply_premium_support_message,
 )
 
@@ -1018,7 +1019,20 @@ class AprilHandler(BaseHTTPRequestHandler):
                     self._send_json(401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"})
                     return
                 expected_admin_id = _text(os.getenv("APRIL_SUPERADMIN_APRIL_ID", "APR-WMBS-8W4Y"))
-                if supplied_user_id == expected_admin_id:
+                is_admin = supplied_user_id == expected_admin_id
+                requested_message_id = _text(query.get("message_id", [""])[0])
+                if requested_message_id:
+                    detail = get_premium_support_message_detail(
+                        supplied_user_id, requested_message_id, is_admin=is_admin,
+                    )
+                    if not detail or detail.get("success") is not True:
+                        error = _text((detail or {}).get("error") or "SUPPORT_MESSAGE_NOT_FOUND")
+                        status_code = 503 if error in {"DATABASE_UNAVAILABLE", "SUPPORT_UNAVAILABLE"} else 404
+                        self._send_json(status_code, detail or {"success": False, "error": error})
+                        return
+                    self._send_json(200, detail)
+                    return
+                if is_admin:
                     inbox = list_premium_support_messages(limit=10)
                     if not inbox:
                         self._send_json(503, {"success": False, "error": "SUPPORT_INBOX_UNAVAILABLE"})
@@ -1097,6 +1111,18 @@ class AprilHandler(BaseHTTPRequestHandler):
 
             action = _text(body.get("support_action")).lower()
             expected_admin_id = _text(os.getenv("APRIL_SUPERADMIN_APRIL_ID", "APR-WMBS-8W4Y"))
+            if action == "mark_read":
+                is_admin = user_id == expected_admin_id
+                result = mark_premium_support_message_read(
+                    user_id, body.get("message_id"), is_admin=is_admin,
+                )
+                if result.get("success") is True:
+                    self._send_json(200, result)
+                    return
+                error = _text(result.get("error") or "SUPPORT_UNAVAILABLE")
+                status = 404 if error in {"SUPPORT_MESSAGE_NOT_FOUND", "MESSAGE_ID_INVALID"} else 401 if error == "AUTHENTICATED_USER_REQUIRED" else 503 if error in {"DATABASE_UNAVAILABLE", "SUPPORT_UNAVAILABLE"} else 400
+                self._send_json(status, result)
+                return
             if action == "send":
                 if user_id == expected_admin_id:
                     self._send_json(403, {"success": False, "error": "ADMIN_CANNOT_OPEN_SUPPORT_TICKET"})
