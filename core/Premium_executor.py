@@ -1131,6 +1131,11 @@ async def execute(
             "search_scope": semantic_interpretation.get("search_scope"),
             "relation_hint": semantic_interpretation.get("relation_hint"),
             "reason": semantic_interpretation.get("reason"),
+            "speech_act": semantic_interpretation.get("speech_act"),
+            "communicative_act": semantic_interpretation.get("communicative_act"),
+            "pragmatic_intent": semantic_interpretation.get("pragmatic_intent"),
+            "message_function": semantic_interpretation.get("message_function"),
+            "pragmatic_features": semantic_interpretation.get("pragmatic_features", {}),
             "features": semantic_interpretation.get("features", {}),
             "context_signature": semantic_interpretation.get("context_signature", {}),
         }
