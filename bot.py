@@ -1019,7 +1019,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                     return
                 expected_admin_id = _text(os.getenv("APRIL_SUPERADMIN_APRIL_ID", "APR-WMBS-8W4Y"))
                 if supplied_user_id == expected_admin_id:
-                    inbox = list_premium_support_messages(limit=100)
+                    inbox = list_premium_support_messages(limit=10)
                     if not inbox:
                         self._send_json(503, {"success": False, "error": "SUPPORT_INBOX_UNAVAILABLE"})
                         return
@@ -1082,7 +1082,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-                if length < 0 or length > 64 * 1024:
+                if length < 0 or length > 1_000_000:
                     self.close_connection = True
                     self._send_json(413, {"success": False, "error": "REQUEST_BODY_TOO_LARGE"})
                     return
@@ -1101,7 +1101,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                 if user_id == expected_admin_id:
                     self._send_json(403, {"success": False, "error": "ADMIN_CANNOT_OPEN_SUPPORT_TICKET"})
                     return
-                result = send_premium_support_message(user_id, body.get("message"), body.get("language"))
+                result = send_premium_support_message(user_id, body.get("message"), body.get("language"), body.get("attachment_data"), body.get("attachment_mime"))
                 if result.get("success") is True:
                     self._send_json(200, result)
                     return
