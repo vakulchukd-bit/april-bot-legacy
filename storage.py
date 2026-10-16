@@ -253,7 +253,8 @@ def init_db() -> None:
                         images_today INTEGER NOT NULL DEFAULT 0,
                         last_reset TEXT NOT NULL DEFAULT CURRENT_DATE::TEXT,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        last_login_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                        last_login_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        last_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
                     )
                     """
                 )
@@ -272,6 +273,7 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_reset TEXT DEFAULT CURRENT_DATE::TEXT")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
+                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
 
                 cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_april_id ON users(april_id) WHERE april_id IS NOT NULL AND april_id <> ''")
                 cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL AND email <> ''")
@@ -1800,6 +1802,59 @@ def get_reset_seconds(user_id):
 def format_time(seconds):
     seconds = int(seconds or 0)
     return f"{seconds // 3600:02}:{(seconds % 3600)//60:02}:{seconds % 60:02}"
+
+
+def touch_user_activity(user_id: Any) -> None:
+    """Update last activity on existing authenticated chat requests."""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return
+    conn = get_conn()
+    if not conn:
+        return
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE users SET last_seen_at = CURRENT_TIMESTAMP WHERE user_id = %s", (uid,))
+    finally:
+        conn.close()
+
+
+def get_admin_user_telemetry() -> dict[str, int] | None:
+    """Return small aggregate counters; online means chat activity in the last 3 minutes."""
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*)::INT AS total,
+                        COUNT(*) FILTER (
+                            WHERE COALESCE(LOWER(plan), 'free') = 'premium'
+                              AND COALESCE(subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
+                        )::INT AS premium,
+                        COUNT(*) FILTER (
+                            WHERE NOT (
+                                COALESCE(LOWER(plan), 'free') = 'premium'
+                                AND COALESCE(subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
+                            )
+                        )::INT AS free,
+                        COUNT(*) FILTER (
+                            WHERE last_seen_at >= CURRENT_TIMESTAMP - INTERVAL '3 minutes'
+                        )::INT AS online
+                    FROM users
+                    """
+                )
+                row = cur.fetchone() or {}
+                return {key: max(0, int(row.get(key) or 0)) for key in ("online", "premium", "free", "total")}
+    except Exception as exc:
+        print(f"[APRIL_TELEMETRY] READ_ERROR type={type(exc).__name__}", flush=True)
+        return None
+    finally:
+        conn.close()
 
 
 def get_all_users():
