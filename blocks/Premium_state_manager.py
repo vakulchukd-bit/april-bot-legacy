@@ -2678,7 +2678,7 @@ def search_dialogue_context(
     reference_followup = _looks_like_referential_followup(query)
     query_interpretation = dict(query_interpretation or {})
     history_request = bool(query_interpretation.get("history_request")) or _is_history_request(query)
-    new_topic_request = _looks_like_new_topic(query)
+    new_topic_request = _looks_like_new_topic(query) or bool(query_interpretation.get("explicit_topic_switch"))
     interpreted_direction = _text(query_interpretation.get("direction"))
     interpreted_intent = _text(query_interpretation.get("primary_intent"))
     topic_reference_fragment = _text(query_interpretation.get("topic_reference")) == "TOPIC_FRAGMENT"
@@ -2688,6 +2688,12 @@ def search_dialogue_context(
     communicative_act = _text(query_interpretation.get("communicative_act")).upper()
     is_correction = bool(
         pragmatic_features.get("correction")
+        or pragmatic_features.get("active_branch_repair")
+        or pragmatic_features.get("previous_answer_reference")
+        or pragmatic_features.get("factual_verification_request")
+        or query_interpretation.get("active_branch_repair")
+        or query_interpretation.get("previous_answer_reference")
+        or query_interpretation.get("factual_verification_request")
         or speech_act in {"CORRECTION_OR_REVISION", "FRUSTRATION_OR_DISSATISFACTION", "NEGATION_OR_DISAGREEMENT"}
         or communicative_act in {"REVISE_PREVIOUS_RESPONSE", "RESPOND_TO_DISAGREEMENT"}
         or _looks_like_topic_correction(query)
@@ -3126,6 +3132,7 @@ def search_dialogue_context(
         and not marker
         and not _is_section_request(query)
         and not _looks_like_topic_correction(query)
+        and not repair_active_branch
         and not explicit_prior_pointer
         and (bool(query_subjects) or not reference_followup)
     )
@@ -3135,9 +3142,51 @@ def search_dialogue_context(
         relation = "NEW"
         continuation = False
 
-    # Resolve the anchor. Short referential requests with no explicit topic always
-    # begin at the latest active turn; section ranking happens inside that topic.
+    # A repair is anchored to evidence in the current dialog, not to an older
+    # cross-history topic that happens to share a named entity. Compare both USER
+    # and APRIL sides so the challenged answer can still be found when the user's
+    # message does not repeat the answer's subject; otherwise use the latest turn.
     anchor: dict[str, Any] | None = None
+    if repair_active_branch and latest_same_dialog:
+        repair_candidates = []
+        for candidate in matches:
+            if not candidate.get("same_dialog"):
+                continue
+            candidate_text = " ".join((
+                _text(candidate.get("topic")),
+                _text(candidate.get("user") or candidate.get("user_text")),
+                _text(candidate.get("april") or candidate.get("april_text")),
+            ))
+            lexical_fit = _topic_query_overlap(query, candidate_text)
+            semantic_fit = max(
+                float(candidate.get("context") or 0),
+                float(candidate.get("entity_overlap") or 0),
+                float(candidate.get("answer_overlap") or 0),
+                float(candidate.get("user_overlap") or 0),
+                float(candidate.get("subject_overlap") or 0),
+            )
+            # A correction may name entities that were absent from the user's last
+            # message but present in April's answer (e.g. Paris after Constantinople).
+            # Compare both sides of the canonical pair; do not discard the exact
+            # challenged answer just because it conflicts with a newer unrelated turn.
+            row_subjects = set(_row_subject_tokens(candidate))
+            subject_evidence = _subject_overlap(query_subjects, row_subjects) if query_subjects else 0.0
+            evidence_fit = max(lexical_fit, semantic_fit, subject_evidence)
+            if evidence_fit > 0.0:
+                repair_candidates.append((
+                    evidence_fit, subject_evidence, semantic_fit,
+                    float(candidate.get("created_at") or 0), candidate,
+                ))
+        if query_subjects and repair_candidates:
+            repair_candidates.sort(key=lambda entry: (entry[0], entry[1], entry[2], entry[3]), reverse=True)
+            # Use same-dialog evidence only when it really mentions the challenge;
+            # otherwise remain on the newest active exchange instead of a weak hit.
+            if repair_candidates[0][0] >= 0.16 and (
+                repair_candidates[0][1] >= 0.10 or repair_candidates[0][0] >= 0.34
+            ):
+                anchor = repair_candidates[0][4]
+        if anchor is None:
+            anchor = latest_same_dialog
     forced_section: dict[str, Any] = {}
     clarification_resolution: dict[str, Any] = {}
     clarification_needed = False
@@ -3232,8 +3281,9 @@ def search_dialogue_context(
         # globally, or handed back to normal dialogue. It must not create another
         # local clarification from the old options.
     elif relation == "CONTINUE" and rows:
-        if repair_active_branch and latest_same_dialog and not (is_correction and subject_query.strip()):
-            anchor = latest_same_dialog
+        if repair_active_branch and latest_same_dialog:
+            if anchor is None:
+                anchor = latest_same_dialog
         elif not query_subjects and latest_same_dialog:
             # For an underspecified turn, prefer role-aligned evidence when available.
             # Otherwise compare the actual topical evidence with the active turn; if
@@ -3290,56 +3340,162 @@ def search_dialogue_context(
             selection_method=history_selection_method, topic_index_count=len(topic_index),
         )
     elif relation == "CONTINUE":
-        if anchor:
-            selected_for_context.append(_compact_pair(anchor))
-        # At most one corroborating pair; never forward a pile of unrelated turns.
-        anchor_subjects = set((anchor or {}).get("subject_terms") or [])
-        anchor_has_values = bool(int((anchor or {}).get("structured_data_richness") or 0) >= 8)
-        related_candidates = []
-        # A role-aligned factual record is sufficient for a participant-centered
-        # lookup. Do not dilute it with neighboring turns that may only report a
-        # prior failure to recall that fact (e.g. "I don't see your name").
-        related_context_candidates = [] if int((anchor or {}).get("participant_alignment") or 0) > 0 else matches
-        for item in related_context_candidates:
-            if item.get("is_pending_clarification"):
-                continue
-            if not item.get("message_id") or _text(item.get("message_id")) == _text((anchor or {}).get("message_id")):
-                continue
-            if bool(query_subjects and item.get("subject_mismatch")):
-                continue
-            if bool(item.get("same_dialog")) is False and _text(item.get("dialog_id")) != _text(dialog_id):
-                continue
-            topic_similarity = fuzz.token_set_ratio(
-                _text((anchor or {}).get("topic")).casefold(), _text(item.get("topic")).casefold()
-            ) / 100.0 if _text((anchor or {}).get("topic")) and _text(item.get("topic")) else 0.0
-            item_subjects = set(item.get("subject_terms") or [])
-            subject_similarity = _subject_overlap(anchor_subjects, item_subjects)
-            structured_richness = int(item.get("structured_data_richness") or 0)
-            item_source_alignment = float(item.get("source_data_alignment") or 0)
-            # Once the anchor contains the user's original constraints and matching
-            # structured values, do not attach a later value-bearing derivative whose
-            # own request supplied no numbers. It may represent a mistaken reformatting
-            # and otherwise reintroduce the very values the active source corrected.
-            if (
-                anchor_has_values
-                and float((anchor or {}).get("source_data_alignment") or 0) >= 0.60
-                and structured_richness >= 8
-                and item_source_alignment < 0.20
-                and int(item.get("turn_index") or 0) > int((anchor or {}).get("turn_index") or 0)
-            ):
-                continue
-            same_context = (topic_similarity >= 0.65 or subject_similarity >= 0.60
-                            or _topic_query_overlap(query, _text(item.get("topic"))) >= 0.50)
-            if reference_followup and anchor_subjects and item_subjects and subject_similarity >= 0.60:
-                same_context = True
-            if same_context:
-                # If the anchor is a text-only derivative, prefer its nearest source
-                # with the original structured values; otherwise retain relevance rank.
-                provenance_bonus = 0.10 if (not anchor_has_values and structured_richness >= 8) else 0.0
-                related_candidates.append((float(item.get("score") or 0) + provenance_bonus, item))
-        if related_candidates:
-            related_candidates.sort(key=lambda pair: pair[0], reverse=True)
-            selected_for_context.append(_compact_pair(related_candidates[0][1]))
+        if repair_active_branch:
+            # A correction needs factual evidence, not only the selected topic summary.
+            # Start from the best matching answer and add a small same-branch window.
+            dialog_candidates = [
+                item for item in matches
+                if item.get("same_dialog")
+                and _text(item.get("dialog_id")) == _text(dialog_id)
+                and not item.get("is_pending_clarification")
+            ]
+            dialog_candidates.sort(key=lambda item: (
+                float(item.get("created_at") or 0), int(item.get("turn_index") or 0)
+            ))
+            anchor_id = _text((anchor or {}).get("message_id"))
+            anchor_topic_id = _text((anchor or {}).get("topic_id"))
+            anchor_topic_text = _text((anchor or {}).get("topic"))
+            anchor_position = next((i for i, item in enumerate(dialog_candidates)
+                                    if _text(item.get("message_id")) == anchor_id), -1)
+
+            evidence_items: list[dict[str, Any]] = []
+            if anchor:
+                evidence_items.append(anchor)
+
+            # Exact topic identity is the strongest neighborhood signal. For older
+            # rows without topic IDs, combine semantic overlap with nearby turns in
+            # the active exchange. Keep the set bounded so repair does not lock the
+            # conversation onto a whole historical branch.
+            related_candidates = []
+            anchor_subjects = set((anchor or {}).get("subject_terms") or [])
+            for item in dialog_candidates:
+                item_id = _text(item.get("message_id"))
+                if not item_id or item_id == anchor_id:
+                    continue
+                item_topic_id = _text(item.get("topic_id"))
+                item_topic_text = _text(item.get("topic"))
+                topic_similarity = (
+                    fuzz.token_set_ratio(anchor_topic_text.casefold(), item_topic_text.casefold()) / 100.0
+                    if anchor_topic_text and item_topic_text else 0.0
+                )
+                subject_similarity = _subject_overlap(anchor_subjects, set(item.get("subject_terms") or []))
+                query_overlap = _topic_query_overlap(query, " ".join((
+                    item_topic_text, _text(item.get("user") or item.get("user_text")),
+                    _text(item.get("april") or item.get("april_text")),
+                )))
+                same_topic_id = bool(anchor_topic_id and item_topic_id and anchor_topic_id == item_topic_id)
+                # Time adjacency alone is not evidence of belonging to this task:
+                # an unrelated self-contained turn may sit between two related turns.
+                # Keep a conflicting row only when topic identity/text or query evidence
+                # independently links it back to the repair target.
+                if item.get("subject_mismatch") and not same_topic_id and topic_similarity < 0.48 and query_overlap < 0.16:
+                    continue
+                is_neighbor = False
+                if anchor_position >= 0:
+                    item_position = next((i for i, candidate in enumerate(dialog_candidates)
+                                          if _text(candidate.get("message_id")) == item_id), -1000)
+                    if abs(item_position - anchor_position) <= 2:
+                        try:
+                            delta = abs(float(item.get("created_at") or 0) - float((anchor or {}).get("created_at") or 0))
+                        except (TypeError, ValueError):
+                            delta = float("inf")
+                        is_neighbor = delta <= 20 * 60
+                if same_topic_id or topic_similarity >= 0.48 or subject_similarity >= 0.42 or query_overlap >= 0.16 or is_neighbor:
+                    relevance = (
+                        1.0 * int(same_topic_id)
+                        + 0.65 * topic_similarity
+                        + 0.55 * subject_similarity
+                        + 0.55 * query_overlap
+                        + 0.18 * int(is_neighbor)
+                    )
+                    related_candidates.append((relevance, float(item.get("created_at") or 0), item))
+            related_candidates.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+            for _score, _created_at, item in related_candidates:
+                if _text(item.get("message_id")) not in {_text(x.get("message_id")) for x in evidence_items}:
+                    evidence_items.append(item)
+                if len(evidence_items) >= 4:
+                    break
+
+            # If a selected answer directly matches the user's named correction,
+            # retain its exact canonical text as evidence (bounded, with completeness
+            # flags). A summary alone must not replace what April actually said.
+            evidence_items = evidence_items[:4]
+            evidence_items.sort(key=lambda item: (
+                float(item.get("created_at") or 0), int(item.get("turn_index") or 0)
+            ))
+            preserve_budget = 3
+            for item in evidence_items:
+                pair = _compact_pair(item)
+                source_user = _text(item.get("user_text") or item.get("user"))
+                source_april = _text(item.get("april_text") or item.get("april"))
+                if preserve_budget > 0 and source_user and source_april:
+                    # These are source excerpts, not summaries. Truncation is explicit.
+                    user_cap, april_cap = 1800, 5200
+                    pair.update({
+                        "preserve_source_text": True,
+                        "source_user_text": source_user[:user_cap],
+                        "source_april_text": source_april[:april_cap],
+                        "source_user_text_chars": len(source_user),
+                        "source_april_text_chars": len(source_april),
+                        "source_user_text_complete": len(source_user) <= user_cap,
+                        "source_april_text_complete": len(source_april) <= april_cap,
+                        "source_content_complete": len(source_user) <= user_cap and len(source_april) <= april_cap,
+                        "source_text_origin": "dialogue_memory",
+                    })
+                    preserve_budget -= 1
+                selected_for_context.append(pair)
+            history_selection_method = "active_branch_repair_evidence"
+        else:
+            if anchor:
+                selected_for_context.append(_compact_pair(anchor))
+            # At most one corroborating pair; never forward a pile of unrelated turns.
+            anchor_subjects = set((anchor or {}).get("subject_terms") or [])
+            anchor_has_values = bool(int((anchor or {}).get("structured_data_richness") or 0) >= 8)
+            related_candidates = []
+            # A role-aligned factual record is sufficient for a participant-centered
+            # lookup. Do not dilute it with neighboring turns that may only report a
+            # prior failure to recall that fact (e.g. "I don't see your name").
+            related_context_candidates = [] if int((anchor or {}).get("participant_alignment") or 0) > 0 else matches
+            for item in related_context_candidates:
+                if item.get("is_pending_clarification"):
+                    continue
+                if not item.get("message_id") or _text(item.get("message_id")) == _text((anchor or {}).get("message_id")):
+                    continue
+                if bool(query_subjects and item.get("subject_mismatch")):
+                    continue
+                if bool(item.get("same_dialog")) is False and _text(item.get("dialog_id")) != _text(dialog_id):
+                    continue
+                topic_similarity = fuzz.token_set_ratio(
+                    _text((anchor or {}).get("topic")).casefold(), _text(item.get("topic")).casefold()
+                ) / 100.0 if _text((anchor or {}).get("topic")) and _text(item.get("topic")) else 0.0
+                item_subjects = set(item.get("subject_terms") or [])
+                subject_similarity = _subject_overlap(anchor_subjects, item_subjects)
+                structured_richness = int(item.get("structured_data_richness") or 0)
+                item_source_alignment = float(item.get("source_data_alignment") or 0)
+                # Once the anchor contains the user's original constraints and matching
+                # structured values, do not attach a later value-bearing derivative whose
+                # own request supplied no numbers. It may represent a mistaken reformatting
+                # and otherwise reintroduce the very values the active source corrected.
+                if (
+                    anchor_has_values
+                    and float((anchor or {}).get("source_data_alignment") or 0) >= 0.60
+                    and structured_richness >= 8
+                    and item_source_alignment < 0.20
+                    and int(item.get("turn_index") or 0) > int((anchor or {}).get("turn_index") or 0)
+                ):
+                    continue
+                same_context = (topic_similarity >= 0.65 or subject_similarity >= 0.60
+                                or _topic_query_overlap(query, _text(item.get("topic"))) >= 0.50)
+                if reference_followup and anchor_subjects and item_subjects and subject_similarity >= 0.60:
+                    same_context = True
+                if same_context:
+                    # If the anchor is a text-only derivative, prefer its nearest source
+                    # with the original structured values; otherwise retain relevance rank.
+                    provenance_bonus = 0.10 if (not anchor_has_values and structured_richness >= 8) else 0.0
+                    related_candidates.append((float(item.get("score") or 0) + provenance_bonus, item))
+            if related_candidates:
+                related_candidates.sort(key=lambda pair: pair[0], reverse=True)
+                selected_for_context.append(_compact_pair(related_candidates[0][1]))
 
     # A NEW request may still name a topic retained from an earlier dialogue.
     # Keep relation=NEW (no forced continuation), but pass one grounded pair when
@@ -3746,7 +3902,7 @@ def search_dialogue_context(
     anchor_payload = _compact_pair(anchor) if relation == "CONTINUE" and anchor else {}
     _attach_topic_provenance(anchor_payload)
     result = {
-        "engine": "premium_state_manager_topic_section_search_v9_dialogue_continuity_source_evidence",
+        "engine": "premium_state_manager_topic_section_search_v10_active_branch_repair_evidence",
         "authenticated": True,
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "dialog_id": str(dialog_id or ""),
@@ -3762,6 +3918,10 @@ def search_dialogue_context(
         "total_pairs": len(rows),
         "candidate_count": len(matches),
         "relation": relation,
+        "active_branch_repair": bool(repair_active_branch),
+        "previous_answer_reference": bool(pragmatic_features.get("previous_answer_reference") or query_interpretation.get("previous_answer_reference")),
+        "factual_verification_request": bool(pragmatic_features.get("factual_verification_request") or query_interpretation.get("factual_verification_request")),
+        "explicit_topic_switch": bool(query_interpretation.get("explicit_topic_switch")),
         "reason": (
             "explicit_history_resume" if resume_anchor_row
             else "clarification_resolved" if clarification_resolution and _text(clarification_resolution.get("status")).startswith("resolved")
@@ -3770,6 +3930,7 @@ def search_dialogue_context(
             else "history_request" if history_request
             else "semantic_history_match" if contextual_history_match
             else "self_contained_new_information" if self_contained_new_information
+            else "active_branch_repair_evidence" if relation == "CONTINUE" and anchor and repair_active_branch
             else "named_topic_match" if explicit_topic_hits and relation == "CONTINUE"
             else "hot_branch_ambiguous_followup" if relation == "CONTINUE" and anchor and hot_branch_candidate
             else "underspecified_turn_context" if relation == "CONTINUE" and anchor and not query_subjects
@@ -3790,7 +3951,7 @@ def search_dialogue_context(
         "active_topic": active_topic,
         "anchor": anchor_payload,
         "matches": matches[:max(1, int(limit or 12))] if matches else [],
-        "selected": selected_for_context[:4 if (history_request or resume_anchor_row) else 2],
+        "selected": selected_for_context[:4 if (history_request or resume_anchor_row or repair_active_branch) else 2],
         "history_topics": history_topics,
         "topic_index": topic_index,
         "known_topic_count": len(topics),
@@ -3818,6 +3979,10 @@ def search_dialogue_context(
         contextual_history_match=contextual_history_match, history_selection_method=history_selection_method,
         dialogue_act=speech_act or communicative_act or "UNSPECIFIED",
         active_branch_repair=bool(repair_active_branch),
+        previous_answer_reference=bool(pragmatic_features.get("previous_answer_reference") or query_interpretation.get("previous_answer_reference")),
+        factual_verification_request=bool(pragmatic_features.get("factual_verification_request") or query_interpretation.get("factual_verification_request")),
+        active_repair_evidence_count=len(selected_for_context) if repair_active_branch else 0,
+        active_repair_selection_method=history_selection_method if repair_active_branch else "",
         short_acknowledgement=bool(is_short_acknowledgement),
         selected_section_heading=_text(selected_section.get("heading")), clarification_needed=clarification_needed,
         clarification_status=_text(clarification_resolution.get("status")),
@@ -3869,6 +4034,10 @@ def prepare_dialogue_context(
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "relation": context["relation"],
         "relation_confidence": context["relation_confidence"],
+        "active_branch_repair": bool(context.get("active_branch_repair")),
+        "previous_answer_reference": bool(context.get("previous_answer_reference")),
+        "factual_verification_request": bool(context.get("factual_verification_request")),
+        "explicit_topic_switch": bool(context.get("explicit_topic_switch")),
         "reason": context["reason"],
         "active_topic": context["active_topic"],
         "selected_pairs": deepcopy(context["selected"]),
