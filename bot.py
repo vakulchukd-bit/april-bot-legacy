@@ -45,7 +45,7 @@ from blocks.Premium_state_manager import (
 from storage import (
     activate_test_premium, find_or_create_user, get_user_plan,
     get_user_subscription_status, init_db, is_authenticated_user, resolve_user_id,
-    delete_april_account, load_dialogue_history_index,
+    delete_april_account, load_dialogue_history_index, load_dialogue_history_details,
     get_admin_user_telemetry, touch_user_activity,
 )
 
@@ -705,7 +705,7 @@ def _history_index_payload(user_id: str) -> tuple[int, dict[str, Any]]:
                 continue
             history.append({key: row.get(key) for key in (
                 "id", "message_id", "dialog_id", "conversation_id", "title",
-                "user_text", "april_text", "created_at", "turn_index"
+                "topic_label", "relation", "user_text", "april_text", "created_at", "turn_index"
             )})
         _apr_timing_log(
             "history_index_loaded",
@@ -729,95 +729,139 @@ def _history_index_payload(user_id: str) -> tuple[int, dict[str, Any]]:
 
 
 def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str, Any]]:
-    """Expose the authenticated user's canonical memory through their plan engine."""
+    """Restore a selected topic from lightweight candidates plus selected full payloads.
+
+    Older versions forced the Premium/Free state manager to hydrate every retained
+    row, including all JSONB scenes and image data, on every history click. Here the
+    semantic match uses the lightweight history index, and full renderer data is read
+    only for the topic pairs selected for display.
+    """
     if not user_id:
         return 400, {"success": False, "error": "USER_ID_REQUIRED"}
-    if not is_authenticated_user(user_id):
-        return 401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
 
     try:
-        active_plan = _text(get_user_plan(user_id)).lower() or "free"
+        index_started = time.perf_counter()
+        snapshot = load_dialogue_history_index(user_id)
+        if snapshot is None:
+            return 503, {"success": False, "error": "HISTORY_UNAVAILABLE"}
+        if not snapshot.get("authenticated"):
+            return 401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+
+        active_plan = _text(snapshot.get("plan")).lower() or "free"
         is_premium = active_plan == "premium"
         window_hours = 24 if is_premium else 12
-        rows = _get_dialogue_pairs_for_plan(
-            user_id, plan=active_plan, refresh=True, limit=0
-        )
         topic_label = _premium_topic_label if is_premium else _free_topic_label
         row_subject_tokens = _premium_row_subject_tokens if is_premium else _free_row_subject_tokens
         subject_overlap = _premium_subject_overlap if is_premium else _free_subject_overlap
         topic_query_overlap = _premium_topic_query_overlap if is_premium else _free_topic_query_overlap
-        records = [(_history_item(row), row) for row in rows if isinstance(row, dict)]
-        records.sort(key=lambda pair: (
-            pair[0]["created_at"], pair[0]["turn_index"], pair[0]["id"]
-        ))
-        items = [item for item, _row in records]
-        source_by_id = {item["message_id"]: row for item, row in records}
-        # The selected plan engine enforces its 12h/24h memory policy against
-        # the same canonical dialogue_memory table; no parallel store is created.
-        if not message_id:
-            history = []
-            for item in reversed(items):
-                history.append({key: item[key] for key in (
-                    "id", "message_id", "dialog_id", "conversation_id", "title",
-                    "user_text", "april_text", "created_at", "turn_index"
-                )})
-            return 200, {
-                "success": True,
-                "user_id": user_id,
-                "window_hours": window_hours,
-                "count": len(history),
-                "history": history,
-                "canonical_route": CANONICAL_CHAT_ROUTE,
-            }
-
-        target_index = next((i for i, item in enumerate(items) if item["message_id"] == message_id), None)
-        if target_index is None:
-            return 404, {"success": False, "error": "HISTORY_ENTRY_NOT_FOUND"}
-        target = items[target_index]
-        target_row = source_by_id.get(message_id, {})
-        target_topic = topic_label(target_row) if target_row else (target.get("title") or target.get("user_text") or "")
-        target_subjects = row_subject_tokens(target_row) if target_row else set()
-
-        # A dialog_id can span the plan's full memory window; using it as a restore
-        # boundary was the source of the 158-message payload. Restore the selected
-        # topic vector instead: target + at most three strongly related prior pairs.
-        vector_candidates = []
-        for index, item in enumerate(items[:target_index]):
-            candidate_row = source_by_id.get(item["message_id"], {})
-            if not candidate_row:
-                continue
-            candidate_topic = topic_label(candidate_row)
-            topic_score = topic_query_overlap(target_topic, candidate_topic)
-            subject_score = subject_overlap(target_subjects, row_subject_tokens(candidate_row))
-            score = max(topic_score, subject_score * 0.85)
-            if topic_score >= 0.35 or subject_score >= 0.30:
-                vector_candidates.append((score, index, item))
-
-        vector_candidates.sort(key=lambda value: (value[0], value[2]["created_at"], value[2]["turn_index"]), reverse=True)
-        selected_ids = {target["message_id"]}
-        selected_ids.update(item["message_id"] for _score, _index, item in vector_candidates[:3])
-        selected_rows = [item for item in items[:target_index + 1] if item["message_id"] in selected_ids]
-        # No reliable topic vector? Continue from the clicked pair alone. Never
-        # inflate it into every saved row sharing the broad session identifier.
-        if not selected_rows:
-            selected_rows = [target]
-
+        light_rows = [row for row in (snapshot.get("rows") or []) if isinstance(row, dict)]
         _apr_timing_log(
-            "history_restore_context",
-            user_key=_apr_diag_ref(user_id),
-            target_key=_apr_diag_ref(message_id),
-            method="topic_vector" if len(selected_rows) > 1 else "selected_pair_anchor",
-            selected_pairs=len(selected_rows),
-            window_pairs=len(items),
+            "history_restore_index_loaded",
+            index_started,
+            user_key=_apr_diag_ref(snapshot.get("user_id") or user_id),
+            plan=active_plan,
+            count=len(light_rows),
+            payload_mode="lightweight_topic_match",
         )
 
+        target_position = next((index for index, row in enumerate(light_rows) if _text(row.get("message_id")) == message_id), None)
+        if target_position is None:
+            return 404, {"success": False, "error": "HISTORY_ENTRY_NOT_FOUND"}
+        target_row = light_rows[target_position]
+
+        def match_row(row: dict[str, Any]) -> dict[str, Any]:
+            # Keep the topic scalar from JSONB in the match text without hydrating
+            # complete structured_request/structured_response objects.
+            output = dict(row)
+            topic = _text(row.get("topic_label") or row.get("title"))
+            output["user_text"] = " ".join(part for part in (
+                topic,
+                _text(row.get("title")),
+                _text(row.get("user_text")),
+                _text(row.get("april_text")),
+            ) if part)
+            return output
+
+        target_match_row = match_row(target_row)
+        target_topic = _text(target_row.get("topic_label") or topic_label(target_match_row) or target_row.get("title") or target_row.get("user_text"))
+        target_subjects = row_subject_tokens(target_match_row)
+        candidates = []
+        for row_position, row in enumerate(light_rows):
+            candidate_id = _text(row.get("message_id"))
+            if not candidate_id or candidate_id == message_id:
+                continue
+            # Keep Free's previous target + up to three prior pairs behavior;
+            # Premium restores the wider topic thread in both directions.
+            if not is_premium and row_position >= target_position:
+                continue
+            candidate_match_row = match_row(row)
+            candidate_topic = _text(row.get("topic_label") or topic_label(candidate_match_row) or row.get("title") or row.get("user_text"))
+            topic_score = topic_query_overlap(target_topic, candidate_topic)
+            subject_score = subject_overlap(target_subjects, row_subject_tokens(candidate_match_row))
+            score = max(topic_score, subject_score * 0.85)
+            if topic_score >= 0.35 or subject_score >= 0.30:
+                candidates.append((score, row))
+
+        # Include every strongly related pair up to a practical mobile-rendering
+        # ceiling. Do not use dialog_id as a boundary: it may span the whole memory
+        # window and can otherwise bring back unrelated topics.
+        candidates.sort(key=lambda value: (
+            value[0],
+            float(value[1].get("created_at") or 0),
+            int(value[1].get("turn_index") or 0),
+        ), reverse=True)
+        MAX_RESTORE_PAIRS = 24 if is_premium else 4
+        chosen_rows = [target_row] + [row for _score, row in candidates[:MAX_RESTORE_PAIRS - 1]]
+        selected_ids = list(dict.fromkeys(_text(row.get("message_id")) for row in chosen_rows if _text(row.get("message_id"))))
+
+        detail_started = time.perf_counter()
+        full_rows = load_dialogue_history_details(user_id, selected_ids)
+        full_by_id = {
+            _text(row.get("message_id")) or f"legacy-memory-{_text(row.get('id'))}": row
+            for row in full_rows if isinstance(row, dict)
+        }
+        ordered_ids = [message_id] + [
+            _text(row.get("message_id")) for row in chosen_rows
+            if _text(row.get("message_id")) and _text(row.get("message_id")) != message_id
+        ]
+        ordered_ids = list(dict.fromkeys(ordered_ids))
+        selected_rows = [full_by_id[mid] for mid in ordered_ids if mid in full_by_id]
+        selected_rows.sort(key=lambda row: (
+            float(row.get("created_at") or 0),
+            int(row.get("turn_index") or 0),
+            _text(row.get("message_id")),
+        ))
+        if not any((_text(row.get("message_id")) or f"legacy-memory-{_text(row.get('id'))}") == message_id for row in selected_rows):
+            return 404, {"success": False, "error": "HISTORY_ENTRY_NOT_FOUND"}
+
+        _apr_timing_log(
+            "history_restore_details_loaded",
+            detail_started,
+            user_key=_apr_diag_ref(user_id),
+            target_key=_apr_diag_ref(message_id),
+            selected_pairs=len(selected_rows),
+            candidate_pairs=len(candidates),
+            full_rows=len(full_rows),
+        )
+
+        full_records = []
+        for row in selected_rows:
+            item = _history_item(row)
+            full_records.append((item, row))
+        target_item = next((item for item, _row in full_records if item["message_id"] == message_id), None)
+        if target_item is None:
+            return 404, {"success": False, "error": "HISTORY_ENTRY_NOT_FOUND"}
+
         messages = []
-        for item in selected_rows:
+        for item, _row in full_records:
             timestamp = item["created_at"]
             stamp_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(timestamp)) if timestamp else ""
             stamp_time = time.strftime("%H:%M", time.localtime(timestamp)) if timestamp else ""
             structured_response = item["structured_response"]
             scene_contract = structured_response.get("scene_contract") if isinstance(structured_response.get("scene_contract"), dict) else {}
+            render_blocks = structured_response.get("render_blocks") if isinstance(structured_response.get("render_blocks"), list) else []
+            if render_blocks and not scene_contract.get("render_blocks"):
+                scene_contract = {**scene_contract, "render_blocks": render_blocks}
             user_id_value = item["message_id"] or f"memory-{item['turn_index']}"
             messages.append({
                 "id": f"{user_id_value}:user",
@@ -829,25 +873,36 @@ def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str,
                 "dialog_id": item["dialog_id"],
                 "conversation_id": item["conversation_id"],
             })
-            messages.append({
+            assistant_message = {
                 "id": f"{user_id_value}:april",
                 "role": "assistant",
                 "content": _text(structured_response.get("answer") or structured_response.get("content") or item["april_text"]),
                 "summary": _text(structured_response.get("summary")),
                 "scene_contract": scene_contract,
-                "render_blocks": structured_response.get("render_blocks") if isinstance(structured_response.get("render_blocks"), list) else [],
+                "render_blocks": render_blocks,
                 "time": stamp_time,
                 "created_at": stamp_iso,
                 "message_id": item["message_id"],
                 "dialog_id": item["dialog_id"],
                 "conversation_id": item["conversation_id"],
-            })
+            }
+            # Preserve renderer/supporting data stored beside scene_contract. These
+            # fields are often small references/state objects, not duplicate prose.
+            for field in (
+                "asset_refs", "visual_state", "workspace_state", "scene_events",
+                "scene_vector", "active_scene", "renderer_state", "attachments",
+                "images", "image", "file",
+            ):
+                value = structured_response.get(field)
+                if value not in (None, "", [], {}):
+                    assistant_message[field] = value
+            messages.append(assistant_message)
 
         return 200, {
             "success": True,
             "user_id": user_id,
             "window_hours": window_hours,
-            "target": {key: target[key] for key in (
+            "target": {key: target_item[key] for key in (
                 "id", "message_id", "dialog_id", "conversation_id", "title", "created_at"
             )},
             "messages": messages,
