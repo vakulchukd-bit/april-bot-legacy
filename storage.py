@@ -757,6 +757,140 @@ def load_dialogue_pairs(user_id: Any, *, limit: int = 0, timestamp: float | int 
         conn.close()
 
 
+def load_dialogue_history_index(
+    user_id: Any,
+    *,
+    timestamp: float | int | datetime | None = None,
+) -> dict[str, Any] | None:
+    """Load the small history-list index without fetching large structured payloads.
+
+    The full ``structured_request`` / ``structured_response`` JSON can contain
+    expensive scene, table, graph and image metadata. The history screen only
+    needs short labels and message identity, so this query intentionally selects
+    only list fields and bounds the index scan to the maximum 24-hour retention.
+
+    Returns None when storage is unavailable, ``authenticated=False`` for an
+    unknown/unverified account, or the active plan and lightweight rows.
+    """
+    raw_uid = str(user_id or "").strip()
+    if not raw_uid:
+        return {"authenticated": False}
+    conn = get_conn()
+    if not conn:
+        return None
+    current = now() if timestamp is None else (
+        timestamp.astimezone(timezone.utc)
+        if isinstance(timestamp, datetime)
+        else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
+    )
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # Resolve public April ID/internal user_id and entitlement with one
+                # indexed account lookup instead of separate auth/plan round-trips.
+                cur.execute(
+                    """
+                    SELECT user_id, april_id, email, provider, plan, subscription_until
+                    FROM users
+                    WHERE user_id = %s OR april_id = %s
+                    ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
+                    LIMIT 1
+                    """,
+                    (raw_uid, raw_uid, raw_uid),
+                )
+                account = cur.fetchone()
+                if not _is_authenticated_row(account):
+                    return {"authenticated": False}
+
+                uid = str(account.get("user_id") or raw_uid).strip()
+                raw_plan = str(account.get("plan") or "free").strip().lower()
+                expiry = float(account.get("subscription_until") or 0)
+                plan = raw_plan if raw_plan in {"lite", "premium"} and expiry > current.timestamp() else "free"
+                if raw_plan in {"lite", "premium"} and plan == "free":
+                    cur.execute(
+                        "UPDATE users SET plan = 'free' WHERE user_id = %s AND plan = %s",
+                        (uid, raw_plan),
+                    )
+
+                # Retain the existing Premium rule: when an account is actively
+                # Premium, extend still-retained candidates to 24 h, but never
+                # revive anything older than the maximum 24-hour window.
+                if plan == "premium":
+                    cur.execute(
+                        """
+                        UPDATE dialogue_memory
+                        SET retention_hours = 24
+                        WHERE user_id = %s
+                          AND COALESCE(retention_hours, 12) < 24
+                          AND created_at <= %s
+                          AND created_at > %s - INTERVAL '24 hours'
+                          AND created_at + INTERVAL '24 hours' > %s
+                        """,
+                        (uid, current, current, current),
+                    )
+
+                # The explicit 24-hour lower bound allows the existing
+                # (user_id, created_at DESC) index to limit work before checking
+                # each row's saved 12/24-hour expiry.
+                cur.execute(
+                    """
+                    SELECT
+                        id,
+                        COALESCE(NULLIF(BTRIM(message_id), ''), 'legacy-memory-' || id::text) AS message_id,
+                        user_id,
+                        dialog_id,
+                        conversation_id,
+                        COALESCE(
+                            NULLIF(BTRIM(structured_request #>> '{goal}'), ''),
+                            NULLIF(BTRIM(structured_request #>> '{intent,user_goal}'), ''),
+                            NULLIF(BTRIM(structured_request #>> '{intent,goal}'), ''),
+                            NULLIF(BTRIM(structured_request #>> '{request_structure,user_goal}'), ''),
+                            NULLIF(LEFT(BTRIM(user_text), 140), ''),
+                            'Сохранённый диалог'
+                        ) AS title,
+                        LEFT(COALESCE(user_text, ''), 1200) AS user_text,
+                        LEFT(COALESCE(april_text, ''), 1000) AS april_text,
+                        EXTRACT(EPOCH FROM created_at) AS created_at,
+                        turn_index
+                    FROM dialogue_memory
+                    WHERE user_id = %s
+                      AND created_at <= %s
+                      AND created_at > %s - INTERVAL '24 hours'
+                      AND created_at + (
+                          GREATEST(12, LEAST(24, COALESCE(retention_hours, 12)))
+                          * INTERVAL '1 hour'
+                      ) > %s
+                    ORDER BY created_at ASC, turn_index ASC, id ASC
+                    """,
+                    (uid, current, current, current),
+                )
+                rows = []
+                for source in cur.fetchall():
+                    row = dict(source)
+                    row["id"] = str(row.get("message_id") or row.get("id") or "")
+                    row["message_id"] = str(row.get("message_id") or "")
+                    row["user_id"] = str(row.get("user_id") or uid)
+                    row["dialog_id"] = str(row.get("dialog_id") or "")
+                    row["conversation_id"] = str(row.get("conversation_id") or "")
+                    row["title"] = str(row.get("title") or row.get("user_text") or "Сохранённый диалог")
+                    row["user_text"] = str(row.get("user_text") or "")
+                    row["april_text"] = str(row.get("april_text") or "")
+                    row["created_at"] = float(row.get("created_at") or 0.0)
+                    row["turn_index"] = int(row.get("turn_index") or 0)
+                    rows.append(row)
+                return {
+                    "authenticated": True,
+                    "user_id": uid,
+                    "plan": plan,
+                    "window_hours": 24 if plan == "premium" else 12,
+                    "rows": rows,
+                }
+    except psycopg2.errors.UndefinedTable:
+        return None
+    finally:
+        conn.close()
+
+
 def search_dialogue_memory(user_id: Any, query: str, *, limit: int = 8) -> dict[str, Any]:
     """Compatibility adapter that delegates dialogue retrieval to State Manager.
 
