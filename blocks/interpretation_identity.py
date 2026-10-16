@@ -665,10 +665,12 @@ _CONTEXT_SIGNATURE_GENERIC = {
     "month", "months", "year", "years", "uah", "uah.", "usd", "dollar", "dollars",
 }
 _CONTEXT_SIGNATURE_REFERENCES = {
-    "это", "этого", "этой", "этом", "эти", "этих", "тот", "та", "те", "того",
-    "данный", "данная", "данное", "такой", "такую", "такого", "такие", "них",
-    "их", "него", "нее", "неё", "ней", "ним", "those", "these", "that", "this",
-    "it", "them", "they", "same", "previous", "earlier", "еще", "ещё", "дальше",
+    "это", "этого", "этой", "этом", "эту", "этот", "эта", "эти", "этих",
+    "тот", "та", "ту", "те", "того", "той", "тех", "данный", "данная", "данное",
+    "он", "она", "оно", "они", "его", "ее", "ему", "ей", "им", "них", "их",
+    "него", "нее", "ней", "ним", "those", "these", "that", "this", "it", "he",
+    "she", "they", "him", "her", "them", "its", "same", "previous", "earlier",
+    "еще", "ещё", "дальше",
 }
 _CONTEXT_OUTPUT_TERMS = {
     "graph": {"graph", "chart", "plot", "график", "диаграмм"},
@@ -683,7 +685,9 @@ _CONTEXT_SIGNATURE_DISCOURSE_ROOTS = (
     "напиш", "опиш", "расскаж", "объясн", "поясн", "покаж", "постро", "созда",
     "сдела", "вычисл", "рассчит", "сравн", "найд", "проверь", "проанализ", "привед",
     "перечисл", "продолж", "дальш", "должн", "каки", "был",
-    "формул", "график", "таблиц", "диаграмм", "уравнен", "данн", "значен",
+    "придум", "предложи", "почем", "почему", "зачем", "открыл", "изобрел", "изобрёл",
+    "доказал", "обосновал", "считал", "называл", "формул", "график", "таблиц",
+    "диаграмм", "уравнен", "данн", "значен",
 )
 
 _PARTICIPANT_SPEAKER_WORDS = {
@@ -856,6 +860,196 @@ def _looks_like_previous_answer_followup(text: str) -> bool:
     return bool(qualifier_only and len(tokens) <= 5)
 
 
+def _looks_like_context_dependent_question(
+    text: str,
+    *,
+    interrogative: bool,
+    explicit_topic_introduction: bool = False,
+) -> bool:
+    """Recognise a question whose omitted object is supplied by the active dialogue.
+
+    This is an intent feature, not a command-word trigger. A demonstrative/pronoun
+    ("кто её придумал?", "who invented this?") creates a backward reference; a very
+    short subjectless question ("почему так?", "кто предложил?") is an ellipsis
+    candidate. A self-contained named subject remains a new-information request.
+    """
+    if not interrogative or explicit_topic_introduction:
+        return False
+    low, tokens = _semantic_normalize(text)
+    if not tokens:
+        return False
+    token_set = set(tokens)
+    anaphoric_terms = {
+        "он", "она", "оно", "они", "его", "ее", "ему", "ей", "им", "их",
+        "нее", "него", "ней", "ним", "них", "это", "этот", "эта", "эту",
+        "этого", "этой", "этом", "эти", "этих", "тот", "та", "ту", "того",
+        "той", "тех", "this", "that", "these", "those", "it", "he", "she",
+        "they", "him", "her", "them", "its", "same", "former", "latter",
+    }
+    # Bound the signal to ordinary follow-up sized questions; a long request with a
+    # pronoun and a new explicit subject should be resolved by normal decomposition.
+    if token_set & anaphoric_terms and len(tokens) <= 18:
+        return True
+    if len(tokens) <= 5:
+        signature = _context_signature(text)
+        subjects = signature.get("subject_terms") if isinstance(signature, dict) else []
+        return not bool(subjects)
+    return False
+
+
+def _infer_dialogue_act_profile(
+    text: str,
+    *,
+    interrogative: bool,
+    context_dependent_question: bool,
+    answer_followup: bool,
+    continuation_action: bool,
+    explicit_topic_introduction: bool,
+) -> dict[str, Any]:
+    """Describe the user's speech act without treating keywords as topic switches.
+
+    The profile is advisory metadata for active-dialogue retrieval. A short bare
+    agreement/rejection can refer to the immediately preceding turn; a message
+    that introduces its own subject or deliverable must remain a new request.
+    """
+    low, tokens = _semantic_normalize(text)
+    if not tokens:
+        return {
+            "speech_act": "EMPTY", "communicative_act": "EMPTY",
+            "pragmatic_intent": "NONE", "message_function": "EMPTY",
+            "context_dependent_reaction": False,
+            "pragmatic_features": {},
+        }
+
+    token_set = set(tokens)
+    signature = _context_signature(text)
+    subjects = signature.get("subject_terms") if isinstance(signature, dict) else []
+    output_forms = signature.get("output_forms") if isinstance(signature, dict) else []
+    # The context-signature layer is intentionally permissive. Filter conversational
+    # fillers here so words like "понятно", "ладно" or "объясни" are not mistaken
+    # for a newly introduced topic.
+    non_topical_roots = (
+        "понят", "спаси", "хорош", "ладн", "молод", "отлич", "соглас",
+        "правиль", "точн", "верн", "ага", "угу", "да", "нет", "неа",
+        "отнюд", "подроб", "поясн", "объясн", "уточн", "разъясн",
+        "расшифр", "докаж", "обоснуй", "обоснуйте", "имел", "имела",
+        "виду", "друго", "смысл", "так", "это",
+    )
+    meaningful_subjects = [
+        _text(term) for term in (subjects or [])
+        if _text(term) and not any(_text(term).startswith(root) for root in non_topical_roots)
+    ]
+    has_independent_payload = bool(meaningful_subjects or output_forms or signature.get("numeric_anchors"))
+    short = len(tokens) <= 7
+
+    agreement_terms = {
+        "да", "ага", "угу", "ок", "окей", "ладно", "хорошо", "верно", "точно",
+        "именно", "правильно", "согласен", "согласна", "согласны", "конечно",
+        "yes", "yeah", "yep", "ok", "okay", "right", "exactly", "correct", "agreed",
+    }
+    rejection_terms = {
+        "нет", "неа", "неверно", "неправильно", "ошибка", "мимо", "отнюдь",
+        "no", "nope", "wrong", "incorrect",
+    }
+    correction_terms = (
+        "не так", "не то", "не это", "не совсем", "я имел в виду", "я имела в виду",
+        "я про другое", "не об этом", "не об этом речь", "поправка", "уточню",
+        "not that", "not what i meant", "i meant", "that's not right",
+    )
+    clarification_terms = (
+        "поясни", "поясните", "уточни", "уточните", "разъясни", "разъясните",
+        "что ты имеешь в виду", "что вы имеете в виду", "в каком смысле",
+        "подробнее", "расшифруй", "clarify", "what do you mean", "elaborate",
+    )
+    explanation_terms = (
+        "объясни", "объясните", "докажи", "докажите", "обоснуй", "обоснуйте",
+        "почему", "как это работает", "как это получается", "explain", "prove",
+        "why does", "why is", "how does",
+    )
+    acknowledgement = short and any(
+        token in agreement_terms or any(token.startswith(root) for root in ("соглас", "правиль", "точн"))
+        for token in tokens
+    ) and not any(token in rejection_terms or token in {"не", "никак", "ни"} for token in tokens)
+    negation = short and (
+        any(token in rejection_terms for token in tokens)
+        or ("не" in token_set and bool(token_set & {"так", "то", "это", "совсем", "согласен", "согласна", "верно", "правильно"}))
+        or bool(re.search(r"\b(?:не\s+соглас\w*|не\s+так|не\s+то|не\s+это|я\s+не\s+это)\b", low))
+    )
+    correction = any(term in low for term in correction_terms) or (
+        negation and bool(token_set & {"это", "то", "так", "другое", "имел", "имела", "виду"})
+    )
+    clarification = any(term in low for term in clarification_terms)
+    explanation_request = any(term in low for term in explanation_terms) or (interrogative and bool(token_set & {"почему", "как", "зачем", "why", "how"}))
+    has_deictic_reference = bool(token_set & {
+        "это", "этот", "эта", "эту", "этого", "этой", "этом", "эти", "тот", "та",
+        "ту", "того", "той", "он", "она", "оно", "они", "его", "ее", "ей", "ему",
+        "им", "их", "it", "this", "that", "he", "she", "they", "him", "her", "them",
+    })
+    own_topic_or_output = explicit_topic_introduction or has_independent_payload
+    context_dependent_reaction = bool(
+        not own_topic_or_output
+        and not explicit_topic_introduction
+        and (
+            (acknowledgement and len(tokens) <= 4)
+            or negation
+            or correction
+            or ((clarification or explanation_request) and short and not context_dependent_question)
+        )
+    )
+
+    if correction:
+        speech_act = "CORRECTION"
+    elif negation:
+        speech_act = "NEGATION_OR_DISAGREEMENT"
+    elif acknowledgement:
+        speech_act = "AGREEMENT_OR_ACKNOWLEDGEMENT"
+    elif clarification:
+        speech_act = "CLARIFICATION_REQUEST"
+    elif explanation_request or answer_followup:
+        speech_act = "EXPLANATION_REQUEST"
+    elif context_dependent_question or has_deictic_reference:
+        speech_act = "REFERENTIAL_CONTINUATION"
+    elif continuation_action:
+        speech_act = "CONTINUATION_REQUEST"
+    elif interrogative:
+        speech_act = "INFORMATION_QUESTION"
+    else:
+        speech_act = "STATEMENT_OR_REQUEST"
+
+    if context_dependent_reaction or context_dependent_question or answer_followup:
+        communicative_act = "CONTINUATION"
+    elif acknowledgement:
+        communicative_act = "ACKNOWLEDGEMENT"
+    elif negation or correction:
+        communicative_act = "RESPONSE_OR_CORRECTION"
+    elif clarification:
+        communicative_act = "CLARIFICATION"
+    elif explanation_request:
+        communicative_act = "EXPLANATION"
+    elif continuation_action:
+        communicative_act = "CONTINUATION"
+    else:
+        communicative_act = "NEW_OR_STANDALONE"
+
+    return {
+        "speech_act": speech_act,
+        "communicative_act": communicative_act,
+        "pragmatic_intent": speech_act.lower(),
+        "message_function": communicative_act.lower(),
+        "context_dependent_reaction": context_dependent_reaction,
+        "pragmatic_features": {
+            "acknowledgement_or_agreement": bool(acknowledgement),
+            "negation_or_disagreement": bool(negation),
+            "correction": bool(correction),
+            "clarification_request": bool(clarification),
+            "explanation_request": bool(explanation_request),
+            "continuation_request": bool(continuation_action),
+            "deictic_reference": bool(has_deictic_reference),
+            "has_independent_payload": bool(has_independent_payload),
+        },
+    }
+
+
 def interpret_request_semantics(text: str) -> dict[str, Any]:
     """Infer request intent and retrieval direction before splitting into tasks.
 
@@ -952,6 +1146,20 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         or (past_reference and (dialogue_action or decision_action or plan_action) and (interrogative or imperative_recall))
     ) and not future_topic_question
 
+    context_dependent_question = _looks_like_context_dependent_question(
+        source, interrogative=interrogative,
+        explicit_topic_introduction=explicit_topic_introduction,
+    )
+    dialogue_act_profile = _infer_dialogue_act_profile(
+        source,
+        interrogative=interrogative,
+        context_dependent_question=context_dependent_question,
+        answer_followup=answer_followup,
+        continuation_action=continuation_action,
+        explicit_topic_introduction=explicit_topic_introduction,
+    )
+    context_dependent_reaction = bool(dialogue_act_profile.get("context_dependent_reaction"))
+
     if history_recall:
         requires_memory = True
         history_request = True
@@ -984,6 +1192,30 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
             reason = "dialogue_reference_detected_semantically"
         relation_hint = "HISTORY_LOOKUP"
         time_scope = "TODAY" if today_reference else ("RECENT_WINDOW" if recent_reference else ("PAST_DIALOGUE" if past_reference else ("FUTURE_PLAN_CONTEXT" if temporal_future else "AVAILABLE_HISTORY")))
+    elif context_dependent_reaction:
+        # Bare agreement/disagreement belongs to the active turn unless it
+        # introduces an independent subject or concrete deliverable.
+        primary_intent = "TOPIC_CONTINUATION"
+        direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
+        topic_reference = "PREVIOUS_OR_ACTIVE_TOPIC"
+        time_scope = "ACTIVE_DIALOGUE"
+        requires_memory = True
+        history_request = False
+        search_scope = "TOPIC_OR_ACTIVE_CONTEXT"
+        intent_score = 3
+        relation_hint = "CONTINUE"
+        reason = "context_dependent_agreement_or_rejection"
+    elif context_dependent_question:
+        primary_intent = "TOPIC_CONTINUATION"
+        direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
+        topic_reference = "PREVIOUS_OR_ACTIVE_TOPIC"
+        time_scope = "ACTIVE_DIALOGUE"
+        requires_memory = True
+        history_request = False
+        search_scope = "TOPIC_OR_ACTIVE_CONTEXT"
+        intent_score = 3 + int(interrogative)
+        relation_hint = "CONTINUE"
+        reason = "anaphoric_or_elliptical_question"
     elif answer_followup:
         primary_intent = "TOPIC_CONTINUATION"
         direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
@@ -1041,6 +1273,8 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "plan_action": bool(plan_action),
         "continuation_action": bool(continuation_action),
         "answer_followup": bool(answer_followup),
+        "context_dependent_question": bool(context_dependent_question),
+        "context_dependent_reaction": bool(context_dependent_reaction),
         "self_reference": bool(self_reference),
         "past_reference": bool(past_reference),
         "today_reference": bool(today_reference),
@@ -1060,6 +1294,11 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "search_scope": search_scope,
         "relation_hint": relation_hint,
         "intent_score": int(intent_score),
+        "speech_act": dialogue_act_profile.get("speech_act"),
+        "communicative_act": dialogue_act_profile.get("communicative_act"),
+        "pragmatic_intent": dialogue_act_profile.get("pragmatic_intent"),
+        "message_function": dialogue_act_profile.get("message_function"),
+        "pragmatic_features": dialogue_act_profile.get("pragmatic_features", {}),
         "features": features,
         "reason": reason,
         "context_signature": _context_signature(source),
