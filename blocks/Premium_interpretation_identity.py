@@ -862,6 +862,34 @@ def _context_signature(text: Any) -> dict[str, Any]:
     }
 
 
+def _has_explicit_topic_switch(text: str) -> bool:
+    """Recognize explicit user-directed branch changes without relying on topic nouns alone."""
+    low = _text(text).lower().replace("ё", "е").strip()
+    if not low:
+        return False
+    explicit_switch = re.search(
+        r"(?:^|[.!?;:\n]\s*)(?:новая\s+тема|другая\s+тема|другой\s+вопрос|"
+        r"перейд[её]м\s+к(?:\s+новой\s+теме)?|"
+        r"давай(?:те)?\s+(?:сменим|сменить)\s+тему|"
+        r"switch\s+to\s+(?:a\s+)?new\s+topic|new\s+topic|"
+        r"let['’]?s\s+change\s+the\s+topic)(?:\b|\s*[:—-])",
+        low,
+        flags=re.IGNORECASE,
+    )
+    if explicit_switch:
+        return True
+    # “Теперь про X” is a branch change when X is explicitly named. Do not
+    # interpret an ordinary continuation preface (“а теперь объясни это”) as one.
+    return bool(re.search(
+        r"(?:^|[.!?;:]\s*)теперь\s+(?:о|про|об|обо)\s+"
+        r"(?!него\b|неё\b|нее\b|ней\b|ним\b|нем\b|нём\b|них\b|"
+        r"мне\b|нас\b|это\b|этого\b|этой\b|этот\b|этом\b|эту\b|эти\b|"
+        r"him\b|her\b|them\b|it\b|this\b|that\b|those\b|these\b)[а-яa-z0-9]",
+        low,
+        flags=re.IGNORECASE,
+    ))
+
+
 def _has_explicit_topic_introduction(text: str) -> bool:
     """Return true when a request explicitly introduces a subject instead of only referring back.
 
@@ -870,6 +898,8 @@ def _has_explicit_topic_introduction(text: str) -> bool:
     Pure anaphoric phrases such as “tell me about him/that” remain continuations.
     """
     low = _text(text).lower().replace("ё", "е")
+    if _has_explicit_topic_switch(low):
+        return True
     pattern = re.compile(
         r"\b(?:рас{1,2}каж\w*|рас{1,2}каз\w*|рассказать|напиши(?:те)?|написать|опиши(?:те)?|описать|"
         r"объясни(?:те)?|объяснить|изложи(?:те)?|представь(?:те)?|дай|покажи(?:те)?|"
@@ -1022,6 +1052,115 @@ def _looks_like_topic_reference_fragment(
     )
     return bool(pointer)
 
+def _detect_previous_answer_recheck(text: str) -> bool:
+    """Detect a challenge/check of April's earlier response, including long turns.
+
+    This is intentionally narrower than ordinary disagreement detection: it needs
+    a prior-answer/action reference plus a challenge, verification or explanation
+    cue, so a self-contained question on a new subject does not become a repair.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+
+    assistant_action = r"(?:назвал\w*|назвала\w*|назвали|сказал\w*|сказала\w*|сказали|ответил\w*|ответила\w*|ответили|написал\w*|написала\w*|написали|выбрал\w*|выбрала\w*|выбрали|решил\w*|решила\w*|решили|сделал\w*|сделала\w*|сделали|предложил\w*|предложила\w*|выдал\w*|выдала\w*|назван\w*|ответ\w*|написан\w*|chosen|said|answered|wrote|picked|selected|did)"
+    challenge = r"(?:почему|зачем|как\s+так|должн\w*|следовал\w*|надо\s+было|нужно\s+было|вместо|хотя|ошиб\w*|неправил\w*|неверн\w*|проверь\w*|перепроверь\w*|сверь\w*|объясни\w*|поясни\w*|разбер\w*|проверь\s+что|why|how\s+come|should\s+have|instead|although|wrong|mistake|check|verify|explain|review)"
+
+    # Direct second-person reference to something April actually said/did.
+    direct_action = bool(re.search(
+        rf"\b(?:ты|вы|you)\s+(?:же\s+|ведь\s+|вообще\s+)?{assistant_action}\b",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    direct_why = bool(re.search(
+        rf"\b(?:почему|зачем|how\s+come|why)\s+(?:ты|вы|you)\s+.{0,80}{assistant_action}\b",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    assistant_mistake = bool(re.search(
+        r"\b(?:ты|вы|you)\s+(?:ошиб\w*|перепутал\w*|неправил\w*|неверн\w*|got\s+it\s+wrong|made\s+a\s+mistake)\b",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    verification_target = bool(re.search(
+        rf"\b(?:проверь\w*|перепроверь\w*|сверь\w*|проверь\s+еще\s+раз|check|verify|review)\b.{{0,100}}(?:что\s+)?(?:ты|вы|you)?\s*{assistant_action}\b",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    prior_answer_pointer = bool(re.search(
+        r"(?:предыдущ\w*\s+ответ|прошл\w*\s+ответ|что\s+ты\s+(?:сказал\w*|сказала|написал\w*|написала|назвал\w*|назвала|ответил\w*|ответила)|"
+        r"то,?\s+что\s+ты\s+(?:сказал\w*|сказала|написал\w*|написала|назвал\w*|назвала|ответил\w*|ответила)|"
+        r"previous\s+answer|what\s+you\s+(?:said|wrote|answered|called|named|selected))",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    obligation_contrast = bool(re.search(
+        rf"\b(?:ты|вы|you)\s+(?:должн\w*|следовал\w*|should\s+have)\b.{{0,100}}(?:а\s+ты|но\s+ты|хотя|вместо|but\s+you|instead)\b.{{0,70}}{assistant_action}\b",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    cue = bool(re.search(challenge, low, flags=re.IGNORECASE))
+
+    return bool(
+        direct_why
+        or obligation_contrast
+        or assistant_mistake
+        or verification_target
+        or (prior_answer_pointer and cue)
+        or (direct_action and cue)
+    )
+
+
+def _is_repair_followup_clause(text: str) -> bool:
+    """Recognize a clause that continues a repair already established upstream."""
+    low = _text(text).lower().replace("ё", "е").strip(" \t\r\n,;:.-")
+    if not low:
+        return False
+    if _detect_previous_answer_recheck(low):
+        return True
+
+    # A connective must not turn a fully independent new task into a repair just
+    # because it begins with "то есть" or "объясни". Keep object-bearing commands
+    # only when their object clearly points back to the current exchange.
+    standalone_command = re.match(
+        r"^(?:(?:то\s+есть|ведь|а\s+значит|и\s+значит)\s*[,;:]?\s*)?"
+        r"(?:расскажи\w*|расскажите|опиши\w*|опишите|создай\w*|создайте|"
+        r"напиши\w*|напишите|покажи\w*|покажите|построй\w*|постройте|"
+        r"реши\w*|решите|объясни\w*|объясните|поясни\w*|поясните|разъясни\w*|"
+        r"проверь\w*|перепроверь\w*|сверь\w*|уточни\w*|дай\s+мне|tell\s+me\s+about|"
+        r"explain|clarify|verify|check|describe|create|write|show|solve|что\s+такое|what\s+is)"
+        r"\s+(?:(?:про|о|об|насчет|about|для)\s+)?([\w\u0080-\uffff-]+)",
+        low,
+        flags=re.IGNORECASE,
+    )
+    if standalone_command:
+        pointed_back = bool(re.search(
+            r"(?:\b(?:это|этот|эта|эту|этого|эти|тот|та|ту|предыдущ\w*|прошл\w*|"
+            r"ответ\w*|сказанн\w*|названн\w*|ошиб\w*|правил\w*|услов\w*|"
+            r"игр\w*|ход\w*|букв\w*|город\w*|задач\w*|формул\w*|уравнен\w*|"
+            r"график\w*|таблиц\w*|этот\s+текст|this|that|previous|last|answer|mistake|rule|move|letter|city|task|formula|equation)\b)",
+            low,
+            flags=re.IGNORECASE,
+        ))
+        if not pointed_back:
+            return False
+    if re.match(
+        r"^(?:ведь|то\s+есть|а\s+значит|и\s+значит|но\s+ведь|"
+        r"я\s+(?:что-то\s+)?(?:запутал\w*|не\s+понима\w*|не\s+понял\w*)|"
+        r"объясни\w*|поясни\w*|разъясни\w*|проверь\w*|перепроверь\w*|"
+        r"уточни\w*|разбер\w*|в\s+чем\s+ошиб\w*|в\s+ч[её]м\s+ошиб\w*|"
+        r"почему\s+так|как\s+так|why\s+is\s+that|explain\b|check\b|clarify\b)",
+        low,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    tokens = [t for t in re.findall(r"[\w\u0080-\uffff]+", low) if len(t) > 1]
+    return bool(
+        len(tokens) <= 4
+        and any(token.startswith(("объясни", "объясните", "поясни", "поясните", "разъясни", "проверь", "перепроверь", "уточни", "уточните", "explain", "check", "clarify")) for token in tokens)
+    )
+
+
 def _infer_dialogue_act_profile(
     text: str,
     *,
@@ -1049,12 +1188,17 @@ def _infer_dialogue_act_profile(
 
     token_set = set(tokens)
     signature = _context_signature(text)
+    previous_answer_reference = _detect_previous_answer_recheck(text)
+    factual_verification_request = bool(re.search(
+        r"(?:проверь\w*|перепроверь\w*|сверь\w*|check\s+(?:the\s+)?(?:previous\s+)?answer|verify\s+(?:the\s+)?answer|review\s+(?:what\s+you\s+said|the\s+previous\s+answer))",
+        low, flags=re.IGNORECASE,
+    ))
     subjects = signature.get("subject_terms") if isinstance(signature, dict) else []
     output_forms = signature.get("output_forms") if isinstance(signature, dict) else []
     non_topical_roots = (
         "понят", "спаси", "благодар", "хорош", "ладн", "молод", "отлич", "здоров",
         "прекрас", "классн", "крут", "соглас", "правиль", "точн", "верн", "ага", "угу",
-        "да", "нет", "неа", "отнюд", "подроб", "поясн", "объясн", "уточн", "разъясн",
+        "да", "нет", "неа", "отнюд", "подро", "подроб", "поясн", "объясн", "уточн", "разъясн",
         "расшифр", "докаж", "обоснуй", "обоснуйте", "имел", "имела", "имели", "виду",
         "друго", "смысл", "так", "это", "получ", "непон", "понял", "поняла", "нрав",
         "ужас", "бесит", "раздраж", "разочар", "передел", "перепиш", "исправ", "улучш",
@@ -1071,6 +1215,7 @@ def _infer_dialogue_act_profile(
     has_deictic_reference = bool(token_set & {
         "это", "этот", "эта", "эту", "этого", "этой", "этом", "эти", "тот", "та", "ту",
         "того", "он", "она", "оно", "они", "его", "ее", "её", "ей", "ему", "им", "их",
+        "него", "нее", "неё", "ней", "ним", "нем", "нём", "них",
         "it", "this", "that", "he", "she", "they", "him", "her", "them",
     })
 
@@ -1136,18 +1281,24 @@ def _infer_dialogue_act_profile(
         or ("не" in token_set and bool(token_set & {"так", "то", "это", "совсем", "согласен", "согласна", "верно", "правильно"}))
         or bool(re.search(r"\b(?:не\s+соглас\w*|не\s+так|не\s+то|не\s+это|я\s+не\s+это|i\s+(?:do\s+not|don\s+t)\s+agree|not\s+really|no\s+way)\b", low))
     )
-    correction = has_phrase(correction_terms) or dissatisfaction or (
+    correction = previous_answer_reference or has_phrase(correction_terms) or dissatisfaction or (
         negation and bool(token_set & {"это", "то", "так", "другое", "имел", "имела", "виду"})
     )
     clarification = has_phrase(clarification_terms)
     explanation_request = has_phrase(explanation_terms) or (interrogative and bool(token_set & {"почему", "как", "зачем", "why", "how"}))
     own_topic_or_output = explicit_topic_introduction or (has_independent_payload and not topic_reference_fragment)
     correction_of_active = bool(
-        not explicit_topic_introduction and short and (correction or dissatisfaction or revision_request)
-        and ((not meaningful_subjects and not numeric_anchors) or has_deictic_reference or topic_reference_fragment or bool(re.search(
-            r"\b(?:я\s+имел\w*\s+в\s*(?:виду|ввиду)|я\s+имела\w*\s+в\s*(?:виду|ввиду)|я\s+не\s+про\b|не\s+про\s+.+\s+спрашивал\w*|не\s+про\s+.+\s+спрашивала\w*|ты\s+не\s+понял\w*|ты\s+меня\s+не\s+понима\w*)\b",
-            low,
-        )))
+        not explicit_topic_introduction
+        and (
+            previous_answer_reference
+            or (
+                short and (correction or dissatisfaction or revision_request)
+                and ((not meaningful_subjects and not numeric_anchors) or has_deictic_reference or topic_reference_fragment or bool(re.search(
+                    r"\b(?:я\s+имел\w*\s+в\s*(?:виду|ввиду)|я\s+имела\w*\s+в\s*(?:виду|ввиду)|я\s+не\s+про\b|не\s+про\s+.+\s+спрашивал\w*|не\s+про\s+.+\s+спрашивала\w*|ты\s+не\s+понял\w*|ты\s+меня\s+не\s+понима\w*)\b",
+                    low,
+                )))
+            )
+        )
     )
     context_dependent_reaction = bool(
         not explicit_topic_introduction
@@ -1156,8 +1307,13 @@ def _infer_dialogue_act_profile(
             or (gratitude and not has_independent_payload)
             or (positive_evaluation and not has_independent_payload)
             or correction_of_active
+            or previous_answer_reference
             or (negation and (not has_independent_payload or has_deictic_reference))
             or ((clarification or explanation_request) and short and not has_independent_payload)
+            # Short anaphoric fragments such as “теперь о нём подробнее” point
+            # back to the current exchange even without a question mark or a fixed
+            # continuation verb. A named independent subject still bypasses this.
+            or (has_deictic_reference and short and not has_independent_payload)
             or topic_reference_fragment
         )
     )
@@ -1191,7 +1347,11 @@ def _infer_dialogue_act_profile(
 
     if correction_of_active or revision_request:
         communicative_act = "REVISE_PREVIOUS_RESPONSE"
-        recommended_response_action = "REPAIR_OR_IMPROVE_PREVIOUS_RESPONSE"
+        recommended_response_action = (
+            "RECHECK_PREVIOUS_RESPONSE_AND_CORRECT_IF_NEEDED"
+            if previous_answer_reference or factual_verification_request
+            else "REPAIR_OR_IMPROVE_PREVIOUS_RESPONSE"
+        )
         tone = "DISSATISFIED" if dissatisfaction or negation else "CORRECTIVE"
     elif gratitude:
         communicative_act = "APPRECIATION_AND_CONTINUE"
@@ -1225,6 +1385,9 @@ def _infer_dialogue_act_profile(
         "message_function": communicative_act.lower(),
         "context_dependent_reaction": context_dependent_reaction,
         "topic_reference_fragment": bool(topic_reference_fragment),
+        "previous_answer_reference": bool(previous_answer_reference),
+        "active_branch_repair": bool(not explicit_topic_introduction and (correction_of_active or previous_answer_reference)),
+        "factual_verification_request": bool(factual_verification_request),
         "tone": tone,
         "recommended_response_action": (
             "ACKNOWLEDGE_COMPLETED_RESULT_WITHOUT_REPEATING"
@@ -1246,6 +1409,9 @@ def _infer_dialogue_act_profile(
             "deictic_reference": bool(has_deictic_reference),
             "topic_reference_fragment": bool(topic_reference_fragment),
             "has_independent_payload": bool(has_independent_payload),
+            "previous_answer_reference": bool(previous_answer_reference),
+            "active_branch_repair": bool(not explicit_topic_introduction and (correction_of_active or previous_answer_reference)),
+            "factual_verification_request": bool(factual_verification_request),
         },
     }
 
@@ -1277,6 +1443,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     ) or "к чему мы пришли" in low or "what did we conclude" in low
     plan_action = _semantic_group_hit(tokens, "plan_action")
     continuation_action = _semantic_group_hit(tokens, "continuation_action")
+    explicit_topic_switch = _has_explicit_topic_switch(source)
     explicit_topic_introduction = _has_explicit_topic_introduction(source)
     answer_followup = _looks_like_previous_answer_followup(source)
     past_reference = _semantic_group_hit(tokens, "past_reference")
@@ -1387,8 +1554,25 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         topic_reference_fragment=topic_reference_fragment,
     )
     context_dependent_reaction = bool(dialogue_act_profile.get("context_dependent_reaction"))
+    active_branch_repair = bool(dialogue_act_profile.get("active_branch_repair"))
+    previous_answer_reference = bool(dialogue_act_profile.get("previous_answer_reference"))
+    factual_verification_request = bool(dialogue_act_profile.get("factual_verification_request"))
 
-    if history_recall:
+    if explicit_topic_switch and not history_recall:
+        # Explicitly changing branch overrides reaction/anaphora cues in the same
+        # wording. The state manager may still retrieve evidence, but must not keep
+        # the current hot branch active merely because an earlier answer is named.
+        primary_intent = "NEW_INFORMATION"
+        direction = "ANSWER_NEW_REQUEST"
+        topic_reference = "UNSPECIFIED"
+        time_scope = "UNSPECIFIED"
+        requires_memory = False
+        history_request = False
+        search_scope = "CURRENT_DIALOGUE"
+        intent_score = 0
+        relation_hint = "NEW"
+        reason = "explicit_topic_switch"
+    elif history_recall and (not active_branch_repair or history_reference_words or history_inventory_request or has_explicit_time_window or today_reference or recent_reference):
         requires_memory = True
         history_request = True
         search_scope = "ALL_DIALOGUE_HISTORY"
@@ -1437,6 +1621,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         relation_hint = "CONTINUE"
         reason = (
             "short_topic_pointer_requires_history_match" if topic_reference_fragment
+            else "active_branch_previous_answer_recheck" if active_branch_repair
             else "context_dependent_reaction_to_previous_response"
         )
     elif context_dependent_question:
@@ -1514,6 +1699,10 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "context_dependent_question": bool(context_dependent_question),
         "context_dependent_reaction": bool(context_dependent_reaction),
         "topic_reference_fragment": bool(topic_reference_fragment),
+        "previous_answer_reference": bool(previous_answer_reference),
+        "active_branch_repair": bool(active_branch_repair),
+        "factual_verification_request": bool(factual_verification_request),
+        "explicit_topic_switch": bool(explicit_topic_switch),
         "self_reference": bool(self_reference),
         "past_reference": bool(past_reference),
         "today_reference": bool(today_reference),
@@ -1539,6 +1728,10 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "intent_score": int(intent_score),
         "speech_act": dialogue_act_profile.get("speech_act"),
         "communicative_act": dialogue_act_profile.get("communicative_act"),
+        "previous_answer_reference": bool(previous_answer_reference),
+        "active_branch_repair": bool(active_branch_repair),
+        "factual_verification_request": bool(factual_verification_request),
+        "explicit_topic_switch": bool(explicit_topic_switch),
         "pragmatic_intent": dialogue_act_profile.get("pragmatic_intent"),
         "message_function": dialogue_act_profile.get("message_function"),
         "pragmatic_features": dialogue_act_profile.get("pragmatic_features", {}),
@@ -1773,6 +1966,12 @@ def build_question_sequence(
     """
     sequence: list[dict[str, Any]] = []
     parent = dict(parent_interpretation or interpret_request_semantics(text))
+    parent_pragmatic = parent.get("pragmatic_features") if isinstance(parent.get("pragmatic_features"), dict) else {}
+    parent_explicit_topic_switch = bool(parent.get("explicit_topic_switch") or _has_explicit_topic_switch(text))
+    parent_repair = bool(
+        not parent_explicit_topic_switch
+        and (parent.get("active_branch_repair") or parent_pragmatic.get("active_branch_repair"))
+    )
     parent_outputs = _enhance_requested_outputs(text, _detect_requested_outputs(text))
     pieces = _split_request_sequence(text)
     parent_introduces_subject = _has_explicit_topic_introduction(text)
@@ -1817,6 +2016,70 @@ def build_question_sequence(
         if "text" not in outputs:
             outputs.insert(0, "text")
         item_semantics = interpret_request_semantics(item)
+        if parent_explicit_topic_switch:
+            item_semantics["explicit_topic_switch"] = True
+            item_semantics["active_branch_repair"] = False
+            item_semantics.setdefault("features", {})["active_branch_repair"] = False
+            item_semantics["features"]["explicit_topic_switch"] = True
+            item_semantics.setdefault("pragmatic_features", {})["active_branch_repair"] = False
+        repair_linked_clause = bool(
+            parent_repair
+            and not _has_explicit_topic_introduction(item)
+            and (
+                _detect_previous_answer_recheck(item)
+                or _is_repair_followup_clause(item)
+            )
+        )
+        if repair_linked_clause:
+            child_pragmatic = item_semantics.get("pragmatic_features") if isinstance(item_semantics.get("pragmatic_features"), dict) else {}
+            child_features = item_semantics.get("features") if isinstance(item_semantics.get("features"), dict) else {}
+            item_semantics.update({
+                "primary_intent": "TOPIC_CONTINUATION",
+                "direction": "SEARCH_ACTIVE_OR_REFERENCED_TOPIC",
+                "topic_reference": "PREVIOUS_ASSISTANT_ANSWER",
+                "time_scope": "ACTIVE_DIALOGUE",
+                "requires_memory": True,
+                "history_request": False,
+                "search_scope": "TOPIC_OR_ACTIVE_CONTEXT",
+                "relation_hint": "CONTINUE",
+                "reason": "repair_clause_inherits_active_branch",
+                "speech_act": item_semantics.get("speech_act") or "CORRECTION_OR_REVISION",
+                "communicative_act": "REVISE_PREVIOUS_RESPONSE",
+                "pragmatic_intent": "correction_or_revision",
+                "message_function": "revise_previous_response",
+                "tone": "CORRECTIVE",
+                "recommended_response_action": "RECHECK_PREVIOUS_RESPONSE_AND_CORRECT_IF_NEEDED",
+                "previous_answer_reference": True,
+                "active_branch_repair": True,
+                "factual_verification_request": bool(
+                    item_semantics.get("factual_verification_request")
+                    or parent.get("factual_verification_request")
+                    or parent_pragmatic.get("factual_verification_request")
+                ),
+                "pragmatic_features": {
+                    **child_pragmatic,
+                    "previous_answer_reference": True,
+                    "active_branch_repair": True,
+                    "factual_verification_request": bool(
+                        child_pragmatic.get("factual_verification_request")
+                        or parent.get("factual_verification_request")
+                        or parent_pragmatic.get("factual_verification_request")
+                    ),
+                },
+                "features": {
+                    **child_features,
+                    "context_dependent_reaction": True,
+                    "previous_answer_reference": True,
+                    "active_branch_repair": True,
+                    "factual_verification_request": bool(
+                        child_features.get("factual_verification_request")
+                        or parent.get("factual_verification_request")
+                        or parent_pragmatic.get("factual_verification_request")
+                    ),
+                },
+                "parent_context_dependency": True,
+                "parent_intent": parent.get("primary_intent", "TOPIC_CONTINUATION"),
+            })
         parent_window = parent.get("time_window") if isinstance(parent.get("time_window"), dict) else {}
         if parent_window.get("has_constraint") and not (item_semantics.get("time_window") or {}).get("has_constraint"):
             item_semantics["time_window"] = parent_window
@@ -1930,6 +2193,18 @@ def build_question_sequence(
             "requires_memory": bool(item_semantics.get("requires_memory")),
             "history_request": bool(item_semantics.get("history_request")),
             "semantic_reason": item_semantics.get("reason", ""),
+            "speech_act": item_semantics.get("speech_act", "STATEMENT_OR_REQUEST"),
+            "communicative_act": item_semantics.get("communicative_act", "NEW_OR_STANDALONE"),
+            "pragmatic_intent": item_semantics.get("pragmatic_intent", ""),
+            "message_function": item_semantics.get("message_function", ""),
+            "tone": item_semantics.get("tone", "NEUTRAL"),
+            "recommended_response_action": item_semantics.get("recommended_response_action", "ANSWER_NORMALLY"),
+            "pragmatic_features": item_semantics.get("pragmatic_features", {}),
+            "features": item_semantics.get("features", {}),
+            "previous_answer_reference": bool(item_semantics.get("previous_answer_reference")),
+            "active_branch_repair": bool(item_semantics.get("active_branch_repair") or repair_linked_clause),
+            "factual_verification_request": bool(item_semantics.get("factual_verification_request")),
+            "explicit_topic_switch": bool(parent_explicit_topic_switch or item_semantics.get("explicit_topic_switch")),
             "context_signature": item_semantics.get("context_signature") or _context_signature(item),
             "parent_context_dependency": bool(item_semantics.get("parent_context_dependency")),
             "parent_intent": item_semantics.get("parent_intent", ""),
@@ -2166,6 +2441,10 @@ def build_interpretation(
                 "tone": _text(request_semantics.get("tone") or "NEUTRAL"),
                 "recommended_response_action": _text(request_semantics.get("recommended_response_action") or "ANSWER_NORMALLY"),
                 "context_dependent_reaction": bool(request_semantics.get("features", {}).get("context_dependent_reaction")) if isinstance(request_semantics.get("features"), dict) else False,
+                "active_branch_repair": bool(request_semantics.get("active_branch_repair")),
+                "previous_answer_reference": bool(request_semantics.get("previous_answer_reference")),
+                "factual_verification_request": bool(request_semantics.get("factual_verification_request")),
+                "explicit_topic_switch": bool(request_semantics.get("explicit_topic_switch")),
             },
             "continuation_context": {
                 "active_topic": _text(memory.get("active_topic")),
@@ -2265,18 +2544,23 @@ def build_interpretation(
             "improvement_policy": "Improve the requested result while preserving unaffected behavior; do not invent missing source content.",
             "output_plan": requested_outputs,
             "semantic_interpretation": request_semantics,
-            "semantic_interpretation_version": "april_request_semantics_v3_continuity_actions",
+            "semantic_interpretation_version": "april_request_semantics_v4_active_branch_repair",
             "dialogue_communication": {
                 "principle": "Respond to the user's conversational move, not only to the literal words.",
                 "speech_act": _text(request_semantics.get("speech_act") or "STATEMENT_OR_REQUEST"),
                 "communicative_act": _text(request_semantics.get("communicative_act") or "NEW_OR_STANDALONE"),
                 "tone": _text(request_semantics.get("tone") or "NEUTRAL"),
                 "recommended_response_action": _text(request_semantics.get("recommended_response_action") or "ANSWER_NORMALLY"),
+                "active_branch_repair": bool(request_semantics.get("active_branch_repair")),
+                "previous_answer_reference": bool(request_semantics.get("previous_answer_reference")),
+                "factual_verification_request": bool(request_semantics.get("factual_verification_request")),
+                "explicit_topic_switch": bool(request_semantics.get("explicit_topic_switch")),
                 "instructions": [
                     "When context says CONTINUE and evidence is present, continue the conversation naturally from the relevant prior point; do not restart the subject or recite internal search metadata.",
                     "Mention past discussion in ordinary conversational language only when it helps answer the user or the user asks what was discussed.",
                     "Treat gratitude and positive feedback briefly and naturally, then continue only when the user also gave a next step.",
                     "Treat disagreement, dissatisfaction, or a revision request as feedback on the previous answer when supported by context; re-check the previous answer and correct/improve it instead of defending it blindly.",
+                    "When active_branch_repair or previous_answer_reference is true, compare the current challenge with the selected canonical USER↔APRIL source turns; report what April actually said separately from what should have been said, and do not advance the active task until the correction is addressed.",
                     "Use only selected dialogue-memory evidence for claims about what was previously said. If the requested time range has no entries, state that honestly and offer nearby retained entries as nearby, not as matches inside the requested range.",
                     "A topic pointer is a retrieval hint, not proof that a memory exists. If no matching prior record is found, answer as a new request or ask a concise clarification instead of inventing continuity.",
                 ],
