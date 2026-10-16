@@ -51,7 +51,7 @@ from blocks.Premium_state_manager import (
 )
 
 
-PROCESSOR_VERSION = "april_premium_exkrutor_single_route_v4_pragmatic_continuity"
+PROCESSOR_VERSION = "april_premium_exkrutor_single_route_v5_active_branch_repair"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -195,6 +195,23 @@ def _compact_question_search(
             "message_id": _text(item.get("message_id"))[:120],
         })
     semantics = dict(semantics or {})
+    repair_features = semantics.get("pragmatic_features") if isinstance(semantics.get("pragmatic_features"), dict) else {}
+    state_search = context.get("search") if isinstance(context.get("search"), dict) else {}
+    active_repair = bool(
+        semantics.get("active_branch_repair")
+        or repair_features.get("active_branch_repair")
+        or context.get("active_branch_repair")
+        or state_search.get("active_branch_repair")
+    )
+    anchor_message_id = _text(anchor.get("message_id"))
+    if active_repair and anchor_message_id:
+        # Provider compaction has stricter pair limits than State Manager. Put the
+        # exact challenged USER↔APRIL source first so the wrong answer is not lost
+        # when the prompt is reduced to one evidence pair.
+        anchor_pair_index = next((i for i, pair in enumerate(pairs)
+                                  if _text(pair.get("message_id")) == anchor_message_id), -1)
+        if anchor_pair_index > 0:
+            pairs = [pairs[anchor_pair_index]] + pairs[:anchor_pair_index] + pairs[anchor_pair_index + 1:]
     history_request = bool(context.get("history_request") or semantics.get("history_request"))
     topic_index = []
     requested_topic_count = max(1, min(10, int(
@@ -261,6 +278,24 @@ def _compact_question_search(
         "time_scope": _text(semantics.get("time_scope") or "UNSPECIFIED"),
         "speech_act": _text(semantics.get("speech_act") or "STATEMENT_OR_REQUEST"),
         "communicative_act": _text(semantics.get("communicative_act") or "NEW_OR_STANDALONE"),
+        "active_branch_repair": bool(active_repair),
+        "previous_answer_reference": bool(
+            semantics.get("previous_answer_reference")
+            or (semantics.get("pragmatic_features") or {}).get("previous_answer_reference")
+            or context.get("previous_answer_reference")
+            or state_search.get("previous_answer_reference")
+        ),
+        "factual_verification_request": bool(
+            semantics.get("factual_verification_request")
+            or (semantics.get("pragmatic_features") or {}).get("factual_verification_request")
+            or context.get("factual_verification_request")
+            or state_search.get("factual_verification_request")
+        ),
+        "explicit_topic_switch": bool(
+            semantics.get("explicit_topic_switch")
+            or context.get("explicit_topic_switch")
+            or state_search.get("explicit_topic_switch")
+        ),
         "tone": _text(semantics.get("tone") or "NEUTRAL"),
         "recommended_response_action": _text(semantics.get("recommended_response_action") or "ANSWER_NORMALLY"),
         "pragmatic_features": dict(semantics.get("pragmatic_features") or {}),
@@ -525,7 +560,7 @@ def _build_scene(
         dialogue_state=dict((interpretation.get("dialogue") or {})),
         dialogue_development={
             "interpretation_id": identity["interpretation_id"],
-            "memory_search_engine": "state_manager_topic_section_search_v5_clarification",
+            "memory_search_engine": "state_manager_topic_section_search_v10_active_branch_repair_evidence",
         },
         result_event={
             "status": "complete",
@@ -1149,6 +1184,7 @@ async def execute(
             "minimum_topic_count": semantic_interpretation.get("minimum_topic_count"),
             "search_scope": semantic_interpretation.get("search_scope"),
             "relation_hint": semantic_interpretation.get("relation_hint"),
+            "explicit_topic_switch": bool(semantic_interpretation.get("explicit_topic_switch")),
             "reason": semantic_interpretation.get("reason"),
             "speech_act": semantic_interpretation.get("speech_act"),
             "communicative_act": semantic_interpretation.get("communicative_act"),
@@ -1212,6 +1248,10 @@ async def execute(
                     )),
                     "relation_hint": "NEW" if inherits_subject else ("HISTORY_LOOKUP" if question_item.get("history_request") else "CONTINUE" if question_item.get("requires_memory") else "NEW"),
                     "reason": "pronoun_inherits_subject_from_current_request" if inherits_subject else question_item.get("semantic_reason", ""),
+                    "explicit_topic_switch": bool(question_item.get("explicit_topic_switch")),
+                    "active_branch_repair": bool(question_item.get("active_branch_repair")),
+                    "previous_answer_reference": bool(question_item.get("previous_answer_reference")),
+                    "factual_verification_request": bool(question_item.get("factual_verification_request")),
                     "speech_act": question_item.get("speech_act") or (semantic_interpretation.get("speech_act") if index == 0 else ""),
                     "communicative_act": question_item.get("communicative_act") or (semantic_interpretation.get("communicative_act") if index == 0 else ""),
                     "pragmatic_intent": question_item.get("pragmatic_intent") or (semantic_interpretation.get("pragmatic_intent") if index == 0 else ""),
@@ -1306,6 +1346,8 @@ async def execute(
                 context_source="current_request_subject" if question_item.get("inherits_current_request_subject") else "dialogue_memory",
                 semantic_intent=task_semantics.get("primary_intent"),
                 search_direction=task_semantics.get("direction"),
+                active_branch_repair=bool(task_semantics.get("active_branch_repair") or (task_semantics.get("pragmatic_features") or {}).get("active_branch_repair")),
+                previous_answer_reference=bool(task_semantics.get("previous_answer_reference") or (task_semantics.get("pragmatic_features") or {}).get("previous_answer_reference")),
                 history_request=bool(task_context.get("history_request")) if isinstance(task_context, dict) else False,
                 topic_index_count=len(task_context.get("topic_index") or []) if isinstance(task_context, dict) else 0,
             )
@@ -1434,9 +1476,9 @@ async def execute(
     request_structure = interpretation.setdefault("request_structure", {})
     request_structure["question_sequence"] = question_sequence
     request_structure["answer_sequence_in_order"] = True
-    request_structure["question_search_engine"] = "state_manager_per_question_semantic_v2"
+    request_structure["question_search_engine"] = "state_manager_per_question_semantic_v3_active_repair"
     request_structure["semantic_interpretation"] = semantic_interpretation
-    request_structure["semantic_interpretation_version"] = "april_request_semantics_v3_continuity_actions"
+    request_structure["semantic_interpretation_version"] = "april_request_semantics_v4_active_branch_repair"
     request_structure["question_search_count"] = len(question_sequence)
     request_structure["question_relations"] = [
         {
@@ -1455,6 +1497,9 @@ async def execute(
         question_sequence_count=len(((interpretation.get("request_structure") or {}).get("question_sequence") or [])),
         semantic_intent=semantic_interpretation.get("primary_intent"),
         search_direction=semantic_interpretation.get("direction"),
+        active_branch_repair=bool(semantic_interpretation.get("active_branch_repair")),
+        previous_answer_reference=bool(semantic_interpretation.get("previous_answer_reference")),
+        factual_verification_request=bool(semantic_interpretation.get("factual_verification_request")),
         history_request=bool(semantic_interpretation.get("history_request")),
     )
 
