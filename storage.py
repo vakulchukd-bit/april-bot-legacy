@@ -1822,12 +1822,13 @@ def touch_user_activity(user_id: Any) -> None:
 
 
 def get_admin_user_telemetry() -> dict[str, int] | None:
-    """Return unique-account telemetry, deduplicating linked April/Google rows.
+    """Count registered identities, excluding guest/voice/system placeholder rows.
 
-    A normalized email is the strongest cross-provider identity key. If email is
-    unavailable, use the public April ID, then provider identity, then internal ID.
-    Premium wins when any row for the same identity has a currently valid Premium
-    entitlement. Online counts unique identities with a recent chat activity mark.
+    Only rows with a real email and authentication provider are eligible. Email
+    is the canonical identity key, so legacy rows keyed by email and April-ID
+    rows for the same Google identity are not counted as separate users. If an
+    identity has any currently active Premium row, that identity is Premium.
+    Online remains based on a recent chat activity mark (last 3 minutes).
     """
     conn = get_conn()
     if not conn:
@@ -1837,32 +1838,25 @@ def get_admin_user_telemetry() -> dict[str, int] | None:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    WITH normalized AS (
+                    WITH registered AS (
                         SELECT
-                            COALESCE(
-                                NULLIF(LOWER(BTRIM(email)), ''),
-                                NULLIF(BTRIM(april_id), ''),
-                                CASE
-                                    WHEN NULLIF(BTRIM(provider), '') IS NOT NULL
-                                     AND NULLIF(BTRIM(provider_user_id), '') IS NOT NULL
-                                    THEN LOWER(BTRIM(provider)) || ':' || BTRIM(provider_user_id)
-                                    ELSE NULLIF(BTRIM(user_id), '')
-                                END
-                            ) AS account_key,
+                            LOWER(BTRIM(email)) AS account_key,
                             (
-                                COALESCE(LOWER(BTRIM(plan)), 'free') = 'premium'
+                                LOWER(BTRIM(COALESCE(plan, 'free'))) = 'premium'
                                 AND COALESCE(subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
                             ) AS premium_active,
                             (last_seen_at >= CURRENT_TIMESTAMP - INTERVAL '3 minutes') AS recently_active
                         FROM users
+                        WHERE NULLIF(BTRIM(email), '') IS NOT NULL
+                          AND NULLIF(BTRIM(provider), '') IS NOT NULL
+                          AND LOWER(BTRIM(user_id)) NOT IN ('guest', 'web_voice')
                     ),
                     accounts AS (
                         SELECT
                             account_key,
                             BOOL_OR(COALESCE(premium_active, FALSE)) AS premium_active,
                             BOOL_OR(COALESCE(recently_active, FALSE)) AS recently_active
-                        FROM normalized
-                        WHERE account_key IS NOT NULL
+                        FROM registered
                         GROUP BY account_key
                     )
                     SELECT
@@ -1874,13 +1868,15 @@ def get_admin_user_telemetry() -> dict[str, int] | None:
                     """
                 )
                 row = cur.fetchone() or {}
-                return {key: max(0, int(row.get(key) or 0)) for key in ("online", "premium", "free", "total")}
+                return {
+                    key: max(0, int(row.get(key) or 0))
+                    for key in ("online", "premium", "free", "total")
+                }
     except Exception as exc:
         print(f"[APRIL_TELEMETRY] READ_ERROR type={type(exc).__name__}", flush=True)
         return None
     finally:
         conn.close()
-
 
 def get_all_users():
     conn = get_conn()
