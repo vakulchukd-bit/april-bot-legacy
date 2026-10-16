@@ -40,7 +40,7 @@ def _scaled_prompt_tokens(base_tokens: int) -> int:
     return max(1, int(round(int(base_tokens) * PREMIUM_PROMPT_SCALE)))
 
 TRANSLATION_ROUTE_VERSION = "botru_embedded_translation_v1"
-PROVIDER_ROUTER_VERSION = "premium_provider_router_v2_dialogue_continuity_source_preservation"
+PROVIDER_ROUTER_VERSION = "premium_provider_router_v3_active_branch_repair_evidence"
 
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _inflight: set[str] = set()
@@ -78,7 +78,7 @@ Do not expose internal reasoning.
 Always treat these sections as structured input:
 1. AUTHENTICATED_IDENTITY and CURRENT_REQUEST (the current request always exists)
 2. CONTINUATION_CONTEXT (selected USER↔APRIL pairs; [] when NEW unless HISTORY_REQUEST=true or a semantically matched historical pair is explicitly supplied)
-   When DIALOGUE_COMMUNICATION describes feedback/reaction, answer that conversational move: acknowledge praise naturally; treat dissatisfaction, correction, or “not what I meant” as a cue to re-evaluate the previous answer and improve it. Do not merely report search results or say “I found a record” unless the user asks what was discussed. For a bare acknowledgement such as “да”, “ага”, “ок” or “точно”, acknowledge briefly and do not repeat/regenerate the completed answer or artifact. Continue with more work only when the user adds a request or the preceding assistant turn explicitly asked for confirmation before an action.
+   When DIALOGUE_COMMUNICATION describes feedback/reaction, answer that conversational move: acknowledge praise naturally; treat dissatisfaction, correction, or “not what I meant” as a cue to re-evaluate the previous answer and improve it. If active_branch_repair or previous_answer_reference is true, use selected canonical source turns to verify what April actually said before explaining what should have happened; distinguish the actual prior answer from the corrected answer, never rewrite the historical claim as if April had already said the correction, and address the repair before advancing an ongoing task. Do not merely report search results or say “I found a record” unless the user asks what was discussed. For a bare acknowledgement such as “да”, “ага”, “ок” or “точно”, acknowledge briefly and do not repeat/regenerate the completed answer or artifact. Continue with more work only when the user adds a request or the preceding assistant turn explicitly asked for confirmation before an action.
    If a selected pair includes preserve_source_text=true, source_user_text/source_april_text are bounded excerpts copied from the canonical dialogue_memory row, not inferred summaries. Use them as primary evidence about the prior exchange. Respect source_content_complete/source_*_complete flags: never claim to have the full original text if a flag is false.
 3. NEW_DIALOGUE_REQUEST (always contains the literal current request; consult NEW_DIALOGUE_ACTIVE before treating it as a topic switch)
 4. ATTACHMENT_TASK_MAP / INPUT_MODALITIES / VISUAL_CONTEXT / ATTACHED_TEXT_FILES
@@ -86,7 +86,9 @@ Always treat these sections as structured input:
    Each step's dialogue_search.relation, intent and context were retrieved independently
    from the authenticated user's history. Use its selected pairs when relation=CONTINUE OR
    history_request=true; HISTORY_RECALL may deliberately remain relation=NEW so recall does not
-   incorrectly switch the active topic. Other NEW steps remain independent.
+   incorrectly switch the active topic. Other NEW steps remain independent. If a step's
+   dialogue_search.active_branch_repair or previous_answer_reference is true, handle that step
+   as a correction/check of prior output even when the top-level DIALOGUE_COMMUNICATION differs.
    Never let the top-level DIALOGUE_RELATION override per-step relation. Resolve task dependencies
    in sequence order and preserve step_index order in the answer and render_blocks.
    If one subtask needs clarification, answer the other clear subtasks and ask only about that part.
@@ -238,10 +240,14 @@ in REQUEST_SEQUENCE order. Never emit an empty table shell; rows and cells must 
 Composite output requests are cumulative. Generated illustrations are not authentic photographs.
 When multiple visual outputs are in C_ARTIFACT_RENDER_PLAN, provide concrete payloads for them; at least half of four-or-more requested visual types must render. Target a 60/40 text-to-render allocation when visuals are relevant; interleave typed blocks with the matching step in order. For non-numeric concepts use a grounded network graph, never fake numeric data. Images need the generator signal; links need real URLs.
 Use CURRENT_REQUEST as the task. On CONTINUE, SELECTED_SECTION is the target when present; use
-its concise summary and selected anchor rather than full previous answers. Follow DIALOGUE_COMMUNICATION:
+its concise summary and selected anchor rather than full previous answers. For each REQUEST_SEQUENCE
+step, treat c.active_branch_repair/c.previous_answer_reference as step-specific repair instructions
+that take precedence over a conflicting turn-level communication label. Follow DIALOGUE_COMMUNICATION:
 respond to the conversational move, not just the literal wording. Acknowledge gratitude/praise naturally;
 when the user signals dissatisfaction, correction, or misunderstanding, re-check the prior answer and improve
-it rather than offering a dry retrieval report. For a bare acknowledgement (for example “да”, “ага”, “ок”, “точно”), give a brief acknowledgement only; do not repeat or regenerate a completed answer/artifact unless the user adds a new request or explicitly confirms an action you had asked permission to perform. For selected pairs with preserve_source_text=true, treat
+it rather than offering a dry retrieval report. If active_branch_repair or previous_answer_reference is true, use
+selected canonical source turns to separate what April actually said from what should have been said; correct any
+mismatch explicitly before advancing the active task. For a bare acknowledgement (for example “да”, “ага”, “ок”, “точно”), give a brief acknowledgement only; do not repeat or regenerate a completed answer/artifact unless the user adds a new request or explicitly confirms an action you had asked permission to perform. For selected pairs with preserve_source_text=true, treat
 source_user_text/source_april_text as bounded canonical dialogue_memory evidence, not generated summaries;
 respect all source-completeness flags. Never claim to know missing/truncated source content.
 For person references, first
@@ -284,8 +290,11 @@ tokens total, including up to 4800 tokens for render payloads and about 7200 for
 visuals when materially useful, and label generated illustrations as generated, not authentic photos.
 When multiple visual outputs are requested, emit the materially relevant requested renderers with concrete payloads. Target about 60% explanatory text and 40% visual/render payloads when the request calls for visuals; this is an allocation target, not a rigid truncation rule. For multi-step requests, add step_index and step_title to every block where possible, interleave each step's concise text with that step's formula/table/diagram/graph/image, and preserve step order. Never collect all visuals at the end or use a visual to replace needed explanation. Use grounded network graphs for concepts, never invent numeric measurements; images require the generator signal and links require real URLs.
 Answer CURRENT_REQUEST in RETURN_LANGUAGE. On CONTINUE, use SELECTED_SECTION as the target when present.
-Follow DIALOGUE_COMMUNICATION to handle the user's conversational act naturally: acknowledge appreciation briefly,
-and treat negative feedback/correction as a cue to reassess and improve the preceding answer. For a bare acknowledgement
+For each REQUEST_SEQUENCE step, its c.active_branch_repair/c.previous_answer_reference flags describe that step
+and override a conflicting top-level communication label. Follow DIALOGUE_COMMUNICATION to handle the user's conversational act naturally: acknowledge appreciation briefly,
+and treat negative feedback/correction as a cue to reassess and improve the preceding answer. If active_branch_repair
+or previous_answer_reference is true, verify against selected canonical source turns, distinguish the actual former
+answer from the correct answer, and repair the issue before advancing the ongoing task. For a bare acknowledgement
 such as “да”, “ага”, “ок” or “точно”, do not repeat a completed answer/artifact; respond briefly unless the user adds a task
 or is confirming an action the assistant explicitly asked permission to perform. If a selected
 CONTINUATION_CONTEXT pair has preserve_source_text=true, use its source_user_text/source_april_text as canonical
@@ -1329,7 +1338,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                             for sec in (pair.get("sections") or [])[:3] if isinstance(sec, dict)
                         ],
                     }
-                    for pair in (task_search.get("selected_pairs") or [])[:1] if isinstance(pair, dict)
+                    for pair in (task_search.get("selected_pairs") or [])[:(2 if task_search.get("active_branch_repair") else 1)] if isinstance(pair, dict)
                 ]
                 if isinstance(task_search.get("anchor"), dict):
                     anchor = task_search["anchor"]
@@ -1573,6 +1582,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "history_request": bool(task_search.get("history_request")),
                 "semantic_intent": task_search.get("semantic_intent", ""),
                 "search_direction": task_search.get("search_direction", ""),
+                "active_branch_repair": bool(task_search.get("active_branch_repair")),
+                "previous_answer_reference": bool(task_search.get("previous_answer_reference")),
+                "factual_verification_request": bool(task_search.get("factual_verification_request")),
+                "explicit_topic_switch": bool(task_search.get("explicit_topic_switch")),
                 "time_scope": task_search.get("time_scope", "UNSPECIFIED"),
                 "requested_topic_count": max(1, min(10, int(task_search.get("requested_topic_count") or requested_topic_count or 10))) if task_search.get("history_request") else 0,
                 "minimum_topic_count": max(1, min(10, int(task_search.get("minimum_topic_count") or min(5, requested_topic_count or 10)))) if task_search.get("history_request") else 0,
@@ -1628,7 +1641,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                                       "summary": _semantic_compress(sec.get("summary"), max(_scaled_prompt_tokens(12), summary_budget // 2)),
                                       "order": sec.get("order")} for sec in (pair.get("sections") or [])[:2] if isinstance(sec, dict)]
                     }
-                    for pair in (task_search.get("selected_pairs") or [])[:1] if isinstance(pair, dict)
+                    for pair in (task_search.get("selected_pairs") or [])[:(2 if task_search.get("active_branch_repair") else 1)] if isinstance(pair, dict)
                 ],
                 "clarification_needed": bool(task_search.get("clarification_needed")),
                 "clarification_prompt": _semantic_compress(task_search.get("clarification_prompt"), max(_scaled_prompt_tokens(8), summary_budget)),
@@ -1890,6 +1903,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     "p": bool(item.get("inherits_current_request_subject")),
                     "c": {
                         "relation": ((item.get("dialogue_search") or {}).get("relation", "NEW") if isinstance(item.get("dialogue_search"), dict) else "NEW"),
+                        "active_branch_repair": bool(((item.get("dialogue_search") or {}).get("active_branch_repair", False) if isinstance(item.get("dialogue_search"), dict) else False)),
+                        "previous_answer_reference": bool(((item.get("dialogue_search") or {}).get("previous_answer_reference", False) if isinstance(item.get("dialogue_search"), dict) else False)),
+                        "factual_verification_request": bool(((item.get("dialogue_search") or {}).get("factual_verification_request", False) if isinstance(item.get("dialogue_search"), dict) else False)),
+                        "explicit_topic_switch": bool(((item.get("dialogue_search") or {}).get("explicit_topic_switch", False) if isinstance(item.get("dialogue_search"), dict) else False)),
                         "topic": _semantic_compress(((item.get("dialogue_search") or {}).get("topic", "") if isinstance(item.get("dialogue_search"), dict) else ""), max(_scaled_prompt_tokens(4), tiny_topic_budget)),
                         "clarification_needed": bool(((item.get("dialogue_search") or {}).get("clarification_needed", False) if isinstance(item.get("dialogue_search"), dict) else False)),
                     },
@@ -2407,6 +2424,10 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "tone": _clip(communication.get("tone") or interaction_profile.get("tone") or "NEUTRAL", 32),
         "recommended_response_action": _clip(communication.get("recommended_response_action") or interaction_profile.get("recommended_response_action") or "ANSWER_NORMALLY", 80),
         "context_dependent_reaction": bool(interaction_profile.get("context_dependent_reaction")),
+        "active_branch_repair": bool(communication.get("active_branch_repair") or interaction_profile.get("active_branch_repair")),
+        "previous_answer_reference": bool(communication.get("previous_answer_reference") or interaction_profile.get("previous_answer_reference")),
+        "factual_verification_request": bool(communication.get("factual_verification_request") or interaction_profile.get("factual_verification_request")),
+        "explicit_topic_switch": bool(communication.get("explicit_topic_switch") or interaction_profile.get("explicit_topic_switch")),
         "instructions": [str(item)[:260] for item in (communication.get("instructions") or [])[:5] if str(item).strip()],
     }
     question_sequence = request_structure.get("question_sequence") if isinstance(request_structure.get("question_sequence"), list) else []
