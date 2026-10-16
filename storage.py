@@ -851,6 +851,15 @@ def load_dialogue_history_index(
                             NULLIF(LEFT(BTRIM(user_text), 140), ''),
                             'Сохранённый диалог'
                         ) AS title,
+                        COALESCE(
+                            NULLIF(BTRIM(structured_response #>> '{dialogue_memory_record,topic}'), ''),
+                            NULLIF(BTRIM(structured_response #>> '{metadata,dialogue_memory_record,topic}'), ''),
+                            NULLIF(BTRIM(structured_request #>> '{dialogue,continuation_context,active_topic}'), ''),
+                            NULLIF(BTRIM(structured_request #>> '{request_structure,user_goal}'), ''),
+                            NULLIF(LEFT(BTRIM(user_text), 140), ''),
+                            'Сохранённый диалог'
+                        ) AS topic_label,
+                        relation,
                         LEFT(COALESCE(user_text, ''), 1200) AS user_text,
                         LEFT(COALESCE(april_text, ''), 1000) AS april_text,
                         EXTRACT(EPOCH FROM created_at) AS created_at,
@@ -876,6 +885,8 @@ def load_dialogue_history_index(
                     row["dialog_id"] = str(row.get("dialog_id") or "")
                     row["conversation_id"] = str(row.get("conversation_id") or "")
                     row["title"] = str(row.get("title") or row.get("user_text") or "Сохранённый диалог")
+                    row["topic_label"] = str(row.get("topic_label") or row.get("title") or row.get("user_text") or "Сохранённый диалог")
+                    row["relation"] = str(row.get("relation") or "")
                     row["user_text"] = str(row.get("user_text") or "")
                     row["april_text"] = str(row.get("april_text") or "")
                     row["created_at"] = float(row.get("created_at") or 0.0)
@@ -890,6 +901,74 @@ def load_dialogue_history_index(
                 }
     except psycopg2.errors.UndefinedTable:
         return None
+    finally:
+        conn.close()
+
+
+
+def load_dialogue_history_details(
+    user_id: Any,
+    message_ids: list[str],
+    *,
+    timestamp: float | int | datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Load heavyweight dialogue payloads only for selected, retained memory pairs.
+
+    History listing and topic matching use ``load_dialogue_history_index``. This
+    function is the second-stage read for the chosen topic and intentionally
+    fetches JSONB scene/render payloads only for the selected message IDs.
+    """
+    uid = str(user_id or "").strip()
+    ids = list(dict.fromkeys(str(value or "").strip() for value in (message_ids or []) if str(value or "").strip()))
+    if not uid or not ids:
+        return []
+    conn = get_conn()
+    if not conn:
+        return []
+    current = now() if timestamp is None else (
+        timestamp.astimezone(timezone.utc)
+        if isinstance(timestamp, datetime)
+        else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
+    )
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                if not _is_authenticated_cursor(cur, uid):
+                    return []
+                cur.execute(
+                    """
+                    SELECT id, user_id, created_at, retention_hours, turn_index,
+                           user_text, april_text, user_text_en, april_text_en,
+                           language, relation, dialog_id, conversation_id,
+                           message_id, interpretation_id,
+                           structured_request, structured_response
+                    FROM dialogue_memory
+                    WHERE user_id = %s
+                      AND created_at <= %s
+                      AND created_at > %s - INTERVAL '24 hours'
+                      AND created_at + (
+                          GREATEST(12, LEAST(24, COALESCE(retention_hours, 12)))
+                          * INTERVAL '1 hour'
+                      ) > %s
+                      AND (
+                          message_id = ANY(%s)
+                          OR ('legacy-memory-' || id::text) = ANY(%s)
+                      )
+                    ORDER BY created_at ASC, turn_index ASC, id ASC
+                    """,
+                    (uid, current, current, current, ids, ids),
+                )
+                rows = [dict(row) for row in cur.fetchall()]
+                for row in rows:
+                    created = row.get("created_at")
+                    if isinstance(created, datetime):
+                        row["created_at"] = created.astimezone(timezone.utc).timestamp()
+                    elif row.get("created_at") is not None:
+                        row["created_at"] = float(row["created_at"])
+                    row["message_id"] = str(row.get("message_id") or f"legacy-memory-{row.get('id')}")
+                return rows
+    except psycopg2.errors.UndefinedTable:
+        return []
     finally:
         conn.close()
 
