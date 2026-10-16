@@ -1108,8 +1108,10 @@ def _infer_dialogue_act_profile(
         "redo", "revise", "rewrite", "fix that", "make it better", "could be better", "try again", "do it differently",
     )
     correction_terms = (
-        "не так", "не то", "не это", "не совсем", "я имел в виду", "я имела в виду",
-        "я про другое", "не об этом", "не об этом речь", "поправка", "уточню",
+        "не так", "не то", "не это", "не совсем", "я имел в виду", "я имел ввиду",
+        "я имела в виду", "я имела ввиду", "я про другое", "не об этом", "не об этом речь",
+        "поправка", "уточню", "я не про", "я не об", "не про это спрашивал",
+        "не про это спрашивала", "я не это спрашивал", "я не это спрашивала",
         "not that", "not what i meant", "i meant", "that's not right",
     )
     clarification_terms = (
@@ -1143,7 +1145,7 @@ def _infer_dialogue_act_profile(
     correction_of_active = bool(
         not explicit_topic_introduction and short and (correction or dissatisfaction or revision_request)
         and ((not meaningful_subjects and not numeric_anchors) or has_deictic_reference or topic_reference_fragment or bool(re.search(
-            r"\b(?:я\s+имел\w*\s+в\s+виду|я\s+имела\s+в\s+виду|ты\s+не\s+понял\w*|ты\s+меня\s+не\s+понима\w*)\b",
+            r"\b(?:я\s+имел\w*\s+в\s*(?:виду|ввиду)|я\s+имела\w*\s+в\s*(?:виду|ввиду)|я\s+не\s+про\b|не\s+про\s+.+\s+спрашивал\w*|не\s+про\s+.+\s+спрашивала\w*|ты\s+не\s+понял\w*|ты\s+меня\s+не\s+понима\w*)\b",
             low,
         )))
     )
@@ -1224,9 +1226,14 @@ def _infer_dialogue_act_profile(
         "context_dependent_reaction": context_dependent_reaction,
         "topic_reference_fragment": bool(topic_reference_fragment),
         "tone": tone,
-        "recommended_response_action": recommended_response_action,
+        "recommended_response_action": (
+            "ACKNOWLEDGE_COMPLETED_RESULT_WITHOUT_REPEATING"
+            if acknowledgement and len(tokens) <= 2 and not has_independent_payload
+            else recommended_response_action
+        ),
         "pragmatic_features": {
             "acknowledgement_or_agreement": bool(acknowledgement),
+            "bare_acknowledgement": bool(acknowledgement and len(tokens) <= 2 and not has_independent_payload),
             "negation_or_disagreement": bool(negation),
             "correction": bool(correction),
             "gratitude": bool(gratitude),
