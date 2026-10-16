@@ -741,6 +741,8 @@ _CONTEXT_SIGNATURE_GENERIC = {
     "fix", "correct", "data", "value", "values", "chart", "graph", "table",
     "formula", "price", "cost", "growth", "fall", "day", "days", "week", "weeks",
     "month", "months", "year", "years", "uah", "uah.", "usd", "dollar", "dollars",
+    # Short English feedback/questions are discourse markers, not topic names.
+    "what", "mean", "hate", "nice", "good", "okay", "thanks", "thank", "agree",
 }
 _CONTEXT_SIGNATURE_REFERENCES = {
     "это", "этого", "этой", "этом", "эту", "этот", "эта", "эти", "этих",
@@ -769,6 +771,17 @@ _CONTEXT_SIGNATURE_DISCOURSE_ROOTS = (
     "придум", "предложи", "почем", "почему", "зачем", "открыл", "изобрел", "изобрёл",
     "доказал", "обосновал", "считал", "называл", "формул", "график", "таблиц",
     "диаграмм", "уравнен", "данн", "значен",
+    # Short interpersonal reactions must not be misread as named topic entities.
+    "спасибо", "спасиб", "благодар", "классн", "крут", "отлич", "прекрас", "здоров",
+    "молодц", "понят", "непон", "понял", "поняла", "соглас", "правил", "верн", "точн",
+    "именно", "ладн", "опять", "ужас", "нрав", "бесит", "раздраж", "разочар",
+    "передел", "перепиш", "исправ", "улучш", "поправ", "отнюд", "ошиб", "мимо",
+    "получ", "виду", "смысл", "лучше",
+    # English conversational reactions are not external topic entities.
+    "thank", "thanks", "appreci", "great", "brilliant", "nice", "perfect",
+    "wonderful", "excellent", "awesome", "good", "wrong", "misunderstood",
+    "understand", "disagree", "agree", "hate", "frustrat", "annoy", "irritat",
+    "revise", "rewrite", "improve", "redo", "fix", "correct", "mean", "what",
 )
 
 _PARTICIPANT_SPEAKER_WORDS = {
@@ -816,6 +829,13 @@ def _context_signature(text: Any) -> dict[str, Any]:
             continue
         if len(token) < 4:
             continue
+        # Normalize common inflected/topic-level variants before short stemming.
+        token = {
+            "стихи": "стих", "стиха": "стих", "стихом": "стих", "стихе": "стих",
+            "стихотворение": "стих", "стихотворения": "стих", "стихотворению": "стих",
+            "стихотворением": "стих", "стихотворении": "стих", "стихотворений": "стих",
+            "поэтический": "поэзия", "поэтическая": "поэзия", "поэтическое": "поэзия",
+        }.get(token, token)
         # A small morphological stem keeps inflected Russian nouns aligned.
         subjects.add(token[:5] if len(token) >= 5 else token)
     reference_hits = token_set & _CONTEXT_SIGNATURE_REFERENCES
@@ -958,6 +978,50 @@ def _looks_like_context_dependent_question(
     return False
 
 
+
+def _looks_like_topic_reference_fragment(
+    text: str,
+    *,
+    explicit_topic_introduction: bool = False,
+) -> bool:
+    """Recognise a short topic pointer that should search memory before treating it as new.
+
+    Examples include “про стих”, “я про Premium”, and “я имел в виду тот график”.
+    A concrete instruction such as “расскажи про Эйнштейна” is not a fragment and
+    keeps the normal new-information path. The state manager still decides whether
+    a real matching memory entry exists; this helper only asks it to look.
+    """
+    low, tokens = _semantic_normalize(text)
+    if not low or len(tokens) > 10 or explicit_topic_introduction:
+        return False
+    if _detect_requested_outputs(text) != ["text"]:
+        return False
+    # Requests with an independent action are tasks, not bare topic pointers.
+    action = re.search(
+        r"\b(?:расскажи|расскажите|объясни|объясните|напиши|напишите|опиши|опишите|"
+        r"покажи|построй|создай|сделай|вычисли|сравни|найди|проверь|проанализируй|"
+        r"продолжи|перечисли|нарисуй|tell|describe|explain|write|show|build|create|"
+        r"make|calculate|compare|find|check|analyze|continue)\b",
+        low,
+    )
+    # A self-correction is a memory pointer even when it names the intended topic.
+    correction_pointer = bool(re.search(
+        r"\b(?:я\s+)?(?:имел|имела|имели)\s+в\s+виду\b|"
+        r"\bя\s+говорю\s+про\b|\bя\s+именно\s+про\b|"
+        r"\bне\s+это\s+имел\w*\s+в\s+виду\b",
+        low,
+    ))
+    if correction_pointer:
+        return True
+    if action:
+        return False
+    pointer = re.match(
+        r"^(?:(?:а|и|ну|так|нет|не)\s+)?(?:(?:я|мы)\s+)?(?:именно\s+)?"
+        r"(?:про|об|обо|насч[её]т|относительно|по\s+поводу|about|regarding)\s+\S+",
+        low,
+    )
+    return bool(pointer)
+
 def _infer_dialogue_act_profile(
     text: str,
     *,
@@ -966,19 +1030,20 @@ def _infer_dialogue_act_profile(
     answer_followup: bool,
     continuation_action: bool,
     explicit_topic_introduction: bool,
+    topic_reference_fragment: bool = False,
 ) -> dict[str, Any]:
-    """Describe the user's speech act without treating keywords as topic switches.
+    """Classify conversational intent without turning reaction wording into a topic.
 
-    The profile is advisory metadata for active-dialogue retrieval. A short bare
-    agreement/rejection can refer to the immediately preceding turn; a message
-    that introduces its own subject or deliverable must remain a new request.
+    All sentiment/reaction signals are advisory. They only bind to the active
+    exchange when the message does not clearly introduce a self-contained new task.
     """
     low, tokens = _semantic_normalize(text)
     if not tokens:
         return {
             "speech_act": "EMPTY", "communicative_act": "EMPTY",
             "pragmatic_intent": "NONE", "message_function": "EMPTY",
-            "context_dependent_reaction": False,
+            "context_dependent_reaction": False, "topic_reference_fragment": False,
+            "tone": "NEUTRAL", "recommended_response_action": "ANSWER_NORMALLY",
             "pragmatic_features": {},
         }
 
@@ -986,32 +1051,62 @@ def _infer_dialogue_act_profile(
     signature = _context_signature(text)
     subjects = signature.get("subject_terms") if isinstance(signature, dict) else []
     output_forms = signature.get("output_forms") if isinstance(signature, dict) else []
-    # The context-signature layer is intentionally permissive. Filter conversational
-    # fillers here so words like "понятно", "ладно" or "объясни" are not mistaken
-    # for a newly introduced topic.
     non_topical_roots = (
-        "понят", "спаси", "хорош", "ладн", "молод", "отлич", "соглас",
-        "правиль", "точн", "верн", "ага", "угу", "да", "нет", "неа",
-        "отнюд", "подроб", "поясн", "объясн", "уточн", "разъясн",
-        "расшифр", "докаж", "обоснуй", "обоснуйте", "имел", "имела",
-        "виду", "друго", "смысл", "так", "это",
+        "понят", "спаси", "благодар", "хорош", "ладн", "молод", "отлич", "здоров",
+        "прекрас", "классн", "крут", "соглас", "правиль", "точн", "верн", "ага", "угу",
+        "да", "нет", "неа", "отнюд", "подроб", "поясн", "объясн", "уточн", "разъясн",
+        "расшифр", "докаж", "обоснуй", "обоснуйте", "имел", "имела", "имели", "виду",
+        "друго", "смысл", "так", "это", "получ", "непон", "понял", "поняла", "нрав",
+        "ужас", "бесит", "раздраж", "разочар", "передел", "перепиш", "исправ", "улучш",
+        "поправ", "ошиб", "мимо", "передум", "неверн", "неправил", "именн", "прави",
+        "согла", "опять", "лучше",
     )
     meaningful_subjects = [
         _text(term) for term in (subjects or [])
         if _text(term) and not any(_text(term).startswith(root) for root in non_topical_roots)
     ]
-    has_independent_payload = bool(meaningful_subjects or output_forms or signature.get("numeric_anchors"))
-    short = len(tokens) <= 7
+    numeric_anchors = signature.get("numeric_anchors") if isinstance(signature.get("numeric_anchors"), list) else []
+    has_independent_payload = bool(meaningful_subjects or output_forms or numeric_anchors)
+    short = len(tokens) <= 9
+    has_deictic_reference = bool(token_set & {
+        "это", "этот", "эта", "эту", "этого", "этой", "этом", "эти", "тот", "та", "ту",
+        "того", "он", "она", "оно", "они", "его", "ее", "её", "ей", "ему", "им", "их",
+        "it", "this", "that", "he", "she", "they", "him", "her", "them",
+    })
 
     agreement_terms = {
-        "да", "ага", "угу", "ок", "окей", "ладно", "хорошо", "верно", "точно",
-        "именно", "правильно", "согласен", "согласна", "согласны", "конечно",
-        "yes", "yeah", "yep", "ok", "okay", "right", "exactly", "correct", "agreed",
+        "да", "ага", "угу", "ок", "окей", "ладно", "хорошо", "верно", "точно", "именно",
+        "правильно", "согласен", "согласна", "согласны", "конечно", "yes", "yeah", "yep",
+        "ok", "okay", "right", "exactly", "correct", "agreed",
     }
     rejection_terms = {
         "нет", "неа", "неверно", "неправильно", "ошибка", "мимо", "отнюдь",
         "no", "nope", "wrong", "incorrect",
     }
+    gratitude_terms = (
+        "спасибо", "спасибки", "благодарю", "благодарен", "благодарна", "очень признателен",
+        "ценю это", "thanks", "thank you", "many thanks", "appreciate it",
+    )
+    positive_terms = (
+        "классно", "круто", "отлично", "здорово", "прекрасно", "замечательно", "молодец",
+        "хорошо получилось", "вот это хорошо", "супер", "great", "brilliant", "well done",
+        "looks good", "nice work", "perfect",
+    )
+    dissatisfaction_terms = (
+        "не нравится", "не устраивает", "не то", "не так", "неправильно", "мимо", "ужасно",
+        "раздражает", "бесит", "не то что я просил", "не то что я просила",
+        "ты не поняла", "ты не понял", "вы не поняли", "опять не понял", "опять не поняла",
+        "не понимаешь меня", "ты меня не понимаешь", "не то имел в виду", "не то имела в виду",
+        "not what i asked", "you misunderstood", "you did not understand", "i don't understand", "i do not understand",
+        "you don't understand me", "you do not understand me", "i hate this", "i hate it", "this is annoying",
+        "i'm frustrated", "im frustrated", "doesn't work", "does not work",
+    )
+    revision_terms = (
+        "переделай", "переделать", "перепиши", "переписать", "исправь", "поправь", "улучши",
+        "сделай иначе", "попробуй иначе", "по другому", "по-другому", "заново", "с нуля",
+        "можно лучше", "можно было лучше", "а можно лучше", "давай лучше", "надо лучше",
+        "redo", "revise", "rewrite", "fix that", "make it better", "could be better", "try again", "do it differently",
+    )
     correction_terms = (
         "не так", "не то", "не это", "не совсем", "я имел в виду", "я имела в виду",
         "я про другое", "не об этом", "не об этом речь", "поправка", "уточню",
@@ -1019,56 +1114,71 @@ def _infer_dialogue_act_profile(
     )
     clarification_terms = (
         "поясни", "поясните", "уточни", "уточните", "разъясни", "разъясните",
-        "что ты имеешь в виду", "что вы имеете в виду", "в каком смысле",
-        "подробнее", "расшифруй", "clarify", "what do you mean", "elaborate",
+        "что ты имеешь в виду", "что вы имеете в виду", "в каком смысле", "подробнее",
+        "расшифруй", "clarify", "what do you mean", "elaborate",
     )
     explanation_terms = (
-        "объясни", "объясните", "докажи", "докажите", "обоснуй", "обоснуйте",
-        "почему", "как это работает", "как это получается", "explain", "prove",
-        "why does", "why is", "how does",
+        "объясни", "объясните", "докажи", "докажите", "обоснуй", "обоснуйте", "почему",
+        "как это работает", "как это получается", "explain", "prove", "why does", "why is", "how does",
     )
+    has_phrase = lambda phrases: any(phrase in low for phrase in phrases)
+    gratitude = short and has_phrase(gratitude_terms)
+    positive_evaluation = short and has_phrase(positive_terms)
+    dissatisfaction = has_phrase(dissatisfaction_terms)
+    revision_request = has_phrase(revision_terms) and short
     acknowledgement = short and any(
-        token in agreement_terms or any(token.startswith(root) for root in ("соглас", "правиль", "точн"))
-        for token in tokens
+        token in agreement_terms or token.startswith(("соглас", "правиль", "точн")) for token in tokens
     ) and not any(token in rejection_terms or token in {"не", "никак", "ни"} for token in tokens)
     negation = short and (
         any(token in rejection_terms for token in tokens)
         or ("не" in token_set and bool(token_set & {"так", "то", "это", "совсем", "согласен", "согласна", "верно", "правильно"}))
-        or bool(re.search(r"\b(?:не\s+соглас\w*|не\s+так|не\s+то|не\s+это|я\s+не\s+это)\b", low))
+        or bool(re.search(r"\b(?:не\s+соглас\w*|не\s+так|не\s+то|не\s+это|я\s+не\s+это|i\s+(?:do\s+not|don\s+t)\s+agree|not\s+really|no\s+way)\b", low))
     )
-    correction = any(term in low for term in correction_terms) or (
+    correction = has_phrase(correction_terms) or dissatisfaction or (
         negation and bool(token_set & {"это", "то", "так", "другое", "имел", "имела", "виду"})
     )
-    clarification = any(term in low for term in clarification_terms)
-    explanation_request = any(term in low for term in explanation_terms) or (interrogative and bool(token_set & {"почему", "как", "зачем", "why", "how"}))
-    has_deictic_reference = bool(token_set & {
-        "это", "этот", "эта", "эту", "этого", "этой", "этом", "эти", "тот", "та",
-        "ту", "того", "той", "он", "она", "оно", "они", "его", "ее", "ей", "ему",
-        "им", "их", "it", "this", "that", "he", "she", "they", "him", "her", "them",
-    })
-    own_topic_or_output = explicit_topic_introduction or has_independent_payload
+    clarification = has_phrase(clarification_terms)
+    explanation_request = has_phrase(explanation_terms) or (interrogative and bool(token_set & {"почему", "как", "зачем", "why", "how"}))
+    own_topic_or_output = explicit_topic_introduction or (has_independent_payload and not topic_reference_fragment)
+    correction_of_active = bool(
+        not explicit_topic_introduction and short and (correction or dissatisfaction or revision_request)
+        and ((not meaningful_subjects and not numeric_anchors) or has_deictic_reference or topic_reference_fragment or bool(re.search(
+            r"\b(?:я\s+имел\w*\s+в\s+виду|я\s+имела\s+в\s+виду|ты\s+не\s+понял\w*|ты\s+меня\s+не\s+понима\w*)\b",
+            low,
+        )))
+    )
     context_dependent_reaction = bool(
-        not own_topic_or_output
-        and not explicit_topic_introduction
+        not explicit_topic_introduction
         and (
-            (acknowledgement and len(tokens) <= 4)
-            or negation
-            or correction
-            or ((clarification or explanation_request) and short and not context_dependent_question)
+            (acknowledgement and len(tokens) <= 5 and not has_independent_payload)
+            or (gratitude and not has_independent_payload)
+            or (positive_evaluation and not has_independent_payload)
+            or correction_of_active
+            or (negation and (not has_independent_payload or has_deictic_reference))
+            or ((clarification or explanation_request) and short and not has_independent_payload)
+            or topic_reference_fragment
         )
     )
 
-    if correction:
-        speech_act = "CORRECTION"
+    if correction_of_active or correction:
+        speech_act = "CORRECTION_OR_REVISION"
+    elif dissatisfaction:
+        speech_act = "FRUSTRATION_OR_DISSATISFACTION"
+    elif revision_request:
+        speech_act = "REVISION_REQUEST"
     elif negation:
         speech_act = "NEGATION_OR_DISAGREEMENT"
+    elif gratitude:
+        speech_act = "GRATITUDE_OR_APPRECIATION"
+    elif positive_evaluation:
+        speech_act = "POSITIVE_EVALUATION"
     elif acknowledgement:
         speech_act = "AGREEMENT_OR_ACKNOWLEDGEMENT"
     elif clarification:
         speech_act = "CLARIFICATION_REQUEST"
     elif explanation_request or answer_followup:
         speech_act = "EXPLANATION_REQUEST"
-    elif context_dependent_question or has_deictic_reference:
+    elif context_dependent_question or has_deictic_reference or topic_reference_fragment:
         speech_act = "REFERENTIAL_CONTINUATION"
     elif continuation_action:
         speech_act = "CONTINUATION_REQUEST"
@@ -1077,20 +1187,34 @@ def _infer_dialogue_act_profile(
     else:
         speech_act = "STATEMENT_OR_REQUEST"
 
-    if context_dependent_reaction or context_dependent_question or answer_followup:
-        communicative_act = "CONTINUATION"
-    elif acknowledgement:
-        communicative_act = "ACKNOWLEDGEMENT"
-    elif negation or correction:
-        communicative_act = "RESPONSE_OR_CORRECTION"
+    if correction_of_active or revision_request:
+        communicative_act = "REVISE_PREVIOUS_RESPONSE"
+        recommended_response_action = "REPAIR_OR_IMPROVE_PREVIOUS_RESPONSE"
+        tone = "DISSATISFIED" if dissatisfaction or negation else "CORRECTIVE"
+    elif gratitude:
+        communicative_act = "APPRECIATION_AND_CONTINUE"
+        recommended_response_action = "ACKNOWLEDGE_BRIEFLY_AND_CONTINUE_NATURALLY"
+        tone = "GRATEFUL"
+    elif positive_evaluation or acknowledgement:
+        communicative_act = "ACKNOWLEDGEMENT_OR_POSITIVE_FEEDBACK"
+        recommended_response_action = "ACKNOWLEDGE_BRIEFLY_AND_CONTINUE_NATURALLY"
+        tone = "POSITIVE"
+    elif negation or dissatisfaction:
+        communicative_act = "RESPOND_TO_DISAGREEMENT"
+        recommended_response_action = "RECHECK_PREVIOUS_RESPONSE_AND_CORRECT_IF_NEEDED"
+        tone = "DISSATISFIED"
     elif clarification:
         communicative_act = "CLARIFICATION"
-    elif explanation_request:
-        communicative_act = "EXPLANATION"
-    elif continuation_action:
-        communicative_act = "CONTINUATION"
+        recommended_response_action = "CLARIFY_THE_PREVIOUS_POINT"
+        tone = "CURIOUS_OR_UNCERTAIN"
+    elif context_dependent_question or answer_followup or topic_reference_fragment:
+        communicative_act = "CONTINUE_ACTIVE_DIALOGUE"
+        recommended_response_action = "ANSWER_FROM_THE_RELEVANT_DIALOGUE_CONTEXT"
+        tone = "NEUTRAL"
     else:
         communicative_act = "NEW_OR_STANDALONE"
+        recommended_response_action = "ANSWER_NORMALLY"
+        tone = "NEUTRAL"
 
     return {
         "speech_act": speech_act,
@@ -1098,18 +1222,25 @@ def _infer_dialogue_act_profile(
         "pragmatic_intent": speech_act.lower(),
         "message_function": communicative_act.lower(),
         "context_dependent_reaction": context_dependent_reaction,
+        "topic_reference_fragment": bool(topic_reference_fragment),
+        "tone": tone,
+        "recommended_response_action": recommended_response_action,
         "pragmatic_features": {
             "acknowledgement_or_agreement": bool(acknowledgement),
             "negation_or_disagreement": bool(negation),
             "correction": bool(correction),
+            "gratitude": bool(gratitude),
+            "positive_evaluation": bool(positive_evaluation),
+            "frustration_or_dissatisfaction": bool(dissatisfaction),
+            "revision_request": bool(revision_request),
             "clarification_request": bool(clarification),
             "explanation_request": bool(explanation_request),
             "continuation_request": bool(continuation_action),
             "deictic_reference": bool(has_deictic_reference),
+            "topic_reference_fragment": bool(topic_reference_fragment),
             "has_independent_payload": bool(has_independent_payload),
         },
     }
-
 
 def interpret_request_semantics(text: str) -> dict[str, Any]:
     """Infer request intent and retrieval direction before splitting into tasks.
@@ -1236,6 +1367,9 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         source, interrogative=interrogative,
         explicit_topic_introduction=explicit_topic_introduction,
     )
+    topic_reference_fragment = _looks_like_topic_reference_fragment(
+        source, explicit_topic_introduction=explicit_topic_introduction,
+    )
     dialogue_act_profile = _infer_dialogue_act_profile(
         source,
         interrogative=interrogative,
@@ -1243,6 +1377,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         answer_followup=answer_followup,
         continuation_action=continuation_action,
         explicit_topic_introduction=explicit_topic_introduction,
+        topic_reference_fragment=topic_reference_fragment,
     )
     context_dependent_reaction = bool(dialogue_act_profile.get("context_dependent_reaction"))
 
@@ -1281,19 +1416,22 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
             "EXPLICIT_TIME_WINDOW" if has_explicit_time_window else
             ("TODAY" if today_reference else ("RECENT_WINDOW" if recent_reference else ("PAST_DIALOGUE" if past_reference else ("FUTURE_PLAN_CONTEXT" if temporal_future else "AVAILABLE_HISTORY"))))
         )
-    elif context_dependent_reaction:
-        # Bare agreement/disagreement belongs to the active turn unless it
-        # introduces an independent subject or concrete deliverable.
+    elif context_dependent_reaction or topic_reference_fragment:
+        # Reactions and terse topic pointers request a memory-assisted interpretation.
+        # The state manager must still verify a real match; this is not a forced relation.
         primary_intent = "TOPIC_CONTINUATION"
-        direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
-        topic_reference = "PREVIOUS_OR_ACTIVE_TOPIC"
+        direction = "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"
+        topic_reference = "TOPIC_FRAGMENT" if topic_reference_fragment else "PREVIOUS_OR_ACTIVE_TOPIC"
         time_scope = "ACTIVE_DIALOGUE"
         requires_memory = True
         history_request = False
         search_scope = "TOPIC_OR_ACTIVE_CONTEXT"
-        intent_score = 3
+        intent_score = 4 if topic_reference_fragment else 3
         relation_hint = "CONTINUE"
-        reason = "context_dependent_agreement_or_rejection"
+        reason = (
+            "short_topic_pointer_requires_history_match" if topic_reference_fragment
+            else "context_dependent_reaction_to_previous_response"
+        )
     elif context_dependent_question:
         primary_intent = "TOPIC_CONTINUATION"
         direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
@@ -1368,6 +1506,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "answer_followup": bool(answer_followup),
         "context_dependent_question": bool(context_dependent_question),
         "context_dependent_reaction": bool(context_dependent_reaction),
+        "topic_reference_fragment": bool(topic_reference_fragment),
         "self_reference": bool(self_reference),
         "past_reference": bool(past_reference),
         "today_reference": bool(today_reference),
@@ -1396,6 +1535,8 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "pragmatic_intent": dialogue_act_profile.get("pragmatic_intent"),
         "message_function": dialogue_act_profile.get("message_function"),
         "pragmatic_features": dialogue_act_profile.get("pragmatic_features", {}),
+        "tone": dialogue_act_profile.get("tone", "NEUTRAL"),
+        "recommended_response_action": dialogue_act_profile.get("recommended_response_action", "ANSWER_NORMALLY"),
         "features": features,
         "reason": reason,
         "context_signature": _context_signature(source),
@@ -2012,6 +2153,13 @@ def build_interpretation(
         "dialogue": {
             "relation": relation,
             "is_new_dialogue": relation != "CONTINUE",
+            "interaction_profile": {
+                "speech_act": _text(request_semantics.get("speech_act") or "STATEMENT_OR_REQUEST"),
+                "communicative_act": _text(request_semantics.get("communicative_act") or "NEW_OR_STANDALONE"),
+                "tone": _text(request_semantics.get("tone") or "NEUTRAL"),
+                "recommended_response_action": _text(request_semantics.get("recommended_response_action") or "ANSWER_NORMALLY"),
+                "context_dependent_reaction": bool(request_semantics.get("features", {}).get("context_dependent_reaction")) if isinstance(request_semantics.get("features"), dict) else False,
+            },
             "continuation_context": {
                 "active_topic": _text(memory.get("active_topic")),
                 "reason": _text(memory.get("reason")),
@@ -2110,7 +2258,22 @@ def build_interpretation(
             "improvement_policy": "Improve the requested result while preserving unaffected behavior; do not invent missing source content.",
             "output_plan": requested_outputs,
             "semantic_interpretation": request_semantics,
-            "semantic_interpretation_version": "april_request_semantics_v1",
+            "semantic_interpretation_version": "april_request_semantics_v3_continuity_actions",
+            "dialogue_communication": {
+                "principle": "Respond to the user's conversational move, not only to the literal words.",
+                "speech_act": _text(request_semantics.get("speech_act") or "STATEMENT_OR_REQUEST"),
+                "communicative_act": _text(request_semantics.get("communicative_act") or "NEW_OR_STANDALONE"),
+                "tone": _text(request_semantics.get("tone") or "NEUTRAL"),
+                "recommended_response_action": _text(request_semantics.get("recommended_response_action") or "ANSWER_NORMALLY"),
+                "instructions": [
+                    "When context says CONTINUE and evidence is present, continue the conversation naturally from the relevant prior point; do not restart the subject or recite internal search metadata.",
+                    "Mention past discussion in ordinary conversational language only when it helps answer the user or the user asks what was discussed.",
+                    "Treat gratitude and positive feedback briefly and naturally, then continue only when the user also gave a next step.",
+                    "Treat disagreement, dissatisfaction, or a revision request as feedback on the previous answer when supported by context; re-check the previous answer and correct/improve it instead of defending it blindly.",
+                    "Use only selected dialogue-memory evidence for claims about what was previously said. If the requested time range has no entries, state that honestly and offer nearby retained entries as nearby, not as matches inside the requested range.",
+                    "A topic pointer is a retrieval hint, not proof that a memory exists. If no matching prior record is found, answer as a new request or ask a concise clarification instead of inventing continuity.",
+                ],
+            },
         },
     }
     _apr_timing_log("build_interpretation", interpretation_started,
