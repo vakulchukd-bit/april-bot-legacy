@@ -45,7 +45,7 @@ from blocks.Premium_state_manager import (
 from storage import (
     activate_test_premium, find_or_create_user, get_user_plan,
     get_user_subscription_status, init_db, is_authenticated_user, resolve_user_id,
-    delete_april_account,
+    delete_april_account, load_dialogue_history_index,
 )
 
 HOST = os.getenv("HOST", "0.0.0.0")
@@ -686,6 +686,47 @@ def _history_item(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _history_index_payload(user_id: str) -> tuple[int, dict[str, Any]]:
+    """Serve the history screen's lightweight list without loading scene JSON."""
+    if not user_id:
+        return 400, {"success": False, "error": "USER_ID_REQUIRED"}
+    started = time.perf_counter()
+    try:
+        snapshot = load_dialogue_history_index(user_id)
+        if snapshot is None:
+            return 503, {"success": False, "error": "HISTORY_UNAVAILABLE"}
+        if not snapshot.get("authenticated"):
+            return 401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+        rows = snapshot.get("rows") if isinstance(snapshot.get("rows"), list) else []
+        history = []
+        for row in reversed(rows):
+            if not isinstance(row, dict):
+                continue
+            history.append({key: row.get(key) for key in (
+                "id", "message_id", "dialog_id", "conversation_id", "title",
+                "user_text", "april_text", "created_at", "turn_index"
+            )})
+        _apr_timing_log(
+            "history_index_loaded",
+            started,
+            user_key=_apr_diag_ref(snapshot.get("user_id") or user_id),
+            plan=str(snapshot.get("plan") or "free"),
+            count=len(history),
+            payload_mode="lightweight_index",
+        )
+        return 200, {
+            "success": True,
+            "user_id": str(snapshot.get("user_id") or user_id),
+            "window_hours": 24 if int(snapshot.get("window_hours") or 12) == 24 else 12,
+            "count": len(history),
+            "history": history,
+            "canonical_route": CANONICAL_CHAT_ROUTE,
+        }
+    except Exception as exc:
+        print(f"[APRIL_HISTORY] INDEX_READ_ERROR type={type(exc).__name__}", flush=True)
+        return 503, {"success": False, "error": "HISTORY_UNAVAILABLE"}
+
+
 def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str, Any]]:
     """Expose the authenticated user's canonical memory through their plan engine."""
     if not user_id:
@@ -893,13 +934,24 @@ class AprilHandler(BaseHTTPRequestHandler):
                 if not self._service_authorized():
                     self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
                     return
+                history_request_started = time.perf_counter()
                 supplied_user_id = _text(self.headers.get("X-April-User-Id"))
-                user_id = resolve_user_id(supplied_user_id) or ""
                 message_id = _text(self.headers.get("X-April-Message-Id"))
-                _apr_timing_log("history_request", user_key=_apr_diag_ref(user_id or supplied_user_id), has_message_id=bool(message_id))
-                status, payload = _history_payload(user_id, message_id)
-                _apr_timing_log("history_response", user_key=_apr_diag_ref(user_id), status=status,
-                                count=int(payload.get("count") or 0), message_count=len(payload.get("messages") or []))
+                # Listing uses a single lightweight indexed query. The full scene
+                # payload and topic-vector retrieval are loaded only after a user
+                # explicitly opens one saved entry.
+                user_key = supplied_user_id
+                if message_id:
+                    user_id = resolve_user_id(supplied_user_id) or ""
+                    user_key = user_id or supplied_user_id
+                    status, payload = _history_payload(user_id, message_id)
+                else:
+                    status, payload = _history_index_payload(supplied_user_id)
+                    user_key = str(payload.get("user_id") or supplied_user_id)
+                _apr_timing_log("history_response", history_request_started,
+                                user_key=_apr_diag_ref(user_key), status=status,
+                                count=int(payload.get("count") or 0), message_count=len(payload.get("messages") or []),
+                                mode="restore" if bool(message_id) else "index")
                 self._send_json(status, payload)
                 return
         if parsed.path == "/" or parsed.path == CANONICAL_CHAT_ROUTE:
