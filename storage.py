@@ -306,6 +306,26 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_created ON payments(user_id, created_at DESC)")
 
+                # Premium support inbox. The cooldown is derived from the last
+                # ticket timestamp, so it survives browser/device changes and
+                # cannot be bypassed by clearing client storage.
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS premium_support_messages (
+                        id BIGSERIAL PRIMARY KEY,
+                        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        message TEXT NOT NULL,
+                        language TEXT NOT NULL DEFAULT 'en',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        admin_reply TEXT,
+                        replied_at TIMESTAMPTZ,
+                        admin_id TEXT
+                    )
+                    """
+                )
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_user_created ON premium_support_messages(user_id, created_at DESC)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_pending ON premium_support_messages(created_at ASC) WHERE admin_reply IS NULL")
+
                 # Detect first-time retention migration before CREATE/ALTER adds the field.
                 # This lets us backfill currently-verifiable Premium rows once instead of
                 # running a correlated update on every request (init_db is called by both executors).
@@ -1584,6 +1604,234 @@ def get_user_subscription_status(user_id):
                     "remaining_seconds": max(0, int(until_seconds - now_seconds)) if plan in {"lite", "premium"} else 0,
                     "has_premium_history": has_premium_history,
                 }
+    finally:
+        conn.close()
+
+
+SUPPORT_COOLDOWN_SECONDS = 24 * 60 * 60
+
+
+def _support_time_ms(value: Any) -> int | None:
+    if not value:
+        return None
+    try:
+        if isinstance(value, datetime):
+            stamp = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+            return int(stamp.timestamp() * 1000)
+        return int(float(value) * 1000)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _support_message_payload(row: dict[str, Any] | None, *, include_identity: bool = False) -> dict[str, Any] | None:
+    if not row:
+        return None
+    result = {
+        "id": int(row.get("id") or 0),
+        "message": str(row.get("message") or ""),
+        "language": str(row.get("language") or "en"),
+        "created_at_ms": _support_time_ms(row.get("created_at")),
+        "admin_reply": str(row.get("admin_reply") or "") or None,
+        "replied_at_ms": _support_time_ms(row.get("replied_at")),
+    }
+    if include_identity:
+        result.update({
+            "user_id": str(row.get("user_id") or ""),
+            "april_id": str(row.get("april_id") or ""),
+            "name": str(row.get("name") or ""),
+            "email": str(row.get("email") or ""),
+        })
+    return result
+
+
+def get_premium_support_status(user_id: Any) -> dict[str, Any] | None:
+    """Load the caller's latest support request and authoritative send cooldown.
+
+    This read is also allowed after Premium expires so a former Premium user can
+    still see the reply to an already submitted request. Sending remains gated
+    by the active database entitlement in send_premium_support_message().
+    """
+    raw = str(user_id or "").strip()
+    if not raw:
+        return None
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT user_id, april_id, email, provider, plan, subscription_until
+                   FROM users WHERE user_id = %s OR april_id = %s
+                   ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END LIMIT 1""",
+                (raw, raw, raw),
+            )
+            user = cur.fetchone()
+            if not _is_authenticated_row(user):
+                return None
+            canonical_id = str(user.get("user_id") or raw)
+            current = now()
+            until = float(user.get("subscription_until") or 0)
+            active_premium = str(user.get("plan") or "free").lower() == "premium" and until > current.timestamp()
+            cur.execute(
+                """SELECT id, user_id, message, language, created_at, admin_reply, replied_at
+                   FROM premium_support_messages WHERE user_id = %s
+                   ORDER BY created_at DESC, id DESC LIMIT 1""",
+                (canonical_id,),
+            )
+            row = cur.fetchone()
+            next_allowed = None
+            if row and row.get("created_at"):
+                created = row["created_at"]
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                next_allowed = created + timedelta(seconds=SUPPORT_COOLDOWN_SECONDS)
+            remaining = max(0, int((next_allowed - current).total_seconds())) if next_allowed else 0
+            return {
+                "success": True,
+                "active_premium": active_premium,
+                "can_send": bool(active_premium and remaining <= 0),
+                "next_allowed_at_ms": _support_time_ms(next_allowed),
+                "remaining_seconds": remaining,
+                "latest_message": _support_message_payload(dict(row) if row else None),
+            }
+    except Exception as exc:
+        print(f"[APRIL_SUPPORT] STATUS_ERROR type={type(exc).__name__}", flush=True)
+        return None
+    finally:
+        conn.close()
+
+
+def send_premium_support_message(user_id: Any, message: Any, language: Any = "en") -> dict[str, Any]:
+    """Insert a Premium support ticket with an atomic per-account 24h limit."""
+    raw = str(user_id or "").strip()
+    body = str(message or "").strip()
+    lang = str(language or "en").strip().lower()[:8] or "en"
+    if not raw:
+        return {"success": False, "error": "USER_ID_REQUIRED"}
+    if len(body) < 5:
+        return {"success": False, "error": "MESSAGE_TOO_SHORT"}
+    if len(body) > 4000:
+        return {"success": False, "error": "MESSAGE_TOO_LONG"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # Serialize send attempts for this account, including simultaneous
+                # requests arriving from separate tabs/devices.
+                cur.execute(
+                    """SELECT user_id, email, provider, plan, subscription_until
+                       FROM users WHERE user_id = %s OR april_id = %s
+                       ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
+                       LIMIT 1 FOR UPDATE""",
+                    (raw, raw, raw),
+                )
+                user = cur.fetchone()
+                if not _is_authenticated_row(user):
+                    return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+                canonical_id = str(user.get("user_id") or raw)
+                active = str(user.get("plan") or "free").lower() == "premium" and float(user.get("subscription_until") or 0) > now().timestamp()
+                if not active:
+                    return {"success": False, "error": "PREMIUM_REQUIRED"}
+                cur.execute(
+                    "SELECT created_at FROM premium_support_messages WHERE user_id = %s ORDER BY created_at DESC, id DESC LIMIT 1",
+                    (canonical_id,),
+                )
+                latest = cur.fetchone()
+                if latest and latest.get("created_at"):
+                    created = latest["created_at"]
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                    next_allowed = created + timedelta(seconds=SUPPORT_COOLDOWN_SECONDS)
+                    current = now()
+                    if current < next_allowed:
+                        return {
+                            "success": False,
+                            "error": "COOLDOWN_ACTIVE",
+                            "next_allowed_at_ms": _support_time_ms(next_allowed),
+                            "remaining_seconds": max(0, int((next_allowed - current).total_seconds())),
+                        }
+                cur.execute(
+                    """INSERT INTO premium_support_messages(user_id, message, language)
+                       VALUES (%s, %s, %s) RETURNING id, user_id, message, language, created_at, admin_reply, replied_at""",
+                    (canonical_id, body, lang),
+                )
+        status = get_premium_support_status(raw)
+        return status or {"success": False, "error": "SUPPORT_STATUS_UNAVAILABLE"}
+    except Exception as exc:
+        print(f"[APRIL_SUPPORT] SEND_ERROR type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "SUPPORT_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def list_premium_support_messages(limit: int = 100) -> dict[str, Any] | None:
+    """Return the administrator inbox, prioritizing unanswered Premium tickets."""
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        safe_limit = max(1, min(int(limit), 200))
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT s.id, s.user_id, s.message, s.language, s.created_at,
+                          s.admin_reply, s.replied_at, u.april_id, u.name, u.email
+                   FROM premium_support_messages s
+                   JOIN users u ON u.user_id = s.user_id
+                   ORDER BY (s.admin_reply IS NULL) DESC, s.created_at DESC, s.id DESC
+                   LIMIT %s""",
+                (safe_limit,),
+            )
+            rows = cur.fetchall() or []
+            return {"success": True, "messages": [
+                _support_message_payload(dict(row), include_identity=True) for row in rows
+            ]}
+    except Exception as exc:
+        print(f"[APRIL_SUPPORT] INBOX_ERROR type={type(exc).__name__}", flush=True)
+        return None
+    finally:
+        conn.close()
+
+
+def reply_premium_support_message(message_id: Any, reply: Any, admin_id: Any) -> dict[str, Any]:
+    """Save the first administrator reply for a request; replies cannot be spoofed by callers."""
+    try:
+        ticket_id = int(message_id)
+    except (TypeError, ValueError, OverflowError):
+        return {"success": False, "error": "MESSAGE_ID_INVALID"}
+    body = str(reply or "").strip()
+    admin = str(admin_id or "").strip()
+    if ticket_id <= 0:
+        return {"success": False, "error": "MESSAGE_ID_INVALID"}
+    if len(body) < 2:
+        return {"success": False, "error": "REPLY_TOO_SHORT"}
+    if len(body) > 4000:
+        return {"success": False, "error": "REPLY_TOO_LONG"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, admin_reply FROM premium_support_messages WHERE id = %s FOR UPDATE", (ticket_id,))
+                row = cur.fetchone()
+                if not row:
+                    return {"success": False, "error": "SUPPORT_MESSAGE_NOT_FOUND"}
+                if str(row.get("admin_reply") or "").strip():
+                    return {"success": False, "error": "SUPPORT_MESSAGE_ALREADY_REPLIED"}
+                cur.execute(
+                    """UPDATE premium_support_messages
+                       SET admin_reply = %s, replied_at = CURRENT_TIMESTAMP, admin_id = %s
+                       WHERE id = %s AND admin_reply IS NULL""",
+                    (body, admin, ticket_id),
+                )
+                if cur.rowcount != 1:
+                    return {"success": False, "error": "SUPPORT_MESSAGE_ALREADY_REPLIED"}
+        return {"success": True, "message_id": ticket_id}
+    except Exception as exc:
+        print(f"[APRIL_SUPPORT] REPLY_ERROR type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "SUPPORT_UNAVAILABLE"}
     finally:
         conn.close()
 
