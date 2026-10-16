@@ -51,7 +51,7 @@ from blocks.Premium_state_manager import (
 )
 
 
-PROCESSOR_VERSION = "april_premium_exkrutor_single_route_v3_semantic_context_gate"
+PROCESSOR_VERSION = "april_premium_exkrutor_single_route_v4_pragmatic_continuity"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -150,6 +150,20 @@ def _compact_question_search(
             "last_at": item.get("last_at") or item.get("topic_last_at"),
             "same_dialog": bool(item.get("same_dialog")),
         }
+        # Optional exact source text is forwarded only when State Manager has
+        # selected a verified matching DB pair. It is never reconstructed from a summary.
+        if item.get("preserve_source_text") is True:
+            compact.update({
+                "preserve_source_text": True,
+                "source_user_text": _text(item.get("source_user_text"))[:1800],
+                "source_april_text": _text(item.get("source_april_text"))[:5200],
+                "source_user_text_chars": item.get("source_user_text_chars"),
+                "source_april_text_chars": item.get("source_april_text_chars"),
+                "source_user_text_complete": bool(item.get("source_user_text_complete")),
+                "source_april_text_complete": bool(item.get("source_april_text_complete")),
+                "source_content_complete": bool(item.get("source_content_complete")),
+                "source_text_origin": _text(item.get("source_text_origin") or "dialogue_memory")[:40],
+            })
         # Do not reconstruct structured data from clipped text. Preserve the exact
         # source payload (including its source_message_id/checksum) only when it is
         # a real, value-bearing structure; Provider will validate/route it by source.
@@ -245,6 +259,11 @@ def _compact_question_search(
         "semantic_intent": _text(semantics.get("primary_intent") or ("HISTORY_RECALL" if history_request else "NEW_INFORMATION")),
         "search_direction": _text(semantics.get("direction") or ("SEARCH_DIALOGUE_HISTORY" if history_request else "ANSWER_NEW_REQUEST")),
         "time_scope": _text(semantics.get("time_scope") or "UNSPECIFIED"),
+        "speech_act": _text(semantics.get("speech_act") or "STATEMENT_OR_REQUEST"),
+        "communicative_act": _text(semantics.get("communicative_act") or "NEW_OR_STANDALONE"),
+        "tone": _text(semantics.get("tone") or "NEUTRAL"),
+        "recommended_response_action": _text(semantics.get("recommended_response_action") or "ANSWER_NORMALLY"),
+        "pragmatic_features": dict(semantics.get("pragmatic_features") or {}),
         "history_topics": history_topics,
         "topic_index": topic_index,
         "confidence": round(float(context.get("relation_confidence") or 0.0), 4),
@@ -1136,6 +1155,8 @@ async def execute(
             "pragmatic_intent": semantic_interpretation.get("pragmatic_intent"),
             "message_function": semantic_interpretation.get("message_function"),
             "pragmatic_features": semantic_interpretation.get("pragmatic_features", {}),
+            "tone": semantic_interpretation.get("tone", "NEUTRAL"),
+            "recommended_response_action": semantic_interpretation.get("recommended_response_action", "ANSWER_NORMALLY"),
             "features": semantic_interpretation.get("features", {}),
             "context_signature": semantic_interpretation.get("context_signature", {}),
         }
@@ -1191,7 +1212,14 @@ async def execute(
                     )),
                     "relation_hint": "NEW" if inherits_subject else ("HISTORY_LOOKUP" if question_item.get("history_request") else "CONTINUE" if question_item.get("requires_memory") else "NEW"),
                     "reason": "pronoun_inherits_subject_from_current_request" if inherits_subject else question_item.get("semantic_reason", ""),
-                    "features": {},
+                    "speech_act": question_item.get("speech_act") or (semantic_interpretation.get("speech_act") if index == 0 else ""),
+                    "communicative_act": question_item.get("communicative_act") or (semantic_interpretation.get("communicative_act") if index == 0 else ""),
+                    "pragmatic_intent": question_item.get("pragmatic_intent") or (semantic_interpretation.get("pragmatic_intent") if index == 0 else ""),
+                    "message_function": question_item.get("message_function") or (semantic_interpretation.get("message_function") if index == 0 else ""),
+                    "pragmatic_features": question_item.get("pragmatic_features") or (semantic_interpretation.get("pragmatic_features", {}) if index == 0 else {}),
+                    "tone": question_item.get("tone") or (semantic_interpretation.get("tone", "NEUTRAL") if index == 0 else "NEUTRAL"),
+                    "recommended_response_action": question_item.get("recommended_response_action") or (semantic_interpretation.get("recommended_response_action", "ANSWER_NORMALLY") if index == 0 else "ANSWER_NORMALLY"),
+                    "features": question_item.get("features", {}),
                     "context_signature": question_item.get("context_signature", {}),
                     "parent_context_dependency": bool(question_item.get("parent_context_dependency")),
                     "parent_intent": question_item.get("parent_intent", ""),
@@ -1408,7 +1436,7 @@ async def execute(
     request_structure["answer_sequence_in_order"] = True
     request_structure["question_search_engine"] = "state_manager_per_question_semantic_v2"
     request_structure["semantic_interpretation"] = semantic_interpretation
-    request_structure["semantic_interpretation_version"] = "april_request_semantics_v1"
+    request_structure["semantic_interpretation_version"] = "april_request_semantics_v3_continuity_actions"
     request_structure["question_search_count"] = len(question_sequence)
     request_structure["question_relations"] = [
         {
