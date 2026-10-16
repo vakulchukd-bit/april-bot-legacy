@@ -40,6 +40,7 @@ def _scaled_prompt_tokens(base_tokens: int) -> int:
     return max(1, int(round(int(base_tokens) * PREMIUM_PROMPT_SCALE)))
 
 TRANSLATION_ROUTE_VERSION = "botru_embedded_translation_v1"
+PROVIDER_ROUTER_VERSION = "premium_provider_router_v2_dialogue_continuity_source_preservation"
 
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _inflight: set[str] = set()
@@ -77,6 +78,8 @@ Do not expose internal reasoning.
 Always treat these sections as structured input:
 1. AUTHENTICATED_IDENTITY and CURRENT_REQUEST (the current request always exists)
 2. CONTINUATION_CONTEXT (selected USER↔APRIL pairs; [] when NEW unless HISTORY_REQUEST=true or a semantically matched historical pair is explicitly supplied)
+   When DIALOGUE_COMMUNICATION describes feedback/reaction, answer that conversational move: acknowledge praise naturally; treat dissatisfaction, correction, or “not what I meant” as a cue to re-evaluate the previous answer and improve it. Do not merely report search results or say “I found a record” unless the user asks what was discussed.
+   If a selected pair includes preserve_source_text=true, source_user_text/source_april_text are bounded excerpts copied from the canonical dialogue_memory row, not inferred summaries. Use them as primary evidence about the prior exchange. Respect source_content_complete/source_*_complete flags: never claim to have the full original text if a flag is false.
 3. NEW_DIALOGUE_REQUEST (always contains the literal current request; consult NEW_DIALOGUE_ACTIVE before treating it as a topic switch)
 4. ATTACHMENT_TASK_MAP / INPUT_MODALITIES / VISUAL_CONTEXT / ATTACHED_TEXT_FILES
 5. REQUEST_SEQUENCE (answer each explicit question/step in supplied order)
@@ -235,7 +238,13 @@ in REQUEST_SEQUENCE order. Never emit an empty table shell; rows and cells must 
 Composite output requests are cumulative. Generated illustrations are not authentic photographs.
 When multiple visual outputs are in C_ARTIFACT_RENDER_PLAN, provide concrete payloads for them; at least half of four-or-more requested visual types must render. Target a 60/40 text-to-render allocation when visuals are relevant; interleave typed blocks with the matching step in order. For non-numeric concepts use a grounded network graph, never fake numeric data. Images need the generator signal; links need real URLs.
 Use CURRENT_REQUEST as the task. On CONTINUE, SELECTED_SECTION is the target when present; use
-its concise summary and selected anchor rather than full previous answers. For person references, first
+its concise summary and selected anchor rather than full previous answers. Follow DIALOGUE_COMMUNICATION:
+respond to the conversational move, not just the literal wording. Acknowledge gratitude/praise naturally;
+when the user signals dissatisfaction, correction, or misunderstanding, re-check the prior answer and improve
+it rather than offering a dry retrieval report. For selected pairs with preserve_source_text=true, treat
+source_user_text/source_april_text as bounded canonical dialogue_memory evidence, not generated summaries;
+respect all source-completeness flags. Never claim to know missing/truncated source content.
+For person references, first
 person in USER messages means the authenticated user and first person in APRIL responses means April;
 second person is the other participant. Preserve explicit name-to-speaker corrections from selected
 history and never mirror a user's name onto April or vice versa. Prefer a stored name-bearing fact over a
@@ -275,6 +284,10 @@ tokens total, including up to 4800 tokens for render payloads and about 7200 for
 visuals when materially useful, and label generated illustrations as generated, not authentic photos.
 When multiple visual outputs are requested, emit the materially relevant requested renderers with concrete payloads. Target about 60% explanatory text and 40% visual/render payloads when the request calls for visuals; this is an allocation target, not a rigid truncation rule. For multi-step requests, add step_index and step_title to every block where possible, interleave each step's concise text with that step's formula/table/diagram/graph/image, and preserve step order. Never collect all visuals at the end or use a visual to replace needed explanation. Use grounded network graphs for concepts, never invent numeric measurements; images require the generator signal and links require real URLs.
 Answer CURRENT_REQUEST in RETURN_LANGUAGE. On CONTINUE, use SELECTED_SECTION as the target when present.
+Follow DIALOGUE_COMMUNICATION to handle the user's conversational act naturally: acknowledge appreciation briefly,
+and treat negative feedback/correction as a cue to reassess and improve the preceding answer. If a selected
+CONTINUATION_CONTEXT pair has preserve_source_text=true, use its source_user_text/source_april_text as canonical
+selected dialogue_memory evidence; respect source completeness flags and do not reconstruct omitted text.
 If CLARIFICATION_RESOLUTION exists, fulfill original_request and treat CURRENT_REQUEST as the user's
 clarification reply, not a replacement intent. For status topic_not_found or needs_more_detail, apologize and say no clear match
 was found in saved history without claiming the topic definitely never came up; don't repeat old options, ask for one or two hints.
@@ -1428,13 +1441,18 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     # Reduce dialogue pairs progressively while retaining the semantic anchor and
     # the most useful pair(s). Remove evidence excerpts before pair identities.
     pairs = data.get("CONTINUATION_CONTEXT") if isinstance(data.get("CONTINUATION_CONTEXT"), list) else []
-    pair_keep_levels = (3, 2, 1) if is_history and pairs else (3, 2, 1, 0)
+    has_preserved_source_pair = any(
+        isinstance(item, dict) and item.get("preserve_source_text") is True for item in pairs
+    )
+    # Never discard the only verified source excerpt just because the general prompt
+    # is over budget. Keep one bounded source pair and compress less critical context first.
+    pair_keep_levels = (3, 2, 1) if (is_history and pairs) or has_preserved_source_pair else (3, 2, 1, 0)
     for keep_n in pair_keep_levels:
         compact_pairs = []
         for item in pairs[:keep_n]:
             if not isinstance(item, dict):
                 continue
-            compact_pairs.append({
+            compact_pair = {
                 "turn": item.get("turn"),
                 "user": _semantic_compress(item.get("user"), _scaled_prompt_tokens(55)),
                 "april": _semantic_compress(item.get("april"), _scaled_prompt_tokens(65)),
@@ -1448,7 +1466,20 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "score": item.get("score"),
                 "same_dialog": item.get("same_dialog"),
                 "message_id": item.get("message_id"),
-            })
+            }
+            if item.get("preserve_source_text") is True:
+                # Hard cap the loss-sensitive excerpt so a long creative text cannot
+                # crowd out the current request. Do not paraphrase it during compaction.
+                compact_pair.update({
+                    "preserve_source_text": True,
+                    "source_user_text": _clip(item.get("source_user_text"), 900),
+                    "source_april_text": _clip(item.get("source_april_text"), 3000),
+                    "source_user_text_complete": bool(item.get("source_user_text_complete")) and len(_text(item.get("source_user_text"))) <= 900,
+                    "source_april_text_complete": bool(item.get("source_april_text_complete")) and len(_text(item.get("source_april_text"))) <= 3000,
+                    "source_content_complete": bool(item.get("source_content_complete")) and len(_text(item.get("source_user_text"))) <= 900 and len(_text(item.get("source_april_text"))) <= 3000,
+                    "source_text_origin": _clip(item.get("source_text_origin") or "dialogue_memory", 40),
+                })
+            compact_pairs.append(compact_pair)
         data["CONTINUATION_CONTEXT"] = compact_pairs
         data["DIALOGUE_ANCHOR"]["attachment_evidence"] = "" if isinstance(data.get("DIALOGUE_ANCHOR"), dict) else ""
         card, total = count(system, data)
@@ -1577,13 +1608,24 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     "message_id": (task_search.get("selected_section") or {}).get("message_id"),
                 } if isinstance(task_search.get("selected_section"), dict) and task_search.get("selected_section") else {},
                 "selected_pairs": [
-                    {"topic": _semantic_compress(pair.get("topic"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
-                     "user": _semantic_compress(pair.get("user"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
-                     "april": _semantic_compress(pair.get("april"), max(_scaled_prompt_tokens(12), summary_budget)),
-                     "message_id": pair.get("message_id"),
-                     "sections": [{"heading": _semantic_compress(sec.get("heading"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
-                                   "summary": _semantic_compress(sec.get("summary"), max(_scaled_prompt_tokens(12), summary_budget // 2)),
-                                   "order": sec.get("order")} for sec in (pair.get("sections") or [])[:2] if isinstance(sec, dict)]}
+                    {
+                        "topic": _semantic_compress(pair.get("topic"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
+                        "user": _semantic_compress(pair.get("user"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
+                        "april": _semantic_compress(pair.get("april"), max(_scaled_prompt_tokens(12), summary_budget)),
+                        "message_id": pair.get("message_id"),
+                        **({
+                            "preserve_source_text": True,
+                            "source_user_text": _clip(pair.get("source_user_text"), 900),
+                            "source_april_text": _clip(pair.get("source_april_text"), 3000),
+                            "source_user_text_complete": bool(pair.get("source_user_text_complete")) and len(_text(pair.get("source_user_text"))) <= 900,
+                            "source_april_text_complete": bool(pair.get("source_april_text_complete")) and len(_text(pair.get("source_april_text"))) <= 3000,
+                            "source_content_complete": bool(pair.get("source_content_complete")) and len(_text(pair.get("source_user_text"))) <= 900 and len(_text(pair.get("source_april_text"))) <= 3000,
+                            "source_text_origin": _clip(pair.get("source_text_origin") or "dialogue_memory", 40),
+                        } if pair.get("preserve_source_text") is True else {}),
+                        "sections": [{"heading": _semantic_compress(sec.get("heading"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
+                                      "summary": _semantic_compress(sec.get("summary"), max(_scaled_prompt_tokens(12), summary_budget // 2)),
+                                      "order": sec.get("order")} for sec in (pair.get("sections") or [])[:2] if isinstance(sec, dict)]
+                    }
                     for pair in (task_search.get("selected_pairs") or [])[:1] if isinstance(pair, dict)
                 ],
                 "clarification_needed": bool(task_search.get("clarification_needed")),
@@ -1620,7 +1662,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         for item in original_pairs[:pair_limit]:
             if not isinstance(item, dict):
                 continue
-            pairs_min.append({
+            compact_min_pair = {
                 "turn": item.get("turn"),
                 "user": _semantic_compress(item.get("user"), max(_scaled_prompt_tokens(12), summary_budget // 2)),
                 "april": _semantic_compress(item.get("april"), max(_scaled_prompt_tokens(12), summary_budget)),
@@ -1633,7 +1675,18 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     if isinstance(sec, dict)
                 ],
                 "message_id": item.get("message_id"),
-            })
+            }
+            if item.get("preserve_source_text") is True:
+                compact_min_pair.update({
+                    "preserve_source_text": True,
+                    "source_user_text": _clip(item.get("source_user_text"), 500),
+                    "source_april_text": _clip(item.get("source_april_text"), 1400),
+                    "source_user_text_complete": bool(item.get("source_user_text_complete")) and len(_text(item.get("source_user_text"))) <= 500,
+                    "source_april_text_complete": bool(item.get("source_april_text_complete")) and len(_text(item.get("source_april_text"))) <= 1400,
+                    "source_content_complete": bool(item.get("source_content_complete")) and len(_text(item.get("source_user_text"))) <= 500 and len(_text(item.get("source_april_text"))) <= 1400,
+                    "source_text_origin": _clip(item.get("source_text_origin") or "dialogue_memory", 40),
+                })
+            pairs_min.append(compact_min_pair)
         topics_min = []
         if is_history:
             for item in original_topics[:requested_topic_count]:
@@ -1679,6 +1732,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "RETURN_LANGUAGE": data.get("RETURN_LANGUAGE") or "en",
             "INTERPRETATION": keep_intent,
             "DIALOGUE_RELATION": data.get("DIALOGUE_RELATION") or "NEW",
+            "DIALOGUE_COMMUNICATION": data.get("DIALOGUE_COMMUNICATION") or {},
             "HISTORY_REQUEST": is_history,
             "HISTORY_TOPIC_COUNT": data.get("HISTORY_TOPIC_COUNT", 0) if is_history else 0,
             "HISTORY_TOPIC_MINIMUM": minimum_topic_count if is_history else 0,
@@ -1784,7 +1838,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
 
     # Try progressively smaller allocations. Topic requests are always <= 30% of
     # 3600 estimated tokens, and each step remains represented in REQUEST_SEQUENCE.
-    minimum_history_pair = 1 if is_history and original_pairs else 0
+    minimum_history_pair = 1 if (
+        (is_history and original_pairs)
+        or any(isinstance(item, dict) and item.get("preserve_source_text") is True for item in original_pairs)
+    ) else 0
     candidates = [
         (_scaled_prompt_tokens(420), min(_scaled_prompt_tokens(516), MAX_TOPIC_PROMPT_TOKENS - _scaled_prompt_tokens(24)), _scaled_prompt_tokens(70), min(2, len(original_pairs))),
         (_scaled_prompt_tokens(300), _scaled_prompt_tokens(210), _scaled_prompt_tokens(45), min(2, len(original_pairs))),
@@ -1907,8 +1964,21 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         compact_pairs = []
         for pair in minimal["CONTINUATION_CONTEXT"][:1]:
             if isinstance(pair, dict):
-                compact_pairs.append({k: _semantic_compress(pair.get(k), 12 if k in {"user", "april"} else 6)
-                                      for k in ("topic", "user", "april") if pair.get(k)})
+                compact_pair = {k: _semantic_compress(pair.get(k), 12 if k in {"user", "april"} else 6)
+                                for k in ("topic", "user", "april") if pair.get(k)}
+                if pair.get("preserve_source_text") is True:
+                    # Last-resort budget trim keeps a small literal excerpt from the
+                    # verified canonical source; all remaining text is explicitly marked incomplete.
+                    compact_pair.update({
+                        "preserve_source_text": True,
+                        "source_user_text": _clip(pair.get("source_user_text"), 300),
+                        "source_april_text": _clip(pair.get("source_april_text"), 900),
+                        "source_user_text_complete": False,
+                        "source_april_text_complete": False,
+                        "source_content_complete": False,
+                        "source_text_origin": _clip(pair.get("source_text_origin") or "dialogue_memory", 40),
+                    })
+                compact_pairs.append(compact_pair)
         minimal["CONTINUATION_CONTEXT"] = compact_pairs
         card = _json_card(minimal)
         total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
@@ -2233,10 +2303,12 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         result: list[dict[str, Any]] = []
         if not isinstance(rows, list):
             return result
-        for item in rows[-limit:]:
+        # Selected pairs are already relevance-ranked by State Manager: the first
+        # entry is the strongest source/anchor. Taking the tail could discard it.
+        for item in rows[:limit]:
             if not isinstance(item, dict):
                 continue
-            result.append({
+            pair = {
                 "turn": item.get("turn_index") or item.get("turn"),
                 "user": _clip(item.get("user") or item.get("user_text"), 480),
                 "april": _clip(item.get("april") or item.get("april_text"), 360),
@@ -2259,7 +2331,20 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
                 "same_dialog": bool(item.get("same_dialog")),
                 "message_id": item.get("message_id"),
                 "attachment_evidence": _clip(item.get("attachment_evidence"), 3600),
-            })
+            }
+            if item.get("preserve_source_text") is True:
+                pair.update({
+                    "preserve_source_text": True,
+                    "source_user_text": _clip(item.get("source_user_text"), 1800),
+                    "source_april_text": _clip(item.get("source_april_text"), 5200),
+                    "source_user_text_chars": item.get("source_user_text_chars"),
+                    "source_april_text_chars": item.get("source_april_text_chars"),
+                    "source_user_text_complete": bool(item.get("source_user_text_complete")),
+                    "source_april_text_complete": bool(item.get("source_april_text_complete")),
+                    "source_content_complete": bool(item.get("source_content_complete")),
+                    "source_text_origin": _clip(item.get("source_text_origin") or "dialogue_memory", 40),
+                })
+            result.append(pair)
         return result
 
     anchor = continuation.get("anchor") or memory.get("anchor") or {}
@@ -2312,6 +2397,16 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "interpretation_id": _text(routing.get("interpretation_id")),
         }
     request_structure = interpretation.get("request_structure") if isinstance(interpretation.get("request_structure"), dict) else {}
+    communication = request_structure.get("dialogue_communication") if isinstance(request_structure.get("dialogue_communication"), dict) else {}
+    interaction_profile = dialogue.get("interaction_profile") if isinstance(dialogue.get("interaction_profile"), dict) else {}
+    dialogue_communication = {
+        "speech_act": _clip(communication.get("speech_act") or interaction_profile.get("speech_act"), 64),
+        "communicative_act": _clip(communication.get("communicative_act") or interaction_profile.get("communicative_act"), 80),
+        "tone": _clip(communication.get("tone") or interaction_profile.get("tone") or "NEUTRAL", 32),
+        "recommended_response_action": _clip(communication.get("recommended_response_action") or interaction_profile.get("recommended_response_action") or "ANSWER_NORMALLY", 80),
+        "context_dependent_reaction": bool(interaction_profile.get("context_dependent_reaction")),
+        "instructions": [str(item)[:260] for item in (communication.get("instructions") or [])[:5] if str(item).strip()],
+    }
     question_sequence = request_structure.get("question_sequence") if isinstance(request_structure.get("question_sequence"), list) else []
     question_sequence = [dict(item) for item in question_sequence if isinstance(item, dict)]
     for _step in question_sequence:
@@ -2344,6 +2439,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "explicit_generation_request": bool(structured_intent.get("explicit_generation_request")),
         },
         "DIALOGUE_RELATION": relation,
+        "DIALOGUE_COMMUNICATION": dialogue_communication,
         "HISTORY_REQUEST": history_request,
         "HISTORY_TOPIC_COUNT": requested_topic_count if history_request else 0,
         "HISTORY_TOPIC_MINIMUM": minimum_topic_count if history_request else 0,
@@ -3432,6 +3528,7 @@ async def generate_text(
             selected_context_pairs=len((request.memory or {}).get("selected_pairs") or []) if isinstance(request.memory, dict) else 0)
         _log_json("REQUEST", {
             "status": "sending",
+            "provider_router_version": PROVIDER_ROUTER_VERSION,
             "request_fingerprint": key[:16],
             "route": "canonical_responses_call_with_bounded_output_recovery",
             "provider_calls": 1,
