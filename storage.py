@@ -306,6 +306,18 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_created ON payments(user_id, created_at DESC)")
 
+                # Detect whether read receipts existed before this migration.
+                # Only backfill historical rows once; never auto-clear a genuinely
+                # unread message simply because the Bot process restarts later.
+                cur.execute(
+                    """SELECT
+                         EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'premium_support_messages' AND column_name = 'admin_read_at') AS has_admin_read_at,
+                         EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'premium_support_messages' AND column_name = 'user_read_at') AS has_user_read_at"""
+                )
+                support_read_receipts_preexisting = cur.fetchone() or {}
+                had_admin_read_receipt = bool(support_read_receipts_preexisting.get("has_admin_read_at"))
+                had_user_read_receipt = bool(support_read_receipts_preexisting.get("has_user_read_at"))
+
                 # Premium support inbox. The cooldown is derived from the last
                 # ticket timestamp, so it survives browser/device changes and
                 # cannot be bypassed by clearing client storage.
@@ -327,8 +339,19 @@ def init_db() -> None:
                 )
                 cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS attachment_data TEXT")
                 cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS attachment_mime TEXT")
+                # Read receipts are per side: opening a ticket clears only the
+                # corresponding badge. Existing tickets are treated as already
+                # seen on the admin side to avoid false unread badges after deploy.
+                cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS admin_read_at TIMESTAMPTZ")
+                cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS user_read_at TIMESTAMPTZ")
+                if not had_admin_read_receipt:
+                    cur.execute("UPDATE premium_support_messages SET admin_read_at = created_at WHERE admin_read_at IS NULL")
+                if not had_user_read_receipt:
+                    cur.execute("UPDATE premium_support_messages SET user_read_at = COALESCE(replied_at, created_at) WHERE user_read_at IS NULL")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_user_created ON premium_support_messages(user_id, created_at DESC)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_pending ON premium_support_messages(created_at ASC) WHERE admin_reply IS NULL")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_admin_unread ON premium_support_messages(admin_read_at, created_at DESC)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_user_unread ON premium_support_messages(user_id, user_read_at, replied_at DESC)")
 
                 # Detect first-time retention migration before CREATE/ALTER adds the field.
                 # This lets us backfill currently-verifiable Premium rows once instead of
@@ -1627,7 +1650,12 @@ def _support_time_ms(value: Any) -> int | None:
         return None
 
 
-def _support_message_payload(row: dict[str, Any] | None, *, include_identity: bool = False) -> dict[str, Any] | None:
+def _support_message_payload(
+    row: dict[str, Any] | None,
+    *,
+    include_identity: bool = False,
+    include_attachment: bool = True,
+) -> dict[str, Any] | None:
     if not row:
         return None
     result = {
@@ -1637,29 +1665,27 @@ def _support_message_payload(row: dict[str, Any] | None, *, include_identity: bo
         "created_at_ms": _support_time_ms(row.get("created_at")),
         "admin_reply": str(row.get("admin_reply") or "") or None,
         "replied_at_ms": _support_time_ms(row.get("replied_at")),
-        "attachment_data": str(row.get("attachment_data") or "") or None,
         "attachment_mime": str(row.get("attachment_mime") or "") or None,
+        "has_attachment": bool(row.get("attachment_mime") or row.get("attachment_data")),
+        "admin_read_at_ms": _support_time_ms(row.get("admin_read_at")),
+        "user_read_at_ms": _support_time_ms(row.get("user_read_at")),
+        "admin_unread": row.get("admin_read_at") is None,
+        "user_unread": bool(row.get("admin_reply")) and row.get("user_read_at") is None,
     }
+    if include_attachment:
+        result["attachment_data"] = str(row.get("attachment_data") or "") or None
     if include_identity:
         result.update({
             "user_id": str(row.get("user_id") or ""),
             "april_id": str(row.get("april_id") or ""),
             "name": str(row.get("name") or ""),
             "email": str(row.get("email") or ""),
+            "active_premium": bool(row.get("active_premium")),
         })
     return result
 
 
-def get_premium_support_status(user_id: Any) -> dict[str, Any] | None:
-    """Load the caller's latest support request and authoritative send cooldown.
-
-    This read is also allowed after Premium expires so a former Premium user can
-    still see the reply to an already submitted request. Sending remains gated
-    by the active database entitlement in send_premium_support_message().
-    """
-    raw = str(user_id or "").strip()
-    if not raw:
-        return None
+def _support_resolve_user(raw: str) -> dict[str, Any] | None:
     conn = get_conn()
     if not conn:
         return None
@@ -1671,34 +1697,67 @@ def get_premium_support_status(user_id: Any) -> dict[str, Any] | None:
                    ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END LIMIT 1""",
                 (raw, raw, raw),
             )
-            user = cur.fetchone()
-            if not _is_authenticated_row(user):
-                return None
-            canonical_id = str(user.get("user_id") or raw)
-            current = now()
-            until = float(user.get("subscription_until") or 0)
-            active_premium = str(user.get("plan") or "free").lower() == "premium" and until > current.timestamp()
+            row = cur.fetchone()
+            return dict(row) if row and _is_authenticated_row(row) else None
+    finally:
+        conn.close()
+
+
+def get_premium_support_status(user_id: Any) -> dict[str, Any] | None:
+    """Return the current user's support history summary without bulk image bytes."""
+    raw = str(user_id or "").strip()
+    if not raw:
+        return None
+    user = _support_resolve_user(raw)
+    if not user:
+        return None
+    canonical_id = str(user.get("user_id") or raw)
+    current = now()
+    until = float(user.get("subscription_until") or 0)
+    active_premium = str(user.get("plan") or "free").lower() == "premium" and until > current.timestamp()
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
             cur.execute(
-                """SELECT id, user_id, message, language, created_at, admin_reply, replied_at, attachment_data, attachment_mime
+                """SELECT id, user_id, message, language, created_at, admin_reply, replied_at,
+                          attachment_mime, admin_read_at, user_read_at
                    FROM premium_support_messages WHERE user_id = %s
-                   ORDER BY created_at DESC, id DESC LIMIT 1""",
+                   ORDER BY created_at DESC, id DESC LIMIT 50""",
                 (canonical_id,),
             )
-            row = cur.fetchone()
+            rows = [dict(row) for row in (cur.fetchall() or [])]
+            cur.execute(
+                """SELECT COUNT(*) AS unread_count, MAX(id) AS newest_unread_id
+                   FROM premium_support_messages
+                   WHERE user_id = %s AND admin_reply IS NOT NULL AND user_read_at IS NULL""",
+                (canonical_id,),
+            )
+            unread_row = cur.fetchone() or {}
+            latest = rows[0] if rows else None
             next_allowed = None
-            if row and row.get("created_at"):
-                created = row["created_at"]
+            if latest and latest.get("created_at"):
+                created = latest["created_at"]
                 if created.tzinfo is None:
                     created = created.replace(tzinfo=timezone.utc)
                 next_allowed = created + timedelta(seconds=SUPPORT_COOLDOWN_SECONDS)
             remaining = max(0, int((next_allowed - current).total_seconds())) if next_allowed else 0
+            messages = [_support_message_payload(row, include_attachment=False) for row in rows]
+            latest_payload = _support_message_payload(latest, include_attachment=False)
+            unread_count = max(0, int(unread_row.get("unread_count") or 0))
             return {
                 "success": True,
+                "is_admin": False,
                 "active_premium": active_premium,
                 "can_send": bool(active_premium and remaining <= 0),
                 "next_allowed_at_ms": _support_time_ms(next_allowed),
                 "remaining_seconds": remaining,
-                "latest_message": _support_message_payload(dict(row) if row else None),
+                "latest_message": latest_payload,
+                "messages": messages,
+                "unread_reply_count": unread_count,
+                "has_unread_reply": unread_count > 0,
+                "unread_reply_message_id": int(unread_row.get("newest_unread_id") or 0) or None,
             }
     except Exception as exc:
         print(f"[APRIL_SUPPORT] STATUS_ERROR type={type(exc).__name__}", flush=True)
@@ -1707,6 +1766,92 @@ def get_premium_support_status(user_id: Any) -> dict[str, Any] | None:
         conn.close()
 
 
+def get_premium_support_message_detail(user_id: Any, message_id: Any, *, is_admin: bool = False) -> dict[str, Any] | None:
+    """Load one full ticket (including image bytes) only after authorization."""
+    try:
+        ticket_id = int(message_id)
+    except (TypeError, ValueError, OverflowError):
+        return {"success": False, "error": "MESSAGE_ID_INVALID"}
+    if ticket_id <= 0:
+        return {"success": False, "error": "MESSAGE_ID_INVALID"}
+    raw = str(user_id or "").strip()
+    user = _support_resolve_user(raw)
+    if not user:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    canonical_id = str(user.get("user_id") or raw)
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT s.id, s.user_id, s.message, s.language, s.created_at,
+                          s.admin_reply, s.replied_at, s.attachment_data, s.attachment_mime,
+                          s.admin_read_at, s.user_read_at, u.april_id, u.name, u.email,
+                          (LOWER(COALESCE(u.plan, 'free')) = 'premium' AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS active_premium
+                   FROM premium_support_messages s JOIN users u ON u.user_id = s.user_id
+                   WHERE s.id = %s LIMIT 1""",
+                (ticket_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return {"success": False, "error": "SUPPORT_MESSAGE_NOT_FOUND"}
+            data = dict(row)
+            if is_admin:
+                if not bool(data.get("active_premium")):
+                    return {"success": False, "error": "SUPPORT_MESSAGE_NOT_FOUND"}
+            elif str(data.get("user_id") or "") != canonical_id:
+                return {"success": False, "error": "SUPPORT_MESSAGE_NOT_FOUND"}
+            return {"success": True, "is_admin": bool(is_admin), "message": _support_message_payload(data, include_identity=is_admin, include_attachment=True)}
+    except Exception as exc:
+        print(f"[APRIL_SUPPORT] DETAIL_ERROR type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "SUPPORT_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def mark_premium_support_message_read(user_id: Any, message_id: Any, *, is_admin: bool = False) -> dict[str, Any]:
+    """Mark one visible ticket read by its recipient without affecting the other side."""
+    try:
+        ticket_id = int(message_id)
+    except (TypeError, ValueError, OverflowError):
+        return {"success": False, "error": "MESSAGE_ID_INVALID"}
+    if ticket_id <= 0:
+        return {"success": False, "error": "MESSAGE_ID_INVALID"}
+    raw = str(user_id or "").strip()
+    user = _support_resolve_user(raw)
+    if not user:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    canonical_id = str(user.get("user_id") or raw)
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                if is_admin:
+                    cur.execute(
+                        """UPDATE premium_support_messages s SET admin_read_at = COALESCE(s.admin_read_at, CURRENT_TIMESTAMP)
+                           FROM users u WHERE s.id = %s AND u.user_id = s.user_id
+                             AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
+                             AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)""",
+                        (ticket_id,),
+                    )
+                else:
+                    cur.execute(
+                        """UPDATE premium_support_messages SET user_read_at = CURRENT_TIMESTAMP
+                           WHERE id = %s AND user_id = %s""",
+                        (ticket_id, canonical_id),
+                    )
+                if cur.rowcount != 1:
+                    return {"success": False, "error": "SUPPORT_MESSAGE_NOT_FOUND"}
+        return {"success": True, "message_id": ticket_id, "reader": "admin" if is_admin else "user"}
+    except Exception as exc:
+        print(f"[APRIL_SUPPORT] MARK_READ_ERROR type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "SUPPORT_UNAVAILABLE"}
+    finally:
+        conn.close()
+
 def send_premium_support_message(user_id: Any, message: Any, language: Any = "en", attachment_data: Any = None, attachment_mime: Any = None) -> dict[str, Any]:
     """Insert a Premium support ticket with an atomic per-account 24h limit."""
     raw = str(user_id or "").strip()
@@ -1714,8 +1859,6 @@ def send_premium_support_message(user_id: Any, message: Any, language: Any = "en
     lang = str(language or "en").strip().lower()[:8] or "en"
     if not raw:
         return {"success": False, "error": "USER_ID_REQUIRED"}
-    if len(body) < 5:
-        return {"success": False, "error": "MESSAGE_TOO_SHORT"}
     if len(body) > 4000:
         return {"success": False, "error": "MESSAGE_TOO_LONG"}
     image_data = str(attachment_data or "").strip()
@@ -1769,8 +1912,8 @@ def send_premium_support_message(user_id: Any, message: Any, language: Any = "en
                             "remaining_seconds": max(0, int((next_allowed - current).total_seconds())),
                         }
                 cur.execute(
-                    """INSERT INTO premium_support_messages(user_id, message, language, attachment_data, attachment_mime)
-                       VALUES (%s, %s, %s, %s, %s) RETURNING id, user_id, message, language, created_at, admin_reply, replied_at, attachment_data, attachment_mime""",
+                    """INSERT INTO premium_support_messages(user_id, message, language, attachment_data, attachment_mime, user_read_at)
+                       VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP) RETURNING id, user_id, message, language, created_at, admin_reply, replied_at, attachment_data, attachment_mime""",
                     (canonical_id, body, lang, image_data, image_mime),
                 )
         status = get_premium_support_status(raw)
@@ -1782,33 +1925,49 @@ def send_premium_support_message(user_id: Any, message: Any, language: Any = "en
         conn.close()
 
 
-def list_premium_support_messages(limit: int = 100) -> dict[str, Any] | None:
-    """Return the administrator inbox, prioritizing unanswered Premium tickets."""
+def list_premium_support_messages(limit: int = 10) -> dict[str, Any] | None:
+    """Return at most ten active Premium tickets, unread items first."""
     conn = get_conn()
     if not conn:
         return None
     try:
-        safe_limit = max(1, min(int(limit), 200))
+        safe_limit = max(1, min(int(limit), 10))
         with conn.cursor() as cur:
             cur.execute(
                 """SELECT s.id, s.user_id, s.message, s.language, s.created_at,
-                          s.admin_reply, s.replied_at, u.april_id, u.name, u.email
+                          s.admin_reply, s.replied_at, s.attachment_mime,
+                          s.admin_read_at, s.user_read_at, u.april_id, u.name, u.email,
+                          (LOWER(COALESCE(u.plan, 'free')) = 'premium' AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS active_premium
                    FROM premium_support_messages s
                    JOIN users u ON u.user_id = s.user_id
-                   ORDER BY (s.admin_reply IS NULL) DESC, s.created_at DESC, s.id DESC
+                   WHERE LOWER(COALESCE(u.plan, 'free')) = 'premium'
+                     AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
+                   ORDER BY (s.admin_read_at IS NULL) DESC,
+                            (s.admin_reply IS NULL) DESC,
+                            s.created_at DESC, s.id DESC
                    LIMIT %s""",
                 (safe_limit,),
             )
             rows = cur.fetchall() or []
-            return {"success": True, "messages": [
-                _support_message_payload(dict(row), include_identity=True) for row in rows
-            ]}
+            cur.execute(
+                """SELECT COUNT(*) AS unread_count FROM premium_support_messages s
+                   JOIN users u ON u.user_id = s.user_id
+                   WHERE s.admin_read_at IS NULL
+                     AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
+                     AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)"""
+            )
+            unread = cur.fetchone() or {}
+            return {
+                "success": True,
+                "is_admin": True,
+                "unread_count": max(0, int(unread.get("unread_count") or 0)),
+                "messages": [_support_message_payload(dict(row), include_identity=True, include_attachment=False) for row in rows],
+            }
     except Exception as exc:
         print(f"[APRIL_SUPPORT] INBOX_ERROR type={type(exc).__name__}", flush=True)
         return None
     finally:
         conn.close()
-
 
 def reply_premium_support_message(message_id: Any, reply: Any, admin_id: Any) -> dict[str, Any]:
     """Save the first administrator reply for a request; replies cannot be spoofed by callers."""
@@ -1830,15 +1989,23 @@ def reply_premium_support_message(message_id: Any, reply: Any, admin_id: Any) ->
     try:
         with conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT id, admin_reply FROM premium_support_messages WHERE id = %s FOR UPDATE", (ticket_id,))
+                cur.execute(
+                    """SELECT s.id, s.admin_reply,
+                              (LOWER(COALESCE(u.plan, 'free')) = 'premium' AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS active_premium
+                       FROM premium_support_messages s JOIN users u ON u.user_id = s.user_id
+                       WHERE s.id = %s FOR UPDATE OF s""",
+                    (ticket_id,),
+                )
                 row = cur.fetchone()
-                if not row:
+                if not row or not bool(row.get("active_premium")):
                     return {"success": False, "error": "SUPPORT_MESSAGE_NOT_FOUND"}
                 if str(row.get("admin_reply") or "").strip():
                     return {"success": False, "error": "SUPPORT_MESSAGE_ALREADY_REPLIED"}
                 cur.execute(
                     """UPDATE premium_support_messages
-                       SET admin_reply = %s, replied_at = CURRENT_TIMESTAMP, admin_id = %s
+                       SET admin_reply = %s, replied_at = CURRENT_TIMESTAMP, admin_id = %s,
+                           admin_read_at = COALESCE(admin_read_at, CURRENT_TIMESTAMP),
+                           user_read_at = NULL
                        WHERE id = %s AND admin_reply IS NULL""",
                     (body, admin, ticket_id),
                 )
