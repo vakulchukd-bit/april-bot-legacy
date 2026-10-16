@@ -580,6 +580,11 @@ _SEMANTIC_ALIASES = {
     # match persisted summaries phrased as "Имя пользователя: …".
     "зовут": "имя", "имени": "имя", "именем": "имя", "имена": "имя", "именах": "имя",
     "называюсь": "имя", "называешься": "имя", "называют": "имя",
+    # Keep common literary-topic variants on one retrieval concept.
+    "стихи": "стих", "стиха": "стих", "стиху": "стих", "стихом": "стих", "стихе": "стих",
+    "стихотворение": "стих", "стихотворения": "стих", "стихотворению": "стих",
+    "стихотворением": "стих", "стихотворении": "стих", "стихотворений": "стих",
+    "поэма": "поэм", "поэмы": "поэм", "поэме": "поэм", "поэмой": "поэм",
 }
 
 _STOP_WORDS = {
@@ -667,6 +672,12 @@ _CONTEXT_GENERIC_TERMS = {
     "table", "formula", "equation", "price", "prices", "cost", "growth", "fall",
     "change", "day", "days", "week", "weeks", "month", "months", "year", "years",
     "uah", "usd", "dollar", "dollars", "rubles", "ruble", "euro", "linear", "bar",
+    # Pure conversational reactions should not become topical entities or conflicts.
+    "спасибо", "спасиб", "благодарю", "благодарен", "благодарна", "классно", "круто",
+    "отлично", "прекрасно", "здорово", "молодец", "именно", "понятно", "ладно",
+    "согласен", "согласна", "правильно", "верно", "точно", "нравится", "ужасно",
+    "раздражает", "бесит", "переделай", "перепиши", "исправь", "улучши", "поправь",
+    "поняла", "понял", "получилось", "отнюдь", "мимо", "ошибка", "виду", "смысл",
 }
 _CONTEXT_REFERENCE_TERMS = {
     "это", "этого", "этой", "этом", "эту", "этот", "эта", "эти", "этих",
@@ -944,7 +955,10 @@ def _hot_branch_followup_candidate(
     pragmatic_followup = any(term in pragmatic_value for term in (
         "reaction", "acknowledg", "agreement", "disagreement", "negation",
         "emotion", "evaluation", "referential", "ellipsis", "continuation",
+        "gratitude", "appreciation", "positive", "frustration", "dissatisfaction",
+        "revision", "correction", "revise_previous", "respond_to_disagreement",
         "реакц", "подтвержд", "несоглас", "отрицан", "эмоц", "оценк",
+        "благодар", "признатель", "раздраж", "недоволь", "передел", "исправ",
         "отсылк", "эллипсис", "продолж",
     ))
 
@@ -2664,6 +2678,7 @@ def search_dialogue_context(
     new_topic_request = _looks_like_new_topic(query)
     interpreted_direction = _text(query_interpretation.get("direction"))
     interpreted_intent = _text(query_interpretation.get("primary_intent"))
+    topic_reference_fragment = _text(query_interpretation.get("topic_reference")) == "TOPIC_FRAGMENT"
     context_signature = _query_context_signature(query, query_interpretation)
     # An explicitly empty subject signature is meaningful: it says the request is
     # referential (“these data”, “continue it”), not a new named subject. Do not
@@ -2963,6 +2978,11 @@ def search_dialogue_context(
             )
             explicit_topic_hits.append((row_rank, row))
     explicit_topic_hits.sort(key=lambda item: (item[0], float(item[1].get("created_at") or 0)), reverse=True)
+    topic_pointer_match = bool(topic_reference_fragment and explicit_topic_hits)
+    # A successfully matched topic pointer explicitly refers to that prior topic,
+    # even when the latest turn is about something else. Preserve the raw switch
+    # diagnostic, but don't let the latest topic veto the user's resolved pointer.
+    decision_subject_switch = bool(semantic_subject_switch and not topic_pointer_match)
 
     # Treat the ranked match as contextual when it contains actual semantic evidence,
     # rather than requiring a fixed hand-chosen score cutoff. Subject conflict remains
@@ -2983,6 +3003,11 @@ def search_dialogue_context(
         marker=marker, conversation_id=str(conversation_id or ""), has_attachment=bool(query_modalities),
         history_request=history_request, new_topic_request=new_topic_request,
     )
+    # A bare topic pointer such as “про стих” may continue only when the 24-hour
+    # database search found a matching source topic. Do not let recency attach it
+    # to an unrelated latest turn just because its wording is short.
+    if topic_reference_fragment and not topic_pointer_match:
+        hot_branch_candidate = False
     continuation = False
     has_new_attachment = bool(query_modalities)
     explicit_attachment_followup = has_new_attachment and reference_followup
@@ -3002,17 +3027,19 @@ def search_dialogue_context(
         and _text(query_interpretation.get("topic_reference")) == "PREVIOUS_ASSISTANT_ANSWER"
     ):
         continuation = True
-    elif hot_branch_candidate and not semantic_subject_switch:
+    elif hot_branch_candidate and not decision_subject_switch:
         # Only ambiguous turns that pass the hot-branch relevance check may continue
         # by default. Missing subject words alone are not enough to force CONTINUE.
         continuation = True
-    elif latest_same_dialog and reference_followup and not semantic_subject_switch:
+    elif latest_same_dialog and reference_followup and not decision_subject_switch:
         continuation = True
-    elif latest_same_dialog and marker and len(_tokens(query)) <= 14 and not semantic_subject_switch:
+    elif latest_same_dialog and marker and len(_tokens(query)) <= 14 and not decision_subject_switch:
         continuation = True
-    elif explicit_topic_hits and not semantic_subject_switch and (reference_followup or _is_section_request(query) or _looks_like_topic_correction(query)):
+    elif explicit_topic_hits and not decision_subject_switch and (
+        reference_followup or _is_section_request(query) or _looks_like_topic_correction(query) or topic_reference_fragment
+    ):
         continuation = True
-    elif same_dialog_semantic and not semantic_subject_switch:
+    elif same_dialog_semantic and not decision_subject_switch and not (topic_reference_fragment and not topic_pointer_match):
         continuation = True
     relation = "CONTINUE" if continuation else "NEW"
 
@@ -3268,7 +3295,7 @@ def search_dialogue_context(
         topic_tokens = _semantic_tokens(_history_topic_text(top_topic))
         topic_overlap = _fuzzy_token_overlap(lookup_tokens, topic_tokens) if lookup_tokens else 0.0
         has_distinctive_query = len(lookup_tokens) >= 2 or any(len(token) >= 7 for token in lookup_tokens)
-        if topic_overlap >= 0.50 and has_distinctive_query:
+        if topic_overlap >= 0.50 and (has_distinctive_query or topic_reference_fragment):
             topic_message_id = _text(top_topic.get("message_id"))
             source_row = next((row for row in all_rows if _text(row.get("message_id")) == topic_message_id), None)
             if source_row is not None:
@@ -3577,6 +3604,65 @@ def search_dialogue_context(
     for selected_pair in selected_for_context:
         _attach_topic_provenance(selected_pair)
     _attach_topic_provenance(selected_section)
+
+    # Keep the actual PostgreSQL source pair for a selected poem/verse or other
+    # authored text when the user is referring to that branch. Compact summaries
+    # are useful for search, but cannot replace the source when discussing wording,
+    # reactions, edits, or whether a text was preserved correctly.
+    preserve_text_request = bool(re.search(
+        r"(?:стих\w*|поэм\w*|сонет\w*|лирик\w*|текст\w*|строк\w*|"
+        r"дословн\w*|целиком|полностью|повтори|перечитай|как ты написал|что ты написал|"
+        r"poem\w*|poetr\w*|verse\w*|sonnet\w*|the text|word for word|verbatim|full text)",
+        _text(query).lower().replace("ё", "е"),
+    ))
+    source_sensitive_acts = {
+        "REFERENTIAL_CONTINUATION", "EXPLANATION_REQUEST", "CLARIFICATION_REQUEST",
+        "CORRECTION_OR_REVISION", "FRUSTRATION_OR_DISSATISFACTION", "REVISION_REQUEST",
+        "INFORMATION_QUESTION", "CONTINUATION_REQUEST",
+    }
+    needs_textual_evidence = bool(
+        preserve_text_request or topic_reference_fragment or reference_followup
+        or _text(query_interpretation.get("speech_act")).upper() in source_sensitive_acts
+    )
+    if (
+        relation == "CONTINUE" or contextual_history_match
+        or (history_request and (preserve_text_request or topic_reference_fragment or reference_followup))
+    ) and needs_textual_evidence:
+        source_by_id = {
+            _text(row.get("message_id")): row for row in all_rows
+            if isinstance(row, dict) and _text(row.get("message_id"))
+        }
+        for selected_pair in selected_for_context[:2]:
+            if not isinstance(selected_pair, dict):
+                continue
+            source_id = _text(selected_pair.get("source_message_id") or selected_pair.get("message_id"))
+            source = source_by_id.get(source_id)
+            if not source:
+                continue
+            topic_and_text = " ".join((
+                _text(selected_pair.get("topic")),
+                _text(source.get("user_text") or source.get("user")),
+                _text(source.get("april_text") or source.get("april")),
+            )).lower().replace("ё", "е")
+            is_authored_text = bool(re.search(
+                r"(?:стих\w*|поэм\w*|сонет\w*|лирик\w*|рифм\w*|куплет\w*|"
+                r"poem\w*|poetr\w*|verse\w*|sonnet\w*|lyrics)", topic_and_text
+            ))
+            # Require both a real selected DB source and a textual reference in
+            # either the query or that source. This is not a global history dump.
+            if not is_authored_text:
+                continue
+            raw_user = _text(source.get("user_text") or source.get("user"))
+            raw_april = _text(source.get("april_text") or source.get("april"))
+            selected_pair["preserve_source_text"] = True
+            selected_pair["source_user_text"] = raw_user[:1800]
+            selected_pair["source_april_text"] = raw_april[:5200]
+            selected_pair["source_user_text_chars"] = len(raw_user)
+            selected_pair["source_april_text_chars"] = len(raw_april)
+            selected_pair["source_user_text_complete"] = len(raw_user) <= 1800
+            selected_pair["source_april_text_complete"] = len(raw_april) <= 5200
+            selected_pair["source_content_complete"] = len(raw_user) <= 1800 and len(raw_april) <= 5200
+            selected_pair["source_text_origin"] = "dialogue_memory"
     if clarification_options:
         clarification_options = [_attach_topic_provenance(dict(option)) for option in clarification_options]
 
@@ -3605,7 +3691,7 @@ def search_dialogue_context(
     anchor_payload = _compact_pair(anchor) if relation == "CONTINUE" and anchor else {}
     _attach_topic_provenance(anchor_payload)
     result = {
-        "engine": "premium_state_manager_topic_section_search_v8_semantic_history_handoff",
+        "engine": "premium_state_manager_topic_section_search_v9_dialogue_continuity_source_evidence",
         "authenticated": True,
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "dialog_id": str(dialog_id or ""),
@@ -3614,6 +3700,9 @@ def search_dialogue_context(
         "context_signature": context_signature,
         "active_subject_conflict": bool(active_subject_conflict),
         "semantic_subject_switch": bool(semantic_subject_switch),
+        "decision_subject_switch": bool(decision_subject_switch),
+        "topic_reference_fragment": bool(topic_reference_fragment),
+        "topic_pointer_match": bool(topic_pointer_match),
         "self_contained_subject_switch": bool(self_contained_subject_switch),
         "total_pairs": len(rows),
         "candidate_count": len(matches),
