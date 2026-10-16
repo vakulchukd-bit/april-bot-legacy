@@ -66,6 +66,7 @@ _USERS_COLUMNS = (
     "last_reset",
     "created_at",
     "last_login_at",
+    "last_seen_at",
 )
 
 
