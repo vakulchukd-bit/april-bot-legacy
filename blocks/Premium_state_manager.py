@@ -702,6 +702,9 @@ _CONTEXT_NON_TOPICAL_ROOTS = (
     "формул", "график", "таблиц", "диаграмм", "уравнен", "данн", "значен",
     "придум", "предложи", "почем", "почему", "зачем", "открыл", "изобрел", "изобрёл",
     "доказал", "обосновал", "считал", "называл",
+    # Provenance questions describe an action/source, not a new topic.
+    "слиз", "скопир", "скач", "источник", "автор", "напис", "придум",
+    "плагиат", "нет", "нета",
 )
 
 _PARTICIPANT_SPEAKER_WORDS = {
@@ -2680,11 +2683,43 @@ def search_dialogue_context(
     interpreted_intent = _text(query_interpretation.get("primary_intent"))
     topic_reference_fragment = _text(query_interpretation.get("topic_reference")) == "TOPIC_FRAGMENT"
     context_signature = _query_context_signature(query, query_interpretation)
-    # An explicitly empty subject signature is meaningful: it says the request is
-    # referential (“these data”, “continue it”), not a new named subject. Do not
-    # repopulate it with generic task words such as “move”, “data”, or “table”.
+    pragmatic_features = query_interpretation.get("pragmatic_features") if isinstance(query_interpretation.get("pragmatic_features"), dict) else {}
+    speech_act = _text(query_interpretation.get("speech_act")).upper()
+    communicative_act = _text(query_interpretation.get("communicative_act")).upper()
+    is_correction = bool(
+        pragmatic_features.get("correction")
+        or speech_act in {"CORRECTION_OR_REVISION", "FRUSTRATION_OR_DISSATISFACTION", "NEGATION_OR_DISAGREEMENT"}
+        or communicative_act in {"REVISE_PREVIOUS_RESPONSE", "RESPOND_TO_DISAGREEMENT"}
+        or _looks_like_topic_correction(query)
+    )
+    is_short_acknowledgement = bool(
+        pragmatic_features.get("acknowledgement_or_agreement")
+        and len(_tokens(query)) <= 3
+        and not pragmatic_features.get("has_independent_payload")
+        and not history_request
+        and not new_topic_request
+    )
+    # In a correction, a rejected entity ("not Mendeleev") is not the intended
+    # search subject. If the user supplies a positive replacement ("I mean math"),
+    # resolve subjects from that replacement clause only.
+    subject_query = query
+    low_subject_query = _text(query).lower().replace("ё", "е")
+    positive_replacement = re.search(r"\b(?:я\s+про|я\s+имел\w*\s+в\s+виду|я\s+имела\w*\s+в\s+виду|именно)\s+(.+)$", low_subject_query)
+    if is_correction and positive_replacement:
+        subject_query = positive_replacement.group(1)
+    elif is_correction and re.search(r"\bне\s+про\s+[^,.;!?]+(?:\s+(?:спрашивал|спрашивала|говорил|говорила|имел|имела)\b|$)", low_subject_query):
+        subject_query = ""
     supplied_subjects = context_signature.get("subject_terms")
-    query_subjects = set(supplied_subjects) if isinstance(supplied_subjects, list) else _subject_tokens(query)
+    query_subjects = set(_subject_tokens(subject_query)) if subject_query != query else (
+        set(supplied_subjects) if isinstance(supplied_subjects, list) else _subject_tokens(query)
+    )
+    # Referential questions about an object's origin are continuations, not a new
+    # "internet/source" topic. The grammar/predicate terms are excluded above; this
+    # fallback prevents morphology/typos from creating a false subject conflict.
+    if reference_followup and not positive_replacement and not is_correction:
+        low = _text(query).lower().replace("ё", "е")
+        if re.search(r"\b(?:его|ее|её|это|этот|эта|эту)\b", low) and re.search(r"\b(?:придум\w*|слиз\w*|скопир\w*|напис\w*|взял\w*|взяла\w*)\b", low):
+            query_subjects = set()
 
     # Resolve a text-specified period into an actual filter over the authenticated
     # Premium memory. This preserves the 24-hour product retention cap and uses
@@ -2795,7 +2830,18 @@ def search_dialogue_context(
 
     # Search the whole user's 24-hour window for a distinctly named old topic,
     # but do not let generic words such as "применение" switch the active topic.
-    topic_bearing = _semantic_tokens(query) - _SECTION_QUERY_NOISE - _CONTEXT_GENERIC_TERMS
+    topic_bearing = _semantic_tokens(subject_query if is_correction and subject_query != query else query) - _SECTION_QUERY_NOISE - _CONTEXT_GENERIC_TERMS
+    # A pure correction such as "I wasn't asking about Mendeleev" rejects that
+    # entity; searching the archive for the rejected name would repeat the mistake.
+    if is_correction and not subject_query.strip():
+        topic_bearing = set()
+    if reference_followup and not query_subjects and re.search(
+        r"\b(?:придум\w*|слиз\w*|скопир\w*|напис\w*|взял\w*|взяла\w*)\b",
+        _text(query).lower().replace("ё", "е"),
+    ):
+        # A referential authorship/source question has no new topical entity.
+        # Do not launch a cross-history named-topic search for its predicates.
+        topic_bearing = set()
     named_rows: list[tuple[float, dict[str, Any]]] = []
     if not history_request and topic_bearing:
         scoped_ids = {_text(row.get("message_id")) for row in scoped_rows}
@@ -2854,6 +2900,7 @@ def search_dialogue_context(
     # written from the relevant speaker perspective; use the existing relevance and
     # recency ordering for all other turns. No fixed score gate is introduced.
     matches.sort(key=lambda item: (
+        int(bool((is_correction or is_short_acknowledgement) and item.get("same_dialog"))),
         int(item.get("participant_alignment") or 0) if not query_subjects else 0,
         float(item["score"]), float(item["recency"]), int(item["turn_index"])
     ), reverse=True)
@@ -2982,7 +3029,8 @@ def search_dialogue_context(
     # A successfully matched topic pointer explicitly refers to that prior topic,
     # even when the latest turn is about something else. Preserve the raw switch
     # diagnostic, but don't let the latest topic veto the user's resolved pointer.
-    decision_subject_switch = bool(semantic_subject_switch and not topic_pointer_match)
+    decision_subject_switch = bool(semantic_subject_switch and not topic_pointer_match and not is_correction and not is_short_acknowledgement)
+    repair_active_branch = bool((is_correction or is_short_acknowledgement) and latest_same_dialog and not new_topic_request and not history_request)
 
     # Treat the ranked match as contextual when it contains actual semantic evidence,
     # rather than requiring a fixed hand-chosen score cutoff. Subject conflict remains
@@ -3026,6 +3074,11 @@ def search_dialogue_context(
         and bool(query_interpretation.get("requires_memory"))
         and _text(query_interpretation.get("topic_reference")) == "PREVIOUS_ASSISTANT_ANSWER"
     ):
+        continuation = True
+    elif repair_active_branch:
+        # Corrections and bare acknowledgements are discourse moves attached to the
+        # active exchange. Do not let a rejected entity or a lexical score pull them
+        # into an unrelated older topic.
         continuation = True
     elif hot_branch_candidate and not decision_subject_switch:
         # Only ambiguous turns that pass the hot-branch relevance check may continue
@@ -3179,7 +3232,9 @@ def search_dialogue_context(
         # globally, or handed back to normal dialogue. It must not create another
         # local clarification from the old options.
     elif relation == "CONTINUE" and rows:
-        if not query_subjects and latest_same_dialog:
+        if repair_active_branch and latest_same_dialog and not (is_correction and subject_query.strip()):
+            anchor = latest_same_dialog
+        elif not query_subjects and latest_same_dialog:
             # For an underspecified turn, prefer role-aligned evidence when available.
             # Otherwise compare the actual topical evidence with the active turn; if
             # neither gives a clear relative preference, stay on the active turn.
@@ -3761,6 +3816,9 @@ def search_dialogue_context(
         temporal_empty_reason=_text(time_filter.get("empty_reason")),
         temporal_neighbor_sides=sum(1 for side in (time_filter.get("neighbors") or {}).values() if isinstance(side, dict)),
         contextual_history_match=contextual_history_match, history_selection_method=history_selection_method,
+        dialogue_act=speech_act or communicative_act or "UNSPECIFIED",
+        active_branch_repair=bool(repair_active_branch),
+        short_acknowledgement=bool(is_short_acknowledgement),
         selected_section_heading=_text(selected_section.get("heading")), clarification_needed=clarification_needed,
         clarification_status=_text(clarification_resolution.get("status")),
         selected_message_keys=[_apr_diag_ref(x.get("message_id")) for x in selected_for_context if isinstance(x, dict) and x.get("message_id")],
