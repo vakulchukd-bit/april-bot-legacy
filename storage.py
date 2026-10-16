@@ -1822,7 +1822,13 @@ def touch_user_activity(user_id: Any) -> None:
 
 
 def get_admin_user_telemetry() -> dict[str, int] | None:
-    """Return small aggregate counters; online means chat activity in the last 3 minutes."""
+    """Return unique-account telemetry, deduplicating linked April/Google rows.
+
+    A normalized email is the strongest cross-provider identity key. If email is
+    unavailable, use the public April ID, then provider identity, then internal ID.
+    Premium wins when any row for the same identity has a currently valid Premium
+    entitlement. Online counts unique identities with a recent chat activity mark.
+    """
     conn = get_conn()
     if not conn:
         return None
@@ -1831,22 +1837,40 @@ def get_admin_user_telemetry() -> dict[str, int] | None:
             with conn.cursor() as cur:
                 cur.execute(
                     """
+                    WITH normalized AS (
+                        SELECT
+                            COALESCE(
+                                NULLIF(LOWER(BTRIM(email)), ''),
+                                NULLIF(BTRIM(april_id), ''),
+                                CASE
+                                    WHEN NULLIF(BTRIM(provider), '') IS NOT NULL
+                                     AND NULLIF(BTRIM(provider_user_id), '') IS NOT NULL
+                                    THEN LOWER(BTRIM(provider)) || ':' || BTRIM(provider_user_id)
+                                    ELSE NULLIF(BTRIM(user_id), '')
+                                END
+                            ) AS account_key,
+                            (
+                                COALESCE(LOWER(BTRIM(plan)), 'free') = 'premium'
+                                AND COALESCE(subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
+                            ) AS premium_active,
+                            (last_seen_at >= CURRENT_TIMESTAMP - INTERVAL '3 minutes') AS recently_active
+                        FROM users
+                    ),
+                    accounts AS (
+                        SELECT
+                            account_key,
+                            BOOL_OR(COALESCE(premium_active, FALSE)) AS premium_active,
+                            BOOL_OR(COALESCE(recently_active, FALSE)) AS recently_active
+                        FROM normalized
+                        WHERE account_key IS NOT NULL
+                        GROUP BY account_key
+                    )
                     SELECT
                         COUNT(*)::INT AS total,
-                        COUNT(*) FILTER (
-                            WHERE COALESCE(LOWER(plan), 'free') = 'premium'
-                              AND COALESCE(subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
-                        )::INT AS premium,
-                        COUNT(*) FILTER (
-                            WHERE NOT (
-                                COALESCE(LOWER(plan), 'free') = 'premium'
-                                AND COALESCE(subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
-                            )
-                        )::INT AS free,
-                        COUNT(*) FILTER (
-                            WHERE last_seen_at >= CURRENT_TIMESTAMP - INTERVAL '3 minutes'
-                        )::INT AS online
-                    FROM users
+                        COUNT(*) FILTER (WHERE premium_active)::INT AS premium,
+                        COUNT(*) FILTER (WHERE NOT premium_active)::INT AS free,
+                        COUNT(*) FILTER (WHERE recently_active)::INT AS online
+                    FROM accounts
                     """
                 )
                 row = cur.fetchone() or {}
