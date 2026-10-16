@@ -445,10 +445,12 @@ _CONTEXT_GENERIC_TERMS = {
     "uah", "usd", "dollar", "dollars", "rubles", "ruble", "euro", "linear", "bar",
 }
 _CONTEXT_REFERENCE_TERMS = {
-    "это", "этого", "этой", "этом", "эти", "этих", "тот", "та", "те", "того",
-    "данный", "данная", "данное", "такие", "такой", "такую", "такого", "них", "их",
+    "это", "этого", "этой", "этом", "эту", "этот", "эта", "эти", "этих",
+    "тот", "та", "ту", "те", "того", "той", "тех", "данный", "данная", "данное",
+    "он", "она", "оно", "они", "его", "ее", "ему", "ей", "им", "их", "них",
     "него", "нее", "неё", "ней", "ним", "previous", "earlier", "these", "those",
-    "this", "that", "same", "them", "it", "дальше", "ещё", "еще",
+    "this", "that", "same", "them", "it", "he", "she", "they", "him", "her", "its",
+    "дальше", "ещё", "еще",
 }
 
 def _subject_family(token: Any) -> str:
@@ -462,6 +464,8 @@ _CONTEXT_NON_TOPICAL_ROOTS = (
     "сдела", "вычисл", "рассчит", "сравн", "найд", "проверь", "проанализ", "привед",
     "перечисл", "продолж", "дальш", "должн", "каки", "был",
     "формул", "график", "таблиц", "диаграмм", "уравнен", "данн", "значен",
+    "придум", "предложи", "почем", "почему", "зачем", "открыл", "изобрел", "изобрёл",
+    "доказал", "обосновал", "считал", "называл",
 )
 
 _PARTICIPANT_SPEAKER_WORDS = {
@@ -680,6 +684,7 @@ def _hot_branch_followup_candidate(
     query_subjects: set[str] | None = None,
     reference_followup: bool = False,
     marker: bool = False,
+    conversation_id: str = "",
     has_attachment: bool = False,
     history_request: bool = False,
     new_topic_request: bool = False,
@@ -741,6 +746,7 @@ def _hot_branch_followup_candidate(
     candidate = _candidate_score(
         text, scoring_row,
         dialog_id=_text(latest_row.get("dialog_id")),
+        conversation_id=conversation_id,
         reference_followup=reference_followup,
     )
     semantic_fit = max(
@@ -896,11 +902,18 @@ def _looks_like_referential_followup(query: str) -> bool:
 
     tokens = _tokens(low)
     reference_tokens = {
-        "он", "она", "они", "его", "ее", "её", "их", "ему", "ей", "им",
-        "ним", "ней", "него", "нее", "неё", "них", "это", "тот", "та",
-        "эта", "этот", "эти", "так", "данный", "данная",
+        "он", "она", "оно", "они", "его", "ее", "её", "их", "ему", "ей", "им",
+        "ним", "ней", "него", "нее", "неё", "них", "это", "тот", "та", "ту", "эта",
+        "этот", "эту", "этого", "этой", "этом", "эти", "этих", "так", "данный", "данная",
+        "this", "that", "these", "those", "it", "he", "she", "they", "him", "her", "them",
     }
-    return len(tokens) <= 10 and bool(tokens & reference_tokens)
+    if len(tokens) <= 12 and bool(tokens & reference_tokens):
+        return True
+    # Subjectless short questions are ellipses when the object is recoverable from the active turn.
+    question_words = {"кто", "что", "чем", "чего", "какой", "какая", "какие", "где", "когда", "почему", "зачем", "как", "who", "what", "where", "when", "why", "how"}
+    if len(tokens) <= 5 and bool(tokens & question_words) and not _subject_tokens(low):
+        return True
+    return False
 
 
 def _looks_like_asset_reference(query: str) -> bool:
@@ -1520,6 +1533,7 @@ def _candidate_score(
     row: dict[str, Any],
     *,
     dialog_id: str = "",
+    conversation_id: str = "",
     now_ts: float | None = None,
     reference_followup: bool = False,
     query_modalities: set[str] | None = None,
@@ -1579,7 +1593,10 @@ def _candidate_score(
     recency = max(0.0, 1.0 - age / DIALOGUE_WINDOW_SECONDS)
 
     row_dialog = _text(row.get("dialog_id"))
+    row_conversation = _text(row.get("conversation_id"))
     exact_dialog = bool(dialog_id and row_dialog and row_dialog == dialog_id)
+    exact_conversation = bool(conversation_id and row_conversation and row_conversation == conversation_id)
+    same_active_context = exact_dialog or exact_conversation
 
     score = (
         lexical * 0.12
@@ -1591,9 +1608,9 @@ def _candidate_score(
         + direction * 0.04
         + modality_match * 0.08
         + recency * 0.05
-        + (0.09 if exact_dialog else 0.0)
+        + (0.09 if exact_dialog else (0.06 if exact_conversation else 0.0))
     )
-    if reference_followup and exact_dialog:
+    if reference_followup and same_active_context:
         score += 0.20
     if exact_dialog and int(row.get("turn_index") or 0) == max(
         [int(x.get("turn_index") or 0) for x in _STATES.get(_text(row.get("user_id")), {}).get("dialogue_pairs", []) if isinstance(x, dict)],
@@ -1633,7 +1650,10 @@ def _candidate_score(
         "row_modalities": sorted(row_modalities),
         "direction": round(direction, 6),
         "recency": round(recency, 6),
-        "same_dialog": exact_dialog,
+        # Treat a stable conversation_id as active scope when dialog_id rotates.
+        "same_dialog": same_active_context,
+        "exact_dialog": exact_dialog,
+        "same_conversation": exact_conversation,
         "turn_index": int(row.get("turn_index") or 0),
         "created_at": created,
         "user": user,
@@ -2937,7 +2957,7 @@ def search_dialogue_context(
         # original request rather than becoming the new active topic.
 
     candidate_started = time.perf_counter()
-    matches = [_candidate_score(query, row, dialog_id=str(dialog_id or ""), reference_followup=reference_followup, query_modalities=query_modalities)
+    matches = [_candidate_score(query, row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""), reference_followup=reference_followup, query_modalities=query_modalities)
                for row in rows]
     # For participant-centered, subjectless questions, first rank factual evidence
     # written from the relevant speaker perspective; use the existing relevance and
@@ -3052,7 +3072,7 @@ def search_dialogue_context(
     hot_branch_candidate = _hot_branch_followup_candidate(
         query, query_interpretation, latest_same_dialog,
         query_subjects=query_subjects, reference_followup=reference_followup,
-        marker=marker, has_attachment=bool(query_modalities),
+        marker=marker, conversation_id=str(conversation_id or ""), has_attachment=bool(query_modalities),
         history_request=history_request, new_topic_request=new_topic_request,
     )
     continuation = False
@@ -3250,7 +3270,7 @@ def search_dialogue_context(
             vector_row = topic_vector_hits[0].get("row")
             if isinstance(vector_row, dict):
                 anchor = _candidate_score(
-                    query, vector_row, dialog_id=str(dialog_id or ""),
+                    query, vector_row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""),
                     reference_followup=True, query_modalities=query_modalities,
                 )
         elif not query_subjects and latest_same_dialog:
@@ -3281,7 +3301,7 @@ def search_dialogue_context(
                     anchor = latest_same_dialog
         elif explicit_topic_hits:
             chosen_global = explicit_topic_hits[0][1]
-            anchor = _candidate_score(query, chosen_global, dialog_id=str(dialog_id or ""), reference_followup=reference_followup, query_modalities=query_modalities)
+            anchor = _candidate_score(query, chosen_global, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""), reference_followup=reference_followup, query_modalities=query_modalities)
         elif latest_same_dialog and (reference_followup or marker or short_contextual or _is_section_request(query)):
             topic_overlap_best = max((_topic_query_overlap(query, item.get("topic", "")) for item in matches if item.get("same_dialog")), default=0.0)
             if topic_overlap_best < 0.50:
@@ -3349,7 +3369,7 @@ def search_dialogue_context(
                 if message_id:
                     seen_vector_ids.add(message_id)
                 scored_hit = _candidate_score(
-                    query, hit_row, dialog_id=str(dialog_id or ""),
+                    query, hit_row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""),
                     reference_followup=True, query_modalities=query_modalities,
                 )
                 selected_for_context.append(_compact_pair(scored_hit))
@@ -3428,7 +3448,7 @@ def search_dialogue_context(
             source_row = next((row for row in all_rows if _text(row.get("message_id")) == topic_message_id), None)
             if source_row is not None:
                 matched_pair = _candidate_score(
-                    query, source_row, dialog_id=str(dialog_id or ""),
+                    query, source_row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""),
                     reference_followup=True, query_modalities=query_modalities,
                 )
                 selected_for_context = [_compact_pair(matched_pair)]
