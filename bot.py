@@ -46,6 +46,7 @@ from storage import (
     activate_test_premium, find_or_create_user, get_user_plan,
     get_user_subscription_status, init_db, is_authenticated_user, resolve_user_id,
     delete_april_account, load_dialogue_history_index,
+    get_admin_user_telemetry, touch_user_activity,
 )
 
 HOST = os.getenv("HOST", "0.0.0.0")
@@ -928,7 +929,23 @@ class AprilHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == CANONICAL_CHAT_ROUTE:
             query = parse_qs(parsed.query, keep_blank_values=False)
-            if query.get("mode", [""])[0] == "history":
+            mode = query.get("mode", [""])[0]
+            if mode == "telemetry":
+                if not self._service_authorized():
+                    self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                    return
+                supplied_admin_id = _text(self.headers.get("X-April-User-Id"))
+                expected_admin_id = _text(os.getenv("APRIL_SUPERADMIN_APRIL_ID", "APR-WMBS-8W4Y"))
+                if not supplied_admin_id or supplied_admin_id != expected_admin_id:
+                    self._send_json(403, {"success": False, "error": "SUPERADMIN_REQUIRED"})
+                    return
+                telemetry = get_admin_user_telemetry()
+                if not telemetry:
+                    self._send_json(503, {"success": False, "error": "TELEMETRY_UNAVAILABLE"})
+                    return
+                self._send_json(200, {"success": True, **telemetry})
+                return
+            if mode == "history":
                 # Both layers authenticate: Web verifies NextAuth, Bot verifies
                 # the service token and checks that the forwarded account exists.
                 if not self._service_authorized():
@@ -1211,6 +1228,11 @@ class AprilHandler(BaseHTTPRequestHandler):
         if not canonical_user_id:
             self._send_json(503, {"success": False, "error": "USER_ID_RESOLUTION_FAILED", "canonical_route": CANONICAL_CHAT_ROUTE})
             return
+        # Existing chat traffic is the lightweight activity signal; no new route or table is required.
+        try:
+            touch_user_activity(canonical_user_id)
+        except Exception:
+            pass
         http_started = time.perf_counter()
         try:
             length = int(self.headers.get("Content-Length", "0"))
