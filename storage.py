@@ -319,10 +319,14 @@ def init_db() -> None:
                         created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                         admin_reply TEXT,
                         replied_at TIMESTAMPTZ,
-                        admin_id TEXT
+                        admin_id TEXT,
+                        attachment_data TEXT,
+                        attachment_mime TEXT
                     )
                     """
                 )
+                cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS attachment_data TEXT")
+                cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS attachment_mime TEXT")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_user_created ON premium_support_messages(user_id, created_at DESC)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_pending ON premium_support_messages(created_at ASC) WHERE admin_reply IS NULL")
 
@@ -1633,6 +1637,8 @@ def _support_message_payload(row: dict[str, Any] | None, *, include_identity: bo
         "created_at_ms": _support_time_ms(row.get("created_at")),
         "admin_reply": str(row.get("admin_reply") or "") or None,
         "replied_at_ms": _support_time_ms(row.get("replied_at")),
+        "attachment_data": str(row.get("attachment_data") or "") or None,
+        "attachment_mime": str(row.get("attachment_mime") or "") or None,
     }
     if include_identity:
         result.update({
@@ -1673,7 +1679,7 @@ def get_premium_support_status(user_id: Any) -> dict[str, Any] | None:
             until = float(user.get("subscription_until") or 0)
             active_premium = str(user.get("plan") or "free").lower() == "premium" and until > current.timestamp()
             cur.execute(
-                """SELECT id, user_id, message, language, created_at, admin_reply, replied_at
+                """SELECT id, user_id, message, language, created_at, admin_reply, replied_at, attachment_data, attachment_mime
                    FROM premium_support_messages WHERE user_id = %s
                    ORDER BY created_at DESC, id DESC LIMIT 1""",
                 (canonical_id,),
@@ -1701,7 +1707,7 @@ def get_premium_support_status(user_id: Any) -> dict[str, Any] | None:
         conn.close()
 
 
-def send_premium_support_message(user_id: Any, message: Any, language: Any = "en") -> dict[str, Any]:
+def send_premium_support_message(user_id: Any, message: Any, language: Any = "en", attachment_data: Any = None, attachment_mime: Any = None) -> dict[str, Any]:
     """Insert a Premium support ticket with an atomic per-account 24h limit."""
     raw = str(user_id or "").strip()
     body = str(message or "").strip()
@@ -1712,6 +1718,16 @@ def send_premium_support_message(user_id: Any, message: Any, language: Any = "en
         return {"success": False, "error": "MESSAGE_TOO_SHORT"}
     if len(body) > 4000:
         return {"success": False, "error": "MESSAGE_TOO_LONG"}
+    image_data = str(attachment_data or "").strip()
+    image_mime = str(attachment_mime or "").strip().lower()
+    if image_data:
+        allowed_mimes = {"image/jpeg", "image/png", "image/webp"}
+        if image_mime not in allowed_mimes or not image_data.startswith(f"data:{image_mime};base64,") or len(image_data) > 700_000:
+            return {"success": False, "error": "ATTACHMENT_INVALID"}
+    else:
+        image_data, image_mime = None, None
+    if len(body) < 5 and not image_data:
+        return {"success": False, "error": "MESSAGE_TOO_SHORT"}
     conn = get_conn()
     if not conn:
         return {"success": False, "error": "DATABASE_UNAVAILABLE"}
@@ -1753,9 +1769,9 @@ def send_premium_support_message(user_id: Any, message: Any, language: Any = "en
                             "remaining_seconds": max(0, int((next_allowed - current).total_seconds())),
                         }
                 cur.execute(
-                    """INSERT INTO premium_support_messages(user_id, message, language)
-                       VALUES (%s, %s, %s) RETURNING id, user_id, message, language, created_at, admin_reply, replied_at""",
-                    (canonical_id, body, lang),
+                    """INSERT INTO premium_support_messages(user_id, message, language, attachment_data, attachment_mime)
+                       VALUES (%s, %s, %s, %s, %s) RETURNING id, user_id, message, language, created_at, admin_reply, replied_at, attachment_data, attachment_mime""",
+                    (canonical_id, body, lang, image_data, image_mime),
                 )
         status = get_premium_support_status(raw)
         return status or {"success": False, "error": "SUPPORT_STATUS_UNAVAILABLE"}
