@@ -48,10 +48,11 @@ from blocks.Premium_state_manager import (
     is_authenticated_user,
     save_dialogue_pair,
     prepare_dialogue_context,
+    build_active_work_branch_record,
 )
 
 
-PROCESSOR_VERSION = "april_premium_exkrutor_single_route_v5_active_branch_repair"
+PROCESSOR_VERSION = "april_premium_exkrutor_single_route_v6_hot_work_branch_priority"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -280,6 +281,9 @@ def _compact_question_search(
         "communicative_act": _text(semantics.get("communicative_act") or "NEW_OR_STANDALONE"),
         "active_branch_repair": bool(active_repair),
         "active_branch": dict(context.get("active_branch") or state_search.get("active_branch") or {}),
+        "active_work_branch": dict(context.get("active_work_branch") or state_search.get("active_work_branch") or {}),
+        "hot_work_followup": bool(context.get("hot_work_followup") or state_search.get("hot_work_followup")),
+        "hot_work_match_reason": _text(context.get("hot_work_match_reason") or state_search.get("hot_work_match_reason"))[:80],
         "user_operation": dict(context.get("user_operation") or state_search.get("user_operation") or {}),
         "source_retrieval": dict(context.get("source_retrieval") or state_search.get("source_retrieval") or {}),
         "previous_answer_reference": bool(
@@ -1531,6 +1535,12 @@ async def execute(
             "relation": dialogue_context["relation"],
             "relation_confidence": dialogue_context["relation_confidence"],
             "active_branch": dict(dialogue_context.get("active_branch") or {}),
+            "active_work_branch": (
+                dict(dialogue_context.get("active_work_branch") or {})
+                if dialogue_context.get("hot_work_followup") else {}
+            ),
+            "hot_work_followup": bool(dialogue_context.get("hot_work_followup")),
+            "hot_work_match_reason": _text(dialogue_context.get("hot_work_match_reason"))[:80],
             "user_operation": dict(dialogue_context.get("user_operation") or {}),
             "source_retrieval": dict(dialogue_context.get("source_retrieval") or {}),
             "selected_pairs": (
@@ -1596,6 +1606,12 @@ async def execute(
                 "relation": dialogue_context["relation"],
                 "current_request": current_text,
                 "active_branch": dict(dialogue_context.get("active_branch") or {}),
+                "active_work_branch": (
+                    dict(dialogue_context.get("active_work_branch") or {})
+                    if dialogue_context.get("hot_work_followup") else {}
+                ),
+                "hot_work_followup": bool(dialogue_context.get("hot_work_followup")),
+                "hot_work_match_reason": _text(dialogue_context.get("hot_work_match_reason"))[:80],
                 "user_operation": dict(dialogue_context.get("user_operation") or {}),
                 "source_retrieval": dict(dialogue_context.get("source_retrieval") or {}),
                 "selected_dialogue_chain": (
@@ -1639,6 +1655,11 @@ async def execute(
                     "confidence": dialogue_context["relation_confidence"],
                     "anchor_topic": (dialogue_context.get("anchor") or {}).get("topic", ""),
                     "active_branch": dict(dialogue_context.get("active_branch") or {}),
+                    "active_work_branch": (
+                        dict(dialogue_context.get("active_work_branch") or {})
+                        if dialogue_context.get("hot_work_followup") else {}
+                    ),
+                    "hot_work_followup": bool(dialogue_context.get("hot_work_followup")),
                     "user_operation": dict(dialogue_context.get("user_operation") or {}),
                     "source_retrieval": dict(dialogue_context.get("source_retrieval") or {}),
                 },
@@ -2512,6 +2533,32 @@ async def execute(
     scene_contract["metadata"] = scene_meta
     result["scene_contract"] = scene_contract
 
+    response_memory_record = (
+        raw.get("dialogue_memory_record") if isinstance(raw.get("dialogue_memory_record"), dict)
+        else ((raw.get("metadata") or {}).get("dialogue_memory_record") if isinstance(raw.get("metadata"), dict) else {})
+    )
+    if not isinstance(response_memory_record, dict):
+        response_memory_record = {}
+    inherited_work_branch = (
+        dialogue_context.get("active_work_branch")
+        if dialogue_context.get("hot_work_followup") and isinstance(dialogue_context.get("active_work_branch"), dict)
+        else {}
+    )
+    active_work_record = build_active_work_branch_record(
+        user_text=original or current_text,
+        april_text=answer,
+        summary=_text(response_memory_record.get("summary") or raw.get("summary") or answer[:180]),
+        topic=_text(response_memory_record.get("topic") or response_memory_record.get("title")),
+        message_id=identity["message_id"],
+        dialog_id=identity["dialog_id"],
+        conversation_id=identity["conversation_id"],
+        relation=_text(dialogue_context.get("relation") or "NEW"),
+        inherited_branch=inherited_work_branch,
+        intent=interpretation,
+        requested_outputs=list(request.requested_outputs),
+        render_blocks=list(response.render_blocks or []),
+        artifacts=list(response.artifacts or []),
+    )
     structured_request = _strip_inline_binary({
         "request_id": request.request_id,
         "goal": request.goal,
@@ -2541,7 +2588,8 @@ async def execute(
             "source_inputs": attachment_refs,
             "april_outputs": output_asset_refs,
         },
-        "dialogue_memory_record": (response.metadata or {}).get("dialogue_memory_record", {}),
+        "dialogue_memory_record": response_memory_record,
+        **({"active_work_branch": active_work_record} if active_work_record else {}),
     })
 
     pair_save_started = time.perf_counter()
