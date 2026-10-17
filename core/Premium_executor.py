@@ -279,6 +279,9 @@ def _compact_question_search(
         "speech_act": _text(semantics.get("speech_act") or "STATEMENT_OR_REQUEST"),
         "communicative_act": _text(semantics.get("communicative_act") or "NEW_OR_STANDALONE"),
         "active_branch_repair": bool(active_repair),
+        "active_branch": dict(context.get("active_branch") or state_search.get("active_branch") or {}),
+        "user_operation": dict(context.get("user_operation") or state_search.get("user_operation") or {}),
+        "source_retrieval": dict(context.get("source_retrieval") or state_search.get("source_retrieval") or {}),
         "previous_answer_reference": bool(
             semantics.get("previous_answer_reference")
             or (semantics.get("pragmatic_features") or {}).get("previous_answer_reference")
@@ -1527,6 +1530,9 @@ async def execute(
             "window_hours": int(dialogue_context.get("window_hours") or 24),
             "relation": dialogue_context["relation"],
             "relation_confidence": dialogue_context["relation_confidence"],
+            "active_branch": dict(dialogue_context.get("active_branch") or {}),
+            "user_operation": dict(dialogue_context.get("user_operation") or {}),
+            "source_retrieval": dict(dialogue_context.get("source_retrieval") or {}),
             "selected_pairs": (
                 dialogue_context.get("selected_pairs") or []
                 if (dialogue_context.get("relation") == "CONTINUE" or dialogue_context.get("history_request") or dialogue_context.get("contextual_history_match"))
@@ -1589,6 +1595,9 @@ async def execute(
             "provider_context_plan": {
                 "relation": dialogue_context["relation"],
                 "current_request": current_text,
+                "active_branch": dict(dialogue_context.get("active_branch") or {}),
+                "user_operation": dict(dialogue_context.get("user_operation") or {}),
+                "source_retrieval": dict(dialogue_context.get("source_retrieval") or {}),
                 "selected_dialogue_chain": (
                     dialogue_context.get("selected_pairs") or []
                     if (dialogue_context.get("relation") == "CONTINUE" or dialogue_context.get("history_request"))
@@ -1629,6 +1638,9 @@ async def execute(
                     "reason": dialogue_context["reason"],
                     "confidence": dialogue_context["relation_confidence"],
                     "anchor_topic": (dialogue_context.get("anchor") or {}).get("topic", ""),
+                    "active_branch": dict(dialogue_context.get("active_branch") or {}),
+                    "user_operation": dict(dialogue_context.get("user_operation") or {}),
+                    "source_retrieval": dict(dialogue_context.get("source_retrieval") or {}),
                 },
                 "mcdowell": {
                     "always": True,
