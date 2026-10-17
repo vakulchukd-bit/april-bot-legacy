@@ -1208,19 +1208,19 @@ class AprilHandler(BaseHTTPRequestHandler):
                 if user_id == expected_admin_id:
                     self._send_json(403, {"success": False, "error": "ADMIN_CANNOT_OPEN_SUPPORT_TICKET"})
                     return
-                _attachment_data = body.get("attachment_data")
-                _attachment_mime = body.get("attachment_mime")
+                _image_data = body.get("image_data")
+                _image_mime = body.get("image_mime")
                 _apr_timing_log(
                     "support_send_received", user_key=_apr_diag_ref(user_id),
                     message_chars=len(_text(body.get("message"))),
-                    attachment_present=bool(_attachment_data),
-                    attachment_mime=_text(_attachment_mime)[:80],
-                    attachment_chars=len(str(_attachment_data or "")),
-                    attachment_name_present=bool(_text(body.get("attachment_name"))),
+                    image_present=bool(_image_data),
+                    image_mime=_text(_image_mime)[:80],
+                    image_chars=len(str(_image_data or "")),
+                    image_name_present=bool(_text(body.get("image_name"))),
                 )
                 result = send_premium_support_message(
                     user_id, body.get("message"), body.get("language"),
-                    _attachment_data, _attachment_mime, body.get("attachment_name"),
+                    _image_data, _image_mime, body.get("image_name"),
                 )
                 if result.get("success") is True:
                     self._send_json(200, result)
@@ -1233,14 +1233,26 @@ class AprilHandler(BaseHTTPRequestHandler):
                 if user_id != expected_admin_id:
                     self._send_json(403, {"success": False, "error": "SUPERADMIN_REQUIRED"})
                     return
+                _reply_image_data = body.get("image_data")
+                _reply_image_mime = body.get("image_mime")
+                _apr_timing_log(
+                    "support_reply_received", user_key=_apr_diag_ref(user_id),
+                    message_id=_text(body.get("message_id"))[:40],
+                    reply_chars=len(_text(body.get("reply"))),
+                    image_present=bool(_reply_image_data),
+                    image_mime=_text(_reply_image_mime)[:80],
+                    image_chars=len(str(_reply_image_data or "")),
+                )
                 result = reply_premium_support_message(
-                    body.get("message_id"), body.get("reply"), user_id, body.get("reply_language", "en"),
+                    body.get("message_id"), body.get("reply"), user_id,
+                    body.get("reply_language", "en"), _reply_image_data,
+                    _reply_image_mime, body.get("image_name"),
                 )
                 if result.get("success") is True:
                     self._send_json(200, result)
                     return
                 error = _text(result.get("error") or "SUPPORT_UNAVAILABLE")
-                status = 403 if error == "SUPERADMIN_REQUIRED" else 404 if error == "SUPPORT_MESSAGE_NOT_FOUND" else 409 if error == "SUPPORT_MESSAGE_ALREADY_REPLIED" else 503 if error in {"DATABASE_UNAVAILABLE", "SUPPORT_UNAVAILABLE"} else 400
+                status = 403 if error == "SUPERADMIN_REQUIRED" else 404 if error == "SUPPORT_MESSAGE_NOT_FOUND" else 503 if error in {"DATABASE_UNAVAILABLE", "SUPPORT_UNAVAILABLE"} else 400
                 self._send_json(status, result)
                 return
             self._send_json(400, {"success": False, "error": "INVALID_SUPPORT_ACTION"})
