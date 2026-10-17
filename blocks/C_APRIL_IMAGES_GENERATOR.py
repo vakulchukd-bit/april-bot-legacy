@@ -65,7 +65,7 @@ class AprilImagesGenerator:
     """The only image producer between Provider and C_ARTIFACT_CONTRACT."""
 
     ENGINE_NAME = "GPT Image 2.0"
-    ENGINE_VERSION = "2.0.0"
+    ENGINE_VERSION = "2.0.1-prompt-refinement"
     MODEL = "gpt-image-2"
     BACKEND = "openai_gpt_image_2"
 
@@ -388,8 +388,11 @@ class AprilImagesGenerator:
                     parts.append(f"Relevant appearance facts from the answer: {appearance}")
 
         parts.append(
-            "Render the supplied visual content faithfully. Do not replace the requested subject, "
-            "do not add unrelated subjects or environments, and do not invent missing scene elements."
+            "Follow the request and visual plan exactly, preserving subject, identity, action, relationships, "
+            "setting, mood, palette and style. Use clear framing, focal hierarchy, coherent perspective, "
+            "consistent lighting and readable textures. Keep anatomy and object geometry consistent. Add no "
+            "unrequested elements; avoid clutter, duplicates, stray text, logos and watermarks unless requested. "
+            "Resolve ambiguities conservatively."
         )
         return "\n".join(parts)
 
