@@ -40,7 +40,7 @@ def _scaled_prompt_tokens(base_tokens: int) -> int:
     return max(1, int(round(int(base_tokens) * PREMIUM_PROMPT_SCALE)))
 
 TRANSLATION_ROUTE_VERSION = "botru_embedded_translation_v1"
-PROVIDER_ROUTER_VERSION = "premium_provider_router_v3_active_branch_repair_evidence"
+PROVIDER_ROUTER_VERSION = "premium_provider_router_v4_hot_work_branch_priority"
 
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _inflight: set[str] = set()
@@ -104,6 +104,13 @@ When PROTECTED_STRUCTURED_DATA is present, preserve only its selected source val
 When PROTECTED_CURRENT_INPUT is present, its metadata identifies a separate adjacent input_text part labeled PROTECTED_CURRENT_INPUT_SOURCE. That labeled source part is the authoritative full current request/data. Preserve every row, value, coordinate, label, unit, sign, formula, equation, ordering and constraint exactly. Do not substitute sampled values, regenerate missing rows, or rely on a compressed paraphrase. Use CURRENT_REQUEST and REQUEST_SEQUENCE for task intent and order; use PROTECTED_CURRENT_INPUT_SOURCE for exact data. Keep that source intact; it is counted in actual API input usage but is not duplicated inside the 3600-token system-plus-structured-card budget.
 
 For CONTINUE, continue the selected subject and do not repeat questions already answered.
+ACTIVE_WORK_BRANCH is present only when State Manager matched this request to a live task/interaction.
+When active, use it as the FIRST context source: apply the current task state and selected canonical
+work pairs before general topic/history ranking. For a numbered choice, in-scene action, code change,
+solution step, image edit, diagram/graph adjustment, or other operation on that task, continue the
+same work instead of restarting or asking the user to resend rules, code, constraints, or state already
+provided. If the work branch does not actually fit the request, fall through to the ordinary search and
+answer the independent request; never force an unrelated question into the hot task.
 Use SELECTED_SECTION as the primary target when it is present; use its heading and short summary,
 not all prior answer text. If CLARIFICATION_RESOLUTION exists, fulfill its original_request and treat
 CURRENT_REQUEST as the user's answer to a clarification, not as a replacement for the original intent.
@@ -122,7 +129,7 @@ McDowell must organize explanatory answers into meaningful user-visible Markdown
 (for example ## Biography, ## Works, ## Main themes) whenever the answer covers multiple
 sections. Do not answer a follow-up by merely summarizing or repeating the previous answer;
 develop the requested part and preserve all requested details.
-For NEW, answer independently and do not let old context override the request.
+For NEW with no ACTIVE_WORK_BRANCH, answer independently and do not let old context override the request. When ACTIVE_WORK_BRANCH is explicitly supplied, first honor the matched task state described above.
 
 For a history_request, use DIALOGUE_HISTORY_TOPICS / DIALOGUE_TABLE_MARKDOWN as an index over
 the retained dialogue. Never claim that the dialogue is unavailable when the index contains
@@ -240,7 +247,10 @@ in REQUEST_SEQUENCE order. Never emit an empty table shell; rows and cells must 
 Composite output requests are cumulative. Generated illustrations are not authentic photographs.
 When multiple visual outputs are in C_ARTIFACT_RENDER_PLAN, provide concrete payloads for them; at least half of four-or-more requested visual types must render. Target a 60/40 text-to-render allocation when visuals are relevant; interleave typed blocks with the matching step in order. For non-numeric concepts use a grounded network graph, never fake numeric data. Images need the generator signal; links need real URLs.
 Use CURRENT_REQUEST as the task. On CONTINUE, SELECTED_SECTION is the target when present; use
-its concise summary and selected anchor rather than full previous answers. For each REQUEST_SEQUENCE
+its concise summary and selected anchor rather than full previous answers. When ACTIVE_WORK_BRANCH is
+active, it is the first context lane for the matched turn: keep current state and original task constraints
+before generic history ranking. Continue choices, scene actions, code/image edits, diagram changes and solution
+steps within that task, but do not force independent requests into it. For each REQUEST_SEQUENCE
 step, treat c.active_branch_repair/c.previous_answer_reference as step-specific repair instructions
 that take precedence over a conflicting turn-level communication label. Follow DIALOGUE_COMMUNICATION:
 respond to the conversational move, not just the literal wording. Acknowledge gratitude/praise naturally;
@@ -259,7 +269,7 @@ If CLARIFICATION_RESOLUTION
 exists, honor its original_request and treat CURRENT_REQUEST as a clarification reply, not a replacement
 intent. For status topic_not_found or needs_more_detail, apologize briefly and say no clear match was found in saved history,
 without claiming the topic definitely never came up; don't repeat old options, and ask for a couple of concrete hints. Keep any resolved topic active.
-Use compact section maps to know what was already covered and how to deepen it. Do not repeat answered sections verbatim. If PROTECTED_STRUCTURED_DATA is present, preserve only its selected source values exactly; compress ordinary explanation and history as usual. If PROTECTED_CURRENT_INPUT is present, read the separately labeled PROTECTED_CURRENT_INPUT_SOURCE input_text part as the lossless authoritative source for the current structured/numeric request: preserve all values/rows/coordinates/formulas/order and never recreate missing data from a summary. That source body is outside the structured-card compaction budget but still counts toward actual API input usage. On NEW, answer independently. For each REQUEST_SEQUENCE item, prefer its own dialogue_search relation/context (or compact r/c fields) over the top-level relation. A NEW item must not inherit another item's prior-history context. When compact flag p=true, inherit only the explicit subject from CURRENT_REQUEST and do not import prior records or structured values for that item. If one item needs clarification, answer all clear items and ask only about the unresolved item. Use topic history only when
+Use compact section maps to know what was already covered and how to deepen it. Do not repeat answered sections verbatim. If PROTECTED_STRUCTURED_DATA is present, preserve only its selected source values exactly; compress ordinary explanation and history as usual. If PROTECTED_CURRENT_INPUT is present, read the separately labeled PROTECTED_CURRENT_INPUT_SOURCE input_text part as the lossless authoritative source for the current structured/numeric request: preserve all values/rows/coordinates/formulas/order and never recreate missing data from a summary. That source body is outside the structured-card compaction budget but still counts toward actual API input usage. On NEW with no ACTIVE_WORK_BRANCH, answer independently. If ACTIVE_WORK_BRANCH is supplied, follow its validated task state unless the current request clearly switches topic. For each REQUEST_SEQUENCE item, prefer its own dialogue_search relation/context (or compact r/c fields) over the top-level relation. A NEW item must not inherit another item's prior-history context. When compact flag p=true, inherit only the explicit subject from CURRENT_REQUEST and do not import prior records or structured values for that item. If one item needs clarification, answer all clear items and ask only about the unresolved item. Use topic history only when
 HISTORY_REQUEST=true. For HISTORY_REQUEST=true with a named subject/task, use matching DIALOGUE_TOPIC_INDEX, DIALOGUE_HISTORY_TOPICS, and CONTINUATION_CONTEXT as factual evidence even though the relation can remain NEW. Honor HISTORY_TOPIC_MINIMUM and HISTORY_TOPIC_COUNT; default to up to 10 topics, show at least five when five or more distinct entries exist, and report the actual smaller count when fewer exist. Never invent topics. Use HISTORY_TIME_WINDOW as the requested scope after Premium's 24-hour retention cap. Preserve topic_id/origin_message_id/source_message_id bindings when resuming a topic or restoring its table, graph, image or other saved data. Ask for hints only if no matching stored entry/pair is supplied. Enumerate a topic list only when the user asks for a general history overview. For REQUEST_SEQUENCE items marked p=true, resolve pronouns from the explicit subject in CURRENT_REQUEST, without importing prior-history context. For multi-section
 explanations, use user-visible Markdown headings and put the same ordered heading/summary map in
 dialogue_memory_record.sections.
@@ -290,6 +300,10 @@ tokens total, including up to 4800 tokens for render payloads and about 7200 for
 visuals when materially useful, and label generated illustrations as generated, not authentic photos.
 When multiple visual outputs are requested, emit the materially relevant requested renderers with concrete payloads. Target about 60% explanatory text and 40% visual/render payloads when the request calls for visuals; this is an allocation target, not a rigid truncation rule. For multi-step requests, add step_index and step_title to every block where possible, interleave each step's concise text with that step's formula/table/diagram/graph/image, and preserve step order. Never collect all visuals at the end or use a visual to replace needed explanation. Use grounded network graphs for concepts, never invent numeric measurements; images require the generator signal and links require real URLs.
 Answer CURRENT_REQUEST in RETURN_LANGUAGE. On CONTINUE, use SELECTED_SECTION as the target when present.
+When ACTIVE_WORK_BRANCH is active, it is the first retrieval/context lane for this matched turn. Preserve the
+latest task state and its original constraints before generic history search; choices/actions/edits/solution steps
+belong to that work unless the current request clearly switches topic. Only fall back to other history when the
+active branch does not match. Never force an independent question into the active task.
 For each REQUEST_SEQUENCE step, its c.active_branch_repair/c.previous_answer_reference flags describe that step
 and override a conflicting top-level communication label. Follow DIALOGUE_COMMUNICATION to handle the user's conversational act naturally: acknowledge appreciation briefly,
 and treat negative feedback/correction as a cue to reassess and improve the preceding answer. If active_branch_repair
@@ -1325,6 +1339,12 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 task_search["topic"] = _semantic_compress(task_search.get("topic"), _scaled_prompt_tokens(70))
                 task_search["reason"] = _semantic_compress(task_search.get("reason"), _scaled_prompt_tokens(40))
                 task_search["clarification_prompt"] = _semantic_compress(task_search.get("clarification_prompt"), _scaled_prompt_tokens(90))
+                task_work = task_search.get("active_work_branch") if isinstance(task_search.get("active_work_branch"), dict) else {}
+                task_search["active_work_branch"] = {
+                    key: value for key, value in task_work.items()
+                    if key in {"active", "priority", "kind", "work_id", "topic", "goal", "state_summary", "last_action", "expects_choice", "source_message_id", "origin_message_id", "match_reason", "matched_this_turn"}
+                    and value not in (None, "", {}, [])
+                } if task_work.get("active") and task_search.get("hot_work_followup") else {}
                 task_search["selected_pairs"] = [
                     {
                         "topic": _semantic_compress(pair.get("topic"), _scaled_prompt_tokens(35)),
@@ -1338,7 +1358,16 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                             for sec in (pair.get("sections") or [])[:3] if isinstance(sec, dict)
                         ],
                     }
-                    for pair in (task_search.get("selected_pairs") or [])[:(2 if task_search.get("active_branch_repair") else 1)] if isinstance(pair, dict)
+                    | ({
+                        "preserve_source_text": True,
+                        "source_user_text": _clip(pair.get("source_user_text"), 500),
+                        "source_april_text": _clip(pair.get("source_april_text"), 1400),
+                        "source_user_text_complete": bool(pair.get("source_user_text_complete")) and len(_text(pair.get("source_user_text"))) <= 500,
+                        "source_april_text_complete": bool(pair.get("source_april_text_complete")) and len(_text(pair.get("source_april_text"))) <= 1400,
+                        "source_content_complete": bool(pair.get("source_content_complete")) and len(_text(pair.get("source_user_text"))) <= 500 and len(_text(pair.get("source_april_text"))) <= 1400,
+                        "source_text_origin": _clip(pair.get("source_text_origin") or "dialogue_memory", 40),
+                    } if pair.get("preserve_source_text") is True else {})
+                    for pair in (task_search.get("selected_pairs") or [])[:(2 if task_search.get("active_branch_repair") or task_search.get("hot_work_followup") else 1)] if isinstance(pair, dict)
                 ]
                 if isinstance(task_search.get("anchor"), dict):
                     anchor = task_search["anchor"]
@@ -1583,6 +1612,12 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "semantic_intent": task_search.get("semantic_intent", ""),
                 "search_direction": task_search.get("search_direction", ""),
                 "active_branch_repair": bool(task_search.get("active_branch_repair")),
+                "active_work_branch": {
+                    key: value for key, value in (task_search.get("active_work_branch") or {}).items()
+                    if key in {"active", "priority", "kind", "work_id", "topic", "goal", "state_summary", "last_action", "expects_choice", "source_message_id", "origin_message_id", "match_reason", "matched_this_turn"}
+                    and value not in (None, "", {}, [])
+                } if isinstance(task_search.get("active_work_branch"), dict) and task_search.get("hot_work_followup") else {},
+                "hot_work_followup": bool(task_search.get("hot_work_followup")),
                 "previous_answer_reference": bool(task_search.get("previous_answer_reference")),
                 "factual_verification_request": bool(task_search.get("factual_verification_request")),
                 "explicit_topic_switch": bool(task_search.get("explicit_topic_switch")),
@@ -1747,6 +1782,11 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "RETURN_LANGUAGE": data.get("RETURN_LANGUAGE") or "en",
             "INTERPRETATION": keep_intent,
             "DIALOGUE_RELATION": data.get("DIALOGUE_RELATION") or "NEW",
+            "ACTIVE_WORK_BRANCH": {
+                key: value for key, value in (data.get("ACTIVE_WORK_BRANCH") or {}).items()
+                if key in {"active", "priority", "kind", "work_id", "topic", "goal", "state_summary", "last_action", "expects_choice", "source_message_id", "origin_message_id", "match_reason", "matched_this_turn"}
+                and value not in (None, "", {}, [])
+            } if isinstance(data.get("ACTIVE_WORK_BRANCH"), dict) else {},
             "DIALOGUE_COMMUNICATION": data.get("DIALOGUE_COMMUNICATION") or {},
             "HISTORY_REQUEST": is_history,
             "HISTORY_TOPIC_COUNT": data.get("HISTORY_TOPIC_COUNT", 0) if is_history else 0,
@@ -2233,6 +2273,26 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         or memory.get("relation")
         or "NEW"
     ).upper()
+    active_work_branch = memory.get("active_work_branch") if isinstance(memory.get("active_work_branch"), dict) else {}
+    # Only this turn's State Manager decision can route the request through the
+    # hot-work lane. A persisted branch can never self-authorize continuation.
+    if not bool(memory.get("hot_work_followup")):
+        active_work_branch = {}
+    active_work_branch = {
+        "active": bool(active_work_branch.get("active")),
+        "priority": _clip(active_work_branch.get("priority") or "HOT_TASK_FIRST", 40),
+        "kind": _clip(active_work_branch.get("kind"), 60),
+        "work_id": _clip(active_work_branch.get("work_id"), 120),
+        "topic": _clip(active_work_branch.get("topic"), 180),
+        "goal": _clip(active_work_branch.get("goal"), 360),
+        "state_summary": _clip(active_work_branch.get("state_summary"), 480),
+        "last_action": _clip(active_work_branch.get("last_action"), 180),
+        "expects_choice": bool(active_work_branch.get("expects_choice")),
+        "source_message_id": _clip(active_work_branch.get("source_message_id"), 120),
+        "origin_message_id": _clip(active_work_branch.get("origin_message_id"), 120),
+        "match_reason": _clip(active_work_branch.get("match_reason"), 80),
+        "matched_this_turn": bool(active_work_branch.get("matched_this_turn")),
+    } if active_work_branch.get("active") else {}
 
     continuation = dialogue.get("continuation_context") if isinstance(dialogue.get("continuation_context"), dict) else {}
     selected_pairs = continuation.get("selected_pairs") or memory.get("selected_pairs") or []
@@ -2462,6 +2522,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "explicit_generation_request": bool(structured_intent.get("explicit_generation_request")),
         },
         "DIALOGUE_RELATION": relation,
+        "ACTIVE_WORK_BRANCH": active_work_branch,
         "DIALOGUE_COMMUNICATION": dialogue_communication,
         "HISTORY_REQUEST": history_request,
         "HISTORY_TOPIC_COUNT": requested_topic_count if history_request else 0,
