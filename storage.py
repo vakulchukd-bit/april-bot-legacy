@@ -332,17 +332,71 @@ def init_db() -> None:
                         admin_reply TEXT,
                         replied_at TIMESTAMPTZ,
                         admin_id TEXT,
-                        attachment_data TEXT,
-                        attachment_mime TEXT,
-                        attachment_name TEXT,
+                        image_data TEXT,
+                        image_mime TEXT,
+                        image_name TEXT,
                         admin_reply_language TEXT NOT NULL DEFAULT 'en'
                     )
                     """
                 )
-                cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS attachment_data TEXT")
-                cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS attachment_mime TEXT")
-                cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS attachment_name TEXT")
+                cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS image_data TEXT")
+                cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS image_mime TEXT")
+                cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS image_name TEXT")
                 cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS admin_reply_language TEXT NOT NULL DEFAULT 'en'")
+                # One-time cleanup of the previous generic-file columns. Only image
+                # data URLs are migrated; PDFs, archives and other file payloads are
+                # intentionally discarded from the Premium support feature.
+                cur.execute("""
+                    DO $support_image_only_migration$
+                    BEGIN
+                        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'premium_support_messages' AND column_name = 'attachment_data')
+                           AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'premium_support_messages' AND column_name = 'attachment_mime')
+                           AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'premium_support_messages' AND column_name = 'attachment_name') THEN
+                            EXECUTE $migrate_images$
+                                UPDATE premium_support_messages
+                                SET image_data = COALESCE(image_data, attachment_data),
+                                    image_mime = COALESCE(image_mime, attachment_mime),
+                                    image_name = COALESCE(image_name, attachment_name)
+                                WHERE image_data IS NULL
+                                  AND LOWER(COALESCE(attachment_mime, '')) IN ('image/jpeg', 'image/png', 'image/webp')
+                                  AND LOWER(COALESCE(attachment_data, '')) LIKE 'data:image/%'
+                            $migrate_images$;
+                        END IF;
+                        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'premium_support_messages' AND column_name = 'attachment_data') THEN
+                            ALTER TABLE premium_support_messages DROP COLUMN attachment_data;
+                        END IF;
+                        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'premium_support_messages' AND column_name = 'attachment_mime') THEN
+                            ALTER TABLE premium_support_messages DROP COLUMN attachment_mime;
+                        END IF;
+                        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'premium_support_messages' AND column_name = 'attachment_name') THEN
+                            ALTER TABLE premium_support_messages DROP COLUMN attachment_name;
+                        END IF;
+                    END
+                    $support_image_only_migration$
+                """)
+                # Each administrator reply/addition is an independent text/image
+                # event tied to the original Premium request. Legacy summary fields
+                # remain for older clients and existing text-only records.
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS premium_support_replies (
+                        id BIGSERIAL PRIMARY KEY,
+                        support_message_id BIGINT NOT NULL REFERENCES premium_support_messages(id) ON DELETE CASCADE,
+                        reply TEXT NOT NULL DEFAULT '',
+                        reply_language TEXT NOT NULL DEFAULT 'en',
+                        admin_id TEXT,
+                        image_data TEXT,
+                        image_mime TEXT,
+                        image_name TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+                cur.execute("ALTER TABLE premium_support_replies ADD COLUMN IF NOT EXISTS image_data TEXT")
+                cur.execute("ALTER TABLE premium_support_replies ADD COLUMN IF NOT EXISTS image_mime TEXT")
+                cur.execute("ALTER TABLE premium_support_replies ADD COLUMN IF NOT EXISTS image_name TEXT")
+                cur.execute("ALTER TABLE premium_support_replies ALTER COLUMN reply SET DEFAULT ''")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_replies_message ON premium_support_replies(support_message_id, created_at, id)")
                 # Read receipts are per side: opening a ticket clears only the
                 # corresponding badge. Existing tickets are treated as already
                 # seen on the admin side to avoid false unread badges after deploy.
@@ -353,7 +407,8 @@ def init_db() -> None:
                 if not had_user_read_receipt:
                     cur.execute("UPDATE premium_support_messages SET user_read_at = COALESCE(replied_at, created_at) WHERE user_read_at IS NULL")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_user_created ON premium_support_messages(user_id, created_at DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_pending ON premium_support_messages(created_at ASC) WHERE admin_reply IS NULL")
+                cur.execute("DROP INDEX IF EXISTS idx_premium_support_pending")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_pending ON premium_support_messages(created_at ASC) WHERE replied_at IS NULL AND admin_reply IS NULL")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_admin_unread ON premium_support_messages(admin_read_at, created_at DESC)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_user_unread ON premium_support_messages(user_id, user_read_at, replied_at DESC)")
 
@@ -1658,28 +1713,39 @@ def _support_message_payload(
     row: dict[str, Any] | None,
     *,
     include_identity: bool = False,
-    include_attachment: bool = True,
+    include_image: bool = True,
 ) -> dict[str, Any] | None:
+    """Shape a Premium support request; its optional media is an image only.
+
+    Optional media is image-only. Legacy generic-file columns, if present during
+    upgrade, are migrated selectively and removed by init_db().
+    """
     if not row:
         return None
+    raw_image_data = str(row.get("image_data") or "")
+    raw_image_mime = str(row.get("image_mime") or "").strip().lower().split(";", 1)[0]
+    has_image = raw_image_mime in {"image/jpeg", "image/png", "image/webp"} and (
+        "image_data" not in row or raw_image_data.lower().startswith(f"data:{raw_image_mime};base64,")
+    )
     result = {
         "id": int(row.get("id") or 0),
         "message": str(row.get("message") or ""),
         "language": str(row.get("language") or "en"),
         "created_at_ms": _support_time_ms(row.get("created_at")),
         "admin_reply": str(row.get("admin_reply") or "") or None,
+        "has_admin_reply": bool(row.get("has_admin_reply") or row.get("admin_reply")),
         "replied_at_ms": _support_time_ms(row.get("replied_at")),
-        "attachment_mime": str(row.get("attachment_mime") or "") or None,
-        "attachment_name": str(row.get("attachment_name") or "") or None,
+        "image_mime": raw_image_mime if has_image else None,
+        "image_name": str(row.get("image_name") or "") or None if has_image else None,
         "admin_reply_language": (str(row.get("admin_reply_language") or "en").strip().lower() if row.get("admin_reply") else None),
-        "has_attachment": bool(row.get("attachment_mime") or row.get("attachment_data") or row.get("attachment_name")),
+        "has_image": bool(has_image),
         "admin_read_at_ms": _support_time_ms(row.get("admin_read_at")),
         "user_read_at_ms": _support_time_ms(row.get("user_read_at")),
         "admin_unread": row.get("admin_read_at") is None,
-        "user_unread": bool(row.get("admin_reply")) and row.get("user_read_at") is None,
+        "user_unread": bool(row.get("has_admin_reply") or row.get("admin_reply")) and row.get("user_read_at") is None,
     }
-    if include_attachment:
-        result["attachment_data"] = str(row.get("attachment_data") or "") or None
+    if include_image:
+        result["image_data"] = raw_image_data if has_image and raw_image_data.lower().startswith("data:image/") else None
     if include_identity:
         result.update({
             "user_id": str(row.get("user_id") or ""),
@@ -1689,7 +1755,6 @@ def _support_message_payload(
             "active_premium": bool(row.get("active_premium")),
         })
     return result
-
 
 def _support_resolve_user(raw: str) -> dict[str, Any] | None:
     conn = get_conn()
@@ -1727,17 +1792,21 @@ def get_premium_support_status(user_id: Any) -> dict[str, Any] | None:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT id, user_id, message, language, created_at, admin_reply, replied_at,
-                          attachment_mime, attachment_name, admin_reply_language, admin_read_at, user_read_at
-                   FROM premium_support_messages WHERE user_id = %s
-                   ORDER BY created_at DESC, id DESC LIMIT 50""",
+                """SELECT s.id, s.user_id, s.message, s.language, s.created_at, s.admin_reply, s.replied_at,
+                          s.image_mime, s.image_name, s.admin_reply_language, s.admin_read_at, s.user_read_at,
+                          EXISTS(SELECT 1 FROM premium_support_replies r WHERE r.support_message_id = s.id) AS has_admin_reply
+                   FROM premium_support_messages s WHERE s.user_id = %s
+                   ORDER BY s.created_at DESC, s.id DESC LIMIT 50""",
                 (canonical_id,),
             )
             rows = [dict(row) for row in (cur.fetchall() or [])]
             cur.execute(
-                """SELECT COUNT(*) AS unread_count, MAX(id) AS newest_unread_id
-                   FROM premium_support_messages
-                   WHERE user_id = %s AND admin_reply IS NOT NULL AND user_read_at IS NULL""",
+                """SELECT COUNT(*) AS unread_count, MAX(s.id) AS newest_unread_id
+                   FROM premium_support_messages s
+                   WHERE s.user_id = %s AND s.user_read_at IS NULL
+                     AND (s.admin_reply IS NOT NULL OR EXISTS(
+                         SELECT 1 FROM premium_support_replies r WHERE r.support_message_id = s.id
+                     ))""",
                 (canonical_id,),
             )
             unread_row = cur.fetchone() or {}
@@ -1749,8 +1818,8 @@ def get_premium_support_status(user_id: Any) -> dict[str, Any] | None:
                     created = created.replace(tzinfo=timezone.utc)
                 next_allowed = created + timedelta(seconds=SUPPORT_COOLDOWN_SECONDS)
             remaining = max(0, int((next_allowed - current).total_seconds())) if next_allowed else 0
-            messages = [_support_message_payload(row, include_attachment=False) for row in rows]
-            latest_payload = _support_message_payload(latest, include_attachment=False)
+            messages = [_support_message_payload(row, include_image=False) for row in rows]
+            latest_payload = _support_message_payload(latest, include_image=False)
             unread_count = max(0, int(unread_row.get("unread_count") or 0))
             return {
                 "success": True,
@@ -1792,8 +1861,9 @@ def get_premium_support_message_detail(user_id: Any, message_id: Any, *, is_admi
         with conn.cursor() as cur:
             cur.execute(
                 """SELECT s.id, s.user_id, s.message, s.language, s.created_at,
-                          s.admin_reply, s.replied_at, s.attachment_data, s.attachment_mime, s.attachment_name,
+                          s.admin_reply, s.replied_at, s.admin_id, s.image_data, s.image_mime, s.image_name,
                           s.admin_reply_language, s.admin_read_at, s.user_read_at, u.april_id, u.name, u.email,
+                          EXISTS(SELECT 1 FROM premium_support_replies r WHERE r.support_message_id = s.id) AS has_admin_reply,
                           (LOWER(COALESCE(u.plan, 'free')) = 'premium' AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS active_premium
                    FROM premium_support_messages s JOIN users u ON u.user_id = s.user_id
                    WHERE s.id = %s LIMIT 1""",
@@ -1808,7 +1878,50 @@ def get_premium_support_message_detail(user_id: Any, message_id: Any, *, is_admi
                     return {"success": False, "error": "SUPPORT_MESSAGE_NOT_FOUND"}
             elif str(data.get("user_id") or "") != canonical_id:
                 return {"success": False, "error": "SUPPORT_MESSAGE_NOT_FOUND"}
-            return {"success": True, "is_admin": bool(is_admin), "message": _support_message_payload(data, include_identity=is_admin, include_attachment=True)}
+            payload = _support_message_payload(data, include_identity=is_admin, include_image=True) or {}
+            cur.execute(
+                """SELECT id, reply, reply_language, admin_id, image_data, image_mime, image_name, created_at
+                   FROM premium_support_replies
+                   WHERE support_message_id = %s
+                   ORDER BY created_at ASC, id ASC""",
+                (ticket_id,),
+            )
+            reply_rows = [dict(item) for item in (cur.fetchall() or [])]
+            replies = [{
+                "id": int(item.get("id") or 0),
+                "reply": str(item.get("reply") or ""),
+                "language": str(item.get("reply_language") or "en").strip().lower(),
+                "admin_id": str(item.get("admin_id") or ""),
+                "image_data": str(item.get("image_data") or "") or None,
+                "image_mime": str(item.get("image_mime") or "").strip().lower() or None,
+                "image_name": str(item.get("image_name") or "") or None,
+                "has_image": bool(
+                    str(item.get("image_mime") or "").strip().lower() in {"image/jpeg", "image/png", "image/webp"}
+                    and str(item.get("image_data") or "").lower().startswith(
+                        f"data:{str(item.get('image_mime') or '').strip().lower()};base64,"
+                    )
+                ),
+                "created_at_ms": _support_time_ms(item.get("created_at")),
+            } for item in reply_rows if str(item.get("reply") or "").strip() or item.get("image_data")]
+            legacy_reply = str(data.get("admin_reply") or "").strip()
+            # Older deployments stored one reply only on premium_support_messages.
+            # Keep it visible after the first new supplement is added post-upgrade.
+            if legacy_reply and not any(item["reply"] == legacy_reply for item in replies):
+                replies.insert(0, {
+                    "id": 0,
+                    "reply": legacy_reply,
+                    "language": str(data.get("admin_reply_language") or "en").strip().lower(),
+                    "admin_id": str(data.get("admin_id") or ""),
+                    "image_data": None,
+                    "image_mime": None,
+                    "image_name": None,
+                    "has_image": False,
+                    "created_at_ms": _support_time_ms(data.get("replied_at")),
+                })
+            payload["admin_replies"] = replies
+            payload["has_admin_reply"] = bool(replies or legacy_reply)
+            payload["user_unread"] = payload["has_admin_reply"] and payload.get("user_read_at_ms") is None
+            return {"success": True, "is_admin": bool(is_admin), "message": payload}
     except Exception as exc:
         print(f"[APRIL_SUPPORT] DETAIL_ERROR type={type(exc).__name__}", flush=True)
         return {"success": False, "error": "SUPPORT_UNAVAILABLE"}
@@ -1859,10 +1972,10 @@ def mark_premium_support_message_read(user_id: Any, message_id: Any, *, is_admin
         conn.close()
 
 def send_premium_support_message(
-    user_id: Any, message: Any, language: Any = "en", attachment_data: Any = None,
-    attachment_mime: Any = None, attachment_name: Any = None,
+    user_id: Any, message: Any, language: Any = "en", image_data: Any = None,
+    image_mime: Any = None, image_name: Any = None,
 ) -> dict[str, Any]:
-    """Insert a Premium support ticket with an atomic per-account 24h limit."""
+    """Insert a Premium text/image request with an atomic per-account 24h limit."""
     raw = str(user_id or "").strip()
     body = str(message or "").strip()
     lang = str(language or "en").strip().lower()[:8] or "en"
@@ -1870,30 +1983,23 @@ def send_premium_support_message(
         return {"success": False, "error": "USER_ID_REQUIRED"}
     if len(body) > 4000:
         return {"success": False, "error": "MESSAGE_TOO_LONG"}
-    image_data = str(attachment_data or "").strip()
-    image_mime = str(attachment_mime or "").strip().lower().split(";", 1)[0]
-    safe_attachment_name = str(attachment_name or "").replace("\\", "/").split("/")[-1].strip()[:180]
+    image_data = str(image_data or "").strip()
+    image_mime = str(image_mime or "").strip().lower().split(";", 1)[0]
+    safe_image_name = str(image_name or "").replace("\\", "/").split("/")[-1].strip()[:180]
     if image_data:
-        # One image OR one small diagnostic/document file per ticket. Active HTML,
-        # SVG and executable formats are deliberately excluded. The web client
-        # compresses large photos before sending them to this bounded JSON route.
-        allowed_mimes = {
-            "image/jpeg", "image/png", "image/webp",
-            "application/pdf", "text/plain", "text/csv", "application/json",
-            "application/zip", "application/x-zip-compressed",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        }
-        if (image_mime not in allowed_mimes
+        # Premium support accepts only image/screenshot media, never generic files.
+        allowed_image_mimes = {"image/jpeg", "image/png", "image/webp"}
+        if (image_mime not in allowed_image_mimes
                 or not image_data.startswith(f"data:{image_mime};base64,")
                 or len(image_data) > 850_000):
-            return {"success": False, "error": "ATTACHMENT_INVALID"}
-        if not safe_attachment_name:
-            suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "application/pdf": ".pdf", "text/plain": ".txt", "text/csv": ".csv", "application/json": ".json", "application/zip": ".zip", "application/x-zip-compressed": ".zip"}.get(image_mime, ".bin")
-            safe_attachment_name = f"support-attachment{suffix}"
+            return {"success": False, "error": "IMAGE_INVALID"}
+        if not safe_image_name:
+            suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}[image_mime]
+            safe_image_name = f"support-image{suffix}"
     else:
-        image_data, image_mime, safe_attachment_name = None, None, None
-    if len(body) < 5 and not image_data:
+        image_data, image_mime, safe_image_name = None, None, None
+    # The request payloads are independent: non-empty text, image, or both.
+    if not body and not image_data:
         return {"success": False, "error": "MESSAGE_TOO_SHORT"}
     conn = get_conn()
     if not conn:
@@ -1937,11 +2043,11 @@ def send_premium_support_message(
                         }
                 cur.execute(
                     """INSERT INTO premium_support_messages(
-                           user_id, message, language, attachment_data, attachment_mime, attachment_name, user_read_at
+                           user_id, message, language, image_data, image_mime, image_name, user_read_at
                        ) VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                        RETURNING id, user_id, message, language, created_at, admin_reply, replied_at,
-                                 attachment_data, attachment_mime, attachment_name""",
-                    (canonical_id, body, lang, image_data, image_mime, safe_attachment_name),
+                                 image_data, image_mime, image_name""",
+                    (canonical_id, body, lang, image_data, image_mime, safe_image_name),
                 )
         status = get_premium_support_status(raw)
         return status or {"success": False, "error": "SUPPORT_STATUS_UNAVAILABLE"}
@@ -1962,15 +2068,18 @@ def list_premium_support_messages(limit: int = 10) -> dict[str, Any] | None:
         with conn.cursor() as cur:
             cur.execute(
                 """SELECT s.id, s.user_id, s.message, s.language, s.created_at,
-                          s.admin_reply, s.replied_at, s.attachment_mime, s.attachment_name,
+                          s.admin_reply, s.replied_at, s.image_mime, s.image_name,
                           s.admin_reply_language, s.admin_read_at, s.user_read_at, u.april_id, u.name, u.email,
+                          EXISTS(SELECT 1 FROM premium_support_replies r WHERE r.support_message_id = s.id) AS has_admin_reply,
                           (LOWER(COALESCE(u.plan, 'free')) = 'premium' AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS active_premium
                    FROM premium_support_messages s
                    JOIN users u ON u.user_id = s.user_id
                    WHERE LOWER(COALESCE(u.plan, 'free')) = 'premium'
                      AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
                    ORDER BY (s.admin_read_at IS NULL) DESC,
-                            (s.admin_reply IS NULL) DESC,
+                            (s.replied_at IS NULL AND s.admin_reply IS NULL AND NOT EXISTS(
+                                SELECT 1 FROM premium_support_replies r WHERE r.support_message_id = s.id
+                            )) DESC,
                             s.created_at DESC, s.id DESC
                    LIMIT %s""",
                 (safe_limit,),
@@ -1988,7 +2097,7 @@ def list_premium_support_messages(limit: int = 10) -> dict[str, Any] | None:
                 "success": True,
                 "is_admin": True,
                 "unread_count": max(0, int(unread.get("unread_count") or 0)),
-                "messages": [_support_message_payload(dict(row), include_identity=True, include_attachment=False) for row in rows],
+                "messages": [_support_message_payload(dict(row), include_identity=True, include_image=False) for row in rows],
             }
     except Exception as exc:
         print(f"[APRIL_SUPPORT] INBOX_ERROR type={type(exc).__name__}", flush=True)
@@ -1996,8 +2105,11 @@ def list_premium_support_messages(limit: int = 10) -> dict[str, Any] | None:
     finally:
         conn.close()
 
-def reply_premium_support_message(message_id: Any, reply: Any, admin_id: Any, language: Any = "en") -> dict[str, Any]:
-    """Save the first administrator reply for a request; replies cannot be spoofed by callers."""
+def reply_premium_support_message(
+    message_id: Any, reply: Any, admin_id: Any, language: Any = "en",
+    image_data: Any = None, image_mime: Any = None, image_name: Any = None,
+) -> dict[str, Any]:
+    """Add a text reply, image reply, or both to an existing Premium request."""
     try:
         ticket_id = int(message_id)
     except (TypeError, ValueError, OverflowError):
@@ -2007,10 +2119,26 @@ def reply_premium_support_message(message_id: Any, reply: Any, admin_id: Any, la
     reply_language = str(language or "en").strip().lower()[:8] or "en"
     if ticket_id <= 0:
         return {"success": False, "error": "MESSAGE_ID_INVALID"}
-    if len(body) < 2:
-        return {"success": False, "error": "REPLY_TOO_SHORT"}
     if len(body) > 4000:
         return {"success": False, "error": "REPLY_TOO_LONG"}
+
+    image_data = str(image_data or "").strip()
+    image_mime = str(image_mime or "").strip().lower().split(";", 1)[0]
+    safe_image_name = str(image_name or "").replace("\\", "/").split("/")[-1].strip()[:180]
+    if image_data:
+        allowed_image_mimes = {"image/jpeg", "image/png", "image/webp"}
+        if (image_mime not in allowed_image_mimes
+                or not image_data.startswith(f"data:{image_mime};base64,")
+                or len(image_data) > 850_000):
+            return {"success": False, "error": "IMAGE_INVALID"}
+        if not safe_image_name:
+            suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}[image_mime]
+            safe_image_name = f"support-image{suffix}"
+    else:
+        image_data, image_mime, safe_image_name = None, None, None
+    if len(body) < 2 and not image_data:
+        return {"success": False, "error": "REPLY_TOO_SHORT"}
+
     conn = get_conn()
     if not conn:
         return {"success": False, "error": "DATABASE_UNAVAILABLE"}
@@ -2027,20 +2155,33 @@ def reply_premium_support_message(message_id: Any, reply: Any, admin_id: Any, la
                 row = cur.fetchone()
                 if not row or not bool(row.get("active_premium")):
                     return {"success": False, "error": "SUPPORT_MESSAGE_NOT_FOUND"}
-                if str(row.get("admin_reply") or "").strip():
-                    return {"success": False, "error": "SUPPORT_MESSAGE_ALREADY_REPLIED"}
+                cur.execute(
+                    """INSERT INTO premium_support_replies(
+                           support_message_id, reply, reply_language, admin_id,
+                           image_data, image_mime, image_name
+                       ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                       RETURNING id""",
+                    (ticket_id, body, reply_language, admin, image_data, image_mime, safe_image_name),
+                )
+                reply_row = cur.fetchone() or {}
+                # The legacy summary keeps the first non-empty text for older inbox
+                # clients; all replies and images are retained in the new timeline.
                 cur.execute(
                     """UPDATE premium_support_messages
-                       SET admin_reply = %s, admin_reply_language = %s,
+                       SET admin_reply = COALESCE(NULLIF(BTRIM(admin_reply), ''), NULLIF(%s, '')),
+                           admin_reply_language = CASE
+                               WHEN (admin_reply IS NULL OR BTRIM(admin_reply) = '') AND NULLIF(%s, '') IS NOT NULL THEN %s
+                               ELSE admin_reply_language
+                           END,
                            replied_at = CURRENT_TIMESTAMP, admin_id = %s,
                            admin_read_at = COALESCE(admin_read_at, CURRENT_TIMESTAMP),
                            user_read_at = NULL
-                       WHERE id = %s AND admin_reply IS NULL""",
-                    (body, reply_language, admin, ticket_id),
+                       WHERE id = %s""",
+                    (body, body, reply_language, admin, ticket_id),
                 )
                 if cur.rowcount != 1:
-                    return {"success": False, "error": "SUPPORT_MESSAGE_ALREADY_REPLIED"}
-        return {"success": True, "message_id": ticket_id}
+                    return {"success": False, "error": "SUPPORT_MESSAGE_NOT_FOUND"}
+        return {"success": True, "message_id": ticket_id, "reply_id": int(reply_row.get("id") or 0), "has_admin_reply": True}
     except Exception as exc:
         print(f"[APRIL_SUPPORT] REPLY_ERROR type={type(exc).__name__}", flush=True)
         return {"success": False, "error": "SUPPORT_UNAVAILABLE"}
