@@ -1006,6 +1006,383 @@ def _user_operation_profile(
     }
 
 
+# Premium has one canonical dialogue store.  These helpers mark ongoing work
+# inside the existing structured_response JSONB rather than creating a second
+# task/session table.  The marker is deliberately descriptive and bounded.
+_WORK_ACTION_RE = re.compile(
+    r"(?:созда\w*|придум\w*|сгенер\w*|нарис\w*|реш\w*|рассчит\w*|"
+    r"напиш\w*|допиш\w*|перепиш\w*|исправ\w*|почин\w*|отлад\w*|"
+    r"реализ\w*|разработ\w*|постро\w*|состав\w*|улучш\w*|редактир\w*|"
+    r"передел\w*|добав\w*|продолж\w*|проверь\w*|спроектир\w*|анимир\w*|"
+    r"сделай\w*|собери\w*|провед\w*|игра\w*|играем|поигра\w*|"
+    r"build\w*|create\w*|generate\w*|draw\w*|solve\w*|calculate\w*|"
+    r"write\w*|implement\w*|debug\w*|fix\w*|edit\w*|redesign\w*|"
+    r"improve\w*|continue\w*|modify\w*|play\w*)",
+    re.IGNORECASE,
+)
+_WORK_OBJECT_RE = re.compile(
+    r"(?:задач\w*|пример\w*|решени\w*|уравнен\w*|формул\w*|код\w*|скрипт\w*|"
+    r"функци\w*|проект\w*|схем\w*|диаграм\w*|график\w*|таблиц\w*|"
+    r"картин\w*|изображен\w*|визуал\w*|эффект\w*|анимац\w*|макет\w*|"
+    r"документ\w*|файл\w*|программ\w*|игр\w*|правил\w*|ход\w*|квест\w*|"
+    r"сценар\w*|модел\w*|прототип\w*|задач\w*|example\w*|problem\w*|"
+    r"code\w*|script\w*|function\w*|project\w*|diagram\w*|chart\w*|"
+    r"image\w*|picture\w*|effect\w*|animation\w*|game\w*|equation\w*|formula\w*)",
+    re.IGNORECASE,
+)
+_ACTIVE_CHOICE_RE = re.compile(
+    r"(?:выбирай|выбери(?:те)?|выберите действие|твой ход|ваш ход|"
+    r"какой вариант|выбери один|ответь цифрой|пришли номер|"
+    r"choose (?:one|an option)|your move|your turn|pick (?:one|an option)|"
+    r"select (?:one|an option)|вариант\s*[:：]?\s*[1-9]|\b[1-9]\s*[,/и]\s*[1-9])",
+    re.IGNORECASE,
+)
+_CHOICE_REPLY_RE = re.compile(
+    r"(?:^\s*(?:вариант|option|пункт|номер)\s*[1-9]\b|"
+    r"\b(?:я\s+)?(?:выбираю|выбрал|выбрала|беру|выберу|choose|pick|select)\s+"
+    r"(?:(?:вариант|option|пункт|номер)\s*)?[1-9]\b)",
+    re.IGNORECASE,
+)
+_INTERACTIVE_ACTION_RE = re.compile(
+    r"(?:\bя\s+)?(?:крич\w*|зову\w*|говор\w*|спрашива\w*|иду\w*|пош[её]л\w*|"
+    r"заш[её]л\w*|приш[еёо]л\w*|приш\w*\s+за\b|вхожу\w*|захожу\w*|откр\w*|подход\w*|беру\w*|ищу\w*|"
+    r"осматрива\w*|трога\w*|нажима\w*|выбира\w*|выбрал\w*|выбираю\w*|"
+    r"поднима\w*|спуска\w*|атакую\w*|бегу\w*|использую\w*|"
+    r"i\s+(?:shout|call|say|ask|go|enter|open|take|look|inspect|choose|press|use)\w*)",
+    re.IGNORECASE,
+)
+_BRANCH_OPERATION_RE = re.compile(
+    r"(?:продолж\w*|дальше|следующ\w*|"
+    r"добав\w*\s+(?:к|в|туда)|исправ\w*|передел\w*|допиш\w*|перепиш\w*|"
+    r"измени\w*|улучши\w*|сохрани\w*|покажи\w*\s+(?:ещ[её]|снова|его|её|это)|"
+    r"на\s+основе\s+(?:этого|этой|него)|к\s+(?:нему|ней|этому|этой)|"
+    r"continue\w*|next\b|"
+    r"revise\w*|edit\w*|fix\w*|add\w*\s+(?:to|into)|change\w*)",
+    re.IGNORECASE,
+)
+
+
+def _response_and_request_records(row: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    request = _parse_json(row.get("structured_request"))
+    response = _parse_json(row.get("structured_response"))
+    metadata = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
+    memory_record = response.get("dialogue_memory_record")
+    if not isinstance(memory_record, dict):
+        memory_record = metadata.get("dialogue_memory_record") if isinstance(metadata.get("dialogue_memory_record"), dict) else {}
+    return request, response, memory_record if isinstance(memory_record, dict) else {}
+
+
+def _infer_active_work_branch(row: dict[str, Any]) -> dict[str, Any]:
+    """Recognize saved, still-actionable work from canonical pair content.
+
+    Explicit markers win. The heuristic fallback intentionally recognizes old
+    Premium rows saved before this version, so deploying the patch does not require
+    clearing history or migrating PostgreSQL columns.
+    """
+    if not isinstance(row, dict):
+        return {}
+    request, response, memory_record = _response_and_request_records(row)
+    metadata = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
+    marker = response.get("active_work_branch")
+    if not isinstance(marker, dict):
+        marker = metadata.get("active_work_branch")
+    if not isinstance(marker, dict):
+        marker = memory_record.get("active_work_branch")
+    if isinstance(marker, dict) and marker.get("active"):
+        # These are per-request routing diagnostics, not durable task state.
+        # Old versions may have persisted them as true, so never trust them here.
+        profile = dict(marker)
+        profile.pop("matched_this_turn", None)
+        profile.pop("match_reason", None)
+        profile.pop("candidate_message_id", None)
+        return profile
+
+    intent_root = request.get("intent") if isinstance(request.get("intent"), dict) else {}
+    intent = intent_root.get("intent") if isinstance(intent_root.get("intent"), dict) else intent_root
+    requested_outputs = request.get("requested_outputs")
+    if not isinstance(requested_outputs, list):
+        requested_outputs = intent.get("requested_outputs") if isinstance(intent.get("requested_outputs"), list) else []
+    output_names = {str(item or "").strip().lower() for item in requested_outputs}
+    render_blocks = response.get("render_blocks") if isinstance(response.get("render_blocks"), list) else []
+    artifacts = response.get("artifacts") if isinstance(response.get("artifacts"), list) else []
+    rendered_types = {
+        str(item.get("type") or item.get("artifact_type") or "").strip().lower()
+        for item in render_blocks + artifacts if isinstance(item, dict)
+    }
+    user_text = _text(row.get("user_text") or row.get("user"))
+    answer_text = _text(row.get("april_text") or row.get("april"))
+    summary = _text(memory_record.get("summary") or response.get("summary") or row.get("memory_summary"))
+    topic = _text(memory_record.get("topic") or request.get("goal") or user_text)[:240]
+    all_text = " ".join((user_text, topic, summary, answer_text[:1800])).lower().replace("ё", "е")
+    user_low = user_text.lower().replace("ё", "е")
+    answer_low = answer_text.lower().replace("ё", "е")
+
+    wants_code = bool(intent.get("wants_code") or "code" in output_names or "python" in output_names or "source_code" in output_names)
+    wants_visual = bool(intent.get("wants_image") or intent.get("wants_graph") or output_names & {
+        "image", "gallery", "graph", "diagram", "chart", "formula", "table", "file", "code", "document"
+    } or rendered_types & {"image", "graph", "diagram", "chart", "formula", "table", "code", "file", "document"})
+    game_signal = bool(re.search(r"(?:\bигр\w*|\bигрок\w*|\bквест\w*|\bбашн\w*|\bключ\w*|\bсердц\w*|\bхранител\w*|\bправил\w*|\bход\w*|\bgame\w*|\bquest\w*|\btower\w*|\bkey\w*|\byour turn\b|\bтвой ход\b)", all_text))
+    expects_choice = bool(_ACTIVE_CHOICE_RE.search(answer_text))
+    interaction_state = bool(game_signal and (
+        expects_choice
+        or _INTERACTIVE_ACTION_RE.search(answer_text)
+        or _INTERACTIVE_ACTION_RE.search(user_low)
+        or re.search(r"(?:начат\w*\s+(?:нов\w*\s+)?(?:совместн\w*\s+)?(?:пошагов\w*\s+)?игр|продолжен\w*\s+игр|твой ход|your turn|choose|выбирай)", answer_low)
+        or _WORK_ACTION_RE.search(user_low)
+    ))
+    task_action = bool(_WORK_ACTION_RE.search(user_low))
+    task_object = bool(_WORK_OBJECT_RE.search(user_low))
+    explicit_artifact = wants_code or wants_visual
+    active = bool(explicit_artifact or interaction_state or (task_action and task_object))
+    if not active:
+        return {}
+
+    if interaction_state:
+        kind = "interactive_game"
+    elif wants_code or rendered_types & {"code", "file"} or re.search(r"(?:код\w*|скрипт\w*|программ\w*|source code|python)", all_text):
+        kind = "code_or_software_task"
+    elif re.search(r"(?:картин\w*|изображен\w*|рису\w*|визуал\w*|эффект\w*|анимац\w*|image\w*|picture\w*)", all_text):
+        kind = "visual_creation_or_editing"
+    elif re.search(r"(?:задач\w*|пример\w*|решени\w*|уравнен\w*|формул\w*|математ\w*|расчет\w*|расчёт\w*|solve\w*|equation\w*)", all_text):
+        kind = "problem_solving"
+    elif re.search(r"(?:схем\w*|диаграм\w*|график\w*|таблиц\w*|документ\w*|план\w*|макет\w*|diagram\w*|chart\w*)", all_text):
+        kind = "structured_artifact"
+    else:
+        kind = "active_task"
+
+    message_id = _text(row.get("message_id"))[:120]
+    return {
+        "active": True,
+        "priority": "HOT_TASK_FIRST",
+        "work_id": _text(marker.get("work_id") if isinstance(marker, dict) else "") or ("work:" + message_id if message_id else "work:active"),
+        "kind": _text(marker.get("kind") if isinstance(marker, dict) else "") or kind,
+        "topic": _text((marker.get("topic") if isinstance(marker, dict) else "") or topic or user_text)[:240],
+        "goal": _text((marker.get("goal") if isinstance(marker, dict) else "") or user_text)[:500],
+        "state_summary": _text((marker.get("state_summary") if isinstance(marker, dict) else "") or summary or answer_text)[:800],
+        "last_action": _text((marker.get("last_action") if isinstance(marker, dict) else "") or user_text)[:240],
+        "expects_choice": bool((marker.get("expects_choice") if isinstance(marker, dict) else False) or expects_choice),
+        "source_message_id": _text((marker.get("source_message_id") if isinstance(marker, dict) else "") or message_id)[:120],
+        "origin_message_id": _text((marker.get("origin_message_id") if isinstance(marker, dict) else "") or message_id)[:120],
+        "dialog_id": _text(row.get("dialog_id"))[:120],
+        "conversation_id": _text(row.get("conversation_id"))[:120],
+        "updated_at": row.get("created_at"),
+    }
+
+
+_WORK_ROOT_ACTION_RE = re.compile(
+    r"(?:созда\w*|придум\w*|сгенер\w*|нарис\w*|реш\w*|рассчит\w*|напиш\w*|"
+    r"разработ\w*|спроектир\w*|постро\w*|состав\w*|провед\w*|игра\w*|поигра\w*|"
+    r"build\w*|create\w*|generate\w*|draw\w*|solve\w*|calculate\w*|write\w*|"
+    r"implement\w*|design\w*|play\w*)",
+    re.IGNORECASE,
+)
+
+
+def _is_active_work_root_candidate(row: dict[str, Any], profile: dict[str, Any], expected_kind: str) -> bool:
+    """Find the task's original specification when upgrading legacy rows in place."""
+    if not isinstance(row, dict) or not isinstance(profile, dict) or profile.get("kind") != expected_kind:
+        return False
+    user_text = _text(row.get("user_text") or row.get("user"))
+    answer_text = _text(row.get("april_text") or row.get("april"))
+    user_low = user_text.lower().replace("ё", "е")
+    answer_low = answer_text.lower().replace("ё", "е")
+    if expected_kind == "interactive_game":
+        user_starts_game = bool(re.search(
+            r"(?:нов\w*\s+игр\w*|созда\w*\s+игр\w*|придум\w*\s+игр\w*|"
+            r"перепиш\w*.{0,90}игр\w*|поигра\w*.{0,70}вместе|давай.{0,50}игр\w*)",
+            user_low,
+        ))
+        answer_starts_game = bool(re.search(
+            r"(?:начн[её]м.{0,60}нов\w*\s+игр\w*|начат\w*.{0,50}игр\w*|"
+            r"нов\w*\s+игр\w*|игр\w*\s*[«\"]|игроки\s*:|цель\s*:|правила\s*:)",
+            answer_low,
+        ))
+        return user_starts_game and (answer_starts_game or bool(profile.get("expects_choice")))
+
+    # Prefer an original creation/solution request over a later small edit.
+    user_has_object = bool(_WORK_OBJECT_RE.search(user_low))
+    answer_has_source = bool(answer_text.strip())
+    return bool(_WORK_ROOT_ACTION_RE.search(user_low) and user_has_object and answer_has_source)
+
+
+def _hot_work_followup_candidate(
+    query: str,
+    branch: dict[str, Any] | None,
+    branch_row: dict[str, Any] | None,
+    *,
+    history_request: bool = False,
+    new_topic_request: bool = False,
+    has_attachment: bool = False,
+    reference_followup: bool = False,
+) -> tuple[bool, str]:
+    """Test the hot-task lane before generic historical ranking.
+
+    It accepts choice replies and in-task actions that classic intent detection may
+    label NEW, while refusing to hijack a clearly independent question.
+    """
+    text = _text(query).strip()
+    if not text or not isinstance(branch, dict) or not branch.get("active") or not isinstance(branch_row, dict):
+        return False, "no_active_work_branch"
+    if history_request or new_topic_request:
+        return False, "explicit_history_or_new_topic_switch"
+    low = text.lower().replace("ё", "е")
+    tokens = _tokens(text)
+    semantic_tokens = _semantic_tokens(text)
+    topic = _text(branch.get("topic"))
+    branch_text = " ".join((
+        topic, _text(branch.get("goal")), _text(branch.get("state_summary")),
+        _text(branch_row.get("user_text") or branch_row.get("user")),
+        _text(branch_row.get("april_text") or branch_row.get("april")),
+    ))
+    is_choice = bool(re.fullmatch(
+        r"\s*(?:(?:вариант|option|пункт|номер|выбираю|выбираю вариант)\s*)?[1-9](?:\s*(?:вариант|option))?\s*[.!)]?\s*",
+        low,
+    ) or re.fullmatch(r"\s*(?:вариант|option)\s*[1-9]\s*[.!)]?\s*", low))
+    if is_choice and (branch.get("expects_choice") or _text(branch.get("kind")) == "interactive_game"):
+        # A bare numbered reply is unambiguous. For interactive games it remains
+        # a plausible move even when legacy assistant text did not expose a formal
+        # choice marker.
+        return True, "choice_reply_to_open_active_task"
+
+    has_operation = bool(_BRANCH_OPERATION_RE.search(low))
+    has_reference = bool(reference_followup or re.search(
+        r"(?:это|этот|эта|эту|его|ее|её|нему|ней|туда|такой|такая|"
+        r"продолж\w*|дальше|следующ\w*|вариант|на основе|в этой|в этом|"
+        r"the same|that one|this one|continue|next step)", low
+    ))
+    q_subjects = _subject_tokens(text)
+    branch_subjects = _subject_tokens(branch_text)
+    subject_conflict = _subject_conflicts(q_subjects, branch_subjects)
+    # Option/turn vocabulary is weak topical evidence by itself. Remove it before
+    # checking whether a complete question introduces a genuinely different subject.
+    independent_subjects = q_subjects - {"вариа", "вариант", "пункт", "номер", "выбор", "ход", "оптион"}
+    independent_subject_conflict = _subject_conflicts(independent_subjects, branch_subjects)
+    query_overlap = max(
+        _topic_query_overlap(text, branch_text),
+        _fuzzy_token_overlap(semantic_tokens, _semantic_tokens(branch_text)) if semantic_tokens else 0.0,
+    )
+    standalone_question_shape = bool(
+        "?" in text or "？" in text
+        or re.match(r"\s*(?:что такое|кто такой|кто такая|расскажи о|объясни|сколько|сколько будет|какая погода|what is|who is|tell me about|how much|calculate)\b", low)
+    )
+    independent_question = bool(
+        len(semantic_tokens) >= 2
+        and standalone_question_shape
+        and (independent_subject_conflict or query_overlap < 0.12)
+        and (not has_reference or independent_subject_conflict)
+        and not (has_operation and re.search(r"(?:добав\w*|исправ\w*|передел\w*|продолж\w*|допиш\w*|перепиш\w*|улучш\w*)", low))
+    )
+    if independent_question:
+        return False, "self_contained_independent_question"
+    # Do not match a broad assistant-side cue such as “твой ход” inside a factual
+    # question. Only a bare choice or an actual user selection statement is decisive.
+    if branch.get("expects_choice") and _CHOICE_REPLY_RE.search(low):
+        return True, "explicit_choice_reference"
+    # An interactive scene is a live state machine: first-person actions are moves,
+    # not unrelated entities, even when morphology prevents lexical overlap. This
+    # check follows the independent-question guard so “why did someone open a door?”
+    # cannot hijack a running scene.
+    if _text(branch.get("kind")) == "interactive_game" and len(tokens) <= 12 and _INTERACTIVE_ACTION_RE.search(low) and not standalone_question_shape:
+        return True, "interactive_task_action"
+    # A newly supplied image/file can be the source material for the current task
+    # (e.g. edit this picture, fix this file). It should not disable hot-branch
+    # matching by itself; however, an unreferenced attachment must not hijack the
+    # previous task merely because one exists.
+    if has_attachment and not (
+        reference_followup or has_reference or has_operation
+        or _ACTIVE_CHOICE_RE.search(low) or is_choice
+    ):
+        return False, "unreferenced_new_attachment"
+    if has_operation and (has_reference or len(tokens) <= 8):
+        return True, "operation_on_active_work_branch"
+    if subject_conflict and not has_reference and len(semantic_tokens) >= 5:
+        return False, "clear_subject_switch"
+    if query_overlap >= 0.16:
+        return True, "active_work_topic_alignment"
+    if len(tokens) <= 5 and (reference_followup or branch.get("expects_choice")):
+        return True, "underspecified_reply_to_active_task"
+    return False, "no_active_work_match"
+
+
+def build_active_work_branch_record(
+    *,
+    user_text: str,
+    april_text: str,
+    summary: str = "",
+    topic: str = "",
+    message_id: str = "",
+    dialog_id: str = "",
+    conversation_id: str = "",
+    relation: str = "NEW",
+    inherited_branch: dict[str, Any] | None = None,
+    intent: dict[str, Any] | None = None,
+    requested_outputs: list[Any] | None = None,
+    render_blocks: list[Any] | None = None,
+    artifacts: list[Any] | None = None,
+) -> dict[str, Any]:
+    """Persist the hot-work marker alongside the existing USER↔APRIL pair."""
+    inherited = dict(inherited_branch or {}) if isinstance(inherited_branch, dict) else {}
+    relation_value = _text(relation).upper()
+    answer_low = _text(april_text).lower().replace("ё", "е")
+    expects_choice = bool(_ACTIVE_CHOICE_RE.search(answer_low))
+    if relation_value == "CONTINUE" and inherited.get("active"):
+        record = dict(inherited)
+        # Keep only durable state in PostgreSQL. Matching status belongs to the
+        # current request and must be recomputed on every incoming turn.
+        record.pop("matched_this_turn", None)
+        record.pop("match_reason", None)
+        record.pop("candidate_message_id", None)
+        record.update({
+            "active": True,
+            "priority": "HOT_TASK_FIRST",
+            "last_action": _text(user_text)[:240],
+            "state_summary": _text(summary or april_text)[:800],
+            "expects_choice": expects_choice,
+            "source_message_id": _text(message_id or inherited.get("source_message_id"))[:120],
+            "origin_message_id": _text(inherited.get("origin_message_id") or inherited.get("source_message_id") or message_id)[:120],
+            "last_message_id": _text(message_id)[:120],
+            "dialog_id": _text(dialog_id or inherited.get("dialog_id"))[:120],
+            "conversation_id": _text(conversation_id or inherited.get("conversation_id"))[:120],
+        })
+        return record
+
+    fake_row = {
+        "user_text": _text(user_text),
+        "april_text": _text(april_text),
+        "memory_summary": _text(summary),
+        "message_id": _text(message_id),
+        "dialog_id": _text(dialog_id),
+        "conversation_id": _text(conversation_id),
+        "structured_request": {
+            "intent": intent if isinstance(intent, dict) else {},
+            "requested_outputs": list(requested_outputs or []),
+        },
+        "structured_response": {
+            "summary": _text(summary),
+            "dialogue_memory_record": {"topic": _text(topic), "summary": _text(summary)},
+            "render_blocks": list(render_blocks or []),
+            "artifacts": list(artifacts or []),
+        },
+    }
+    inferred = _infer_active_work_branch(fake_row)
+    if not inferred:
+        return {}
+    inferred.update({
+        "active": True,
+        "priority": "HOT_TASK_FIRST",
+        "work_id": "work:" + (_text(message_id)[:120] or uuid.uuid4().hex[:12]),
+        "origin_message_id": _text(message_id)[:120],
+        "source_message_id": _text(message_id)[:120],
+        "last_message_id": _text(message_id)[:120],
+        "dialog_id": _text(dialog_id)[:120],
+        "conversation_id": _text(conversation_id)[:120],
+        "last_action": _text(user_text)[:240],
+        "state_summary": _text(summary or april_text)[:800],
+        "expects_choice": expects_choice or bool(inferred.get("expects_choice")),
+    })
+    return inferred
+
+
 def _has_semantic_active_branch_intent(
     interpretation: dict[str, Any] | None,
     *,
@@ -3106,6 +3483,68 @@ def search_dialogue_context(
 
     latest_same_dialog = max((item for item in matches if bool(item.get("same_dialog"))),
         key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)), default=None)
+    # Search an ongoing task branch before generic topic ranking. The marker lives
+    # in structured_response JSONB; the inference fallback recognizes legacy rows
+    # written before the marker existed. Explicit time/history queries bypass it.
+    active_work_pair: dict[str, Any] | None = None
+    active_work_branch: dict[str, Any] = {}
+    active_work_row_index = -1
+    active_work_has_marker = False
+    if not history_request and not time_filter.get("applied") and not resume_key:
+        scoped_work_rows = [
+            row for row in all_rows
+            if isinstance(row, dict)
+            and not _row_is_pending_clarification(row)
+            and (
+                (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
+                or (_text(conversation_id) and _text(row.get("conversation_id")) == _text(conversation_id))
+            )
+        ]
+        scoped_work_rows.sort(
+            key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
+            reverse=True,
+        )
+        for work_index, work_row in enumerate(scoped_work_rows):
+            work_profile = _infer_active_work_branch(work_row)
+            if work_profile.get("active"):
+                active_work_pair = work_row
+                active_work_branch = dict(work_profile)
+                active_work_row_index = work_index
+                _, response_record, memory_record = _response_and_request_records(work_row)
+                response_meta = response_record.get("metadata") if isinstance(response_record.get("metadata"), dict) else {}
+                persisted_marker = response_record.get("active_work_branch")
+                if not isinstance(persisted_marker, dict):
+                    persisted_marker = response_meta.get("active_work_branch")
+                if not isinstance(persisted_marker, dict):
+                    persisted_marker = memory_record.get("active_work_branch")
+                active_work_has_marker = bool(isinstance(persisted_marker, dict) and persisted_marker.get("active"))
+                active_work_branch.setdefault("source_message_id", _text(work_row.get("message_id")))
+                active_work_branch.setdefault("origin_message_id", _text(work_row.get("message_id")))
+                active_work_branch["candidate_message_id"] = _text(work_row.get("message_id"))[:120]
+                break
+        # Upgrade old rows without a task marker: locate the nearest preceding
+        # task-start row of the same kind, without crossing into an older unrelated
+        # game. Persist this origin on the next accepted continuation.
+        if active_work_pair and active_work_branch and not active_work_has_marker:
+            expected_kind = _text(active_work_branch.get("kind"))
+            for origin_row in scoped_work_rows[active_work_row_index + 1:]:
+                origin_profile = _infer_active_work_branch(origin_row)
+                if _is_active_work_root_candidate(origin_row, origin_profile, expected_kind):
+                    origin_id = _text(origin_row.get("message_id"))
+                    if origin_id:
+                        active_work_branch["origin_message_id"] = origin_id[:120]
+                        root_topic = _text(origin_profile.get("topic"))
+                        root_answer = _text(origin_row.get("april_text") or origin_row.get("april"))
+                        if expected_kind == "interactive_game":
+                            titled_game = re.search(r"\b(?:игра|game)\s*[«\"]([^»\"]{2,100})[»\"]", root_answer, re.IGNORECASE)
+                            if titled_game:
+                                root_topic = _text(titled_game.group(1))
+                        if root_topic:
+                            active_work_branch["topic"] = root_topic[:240]
+                        root_goal = _text(origin_profile.get("goal"))
+                        if root_goal:
+                            active_work_branch["goal"] = root_goal[:500]
+                    break
     best = matches[0] if matches else None
     active_subjects = set(latest_same_dialog.get("subject_terms") or []) if latest_same_dialog else set()
     active_subject_conflict = _subject_conflicts(query_subjects, active_subjects)
@@ -3206,6 +3645,18 @@ def search_dialogue_context(
         marker=marker, conversation_id=str(conversation_id or ""), has_attachment=bool(query_modalities),
         history_request=history_request, new_topic_request=new_topic_request,
     )
+    hot_work_followup, hot_work_match_reason = _hot_work_followup_candidate(
+        query, active_work_branch, active_work_pair,
+        history_request=history_request,
+        new_topic_request=new_topic_request,
+        has_attachment=bool(query_modalities & {"image", "file"}),
+        reference_followup=reference_followup,
+    )
+    if hot_work_followup:
+        # Keep the raw subject-conflict diagnostic, but do not let an imperfect
+        # lexical stem veto a choice or an action within a saved work state.
+        decision_subject_switch = False
+        hot_branch_candidate = True
     # A bare topic pointer such as “про стих” may continue only when the 24-hour
     # database search found a matching source topic. Do not let recency attach it
     # to an unrelated latest turn just because its wording is short.
@@ -3216,6 +3667,11 @@ def search_dialogue_context(
         continuation = True
     elif history_request or new_topic_request:
         continuation = False
+    elif hot_work_followup:
+        # A confirmed in-task choice/action outranks the generic attachment gate.
+        # This allows voice replies and linked image/file edits to continue a saved
+        # task, while _hot_work_followup_candidate rejects unreferenced attachments.
+        continuation = True
     elif has_new_attachment and not explicit_attachment_followup:
         continuation = False
     elif _is_section_request(query) and _explicit_section_number(query) is not None and rows:
@@ -3287,6 +3743,7 @@ def search_dialogue_context(
         and not repair_active_branch
         and not semantic_active_branch_intent
         and not explicit_prior_pointer
+        and not hot_work_followup
         and (bool(query_subjects) or not reference_followup)
     )
     if self_contained_new_information:
@@ -3300,7 +3757,20 @@ def search_dialogue_context(
     # and APRIL sides so the challenged answer can still be found when the user's
     # message does not repeat the answer's subject; otherwise use the latest turn.
     anchor: dict[str, Any] | None = None
-    if repair_active_branch and latest_same_dialog:
+    if hot_work_followup and active_work_pair:
+        # The work branch is chosen before generic score ordering. A high lexical
+        # score from an older topic must not replace the active task's live state.
+        active_work_id = _text(active_work_pair.get("message_id"))
+        anchor = candidate_match_by_id.get(active_work_id)
+        if anchor is None:
+            anchor = _candidate_score(
+                query, active_work_pair,
+                dialog_id=str(dialog_id or ""),
+                conversation_id=str(conversation_id or ""),
+                reference_followup=True,
+                query_modalities=query_modalities,
+            )
+    elif repair_active_branch and latest_same_dialog:
         repair_candidates = []
         for candidate in matches:
             if not candidate.get("same_dialog"):
@@ -3511,7 +3981,57 @@ def search_dialogue_context(
             selection_method=history_selection_method, topic_index_count=len(topic_index),
         )
     elif relation == "CONTINUE":
-        if repair_active_branch:
+        if hot_work_followup and active_work_pair:
+            # Hot-work selection is a separate first lane: never append a fuzzy
+            # neighbor from an older unrelated task (e.g. a previous game).
+            anchor_id = _text(active_work_pair.get("message_id"))
+            anchor = candidate_match_by_id.get(anchor_id) or anchor or _candidate_score(
+                query, active_work_pair, dialog_id=str(dialog_id or ""),
+                conversation_id=str(conversation_id or ""), reference_followup=True,
+                query_modalities=query_modalities,
+            )
+            selected_for_context = []
+            selected_work_ids: set[str] = set()
+
+            def _append_work_source(source_row: dict[str, Any], candidate: dict[str, Any] | None = None) -> None:
+                if not isinstance(source_row, dict):
+                    return
+                source_id = _text(source_row.get("message_id"))
+                if not source_id or source_id in selected_work_ids:
+                    return
+                compact = _compact_pair(candidate or _candidate_score(
+                    query, source_row, dialog_id=str(dialog_id or ""),
+                    conversation_id=str(conversation_id or ""), reference_followup=True,
+                    query_modalities=query_modalities,
+                ))
+                raw_user = _text(source_row.get("user_text") or source_row.get("user"))
+                raw_april = _text(source_row.get("april_text") or source_row.get("april"))
+                if raw_user or raw_april:
+                    compact.update({
+                        "preserve_source_text": True,
+                        "active_work_source": True,
+                        "source_user_text": raw_user[:1800],
+                        "source_april_text": raw_april[:5200],
+                        "source_user_text_chars": len(raw_user),
+                        "source_april_text_chars": len(raw_april),
+                        "source_user_text_complete": len(raw_user) <= 1800,
+                        "source_april_text_complete": len(raw_april) <= 5200,
+                        "source_content_complete": len(raw_user) <= 1800 and len(raw_april) <= 5200,
+                        "source_text_origin": "dialogue_memory_active_work",
+                    })
+                selected_for_context.append(compact)
+                selected_work_ids.add(source_id)
+
+            # The live state comes first; the origin row preserves the original
+            # rules/constraints/code or task specification behind the current state.
+            _append_work_source(active_work_pair, anchor)
+            origin_id = _text(active_work_branch.get("origin_message_id"))
+            if origin_id and origin_id != anchor_id:
+                origin_row = next((row for row in all_rows if isinstance(row, dict) and _text(row.get("message_id")) == origin_id), None)
+                if origin_row:
+                    _append_work_source(origin_row)
+            history_selection_method = "hot_work_branch_state_and_origin" if len(selected_for_context) > 1 else "hot_work_branch_state"
+        elif repair_active_branch:
             # A correction needs factual evidence, not only the selected topic summary.
             # Start from the best matching answer and add a small same-branch window.
             dialog_candidates = [
@@ -4079,6 +4599,8 @@ def search_dialogue_context(
         source_retrieval_strategy = "DIALOGUE_HISTORY_SEARCH"
     elif selected_section:
         source_retrieval_strategy = "EXACT_SOURCE_SECTION"
+    elif relation == "CONTINUE" and hot_work_followup:
+        source_retrieval_strategy = "HOT_WORK_BRANCH_SOURCE"
     elif relation == "CONTINUE" and semantic_active_branch_intent:
         source_retrieval_strategy = "ACTIVE_BRANCH_SOURCE"
     elif relation == "CONTINUE" and selected_for_context:
@@ -4100,6 +4622,10 @@ def search_dialogue_context(
         "semantic_intent_match": bool(semantic_active_branch_intent),
         "subject_conflict_detected": bool(active_subject_conflict),
         "branch_preserved": bool(relation == "CONTINUE" and latest_same_dialog),
+        "hot_work_match": bool(hot_work_followup),
+        "hot_work_match_reason": _text(hot_work_match_reason)[:80],
+        "work_kind": _text(active_work_branch.get("kind"))[:60],
+        "work_id": _text(active_work_branch.get("work_id"))[:120] if hot_work_followup else "",
     }
     source_retrieval_descriptor = {
         "strategy": source_retrieval_strategy,
@@ -4115,7 +4641,7 @@ def search_dialogue_context(
     }
 
     result = {
-        "engine": "premium_state_manager_topic_section_search_v10_active_branch_repair_evidence",
+        "engine": "premium_state_manager_topic_section_search_v11_hot_work_branch_priority",
         "authenticated": True,
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "dialog_id": str(dialog_id or ""),
@@ -4133,6 +4659,16 @@ def search_dialogue_context(
         "relation": relation,
         "active_branch_repair": bool(repair_active_branch),
         "active_branch": active_branch_descriptor,
+        "active_work_branch": ({
+            **active_work_branch,
+            "active": True,
+            "matched_this_turn": bool(hot_work_followup),
+            "match_reason": _text(hot_work_match_reason)[:80],
+            "candidate_message_id": _text(active_work_pair.get("message_id"))[:120] if active_work_pair else "",
+            "priority": "HOT_TASK_FIRST",
+        } if active_work_branch else {}),
+        "hot_work_followup": bool(hot_work_followup),
+        "hot_work_match_reason": _text(hot_work_match_reason)[:80],
         "user_operation": user_operation,
         "source_retrieval": source_retrieval_descriptor,
         "previous_answer_reference": bool(pragmatic_features.get("previous_answer_reference") or query_interpretation.get("previous_answer_reference")),
@@ -4144,6 +4680,7 @@ def search_dialogue_context(
             else "clarification_researched" if clarification_resolution
             else "clarification_pending" if clarification_needed
             else "history_request" if history_request
+            else "hot_work_branch_first" if hot_work_followup
             else "semantic_history_match" if contextual_history_match
             else "self_contained_new_information" if self_contained_new_information
             else "active_branch_repair_evidence" if relation == "CONTINUE" and anchor and repair_active_branch
@@ -4214,6 +4751,11 @@ def search_dialogue_context(
         semantic_subject_switch=bool(semantic_subject_switch),
         self_contained_new_information=bool(self_contained_new_information),
         hot_branch_candidate=bool(hot_branch_candidate),
+        hot_work_followup=bool(hot_work_followup),
+        hot_work_match_reason=_text(hot_work_match_reason),
+        active_work_kind=_text(active_work_branch.get("kind")),
+        active_work_message_key=_apr_diag_ref(active_work_pair.get("message_id") if active_work_pair else ""),
+        active_work_origin_key=_apr_diag_ref(active_work_branch.get("origin_message_id")),
         top_candidate_alignment=[{
             "message_key": _apr_diag_ref(x.get("message_id")), "score": x.get("score"),
             "subject_overlap": x.get("subject_overlap"), "subject_mismatch": x.get("subject_mismatch"),
@@ -4257,6 +4799,9 @@ def prepare_dialogue_context(
         "relation_confidence": context["relation_confidence"],
         "active_branch_repair": bool(context.get("active_branch_repair")),
         "active_branch": deepcopy(context.get("active_branch") or {}),
+        "active_work_branch": deepcopy(context.get("active_work_branch") or {}),
+        "hot_work_followup": bool(context.get("hot_work_followup")),
+        "hot_work_match_reason": _text(context.get("hot_work_match_reason"))[:80],
         "user_operation": deepcopy(context.get("user_operation") or {}),
         "source_retrieval": deepcopy(context.get("source_retrieval") or {}),
         "previous_answer_reference": bool(context.get("previous_answer_reference")),
@@ -4320,5 +4865,6 @@ __all__ = [
     "set_relation",
     "search_dialogue_context",
     "prepare_dialogue_context",
+    "build_active_work_branch_record",
     "initialize",
 ]
