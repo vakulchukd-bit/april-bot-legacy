@@ -915,6 +915,136 @@ def _query_context_signature(query: str, interpretation: dict[str, Any] | None =
     }
 
 
+def _user_operation_profile(
+    query: str,
+    interpretation: dict[str, Any] | None,
+    *,
+    history_request: bool = False,
+    new_topic_request: bool = False,
+    is_correction: bool = False,
+    is_short_acknowledgement: bool = False,
+) -> dict[str, Any]:
+    """Describe the user's discourse operation separately from topic identity.
+
+    This is an additive interpretation layer. It deliberately reuses the existing
+    semantic/pragmatic labels and does not alter tone classification or response
+    style; it only tells retrieval whether the message is operating on the current
+    branch, asking for a source, or opening an independent request.
+    """
+    profile = interpretation if isinstance(interpretation, dict) else {}
+    pragmatic = profile.get("pragmatic_features") if isinstance(profile.get("pragmatic_features"), dict) else {}
+    intent = _text(profile.get("primary_intent")).upper()
+    direction = _text(profile.get("direction")).upper()
+    topic_reference = _text(profile.get("topic_reference")).upper()
+    speech_act = _text(profile.get("speech_act")).upper()
+    communicative_act = _text(profile.get("communicative_act")).upper()
+    relation_hint = _text(profile.get("relation_hint")).upper()
+
+    if history_request:
+        operation = "RETRIEVE_DIALOGUE_SOURCE"
+        evidence = "history_request"
+    elif new_topic_request:
+        operation = "OPEN_NEW_TOPIC"
+        evidence = "explicit_topic_switch"
+    elif speech_act in {"NEGATION_OR_DISAGREEMENT", "FRUSTRATION_OR_DISSATISFACTION"} or communicative_act == "RESPOND_TO_DISAGREEMENT":
+        # Keep emotional disagreement distinct from a factual correction operation.
+        # The original tone label is preserved independently below.
+        operation = "DISAGREE_OR_EXPRESS_DISSATISFACTION"
+        evidence = "pragmatic_disagreement"
+    elif is_correction or speech_act in {"CORRECTION_OR_REVISION", "REVISION_REQUEST"} or bool(
+        profile.get("active_branch_repair")
+        or pragmatic.get("active_branch_repair")
+        or profile.get("previous_answer_reference")
+        or pragmatic.get("previous_answer_reference")
+        or profile.get("factual_verification_request")
+        or pragmatic.get("factual_verification_request")
+    ):
+        operation = "CORRECT_OR_VERIFY_PREVIOUS_TURN"
+        evidence = "correction_or_previous_answer_reference"
+    elif communicative_act == "CLARIFICATION" or speech_act == "CLARIFICATION_REQUEST":
+        operation = "CLARIFY_PREVIOUS_POINT"
+        evidence = "clarification_act"
+    elif speech_act in {"AGREEMENT_OR_ACKNOWLEDGEMENT", "POSITIVE_EVALUATION", "GRATITUDE_OR_APPRECIATION"} or is_short_acknowledgement:
+        operation = "REACT_TO_PREVIOUS_TURN"
+        evidence = "acknowledgement_or_evaluation"
+    elif profile.get("parent_context_dependency") and (profile.get("requires_memory") or relation_hint == "CONTINUE"):
+        operation = "APPLY_NEW_OPERATION_TO_ACTIVE_BRANCH"
+        evidence = "parent_context_dependency"
+    elif (
+        intent == "TOPIC_CONTINUATION"
+        or relation_hint == "CONTINUE"
+        or direction in {"RESUME_OR_RETRIEVE_ACTIVE_TOPIC", "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"}
+        or topic_reference in {"PREVIOUS_OR_ACTIVE_TOPIC", "PREVIOUS_ASSISTANT_ANSWER", "TOPIC_FRAGMENT"}
+    ):
+        operation = "DEVELOP_ACTIVE_BRANCH"
+        evidence = "semantic_continuation_intent"
+    elif speech_act in {"EXPLANATION_REQUEST", "REFERENTIAL_CONTINUATION", "CONTINUATION_REQUEST"}:
+        operation = "EXPLAIN_OR_EXTEND_CURRENT_POINT"
+        evidence = "dialogue_act"
+    elif intent == "NEW_INFORMATION":
+        operation = "REQUEST_NEW_INFORMATION"
+        evidence = "new_information_intent"
+    elif _text(query).strip():
+        operation = "GENERAL_REQUEST_OR_STATEMENT"
+        evidence = "fallback"
+    else:
+        operation = "EMPTY_INPUT"
+        evidence = "empty_query"
+
+    return {
+        "type": operation,
+        "evidence": evidence,
+        "semantic_intent": intent or "UNSPECIFIED",
+        "direction": direction or "UNSPECIFIED",
+        "topic_reference": topic_reference or "UNSPECIFIED",
+        "relation_hint": relation_hint or "UNSPECIFIED",
+        "speech_act": speech_act or "UNSPECIFIED",
+        "communicative_act": communicative_act or "UNSPECIFIED",
+        # Keep the upstream tone visible and untouched. This field is descriptive,
+        # never a replacement for the original emotional/pragmatic interpretation.
+        "tone": _text(profile.get("tone") or "NEUTRAL").upper(),
+    }
+
+
+def _has_semantic_active_branch_intent(
+    interpretation: dict[str, Any] | None,
+    *,
+    history_request: bool,
+    new_topic_request: bool,
+    has_attachment: bool,
+    reference_followup: bool,
+) -> bool:
+    """Trust explicit upstream continuation semantics over a later lexical veto.
+
+    This does not force every NEW into CONTINUE. History lookups, explicit topic
+    switches, and unrelated new attachments retain their existing precedence.
+    """
+    if history_request or new_topic_request:
+        return False
+    if has_attachment and not reference_followup:
+        return False
+    profile = interpretation if isinstance(interpretation, dict) else {}
+    intent = _text(profile.get("primary_intent")).upper()
+    direction = _text(profile.get("direction")).upper()
+    topic_reference = _text(profile.get("topic_reference")).upper()
+    relation_hint = _text(profile.get("relation_hint")).upper()
+    requires_memory = bool(profile.get("requires_memory"))
+    parent_context_dependency = bool(profile.get("parent_context_dependency"))
+    explicit_active_topic_reference = bool(
+        intent == "TOPIC_CONTINUATION"
+        and (
+            requires_memory
+            or relation_hint == "CONTINUE"
+            or direction in {"RESUME_OR_RETRIEVE_ACTIVE_TOPIC", "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"}
+            or topic_reference in {"PREVIOUS_OR_ACTIVE_TOPIC", "PREVIOUS_ASSISTANT_ANSWER", "TOPIC_FRAGMENT"}
+        )
+    )
+    operation_on_active_branch = bool(
+        parent_context_dependency and (requires_memory or relation_hint == "CONTINUE")
+    )
+    return bool(explicit_active_topic_reference or operation_on_active_branch)
+
+
 def _hot_branch_followup_candidate(
     query: str,
     interpretation: dict[str, Any] | None,
@@ -3037,6 +3167,25 @@ def search_dialogue_context(
     # diagnostic, but don't let the latest topic veto the user's resolved pointer.
     decision_subject_switch = bool(semantic_subject_switch and not topic_pointer_match and not is_correction and not is_short_acknowledgement)
     repair_active_branch = bool((is_correction or is_short_acknowledgement) and latest_same_dialog and not new_topic_request and not history_request)
+    has_new_attachment = bool(query_modalities)
+    explicit_attachment_followup = has_new_attachment and reference_followup
+    user_operation = _user_operation_profile(
+        query, query_interpretation,
+        history_request=history_request,
+        new_topic_request=new_topic_request,
+        is_correction=is_correction,
+        is_short_acknowledgement=is_short_acknowledgement,
+    )
+    semantic_active_branch_intent = bool(
+        latest_same_dialog
+        and _has_semantic_active_branch_intent(
+            query_interpretation,
+            history_request=history_request,
+            new_topic_request=new_topic_request,
+            has_attachment=has_new_attachment,
+            reference_followup=reference_followup,
+        )
+    )
 
     # Treat the ranked match as contextual when it contains actual semantic evidence,
     # rather than requiring a fixed hand-chosen score cutoff. Subject conflict remains
@@ -3063,8 +3212,6 @@ def search_dialogue_context(
     if topic_reference_fragment and not topic_pointer_match:
         hot_branch_candidate = False
     continuation = False
-    has_new_attachment = bool(query_modalities)
-    explicit_attachment_followup = has_new_attachment and reference_followup
     if pending_clarification and not new_topic_request:
         continuation = True
     elif history_request or new_topic_request:
@@ -3080,6 +3227,11 @@ def search_dialogue_context(
         and bool(query_interpretation.get("requires_memory"))
         and _text(query_interpretation.get("topic_reference")) == "PREVIOUS_ASSISTANT_ANSWER"
     ):
+        continuation = True
+    elif semantic_active_branch_intent:
+        # The interpretation stage has explicitly resolved this as a continuation
+        # request. A later subject-overlap heuristic may still report a conflict,
+        # but that conflict alone must not erase the active dialogue branch.
         continuation = True
     elif repair_active_branch:
         # Corrections and bare acknowledgements are discourse moves attached to the
@@ -3133,6 +3285,7 @@ def search_dialogue_context(
         and not _is_section_request(query)
         and not _looks_like_topic_correction(query)
         and not repair_active_branch
+        and not semantic_active_branch_intent
         and not explicit_prior_pointer
         and (bool(query_subjects) or not reference_followup)
     )
@@ -3310,6 +3463,24 @@ def search_dialogue_context(
                     anchor = best
                 else:
                     anchor = latest_same_dialog
+        elif explicit_topic_hits and topic_pointer_match:
+            chosen_global = explicit_topic_hits[0][1]
+            anchor = _candidate_score(query, chosen_global, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""), reference_followup=reference_followup, query_modalities=query_modalities)
+        elif semantic_active_branch_intent and latest_same_dialog:
+            # Active-branch continuation prefers a source from this same dialogue.
+            # Use a stronger matching same-dialog row when present; otherwise keep
+            # the latest active exchange rather than a weak unrelated archive hit.
+            same_dialog_candidates = [
+                item for item in matches
+                if item.get("same_dialog") and not item.get("is_pending_clarification")
+                and not item.get("subject_mismatch")
+            ]
+            same_dialog_best = max(
+                same_dialog_candidates,
+                key=lambda item: (float(item.get("score") or 0), float(item.get("created_at") or 0), int(item.get("turn_index") or 0)),
+                default=None,
+            )
+            anchor = same_dialog_best or latest_same_dialog
         elif explicit_topic_hits:
             chosen_global = explicit_topic_hits[0][1]
             anchor = _candidate_score(query, chosen_global, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""), reference_followup=reference_followup, query_modalities=query_modalities)
@@ -3901,6 +4072,48 @@ def search_dialogue_context(
 
     anchor_payload = _compact_pair(anchor) if relation == "CONTINUE" and anchor else {}
     _attach_topic_provenance(anchor_payload)
+    # Source retrieval is tracked independently from the dialogue relation: a new
+    # operation may still retrieve a named historical source, and a continuation
+    # should cite only the branch-specific records actually selected above.
+    if history_request:
+        source_retrieval_strategy = "DIALOGUE_HISTORY_SEARCH"
+    elif selected_section:
+        source_retrieval_strategy = "EXACT_SOURCE_SECTION"
+    elif relation == "CONTINUE" and semantic_active_branch_intent:
+        source_retrieval_strategy = "ACTIVE_BRANCH_SOURCE"
+    elif relation == "CONTINUE" and selected_for_context:
+        source_retrieval_strategy = "RELEVANT_DIALOGUE_SOURCE"
+    elif contextual_history_match and selected_for_context:
+        source_retrieval_strategy = "NAMED_HISTORY_SOURCE_WITH_NEW_OPERATION"
+    elif selected_for_context:
+        source_retrieval_strategy = "RANKED_MEMORY_SOURCE"
+    else:
+        source_retrieval_strategy = "CURRENT_REQUEST_NO_MEMORY_SOURCE"
+
+    active_branch_descriptor = {
+        "status": "ACTIVE" if relation == "CONTINUE" and latest_same_dialog else ("AVAILABLE" if latest_same_dialog else "NONE"),
+        "topic": _text((anchor or {}).get("topic") or (latest_same_dialog or {}).get("topic"))[:240],
+        "message_id": _text((anchor or {}).get("message_id") or (latest_same_dialog or {}).get("message_id"))[:120],
+        "dialog_id": _text((anchor or {}).get("dialog_id") or (latest_same_dialog or {}).get("dialog_id"))[:120],
+        "topic_id": _text((anchor or {}).get("topic_id") or (latest_same_dialog or {}).get("topic_id"))[:100],
+        "topic_origin_message_id": _text((anchor or {}).get("topic_origin_message_id") or (latest_same_dialog or {}).get("topic_origin_message_id"))[:120],
+        "semantic_intent_match": bool(semantic_active_branch_intent),
+        "subject_conflict_detected": bool(active_subject_conflict),
+        "branch_preserved": bool(relation == "CONTINUE" and latest_same_dialog),
+    }
+    source_retrieval_descriptor = {
+        "strategy": source_retrieval_strategy,
+        "method": _text(history_selection_method or "unspecified")[:100],
+        "anchor_message_id": _text((anchor or {}).get("message_id"))[:120],
+        "selected_message_ids": [
+            _text(item.get("message_id"))[:120]
+            for item in selected_for_context[:5]
+            if isinstance(item, dict) and _text(item.get("message_id"))
+        ],
+        "contextual_history_match": bool(contextual_history_match),
+        "source_count": len(selected_for_context),
+    }
+
     result = {
         "engine": "premium_state_manager_topic_section_search_v10_active_branch_repair_evidence",
         "authenticated": True,
@@ -3919,6 +4132,9 @@ def search_dialogue_context(
         "candidate_count": len(matches),
         "relation": relation,
         "active_branch_repair": bool(repair_active_branch),
+        "active_branch": active_branch_descriptor,
+        "user_operation": user_operation,
+        "source_retrieval": source_retrieval_descriptor,
         "previous_answer_reference": bool(pragmatic_features.get("previous_answer_reference") or query_interpretation.get("previous_answer_reference")),
         "factual_verification_request": bool(pragmatic_features.get("factual_verification_request") or query_interpretation.get("factual_verification_request")),
         "explicit_topic_switch": bool(query_interpretation.get("explicit_topic_switch")),
@@ -3931,6 +4147,7 @@ def search_dialogue_context(
             else "semantic_history_match" if contextual_history_match
             else "self_contained_new_information" if self_contained_new_information
             else "active_branch_repair_evidence" if relation == "CONTINUE" and anchor and repair_active_branch
+            else "semantic_active_branch_intent" if relation == "CONTINUE" and semantic_active_branch_intent
             else "named_topic_match" if explicit_topic_hits and relation == "CONTINUE"
             else "hot_branch_ambiguous_followup" if relation == "CONTINUE" and anchor and hot_branch_candidate
             else "underspecified_turn_context" if relation == "CONTINUE" and anchor and not query_subjects
@@ -3970,6 +4187,10 @@ def search_dialogue_context(
         dialog_key=_apr_diag_ref(dialog_id), conversation_key=_apr_diag_ref(conversation_id),
         relation=relation, reason=result["reason"], total_pairs=len(rows), candidates=len(matches),
         selected_pairs=len(selected_for_context), topic_index_count=len(topic_index),
+        user_operation=_text(user_operation.get("type")),
+        semantic_active_branch_intent=bool(semantic_active_branch_intent),
+        active_branch_preserved=bool(active_branch_descriptor.get("branch_preserved")),
+        source_retrieval_strategy=source_retrieval_strategy,
         temporal_filter_applied=bool(time_filter.get("applied")),
         temporal_filter_empty=bool(time_filter.get("empty")),
         temporal_range_start=(time_filter.get("requested_start_at") if time_filter.get("empty") else time_filter.get("start_at")),
@@ -4035,6 +4256,9 @@ def prepare_dialogue_context(
         "relation": context["relation"],
         "relation_confidence": context["relation_confidence"],
         "active_branch_repair": bool(context.get("active_branch_repair")),
+        "active_branch": deepcopy(context.get("active_branch") or {}),
+        "user_operation": deepcopy(context.get("user_operation") or {}),
+        "source_retrieval": deepcopy(context.get("source_retrieval") or {}),
         "previous_answer_reference": bool(context.get("previous_answer_reference")),
         "factual_verification_request": bool(context.get("factual_verification_request")),
         "explicit_topic_switch": bool(context.get("explicit_topic_switch")),
