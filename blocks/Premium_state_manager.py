@@ -1084,11 +1084,18 @@ def _assistant_expects_user_input(answer_text: str) -> bool:
         return False
     if _ACTIVE_CHOICE_RE.search(text):
         return True
+    # A direct question at the end of April's turn leaves the dialogue open.
+    # This is important for generated follow-ups such as “Следующий вопрос:
+    # какая самая большая планета?”: the next one-word answer is not a new topic.
+    if re.search(r"[?？](?:[\"'»”\)\]]*)\s*$", text):
+        return True
     low = text.lower().replace("ё", "е")
     invitation = bool(re.search(
         r"(?:выбери|выбирай|выберите|что\s+выберешь|какой\s+(?:вариант|пункт|ход)|"
         r"твой\s+ход|ваш\s+ход|твоя\s+очередь|теперь\s+ты|теперь\s+ваш\s+ход|"
-        r"ответь|напиши|пришли|загрузи|покажи|укажи|сообщи|скажи\s+мне|"
+        r"ответь|ответьте|напиши|пришли|загрузи|покажи|укажи|сообщи|скажи\s+мне|"
+        r"пусть\s+(?:все\s+)?(?:игроки|участники)\s+отвеча\w*|"
+        r"(?:игроки|участники)\s+отвеча\w*|"
         r"choose|pick\s+(?:one|an option)|your\s+turn|your\s+move|send\s+me|provide\s+the)",
         low,
     ))
@@ -1236,10 +1243,14 @@ def _infer_active_work_branch(row: dict[str, Any]) -> dict[str, Any]:
         or re.search(r"(?:начат\w*\s+(?:нов\w*\s+)?(?:совместн\w*\s+)?(?:пошагов\w*\s+)?игр|продолжен\w*\s+игр|твой ход|your turn|choose|выбирай)", answer_low)
         or _WORK_ACTION_RE.search(user_low)
     ))
+    # April may create the active next step itself by asking a question or
+    # explicitly inviting a response. Keep that branch even when the user did not
+    # originate a formal task and the subject words in the reply are very short.
+    interactive_dialogue_state = bool(expects_choice and not interaction_state)
     task_action = bool(_WORK_ACTION_RE.search(user_low))
     task_object = bool(_WORK_OBJECT_RE.search(user_low))
     explicit_artifact = wants_code or wants_visual
-    active = bool(explicit_artifact or interaction_state or (task_action and task_object))
+    active = bool(explicit_artifact or interaction_state or interactive_dialogue_state or (task_action and task_object))
     if not active:
         return {}
 
@@ -1253,6 +1264,8 @@ def _infer_active_work_branch(row: dict[str, Any]) -> dict[str, Any]:
         kind = "problem_solving"
     elif re.search(r"(?:схем\w*|диаграм\w*|график\w*|таблиц\w*|документ\w*|план\w*|макет\w*|diagram\w*|chart\w*)", all_text):
         kind = "structured_artifact"
+    elif interactive_dialogue_state:
+        kind = "interactive_dialogue"
     else:
         kind = "active_task"
 
@@ -1325,6 +1338,14 @@ def _is_active_work_root_candidate(row: dict[str, Any], profile: dict[str, Any],
             user_starts_game and (answer_starts_game or bool(profile.get("expects_choice")))
             or explicit_structured_root
         )
+    if expected_kind == "interactive_dialogue":
+        # Only the turn that originated the open question is a root. A later
+        # continuation may also end with a question, but its saved marker points
+        # to the original message and must not replace that origin during recovery.
+        profile_origin = _text(profile.get("origin_message_id"))
+        row_id = _text(row.get("message_id"))
+        same_root = not profile_origin or not row_id or profile_origin == row_id
+        return bool(answer_has_source and same_root and _assistant_expects_user_input(answer_text))
 
     # Prefer an original creation/solution request over a later small edit.
     return bool(user_has_root_action and user_has_object and answer_has_source)
