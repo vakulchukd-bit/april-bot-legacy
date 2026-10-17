@@ -2828,6 +2828,10 @@ _HISTORY_QUERY_NOISE = _SECTION_TOPIC_NOISE | {
     "вспомнить", "напомнить", "сказать", "расскажи", "расскажите", "кратко",
     "краткий", "содержание", "содержании", "тема", "темы", "тему", "вопрос",
     "вопросе", "вопросы", "какие", "какую", "какой", "какое", "что", "чем",
+    # Demonstratives in questions such as “что такое гравитация?” are grammar,
+    # not the requested subject. Leaving “такое” here let it falsely match a
+    # historical topic and inject that unrelated pair into a NEW request.
+    "такое", "такой", "такая", "такие", "такого", "такую", "таком", "таким", "таких", "такова", "таков",
     "мы", "нам", "наше", "наши", "наш", "нашу", "мне", "мои", "мой",
     "последних", "последние", "час", "часа", "часов", "минут", "минуты", "дней", "дня", "недели",
     "назад", "хоть", "примерно", "около", "время", "времени", "помни", "помниш", "помнишь", "вспоминаешь",
@@ -2873,6 +2877,37 @@ def _fuzzy_token_overlap(query_tokens: set[str], candidate_tokens: set[str]) -> 
     return matched / max(1, len(query_tokens))
 
 
+def _history_topic_overlap(query_tokens: set[str], candidate_tokens: set[str]) -> float:
+    """Strict overlap for selecting a past *topic*, distinct from typo-tolerant pair search.
+
+    The general fuzzy matcher tolerates one edit in the first five letters. That
+    is useful for a direct typo like “ыизика” -> “физика”, but it can also make
+    unrelated words such as “гравитация” and “правила” look like a topic match.
+    History-topic selection therefore requires a shared morphological prefix or
+    a strong whole-token match before it counts a subject as found.
+    """
+    if not query_tokens or not candidate_tokens:
+        return 0.0
+    matched = 0
+    candidates = list(candidate_tokens)
+    for query_token in query_tokens:
+        if query_token in candidate_tokens or any(
+            len(candidate) >= 5 and len(query_token) >= 5
+            and (query_token[:5] == candidate[:5]
+                 or query_token.startswith(candidate[:6])
+                 or candidate.startswith(query_token[:6]))
+            for candidate in candidates
+        ):
+            matched += 1
+            continue
+        if len(query_token) >= 6 and any(
+            len(candidate) >= 6 and fuzz.ratio(query_token, candidate) >= 82
+            for candidate in candidates
+        ):
+            matched += 1
+    return matched / max(1, len(query_tokens))
+
+
 def _topic_query_overlap(query: str, topic: str) -> float:
     """Overlap only on topic-bearing words, not generic continuation vocabulary."""
     query_tokens = _semantic_tokens(query) - _SECTION_TOPIC_NOISE - _CONTEXT_GENERIC_TERMS
@@ -2909,7 +2944,7 @@ def _rank_history_topics(query: str, topics: list[dict[str, Any]], limit: int, *
     ranked: list[tuple[float, float, dict[str, Any]]] = []
     for item in bounded:
         candidate_tokens = _semantic_tokens(_history_topic_text(item))
-        overlap = _fuzzy_token_overlap(tokens, candidate_tokens)
+        overlap = _history_topic_overlap(tokens, candidate_tokens)
         if overlap <= 0:
             continue
         phrase = fuzz.token_set_ratio(" ".join(sorted(tokens)), " ".join(sorted(candidate_tokens))) / 100.0 if candidate_tokens else 0.0
@@ -3767,7 +3802,10 @@ def search_dialogue_context(
     self_contained_subject_switch = bool(
         active_subject_conflict
         and query_subjects
-        and len(_semantic_tokens(query)) >= 4
+        # A named new entity plus its own pronoun/clause is self-contained even
+        # when the sentence is short (“Расскажи про Коперника и как он выглядел”).
+        # Requiring four lexical tokens alone let “он” suppress the topic switch.
+        and (len(_semantic_tokens(query)) >= 4 or _contains_named_value(query))
         and not history_request
         and not new_topic_request
     )
@@ -3864,6 +3902,44 @@ def search_dialogue_context(
         has_attachment=bool(query_modalities & {"image", "file"}),
         reference_followup=reference_followup,
     )
+
+    # A task marker may outlive a later, explicitly NEW topic. Do not let a bare
+    # option number or generic “continue” jump back to that stale task. A named
+    # reference to the older task (e.g. “продолжи игру”) is still allowed to
+    # reactivate it, preserving deliberate returns to prior work.
+    if hot_work_followup and active_work_pair and active_work_row_index > 0:
+        newer_topic_barrier = next((
+            row for row in scoped_work_rows[:active_work_row_index]
+            if _text(row.get("relation") or "NEW").upper() == "NEW"
+        ), None)
+        if newer_topic_barrier is not None:
+            branch_text = " ".join((
+                _text(active_work_branch.get("topic")),
+                _text(active_work_branch.get("goal")),
+                _text(active_work_branch.get("state_summary")),
+                _text(active_work_pair.get("user_text") or active_work_pair.get("user")),
+                _text(active_work_pair.get("april_text") or active_work_pair.get("april")),
+            ))
+            query_branch_overlap = _topic_query_overlap(query, branch_text)
+            query_subjects_for_branch = _subject_tokens(query)
+            branch_subjects_for_branch = _subject_tokens(branch_text)
+            query_branch_subject_overlap = _subject_overlap(
+                query_subjects_for_branch, branch_subjects_for_branch
+            ) if query_subjects_for_branch else 0.0
+            explicit_older_branch_reference = bool(
+                query_branch_overlap >= 0.28
+                or query_branch_subject_overlap >= 0.50
+            )
+            if not explicit_older_branch_reference:
+                hot_work_followup = False
+                hot_work_match_reason = "superseded_by_newer_topic_without_explicit_reference"
+                # Keep this older marker in storage, but do not pass it to the
+                # current Provider request as if it were still the active task.
+                active_work_branch = {}
+                active_work_pair = None
+                active_work_row_index = -1
+                active_work_has_marker = False
+
     if new_work_root_request:
         hot_work_followup = False
         hot_work_match_reason = "self_contained_new_work_root"
@@ -4046,10 +4122,10 @@ def search_dialogue_context(
         and _text(query_interpretation.get("topic_reference")) == "PREVIOUS_ASSISTANT_ANSWER"
     ):
         continuation = True
-    elif semantic_active_branch_intent:
-        # The interpretation stage has explicitly resolved this as a continuation
-        # request. A later subject-overlap heuristic may still report a conflict,
-        # but that conflict alone must not erase the active dialogue branch.
+    elif semantic_active_branch_intent and not decision_subject_switch:
+        # A context-dependent interpretation may suggest continuation, but an
+        # independently named, conflicting subject wins unless a grounded topic
+        # pointer or correction already resolved it to the prior branch.
         continuation = True
     elif repair_active_branch:
         # Corrections and bare acknowledgements are discourse moves attached to the
@@ -4676,7 +4752,7 @@ def search_dialogue_context(
         lookup_tokens = _history_query_topic_tokens(query)
         top_topic = topic_index[0]
         topic_tokens = _semantic_tokens(_history_topic_text(top_topic))
-        topic_overlap = _fuzzy_token_overlap(lookup_tokens, topic_tokens) if lookup_tokens else 0.0
+        topic_overlap = _history_topic_overlap(lookup_tokens, topic_tokens) if lookup_tokens else 0.0
         has_distinctive_query = len(lookup_tokens) >= 2 or any(len(token) >= 7 for token in lookup_tokens)
         if topic_overlap >= 0.50 and (has_distinctive_query or topic_reference_fragment):
             topic_message_id = _text(top_topic.get("message_id"))
