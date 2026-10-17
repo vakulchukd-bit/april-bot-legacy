@@ -971,6 +971,33 @@ def _looks_like_previous_answer_followup(text: str) -> bool:
     return bool(qualifier_only and len(tokens) <= 5)
 
 
+def _looks_like_next_step_followup(text: str) -> bool:
+    """Recognise compact next-step questions as dialogue follow-ups, not new subjects.
+
+    This is intentionally limited to short, subjectless wording. A self-contained
+    question that names a separate subject still follows the regular NEW path.
+    """
+    low, tokens = _semantic_normalize(text)
+    if not low or len(tokens) > 9:
+        return False
+    pattern = (
+        r"(?:(?:ну|хорошо|ладно|окей|ок|давай|тогда|так)\s+)?"
+        r"(?:(?:а|и)\s+)?"
+        r"(?:"
+        r"следующ\w*\s+шаг"
+        r"|какой\s+(?:будет\s+)?следующ\w*\s+шаг"
+        r"|что\s+(?:нам\s+)?делать\s+дальше"
+        r"|что\s+(?:будет\s+)?дальше"
+        r"|what\s+(?:is\s+)?next(?:\s+step)?"
+        r"|what\s+is\s+the\s+next\s+step"
+        r"|what'?s\s+(?:the\s+)?next\s+step"
+        r"|what\s+comes\s+next"
+        r"|next\s+step"
+        r")"
+    )
+    return bool(re.fullmatch(pattern, low))
+
+
 def _looks_like_context_dependent_question(
     text: str,
     *,
@@ -1537,9 +1564,15 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         or history_inventory_request
     ) and not future_topic_question
 
-    context_dependent_question = _looks_like_context_dependent_question(
-        source, interrogative=interrogative,
-        explicit_topic_introduction=explicit_topic_introduction,
+    context_dependent_question = (
+        _looks_like_context_dependent_question(
+            source, interrogative=interrogative,
+            explicit_topic_introduction=explicit_topic_introduction,
+        )
+        or (
+            _looks_like_next_step_followup(source)
+            and not explicit_topic_introduction
+        )
     )
     topic_reference_fragment = _looks_like_topic_reference_fragment(
         source, explicit_topic_introduction=explicit_topic_introduction,
