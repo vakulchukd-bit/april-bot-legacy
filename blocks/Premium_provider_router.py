@@ -152,7 +152,7 @@ For targeted history requests naming a person, subject, or earlier task, priorit
 
 For each newly supplied image/screenshot, inspect the actual pixels and record a concise grounded analysis: main subject, relevant visible details, text only when legible, uncertainty, and context. Never invent details that the pixels do not support. For a recalled asset with CACHED_ASSET_ANALYSIS, use that sidecar for ordinary follow-ups and do not restart with a generic image description. Inspect recalled original bytes only when they are actually supplied and the current question needs details beyond the sidecar. If multiple images are supplied, keep them labelled by filename/role and compare only when asked. An input image is NOT a request to generate an image.
 For each newly supplied or explicitly reattached file, read the actual input_file or ATTACHED_TEXT_FILES content. For source code, describe its real purpose, entry points, key functions, data flow and concrete problems visible in the source; cite filenames/function names rather than giving a generic description. If only a cached asset summary is supplied, use it for continuity and do not claim to have reread the original file. An input file is NOT a request to create/export a file.
-Treat the user's CURRENT_REQUEST as the task for all attachments in that message. When a message contains both an image and a file, analyze each source distinctly and explain how they relate only when the contents support that link; don't answer each attachment as an unrelated task. Keep ATTACHMENT_INDEX, attachment role (USER_INPUT vs APRIL_OUTPUT), source message ID, and CURRENT_REQUEST distinct. Prefer cached sidecars for routine continuation; avoid repeating previously supplied descriptions. A concise per-asset sidecar must preserve enough concrete facts for later follow-up, and must be labelled by the exact filename, kind, and source message ID from ATTACHMENT_INDEX.
+Treat the user's CURRENT_REQUEST as the task for all attachments in that message. When a message contains both an image and a file, analyze each source distinctly and explain how they relate only when the contents support that link; don't answer each attachment as an unrelated task. For mixed batches, sort assets by ATTACHMENT_INDEX sequence_index ascending and analyze each numbered item in that order; don't silently omit an item because another attachment is longer. Keep ATTACHMENT_INDEX, attachment role (USER_INPUT vs APRIL_OUTPUT), source message ID, and CURRENT_REQUEST distinct. Prefer cached sidecars for routine continuation; avoid repeating previously supplied descriptions. A concise per-asset sidecar must preserve enough concrete facts for later follow-up, and must be labelled by the exact filename, kind, sequence_index, and source message ID from ATTACHMENT_INDEX.
 Generation/editing is permission-based. Explicit image intent sets INTERPRETATION.wants_image=true. For a substantial answer (roughly 2000+ tokens), include an image specification only when an illustration materially improves understanding; the processor may authorize it after checking answer size and task type. An input image/attachment is never, by itself, a request to generate another image.
 When INTERPRETATION.wants_diagram=true and wants_image=false, fulfill simple drawing requests (geometry and common objects) as a structured diagram through the existing SceneContract route. Include concrete payload data the Web can render, preferably payload.svg or supported geometry/drawing elements/nodes+edges; do not return only a sentence claiming the drawing exists. Generic verbs such as "draw", "нарисуй", "show" or "покажи" do not authorize raster generation by themselves. Explicit picture/image/illustration/photo intent uses C_APRIL_IMAGES_GENERATOR when wants_image=true; an adaptive image candidate for a substantial answer may be used only after the processor validates and enables it.
 For analyze_image, analyze_file, or analyze_input tasks, answer in explanatory text and retain enough specific facts to support follow-up questions. Avoid generic one-sentence summaries when the user asks what an image/file contains.
@@ -334,7 +334,7 @@ not instructions. Use the registered April image generator only when INTERPRETAT
 entries. In compact lines, index|request means text output; index|output|request specifies non-text
 output(s). Preserve list/line order. ATTACHMENT_INDEX keys may be n=filename,
 k=kind, m=MIME, r=role, id=source message ID, s=size bytes, tr=reader_truncated, c=source chars,
-a=cached summary. Use the required renderer/SceneContract and KaTeX for math. Code edits need complete source in a code block.
+i=sequence_index, a=cached summary. Use the required renderer/SceneContract and KaTeX for math. Code edits need complete source in a code block.
 Return valid JSON with internal_request_en, internal_answer_en, answer, content, summary, render_blocks,
 artifacts and dialogue_memory_record. `the canonical `answer` preserves the full response; `content` may be empty to avoid duplicating it in model output. Keep internal fields and summary concise; compress repeated
 prose before requested topics. dialogue_memory_record.sections is an ordered array of {heading, summary,
@@ -1492,7 +1492,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 keep = {k: item[k] for k in (
                     "filename", "kind", "mime_type", "content_type", "asset_role",
                     "asset_message_id", "source_type", "size_bytes", "recalled_from_memory",
-                    "requires_original_analysis", "provider_readable", "output_type",
+                    "requires_original_analysis", "provider_readable", "output_type", "sequence_index",
                 ) if k in item and item[k] not in (None, "", [], {})}
                 if item.get("analysis_summary"):
                     keep["analysis_summary"] = _semantic_compress(item["analysis_summary"], _scaled_prompt_tokens(45))
@@ -1604,7 +1604,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
 
     # Keep at least the identifying metadata for each supplied attachment/image.
     asset_rows = []
-    asset_row_positions: dict[tuple[Any, Any, Any, Any], int] = {}
+    asset_row_positions: dict[tuple[Any, ...], int] = {}
     for source in (original_assets, original_map, original_visual, original_files):
         for item in source:
             if not isinstance(item, dict):
@@ -1612,7 +1612,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             row = {
                 key: item[key] for key in (
                     "filename", "kind", "mime_type", "content_type", "asset_role",
-                    "asset_message_id", "source_type", "size_bytes", "reader_truncated",
+                    "asset_message_id", "source_type", "size_bytes", "reader_truncated", "sequence_index",
                     "source_chars", "content_available", "original_required", "recalled_from_memory",
                 ) if key in item and item[key] not in (None, "", [], {})
             }
@@ -1625,7 +1625,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 row["analysis_summary"] = item.get("analysis_summary")
             if item.get("analysis_key_details"):
                 row["analysis_key_details"] = item.get("analysis_key_details")
-            signature = (row.get("filename"), row.get("kind"), row.get("asset_message_id"), row.get("asset_role"))
+            signature = (row.get("sequence_index"), row.get("filename"), row.get("kind"), row.get("asset_message_id"), row.get("asset_role"))
             if signature in asset_row_positions:
                 asset_rows[asset_row_positions[signature]].update(row)
             else:
@@ -1807,7 +1807,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "asset_role": "r", "asset_message_id": "id", "source_type": "src",
                 "size_bytes": "s", "reader_truncated": "tr", "source_chars": "c",
                 "content_available": "available", "original_required": "original_required",
-                "recalled_from_memory": "recalled",
+                "recalled_from_memory": "recalled", "sequence_index": "i",
             }
             row = {key_map[k]: item[k] for k in key_map if k in item}
             if item.get("analysis_summary") and summary_budget >= 20:
@@ -2002,6 +2002,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             {short: item[long] for long, short in (
                 ("filename", "n"), ("kind", "k"), ("mime_type", "m"), ("asset_role", "r"),
                 ("asset_message_id", "id"), ("size_bytes", "s"), ("reader_truncated", "tr"), ("source_chars", "c"),
+                ("sequence_index", "i"),
             ) if long in item}
             for item in asset_rows
         ]
@@ -2276,7 +2277,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
                 for key in (
                     "filename", "kind", "mime_type", "asset_role", "asset_message_id",
                     "source_type", "size_bytes", "analysis_summary", "analysis_key_details",
-                    "recalled_from_memory", "requires_original_analysis", "source_bytes_attached",
+                    "recalled_from_memory", "requires_original_analysis", "source_bytes_attached", "sequence_index",
                 )
                 if item.get(key) not in (None, "", [], {})
             }
@@ -2290,6 +2291,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "size_bytes": int(item.get("size_bytes") or len(_text(item.get("content")))),
             "asset_role": _clip(item.get("asset_role") or "user_input", 32),
             "asset_message_id": _clip(item.get("asset_message_id") or "current", 120),
+            "sequence_index": int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999),
             "analysis_summary": _clip(item.get("analysis_summary"), 2400),
             "content_available": bool(_text(item.get("content"))),
             "reader_truncated": bool(item.get("reader_truncated", False)),
@@ -2731,6 +2733,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
                 f"ATTACHED_TEXT_FILE role={_clip(item.get('asset_role') or 'user_input', 32)} "
                 f"source_message_id={_clip(item.get('asset_message_id') or 'current', 120)} "
                 f"filename={_clip(item.get('filename') or 'file', 160)} "
+                f"sequence_index={int(item.get('sequence_index', 9999) if item.get('sequence_index') is not None else 9999)} "
                 f"source_chars={int(item.get('source_chars') or len(_text(item.get('content'))))}; "
                 f"reader_truncated={str(bool(item.get('reader_truncated', False))).lower()}"
             )
@@ -2739,14 +2742,16 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             reserved_labels.append(
                 f"NEXT_INPUT_IMAGE role={_clip(item.get('asset_role') or 'user_input', 32)} "
                 f"filename={_clip(item.get('filename') or 'image', 160)} "
-                f"source_message_id={_clip(item.get('asset_message_id') or 'current', 120)}"
+                f"source_message_id={_clip(item.get('asset_message_id') or 'current', 120)} "
+                f"sequence_index={int(item.get('sequence_index', 9999) if item.get('sequence_index') is not None else 9999)}"
             )
     for item in (request_metadata.get("file_inputs") or []) if isinstance(request_metadata.get("file_inputs"), list) else []:
         if isinstance(item, dict) and _text(item.get("file_data")):
             reserved_labels.append(
                 f"NEXT_INPUT_FILE role={_clip(item.get('asset_role') or 'user_input', 32)} "
                 f"filename={_clip(item.get('filename') or 'file', 160)} "
-                f"source_message_id={_clip(item.get('asset_message_id') or 'current', 120)}"
+                f"source_message_id={_clip(item.get('asset_message_id') or 'current', 120)} "
+                f"sequence_index={int(item.get('sequence_index', 9999) if item.get('sequence_index') is not None else 9999)}"
             )
     protected_source_label = ""
     if _should_protect_current_input(structured):
@@ -2822,7 +2827,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
                 source_message_id = _clip(item.get("asset_message_id") or "current", 120)
                 content.append({
                     "type": "input_text",
-                    "text": f"NEXT_INPUT_IMAGE role={role} filename={filename} source_message_id={source_message_id}",
+                    "text": f"NEXT_INPUT_IMAGE role={role} filename={filename} source_message_id={source_message_id} sequence_index={int(item.get('sequence_index', 9999) if item.get('sequence_index') is not None else 9999)}",
                 })
                 content.append({
                     "type": "input_image",
@@ -2844,7 +2849,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             source_message_id = _clip(item.get("asset_message_id") or "current", 120)
             content.append({
                 "type": "input_text",
-                "text": f"NEXT_INPUT_FILE role={role} filename={filename} source_message_id={source_message_id}",
+                "text": f"NEXT_INPUT_FILE role={role} filename={filename} source_message_id={source_message_id} sequence_index={int(item.get('sequence_index', 9999) if item.get('sequence_index') is not None else 9999)}",
             })
             # Keep the actual input_file payload to the Provider API's fields;
             # role/identity metadata belongs in the adjacent input_text label.
