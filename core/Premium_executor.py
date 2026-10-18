@@ -30,6 +30,7 @@ from blocks.Premium_C_ARTIFACT_CONTRACT import (
     MachineResponse,
     MachineScene,
     build_scene_contract,
+    prepare_render_blocks_for_room_dispatch,
     get_web_renderer_registration,
     list_registered_rooms,
 )
@@ -454,6 +455,126 @@ def _renderer_plan(
     return plan
 
 
+def _final_portrait_prompt(request_text: str) -> str:
+    """Return a portrait-only prompt when the user explicitly reserved an image for last."""
+    source = _text(request_text)
+    low = source.lower().replace("ё", "е")
+    final_image_cue = bool(re.search(
+        r"(?:в\s+конце|напоследок|в\s+завершени\w*|at\s+the\s+end|finally)"
+        r"[\s\S]{0,140}?(?:покаж\w*|изобраз\w*|представ\w*|show|display|present)"
+        r"[\s\S]{0,90}?(?:изображени\w*|картинк\w*|портрет\w*|фото\b|image\w*|picture\w*|portrait\w*)",
+        low, re.IGNORECASE,
+    ))
+    if not final_image_cue:
+        return ""
+    subject_match = re.search(
+        r"(?:про|об|о|about)\s+([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.'’-]*(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.'’-]*){0,3}?)"
+        r"(?=\s+(?:все|всю|всё|его|ее|её|их|формул\w*|истори\w*|кратк\w*|and|all|his|her|their|formul\w*|biograph\w*)|[,.;!?]|$)",
+        source,
+        re.IGNORECASE,
+    )
+    subject = _text(subject_match.group(1) if subject_match else "")
+    if not subject:
+        return ""
+    return (
+        f"Create one standalone, historically grounded portrait of {subject}. "
+        "This is the final portrait in a factual educational answer. Show only the subject; "
+        "do not create an infographic, poster, collage, formula sheet, diagrams, panels, labels, captions, "
+        "or any text. Use a clear composition, natural proportions, coherent lighting, and a neutral background."
+    )
+
+
+def _apply_presentation_sequence(
+    render_blocks: Any,
+    answer: str,
+    presentation_sequence: Any,
+) -> list[dict[str, Any]]:
+    """Attach ordered presentation steps to typed blocks while preserving every text character."""
+    blocks = [dict(block) for block in (render_blocks or []) if isinstance(block, dict)] if isinstance(render_blocks, list) else []
+    sequence = [dict(item) for item in (presentation_sequence or []) if isinstance(item, dict)] if isinstance(presentation_sequence, list) else []
+    if not sequence:
+        for index, block in enumerate(blocks):
+            block.setdefault("step_index", 1)
+            block["sequence_index"] = index
+        return blocks
+
+    by_section = {str(item.get("section") or ""): item for item in sequence}
+    by_step = {int(item.get("step_index") or index + 1): item for index, item in enumerate(sequence)}
+
+    def section_for_text(value: str, fallback_step: int = 1) -> dict[str, Any]:
+        low = _text(value).lower().replace("ё", "е")
+        patterns = {
+            "formulas": r"(?:формул\w*|уравнен\w*|formula\w*|equation\w*|математическ\w+ запись)",
+            "biography": r"(?:биограф\w*|истори\w* жизни|ранн\w+ годы|жизн\w* и работ\w*|life story|biography|early life)",
+            "experiments": r"(?:опыт\w*|эксперимент\w*|фотоэффект|маякельсон|микельсон|мерли|experiment\w*)",
+            "resources": r"(?:ресурс\w*|ссылк\w*|источник\w*|полезн\w+ ресурс\w*|resource\w*|source\w*|reference\w*)",
+        }
+        for section, pattern in patterns.items():
+            if re.search(pattern, low, re.IGNORECASE) and section in by_section:
+                return by_section[section]
+        return by_step.get(max(1, fallback_step), sequence[0])
+
+    # Split only a single large text block at existing Markdown headings. All
+    # characters are retained exactly; if no headings exist the original block is untouched.
+    expanded: list[dict[str, Any]] = []
+    for block in blocks:
+        block_type = str(block.get("type") or block.get("artifact_type") or "text").strip().lower()
+        content = _text(block.get("content") or block.get("text") or "")
+        if block_type in {"text", "message", "answer"} and len(sequence) > 1 and content.strip():
+            heading_matches = list(re.finditer(r"(?m)^#{1,4}\s+[^\n]+\s*$", content))
+            if len(heading_matches) >= 2:
+                starts = [0] + [match.start() for match in heading_matches]
+                starts = sorted(set(starts))
+                ends = starts[1:] + [len(content)]
+                chunks = [content[a:b] for a, b in zip(starts, ends) if content[a:b].strip()]
+                if len(chunks) >= 2:
+                    for chunk in chunks:
+                        heading_match = re.search(r"(?m)^#{1,4}\s+([^\n]+)", chunk)
+                        heading = heading_match.group(1) if heading_match else chunk[:180]
+                        step = section_for_text(heading + "\n" + chunk[:350])
+                        clone = dict(block)
+                        clone["content"] = chunk.strip()
+                        clone.pop("text", None)
+                        clone["step_index"] = int(step.get("step_index") or 1)
+                        clone["step_title"] = _text(step.get("title") or step.get("section") or "Answer section")[:100]
+                        expanded.append(clone)
+                    continue
+        expanded.append(dict(block))
+
+    for original_order, block in enumerate(expanded):
+        kind = str(block.get("type") or block.get("artifact_type") or "text").strip().lower()
+        try:
+            current_step = max(1, int(block.get("step_index") or 1))
+        except (TypeError, ValueError, OverflowError):
+            current_step = 1
+        if kind in {"image", "gallery"}:
+            match = next((item for item in sequence if item.get("final_output") and "image" in (item.get("output_types") or [])), None)
+            if match is None:
+                image_items = [item for item in sequence if "image" in (item.get("output_types") or [])]
+                match = image_items[-1] if image_items else None
+        elif kind in {"formula", "diagram", "graph", "table", "link", "code", "file"}:
+            match = next((item for item in sequence if kind in (item.get("output_types") or [])), None)
+            # A diagram depicting experiments belongs to the experiment step,
+            # even if another section also requested a diagram renderer.
+            if kind == "diagram" and "experiments" in by_section:
+                match = by_section["experiments"]
+        else:
+            text_payload = _text(block.get("content") or block.get("text") or block.get("title") or "")
+            match = section_for_text(text_payload, current_step)
+        if isinstance(match, dict):
+            block["step_index"] = max(1, int(match.get("step_index") or 1))
+            block["step_title"] = _text(match.get("title") or match.get("section") or "Answer section")[:100]
+        else:
+            block.setdefault("step_index", current_step)
+        block["_april_original_order"] = original_order  # stable sort key until sequence indices are assigned
+
+    expanded.sort(key=lambda block: (max(1, int(block.get("step_index") or 1)), int(block.get("_april_original_order") or 0)))
+    for index, block in enumerate(expanded):
+        block.pop("_april_original_order", None)
+        block["sequence_index"] = index
+    return expanded
+
+
 def _build_image_spec(
     raw: dict[str, Any],
     interpretation: dict[str, Any],
@@ -501,6 +622,20 @@ def _build_image_spec(
         semantic = _first_prompt(clean)
         if not semantic:
             semantic = _first_prompt(clean.get("payload")) if isinstance(clean.get("payload"), dict) else ""
+        final_portrait_prompt = _final_portrait_prompt(request_text)
+        if final_portrait_prompt:
+            # The requested image is a final portrait, not a poster that replaces
+            # the separate biography/formula/experiment/resource deliverables.
+            semantic = final_portrait_prompt
+            subject = _text(re.search(r"portrait of (.+?)\.", final_portrait_prompt, re.IGNORECASE).group(1)) if re.search(r"portrait of (.+?)\.", final_portrait_prompt, re.IGNORECASE) else ""
+            clean["image_subject_only"] = True
+            # Replace any conflicting infographic plan returned for the same
+            # compound prompt. The other sections remain in the text/SceneContract.
+            clean["openai_structured_visual_plan_raw"] = {
+                "rendering_type": "single_portrait",
+                "subject": subject,
+                "exclude": ["infographic", "poster", "collage", "formulas", "diagrams", "panels", "labels", "text"],
+            }
         # Do not downgrade an empty artifact/spec to the original user request
         # here: callers may have a richer candidate later in the same response.
         # The request fallback is applied only after every explicit visual-plan
@@ -510,9 +645,9 @@ def _build_image_spec(
         clean["schema"] = "april_image_spec_v1"
         clean["generator_signal"] = "C_APRIL_IMAGES_GENERATOR"
         clean["request_anchor"] = _text(clean.get("request_anchor") or request_text)
-        clean["prompt"] = _text(clean.get("prompt") or semantic)
+        clean["prompt"] = final_portrait_prompt or _text(clean.get("prompt") or semantic)
         clean["openai_structured_visual_plan_semantic"] = semantic
-        if isinstance(raw_plan, dict):
+        if isinstance(raw_plan, dict) and not final_portrait_prompt:
             clean.setdefault("openai_structured_visual_plan_raw", raw_plan)
         clean.setdefault("width", 512)
         clean.setdefault("height", 512)
@@ -1107,6 +1242,7 @@ async def execute(
     **kwargs: Any,
 ) -> dict[str, Any]:
     pipeline_started = time.perf_counter()
+    progress_sink = kwargs.get("progress_sink") if callable(kwargs.get("progress_sink")) else None
     uid = _text(user_id)
     original = _text(text)
     current_text = _text(internal_text or original)
@@ -2242,6 +2378,64 @@ async def execute(
         raw_render_blocks=len(raw_blocks), raw_artifacts=len(raw_artifacts),
         packaged_blocks=len(packaged.get("render_blocks") or []), packaged_artifacts=len(packaged.get("artifacts") or []))
 
+    request_structure = interpretation.get("request_structure") if isinstance(interpretation.get("request_structure"), dict) else {}
+    presentation_sequence = request_structure.get("presentation_sequence") if isinstance(request_structure.get("presentation_sequence"), list) else []
+    graph_policy = (interpretation.get("intent") or {}).get("graph_policy") if isinstance((interpretation.get("intent") or {}).get("graph_policy"), dict) else {}
+    image_pending = bool((interpretation.get("intent") or {}).get("wants_image"))
+
+    # First publish all text and non-image typed renderers. The Web replaces this
+    # provisional SceneContract with the final one, while the image generator keeps
+    # running and the existing visual typing indicator remains active.
+    if progress_sink:
+        try:
+            progressive_blocks = prepare_render_blocks_for_room_dispatch(
+                packaged.get("render_blocks") or [],
+                answer=answer,
+                requested_outputs=(interpretation.get("intent") or {}).get("requested_outputs") or [],
+                graph_policy=graph_policy,
+            )
+            progressive_blocks = [block for block in progressive_blocks if str(block.get("type") or "").lower() not in {"image", "gallery"}]
+            progressive_blocks = _apply_presentation_sequence(progressive_blocks, answer, presentation_sequence)
+            partial_scene = {
+                "scene_id": f"progress_{identity['message_id']}",
+                "turn_id": identity["message_id"],
+                "flow_id": identity["flow_id"],
+                "answer": answer,
+                "content": answer,
+                "render_blocks": progressive_blocks,
+                "partial": True,
+                "status": "rendering" if image_pending else "text_ready",
+            }
+            progress_sink({
+                "type": "partial_answer",
+                "stage": "text_ready",
+                "data": {
+                    "success": True,
+                    "answer": answer,
+                    "content": answer,
+                    "summary": packaged.get("summary") or answer[:180],
+                    "render_blocks": progressive_blocks,
+                    "scene_contract": partial_scene,
+                    "message_id": identity["message_id"],
+                    "flow_id": identity["flow_id"],
+                    "partial": True,
+                },
+            })
+            if image_pending:
+                image_step = next((item for item in presentation_sequence if item.get("final_output") and "image" in (item.get("output_types") or [])), None)
+                if image_step is None:
+                    image_steps = [item for item in presentation_sequence if "image" in (item.get("output_types") or [])]
+                    image_step = image_steps[-1] if image_steps else None
+                progress_sink({
+                    "type": "render_pending",
+                    "stage": "rendering",
+                    "render_type": "image",
+                    "step_index": int((image_step or {}).get("step_index") or 1),
+                    "title": _text((image_step or {}).get("title") or "Image generation"),
+                })
+        except Exception as progress_error:
+            _apr_timing_log("progressive_handoff_skipped", None, error=type(progress_error).__name__)
+
     image_result = None
     if (interpretation.get("intent") or {}).get("wants_image"):
         image_started = time.perf_counter()
@@ -2268,22 +2462,28 @@ async def execute(
                     visible_image_payload[key] = image_artifact[key]
             image_step_index = 1
             image_step_title = "Illustration"
-            request_structure = interpretation.get("request_structure") if isinstance(interpretation.get("request_structure"), dict) else {}
-            question_sequence = request_structure.get("question_sequence") if isinstance(request_structure.get("question_sequence"), list) else []
-            if not question_sequence:
-                intent_interpretation = (interpretation.get("intent") or {}).get("interpretation") if isinstance(interpretation.get("intent"), dict) else {}
-                nested_structure = intent_interpretation.get("request_structure") if isinstance(intent_interpretation, dict) else {}
-                question_sequence = nested_structure.get("question_sequence") if isinstance(nested_structure, dict) and isinstance(nested_structure.get("question_sequence"), list) else []
-            for question in question_sequence:
-                if not isinstance(question, dict):
-                    continue
-                question_outputs = question.get("output_types") or question.get("outputs") or []
-                if isinstance(question_outputs, str):
-                    question_outputs = [question_outputs]
-                if any(str(value).lower() == "image" for value in question_outputs):
-                    image_step_index = int(question.get("step_index") or 1)
-                    image_step_title = _text(question.get("title") or question.get("request") or "Illustration")[:100]
-                    break
+            image_sequence_items = [item for item in presentation_sequence if isinstance(item, dict) and "image" in (item.get("output_types") or [])]
+            image_sequence_item = next((item for item in image_sequence_items if item.get("final_output")), None)
+            if image_sequence_item is None and image_sequence_items:
+                image_sequence_item = image_sequence_items[-1]
+            if isinstance(image_sequence_item, dict):
+                image_step_index = max(1, int(image_sequence_item.get("step_index") or 1))
+                image_step_title = _text(image_sequence_item.get("title") or "Final portrait")[:100]
+            else:
+                question_sequence = request_structure.get("question_sequence") if isinstance(request_structure.get("question_sequence"), list) else []
+                image_questions = []
+                for question in question_sequence:
+                    if not isinstance(question, dict):
+                        continue
+                    question_outputs = question.get("output_types") or question.get("outputs") or []
+                    if isinstance(question_outputs, str):
+                        question_outputs = [question_outputs]
+                    if any(str(value).lower() == "image" for value in question_outputs):
+                        image_questions.append(question)
+                if image_questions:
+                    last_image_question = image_questions[-1]
+                    image_step_index = max(1, int(last_image_question.get("step_index") or 1))
+                    image_step_title = _text(last_image_question.get("title") or last_image_question.get("request") or "Illustration")[:100]
             image_block = {
                 "type": "image",
                 "step_index": image_step_index,
@@ -2297,7 +2497,9 @@ async def execute(
             }
             packaged["render_blocks"].append(image_block)
 
-    normalized_blocks = list(packaged["render_blocks"] or [])
+    normalized_blocks = _apply_presentation_sequence(
+        packaged["render_blocks"] or [], answer, presentation_sequence
+    )
     # Preserve stable model ordering within each request step while ensuring that
     # a generated image is placed beside its matching explanation, not appended to
     # the end of a multi-question scene regardless of its semantic step.
