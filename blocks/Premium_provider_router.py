@@ -999,6 +999,71 @@ def _protected_data_checksum_valid(value: Any) -> bool:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest() == expected
 
 
+def _bounded_structured_value_chars(value: Any, limit: int) -> int:
+    """Conservatively estimate JSON size without serializing unbounded payloads.
+
+    Count container delimiters, list separators, quoted keys and scalar quotes too.
+    Historical renderer payloads often contain many tiny rows; counting only their
+    cell text can underestimate the actual JSON body by several times.
+    """
+    total = 0
+    stack = [value]
+    visited = 0
+    while stack and total <= limit and visited < 200_000:
+        current = stack.pop()
+        visited += 1
+        if isinstance(current, str):
+            # Add quotes plus a small allowance for JSON escaping.
+            total += len(current) + 2 + current.count('"') + current.count('\\')
+        elif isinstance(current, dict):
+            total += 2 + max(0, len(current) - 1)  # braces and commas
+            for key, child in current.items():
+                total += len(str(key)) + 4  # quoted key, colon and separator allowance
+                if total > limit:
+                    break
+                if isinstance(child, (dict, list, str)):
+                    stack.append(child)
+                elif child is not None:
+                    total += len(str(child)) + 1
+                else:
+                    total += 4  # null
+        elif isinstance(current, list):
+            total += 2 + max(0, len(current) - 1)  # brackets and commas
+            stack.extend(current)
+        elif current is not None:
+            total += len(str(current)) + 1
+        else:
+            total += 4
+    # If the node safety guard was hit, reject the payload conservatively.
+    if stack or visited >= 200_000:
+        return limit + 1
+    return total
+
+
+def _is_self_contained_new_subject_request(value: Any) -> bool:
+    """Detect a full request introducing its own subject, not a pointer to old assets."""
+    source = _text(value).strip()
+    if not source:
+        return False
+    intro = re.search(
+        r"(?:расскажи|расскажите|объясни|объясните|опиши|опишите|покажи|покажите|"
+        r"составь|составьте|найди|найдите|создай|создайте|изучи|изучите|"
+        r"tell\s+me|explain|describe|show|create|build|summari[sz]e)"
+        r"[\s\S]{0,140}?\b(?:про|об|о|about|regarding)\s+([^,.;!?\n]{2,90})",
+        source,
+        re.IGNORECASE,
+    )
+    if not intro:
+        return False
+    subject_phrase = _text(intro.group(1)).strip().lower().replace("ё", "е")
+    # The phrase must introduce a subject, not repeat a deictic reference.
+    first_word = re.split(r"\s+", subject_phrase)[0].strip(" \"'«»()[]{}")
+    return first_word not in {
+        "это", "этот", "эта", "эту", "эти", "того", "той", "тех", "них", "него", "нее",
+        "этого", "этой", "this", "that", "these", "those", "it", "them", "him", "her",
+    }
+
+
 def _requires_prior_structured_payload(
     current_request: Any, relation: str = "NEW", history_request: bool = False
 ) -> bool:
@@ -1039,6 +1104,11 @@ def _requires_prior_structured_payload(
         r"\bcontinue\w*\b|\badd\w*\b|\bchange\w*\b|\bfix\w*\b|\bupdate\w*\b)",
         query,
     ))
+    # A stale active-work branch can be mislabeled CONTINUE even when this message
+    # introduces a complete subject. Do not attach previous tables/images/code unless
+    # the user clearly asks to restore or modify prior content.
+    if _is_self_contained_new_subject_request(current_request) and not has_prior_pointer and not history_request:
+        return False
     return has_prior_pointer or _text(relation).upper() == "CONTINUE" or bool(history_request)
 
 
@@ -1197,24 +1267,35 @@ def _select_protected_structured_data(
         selected_items = [
             item for item in items
             if isinstance(item, dict)
+            and _text(item.get("kind")).lower() != "image"  # image assets restore through their own path
             and (not requested_kinds or _text(item.get("kind")).lower() in requested_kinds)
             and _structured_item_has_exact_values(item)
         ]
         if not selected_items:
             continue
+
+        # Exact values stay lossless, but historical renderer payloads must not
+        # bypass the prompt budget. Skip oversized structures rather than truncating
+        # their values or sending multi-megabyte data URIs to the language model.
+        max_item_chars = 12_000
+        max_batch_chars = 16_000
+        bounded_items: list[dict[str, Any]] = []
+        bounded_chars = 0
+        for item in selected_items:
+            item_chars = _bounded_structured_value_chars(item, max_item_chars)
+            if item_chars > max_item_chars or bounded_chars + item_chars > max_batch_chars:
+                continue
+            bounded_items.append(item)
+            bounded_chars += item_chars
+        if not bounded_items:
+            continue
         slim: dict[str, Any] = {
             "schema": "april_protected_structured_data_v1",
             "source_message_id": source_id,
-            "items": selected_items,
+            "items": bounded_items,
         }
-        # Exact explanations, URLs and renderer payloads are complementary:
-        # compact summaries cannot reconstruct the source text or its provenance.
-        # This bundle is created only for an explicit, matched continuation/history
-        # request, then sent as a lossless external source part rather than squeezed
-        # into the compressible summary card.
-        source_answer = protected.get("source_answer")
-        if isinstance(source_answer, str) and source_answer.strip():
-            slim["source_answer"] = source_answer
+        # The selected typed payload is sufficient; do not duplicate the entire
+        # historical assistant answer next to its exact renderer data.
         # The selected typed payload is the lossless source of truth. Do not
         # duplicate its owning prose/whole answer, including for solutions: exact
         # steps, equations and known values are required in the selected node itself.
@@ -2259,6 +2340,42 @@ def _calculate_cost(usage: dict[str, int]) -> dict[str, Any]:
     }
 
 
+def _safe_prompt_manifest(items: Any, limit: int = 12) -> list[dict[str, Any]]:
+    """Keep small descriptive metadata only; never copy binary/data-URI bodies into model context."""
+    if not isinstance(items, list):
+        return []
+    allowed = {
+        "filename", "kind", "mime_type", "asset_role", "asset_message_id", "source_type",
+        "sequence_index", "size_bytes", "width", "height", "asset_id", "asset_ref",
+        "storage_key", "recalled_from_memory", "analysis_summary", "analysis_key_details",
+        "output_type", "title", "section", "step_index", "final_output", "description",
+        "representation", "reason", "intent", "output", "type", "render_type", "source_position",
+    }
+    result: list[dict[str, Any]] = []
+    for item in items[:max(0, int(limit))]:
+        if not isinstance(item, dict):
+            continue
+        clean: dict[str, Any] = {}
+        for key, value in item.items():
+            key_text = str(key).lower()
+            if key not in allowed or any(marker in key_text for marker in (
+                "data", "base64", "bytes", "uri", "blob", "content", "payload", "image_url", "file_data", "src"
+            )):
+                continue
+            if value in (None, "", [], {}):
+                continue
+            if isinstance(value, str):
+                value = value[:1200 if key in {"analysis_summary", "description"} else 240]
+            elif isinstance(value, list):
+                value = [str(part)[:240] for part in value[:8]]
+            elif not isinstance(value, (bool, int, float)):
+                continue
+            clean[str(key)] = value
+        if clean:
+            result.append(clean)
+    return result
+
+
 def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     intent = req.intent if isinstance(req.intent, dict) else {}
     conversation = req.conversation if isinstance(req.conversation, dict) else {}
@@ -2665,13 +2782,15 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         },
         "INPUT_MODALITIES": modality_lines,
         "VISUAL_CONTEXT": visual_meta,
-        "RECALLED_ASSETS": memory.get("restored_assets") or [],
+        # Binary assets are restored in the renderer path; the model receives metadata only.
+        "RECALLED_ASSETS": _safe_prompt_manifest(memory.get("restored_assets") or []),
         "ATTACHMENT_INDEX": attachment_index,
-        "ATTACHMENTS": request_metadata.get("attachments", []),
+        # Attachment metadata is already represented by ATTACHMENT_INDEX and adjacent input parts.
+        "ATTACHMENTS": _safe_prompt_manifest(request_metadata.get("attachments", [])),
         # Bodies are supplied exactly once as adjacent input_text parts below;
         # this manifest avoids copying thousands of file characters into JSON.
         "ATTACHED_TEXT_FILES": text_file_manifest,
-        "C_ARTIFACT_RENDER_PLAN": render_plan,
+        "C_ARTIFACT_RENDER_PLAN": _safe_prompt_manifest(render_plan, limit=16),
         "SELECTED_ROOMS": routing.get("selected_rooms") or [],
         # Semantic rendering guidance is created by Interpretation, not inferred
         # by the UI. This keeps output choice in the single request pipeline.
@@ -2759,6 +2878,14 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         protected_source_label = _protected_current_input_label(_build_protected_current_input(current))
         reserved_labels.append(protected_source_label)
     reserved_label_tokens = _estimate_tokens("\n".join(reserved_labels))
+    # Defensive ceiling: old exact structures are useful only when small enough to
+    # fit as context. Never externalize a multi-megabyte historical renderer payload
+    # around the normal prompt budget; the renderer asset store remains authoritative.
+    protected_payload = structured.get("PROTECTED_STRUCTURED_DATA") if isinstance(structured, dict) else None
+    if isinstance(protected_payload, list) and _bounded_structured_value_chars(protected_payload, 20_000) > 20_000:
+        structured["PROTECTED_STRUCTURED_DATA"] = []
+        if isinstance(diagnostics_out, dict):
+            diagnostics_out["protected_payload_omitted_oversize"] = True
     source_card_text = _json_card(structured)
     source_card_token_estimate = _estimate_tokens(source_card_text)
     selected_system_prompt, text, card_token_estimate, compression_stage = _fit_structured_prompt(
