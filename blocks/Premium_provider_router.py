@@ -83,6 +83,7 @@ Always treat these sections as structured input:
 3. NEW_DIALOGUE_REQUEST (always contains the literal current request; consult NEW_DIALOGUE_ACTIVE before treating it as a topic switch)
 4. ATTACHMENT_TASK_MAP / INPUT_MODALITIES / VISUAL_CONTEXT / ATTACHED_TEXT_FILES
 5. REQUEST_SEQUENCE (answer each explicit question/step in supplied order)
+   PRESENTATION_SEQUENCE, when present, is the ordered list of deliverable sections and renderers inside this one request; it is NOT a list of independent memory searches. Use its section/title/output_types, produce each requested section in that order, interleave text with its typed renderer, and reserve every final_output=true item for the very end. For a multi-section sequence, start each prose section with a Markdown heading (`##`) corresponding to that section title so the renderer can preserve exact boundaries. Tag render_blocks with step_index, step_title and sequence_index. Do not let multiple deliverables collapse into one poster/image. For an experiments section, make its diagram depict the requested experiments only; keep biography, formulas, resources and a final portrait as separate deliverables.
    Each step's dialogue_search.relation, intent and context were retrieved independently
    from the authenticated user's history. Use its selected pairs when relation=CONTINUE OR
    history_request=true; HISTORY_RECALL may deliberately remain relation=NEW so recall does not
@@ -306,7 +307,7 @@ place for the full response; `summary` is short metadata. Emit requested structu
 concrete payloads and verify all numbered steps before returning. Premium output is capped at 12000
 tokens total, including up to 4800 tokens for render payloads and about 7200 for explanation, both within the total. Never emit an empty table shell. Composite outputs are cumulative; use adaptive
 visuals when materially useful, and label generated illustrations as generated, not authentic photos.
-When multiple visual outputs are requested, emit the materially relevant requested renderers with concrete payloads. Target about 60% explanatory text and 40% visual/render payloads when the request calls for visuals; this is an allocation target, not a rigid truncation rule. For multi-step requests, add step_index and step_title to every block where possible, interleave each step's concise text with that step's formula/table/diagram/graph/image, and preserve step order. Never collect all visuals at the end or use a visual to replace needed explanation. Use grounded network graphs for concepts, never invent numeric measurements; images require the generator signal and links require real URLs.
+When multiple visual outputs are requested, emit the materially relevant requested renderers with concrete payloads. Target about 60% explanatory text and 40% visual/render payloads when the request calls for visuals; this is an allocation target, not a rigid truncation rule. For multi-step requests, follow PRESENTATION_SEQUENCE when present; treat it as a deliverable checklist within the same turn, not separate memory lookups. Add step_index, step_title and sequence_index to each block where possible, interleave each section's text with that section's formula/table/diagram/graph/link/image, and preserve all steps. Start each prose section with a Markdown `##` heading matching the planned section title, so client rendering can keep section boundaries. Keep final_output=true as the final item. Never collect all visuals at the end or let a single infographic replace separate requested outputs. An experiments diagram covers only the experiments, not the whole answer. Use grounded network graphs for concepts, never invent numeric measurements; images require the generator signal and links require real URLs.
 Answer CURRENT_REQUEST in RETURN_LANGUAGE. On CONTINUE, use SELECTED_SECTION as the target when present.
 When ACTIVE_WORK_BRANCH is active, it is the first retrieval/context lane for this matched turn. Preserve the
 latest task state and its original constraints before generic history search; choices/actions/edits/solution steps
@@ -1872,6 +1873,12 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "NEW_DIALOGUE_REQUEST": "Same as CURRENT_REQUEST" if _text(data.get("NEW_DIALOGUE_REQUEST")) else "",
             "NEW_DIALOGUE_ACTIVE": bool(data.get("NEW_DIALOGUE_ACTIVE")),
             "REQUEST_SEQUENCE": seq,
+            "PRESENTATION_SEQUENCE": [
+                {"i": item.get("step_index", idx + 1), "s": _clip(item.get("section"), 32),
+                 "t": _clip(item.get("title"), 60), "o": item.get("output_types") or ["text"],
+                 "f": bool(item.get("final_output"))}
+                for idx, item in enumerate((data.get("PRESENTATION_SEQUENCE") or [])[:12]) if isinstance(item, dict)
+            ],
             "INPUT_MODALITIES": data.get("INPUT_MODALITIES") or {},
             "ATTACHMENT_INDEX": assets_min,
             "C_ARTIFACT_RENDER_PLAN": [
@@ -2540,6 +2547,17 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
     }
     question_sequence = request_structure.get("question_sequence") if isinstance(request_structure.get("question_sequence"), list) else []
     question_sequence = [dict(item) for item in question_sequence if isinstance(item, dict)]
+    presentation_sequence = request_structure.get("presentation_sequence") if isinstance(request_structure.get("presentation_sequence"), list) else []
+    presentation_sequence = [
+        {
+            "step_index": max(1, int(item.get("step_index") or index + 1)),
+            "section": _clip(item.get("section"), 48),
+            "title": _clip(item.get("title"), 100),
+            "output_types": [str(value).lower() for value in (item.get("output_types") if isinstance(item.get("output_types"), list) else []) if str(value).strip()][:6],
+            "final_output": bool(item.get("final_output")),
+        }
+        for index, item in enumerate(presentation_sequence[:12]) if isinstance(item, dict)
+    ]
     for _step in question_sequence:
         _step["request"] = _semantic_compress(_step.get("request"), MAX_TOPIC_PROMPT_TOKENS - _scaled_prompt_tokens(24))
     topic_count = max(1, len(question_sequence))
@@ -2622,6 +2640,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "NEW_DIALOGUE_REQUEST": _text(new_dialogue.get("request") or current),
         "NEW_DIALOGUE_ACTIVE": bool(new_dialogue.get("active", relation == "NEW")) and relation != "CONTINUE",
         "REQUEST_SEQUENCE": question_sequence or [{"step_index": 1, "request": current, "output_types": structured_intent.get("requested_outputs") or ["text"], "answer_in_order": True}],
+        "PRESENTATION_SEQUENCE": presentation_sequence,
         "ATTACHMENT_TASK_MAP": asset_task_map,
         "REQUEST_EXECUTION_POLICY": {
             "preserve_authenticated_identity": True,
