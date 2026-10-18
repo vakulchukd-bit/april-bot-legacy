@@ -1011,12 +1011,14 @@ def _requires_prior_structured_payload(
     if not query:
         return False
     has_data_target = bool(re.search(
-        r"(?:таблиц\w*|строк\w*|столб(?:ец|ц)\w*|ряд\w*|график\w*|диаграмм\w*|координат\w*|"
-        r"значени\w*|данн\w*|формул\w*|уравнен\w*|расчет\w*|вычислен\w*|"
-        r"матриц\w*|csv|json|массив\w*|решен\w*|шаги?\s+решен\w*|"
+        r"(?:таблиц\w*|строк\w*|столб(?:ец|ц)\w*|ряд\w*|график\w*|диаграмм\w*|схем\w*|"
+        r"координат\w*|значени\w*|данн\w*|формул\w*|уравнен\w*|расчет\w*|вычислен\w*|"
+        r"матриц\w*|csv|json|массив\w*|решен\w*|шаги?\s+решен\w*|ссылк\w*|url-?адрес\w*|"
+        r"источник\w*|код\w*|скрипт\w*|картинк\w*|изображен\w*|иллюстрац\w*|визуал\w*|"
         r"\btable\w*|\brows?\b|\bcolumns?\b|\bgraph\w*|\bcharts?\b|\bplots?\b|"
         r"\bcoordinates?\b|\bvalues?\b|\bdata\b|\bformulas?\b|\bequations?\b|"
-        r"\bcalculat\w*|\bsolutions?\b|\bmatrices\b|\bmatrix\b|\barrays?\b)",
+        r"\bcalculat\w*|\bsolutions?\b|\bmatrices\b|\bmatrix\b|\barrays?\b|"
+        r"\blinks?\b|\burls?\b|\bsources?\b|\bcodes?\b|\bscripts?\b|\bdiagrams?\b|\bschemes?\b|\bimages?\b|\bpictures?\b)",
         query,
     ))
     if not has_data_target:
@@ -1054,6 +1056,14 @@ def _prior_structured_kind_targets(current_request: Any) -> set[str]:
         targets.add("formula")
     if re.search(r"(?:решен\w*|вычислен\w*|расчет\w*|расчёт\w*|шаг\w*\s+решен\w*|математическ\w*\s+задач\w*|\bsolution\w*|\bcalculat\w*|\bderivation\w*|\bmath\s+problem\w*)", query):
         targets.add("solution")
+    if re.search(r"(?:ссылк\w*|url-?адрес\w*|источник\w*|\blinks?\b|\burls?\b|\bsources?\b)", query):
+        targets.add("link")
+    if re.search(r"(?:код\w*|скрипт\w*|программ\w*|\bcodes?\b|\bscripts?\b|\bsource\s+code\b)", query):
+        targets.add("code")
+    if re.search(r"(?:схем\w*|диаграмм\w*|блок-?схем\w*|\bdiagrams?\b|\bschemes?\b|\bflowcharts?\b|\bmermaid\b)", query):
+        targets.add("diagram")
+    if re.search(r"(?:картинк\w*|изображен\w*|иллюстрац\w*|фото\b|фотограф\w*|\bimages?\b|\bpictures?\b|\bphotos?\b)", query):
+        targets.add("image")
     if re.search(r"(?:данн\w*|значени\w*|массив\w*|матриц\w*|csv|json|\bdata\b|\bvalues?\b|\barrays?\b|\bmatrix\b)", query) and not targets:
         targets.update({"graph", "table", "formula", "solution"})
     return targets
@@ -1096,6 +1106,14 @@ def _structured_item_has_exact_values(item: Any) -> bool:
         return nonempty_key({"formula", "formulas", "latex", "latex_formulas", "equation", "equations", "expression", "expressions"})
     if kind == "solution":
         return nonempty_key({"solution_steps", "steps", "derivation", "calculations", "given_values", "known_values", "unknowns", "formula", "equation", "latex"})
+    if kind == "link":
+        return nonempty_key({"url", "href", "uri", "target_url", "destination"})
+    if kind == "code":
+        return nonempty_key({"code", "source_code", "source", "content", "text"})
+    if kind == "diagram":
+        return nonempty_key({"svg", "nodes", "edges", "elements", "shapes", "vertices", "connectors", "mermaid", "geometry", "positions", "code"})
+    if kind == "image":
+        return nonempty_key({"image_url", "url", "src", "asset_id", "asset_ref", "storage_key", "filename", "images", "uri"})
     return False
 
 
@@ -1187,6 +1205,14 @@ def _select_protected_structured_data(
             "source_message_id": source_id,
             "items": selected_items,
         }
+        # Exact explanations, URLs and renderer payloads are complementary:
+        # compact summaries cannot reconstruct the source text or its provenance.
+        # This bundle is created only for an explicit, matched continuation/history
+        # request, then sent as a lossless external source part rather than squeezed
+        # into the compressible summary card.
+        source_answer = protected.get("source_answer")
+        if isinstance(source_answer, str) and source_answer.strip():
+            slim["source_answer"] = source_answer
         # The selected typed payload is the lossless source of truth. Do not
         # duplicate its owning prose/whole answer, including for solutions: exact
         # steps, equations and known values are required in the selected node itself.
