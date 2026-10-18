@@ -156,6 +156,8 @@ _OUTPUT_MARKERS = {
     "link": {
         "give me a link", "send a link", "show link", "open link", "дай ссылку",
         "отправь ссылку", "покажи ссылку", "пришли ссылку", "ссылка на сайт",
+        "ссылки на ресурсы", "ссылка на ресурс", "ссылки на источники",
+        "ссылки на сайты", "ресурсы с описанием", "ссылки с описанием",
     },
     "code": {
         "write code", "show code", "generate code", "provide code", "fix code",
@@ -263,9 +265,13 @@ def _detect_link_request(text: str) -> bool:
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
-    action = r"(?:дай\w*|покаж\w*|показ\w*|пришл\w*|отправ\w*|найд\w*|подбер\w*|привед\w*|собер\w*|give|show|send|share|find|provide|list)"
+    action = r"(?:дай\w*|покаж\w*|показ\w*|пришл\w*|отправ\w*|найд\w*|подбер\w*|привед\w*|собер\w*|объясн\w*|опиш\w*|give|show|send|share|find|provide|list|explain|describe)"
     link_noun = r"(?:ссылк\w*|веб-?ссылк\w*|url-?адрес\w*|\burls?\b|\blinks?\b)"
-    return bool(re.search(rf"(?<![\w\u0080-\uffff]){action}\b.{{0,72}}{link_noun}", low, re.IGNORECASE))
+    resource_noun = r"(?:ресурс\w*|источник\w*|сайт\w*|resource\w*|source\w*|website\w*)"
+    action_request = re.search(rf"(?<![\w\u0080-\uffff]){action}\b.{{0,72}}{link_noun}", low, re.IGNORECASE)
+    noun_request = re.search(rf"{link_noun}.{{0,36}}{resource_noun}|{resource_noun}.{{0,36}}{link_noun}", low, re.IGNORECASE)
+    resource_explanation = re.search(rf"{resource_noun}.{{0,44}}(?:с\s+описани\w*|что\s+объясня\w*|куда\s+вед\w*|explain\w*|describe\w*)", low, re.IGNORECASE)
+    return bool(action_request or noun_request or resource_explanation)
 
 
 def _has_drawable_subject(text: str) -> bool:
@@ -444,6 +450,19 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         outputs = [kind for kind in outputs if kind != "diagram"]
         if "image" not in outputs:
             outputs.append("image")
+
+    # A request for pictures/illustrations of experiments asks for a separate,
+    # explanatory schematic. It must not be swallowed by the final portrait/image.
+    experiment_visuals = bool(re.search(
+        r"(?:(?:картинк\w*|изображени\w*|иллюстраци\w*|picture\w*|image\w*|illustration\w*)"
+        r".{0,48}(?:опыт\w*|эксперимент\w*|experiment\w*)|"
+        r"(?:опыт\w*|эксперимент\w*|experiment\w*).{0,48}"
+        r"(?:картинк\w*|изображени\w*|иллюстраци\w*|picture\w*|image\w*|illustration\w*))",
+        low, re.IGNORECASE,
+    ))
+    if experiment_visuals and "diagram" not in outputs:
+        outputs.append("diagram")
+
     # Formula view only for a clearly mathematical request. Graphs remain explicit
     # unless the request asks to plot/visualize data or a function.
     if mathematical_function and bool(re.search(
@@ -1992,6 +2011,13 @@ def _split_request_sequence(text: str) -> list[str]:
     if starts_visual_build and "graph" in parent_outputs and only_graph_artifact_outputs and (has_3d_scene_language or has_visual_artifact_noun) and not re.search(r"[?？]\s+\S", source):
         return [source]
 
+    # A recognized multi-render presentation (for example formulas + biography +
+    # experiment illustrations + sources + a final portrait) is one user task.
+    # Keep its coordinated clauses together so dependent phrases are not sent to
+    # State Manager as fake standalone questions. All other requests retain the
+    # established conjunction-based question splitting.
+    presentation_bundle = len(build_presentation_sequence(source)) >= 2
+
     lines = [line.strip() for line in source.splitlines() if line.strip()] or [source]
     parts: list[str] = []
     for line in lines:
@@ -2007,9 +2033,14 @@ def _split_request_sequence(text: str) -> list[str]:
         # Question marks are strong boundaries. Also split sentence periods only
         # when the next sentence visibly starts another task/question, avoiding
         # ordinary explanatory sentences and most abbreviation false positives.
+        conjunction_boundary = "" if presentation_bundle else (
+            r"|\s+(?:и|а также|а|and|also)\s+(?=" + question_lead + r"\b)"
+        )
         boundary_pattern = re.compile(
+            # In a multi-render presentation, clauses like "ссылки на ресурсы с
+            # описанием, куда они ведут и что объясняют" remain in one request.
             r"(?<=[?？])\s+|(?<=[.!])\s+(?=" + _TASK_OR_QUESTION_START + r")"
-            r"|\s+(?:и|а также|а|and|also)\s+(?=" + question_lead + r"\b)",
+            + conjunction_boundary,
             flags=re.IGNORECASE,
         )
         questions = [piece.strip() for piece in boundary_pattern.split(line) if piece.strip()]
@@ -2043,6 +2074,71 @@ def _split_request_sequence(text: str) -> list[str]:
         # bound per-turn memory searches and prevent unbounded preprocessing time.
         cleaned = cleaned[:23] + ["; ".join(cleaned[23:])]
     return cleaned or [source]
+
+
+def build_presentation_sequence(text: str) -> list[dict[str, Any]]:
+    """Create an ordered deliverable manifest for a single multi-part Premium answer.
+
+    This is a presentation plan, not a set of independent dialogue-memory searches.
+    It preserves requested sections/renderers and moves an explicitly requested
+    final portrait/image to the final slot.
+    """
+    source = _text(text)
+    low = source.lower().replace("ё", "е")
+    if not source:
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    detectors = [
+        ("formulas", r"(?:формул\w*|уравнен\w*|formula\w*|equation\w*)", ["text", "formula"]),
+        ("biography", r"(?:истори\w*\s+(?:его\s+|ее\s+|её\s+)?жизн\w*|биограф\w*|history\s+of\s+(?:his|her|their)\s+life|biography)", ["text"]),
+        ("experiments", r"(?:опыт\w*|эксперимент\w*|experiment\w*)", ["text", "diagram"]),
+        ("resources", r"(?:ссылк\w*|ресурс\w*|источник\w*|website\w*|resource\w*|source\w*|\burls?\b|\blinks?\b)", ["text", "link"]),
+    ]
+    for section, pattern, output_types in detectors:
+        match = re.search(pattern, low, re.IGNORECASE)
+        if match:
+            candidates.append({
+                "section": section,
+                "title": {
+                    "formulas": "Формулы и пояснения",
+                    "biography": "История жизни",
+                    "experiments": "Иллюстрации опытов",
+                    "resources": "Ресурсы и ссылки",
+                }[section],
+                "source_position": match.start(),
+                "output_types": output_types,
+                "final_output": False,
+            })
+
+    final_portrait = bool(re.search(
+        r"(?:в\s+конце|напоследок|в\s+завершени\w*|at\s+the\s+end|finally)"
+        r"[\s\S]{0,140}?(?:покаж\w*|изобраз\w*|представ\w*|show|display|present)"
+        r"[\s\S]{0,90}?(?:изображени\w*|картинк\w*|портрет\w*|фото\b|image\w*|picture\w*|portrait\w*)",
+        low, re.IGNORECASE,
+    ))
+    if final_portrait:
+        candidates.append({
+            "section": "final_portrait",
+            "title": "Итоговый портрет",
+            "source_position": len(source) + 1,
+            "output_types": ["image"],
+            "final_output": True,
+        })
+
+    candidates.sort(key=lambda item: (bool(item.get("final_output")), int(item.get("source_position") or 0)))
+    if len(candidates) <= 1:
+        return []
+    sequence = []
+    for index, item in enumerate(candidates, start=1):
+        sequence.append({
+            "step_index": index,
+            "section": item["section"],
+            "title": item["title"],
+            "output_types": list(item["output_types"]),
+            "final_output": bool(item["final_output"]),
+        })
+    return sequence
 
 
 def build_question_sequence(
@@ -2374,6 +2470,7 @@ def build_interpretation(
         original or text,
         parent_interpretation=request_semantics,
     )
+    presentation_sequence = build_presentation_sequence(original or text)
     detected_outputs = _detect_requested_outputs(original or text)
     requested_outputs = _enhance_requested_outputs(original or text, detected_outputs)
     for sequence_item in question_sequence:
@@ -2600,6 +2697,7 @@ def build_interpretation(
             "topic_index": [dict(item) for item in (memory.get("topic_index") or []) if isinstance(item, dict)][:10],
             "asset_task_map": asset_task_map,
             "question_sequence": question_sequence,
+            "presentation_sequence": presentation_sequence,
             "answer_sequence_in_order": True,
             "premium_render_budget": {
                 "total_output_tokens": 12000,
@@ -2620,6 +2718,8 @@ def build_interpretation(
             },
             "rendering_guidance": [
                 "Always preserve a complete explanatory text answer and answer every REQUEST_SEQUENCE item in order.",
+                "When PRESENTATION_SEQUENCE exists, use it as the ordered checklist of deliverable sections and renderer types within this single request; it does not trigger separate memory retrievals.",
+                "Interleave each section's text and typed renderer by its step_index. Keep final_output=true sections last, after every earlier section and renderer.",
                 "Premium output ceiling is exactly 12000 tokens per complete answer attempt; target 7200 tokens for explanatory text (60%) and 4800 for concrete visual/render payloads (40%), both inside the same total. Do not fill the cap for its own sake.",
                 "Interleave each request step's explanatory text with its own formula/table/diagram/graph/image render blocks using step_index; do not group all visuals at the end.",
                 "Use a structured table for a clear comparison when the answer has comparable attributes. A table payload must contain real headers/columns and at least one populated row; do not emit empty TableBlock shells or put a whole list of values into one cell when each item can be a row/cell.",
@@ -2696,6 +2796,7 @@ __all__ = [
     "build_interpretation_identity",
     "build_interpretation",
     "build_question_sequence",
+    "build_presentation_sequence",
     "interpret_request_semantics",
     "assert_same_identity",
 ]
