@@ -75,7 +75,7 @@ _ALLOWED_TABLE_COLUMNS = {
     "users": set(_USERS_COLUMNS),
     # Test grants are recorded for audit, but they are explicitly not paid payments.
     "payments": {"id", "user_id", "plan", "amount", "premium_id", "payment_status", "payment_source", "created_at"},
-    "dialogue_memory": {"id", "user_id", "created_at", "retention_hours", "turn_index", "user_text", "april_text", "user_text_en", "april_text_en", "language", "relation", "pair_hash", "dialog_id", "conversation_id", "message_id", "interpretation_id", "structured_request", "structured_response"},
+    "dialogue_memory": {"id", "user_id", "created_at", "retention_hours", "turn_index", "user_text", "april_text", "user_text_en", "april_text_en", "language", "relation", "pair_hash", "dialog_id", "conversation_id", "message_id", "interpretation_id", "structured_request", "structured_response", "asset_payloads"},
 }
 
 
@@ -445,7 +445,8 @@ def init_db() -> None:
                         dialog_id TEXT,
                         conversation_id TEXT,
                         message_id TEXT,
-                        interpretation_id TEXT
+                        interpretation_id TEXT,
+                        asset_payloads JSONB NOT NULL DEFAULT '[]'::jsonb
                     )
                     """
                 )
@@ -469,6 +470,7 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS interpretation_id TEXT")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS structured_request JSONB")
                 cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS structured_response JSONB")
+                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS asset_payloads JSONB NOT NULL DEFAULT '[]'::jsonb")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_memory_user_created ON dialogue_memory(user_id, created_at DESC)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_memory_user_dialog ON dialogue_memory(user_id, dialog_id, created_at DESC)")
 
@@ -739,6 +741,7 @@ def save_dialogue_pair(
     interpretation_id: str = "",
     structured_request: dict[str, Any] | None = None,
     structured_response: dict[str, Any] | None = None,
+    asset_payloads: list[dict[str, Any]] | None = None,
     retention_hours: int = DIALOGUE_WINDOW_HOURS,
 ) -> bool:
     """Persist one authenticated USER↔APRIL pair and nothing else."""
@@ -799,13 +802,14 @@ def save_dialogue_pair(
                 cur.execute(
                     """
                     INSERT INTO dialogue_memory
-                        (user_id, created_at, retention_hours, turn_index, user_text, april_text, user_text_en, april_text_en, language, relation, pair_hash, dialog_id, conversation_id, message_id, interpretation_id, structured_request, structured_response)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                        (user_id, created_at, retention_hours, turn_index, user_text, april_text, user_text_en, april_text_en, language, relation, pair_hash, dialog_id, conversation_id, message_id, interpretation_id, structured_request, structured_response, asset_payloads)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb)
                     ON CONFLICT (pair_hash) DO UPDATE SET
                         user_text_en = EXCLUDED.user_text_en,
                         april_text_en = EXCLUDED.april_text_en,
                         structured_request = EXCLUDED.structured_request,
                         structured_response = EXCLUDED.structured_response,
+                        asset_payloads = CASE WHEN EXCLUDED.asset_payloads IS NOT NULL AND EXCLUDED.asset_payloads <> '[]'::jsonb THEN EXCLUDED.asset_payloads ELSE dialogue_memory.asset_payloads END,
                         interpretation_id = EXCLUDED.interpretation_id
                     """,
                     (
@@ -816,6 +820,7 @@ def save_dialogue_pair(
                         str(message_id or ""), str(interpretation_id or ""),
                         json.dumps(structured_request or {}, ensure_ascii=False, default=str),
                         json.dumps(structured_response or {}, ensure_ascii=False, default=str),
+                        json.dumps(asset_payloads or [], ensure_ascii=False, default=str),
                     ),
                 )
                 return True
@@ -931,7 +936,6 @@ def load_dialogue_history_index(
                         SET retention_hours = 24
                         WHERE user_id = %s
                           AND COALESCE(retention_hours, 12) < 24
-                          AND created_at <= %s
                           AND created_at > %s - INTERVAL '24 hours'
                           AND created_at + INTERVAL '24 hours' > %s
                         """,
@@ -1012,6 +1016,114 @@ def load_dialogue_history_index(
 
 
 
+def dialogue_message_saved(
+    user_id: Any,
+    message_id: Any,
+    *,
+    timestamp: float | int | datetime | None = None,
+) -> bool:
+    """Check whether one authenticated turn has reached durable dialogue storage.
+
+    This is intentionally a tiny indexed existence query used by Web recovery
+    polling. It must not hydrate the history index, scene JSON, or binary assets.
+    """
+    uid = str(user_id or "").strip()
+    mid = str(message_id or "").strip()
+    if not uid or not mid:
+        return False
+    conn = get_conn()
+    if not conn:
+        return False
+    current = now() if timestamp is None else (
+        timestamp.astimezone(timezone.utc)
+        if isinstance(timestamp, datetime)
+        else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
+    )
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                if not _is_authenticated_cursor(cur, uid):
+                    return False
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM dialogue_memory
+                        WHERE user_id = %s
+                          AND message_id = %s
+                          AND created_at <= %s
+                          AND created_at > %s - INTERVAL '24 hours'
+                          AND created_at + (
+                              GREATEST(12, LEAST(24, COALESCE(retention_hours, 12)))
+                              * INTERVAL '1 hour'
+                          ) > %s
+                    ) AS saved
+                    """,
+                    (uid, mid, current, current),
+                )
+                row = cur.fetchone() or {}
+                return bool(row.get("saved")) if isinstance(row, dict) else bool(row[0])
+    except psycopg2.errors.UndefinedTable:
+        return False
+    except Exception:
+        # Status polling is advisory; a transient database issue must not crash
+        # the canonical Web history/recovery request.
+        return False
+    finally:
+        conn.close()
+
+
+def load_dialogue_asset_payloads(
+    user_id: Any,
+    message_ids: list[str],
+    *,
+    timestamp: float | int | datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Load saved output bytes only for the authenticated selected dialogue turns.
+
+    This is a narrow recovery path for rendered assets; normal memory search never
+    hydrates image payloads and therefore does not pay the binary-memory cost.
+    """
+    uid = str(user_id or "").strip()
+    ids = list(dict.fromkeys(str(value or "").strip() for value in (message_ids or []) if str(value or "").strip()))[:8]
+    if not uid or not ids:
+        return []
+    conn = get_conn()
+    if not conn:
+        return []
+    current = now() if timestamp is None else (
+        timestamp.astimezone(timezone.utc)
+        if isinstance(timestamp, datetime)
+        else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
+    )
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                if not _is_authenticated_cursor(cur, uid):
+                    return []
+                cur.execute(
+                    """
+                    SELECT message_id, asset_payloads
+                    FROM dialogue_memory
+                    WHERE user_id = %s
+                      AND message_id = ANY(%s)
+                      AND created_at <= %s
+                      AND created_at > %s - INTERVAL '24 hours'
+                      AND created_at + (
+                          GREATEST(12, LEAST(24, COALESCE(retention_hours, 12)))
+                          * INTERVAL '1 hour'
+                      ) > %s
+                    ORDER BY created_at DESC, turn_index DESC, id DESC
+                    """,
+                    (uid, ids, current, current, current),
+                )
+                return [dict(row) for row in cur.fetchall() if isinstance(row, dict)]
+    except psycopg2.errors.UndefinedTable:
+        return []
+    finally:
+        conn.close()
+
+
 def load_dialogue_history_details(
     user_id: Any,
     message_ids: list[str],
@@ -1047,7 +1159,7 @@ def load_dialogue_history_details(
                            user_text, april_text, user_text_en, april_text_en,
                            language, relation, dialog_id, conversation_id,
                            message_id, interpretation_id,
-                           structured_request, structured_response
+                           structured_request, structured_response, asset_payloads
                     FROM dialogue_memory
                     WHERE user_id = %s
                       AND created_at <= %s
