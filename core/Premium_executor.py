@@ -81,6 +81,23 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _stable_scene_id(identity: dict[str, str]) -> str:
+    """Return one deterministic scene ID for the progressive and final turn payloads.
+
+    The Web receives the text-ready scene before a slow image render and the final
+    SceneContract afterwards. Those are two states of one assistant turn, not two
+    messages, so both payloads must share the same scene identity.
+    """
+    parts = (
+        _text(identity.get("user_id")),
+        _text(identity.get("conversation_id") or identity.get("dialog_id")),
+        _text(identity.get("message_id")),
+        _text(identity.get("flow_id")),
+    )
+    source = "|".join(parts).strip("|") or "missing-turn-identity"
+    return "scene_" + hashlib.sha256(source.encode("utf-8")).hexdigest()[:24]
+
+
 def _is_structured_3d_graph_block(block: Any) -> bool:
     if not isinstance(block, dict):
         return False
@@ -489,7 +506,15 @@ def _apply_presentation_sequence(
     answer: str,
     presentation_sequence: Any,
 ) -> list[dict[str, Any]]:
-    """Attach ordered presentation steps to typed blocks while preserving every text character."""
+    """Assign renderer steps and keep each narrative section in a compact block.
+
+    Providers usually return one complete text block. Splitting it at every Markdown
+    heading made the Web render dozens of separate blocks; more importantly, cloned
+    blocks inherited the original full text from ``payload.content`` and could repeat
+    the answer while an image was still generating. This adapter now synchronizes text
+    aliases/payloads per clone and merges adjacent pieces from the same source text and
+    presentation step back into one block.
+    """
     blocks = [dict(block) for block in (render_blocks or []) if isinstance(block, dict)] if isinstance(render_blocks, list) else []
     sequence = [dict(item) for item in (presentation_sequence or []) if isinstance(item, dict)] if isinstance(presentation_sequence, list) else []
     if not sequence:
@@ -500,6 +525,19 @@ def _apply_presentation_sequence(
 
     by_section = {str(item.get("section") or ""): item for item in sequence}
     by_step = {int(item.get("step_index") or index + 1): item for index, item in enumerate(sequence)}
+    text_keys = ("content", "text", "markdown", "display_text")
+
+    def set_text_content(block: dict[str, Any], value: str) -> None:
+        present_keys = [key for key in text_keys if isinstance(block.get(key), str)]
+        for key in (present_keys or ["content"]):
+            block[key] = value
+        payload = block.get("payload")
+        if isinstance(payload, dict):
+            payload_keys = [key for key in text_keys if isinstance(payload.get(key), str)]
+            for key in (payload_keys or ["content"]):
+                # Text-block payloads mirror the visible text; never leave the
+                # original full answer inside every heading-derived clone.
+                payload[key] = value
 
     def section_for_text(value: str, fallback_step: int = 1) -> dict[str, Any]:
         low = _text(value).lower().replace("ё", "е")
@@ -514,17 +552,15 @@ def _apply_presentation_sequence(
                 return by_section[section]
         return by_step.get(max(1, fallback_step), sequence[0])
 
-    # Split only a single large text block at existing Markdown headings. All
-    # characters are retained exactly; if no headings exist the original block is untouched.
     expanded: list[dict[str, Any]] = []
-    for block in blocks:
+    for source_index, block in enumerate(blocks):
         block_type = str(block.get("type") or block.get("artifact_type") or "text").strip().lower()
-        content = _text(block.get("content") or block.get("text") or "")
-        if block_type in {"text", "message", "answer"} and len(sequence) > 1 and content.strip():
+        content = str(block.get("content") or block.get("text") or "")
+        is_text = block_type in {"text", "message", "answer", "markdown", "message_text"}
+        if is_text and len(sequence) > 1 and content.strip():
             heading_matches = list(re.finditer(r"(?m)^#{1,4}\s+[^\n]+\s*$", content))
             if len(heading_matches) >= 2:
-                starts = [0] + [match.start() for match in heading_matches]
-                starts = sorted(set(starts))
+                starts = sorted(set([0] + [match.start() for match in heading_matches]))
                 ends = starts[1:] + [len(content)]
                 chunks = [content[a:b] for a, b in zip(starts, ends) if content[a:b].strip()]
                 if len(chunks) >= 2:
@@ -533,13 +569,26 @@ def _apply_presentation_sequence(
                         heading = heading_match.group(1) if heading_match else chunk[:180]
                         step = section_for_text(heading + "\n" + chunk[:350])
                         clone = dict(block)
-                        clone["content"] = chunk.strip()
-                        clone.pop("text", None)
-                        clone["step_index"] = int(step.get("step_index") or 1)
+                        if isinstance(block.get("payload"), dict):
+                            # A shallow block clone otherwise shares the nested payload
+                            # with every sibling heading and leaks the same full answer.
+                            clone["payload"] = dict(block["payload"])
+                        clone["_april_text_source_index"] = source_index
+                        set_text_content(clone, chunk.strip())
+                        try:
+                            clone["step_index"] = max(1, int(step.get("step_index") or 1))
+                        except (TypeError, ValueError, OverflowError):
+                            clone["step_index"] = 1
                         clone["step_title"] = _text(step.get("title") or step.get("section") or "Answer section")[:100]
                         expanded.append(clone)
                     continue
-        expanded.append(dict(block))
+        clone = dict(block)
+        if is_text:
+            if isinstance(block.get("payload"), dict):
+                clone["payload"] = dict(block["payload"])
+            clone["_april_text_source_index"] = source_index
+            set_text_content(clone, content)
+        expanded.append(clone)
 
     for original_order, block in enumerate(expanded):
         kind = str(block.get("type") or block.get("artifact_type") or "text").strip().lower()
@@ -554,26 +603,59 @@ def _apply_presentation_sequence(
                 match = image_items[-1] if image_items else None
         elif kind in {"formula", "diagram", "graph", "table", "link", "code", "file"}:
             match = next((item for item in sequence if kind in (item.get("output_types") or [])), None)
-            # A diagram depicting experiments belongs to the experiment step,
-            # even if another section also requested a diagram renderer.
             if kind == "diagram" and "experiments" in by_section:
                 match = by_section["experiments"]
         else:
             text_payload = _text(block.get("content") or block.get("text") or block.get("title") or "")
             match = section_for_text(text_payload, current_step)
         if isinstance(match, dict):
-            block["step_index"] = max(1, int(match.get("step_index") or 1))
+            try:
+                block["step_index"] = max(1, int(match.get("step_index") or 1))
+            except (TypeError, ValueError, OverflowError):
+                block["step_index"] = current_step
             block["step_title"] = _text(match.get("title") or match.get("section") or "Answer section")[:100]
         else:
             block.setdefault("step_index", current_step)
-        block["_april_original_order"] = original_order  # stable sort key until sequence indices are assigned
+        block["_april_original_order"] = original_order
 
-    expanded.sort(key=lambda block: (max(1, int(block.get("step_index") or 1)), int(block.get("_april_original_order") or 0)))
-    for index, block in enumerate(expanded):
+    def safe_step_index(block: dict[str, Any]) -> int:
+        try:
+            return max(1, int(block.get("step_index") or 1))
+        except (TypeError, ValueError, OverflowError):
+            return 1
+
+    expanded.sort(key=lambda block: (safe_step_index(block), int(block.get("_april_original_order") or 0)))
+
+    # Merge heading chunks back into one text block per step. Visual blocks retain
+    # their own renderers and sit between the appropriate narrative steps.
+    compact: list[dict[str, Any]] = []
+    for block in expanded:
+        source_index = block.get("_april_text_source_index")
+        kind = str(block.get("type") or block.get("artifact_type") or "text").strip().lower()
+        is_text = kind in {"text", "message", "answer", "markdown", "message_text"}
+        current_step = safe_step_index(block)
+        current_title = _text(block.get("step_title") or "Answer section")
+        current_content = str(block.get("content") or block.get("text") or "").strip()
+        previous = compact[-1] if compact else None
+        can_merge = bool(
+            is_text and previous is not None
+            and str(previous.get("type") or previous.get("artifact_type") or "text").strip().lower() in {"text", "message", "answer", "markdown", "message_text"}
+            and previous.get("_april_text_source_index") == source_index
+            and safe_step_index(previous) == current_step
+            and _text(previous.get("step_title") or "Answer section") == current_title
+        )
+        if can_merge:
+            previous_content = str(previous.get("content") or previous.get("text") or "").strip()
+            combined = "\n\n".join(value for value in (previous_content, current_content) if value)
+            set_text_content(previous, combined)
+        else:
+            compact.append(dict(block))
+
+    for index, block in enumerate(compact):
+        block.pop("_april_text_source_index", None)
         block.pop("_april_original_order", None)
         block["sequence_index"] = index
-    return expanded
-
+    return compact
 
 def _build_image_spec(
     raw: dict[str, Any],
@@ -736,7 +818,7 @@ def _build_scene(
     route_meta: dict[str, Any],
 ) -> dict[str, Any]:
     scene = MachineScene(
-        scene_id=str(uuid.uuid4()),
+        scene_id=_stable_scene_id(identity),
         turn_id=identity["message_id"],
         flow_id=identity["flow_id"],
         topic_group=_text(
@@ -2396,8 +2478,9 @@ async def execute(
             )
             progressive_blocks = [block for block in progressive_blocks if str(block.get("type") or "").lower() not in {"image", "gallery"}]
             progressive_blocks = _apply_presentation_sequence(progressive_blocks, answer, presentation_sequence)
+            stable_scene_id = _stable_scene_id(identity)
             partial_scene = {
-                "scene_id": f"progress_{identity['message_id']}",
+                "scene_id": stable_scene_id,
                 "turn_id": identity["message_id"],
                 "flow_id": identity["flow_id"],
                 "answer": answer,
@@ -2418,9 +2501,19 @@ async def execute(
                     "scene_contract": partial_scene,
                     "message_id": identity["message_id"],
                     "flow_id": identity["flow_id"],
+                    "scene_id": stable_scene_id,
                     "partial": True,
                 },
             })
+            _apr_timing_log(
+                "progressive_text_ready",
+                None,
+                message_key=_apr_diag_ref(identity.get("message_id")),
+                scene_id=stable_scene_id,
+                render_blocks=len(progressive_blocks),
+                text_blocks=sum(1 for block in progressive_blocks if str(block.get("type") or "").lower() in {"text", "message", "answer", "markdown", "message_text"}),
+                image_pending=image_pending,
+            )
             if image_pending:
                 image_step = next((item for item in presentation_sequence if item.get("final_output") and "image" in (item.get("output_types") or [])), None)
                 if image_step is None:
@@ -2432,6 +2525,10 @@ async def execute(
                     "render_type": "image",
                     "step_index": int((image_step or {}).get("step_index") or 1),
                     "title": _text((image_step or {}).get("title") or "Image generation"),
+                    "message_id": identity["message_id"],
+                    "flow_id": identity["flow_id"],
+                    "scene_id": stable_scene_id,
+                    "partial": True,
                 })
         except Exception as progress_error:
             _apr_timing_log("progressive_handoff_skipped", None, error=type(progress_error).__name__)
