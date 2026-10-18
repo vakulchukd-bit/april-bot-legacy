@@ -717,24 +717,39 @@ def _handle_voice_stream(
     # The frontend intentionally ignores unknown event types and still consumes
     # the same final {type:"answer"} SceneContract payload.
     answer_started = time.perf_counter()
+    event_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+    last_heartbeat = time.monotonic()
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="april-voice-answer") as pool:
         pending = pool.submit(
             _handle_payload,
             routed_data,
             attachments,
             voice_transcript=transcript,
+            progress_sink=event_queue.put,
         )
         while True:
             try:
-                status, payload = pending.result(timeout=6.0)
+                status, payload = pending.result(timeout=0.75)
+                while not event_queue.empty():
+                    write_event(event_queue.get_nowait())
                 break
             except FutureTimeoutError:
-                write_event({
-                    "type": "progress",
-                    "stage": "processing",
-                    "canonical_route": CANONICAL_CHAT_ROUTE,
-                    "flow_id": identity["flow_id"],
-                })
+                forwarded_any = False
+                while not event_queue.empty():
+                    write_event(event_queue.get_nowait())
+                    forwarded_any = True
+                now = time.monotonic()
+                if not forwarded_any and now - last_heartbeat >= 6.0:
+                    write_event({
+                        "type": "progress",
+                        "stage": "processing",
+                        "canonical_route": CANONICAL_CHAT_ROUTE,
+                        "flow_id": identity["flow_id"],
+                    })
+                    last_heartbeat = now
+        # Preserve any event queued at the same time the worker resolved.
+        while not event_queue.empty():
+            write_event(event_queue.get_nowait())
     answer_ms = round((time.perf_counter() - answer_started) * 1000, 1)
     scene_contract = payload.get("scene_contract") if isinstance(payload, dict) else {}
     scene_metadata = scene_contract.get("metadata") if isinstance(scene_contract, dict) else {}
