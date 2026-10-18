@@ -1772,7 +1772,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         intent_score = 2 + int(self_reference) + int(continuation_action)
         relation_hint = "CONTINUE"
         reason = "continuation_or_anaphoric_reference"
-    elif temporal_future and (plan_action or dialogue_action or bool(token_set & {"что", "как", "лучше", "нужно", "надо", "будем", "сделать", "план", "should", "tomorrow"})):
+    elif temporal_future and not explicit_topic_introduction and (plan_action or dialogue_action or bool(token_set & {"что", "как", "лучше", "нужно", "надо", "будем", "сделать", "план", "should", "tomorrow"})):
         future_dialogue_topic = bool(dialogue_action and self_reference)
         primary_intent = "FUTURE_TOPIC_PLANNING" if future_dialogue_topic else "FUTURE_PLANNING"
         direction = "RETRIEVE_OR_PLAN_FUTURE_TOPICS" if future_dialogue_topic else "PLAN_OR_ANSWER_FUTURE_QUESTION"
@@ -2017,6 +2017,13 @@ def _split_request_sequence(text: str) -> list[str]:
     # State Manager as fake standalone questions. All other requests retain the
     # established conjunction-based question splitting.
     presentation_bundle = len(build_presentation_sequence(source)) >= 2
+    if presentation_bundle:
+        # A multi-render request is one coherent task with a separate ordered
+        # presentation plan. Splitting its imperatives into memory-search clauses
+        # detaches short connectors and pronouns from the named subject, and can
+        # trigger repeated searches against unrelated old branches.
+        # Keep the user's wording intact; presentation_sequence controls render order.
+        return [source]
 
     lines = [line.strip() for line in source.splitlines() if line.strip()] or [source]
     parts: list[str] = []
@@ -2092,7 +2099,9 @@ def build_presentation_sequence(text: str) -> list[dict[str, Any]]:
     detectors = [
         ("formulas", r"(?:формул\w*|уравнен\w*|formula\w*|equation\w*)", ["text", "formula"]),
         ("biography", r"(?:истори\w*\s+(?:его\s+|ее\s+|её\s+)?жизн\w*|биограф\w*|history\s+of\s+(?:his|her|their)\s+life|biography)", ["text"]),
+        ("tables", r"(?:таблиц\w*|табличн\w*|\btable\w*|screenshot\w*)", ["text", "table"]),
         ("experiments", r"(?:опыт\w*|эксперимент\w*|experiment\w*)", ["text", "diagram"]),
+        ("discoveries", r"(?:открыти\w*|discover\w*)", ["text", "diagram"]),
         ("resources", r"(?:ссылк\w*|ресурс\w*|источник\w*|website\w*|resource\w*|source\w*|\burls?\b|\blinks?\b)", ["text", "link"]),
     ]
     for section, pattern, output_types in detectors:
@@ -2103,7 +2112,9 @@ def build_presentation_sequence(text: str) -> list[dict[str, Any]]:
                 "title": {
                     "formulas": "Формулы и пояснения",
                     "biography": "История жизни",
+                    "tables": "Таблицы и данные",
                     "experiments": "Иллюстрации опытов",
+                    "discoveries": "Открытия и их значение",
                     "resources": "Ресурсы и ссылки",
                 }[section],
                 "source_position": match.start(),
@@ -2112,7 +2123,7 @@ def build_presentation_sequence(text: str) -> list[dict[str, Any]]:
             })
 
     final_portrait = bool(re.search(
-        r"(?:в\s+конце|напоследок|в\s+завершени\w*|at\s+the\s+end|finally)"
+        r"(?:в\s+(?:самом\s+)?конце|напоследок|в\s+завершени\w*|at\s+the\s+end|finally)"
         r"[\s\S]{0,140}?(?:покаж\w*|изобраз\w*|представ\w*|show|display|present)"
         r"[\s\S]{0,90}?(?:изображени\w*|картинк\w*|портрет\w*|фото\b|image\w*|picture\w*|portrait\w*)",
         low, re.IGNORECASE,
