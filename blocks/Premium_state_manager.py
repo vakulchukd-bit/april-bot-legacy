@@ -1221,6 +1221,63 @@ def _looks_like_answer_verification(query: str) -> bool:
     return asks_verdict and refers_to_source_or_conditions
 
 
+
+_TOPIC_CLOSURE_RE = re.compile(
+    r"(?:"
+    r"\b(?:эта\s+)?тема\s+(?:закры\w*|заверш\w*|заканчива\w*)\b|"
+    r"\b(?:эту\s+|данную\s+)?тему\s+(?:закры\w*|заверш\w*|заканчива\w*)\b|"
+    r"\b(?:всё|все)\s*,?\s*(?:эту\s+)?тему\s+(?:закрыли|закрываем|завершили|закончим)\b|"
+    r"\b(?:на\s+этом\s+)?(?:всё|все)\s*[.!…]*$|"
+    r"\b(?:давай(?:те)?\s+)?(?:на\s+этом\s+)?(?:остановимся|закончим|прекратим)\b|"
+    r"\b(?:больше\s+не\s+)?(?:будем\s+)?(?:продолжать|развивать)\s+(?:эту\s+)?тему\b|"
+    r"\btopic\s+is\s+closed\b|\b(?:let'?s\s+)?stop\s+here\b|\bend\s+this\s+topic\b"
+    r")",
+    re.IGNORECASE,
+)
+_TOPIC_REOPEN_RE = re.compile(
+    r"(?:\bверн\w*\s+к\b|\bверн\w*\s+обсужден\w*\b|\bвозобнов\w*\b|"
+    r"\bпродолж\w*\b|\bснова\s+(?:к|продолж\w*)\b|\bвернись\s+к\b|"
+    r"\bresume\b|\breopen\b|\bback\s+to\b|\bcontinue\b)",
+    re.IGNORECASE,
+)
+
+
+def _is_explicit_topic_closure(text: Any) -> bool:
+    """Recognize a clear user signal that the current topic/task is finished."""
+    value = _text(text).lower().replace("ё", "е")
+    if not value or not _TOPIC_CLOSURE_RE.search(value):
+        return False
+    # A fresh concrete task in the same message remains actionable; closure only
+    # prevents importing the previously active branch into that task.
+    has_fresh_action = bool(re.search(
+        r"\b(?:построй\w*|созда\w*|сделай\w*|нарис\w*|исправ\w*|проверь\w*|"
+        r"просмотр\w*|изучи\w*|проанализируй|напиши\w*|разработ\w*|найди\w*|"
+        r"build\w*|create\w*|draw\w*|fix\w*|review\w*|analy[sz]e\w*|write\w*)\b",
+        value,
+        re.IGNORECASE,
+    ))
+    return not has_fresh_action
+
+
+def _explicit_reopen_of_closed_branch(query: str, branch: dict[str, Any]) -> bool:
+    """Only an explicit resume request can cross a saved topic-closure barrier."""
+    value = _text(query).lower().replace("ё", "е")
+    if not value or not _TOPIC_REOPEN_RE.search(value):
+        return False
+    topic_text = " ".join(
+        _text(branch.get(key))
+        for key in ("topic", "goal", "state_summary", "last_user_text", "last_assistant_answer")
+    )
+    if not topic_text.strip():
+        return False
+    # Require an explicit lexical/topic pointer, not just a generic "continue".
+    query_subjects = _subject_tokens(value)
+    branch_subjects = _subject_tokens(topic_text)
+    overlap = _subject_overlap(query_subjects, branch_subjects) if query_subjects else 0.0
+    topic_overlap = _topic_query_overlap(value, topic_text)
+    return bool(overlap >= 0.40 or topic_overlap >= 0.30)
+
+
 def _infer_active_work_branch(row: dict[str, Any]) -> dict[str, Any]:
     """Recognize saved, still-actionable work from canonical pair content.
 
@@ -4005,6 +4062,36 @@ def search_dialogue_context(
         reference_followup=reference_followup,
     )
 
+    # An explicit closure in a newer USER turn supersedes the saved active-work
+    # marker. A later explicit request naming that task may reopen it; vague
+    # follow-ups may not silently revive it.
+    current_topic_closure = _is_explicit_topic_closure(query)
+    closed_branch_barrier = False
+    explicit_closed_branch_reopen = False
+    if active_work_pair and active_work_branch and active_work_row_index > 0:
+        closure_row = next((
+            row for row in scoped_work_rows[:active_work_row_index]
+            if _is_explicit_topic_closure(row.get("user_text") or row.get("user"))
+        ), None)
+        if closure_row is not None:
+            explicit_closed_branch_reopen = _explicit_reopen_of_closed_branch(query, active_work_branch)
+            if not explicit_closed_branch_reopen:
+                closed_branch_barrier = True
+    if current_topic_closure:
+        closed_branch_barrier = True
+        explicit_closed_branch_reopen = False
+
+    if closed_branch_barrier and not explicit_closed_branch_reopen:
+        hot_work_followup = False
+        hot_work_match_reason = "explicit_topic_closure_barrier"
+        active_work_branch = {}
+        active_work_pair = None
+        active_work_row_index = -1
+        active_work_has_marker = False
+        semantic_active_branch_intent = False
+        hot_branch_candidate = False
+        repair_active_branch = False
+
     # A task marker may outlive a later, explicitly NEW topic. Do not let a bare
     # option number or generic “continue” jump back to that stale task. A named
     # reference to the older task (e.g. “продолжи игру”) is still allowed to
@@ -4249,6 +4336,12 @@ def search_dialogue_context(
     elif same_dialog_semantic and not decision_subject_switch and not (topic_reference_fragment and not topic_pointer_match):
         continuation = True
     relation = "CONTINUE" if continuation else "NEW"
+    if closed_branch_barrier and not explicit_closed_branch_reopen and not history_request:
+        # Do not re-import a topic the user has closed through generic anaphora,
+        # even if lexical ranking still finds a strong old match. A concrete new
+        # task remains NEW as it should; explicit history searches remain available.
+        relation = "NEW"
+        continuation = False
 
     # A detailed, self-contained NEW_INFORMATION request must not inherit a
     # previous turn merely because lexical ranking found the same entity.  This
@@ -4359,7 +4452,7 @@ def search_dialogue_context(
     pending_for_next_turn: dict[str, Any] = {}
 
     pending_rejected = bool(pending_clarification and _looks_like_clarification_rejection(query))
-    if pending_clarification and (not new_topic_request or pending_rejected):
+    if pending_clarification and (not new_topic_request or pending_rejected) and not closed_branch_barrier:
         original_pending_request = _text(pending_clarification.get("original_request"))
         if pending_resolved and not pending_rejected:
             # Number/title choice matched the offered clarification. An explicit
@@ -5328,6 +5421,9 @@ def search_dialogue_context(
         } if active_work_branch and relation == "CONTINUE" and not new_work_root_request else {}),
         "hot_work_followup": bool(hot_work_followup),
         "hot_work_match_reason": _text(hot_work_match_reason)[:80],
+        "topic_closure_barrier": bool(closed_branch_barrier),
+        "current_topic_closure": bool(current_topic_closure),
+        "explicit_closed_branch_reopen": bool(explicit_closed_branch_reopen),
         "new_work_root_request": bool(new_work_root_request),
         "historical_task_override": bool(historical_task_override),
         "historical_task_source_id": _text(historical_task_source_id),
@@ -5415,6 +5511,9 @@ def search_dialogue_context(
         hot_branch_candidate=bool(hot_branch_candidate),
         hot_work_followup=bool(hot_work_followup),
         hot_work_match_reason=_text(hot_work_match_reason),
+        topic_closure_barrier=bool(closed_branch_barrier),
+        current_topic_closure=bool(current_topic_closure),
+        explicit_closed_branch_reopen=bool(explicit_closed_branch_reopen),
         active_work_kind=_text(active_work_branch.get("kind")),
         active_work_message_key=_apr_diag_ref(active_work_pair.get("message_id") if active_work_pair else ""),
         active_work_origin_key=_apr_diag_ref(active_work_branch.get("origin_message_id")),
