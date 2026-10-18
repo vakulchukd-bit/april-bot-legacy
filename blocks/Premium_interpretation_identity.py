@@ -1127,12 +1127,28 @@ def _detect_previous_answer_recheck(text: str) -> bool:
         flags=re.IGNORECASE,
     ))
     cue = bool(re.search(challenge, low, flags=re.IGNORECASE))
+    # Asking for the value April just named/wrote is recall of the assistant's own
+    # output even without an explicit accusation or correction cue.
+    compact_value_recall = bool(re.search(
+        r"\b(?:какое|какой|какая|какую|что|which|what)\b.{0,70}"
+        r"\b(?:числ\w*|букв\w*|слов\w*|вариант\w*|номер\w*|ответ\w*|number|letter|word|option|answer)\b.{0,55}"
+        r"\b(?:ты|вы|you)\s+(?:назвал\w*|назвала|назвали|сказал\w*|сказала|сказали|"
+        r"написал\w*|написала|написали|ответил\w*|ответила|ответили|выбрал\w*|выбрала|выбрали)\b",
+        low, flags=re.IGNORECASE,
+    ))
+    direct_value_recall = bool(re.search(
+        r"\b(?:что\s+ты\s+(?:назвал\w*|сказал\w*|написал\w*|ответил\w*)|"
+        r"(?:какое|какой|какая|какую)\s+(?:именно\s+)?(?:числ\w*|букв\w*|слов\w*|номер\w*)\s+(?:ты|вы)\b)",
+        low, flags=re.IGNORECASE,
+    ))
 
     return bool(
         direct_why
         or obligation_contrast
         or assistant_mistake
         or verification_target
+        or compact_value_recall
+        or direct_value_recall
         or (prior_answer_pointer and cue)
         or (direct_action and cue)
     )
@@ -2595,6 +2611,8 @@ def build_interpretation(
                     "Treat disagreement, dissatisfaction, or a revision request as feedback on the previous answer when supported by context; re-check the previous answer and correct/improve it instead of defending it blindly.",
                     "When active_branch_repair or previous_answer_reference is true, compare the current challenge with the selected canonical USER↔APRIL source turns; report what April actually said separately from what should have been said, and do not advance the active task until the correction is addressed.",
                     "Use only selected dialogue-memory evidence for claims about what was previously said. If the requested time range has no entries, state that honestly and offer nearby retained entries as nearby, not as matches inside the requested range.",
+                    "Before saying a prior value or answer is unavailable, inspect ACTIVE_WORK_BRANCH.last_assistant_answer, recent_steps.april_text, DIALOGUE_ANCHOR, and selected CONTINUATION_CONTEXT pairs. A value omitted from a summary is not missing when the exact assistant turn is present.",
+                    "For an explicit question about what April said, named, wrote, calculated, selected, or answered, verify April's own prior output independently from whether that output was factually correct. Apply the same evidence check to the active exchange and matching past-dialogue records.",
                     "A topic pointer is a retrieval hint, not proof that a memory exists. If no matching prior record is found, answer as a new request or ask a concise clarification instead of inventing continuity.",
                 ],
             },
