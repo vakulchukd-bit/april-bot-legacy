@@ -378,8 +378,14 @@ class AprilImagesGenerator:
 
         parts: list[str] = []
         request_anchor = cls._safe_text(spec.get("request_anchor") or "").strip()
-        if request_anchor:
+        image_subject_only = bool(spec.get("image_subject_only"))
+        if request_anchor and not image_subject_only:
             parts.append(f"User request: {request_anchor}")
+        elif image_subject_only:
+            # The full multi-part request remains in dialogue metadata, but this
+            # raster job is only the final portrait subtask. Do not turn the whole
+            # answer request into a one-image poster/infographic.
+            parts.append("Image-only subtask: render the specified final portrait, not the other answer sections.")
 
         if plan_semantic:
             parts.append(f"OpenAI visual meaning: {plan_semantic}")
@@ -965,6 +971,7 @@ class AprilImagesGenerator:
             "seed": None,
             "generator_signal": generator_signal,
             "request_anchor": request_anchor,
+            "image_subject_only": bool(spec.get("image_subject_only")),
             "flow_id": cls._safe_text(spec.get("flow_id") or ""),
             "turn_id": cls._safe_text(spec.get("turn_id") or ""),
             "scene_id": cls._safe_text(spec.get("scene_id") or ""),
