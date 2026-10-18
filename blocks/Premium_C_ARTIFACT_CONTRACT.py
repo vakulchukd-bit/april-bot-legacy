@@ -3625,6 +3625,481 @@ def _scene_payload_has_content(block_type: str, payload: Dict[str, Any], block: 
     return _has_render_payload(block_type, payload, block)
 
 
+_PREMIUM_EXPLAINED_RENDER_TYPES = {
+    "formula", "graph", "table", "diagram", "image", "gallery", "code", "link", "file", "audio", "video"
+}
+
+
+def _explanation_language(answer: str, language_hint: Any = "") -> str:
+    hint = str(language_hint or "").strip().lower().replace("_", "-")
+    if hint.startswith(("uk", "ua", "ukrain")):
+        return "uk"
+    if hint.startswith(("ru", "russian")):
+        return "ru"
+    if hint.startswith(("fr", "french")):
+        return "fr"
+    if hint.startswith(("en", "english")):
+        return "en"
+    low = (answer or "").lower()
+    if any(ch in low for ch in "їєґ"):
+        return "uk"
+    if re.search(r"\b(це|який|яка|формула|посилання|зображення|таблиця|графік|схема|рівняння|пояснює)\b", low):
+        return "uk"
+    if re.search(r"[А-Яа-яЁё]", answer or ""):
+        return "ru"
+    if any(ch in low for ch in "éèàçùœ") or re.search(r"\b(la formule|ce lien|ce graphique|ce tableau|cette image|ce schéma)\b", low):
+        return "fr"
+    return "en"
+
+
+def _render_payload(block: Dict[str, Any]) -> Dict[str, Any]:
+    payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+    if not payload and isinstance(block.get("data"), dict):
+        payload = block.get("data")
+    return payload
+
+
+def _render_block_field(block: Dict[str, Any], payload: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = block.get(key)
+        if value not in (None, "", [], {}):
+            return value
+        value = payload.get(key)
+        if value not in (None, "", [], {}):
+            return value
+    return None
+
+
+def _answer_sections_for_explanation(answer: str) -> List[tuple[str, str]]:
+    text = str(answer or "").strip()
+    if not text:
+        return []
+    matches = list(re.finditer(r"(?m)^\s{0,3}#{1,4}\s+([^\n#][^\n]*)\s*$", text))
+    sections: List[tuple[str, str]] = []
+    if not matches:
+        # Treat paragraph-sized passages as separate candidates. Returning the
+        # entire answer here would cause the full response to repeat under every
+        # renderer when an answer has no Markdown headings.
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+        return [("", part) for part in paragraphs[:80]]
+    if matches[0].start() > 0 and text[:matches[0].start()].strip():
+        sections.append(("", text[:matches[0].start()].strip()))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        sections.append((match.group(1).strip(), text[match.end():end].strip()))
+    return sections
+
+
+def _clean_render_explanation_context(value: str, block_type: str) -> str:
+    text = str(value or "")
+    text = re.sub(r"```[\s\S]*?```", " ", text)
+    text = re.sub(r"\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\n]{1,220}\$(?!\$)", " ", text)
+    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\(https?://[^)]+\)", r"\1", text, flags=re.IGNORECASE)
+    text = re.sub(r"https?://\S+", " ", text, flags=re.IGNORECASE)
+    cleaned_lines: List[str] = []
+    for line in text.splitlines():
+        candidate = line.strip()
+        if not candidate or re.match(r"^#{1,4}\s", candidate):
+            continue
+        if candidate.startswith("|") and candidate.endswith("|"):
+            continue
+        # When an equation and its meaning share one line, retain the prose after
+        # the separator instead of repeating the equation beneath the renderer.
+        equation_explanation = re.split(r"\s+[—–]\s+", candidate, maxsplit=1)
+        if len(equation_explanation) == 2 and any(mark in equation_explanation[0] for mark in ("=", "≈", "→", "↔")) and len(equation_explanation[1].split()) >= 4:
+            candidate = equation_explanation[1].strip()
+        if re.match(r"^\s*[-*•]?\s*`{0,1}[A-Za-zА-Яа-яΑ-ω_\\{}^0-9().,+*/ =<>≤≥≠≈:-]{2,90}`?\s*$", candidate) and any(mark in candidate for mark in ("=", "≈", "→", "↔")) and len(candidate.split()) <= 8:
+            continue
+        cleaned_lines.append(candidate)
+    text = re.sub(r"\s+", " ", " ".join(cleaned_lines)).strip(" \t\n-–—:;,.•")
+    text = re.sub(r"\s+", " ", text)
+    return text[:850]
+
+
+def _render_section_context(block_type: str, block: Dict[str, Any], answer: str) -> tuple[str, str]:
+    sections = _answer_sections_for_explanation(answer)
+    payload = _render_payload(block)
+    title = str(_render_block_field(block, payload, "step_title", "title", "section", "filename") or "").strip()
+    title_low = title.lower()
+    patterns = {
+        "formula": r"формул|рівнян|уравнен|equation|formula|math|mathemat|релят|relativ|mass.?energy",
+        "link": r"посилан|ссылк|джерел|источник|ресурс|source|reference|resource|links?|bibliograph|фотоелектр",
+        "image": r"зображ|зображенн|картин|портрет|ілюстрац|иллюстрац|фото|image|picture|portrait|illustration|photo",
+        "gallery": r"зображ|картин|портрет|ілюстрац|иллюстрац|фото|image|picture|portrait|illustration|photo",
+        "code": r"код|скрипт|реаліза|реализац|implementation|source code|code|script|change|змін|измен",
+        "table": r"таблиц|порівня|сравнен|comparison|table|data",
+        "graph": r"графік|график|залежн|діаграм|chart|graph|plot|function|функці|функци",
+        "diagram": r"схем|діаграм|диаграм|експеримент|эксперимент|дослід|опыт|experiment|diagram|flow|process",
+        "file": r"файл|документ|document|file|attachment|вміст|содерж",
+        "audio": r"аудіо|голос|audio|voice|sound|звук",
+        "video": r"відео|видео|video|сцена|кадр|frame",
+    }
+    pattern = patterns.get(block_type, r"$^")
+    ranked: List[tuple[int, str, str]] = []
+    for heading, body in sections:
+        hlow = heading.lower()
+        score = 0
+        if title_low and hlow:
+            title_terms = {term for term in re.findall(r"[\wА-Яа-яІіЇїЄєҐґ]{3,}", title_low) if term not in {"the", "and", "для", "про", "this", "that"}}
+            heading_terms = set(re.findall(r"[\wА-Яа-яІіЇїЄєҐґ]{3,}", hlow))
+            overlap = len(title_terms & heading_terms)
+            if hlow == title_low:
+                score += 6
+            elif overlap:
+                score += min(5, overlap * 2)
+        if re.search(pattern, hlow, re.IGNORECASE):
+            score += 4
+        if re.search(pattern, body, re.IGNORECASE):
+            score += 2
+        if title_low and re.search(re.escape(title_low), body.lower(), re.IGNORECASE):
+            score += 3
+        cleaned = _clean_render_explanation_context(body, block_type)
+        if len(cleaned) >= 45:
+            score += 1
+        if cleaned:
+            ranked.append((score, heading, cleaned))
+    if not ranked:
+        return "", ""
+    ranked.sort(key=lambda item: (item[0], len(item[2])), reverse=True)
+    score, heading, context = ranked[0]
+    if score <= 1 and len(sections) > 1:
+        # Do not associate an artifact with an unrelated section merely because
+        # it happens to be the longest paragraph.
+        return "", ""
+    # Prefer two concise paragraphs from a well-matched section when available.
+    if score >= 4 and len(sections) > 1:
+        selected = next((body for h, body in sections if h == heading), "")
+        cleaned_selected = _clean_render_explanation_context(selected, block_type)
+        if cleaned_selected:
+            context = cleaned_selected
+    return heading, context[:720]
+
+
+def _localized_explanation_prefix(language: str, block_type: str) -> str:
+    labels = {
+        "ru": {"formula": "Пояснение к формуле", "link": "Зачем нужна ссылка", "image": "Что показывает изображение", "gallery": "Что показывает изображение", "code": "Что делает код", "table": "Как читать таблицу", "graph": "Что показывает график", "diagram": "Что показывает схема", "file": "Что содержит файл", "audio": "Что содержит аудио-блок", "video": "Что показывает видео-блок"},
+        "uk": {"formula": "Пояснення до формули", "link": "Для чого потрібне посилання", "image": "Що показує зображення", "gallery": "Що показує зображення", "code": "Що робить код", "table": "Як читати таблицю", "graph": "Що показує графік", "diagram": "Що показує схема", "file": "Що містить файл", "audio": "Що містить аудіоблок", "video": "Що показує відеоблок"},
+        "fr": {"formula": "Explication de la formule", "link": "Utilité du lien", "image": "Ce que montre l’image", "gallery": "Ce que montre l’image", "code": "Rôle du code", "table": "Lecture du tableau", "graph": "Ce que montre le graphique", "diagram": "Ce que montre le schéma", "file": "Contenu du fichier", "audio": "Contenu du bloc audio", "video": "Contenu du bloc vidéo"},
+        "en": {"formula": "Formula explanation", "link": "Why this link is included", "image": "What the image shows", "gallery": "What the image shows", "code": "What the code does", "table": "How to read the table", "graph": "What the graph shows", "diagram": "What the diagram shows", "file": "What the file contains", "audio": "What the audio block contains", "video": "What the video block shows"},
+    }
+    return labels.get(language, labels["en"]).get(block_type, "Explanation")
+
+
+def _fallback_render_explanation(block_type: str, block: Dict[str, Any], answer: str, language: str) -> str:
+    payload = _render_payload(block)
+    section, context = _render_section_context(block_type, block, answer)
+    block_title = str(_render_block_field(block, payload, "step_title", "title", "section") or "").strip()
+    title = str(section or block_title).strip()
+    title_for_text = f" «{title[:100]}»" if title else ""
+    if context:
+        if language == "uk":
+            bodies = {
+                "formula": f"Ця формула пов’язана з розділом{title_for_text}. Вона пояснює: {context}",
+                "link": f"Посилання веде до джерела, доданого для розділу{title_for_text}. Контекст відповіді: {context}",
+                "image": f"Зображення пов’язане з розділом{title_for_text} і візуально показує: {context}",
+                "gallery": f"Зображення пов’язане з розділом{title_for_text} і візуально показує: {context}",
+                "code": f"Кодовий блок доповнює розділ{title_for_text}. Пояснення його призначення: {context}",
+                "table": f"Таблиця впорядковує дані з розділу{title_for_text}. Її зміст: {context}",
+                "graph": f"Графік візуалізує залежність або дані з розділу{title_for_text}. Його зміст: {context}",
+                "diagram": f"Схема показує процес або зв’язки з розділу{title_for_text}. Відповідний опис: {context}",
+                "file": f"Файл пов’язаний з розділом{title_for_text}. У відповіді він потрібен для: {context}",
+                "audio": f"Аудіоблок пов’язаний з розділом{title_for_text}: {context}",
+                "video": f"Відеоблок пов’язаний з розділом{title_for_text}: {context}",
+            }
+        elif language == "fr":
+            bodies = {
+                "formula": f"Cette formule se rapporte à la section{title_for_text}. Elle exprime : {context}",
+                "link": f"Ce lien renvoie à une source associée à la section{title_for_text}. Le contexte de la réponse est : {context}",
+                "image": f"Cette image se rapporte à la section{title_for_text} et illustre : {context}",
+                "gallery": f"Cette image se rapporte à la section{title_for_text} et illustre : {context}",
+                "code": f"Ce bloc de code complète la section{title_for_text}. Son rôle est décrit ici : {context}",
+                "table": f"Ce tableau organise les données de la section{title_for_text} : {context}",
+                "graph": f"Ce graphique visualise les données ou la relation de la section{title_for_text} : {context}",
+                "diagram": f"Ce schéma montre les étapes ou relations de la section{title_for_text} : {context}",
+                "file": f"Ce fichier se rapporte à la section{title_for_text} : {context}",
+                "audio": f"Ce bloc audio se rapporte à la section{title_for_text} : {context}",
+                "video": f"Ce bloc vidéo se rapporte à la section{title_for_text} : {context}",
+            }
+        else:
+            bodies = {
+                "formula": f"Эта формула связана с разделом{title_for_text}. Она объясняет: {context}" if language == "ru" else f"This formula belongs to the section{title_for_text}. It explains: {context}",
+                "link": f"Ссылка ведёт к источнику, указанному для раздела{title_for_text}. В контексте ответа она нужна для проверки и углубления темы: {context}" if language == "ru" else f"This link points to a source associated with the section{title_for_text}. In this answer it is provided to verify or explore: {context}",
+                "image": f"Изображение связано с разделом{title_for_text} и наглядно показывает: {context}" if language == "ru" else f"This image is associated with the section{title_for_text} and illustrates: {context}",
+                "gallery": f"Изображение связано с разделом{title_for_text} и наглядно показывает: {context}" if language == "ru" else f"This image is associated with the section{title_for_text} and illustrates: {context}",
+                "code": f"Кодовый блок дополняет раздел{title_for_text}. Его назначение по поясняющему тексту: {context}" if language == "ru" else f"This code block complements the section{title_for_text}. Its purpose in the answer is: {context}",
+                "table": f"Таблица структурирует данные из раздела{title_for_text}. Она нужна, чтобы увидеть: {context}" if language == "ru" else f"This table organizes the data in the section{title_for_text}. It helps show: {context}",
+                "graph": f"График визуализирует данные или зависимость из раздела{title_for_text}. Его смысл: {context}" if language == "ru" else f"This graph visualizes the data or relationship in the section{title_for_text}: {context}",
+                "diagram": f"Схема показывает этапы или связи из раздела{title_for_text}. Пояснение: {context}" if language == "ru" else f"This diagram shows the steps or relationships in the section{title_for_text}: {context}",
+                "file": f"Файл относится к разделу{title_for_text}. По пояснению в ответе он нужен для: {context}" if language == "ru" else f"This file relates to the section{title_for_text}: {context}",
+                "audio": f"Аудиоблок относится к разделу{title_for_text}: {context}" if language == "ru" else f"This audio block relates to the section{title_for_text}: {context}",
+                "video": f"Видеоблок относится к разделу{title_for_text}: {context}" if language == "ru" else f"This video block relates to the section{title_for_text}: {context}",
+            }
+        explanation = bodies.get(block_type, context)
+        if block_type in {"image", "gallery"}:
+            edit_note = str(_render_block_field(block, payload, "edit_description", "modification_summary", "changes", "change_summary") or "").strip()
+            generated = str(payload.get("kind") or payload.get("source") or "").lower() in {"generated_image", "april_generated", "c_april_images_generator"} or bool(block.get("generated"))
+            if edit_note:
+                if language == "uk":
+                    explanation += f" Окремо зафіксовані зміни: {edit_note}"
+                elif language == "ru":
+                    explanation += f" Отдельно указанные изменения: {edit_note}"
+                elif language == "fr":
+                    explanation += f" Modifications indiquées : {edit_note}"
+                else:
+                    explanation += f" Explicitly recorded changes: {edit_note}"
+            if generated:
+                caveat = " Це згенерована ілюстрація, а не архівна фотографія." if language == "uk" else " Это сгенерированная иллюстрация, а не архивная фотография." if language == "ru" else " Il s’agit d’une illustration générée, pas d’une photographie d’archive." if language == "fr" else " It is a generated illustration, not an archival photograph."
+                if not any(marker in explanation.lower() for marker in ("згенерована ілюстрація", "сгенерированная иллюстрация", "illustration générée", "generated illustration")):
+                    explanation += caveat
+        return explanation
+
+    # Renderer-specific, source-grounded fallbacks for older model output that
+    # doesn't yet include an explanation field or a matching narrative section.
+    if block_type == "formula":
+        formula_values = payload.get("formulas") or payload.get("latex_formulas") or []
+        if not isinstance(formula_values, list):
+            formula_values = [formula_values]
+        for key in ("formula", "latex", "equation", "expression", "math"):
+            value = payload.get(key)
+            if value and value not in formula_values:
+                formula_values.append(value)
+        formulas = []
+        for item in formula_values[:6]:
+            value = item.get("latex") or item.get("formula") or item.get("equation") if isinstance(item, dict) else item
+            if isinstance(value, str) and value.strip():
+                formulas.append(re.sub(r"\s+", " ", value.strip())[:100])
+        formula = ", ".join(formulas)
+        normalized = re.sub(r"[\s{}\\$()^_]", "", formula).lower().replace("²", "2")
+        if re.search(r"e=mc2", normalized):
+            specific = ("Эта формула выражает эквивалентность массы и энергии: E — энергия, m — масса, c — скорость света; множитель c² показывает, почему даже небольшая масса соответствует большой энергии." if language == "ru" else "Ця формула виражає еквівалентність маси та енергії: E — енергія, m — маса, c — швидкість світла; множник c² показує, чому невелика маса відповідає великій енергії." if language == "uk" else "Cette formule exprime l’équivalence masse-énergie : E est l’énergie, m la masse et c la vitesse de la lumière." if language == "fr" else "This formula expresses mass–energy equivalence: E is energy, m is mass, and c is the speed of light; the factor c² explains why a small mass corresponds to a large amount of energy.")
+            return specific
+        if formula:
+            base = f"{formula}. "
+        else:
+            base = ""
+        if language == "uk":
+            return f"{base}Цей математичний блок записує кількісний зв’язок між величинами, згаданими в поточному розділі{title_for_text}. Не трактуйте символи окремо від визначень і припущень у тексті відповіді."
+        if language == "ru":
+            return f"{base}Этот математический блок записывает количественную связь между величинами из текущего раздела{title_for_text}. Символы нужно толковать вместе с определениями и условиями, приведёнными в тексте ответа."
+        if language == "fr":
+            return f"{base}Ce bloc mathématique représente une relation entre les grandeurs du sujet{title_for_text}. Les symboles doivent être lus avec les définitions et hypothèses données dans la réponse."
+        return f"{base}This mathematical block records a quantitative relationship relevant to{title_for_text or ' the current topic'}. Interpret its symbols using the definitions and assumptions in the answer."
+
+    if block_type == "link":
+        links = payload.get("links") if isinstance(payload.get("links"), list) else []
+        if not links:
+            links = [payload]
+        items = []
+        for item in links[:3]:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("title") or item.get("name") or item.get("description") or "").strip()
+            url = str(item.get("url") or item.get("href") or "").strip()
+            domain_match = re.search(r"https?://([^/\s?#]+)", url, re.IGNORECASE)
+            destination = domain_match.group(1) if domain_match else url
+            if label and destination:
+                items.append(f"{label} ({destination})")
+            elif label or destination:
+                items.append(label or destination)
+        subject = "; ".join(items) or title or "источник из этого ответа"
+        if language == "uk":
+            return f"Посилання відкриває {subject}. Його додано як джерело для перевірки або поглиблення поточної теми; точний зміст сторінки слід звірити після відкриття."
+        if language == "ru":
+            return f"Ссылка открывает {subject}. Она добавлена как источник для проверки или углубления текущей темы; точное содержание страницы следует сверить после перехода."
+        if language == "fr":
+            return f"Ce lien ouvre {subject}. Il sert de source pour vérifier ou approfondir le sujet ; le contenu exact doit être confirmé sur la page ouverte."
+        return f"This link opens {subject}. It is included as a source to verify or explore the current topic; confirm the exact page contents after opening it."
+
+    if block_type == "code":
+        code = str(_render_block_field(block, payload, "code", "content", "text") or payload.get("source") or "")
+        language_name = str(_render_block_field(block, payload, "language", "lang") or "text")
+        filename = str(_render_block_field(block, payload, "filename", "file_name") or "").strip()
+        symbols = re.findall(r"(?m)^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(|^\s*class\s+([A-Za-z_]\w*)\b|^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_]\w*)\s*\(", code)
+        symbol_names = [next((part for part in row if part), "") for row in symbols]
+        symbol_text = ", ".join(dict.fromkeys(symbol_names[:5]))
+        file_text = f" «{filename[:100]}»" if filename else ""
+        if language == "uk":
+            return f"Це блок коду мовою {language_name}{file_text}. {('У ньому визначено: ' + symbol_text + '. ') if symbol_text else ''}Використовуйте його разом із поясненням до цього кроку; без контексту решти проєкту не можна надійно стверджувати про побічні ефекти під час запуску."
+        if language == "ru":
+            return f"Это блок кода на {language_name}{file_text}. {('В нём определены: ' + symbol_text + '. ') if symbol_text else ''}Используйте его вместе с пояснением к этому шагу; без остального контекста проекта нельзя надёжно утверждать о побочных эффектах при запуске."
+        if language == "fr":
+            return f"Ce bloc contient du code {language_name}{file_text}. {('Les éléments définis sont : ' + symbol_text + '. ') if symbol_text else ''}Il doit être interprété avec le contexte du projet ; sans celui-ci, les effets à l’exécution ne peuvent pas être affirmés avec certitude."
+        return f"This block contains {language_name} code{file_text}. {('It defines: ' + symbol_text + '. ') if symbol_text else ''}Interpret it in the surrounding project context; runtime side effects cannot be stated reliably without the rest of the project."
+
+    if block_type in {"image", "gallery"}:
+        images = payload.get("images") or payload.get("items") or payload.get("gallery") or []
+        if isinstance(images, dict):
+            images = [images]
+        image_descriptions = []
+        for image in images[:3] if isinstance(images, list) else []:
+            if not isinstance(image, dict):
+                continue
+            description = str(image.get("description") or image.get("alt") or image.get("title") or image.get("caption") or "").strip()
+            if description:
+                description = re.sub(r"\s+", " ", description)[:220]
+                image_descriptions.append(description)
+        described = "; ".join(image_descriptions)
+        generated = str(payload.get("kind") or payload.get("source") or "").lower() in {"generated_image", "april_generated", "c_april_images_generator"} or bool(block.get("generated"))
+        edit_note = str(_render_block_field(block, payload, "edit_description", "modification_summary", "changes", "change_summary") or "").strip()
+        if edit_note:
+            core = f"Изображение показывает внесённые изменения: {edit_note}" if language == "ru" else f"Зображення показує внесені зміни: {edit_note}" if language == "uk" else f"L’image montre les modifications suivantes : {edit_note}" if language == "fr" else f"The image shows these changes: {edit_note}"
+        elif described:
+            core = ("Это сгенерированная иллюстрация к текущему разделу: " if language == "ru" and generated else "Це згенерована ілюстрація до поточного розділу: " if language == "uk" and generated else "Il s’agit d’une illustration générée pour cette section : " if language == "fr" and generated else "This is a generated illustration for the current section: " if generated else "Это изображение, связанное с текущим разделом: " if language == "ru" else "Це зображення, пов’язане з поточним розділом: " if language == "uk" else "Cette image est associée à la section actuelle : " if language == "fr" else "This image is associated with the current section: ") + described
+        else:
+            subject = title or "тему текущего ответа"
+            core = f"Изображение относится к теме «{subject}»; его роль — визуальная иллюстрация, а не самостоятельное подтверждение фактов." if language == "ru" else f"Зображення стосується теми «{subject}»; воно є візуальною ілюстрацією, а не самостійним підтвердженням фактів." if language == "uk" else f"L’image illustre le sujet « {subject} » sans constituer à elle seule une preuve factuelle." if language == "fr" else f"The image illustrates “{subject}”; it is not, by itself, evidence for a factual claim."
+        if generated:
+            caveat = " Это сгенерированная иллюстрация, а не архивная фотография." if language == "ru" else " Це згенерована ілюстрація, а не архівна фотографія." if language == "uk" else " Il s’agit d’une illustration générée, pas d’une photographie d’archive." if language == "fr" else " It is a generated illustration, not an archival photograph."
+            if "генерированная иллюстрация" not in core.lower() and "згенерована ілюстрація" not in core.lower() and "illustration générée" not in core.lower() and "generated illustration" not in core.lower():
+                core += caveat
+        return core
+
+    if block_type == "table":
+        headers = payload.get("headers") or payload.get("columns") or payload.get("column_names") or []
+        if isinstance(headers, dict):
+            headers = list(headers.keys())
+        if isinstance(headers, list):
+            header_text = ", ".join(str(item.get("label") or item.get("name") or item) if isinstance(item, dict) else str(item) for item in headers[:8])
+        else:
+            header_text = str(headers)
+        rows = payload.get("rows") or payload.get("data") or payload.get("values") or []
+        row_count = len(rows) if isinstance(rows, list) else 0
+        details = f" Столбцы: {header_text}." if header_text else ""
+        details += f" Количество строк данных: {row_count}." if row_count else ""
+        if language == "uk":
+            return f"Таблиця збирає пов’язані значення в одному місці, щоб їх можна було зіставити.{details} Висновок слід робити за фактичними рядками таблиці, а не за відсутніми даними."
+        if language == "ru":
+            return f"Таблица собирает связанные значения, чтобы их было удобно сопоставить.{details} Вывод следует делать по фактическим строкам таблицы, а не по отсутствующим данным."
+        if language == "fr":
+            return f"Ce tableau regroupe les valeurs pour faciliter leur comparaison.{details} La conclusion doit être fondée sur les lignes réellement affichées."
+        return f"This table groups related values for comparison.{details} Any takeaway should be based on the rows actually shown."
+
+    if block_type == "graph":
+        x_axis = str(_render_block_field(block, payload, "x_axis", "xAxisLabel", "x_axis_label") or "ось X")
+        y_axis = str(_render_block_field(block, payload, "y_axis", "yAxisLabel", "y_axis_label") or "ось Y")
+        title_value = str(_render_block_field(block, payload, "title", "name") or title or "")
+        details = f"{title_value + ': ' if title_value else ''}X — {x_axis}; Y — {y_axis}."
+        if language == "uk":
+            return f"Графік показує залежність між величинами, відкладеними по осях. {details} Тренд потрібно читати за відображеними точками або поверхнею; відсутні значення не домислюються."
+        if language == "ru":
+            return f"График показывает зависимость между величинами по осям. {details} Тренд следует читать по отображённым точкам или поверхности; отсутствующие значения не домысливаются."
+        if language == "fr":
+            return f"Le graphique représente une relation entre les grandeurs des axes. {details} La tendance doit être lue à partir des points ou de la surface affichés, sans inventer de valeurs manquantes."
+        return f"The graph represents a relationship between the axis variables. {details} Read the trend from the displayed points or surface; missing values are not inferred."
+
+    if block_type == "diagram":
+        labels: List[str] = []
+        for key in ("nodes", "elements", "steps", "items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                for item in value[:10]:
+                    if isinstance(item, dict):
+                        label = str(item.get("label") or item.get("title") or item.get("name") or item.get("text") or "").strip()
+                    else:
+                        label = str(item).strip()
+                    if label:
+                        labels.append(label[:80])
+        description = str(payload.get("description") or payload.get("caption") or "").strip()
+        detail = description or ("Основные элементы: " + "; ".join(dict.fromkeys(labels[:7])) if labels else "")
+        if language == "uk":
+            return f"Схема візуально пояснює структуру або послідовність кроків. {detail or 'Зв’язки слід читати за стрілками та підписами в самій схемі.'}"
+        if language == "ru":
+            return f"Схема визуально поясняет структуру или последовательность шагов. {detail or 'Связи следует читать по стрелкам и подписям в самой схеме.'}"
+        if language == "fr":
+            return f"Ce schéma illustre une structure ou une succession d’étapes. {detail or 'Lisez les relations à partir des flèches et des libellés affichés.'}"
+        return f"This diagram illustrates a structure or sequence of steps. {detail or 'Read the relationships from the arrows and labels shown.'}"
+
+    # File, audio and video blocks may have only a title/caption and no textual
+    # body; describe the visible metadata without inventing its contents.
+    details = str(_render_block_field(block, payload, "description", "caption", "alt", "title", "filename", "name") or title or "")
+    if language == "ru":
+        return f"Этот блок связан с текущим разделом{title_for_text}. {details or 'Откройте рендер, чтобы ознакомиться с его содержимым.'}"
+    if language == "uk":
+        return f"Цей блок пов’язаний із поточним розділом{title_for_text}. {details or 'Відкрийте рендер, щоб ознайомитися з його вмістом.'}"
+    if language == "fr":
+        return f"Ce bloc est associé à la section actuelle{title_for_text}. {details or 'Ouvrez le bloc pour consulter son contenu.'}"
+    return f"This block is associated with the current section{title_for_text}. {details or 'Open the renderer to inspect its content.'}"
+
+
+def _ensure_premium_render_explanations(blocks: List[Dict[str, Any]], answer: str, language_hint: Any = "") -> List[Dict[str, Any]]:
+    """Guarantee a visible text explanation immediately after every concrete Premium renderer.
+
+    Provider-created `explanation` is preferred. Older output is repaired from the
+    matching answer section and actual renderer payload; this never creates a
+    renderer or invents a URL, equation, row, image edit, or numeric data.
+    """
+    language = _explanation_language(answer, language_hint)
+    ordered: List[Dict[str, Any]] = []
+    additions = 0
+    for original_index, original in enumerate(blocks):
+        if not isinstance(original, dict):
+            continue
+        block = dict(original)
+        block_type = _scene_block_type(block)
+        if block_type not in _PREMIUM_EXPLAINED_RENDER_TYPES or not _scene_payload_has_content(block_type, _render_payload(block), block):
+            ordered.append(block)
+            continue
+
+        # Keep stable references even when the renderer had no explicit block id.
+        block_id = str(block.get("block_id") or block.get("id") or f"block_{original_index + 1}").strip()
+        block.setdefault("block_id", block_id)
+        ordered.append(block)
+
+        # If the source explicitly has a following explanation linked to this block,
+        # preserve it and do not duplicate it.
+        following = blocks[original_index + 1] if original_index + 1 < len(blocks) else None
+        if isinstance(following, dict) and _scene_block_type(following) in {"text", "markdown", "message", "message_text"}:
+            linked_to = str(following.get("explanation_for_block_id") or following.get("explanation_for") or "").strip()
+            if linked_to and linked_to in {block_id, str(block.get("id") or "")}:
+                continue
+
+        payload = _render_payload(block)
+        explanation = str(_render_block_field(block, payload, "explanation", "render_explanation", "what_it_shows") or "").strip()
+        if len(explanation) < 24:
+            description = str(_render_block_field(block, payload, "description", "summary") or "").strip()
+            if len(description) >= 48:
+                explanation = description
+        if len(explanation) < 24:
+            explanation = _fallback_render_explanation(block_type, block, answer, language)
+        if not explanation:
+            continue
+        if not re.match(r"(?i)^\s*(?:пояснение|пояснення|explication|explanation)\b", explanation):
+            prefix = _localized_explanation_prefix(language, block_type)
+            explanation = f"**{prefix}.** {explanation}"
+        explanation = explanation[:1400]
+        step_index = block.get("step_index", 1)
+        explanation_block = {
+            "type": "text",
+            "artifact_type": "text",
+            "renderer": "MessageTextBlock",
+            "viewer": "MessageTextBlock",
+            "content": explanation,
+            "text": explanation,
+            "block_id": f"explanation_{block_id}",
+            "explanation_for_block_id": block_id,
+            "related_block_ids": [block_id],
+            "step_index": step_index,
+            "step_title": f"{_localized_explanation_prefix(language, block_type)}"[:100],
+            "sequence_index": len(ordered),
+            "source": "premium_render_explanation_contract",
+        }
+        ordered.append(explanation_block)
+        additions += 1
+
+    try:
+        if additions:
+            print("[APRIL_RENDER_EXPLANATION_ENRICHMENT] " + __import__("json").dumps({
+                "status": "added_inline_explanations",
+                "added": additions,
+                "language": language,
+                "render_types": [str(block.get("type") or "") for block in ordered if isinstance(block, dict) and str(block.get("type") or "").lower() in _PREMIUM_EXPLAINED_RENDER_TYPES],
+            }, ensure_ascii=False, separators=(",", ":")), flush=True)
+    except Exception:
+        pass
+    return ordered
+
+
 def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
     """Produce one ordered, identity-bound render stream for the scene."""
     blueprint = dict(scene.scene_blueprint or {})
@@ -3745,6 +4220,14 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
             or bool(_scene_text(block))
         )
     ]
+    metadata_for_language = scene.metadata if isinstance(scene.metadata, dict) else {}
+    interpretation_for_language = metadata_for_language.get("interpretation") if isinstance(metadata_for_language.get("interpretation"), dict) else {}
+    language_hint = (
+        interpretation_for_language.get("display_language")
+        or interpretation_for_language.get("language")
+        or metadata_for_language.get("display_language")
+        or ""
+    )
     if answer and not any(_scene_block_type(b) in {"text", "markdown", "formula"} and _scene_text(b) for b in blocks if isinstance(b, dict)):
         blocks.insert(0, {
             "type": "text",
@@ -3754,6 +4237,10 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
             "content": answer,
             "text": answer,
         })
+
+    # Run after the canonical-answer fallback so an explanation block cannot be
+    # mistaken for the primary user-facing answer when the source list had no text.
+    blocks = _ensure_premium_render_explanations(blocks, source_answer or answer, language_hint)
 
     order = [str(x).strip() for x in _scene_list(blueprint.get("order")) if str(x).strip()]
     order_pos = {value: idx for idx, value in enumerate(order)}
@@ -3795,6 +4282,10 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
             "renderer": renderer,
             "content": _scene_text(block),
             "payload": block.get("payload", {}),
+            # Two renderers can legitimately need the same wording while still
+            # requiring separate visible explanations. Include this relation in
+            # the signature only for explanation blocks, preserving normal dedupe.
+            "explanation_for_block_id": str(block.get("explanation_for_block_id") or ""),
         })
         semantic_key = _canonical_visual_dedupe_key(block)
         if semantic_key and semantic_key in semantic_index:
