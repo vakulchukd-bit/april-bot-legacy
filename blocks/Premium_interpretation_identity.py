@@ -1552,13 +1552,43 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     imperative_recall = bool(token_set & {"напомни", "вспомни", "перечисли", "перескажи", "восстанови", "найди", "вернись", "покажи", "remind", "recall", "remember", "summarize"})
     temporal_past = past_reference or today_reference or recent_reference or bool(token_set & {"вчера", "сегодня", "утром", "вечером", "yesterday", "today"})
     temporal_future = future_reference or bool(token_set & {"завтра", "будем", "буду", "будущем", "tomorrow", "will"})
-    explicit_discussion_question = dialogue_action and interrogative and (
-        self_reference or temporal_past or recall_action or any(term in low for term in (
-            "о чем", "про что", "что обсуждали", "что было в диалоге", "что было в разговоре",
+    # A question about how to apply/improve the current dialogue mechanism is not
+    # automatically a request to search old history. Earlier, self_reference alone
+    # ("we/our") plus a dialogue/decision word was enough to set HISTORY_LOOKUP;
+    # this routed operational follow-ups to the history-topic fallback when Provider
+    # returned no answer. Require an actual recollection signal for these two paths.
+    explicit_discussion_recall = bool(re.search(
+        r"(?:\b(?:что|о\s+чем|про\s+что|какие\s+темы|какой\s+вопрос|какие\s+вопросы)\b"
+        r".{0,65}\b(?:обсуждал\w*|говорил\w*|рассматривал\w*|упоминал\w*|затрагивал\w*)\b|"
+        r"\b(?:что\s+было|о\s+чем\s+мы\s+говорили|what\s+did\s+we\s+discuss|"
+        r"what\s+have\s+we\s+discussed|what\s+were\s+we\s+discussing|"
+        r"what\s+did\s+we\s+talk\s+about|what\s+were\s+we\s+talking|"
+        r"what\s+happened\s+in\s+our\s+conversation)\b)",
+        low, re.IGNORECASE,
+    ))
+    explicit_prior_decision_recall = bool(re.search(
+        r"\b(?:что|какое|какие|к\s+чему)\b.{0,55}\b"
+        r"(?:решил\w*|договорил\w*|выбрал\w*|принял\w*|постановил\w*|согласовал\w*|пришл\w*)\b|"
+        r"\b(?:предыдущ\w*|прошл\w*|раньше|ранее|до\s+этого|в\s+прошлый\s+раз)\b.{0,45}\b"
+        r"(?:решени\w*|вывод\w*|выбор\w*|договоренност\w*|договорённост\w*)\b|"
+        r"\b(?:what|which)\b.{0,65}\b(?:did\s+we\s+(?:decid\w*|agree\w*|choos\w*|select\w*|conclud\w*|settle\w*|make)|"
+        r"have\s+we\s+(?:decid\w*|agree\w*|chosen|selected|conclud\w*)|"
+        r"we\s+(?:decid\w*|agree\w*|chose|selected|conclud\w*))\b|"
+        r"\b(?:previous|prior|earlier|last)\s+(?:decision|conclusion|choice)\b",
+        low, re.IGNORECASE,
+    ))
+    explicit_dialogue_recall = bool(
+        explicit_discussion_recall
+        or (self_reference and (temporal_past or recall_action))
+        or any(term in low for term in (
+            "что обсуждали", "что было в диалоге", "что было в разговоре",
             "what did we discuss", "what were we talking", "what happened in our conversation",
         ))
     )
-    decision_recall = decision_action and (interrogative or recall_action) and (self_reference or temporal_past or dialogue_action or past_reference)
+    explicit_discussion_question = dialogue_action and interrogative and explicit_dialogue_recall
+    decision_recall = (decision_action or explicit_prior_decision_recall) and (interrogative or recall_action or explicit_prior_decision_recall) and (
+        recall_action or temporal_past or explicit_prior_decision_recall
+    )
     plan_past_form = any(token.startswith(root) for token in tokens for root in ("заплан", "планировали", "планировал", "собирались", "собирался", "намеревались"))
     plan_recall = plan_action and (interrogative or recall_action or imperative_recall) and (
         recall_action or past_reference or plan_past_form or (self_reference and not temporal_future)
