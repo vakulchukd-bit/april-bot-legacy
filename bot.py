@@ -27,6 +27,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from blocks.input_reader import parse_json_payload, parse_multipart_payload
 from blocks.voice_reader import transcribe_voice_bytes
+from blocks.premium_asset_store import load_message_assets as _load_premium_history_assets
 from core.executor import execute as execute_free
 from core.Premium_executor import execute as execute_premium
 from blocks.state_manager import (
@@ -47,7 +48,7 @@ from storage import (
     activate_test_premium, find_or_create_user, get_user_plan,
     get_user_subscription_status, init_db, is_authenticated_user, resolve_user_id,
     delete_april_account, load_dialogue_history_index, load_dialogue_history_details,
-    get_admin_user_telemetry, touch_user_activity,
+    dialogue_message_saved, get_admin_user_telemetry, touch_user_activity,
     get_premium_support_status, get_premium_support_message_detail,
     mark_premium_support_message_read, send_premium_support_message,
     list_premium_support_messages, reply_premium_support_message,
@@ -56,6 +57,9 @@ from storage import (
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "10000"))
 MAX_BODY_BYTES = int(os.getenv("APRIL_MAX_HTTP_BODY_BYTES", str(25 * 1024 * 1024)))
+MAX_CHAT_ATTACHMENTS = 10
+MAX_CHAT_ATTACHMENT_BYTES = 20 * 1024 * 1024
+MAX_TOTAL_TEXT_FILE_CHARS = 120_000
 CANONICAL_CHAT_ROUTE = "/api/v1/chat"
 CANONICAL_ROUTE_VERSION = "april_web_botru_exkrutor_v1"
 INPUT_NORMALIZATION_VERSION = "botru_input_normalization_v2"
@@ -269,8 +273,12 @@ def _prepare_attachments(
     provider_files: list[dict[str, Any]] = []
     text_file_contents: list[dict[str, Any]] = []
 
-    for att in attachments:
+    text_file_count = sum(1 for att in attachments if str(getattr(att, "kind", "file") or "file") == "text_file")
+    per_text_file_char_budget = min(48_000, max(12_000, MAX_TOTAL_TEXT_FILE_CHARS // max(1, text_file_count)))
+
+    for attachment_index, att in enumerate(attachments):
         item = getattr(att, "metadata", {}) or {}
+        sequence_index = int(item.get("sequence_index", attachment_index) or 0)
         kind = str(getattr(att, "kind", "file") or "file")
         filename = _text(getattr(att, "filename", "file"))
         content_type = _text(getattr(att, "content_type", ""))
@@ -283,6 +291,7 @@ def _prepare_attachments(
             "source_type": item.get("source_type", kind),
             "asset_role": "user_input",
             "provider_readable": bool(item.get("provider_readable", kind in {"image", "text_file", "voice"})),
+            "sequence_index": sequence_index,
         })
 
         if kind == "voice":
@@ -300,7 +309,14 @@ def _prepare_attachments(
                 semantic_text.append(transcript)
 
         elif kind == "text_file":
-            text = _text(item.get("text"))
+            full_text = _text(item.get("text"))
+            source_chars = int(item.get("source_chars") or len(full_text))
+            truncated = bool(item.get("truncated")) or len(full_text) > per_text_file_char_budget
+            # Preserve useful input from every text document without allowing
+            # ten large logs/source files to overwhelm the Premium context.
+            # The complete normalized text is saved in its sidecar; only `content`
+            # is bounded for the current model call.
+            text = full_text[:per_text_file_char_budget]
             if text:
                 # File contents are evidence for the Provider, never part of
                 # CURRENT_REQUEST. This prevents words such as "image",
@@ -309,10 +325,12 @@ def _prepare_attachments(
                     "filename": filename or "file",
                     "mime_type": content_type or item.get("mime_type") or "text/plain",
                     "content": text,
+                    "persistence_content": full_text,
                     "size_bytes": size_bytes,
-                    "reader_truncated": bool(item.get("truncated")),
-                    "source_chars": int(item.get("source_chars") or len(text)),
+                    "reader_truncated": truncated,
+                    "source_chars": source_chars,
                     "asset_role": "user_input",
+                    "sequence_index": sequence_index,
                 })
 
         elif kind == "image":
@@ -325,6 +343,7 @@ def _prepare_attachments(
                     "source_type": item.get("source_type", "image"),
                     "mime_type": content_type,
                     "asset_role": "user_input",
+                    "sequence_index": sequence_index,
                 })
 
         elif kind == "file":
@@ -340,6 +359,7 @@ def _prepare_attachments(
                     "mime_type": content_type or item.get("mime_type") or "application/octet-stream",
                     "size_bytes": size_bytes,
                     "asset_role": "user_input",
+                    "sequence_index": sequence_index,
                 })
 
     return "\n\n".join(semantic_text), visual, meta, provider_files, text_file_contents
@@ -585,6 +605,7 @@ def _handle_payload(
                     "size_bytes": int(item.get("size_bytes") or 0),
                     "source_type": _text(item.get("source_type") or item.get("kind") or "file"),
                     "provider_readable": bool(item.get("provider_readable", False)),
+                    "sequence_index": int(item.get("sequence_index", 0) or 0),
                 }
                 for item in attachment_meta
             ]
@@ -807,6 +828,110 @@ def _history_index_payload(user_id: str) -> tuple[int, dict[str, Any]]:
         return 503, {"success": False, "error": "HISTORY_UNAVAILABLE"}
 
 
+def _history_asset_payload_list(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, str) and value.strip():
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return []
+    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _history_attach_saved_image(
+    scene_contract: dict[str, Any],
+    render_blocks: list[Any],
+    asset_payloads: Any,
+) -> tuple[dict[str, Any], list[Any]]:
+    """Rehydrate one saved image into the existing Gallery SceneContract.
+
+    Dialogue JSON deliberately strips inline base64. The binary remains in the
+    same PostgreSQL dialogue_memory row under asset_payloads; reattach it only
+    for the small number of rows actually being shown in History/recovery.
+    """
+    assets = _history_asset_payload_list(asset_payloads)
+    image_asset = next((item for item in assets if (
+        str(item.get("kind") or "").lower() == "image"
+        and str(item.get("asset_role") or "april_output").lower() in {"april_output", "assistant_output", "generated"}
+        and str(item.get("content_base64") or "").strip()
+    )), None)
+    if not image_asset:
+        return scene_contract, render_blocks
+    encoded = str(image_asset.get("content_base64") or "").strip()
+    mime = str(image_asset.get("mime_type") or "image/png").strip() or "image/png"
+    try:
+        import base64
+        raw = base64.b64decode(encoded, validate=True)
+    except Exception:
+        return scene_contract, render_blocks
+    if not raw:
+        return scene_contract, render_blocks
+    import hashlib
+    expected_hash = str(image_asset.get("sha256") or "").strip()
+    if expected_hash and hashlib.sha256(raw).hexdigest() != expected_hash:
+        print("[APRIL_HISTORY] SAVED_IMAGE_CHECKSUM_MISMATCH", flush=True)
+        return scene_contract, render_blocks
+    import struct
+    width = int(image_asset.get("width") or 0)
+    height = int(image_asset.get("height") or 0)
+    if raw.startswith(b"\x89PNG\r\n\x1a\n") and len(raw) >= 24:
+        width = width or int(struct.unpack(">I", raw[16:20])[0])
+        height = height or int(struct.unpack(">I", raw[20:24])[0])
+    data_uri = f"data:{mime};base64,{encoded}"
+    image_item = {
+        "src": data_uri,
+        "mime_type": mime,
+        "width": width,
+        "height": height,
+        "alt": str(image_asset.get("prompt") or "Сохранённое изображение April")[:180],
+        "caption": "Восстановлено из сохранённой сцены",
+    }
+
+    def rehydrate(block_list: list[Any]) -> list[Any]:
+        output = [dict(block) if isinstance(block, dict) else block for block in block_list]
+        image_index = next((index for index, block in enumerate(output) if isinstance(block, dict) and (
+            str(block.get("type") or "").lower() in {"image", "gallery"}
+            or str(block.get("renderer") or block.get("viewer") or "").lower() == "galleryblock"
+        )), None)
+        if image_index is None:
+            output.append({
+                "type": "image",
+                "renderer": "GalleryBlock",
+                "viewer": "GalleryBlock",
+                "content": "",
+                "payload": {},
+            })
+            image_index = len(output) - 1
+        block = dict(output[image_index])
+        payload = dict(block.get("payload") if isinstance(block.get("payload"), dict) else {})
+        payload.update({
+            "kind": "generated_image",
+            "artifact_type": "image",
+            "mime_type": mime,
+            "width": width,
+            "height": height,
+            "images": [image_item],
+        })
+        block["type"] = "image"
+        block.setdefault("renderer", "GalleryBlock")
+        block.setdefault("viewer", "GalleryBlock")
+        block["payload"] = payload
+        # Remove legacy duplicate sources; payload.images is the single visual
+        # contract and is also what the current GalleryBlock consumes.
+        block.pop("artifact", None)
+        block.pop("images", None)
+        output[image_index] = block
+        return output
+
+    current_contract = dict(scene_contract) if isinstance(scene_contract, dict) else {}
+    contract_blocks = current_contract.get("render_blocks") if isinstance(current_contract.get("render_blocks"), list) else []
+    contract_blocks = rehydrate(contract_blocks or render_blocks)
+    current_contract["render_blocks"] = contract_blocks
+    # Keep the root-level list compatible with older renderers, but callers
+    # intentionally restore only a few recent rows to bound response memory.
+    root_blocks = rehydrate(render_blocks or contract_blocks)
+    return current_contract, root_blocks
+
+
 def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str, Any]]:
     """Restore a selected topic from lightweight candidates plus selected full payloads.
 
@@ -932,6 +1057,13 @@ def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str,
             return 404, {"success": False, "error": "HISTORY_ENTRY_NOT_FOUND"}
 
         messages = []
+        image_restore_ids = {message_id}
+        # Restore only the target scene plus its two newest neighbours to avoid
+        # sending a full thread of large base64 images in a single history response.
+        image_restore_ids.update(
+            item["message_id"] for item, _row in full_records[-3:]
+            if isinstance(item, dict) and item.get("message_id")
+        )
         for item, _row in full_records:
             timestamp = item["created_at"]
             stamp_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(timestamp)) if timestamp else ""
@@ -941,6 +1073,48 @@ def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str,
             render_blocks = structured_response.get("render_blocks") if isinstance(structured_response.get("render_blocks"), list) else []
             if render_blocks and not scene_contract.get("render_blocks"):
                 scene_contract = {**scene_contract, "render_blocks": render_blocks}
+            if item["message_id"] in image_restore_ids:
+                row_asset_payloads = _history_asset_payload_list(_row.get("asset_payloads"))
+                has_durable_image = any(
+                    str(asset.get("kind") or "").lower() == "image"
+                    and str(asset.get("asset_role") or "april_output").lower() in {"april_output", "assistant_output", "generated"}
+                    and str(asset.get("content_base64") or "").strip()
+                    for asset in row_asset_payloads
+                )
+                if not has_durable_image:
+                    # Backward compatibility for turns created before asset_payloads
+                    # existed. This can restore an image if the old sidecar still
+                    # exists; new turns no longer depend on that ephemeral storage.
+                    try:
+                        sidecars = _load_premium_history_assets(user_id, [item["message_id"]])
+                        for sidecar in sidecars:
+                            metadata = sidecar.get("metadata") if isinstance(sidecar.get("metadata"), dict) else {}
+                            source_type = str(metadata.get("source_type") or "").lower()
+                            role = str(sidecar.get("asset_role") or metadata.get("asset_role") or "").lower()
+                            content = bytes(sidecar.get("content") or b"")
+                            kind = str(sidecar.get("kind") or "").lower()
+                            if content and kind == "image" and (role in {"april_output", "assistant_output", "generated"} or source_type == "april_generated"):
+                                row_asset_payloads.append({
+                                    "kind": "image",
+                                    "mime_type": str(sidecar.get("mime_type") or "image/png"),
+                                    "asset_role": "april_output",
+                                    "filename": str(sidecar.get("filename") or "april-generated-image.png"),
+                                    "message_id": item["message_id"],
+                                    "size_bytes": len(content),
+                                    "sha256": hashlib.sha256(content).hexdigest(),
+                                    "width": int(metadata.get("width") or 0),
+                                    "height": int(metadata.get("height") or 0),
+                                    "prompt": str(metadata.get("prompt") or "")[:1200],
+                                    "content_base64": base64.b64encode(content).decode("ascii"),
+                                })
+                                break
+                    except Exception as restore_error:
+                        print("[APRIL_HISTORY] LEGACY_IMAGE_RESTORE_ERROR type=" + type(restore_error).__name__, flush=True)
+                scene_contract, render_blocks = _history_attach_saved_image(
+                    scene_contract,
+                    render_blocks,
+                    row_asset_payloads,
+                )
             user_id_value = item["message_id"] or f"memory-{item['turn_index']}"
             messages.append({
                 "id": f"{user_id_value}:user",
@@ -1134,7 +1308,18 @@ class AprilHandler(BaseHTTPRequestHandler):
                 # payload and topic-vector retrieval are loaded only after a user
                 # explicitly opens one saved entry.
                 user_key = supplied_user_id
-                if message_id:
+                status_only = _text(self.headers.get("X-April-History-Status-Only")) == "1"
+                if message_id and status_only:
+                    user_id = resolve_user_id(supplied_user_id) or ""
+                    user_key = user_id or supplied_user_id
+                    completed = bool(user_id and dialogue_message_saved(user_id, message_id))
+                    status, payload = 200, {
+                        "success": True,
+                        "message_id": message_id,
+                        "completed": completed,
+                        "canonical_route": CANONICAL_CHAT_ROUTE,
+                    }
+                elif message_id:
                     user_id = resolve_user_id(supplied_user_id) or ""
                     user_key = user_id or supplied_user_id
                     status, payload = _history_payload(user_id, message_id)
@@ -1144,7 +1329,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                 _apr_timing_log("history_response", history_request_started,
                                 user_key=_apr_diag_ref(user_key), status=status,
                                 count=int(payload.get("count") or 0), message_count=len(payload.get("messages") or []),
-                                mode="restore" if bool(message_id) else "index")
+                                mode="status" if status_only else "restore" if bool(message_id) else "index")
                 self._send_json(status, payload)
                 return
         if parsed.path == "/" or parsed.path == CANONICAL_CHAT_ROUTE:
@@ -1532,6 +1717,21 @@ class AprilHandler(BaseHTTPRequestHandler):
                 data, attachments = parse_multipart_payload(raw, content_type=content_type)
             else:
                 data, attachments = parse_json_payload(raw)
+            if len(attachments or []) > MAX_CHAT_ATTACHMENTS:
+                self._send_json(413, {"success": False, "error_code": "MAX_ATTACHMENTS_EXCEEDED", "error": f"Attach up to {MAX_CHAT_ATTACHMENTS} files or images per message.", "canonical_route": CANONICAL_CHAT_ROUTE})
+                return
+            oversized_attachments = [
+                _text(getattr(item, "filename", "file")) or "file"
+                for item in (attachments or [])
+                if int(getattr(item, "size_bytes", 0) or 0) > 10 * 1024 * 1024
+            ]
+            if oversized_attachments:
+                self._send_json(413, {"success": False, "error_code": "ATTACHMENT_TOO_LARGE", "error": "Each attachment must be 10 MB or smaller.", "files": oversized_attachments[:10], "canonical_route": CANONICAL_CHAT_ROUTE})
+                return
+            attachment_bytes = sum(int(getattr(item, "size_bytes", 0) or 0) for item in (attachments or []))
+            if attachment_bytes > MAX_CHAT_ATTACHMENT_BYTES:
+                self._send_json(413, {"success": False, "error_code": "ATTACHMENT_BATCH_TOO_LARGE", "error": "The combined attachment size must not exceed 20 MB.", "canonical_route": CANONICAL_CHAT_ROUTE})
+                return
             if not isinstance(data, dict):
                 self._send_json(400, {"success": False, "error": "INVALID_REQUEST", "canonical_route": CANONICAL_CHAT_ROUTE})
                 return
