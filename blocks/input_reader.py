@@ -182,16 +182,19 @@ def parse_multipart_payload(
         payload = part.get_payload(decode=True) or b""
         ctype = part.get_content_type() or "application/octet-stream"
         if filename:
-            attachments.append(
-                normalize_attachment(
-                    Attachment(
-                        field_name=_text(name) or "file",
-                        filename=_text(filename) or "file",
-                        content_type=ctype,
-                        data=payload,
-                    )
+            attachment = normalize_attachment(
+                Attachment(
+                    field_name=_text(name) or "file",
+                    filename=_text(filename) or "file",
+                    content_type=ctype,
+                    data=payload,
                 )
             )
+            # Preserve the original mixed file/image order. The provider still
+            # receives modality-specific payloads, but the manifest and memory
+            # index can reconstruct the user's intended sequence.
+            attachment.metadata["sequence_index"] = len(attachments)
+            attachments.append(attachment)
         else:
             value = payload.decode("utf-8", errors="replace")
             fields[_text(name)] = value
