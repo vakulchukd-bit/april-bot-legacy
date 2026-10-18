@@ -2769,6 +2769,7 @@ def build_interpretation(
                 "Use code, link, file, image, and gallery renderers only when the response contains matching valid payloads and the request/context supports them.",
                 "Never invent numeric data, URLs, files, or images just to fill a renderer.",
                 "Every structured artifact must carry an explicit renderer type and its payload through the canonical SceneContract.",
+                "Every non-text renderer must also carry a specific 1–3 sentence explanation in the selected display language: explain the exact formula/variables, link destination and purpose, image subject and relation (or source-supported edits), code file/functions and changes, table comparison, graph axes/data/trend, or diagram components/relationships. The Premium SceneContract places a separate text explanation block directly after the corresponding renderer; do not repeat that explanation elsewhere verbatim.",
             ],
             "improvement_policy": "Improve the requested result while preserving unaffected behavior; do not invent missing source content.",
             "output_plan": requested_outputs,
