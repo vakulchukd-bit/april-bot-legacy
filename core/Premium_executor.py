@@ -459,72 +459,124 @@ def _build_image_spec(
     interpretation: dict[str, Any],
     identity: dict[str, str],
 ) -> dict[str, Any] | None:
-    # Hard safety gate: attachment presence or Provider hallucination can never
-    # authorize image generation. Only Interpretation may authorize it.
+    """Build the canonical image-generation spec without losing a visual plan.
+
+    Models may put the same scene brief in an image artifact spec, an image
+    render-block payload, or one of the explicit top-level image prompt fields.
+    All of these are accepted only after Interpretation has authorized raster
+    generation. Generic answer text is never treated as the image prompt.
+    """
     if not bool((interpretation.get("intent") or {}).get("wants_image")):
         return None
 
-    artifacts = raw.get("artifacts")
-    if isinstance(artifacts, list):
-        for item in artifacts:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("type") or item.get("artifact_type") or "").lower() == "image":
-                spec = item.get("spec") or item.get("render_spec")
-                if isinstance(spec, dict):
-                    clean = dict(spec)
-                    clean.setdefault("schema", "april_image_spec_v1")
-                    clean.setdefault("generator_signal", "C_APRIL_IMAGES_GENERATOR")
-                    clean.setdefault("request_anchor", _text((interpretation.get("input") or {}).get("original_request")))
-                    clean.setdefault("flow_id", identity["flow_id"])
-                    clean.setdefault("turn_id", identity["message_id"])
-                    clean.setdefault("user_id", identity["user_id"])
-                    clean.setdefault("conversation_id", identity["conversation_id"])
-                    clean.setdefault("dialogue_sequence_id", identity["dialog_id"])
-                    clean.setdefault("dialogue_development", interpretation.get("dialogue") or {})
-                    return clean
+    request_text = _text((interpretation.get("input") or {}).get("original_request"))
+    prompt_keys = (
+        "openai_structured_visual_plan_semantic", "visual_generation_prompt",
+        "image_prompt", "visual_prompt", "image_description", "visual_description",
+        "scene_prompt", "prompt", "description",
+    )
 
-    direct = raw.get("image_spec")
-    if isinstance(direct, dict):
-        clean = dict(direct)
-        clean.setdefault("schema", "april_image_spec_v1")
-        clean.setdefault("generator_signal", "C_APRIL_IMAGES_GENERATOR")
-        clean.setdefault("request_anchor", _text((interpretation.get("input") or {}).get("original_request")))
+    def _first_prompt(value: Any, *, allow_description: bool = True) -> str:
+        if not isinstance(value, dict):
+            return ""
+        keys = prompt_keys if allow_description else prompt_keys[:-1]
+        for key in keys:
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return ""
+
+    def _canonicalize(candidate: Any, *, raw_plan: Any = None) -> dict[str, Any] | None:
+        if not isinstance(candidate, dict):
+            return None
+        clean = dict(candidate)
+        # Specs sometimes arrive wrapped in a render-block's payload/data envelope.
+        for nested_key in ("spec", "render_spec", "image_spec"):
+            nested = clean.get(nested_key)
+            if isinstance(nested, dict):
+                merged = dict(clean)
+                merged.update(nested)
+                clean = merged
+                break
+        semantic = _first_prompt(clean)
+        if not semantic:
+            semantic = _first_prompt(clean.get("payload")) if isinstance(clean.get("payload"), dict) else ""
+        # Do not downgrade an empty artifact/spec to the original user request
+        # here: callers may have a richer candidate later in the same response.
+        # The request fallback is applied only after every explicit visual-plan
+        # location has been inspected.
+        if not semantic:
+            return None
+        clean["schema"] = "april_image_spec_v1"
+        clean["generator_signal"] = "C_APRIL_IMAGES_GENERATOR"
+        clean["request_anchor"] = _text(clean.get("request_anchor") or request_text)
+        clean["prompt"] = _text(clean.get("prompt") or semantic)
+        clean["openai_structured_visual_plan_semantic"] = semantic
+        if isinstance(raw_plan, dict):
+            clean.setdefault("openai_structured_visual_plan_raw", raw_plan)
+        clean.setdefault("width", 512)
+        clean.setdefault("height", 512)
+        clean.setdefault("quality", "low")
+        clean.setdefault("visual_context", {})
         clean.setdefault("flow_id", identity["flow_id"])
         clean.setdefault("turn_id", identity["message_id"])
         clean.setdefault("user_id", identity["user_id"])
         clean.setdefault("conversation_id", identity["conversation_id"])
         clean.setdefault("dialogue_sequence_id", identity["dialog_id"])
+        clean.setdefault("dialogue_development", interpretation.get("dialogue") or {})
         return clean
 
-    if (interpretation.get("intent") or {}).get("wants_image"):
-        request_text = _text((interpretation.get("input") or {}).get("original_request"))
-        if not request_text:
-            return None
-        return {
-            "schema": "april_image_spec_v1",
-            "prompt": request_text,
-            "width": 512,
-            "height": 512,
-            "quality": "low",
-            "visual_context": {},
-            "openai_structured_visual_plan_raw": raw,
-            "openai_structured_visual_plan_semantic": _text(
-                raw.get("image_prompt")
-                or raw.get("visual_prompt")
-                or request_text
-            ),
-            "request_anchor": request_text,
-            "generator_signal": "C_APRIL_IMAGES_GENERATOR",
-            "flow_id": identity["flow_id"],
-            "turn_id": identity["message_id"],
-            "user_id": identity["user_id"],
-            "conversation_id": identity["conversation_id"],
-            "dialogue_sequence_id": identity["dialog_id"],
-            "dialogue_development": interpretation.get("dialogue") or {},
-        }
+    # Canonical form requested by the Provider contract.
+    artifacts = raw.get("artifacts")
+    if isinstance(artifacts, list):
+        for item in artifacts:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or item.get("artifact_type") or "").strip().lower() not in {"image", "generated_image"}:
+                continue
+            for candidate in (item.get("spec"), item.get("render_spec"), item.get("payload"), item.get("data"), item):
+                result = _canonicalize(candidate, raw_plan=raw)
+                if result:
+                    return result
 
-    return None
+    # Compatibility: an image render block may carry the visual plan instead of
+    # duplicating it under artifacts[].spec. Do not treat a source URL alone as a
+    # prompt; the exact current request is used only by the final safe fallback.
+    blocks = raw.get("render_blocks")
+    if isinstance(blocks, list):
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if str(block.get("type") or block.get("artifact_type") or "").strip().lower() not in {"image", "gallery"}:
+                continue
+            payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+            for candidate in (payload.get("spec"), payload.get("render_spec"), payload, block):
+                result = _canonicalize(candidate, raw_plan=raw)
+                if result:
+                    return result
+
+    direct = raw.get("image_spec")
+    if isinstance(direct, dict):
+        result = _canonicalize(direct, raw_plan=raw)
+        if result:
+            return result
+
+    # Some model responses correctly describe the scene but omit the wrapper.
+    # Only named image-prompt fields qualify; never use answer/content/summary.
+    direct_prompt = _first_prompt(raw, allow_description=False)
+    if direct_prompt and request_text:
+        return _canonicalize({
+            "prompt": direct_prompt,
+            "openai_structured_visual_plan_semantic": direct_prompt,
+        }, raw_plan=raw)
+
+    # Safe fallback: the explicit user request remains the semantic authority.
+    if not request_text:
+        return None
+    return _canonicalize({
+        "prompt": request_text,
+        "openai_structured_visual_plan_semantic": request_text,
+    }, raw_plan=raw)
 
 
 async def _generate_image_artifact(
