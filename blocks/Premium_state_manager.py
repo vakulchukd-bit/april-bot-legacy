@@ -1043,6 +1043,16 @@ _CHOICE_REPLY_RE = re.compile(
     r"(?:(?:вариант|option|пункт|номер)\s*)?[1-9]\b)",
     re.IGNORECASE,
 )
+_SINGLE_SCALAR_REPLY_RE = re.compile(
+    r"^\s*(?:[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)|[A-Za-zА-Яа-яЁё])\s*[.!)]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_single_scalar_reply(value: Any) -> bool:
+    """Recognize one standalone numeric value or one Latin/Cyrillic letter."""
+    return bool(_SINGLE_SCALAR_REPLY_RE.fullmatch(_text(value)))
+
 _INTERACTIVE_ACTION_RE = re.compile(
     r"(?:\bя\s+)?(?:крич\w*|зову\w*|говор\w*|спрашива\w*|иду\w*|пош[её]л\w*|"
     r"заш[её]л\w*|приш[еёо]л\w*|приш\w*\s+за\b|вхожу\w*|захожу\w*|откр\w*|подход\w*|беру\w*|ищу\w*|"
@@ -1215,8 +1225,17 @@ def _infer_active_work_branch(row: dict[str, Any]) -> dict[str, Any]:
         profile.pop("match_reason", None)
         profile.pop("candidate_message_id", None)
         saved_answer = _text(row.get("april_text") or row.get("april"))
+        saved_user = _text(row.get("user_text") or row.get("user"))
+        if saved_user:
+            profile.setdefault("last_user_text", saved_user[:500])
         if saved_answer:
-            profile["expects_choice"] = _assistant_expects_user_input(saved_answer)
+            # A one-character/numeric move can be the complete assistant turn;
+            # preserve its exact text separately from a lossy semantic summary.
+            profile["last_assistant_answer"] = saved_answer[:900]
+            profile["expects_choice"] = bool(
+                _assistant_expects_user_input(saved_answer)
+                or (_text(profile.get("kind")) == "interactive_game" and _is_single_scalar_reply(saved_answer))
+            )
         return profile
 
     intent_root = request.get("intent") if isinstance(request.get("intent"), dict) else {}
@@ -1244,7 +1263,12 @@ def _infer_active_work_branch(row: dict[str, Any]) -> dict[str, Any]:
         "image", "gallery", "graph", "diagram", "chart", "formula", "table", "file", "code", "document"
     } or rendered_types & {"image", "graph", "diagram", "chart", "formula", "table", "code", "file", "document"})
     game_signal = bool(re.search(r"(?:\bигр\w*|\bигрок\w*|\bквест\w*|\bбашн\w*|\bключ\w*|\bсердц\w*|\bхранител\w*|\bправил\w*|\bход\w*|\bgame\w*|\bquest\w*|\btower\w*|\bkey\w*|\byour turn\b|\bтвой ход\b)", all_text))
-    expects_choice = _assistant_expects_user_input(answer_text)
+    scalar_game_move = bool(
+        game_signal
+        and re.search(r"(?:\bигр\w*|\bgame\w*|\bход\w*|\byour turn\b)", user_low, re.IGNORECASE)
+        and _is_single_scalar_reply(answer_text)
+    )
+    expects_choice = bool(_assistant_expects_user_input(answer_text) or scalar_game_move)
     interaction_state = bool(game_signal and (
         expects_choice
         or _INTERACTIVE_ACTION_RE.search(answer_text)
@@ -1289,6 +1313,9 @@ def _infer_active_work_branch(row: dict[str, Any]) -> dict[str, Any]:
         "state_summary": _text((marker.get("state_summary") if isinstance(marker, dict) else "") or summary or answer_text)[:800],
         "last_action": _text((marker.get("last_action") if isinstance(marker, dict) else "") or user_text)[:240],
         "expects_choice": bool((marker.get("expects_choice") if isinstance(marker, dict) else False) or expects_choice),
+        "last_user_text": user_text[:500],
+        "last_assistant_answer": answer_text[:900],
+        "recent_steps": [{"message_id": message_id, "user_text": user_text[:500], "april_text": answer_text[:900], "topic": topic[:180]}],
         "source_message_id": _text((marker.get("source_message_id") if isinstance(marker, dict) else "") or message_id)[:120],
         "origin_message_id": _text((marker.get("origin_message_id") if isinstance(marker, dict) else "") or message_id)[:120],
         "dialog_id": _text(row.get("dialog_id"))[:120],
@@ -1396,9 +1423,12 @@ def _hot_work_followup_candidate(
         _text(branch_row.get("april_text") or branch_row.get("april")),
     ))
     is_choice = bool(re.fullmatch(
-        r"\s*(?:(?:вариант|option|пункт|номер|выбираю|выбираю вариант)\s*)?[1-9](?:\s*(?:вариант|option))?\s*[.!)]?\s*",
+        r"\s*(?:(?:вариант|option|пункт|номер|выбираю|выбираю вариант)\s*)?\d{1,4}(?:[.,]\d+)?(?:\s*(?:вариант|option))?\s*[.!)]?\s*",
         low,
-    ) or re.fullmatch(r"\s*(?:вариант|option)\s*[1-9]\s*[.!)]?\s*", low))
+    ) or re.fullmatch(r"\s*(?:вариант|option)\s*\d{1,4}\s*[.!)]?\s*", low))
+    is_single_scalar = _is_single_scalar_reply(low)
+    if is_single_scalar and (pending_user_input or _text(branch.get("kind")) == "interactive_game"):
+        return True, "single_scalar_reply_to_active_task"
     if is_choice and (pending_user_input or _text(branch.get("kind")) == "interactive_game"):
         # A bare numbered reply is unambiguous. For interactive games it remains
         # a plausible move even when legacy assistant text did not expose a formal
@@ -1539,7 +1569,12 @@ def build_active_work_branch_record(
             "priority": "HOT_TASK_FIRST",
             "last_action": _text(user_text)[:240],
             "state_summary": _text(summary or april_text)[:800],
-            "expects_choice": expects_choice,
+            "expects_choice": bool(
+                expects_choice
+                or (_text(inherited.get("kind")) == "interactive_game" and _is_single_scalar_reply(april_text))
+            ),
+            "last_user_text": _text(user_text)[:500],
+            "last_assistant_answer": _text(april_text)[:900],
             "source_message_id": _text(inherited.get("source_message_id") or inherited.get("origin_message_id") or message_id)[:120],
             "origin_message_id": _text(inherited.get("origin_message_id") or inherited.get("source_message_id") or message_id)[:120],
             "last_message_id": _text(message_id)[:120],
@@ -1581,7 +1616,12 @@ def build_active_work_branch_record(
         "conversation_id": _text(conversation_id)[:120],
         "last_action": _text(user_text)[:240],
         "state_summary": _text(summary or april_text)[:800],
-        "expects_choice": expects_choice or bool(inferred.get("expects_choice")),
+        "expects_choice": bool(
+            expects_choice or inferred.get("expects_choice")
+            or (_text(inferred.get("kind")) == "interactive_game" and _is_single_scalar_reply(april_text))
+        ),
+        "last_user_text": _text(user_text)[:500],
+        "last_assistant_answer": _text(april_text)[:900],
         # A compact rolling trace preserves the most recent user/assistant steps
         # alongside the immutable origin row. The full root is still restored from
         # dialogue_memory by origin_message_id; this is not a second task database.
