@@ -1168,13 +1168,33 @@ def _looks_like_new_work_root_request(query: str, branch: dict[str, Any] | None 
         _text(branch.get("state_summary")) if isinstance(branch, dict) else "",
     ))
     branch_overlap = _topic_query_overlap(text, branch_text) if branch_text else 0.0
+    # A generic word such as "поиграем" or "продолжение" must not make an
+    # independent request inherit an older game/task just because the same
+    # sentence also contains "active task". Compare the current subject with the
+    # saved branch before allowing generic continuation wording to veto a new root.
+    branch_subject_conflict = bool(
+        branch_text
+        and _subject_conflicts(_subject_tokens(text), _subject_tokens(branch_text))
+    )
+    explicit_named_branch_operation = bool(re.search(
+        r"\b(?:продолж\w*|продолжим|вернемся|вернёмся)\s+(?:к\s+)?(?:эт\w*\s+)?"
+        r"(?:игр\w*|задач\w*|загадк\w*|головолом\w*|квест\w*|сценар\w*|"
+        r"код\w*|скрипт\w*|проект\w*|формул\w*|схем\w*|диаграм\w*|файл\w*)\b|"
+        r"\b(?:в\s+эт\w*\s+игр\w*|следующ\w*\s+(?:ход|загадк|пункт)\w*)\b",
+        low,
+    ))
     implicit_continuation = bool(re.search(
         r"(?:продолжени\w*\s+(?:кода|задач\w*|игр\w*|схем\w*|истори\w*)|"
         r"next\s+(?:step|part|move)|continue\s+the)", low
     ))
     if not explicit_new and (
         references_existing_artifact
-        or (continuation_operation or implicit_continuation) and branch_overlap >= 0.12
+        or explicit_named_branch_operation
+        or (
+            (continuation_operation or implicit_continuation)
+            and branch_overlap >= 0.12
+            and not (root_action and branch_subject_conflict)
+        )
     ):
         return False
     # Root verbs such as “invent”, “draw”, “solve”, or “write” plus an explicit
