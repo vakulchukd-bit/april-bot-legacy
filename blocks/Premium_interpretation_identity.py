@@ -226,7 +226,7 @@ def _detect_image_generation_request(text: str) -> bool:
     if _detect_image_modification(low):
         return True
 
-    action = r"(?:draw|show|display|create|make|generate|render|нарис\w*|покаж\w*|отобраз\w*|созда\w*|сдела\w*|сгенерир\w*|изобраз\w*)"
+    action = r"(?:draw|show|display|create|make|generate|render|нарис\w*|покаж\w*|показ\w*|отобраз\w*|созда\w*|сдела\w*|сгенерир\w*|изобраз\w*)"
     image_noun = r"(?:picture|image|illustration|photo|картинк\w*|изображени\w*|иллюстраци\w*|фотк\w*|фото\b|фотограф\w*|снимк\w*)"
     # Permit polite words and ordinary modifiers, but do not skip a preceding
     # explicit schema/graph/table noun to reinterpret its object as an image.
@@ -258,6 +258,16 @@ def _detect_image_generation_request(text: str) -> bool:
     )
 
 
+def _detect_link_request(text: str) -> bool:
+    """Recognize explicit plural/resource link requests without mistaking recall for generation."""
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    action = r"(?:дай\w*|покаж\w*|показ\w*|пришл\w*|отправ\w*|найд\w*|подбер\w*|привед\w*|собер\w*|give|show|send|share|find|provide|list)"
+    link_noun = r"(?:ссылк\w*|веб-?ссылк\w*|url-?адрес\w*|\burls?\b|\blinks?\b)"
+    return bool(re.search(rf"(?<![\w\u0080-\uffff]){action}\b.{{0,72}}{link_noun}", low, re.IGNORECASE))
+
+
 def _has_drawable_subject(text: str) -> bool:
     """True when a visual verb has a concrete drawable object, not just style words."""
     low = _text(text).lower().replace("ё", "е")
@@ -285,6 +295,9 @@ def _detect_requested_outputs(text: str) -> list[str]:
     explicit_image_request = _detect_image_generation_request(low)
     if explicit_image_request and "image" not in result:
         result.append("image")
+    explicit_link_request = _detect_link_request(low)
+    if explicit_link_request and "link" not in result:
+        result.append("link")
     if explicit_image_request:
         # The requested output is the picture itself. Do not also classify
         # words describing the picture (e.g. "картинку со схемой") as a
