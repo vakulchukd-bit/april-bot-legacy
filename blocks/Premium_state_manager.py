@@ -2367,6 +2367,13 @@ _PROTECTED_STRUCTURED_TYPE_ALIASES = {
     "chemistry_formula": "formula", "biology_formula": "formula",
     "solution": "solution", "math_solution": "solution", "problem_solution": "solution",
     "worked_solution": "solution", "solution_steps": "solution",
+    # These types are part of the same Premium response/SceneContract. They are
+    # persisted in the existing JSONB dialogue pair, not in a parallel memory.
+    "link": "link", "links": "link", "url": "link", "link_card": "link", "source_link": "link",
+    "code": "code", "source_code": "code", "code_block": "code", "script": "code",
+    "diagram": "diagram", "diagram_data": "diagram", "scheme": "diagram", "schema_diagram": "diagram",
+    "flowchart": "diagram", "mermaid": "diagram",
+    "image": "image", "generated_image": "image", "gallery": "image", "visual": "image",
 }
 
 _PROTECTED_DATA_KEYS = {
@@ -2380,6 +2387,10 @@ _PROTECTED_DATA_KEYS = {
         "solution_steps", "derivation", "calculations", "given_values", "known_values",
         "unknowns", "variables", "parameters", "result",
     },
+    "link": {"url", "href", "uri", "target_url", "destination", "links", "link"},
+    "code": {"code", "source_code", "source", "language", "filename", "entry_point", "symbols"},
+    "diagram": {"svg", "nodes", "edges", "elements", "shapes", "vertices", "connectors", "mermaid", "source", "code", "geometry", "positions"},
+    "image": {"image_url", "url", "src", "asset_id", "asset_ref", "storage_key", "filename", "images", "uri"},
 }
 
 
@@ -2398,6 +2409,10 @@ def _protected_structured_kind(value: Any) -> str:
         "tableblock": "table", "tablerenderer": "table",
         "formularenderer": "formula", "formulablock": "formula",
         "mathsolutionblock": "solution", "problemsolutionblock": "solution",
+        "linkcard": "link", "linkrenderer": "link",
+        "codeblock": "code", "coderenderer": "code",
+        "diagramrenderer": "diagram", "diagramblock": "diagram", "schemerenderer": "diagram",
+        "galleryblock": "image", "imagerenderer": "image",
     }
     for key in ("renderer", "viewer"):
         renderer = _text(value.get(key)).lower().replace("_", "").replace("-", "").replace(" ", "")
@@ -2418,6 +2433,14 @@ def _protected_structured_kind(value: Any) -> str:
     # Do not classify an arbitrary object with a generic `steps` field as maths.
     if keys.intersection({"solution_steps", "derivation", "calculations", "given_values", "known_values", "unknowns"}):
         return "solution"
+    if keys.intersection({"url", "href", "uri", "target_url", "destination"}):
+        return "link"
+    if keys.intersection({"code", "source_code", "language", "filename", "entry_point"}):
+        return "code"
+    if keys.intersection({"svg", "nodes", "edges", "elements", "shapes", "vertices", "connectors", "mermaid", "geometry"}):
+        return "diagram"
+    if keys.intersection({"image_url", "src", "asset_id", "asset_ref", "storage_key", "images"}):
+        return "image"
     return ""
 
 
@@ -2451,9 +2474,31 @@ def _protected_node_payload(kind: str, node: dict[str, Any]) -> dict[str, Any]:
         "type": kind,
         "renderer": _text(node.get("renderer") or node.get("viewer"))[:80],
     }
-    for key in ("title", "name", "label", "unit", "units", "x_axis_label", "y_axis_label"):
+    for key in (
+        "title", "name", "label", "unit", "units", "x_axis_label", "y_axis_label",
+        "url", "href", "uri", "target_url", "destination", "filename", "language",
+        "alt", "caption", "description", "image_url", "src", "asset_id", "asset_ref", "ref", "id",
+        "storage_key", "mime_type", "code", "source_code", "source", "svg", "mermaid",
+        "nodes", "edges", "elements", "shapes", "vertices", "connectors", "geometry",
+        "asset_message_id", "message_id", "source_message_id", "output_type", "asset_role",
+        "source_type", "original_filename", "size_bytes", "content_type", "entry_point", "symbols",
+    ):
         if node.get(key) not in (None, "", [], {}):
             category[key] = deepcopy(node[key])
+
+    # Code renderers sometimes put the literal source in content/text rather than
+    # code. Preserve it verbatim; those fields are otherwise UI envelopes below.
+    if kind == "code":
+        literal_code = next((node.get(key) for key in ("code", "source_code", "source", "content", "text", "markdown") if _text(node.get(key))), None)
+        if literal_code is not None:
+            category["code"] = deepcopy(literal_code)
+        for key in ("language", "filename", "entry_point", "symbols", "imports", "dependencies"):
+            if node.get(key) not in (None, "", [], {}):
+                category[key] = deepcopy(node[key])
+    if kind == "link":
+        for key in ("label", "title", "url", "href", "uri", "target_url", "destination", "description", "caption", "context"):
+            if node.get(key) not in (None, "", [], {}):
+                category[key] = deepcopy(node[key])
 
     # Canonical render blocks carry the exact machine values in `payload`.
     payload = node.get("payload") if isinstance(node.get("payload"), dict) else {}
@@ -2486,6 +2531,150 @@ def _protected_node_payload(kind: str, node: dict[str, Any]) -> dict[str, Any]:
         if value not in (None, "", [], {}):
             category[key] = deepcopy(value)
     return category
+
+def _protected_source_answer(row: dict[str, Any], response: dict[str, Any]) -> str:
+    """Return the longest persisted user-visible answer, including legacy text blocks."""
+    candidates = [
+        _text(response.get("answer")), _text(response.get("content")),
+        _text(row.get("april_text") or row.get("april")),
+    ]
+    blocks = response.get("render_blocks") if isinstance(response.get("render_blocks"), list) else []
+    for block in blocks:
+        if isinstance(block, dict) and _text(block.get("type")).lower() in {"text", "markdown", "message", "message_text"}:
+            candidates.append(_text(block.get("content") or block.get("text") or block.get("markdown")))
+    return max((candidate for candidate in candidates if candidate), key=len, default="")
+
+
+def _answer_link_items(answer: str) -> list[dict[str, Any]]:
+    """Extract exact URLs and their nearby explanation when links live in prose."""
+    if not answer:
+        return []
+    url_re = re.compile(r"https?://[^\s<>\]\"']+", re.IGNORECASE)
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for match in url_re.finditer(answer):
+        url = match.group(0).rstrip(".,;:!?)»】}")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        start = answer.rfind("\n\n", 0, match.start())
+        start = 0 if start < 0 else start + 2
+        end = answer.find("\n\n", match.end())
+        end = len(answer) if end < 0 else end
+        context = re.sub(r"\s+", " ", answer[start:end]).strip()
+        markdown_label = ""
+        # Recover a Markdown link label if this URL belongs to [label](URL).
+        before = answer[max(0, match.start() - 260):match.start()]
+        md = re.search(r"\[([^\]]{1,180})\]\(\s*$", before)
+        if md:
+            markdown_label = md.group(1).strip()
+        items.append({
+            "kind": "link",
+            "source_field": "answer_url_extract",
+            "index": len(items),
+            "data": {
+                "type": "link", "url": url,
+                **({"label": markdown_label} if markdown_label else {}),
+                "context": context[:1600],
+            },
+        })
+        if len(items) >= 32:
+            break
+    return items
+
+
+def _answer_code_and_diagram_items(answer: str, existing_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Protect fenced code/diagram source even when a renderer block was not emitted."""
+    if not answer:
+        return []
+    found: list[dict[str, Any]] = []
+    seen = {
+        _text((item.get("data") or {}).get("code") or (item.get("data") or {}).get("source_code"))
+        for item in existing_items if isinstance(item, dict) and isinstance(item.get("data"), dict)
+    }
+    fence_re = re.compile(r"(?m)^\s*```([^\r\n`]*)\r?\n(.*?)^\s*```\s*$", re.DOTALL)
+    diagram_languages = {"mermaid", "dot", "graphviz", "plantuml", "svg", "d2"}
+    for match in fence_re.finditer(answer):
+        header = _text(match.group(1))
+        body = match.group(2).rstrip("\r\n")
+        if not body.strip() or body in seen:
+            continue
+        language = (header.split(None, 1)[0] if header else "text").lower()
+        kind = "diagram" if language in diagram_languages else "code"
+        start = answer.rfind("\n\n", 0, match.start())
+        start = 0 if start < 0 else start + 2
+        context = re.sub(r"\s+", " ", answer[start:match.start()]).strip()[-700:]
+        data: dict[str, Any] = {"type": kind, "language": language, "code": body}
+        if context:
+            data["context"] = context
+        if kind == "diagram" and language == "mermaid":
+            data["mermaid"] = body
+        found.append({"kind": kind, "source_field": "answer_fenced_source", "index": len(found), "data": data})
+        seen.add(body)
+        if len(found) >= 24:
+            break
+    return found
+
+
+def _answer_markdown_table_items(answer: str) -> list[dict[str, Any]]:
+    """Extract Markdown tables as exact cell arrays when the answer has no TableBlock."""
+    if not answer:
+        return []
+    lines = answer.splitlines()
+    items: list[dict[str, Any]] = []
+    index = 0
+    while index + 2 < len(lines):
+        header = lines[index].strip()
+        separator = lines[index + 1].strip()
+        if header.count("|") < 2 or not re.fullmatch(r"\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?", separator):
+            index += 1
+            continue
+        def cells(line: str) -> list[str]:
+            value = line.strip().strip("|")
+            return [part.strip() for part in value.split("|")]
+        headers = cells(header)
+        rows: list[list[str]] = []
+        cursor = index + 2
+        while cursor < len(lines) and lines[cursor].strip().count("|") >= 2:
+            row_cells = cells(lines[cursor])
+            if len(row_cells) == len(headers):
+                rows.append(row_cells)
+            cursor += 1
+        if headers and rows:
+            before = "\n".join(lines[max(0, index - 2):index]).strip()
+            title = next((line.lstrip("# ").strip() for line in reversed(before.splitlines()) if line.strip()), "")
+            data = {"type": "table", "headers": headers, "rows": rows}
+            if title:
+                data["title"] = title[:180]
+            items.append({"kind": "table", "source_field": "answer_markdown_table", "index": len(items), "data": data})
+        index = max(index + 1, cursor)
+        if len(items) >= 16:
+            break
+    return items
+
+
+def _answer_formula_items(answer: str) -> list[dict[str, Any]]:
+    """Retain explicitly delimited math expressions from prose-only legacy answers."""
+    if not answer:
+        return []
+    items: list[dict[str, Any]] = []
+    patterns = (
+        (re.compile(r"\$\$(.+?)\$\$", re.DOTALL), "display_math"),
+        (re.compile(r"\\\[(.+?)\\\]", re.DOTALL), "display_math"),
+        (re.compile(r"\\\((.+?)\\\)", re.DOTALL), "inline_math"),
+    )
+    seen: set[str] = set()
+    for pattern, style in patterns:
+        for match in pattern.finditer(answer):
+            expression = match.group(1).strip()
+            if not expression or expression in seen:
+                continue
+            seen.add(expression)
+            items.append({"kind": "formula", "source_field": "answer_math_extract", "index": len(items), "data": {"type": "formula", "latex": expression, "style": style}})
+            if len(items) >= 24:
+                return items
+    return items
+
 
 def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
     """Extract exact typed structures and their owning answer, avoiding duplicate envelopes."""
@@ -2524,7 +2713,7 @@ def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
         return found
 
     field_candidates: dict[str, list[dict[str, Any]]] = {}
-    for field_name in ("render_blocks", "artifacts", "scene_contract"):
+    for field_name in ("render_blocks", "artifacts", "scene_contract", "asset_refs"):
         raw = response.get(field_name)
         if isinstance(raw, (dict, list)):
             field_candidates[field_name] = collect_typed_nodes(raw, field_name)
@@ -2539,7 +2728,7 @@ def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
     }
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for kind in ("graph", "table", "formula", "solution"):
+    for kind in ("graph", "table", "formula", "solution", "link", "code", "diagram", "image"):
         if kind not in kinds:
             continue
         candidates_by_field = {
@@ -2572,6 +2761,26 @@ def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
                 "index": item["index"],
                 "data": _protected_node_payload(kind, item["data"]),
             })
+
+    source_answer = _protected_source_answer(row, response)
+    if source_answer:
+        known_urls = {
+            _text((item.get("data") or {}).get("url") or (item.get("data") or {}).get("href"))
+            for item in items if isinstance(item, dict) and isinstance(item.get("data"), dict)
+        }
+        for link_item in _answer_link_items(source_answer):
+            if _text((link_item.get("data") or {}).get("url")) not in known_urls:
+                items.append(link_item)
+        # Structured content may be present in the canonical answer even if the
+        # model returned only one generic text block. Extract only unambiguous,
+        # machine-marked forms so source code, Mermaid schemes, Markdown tables
+        # and delimited formulas still have a lossless continuation representation.
+        items.extend(_answer_code_and_diagram_items(source_answer, items))
+        typed_kinds = {_text(item.get("kind")).lower() for item in items if isinstance(item, dict)}
+        if "table" not in typed_kinds:
+            items.extend(_answer_markdown_table_items(source_answer))
+        if "formula" not in typed_kinds:
+            items.extend(_answer_formula_items(source_answer))
 
     if not items:
         # Older text-only responses can still be protected when the persisted
@@ -2627,7 +2836,7 @@ def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "items": items,
         # The answer binds values to labels/axes and preserves verbal solution steps
         # when a legacy renderer stored only a presentation envelope.
-        "source_answer": str(response.get("answer") or response.get("content") or row.get("april_text") or row.get("april") or ""),
+        "source_answer": source_answer,
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     payload["sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
