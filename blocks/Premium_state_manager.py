@@ -142,6 +142,7 @@ def save_dialogue_pair(
     interpretation_id: str = "",
     structured_request: dict[str, Any] | None = None,
     structured_response: dict[str, Any] | None = None,
+    asset_payloads: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Persist one pair only for the authenticated user with active Premium."""
     uid = str(user_id or "").strip()
@@ -179,13 +180,14 @@ def save_dialogue_pair(
                       (user_id, created_at, retention_hours, turn_index, user_text, april_text,
                        user_text_en, april_text_en, language, relation, pair_hash,
                        dialog_id, conversation_id, message_id, interpretation_id,
-                       structured_request, structured_response)
-                    VALUES (%s, %s, 24, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                       structured_request, structured_response, asset_payloads)
+                    VALUES (%s, %s, 24, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb)
                     ON CONFLICT (pair_hash) DO UPDATE SET
                       user_text_en = EXCLUDED.user_text_en,
                       april_text_en = EXCLUDED.april_text_en,
                       structured_request = EXCLUDED.structured_request,
                       structured_response = EXCLUDED.structured_response,
+                      asset_payloads = CASE WHEN EXCLUDED.asset_payloads IS NOT NULL AND EXCLUDED.asset_payloads <> '[]'::jsonb THEN EXCLUDED.asset_payloads ELSE dialogue_memory.asset_payloads END,
                       interpretation_id = EXCLUDED.interpretation_id
                     """,
                     (
@@ -196,6 +198,7 @@ def save_dialogue_pair(
                         str(message_id or ""), str(interpretation_id or ""),
                         json.dumps(structured_request or {}, ensure_ascii=False, default=str),
                         json.dumps(structured_response or {}, ensure_ascii=False, default=str),
+                        json.dumps(asset_payloads or [], ensure_ascii=False, default=str),
                     ),
                 )
                 # A write invalidates the process-local hydration snapshot. The next
