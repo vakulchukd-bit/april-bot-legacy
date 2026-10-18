@@ -40,6 +40,7 @@ from blocks.Premium_interpretation_identity import (
     build_interpretation,
     build_question_sequence,
     interpret_request_semantics,
+    _has_explicit_topic_introduction,
 )
 from blocks.Premium_provider_router import generate_text
 from blocks.text_module import package_provider_response
@@ -477,7 +478,7 @@ def _final_portrait_prompt(request_text: str) -> str:
     source = _text(request_text)
     low = source.lower().replace("ё", "е")
     final_image_cue = bool(re.search(
-        r"(?:в\s+конце|напоследок|в\s+завершени\w*|at\s+the\s+end|finally)"
+        r"(?:в\s+(?:самом\s+)?конце|напоследок|в\s+завершени\w*|at\s+the\s+end|finally)"
         r"[\s\S]{0,140}?(?:покаж\w*|изобраз\w*|представ\w*|show|display|present)"
         r"[\s\S]{0,90}?(?:изображени\w*|картинк\w*|портрет\w*|фото\b|image\w*|picture\w*|portrait\w*)",
         low, re.IGNORECASE,
@@ -490,7 +491,7 @@ def _final_portrait_prompt(request_text: str) -> str:
         source,
         re.IGNORECASE,
     )
-    subject = _text(subject_match.group(1) if subject_match else "")
+    subject = _text(subject_match.group(1) if subject_match else "").strip(" .,!?:;")
     if not subject:
         return ""
     return (
@@ -1571,9 +1572,61 @@ async def execute(
             "features": semantic_interpretation.get("features", {}),
             "context_signature": semantic_interpretation.get("context_signature", {}),
         }
-        dialogue_context = prepare_dialogue_context(
-            uid, current_text, query_interpretation=single_semantics, **search_kwargs
+        # A self-contained, explicitly introduced topic does not need a costly
+        # historical ranking pass. Besides reducing latency, this prevents an old
+        # active renderer branch from overriding a clearly new subject. Intentional
+        # recall/history requests, explicit resume anchors and continuations still
+        # use the normal State Manager path unchanged.
+        skip_memory_search = bool(
+            single_semantics.get("primary_intent") == "NEW_INFORMATION"
+            and not single_semantics.get("requires_memory")
+            and not single_semantics.get("history_request")
+            and not _text(resume_message_id)
+            and _has_explicit_topic_introduction(original or current_text)
         )
+        if skip_memory_search:
+            dialogue_context = {
+                "window_hours": 24,
+                "relation": "NEW",
+                "relation_confidence": 1.0,
+                "active_branch_repair": False,
+                "active_branch": {},
+                "active_work_branch": {},
+                "hot_work_followup": False,
+                "hot_work_match_reason": "",
+                "user_operation": {},
+                "source_retrieval": {},
+                "previous_answer_reference": False,
+                "factual_verification_request": False,
+                "explicit_topic_switch": False,
+                "reason": "self_contained_new_topic_fast_path",
+                "active_topic": _text(original or current_text)[:140],
+                "selected_pairs": [],
+                "candidates": [],
+                "matches": [],
+                "history_topics": [],
+                "topic_index": [],
+                "known_topic_count": 0,
+                "history_request": False,
+                "contextual_history_match": False,
+                "matched_topic_count": 0,
+                "requested_topic_count": 10,
+                "minimum_topic_count": 0,
+                "time_window": {},
+                "time_filter": {},
+                "topic_table_markdown": "",
+                "anchor": {},
+                "selected_section": {},
+                "clarification_needed": False,
+                "clarification_prompt": "",
+                "pending_clarification": {},
+                "clarification_resolution": {},
+                "search": {"relation": "NEW", "total_pairs": 0, "candidate_count": 0},
+            }
+        else:
+            dialogue_context = prepare_dialogue_context(
+                uid, current_text, query_interpretation=single_semantics, **search_kwargs
+            )
         if question_sequence:
             question_sequence[0]["dialogue_search"] = _compact_question_search(
                 dialogue_context, current_text, single_semantics
@@ -1592,7 +1645,7 @@ async def execute(
             candidates=len(dialogue_context.get("candidates") or []),
             selected_pairs=len(dialogue_context.get("selected_pairs") or []),
             topic_index_count=len(dialogue_context.get("topic_index") or []),
-            status="ok",
+            status="self_contained_new_topic_fast_path" if skip_memory_search else "ok",
         )
     else:
         current_request_subject_context: dict[str, Any] | None = None
@@ -2653,7 +2706,7 @@ async def execute(
 
     image_result = None
     image_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
-    if image_intent.get("wants_image"):
+    if image_intent.get("wants_image") and not bool(provider_metadata.get("provider_fallback")):
         image_started = time.perf_counter()
         if image_intent.get("reuse_saved_image"):
             saved_output = next((
