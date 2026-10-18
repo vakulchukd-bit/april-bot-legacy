@@ -1090,13 +1090,22 @@ def _assistant_expects_user_input(answer_text: str) -> bool:
     if re.search(r"[?？](?:[\"'»”\)\]]*)\s*$", text):
         return True
     low = text.lower().replace("ё", "е")
+    # Assistant turns often invite an answer through an imperative rather than a
+    # question mark (for example, “Назови цвет предмета…”). Treat these as an open
+    # input slot too; otherwise a one-word answer such as “Белый” is misrouted as
+    # a new topic and the active task's rules disappear from the next prompt.
     invitation = bool(re.search(
-        r"(?:выбери|выбирай|выберите|что\s+выберешь|какой\s+(?:вариант|пункт|ход)|"
+        r"(?:выбери(?:те)?|выбирай|что\s+выберешь|какой\s+(?:вариант|пункт|ход)|"
         r"твой\s+ход|ваш\s+ход|твоя\s+очередь|теперь\s+ты|теперь\s+ваш\s+ход|"
-        r"ответь|ответьте|напиши|пришли|загрузи|покажи|укажи|сообщи|скажи\s+мне|"
+        r"ответь(?:те)?|напиши(?:те)?|пришли(?:те)?|загрузи(?:те)?|покажи(?:те)?|"
+        r"укажи(?:те)?|сообщи(?:те)?|скажи(?:те)?(?:\s+мне)?|"
+        r"назови(?:те)?|опиши(?:те)?|перечисли(?:те)?|оцени(?:те)?|уточни(?:те)?|"
+        r"подтверди(?:те)?|определи(?:те)?|вычисли(?:те)?|сравни(?:те)?|"
+        r"расскажи(?:те)?|объясни(?:те)?|поясни(?:те)?|представь(?:те)?|"
         r"пусть\s+(?:все\s+)?(?:игроки|участники)\s+отвеча\w*|"
         r"(?:игроки|участники)\s+отвеча\w*|"
-        r"choose|pick\s+(?:one|an option)|your\s+turn|your\s+move|send\s+me|provide\s+the)",
+        r"choose|pick\s+(?:one|an option)|your\s+turn|your\s+move|send\s+me|provide\s+the|"
+        r"name\s+(?:the|a)\b|describe\b|list\b|rate\b|specify\b|tell\s+me\b)",
         low,
     ))
     # Common labeled alternatives (А/Б/В or A/B/C) count only if the answer
@@ -1413,12 +1422,24 @@ def _hot_work_followup_candidate(
         _topic_query_overlap(text, branch_text),
         _fuzzy_token_overlap(semantic_tokens, _semantic_tokens(branch_text)) if semantic_tokens else 0.0,
     )
+    standalone_prefix = bool(re.match(
+        r"\s*(?:что\s+такое|кто\s+такой|кто\s+такая|расскажи\s+о|объясни|"
+        r"сколько(?:\s+будет)?|какая\s+погода|what\s+is|who\s+is|"
+        r"tell\s+me\s+about|how\s+much|calculate)\b",
+        low,
+    ))
     standalone_question_shape = bool(
-        "?" in text or "？" in text
-        or re.match(r"\s*(?:что такое|кто такой|кто такая|расскажи о|объясни|сколько|сколько будет|какая погода|what is|who is|tell me about|how much|calculate)\b", low)
+        "?" in text or "？" in text or standalone_prefix
+    )
+    # A standalone factual question may contain only one semantic noun after
+    # stop-word removal (“Расскажи о фотосинтезе?”). Do not treat it as a short
+    # game answer merely because the active game is waiting for a reply.
+    enough_independent_content = bool(
+        len(semantic_tokens) >= 2
+        or (standalone_prefix and bool(q_subjects))
     )
     independent_question = bool(
-        len(semantic_tokens) >= 2
+        enough_independent_content
         and standalone_question_shape
         and (independent_subject_conflict or query_overlap < 0.12)
         and (not has_reference or independent_subject_conflict)
