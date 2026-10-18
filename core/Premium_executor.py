@@ -1116,8 +1116,73 @@ def _restore_selected_assets(
     # Binary sidecars are scoped to the same message row as dialogue_memory.
     # Only the selected topic/turn IDs are read; no global asset scan is performed.
     rows = _load_premium_assets(uid, message_ids)
-    restored_meta: list[dict[str, Any]] = []
+    # PostgreSQL is the durable source for generated output bytes. File sidecars
+    # remain a fast path, but a container restart must not make a saved image
+    # disappear from a continued scene.
+    try:
+        from storage import load_dialogue_asset_payloads
+        database_rows = load_dialogue_asset_payloads(uid, message_ids)
+    except Exception:
+        database_rows = []
     import base64
+    import json as _json
+    existing_asset_keys = set()
+    for asset in rows:
+        raw_existing = bytes(asset.get("content") or b"")
+        existing_asset_keys.add((_text(asset.get("message_id")), hashlib.sha256(raw_existing).hexdigest()))
+    for database_row in database_rows:
+        payloads = database_row.get("asset_payloads") if isinstance(database_row, dict) else []
+        if isinstance(payloads, str):
+            try:
+                payloads = _json.loads(payloads)
+            except (TypeError, ValueError):
+                payloads = []
+        if not isinstance(payloads, list):
+            continue
+        for payload in payloads:
+            if not isinstance(payload, dict) or _text(payload.get("kind")).lower() != "image":
+                continue
+            encoded = _text(payload.get("content_base64"))
+            if not encoded:
+                continue
+            try:
+                content = base64.b64decode(encoded, validate=True)
+            except Exception:
+                continue
+            if not content:
+                continue
+            message_key = _text(payload.get("message_id") or database_row.get("message_id"))
+            digest = _text(payload.get("sha256")) or hashlib.sha256(content).hexdigest()
+            asset_key = (message_key, digest)
+            if asset_key in existing_asset_keys:
+                continue
+            existing_asset_keys.add(asset_key)
+            rows.append({
+                "message_id": message_key,
+                "filename": _text(payload.get("filename") or "april-generated-image.png"),
+                "kind": "image",
+                "mime_type": _text(payload.get("mime_type") or "image/png"),
+                "content": content,
+                "size_bytes": len(content),
+                "asset_role": _text(payload.get("asset_role") or "april_output"),
+                "metadata": {
+                    "source_type": "april_generated",
+                    "asset_role": "april_output",
+                    "output_type": "image",
+                    "prompt": _text(payload.get("prompt"))[:1200],
+                    "width": int(payload.get("width") or 0),
+                    "height": int(payload.get("height") or 0),
+                },
+            })
+    def _asset_sequence_index(asset: dict[str, Any]) -> int:
+        metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+        try:
+            return int(metadata.get("sequence_index")) if metadata.get("sequence_index") is not None else 9999
+        except (TypeError, ValueError, OverflowError):
+            return 9999
+
+    rows.sort(key=_asset_sequence_index)
+    restored_meta: list[dict[str, Any]] = []
     for asset in rows:
         raw = bytes(asset.get("content") or b"")
         if not raw:
@@ -1127,8 +1192,16 @@ def _restore_selected_assets(
         mime_type = _text(asset.get("mime_type") or "application/octet-stream")
         asset_metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
         source_type = _text(asset_metadata.get("source_type") or kind)
-        asset_role = _text(asset_metadata.get("asset_role") or ("april_output" if source_type in {"generated_image", "april_output", "generated_file"} else "user_input"))
+        asset_role = _text(
+            asset.get("asset_role")
+            or asset_metadata.get("asset_role")
+            or ("april_output" if source_type in {"april_generated", "generated_image", "april_output", "generated_file"} else "user_input")
+        )
         analysis_summary = _text(asset_metadata.get("analysis_summary"))[:1200]
+        try:
+            sequence_index = int(asset_metadata.get("sequence_index")) if asset_metadata.get("sequence_index") is not None else 9999
+        except (TypeError, ValueError, OverflowError):
+            sequence_index = 9999
         analysis_key_details = asset_metadata.get("analysis_key_details")
         if not isinstance(analysis_key_details, list):
             analysis_key_details = []
@@ -1138,6 +1211,7 @@ def _restore_selected_assets(
             "filename": filename,
             "content_type": mime_type,
             "mime_type": mime_type,
+            "sequence_index": sequence_index,
             "kind": kind,
             "size_bytes": int(asset.get("size_bytes") or len(raw)),
             "source_type": source_type,
@@ -1150,8 +1224,20 @@ def _restore_selected_assets(
             "analysis_key_details": analysis_key_details,
             "requires_original_analysis": restore_original,
         }
+        metadata_item = {k: common[k] for k in ("filename", "mime_type", "kind", "sequence_index", "asset_role", "output_type", "asset_message_id", "analysis_summary", "analysis_key_details")}
+        if asset_role.lower() in {"april_output", "assistant_output", "generated"} and (kind == "image" or mime_type.startswith("image/")):
+            # This is an answer artifact, not a user-uploaded picture. Keep its
+            # bytes available for the Gallery renderer, but never feed it back as
+            # an input image that would cause analyze_image to swallow the output.
+            metadata_item["_content_data_uri"] = _mime_data_uri(raw, mime_type if mime_type.startswith("image/") else "image/png")
+            metadata_item["width"] = int(asset_metadata.get("width") or 0)
+            metadata_item["height"] = int(asset_metadata.get("height") or 0)
+            metadata_item["prompt"] = _text(asset_metadata.get("prompt"))[:1200]
+            restored_meta.append(metadata_item)
+            continue
+
         attachments.append(common)
-        restored_meta.append({k: common[k] for k in ("filename", "mime_type", "kind", "asset_role", "output_type", "asset_message_id", "analysis_summary", "analysis_key_details")})
+        restored_meta.append(metadata_item)
 
         # Recalled assets with a valid sidecar normally enter the dialogue as
         # semantic context only. Reattach the original bytes for precise reads,
@@ -1167,6 +1253,7 @@ def _restore_selected_assets(
                 "filename": filename,
                 "source_type": common["source_type"],
                 "mime_type": mime_type,
+                "sequence_index": sequence_index,
                 "recalled_from_memory": True,
                 "asset_message_id": common["asset_message_id"],
                 "asset_role": asset_role,
@@ -1187,6 +1274,7 @@ def _restore_selected_assets(
             file_contents.append({
                 "filename": filename,
                 "mime_type": mime_type or "text/plain",
+                "sequence_index": sequence_index,
                 "content": text_value[:48000],
                 "size_bytes": len(raw),
                 "reader_truncated": reader_truncated,
@@ -1203,6 +1291,7 @@ def _restore_selected_assets(
             file_inputs.append({
                 "type": "input_file",
                 "filename": filename,
+                "sequence_index": sequence_index,
                 "file_data": _mime_data_uri(raw, mime_type),
                 "mime_type": mime_type,
                 "size_bytes": len(raw),
@@ -1214,6 +1303,15 @@ def _restore_selected_assets(
                 "analysis_key_details": analysis_key_details,
                 "requires_original_analysis": True,
             })
+    if file_contents:
+        restored_text_budget = min(48_000, max(12_000, 120_000 // max(1, len(file_contents))))
+        for file_item in file_contents:
+            original_text = _text(file_item.get("content"))
+            file_item.setdefault("persistence_content", original_text)
+            if len(original_text) > restored_text_budget:
+                file_item["content"] = original_text[:restored_text_budget]
+                file_item["reader_truncated"] = True
+
     if restored_meta:
         # Do not place OCR or semantic details from documents into operational
         # logs. The returned metadata still carries the sidecar into Provider.
@@ -1731,11 +1829,18 @@ async def execute(
     )
 
     interpretation_started = time.perf_counter()
+    interpretation_memory = dict(dialogue_context)
+    # The inline data URI is private to the renderer/reuse branch and must never
+    # enter the model prompt, structured card, or response metadata.
+    interpretation_memory["restored_assets"] = [
+        {key: value for key, value in item.items() if not str(key).startswith("_")}
+        for item in restored_assets if isinstance(item, dict)
+    ]
     interpretation = build_interpretation(
         current_request=current_text,
         original_request=original,
         display_language=display_language,
-        memory=dialogue_context,
+        memory=interpretation_memory,
         attachments=attachments or [],
         visual_context=visual_context or [],
         identity=identity,
@@ -1982,6 +2087,7 @@ async def execute(
             continue
         attachment_index.append({
             "filename": _text(item.get("filename"))[:200],
+            "sequence_index": int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999),
             "kind": _text(item.get("kind") or "file"),
             "mime_type": _text(item.get("mime_type") or item.get("content_type"))[:100],
             "asset_role": _text(item.get("asset_role") or "user_input"),
@@ -2002,6 +2108,7 @@ async def execute(
             continue
         attachment_index.append({
             "filename": _text(item.get("filename") or "file")[:200],
+            "sequence_index": int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999),
             "kind": "text_file",
             "mime_type": _text(item.get("mime_type") or "text/plain")[:100],
             "asset_role": _text(item.get("asset_role") or "user_input"),
@@ -2021,6 +2128,7 @@ async def execute(
             continue
         attachment_index.append({
             "filename": _text(item.get("filename") or "image")[:200],
+            "sequence_index": int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999),
             "kind": "image",
             "mime_type": _text(item.get("mime_type") or "image/*")[:100],
             "asset_role": _text(item.get("asset_role") or "user_input"),
@@ -2032,14 +2140,22 @@ async def execute(
             "requires_original_analysis": bool(item.get("requires_original_analysis")),
             "source_bytes_attached": not bool(item.get("recalled_from_memory")) or bool(item.get("requires_original_analysis")),
         })
+    def _attachment_index_order(item: dict[str, Any]) -> int:
+        try:
+            return int(item.get("sequence_index", 9999))
+        except (TypeError, ValueError, OverflowError):
+            return 9999
+
+    attachment_index.sort(key=_attachment_index_order)
     unique_index: list[dict[str, Any]] = []
-    index_by_asset_key: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    index_by_asset_key: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
     for item in attachment_index:
         asset_key = (
             _text(item.get("asset_message_id")),
             _text(item.get("filename")),
             _text(item.get("asset_role")),
             _text(item.get("kind")),
+            str(_attachment_index_order(item)),
         )
         existing = index_by_asset_key.get(asset_key)
         if existing is None:
@@ -2054,7 +2170,7 @@ async def execute(
                     existing[key] = value
     attachment_index = unique_index[:12]
     attachment_refs = [
-        {key: item.get(key) for key in ("filename", "kind", "mime_type", "asset_role", "asset_message_id", "source_type", "size_bytes") if item.get(key) is not None}
+        {key: item.get(key) for key in ("filename", "kind", "mime_type", "asset_role", "asset_message_id", "source_type", "size_bytes", "sequence_index") if item.get(key) is not None}
         for item in attachment_index
     ]
 
@@ -2069,6 +2185,7 @@ async def execute(
             {
                 "filename": _text(item.get("filename") or "file"),
                 "mime_type": _text(item.get("mime_type") or "application/octet-stream"),
+                "sequence_index": int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999),
                 "size_bytes": int(item.get("size_bytes") or 0),
                 "file_data": _text(item.get("file_data")),
                 "asset_role": _text(item.get("asset_role") or "user_input"),
@@ -2082,6 +2199,7 @@ async def execute(
             {
                 "filename": _text(item.get("filename") or "file"),
                 "mime_type": _text(item.get("mime_type") or "text/plain"),
+                "sequence_index": int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999),
                 "size_bytes": int(item.get("size_bytes") or 0),
                 "content": _text(item.get("content")),
                 "reader_truncated": bool(item.get("reader_truncated", False)),
@@ -2534,29 +2652,110 @@ async def execute(
             _apr_timing_log("progressive_handoff_skipped", None, error=type(progress_error).__name__)
 
     image_result = None
-    if (interpretation.get("intent") or {}).get("wants_image"):
+    image_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    if image_intent.get("wants_image"):
         image_started = time.perf_counter()
-        image_result = await _generate_image_artifact(
-            interpretation,
-            raw,
-            identity,
-        )
-        _apr_timing_log("image_generation", image_started, succeeded=bool(image_result))
+        if image_intent.get("reuse_saved_image"):
+            saved_output = next((
+                item for item in restored_assets
+                if isinstance(item, dict)
+                and _text(item.get("kind")).lower() == "image"
+                and _text(item.get("asset_role")).lower() in {"april_output", "assistant_output", "generated"}
+                and _text(item.get("_content_data_uri")).startswith("data:image/")
+            ), None)
+            decoded_saved = _decode_asset_data_uri(saved_output.get("_content_data_uri")) if saved_output else None
+            if decoded_saved:
+                saved_bytes, saved_mime = decoded_saved
+                saved_width = int((saved_output or {}).get("width") or 0)
+                saved_height = int((saved_output or {}).get("height") or 0)
+                if len(saved_bytes) >= 24 and saved_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+                    import struct as _struct
+                    saved_width = saved_width or int(_struct.unpack(">I", saved_bytes[16:20])[0])
+                    saved_height = saved_height or int(_struct.unpack(">I", saved_bytes[20:24])[0])
+                saved_image_item = {
+                    "src": _mime_data_uri(saved_bytes, saved_mime or "image/png"),
+                    "mime_type": saved_mime or "image/png",
+                    "width": saved_width,
+                    "height": saved_height,
+                    "alt": _text((saved_output or {}).get("prompt") or "Сохранённое изображение предыдущей сцены")[:180],
+                    "caption": "Изображение восстановлено из сохранённой сцены",
+                }
+                reused_artifact = {
+                    "artifact_type": "image",
+                    "type": "image",
+                    "mime_type": saved_mime or "image/png",
+                    "width": saved_width,
+                    "height": saved_height,
+                    "payload": {
+                        "kind": "generated_image",
+                        "artifact_type": "image",
+                        "mime_type": saved_mime or "image/png",
+                        "width": saved_width,
+                        "height": saved_height,
+                        "images": [saved_image_item],
+                    },
+                }
+                image_result = {
+                    "success": True,
+                    "image_bytes": saved_bytes,
+                    "mime_type": saved_mime or "image/png",
+                    "width": saved_width,
+                    "height": saved_height,
+                    "prompt": _text((saved_output or {}).get("prompt"))[:1200],
+                    "artifact": reused_artifact,
+                    "reused": True,
+                }
+                _apr_timing_log("saved_image_reuse", None, reused=True, image_bytes=len(saved_bytes), message_key=_apr_diag_ref((saved_output or {}).get("asset_message_id")))
+        if image_result is None:
+            image_result = await _generate_image_artifact(
+                interpretation,
+                raw,
+                identity,
+            )
+        _apr_timing_log("image_generation", image_started, succeeded=bool(image_result), reused=bool((image_result or {}).get("reused")))
         if image_result:
-            image_artifact = image_result.get("artifact") if isinstance(image_result.get("artifact"), dict) else image_result
-            packaged["artifacts"].append(image_artifact)
-            artifact_payload = image_artifact.get("payload") if isinstance(image_artifact.get("payload"), dict) else {}
-            image_items = image_artifact.get("images") if isinstance(image_artifact.get("images"), list) else artifact_payload.get("images", [])
-            image_items = image_items if isinstance(image_items, list) else []
-            # Put image data directly in the typed block payload. The contract still
-            # carries the artifact sidecar, but the Web gallery no longer depends on
-            # every renderer understanding a nested artifact envelope identically.
-            visible_image_payload = dict(artifact_payload)
-            if image_items:
-                visible_image_payload["images"] = image_items
-            for key in ("src", "url", "image", "image_data_uri", "image_base64", "title", "alt", "caption", "width", "height", "mime_type"):
-                if key not in visible_image_payload and image_artifact.get(key) not in (None, "", [], {}):
-                    visible_image_payload[key] = image_artifact[key]
+            source_artifact = image_result.get("artifact") if isinstance(image_result.get("artifact"), dict) else image_result
+            artifact_payload = source_artifact.get("payload") if isinstance(source_artifact.get("payload"), dict) else {}
+            source_items = source_artifact.get("images") if isinstance(source_artifact.get("images"), list) else artifact_payload.get("images", [])
+            source_items = source_items if isinstance(source_items, list) else []
+            raw_image_bytes = image_result.get("image_bytes")
+            image_mime = _text(image_result.get("mime_type") or source_artifact.get("mime_type") or "image/png")
+            image_data_uri = _mime_data_uri(bytes(raw_image_bytes), image_mime) if isinstance(raw_image_bytes, (bytes, bytearray)) and raw_image_bytes else ""
+            source_item = next((item for item in source_items if isinstance(item, dict) and _text(item.get("src") or item.get("image_data_uri") or item.get("url")).startswith("data:image/")), {})
+            if not image_data_uri:
+                image_data_uri = _text(source_item.get("src") or source_item.get("image_data_uri") or source_item.get("url"))
+            image_width = int(image_result.get("width") or source_artifact.get("width") or source_item.get("width") or 0)
+            image_height = int(image_result.get("height") or source_artifact.get("height") or source_item.get("height") or 0)
+            visible_image = {
+                "src": image_data_uri,
+                "mime_type": image_mime,
+                "width": image_width,
+                "height": image_height,
+                "alt": _text(source_item.get("alt") or source_item.get("title") or "Иллюстрация к ответу")[:180],
+                "caption": _text(source_item.get("caption") or source_item.get("title"))[:220],
+            }
+            # Keep the image bytes exactly once in the response: GalleryBlock reads
+            # payload.images. The previous block duplicated the same ~400 KB PNG
+            # through payload, block.artifact, block.images and artifacts, raising
+            # peak JSON/React memory use and the risk of the Web render crashing.
+            compact_artifact = {
+                "artifact_type": "image",
+                "type": "image",
+                "mime_type": image_mime,
+                "width": image_width,
+                "height": image_height,
+                "generated": not bool((image_result or {}).get("reused")),
+                "reused": bool((image_result or {}).get("reused")),
+            }
+            packaged["artifacts"].append(compact_artifact)
+            visible_image_payload = {
+                "kind": "generated_image",
+                "artifact_type": "image",
+                "mime_type": image_mime,
+                "width": image_width,
+                "height": image_height,
+                "images": [visible_image] if image_data_uri else [],
+            }
             image_step_index = 1
             image_step_title = "Illustration"
             image_sequence_items = [item for item in presentation_sequence if isinstance(item, dict) and "image" in (item.get("output_types") or [])]
@@ -2589,8 +2788,6 @@ async def execute(
                 "viewer": get_web_renderer_registration("image").get("viewer", "GalleryBlock"),
                 "content": "",
                 "payload": visible_image_payload,
-                "artifact": image_artifact,
-                "images": image_items,
             }
             packaged["render_blocks"].append(image_block)
 
@@ -2635,7 +2832,8 @@ async def execute(
             "interpretation": interpretation,
             "selected_rooms": selected_rooms,
             "render_plan": render_plan,
-            "image_generated": bool(image_result),
+            "image_generated": bool(image_result and not image_result.get("reused")),
+            "image_reused": bool(image_result and image_result.get("reused")),
             "local_clarification": bool(provider_metadata.get("local_clarification")),
             "dialogue_memory_record": (
                 raw.get("metadata", {}).get("dialogue_memory_record", {})
@@ -2682,7 +2880,7 @@ async def execute(
                 "premium_interpretation_identity",
                 "Premium_C_ARTIFACT_CONTRACT",
                 "provider_luna",
-                "C_APRIL_IMAGES_GENERATOR" if image_result else "",
+                "C_APRIL_IMAGES_GENERATOR" if image_result and not image_result.get("reused") else "",
                 "SceneContract",
                 "RenderMessage",
                 "bot.ru",
@@ -2706,6 +2904,7 @@ async def execute(
             "filename": _text(item.get("filename") or "image"),
             "source_type": _text(item.get("source_type") or "image"),
             "mime_type": _text(item.get("mime_type") or "image/*"),
+            "sequence_index": int(item.get("sequence_index", 9999) or 0),
             "asset_role": _text(item.get("asset_role") or "user_input"),
             "asset_message_id": _text(item.get("asset_message_id") or identity["message_id"]),
             "output_type": _text(item.get("output_type")),
@@ -2732,6 +2931,7 @@ async def execute(
         ref = _save_premium_asset(uid, identity["message_id"], filename=filename, content=raw_bytes,
             mime_type=_text(item.get("mime_type") or mime), kind="image", asset_role="user_input",
             metadata={"source_type": _text(item.get("source_type") or "user_upload"),
+                      "sequence_index": int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999),
                       "analysis_summary": _text(item.get("analysis_summary"))[:1200],
                       "analysis_key_details": item.get("analysis_key_details") if isinstance(item.get("analysis_key_details"), list) else []})
         if ref:
@@ -2750,13 +2950,13 @@ async def execute(
         seen_input_keys.add(dedupe)
         ref = _save_premium_asset(uid, identity["message_id"], filename=filename, content=raw_bytes,
             mime_type=_text(item.get("mime_type") or mime), kind="file", asset_role="user_input",
-            metadata={"source_type": "user_upload", "analysis_summary": _text(item.get("analysis_summary"))[:1200]})
+            metadata={"source_type": "user_upload", "sequence_index": int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999), "analysis_summary": _text(item.get("analysis_summary"))[:1200]})
         if ref:
             persisted_input_refs.append(ref)
     for item in (file_contents or []):
         if not isinstance(item, dict) or item.get("recalled_from_memory"):
             continue
-        body = _text(item.get("content"))
+        body = _text(item.get("persistence_content") or item.get("content"))
         if not body:
             continue
         filename = _text(item.get("filename") or f"uploaded-text-{identity['message_id'][-8:]}.txt")
@@ -2767,7 +2967,8 @@ async def execute(
         seen_input_keys.add(dedupe)
         ref = _save_premium_asset(uid, identity["message_id"], filename=filename, content=raw_bytes,
             mime_type=_text(item.get("mime_type") or "text/plain"), kind="text_file", asset_role="user_input",
-            metadata={"source_type": "user_upload_text", "analysis_summary": _text(item.get("analysis_summary"))[:1200],
+            metadata={"source_type": "user_upload_text", "sequence_index": int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999),
+                      "analysis_summary": _text(item.get("analysis_summary"))[:1200],
                       "reader_truncated": bool(item.get("reader_truncated")), "source_chars": int(item.get("source_chars") or len(body))})
         if ref:
             persisted_input_refs.append(ref)
@@ -2777,6 +2978,7 @@ async def execute(
     output_asset_persist_started = time.perf_counter()
     generated_asset_saved = False
     output_asset_refs: list[dict[str, Any]] = []
+    durable_asset_payloads: list[dict[str, Any]] = []
     if image_result:
         # The generator returns validated raw bytes as well as a scene artifact.
         # Persist raw bytes first; artifact fields are the compatibility fallback.
@@ -2788,12 +2990,32 @@ async def execute(
             generated_image = _image_payload_bytes(image_result.get("artifact") or image_result)
         if generated_image:
             generated_bytes, generated_mime = generated_image
+            generated_width = int(image_result.get("width") or 0)
+            generated_height = int(image_result.get("height") or 0)
+            if len(generated_bytes) >= 24 and generated_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+                import struct as _struct
+                generated_width = generated_width or int(_struct.unpack(">I", generated_bytes[16:20])[0])
+                generated_height = generated_height or int(_struct.unpack(">I", generated_bytes[20:24])[0])
+            durable_asset_payloads.append({
+                "kind": "image",
+                "mime_type": generated_mime or "image/png",
+                "asset_role": "april_output",
+                "output_type": "image",
+                "filename": f"april-generated-{identity['message_id'][-10:]}.png",
+                "message_id": identity["message_id"],
+                "size_bytes": len(generated_bytes),
+                "sha256": hashlib.sha256(generated_bytes).hexdigest(),
+                "width": generated_width,
+                "height": generated_height,
+                "prompt": _text((image_result or {}).get("prompt"))[:1200],
+                "content_base64": base64.b64encode(generated_bytes).decode("ascii"),
+            })
             generated_ref = _save_premium_asset(
                 uid, identity["message_id"],
                 filename=f"april-generated-{identity['message_id'][-10:]}.png",
                 content=generated_bytes, mime_type=generated_mime, kind="image",
                 asset_role="april_output", output_type="image",
-                metadata={"source_type": "april_generated", "prompt": _text((image_result or {}).get("prompt"))[:1200]},
+                metadata={"source_type": "april_generated", "asset_role": "april_output", "output_type": "image", "width": generated_width, "height": generated_height, "prompt": _text((image_result or {}).get("prompt"))[:1200]},
             )
             if generated_ref:
                 generated_asset_saved = True
@@ -2807,7 +3029,6 @@ async def execute(
     if should_persist_code:
         code_blocks = [block for block in normalized_blocks if isinstance(block, dict) and str(block.get("type") or "").lower() == "code"]
         seen_source_hashes: set[str] = set()
-        import hashlib
         for block_index, block in enumerate(code_blocks[:4], 1):
             extracted = _source_code_from_block(block)
             if not extracted:
@@ -2870,7 +3091,9 @@ async def execute(
                 output_asset_refs.append(saved_ref)
 
     _apr_timing_log("output_asset_persist", output_asset_persist_started,
-        generated_asset_saved=generated_asset_saved, output_asset_refs=len(output_asset_refs))
+        generated_asset_saved=generated_asset_saved, output_asset_refs=len(output_asset_refs),
+        durable_asset_payloads=len(durable_asset_payloads),
+        durable_asset_bytes=sum(int(item.get("size_bytes") or 0) for item in durable_asset_payloads))
 
     # Make the current Scene carry asset pointers and retrieval evidence as well
     # as the renderer blocks; no data URI or private file bytes enter the Scene.
@@ -2960,12 +3183,13 @@ async def execute(
         interpretation_id=identity["interpretation_id"],
         structured_request=structured_request,
         structured_response=structured_response,
+        asset_payloads=durable_asset_payloads,
     )
     pair_save_ms = round((time.perf_counter() - pair_save_started) * 1000, 1)
     _apr_timing_log("dialogue_pair_persist", saved=bool(saved), elapsed_ms=pair_save_ms,
         answer_chars=len(answer), structured_request_fields=len(structured_request),
         structured_response_fields=len(structured_response), render_blocks=len(response.render_blocks or []),
-        artifacts=len(response.artifacts or []))
+        artifacts=len(response.artifacts or []), durable_asset_payloads=len(durable_asset_payloads))
 
     result.update(
         {
@@ -2984,7 +3208,10 @@ async def execute(
             "memory_pair_count": int(dialogue_context.get("search", {}).get("total_pairs") or 0),
             "memory_selected_count": len(dialogue_context.get("selected_pairs") or []),
             "memory_saved": saved,
-            "dialogue_assets_restored": restored_assets,
+            "dialogue_assets_restored": [
+                {key: value for key, value in item.items() if not str(key).startswith("_")}
+                for item in restored_assets if isinstance(item, dict)
+            ],
             "generated_asset_saved": generated_asset_saved,
             "dialogue_asset_refs": {"source_inputs": attachment_refs, "april_outputs": output_asset_refs},
             "interpretation": interpretation,
