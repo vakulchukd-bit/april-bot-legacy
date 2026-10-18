@@ -106,7 +106,11 @@ When PROTECTED_CURRENT_INPUT is present, its metadata identifies a separate adja
 For CONTINUE, continue the selected subject and do not repeat questions already answered.
 ACTIVE_WORK_BRANCH is present only when State Manager matched this request to a live task/interaction.
 When active, use it as the FIRST context source: apply the current task state and selected canonical
-work pairs before general topic/history ranking. For a numbered choice, in-scene action, code change,
+work pairs before general topic/history ranking. Treat last_assistant_answer and recent_steps.april_text as
+canonical exact records of what April actually output, especially for numeric values, single letters, one-word
+answers, choices, and game moves. If the user asks what April just said/named/wrote, quote that exact stored
+value when present; do not claim it is missing only because a summary or selected-pair excerpt omits it.
+Distinguish April's actual prior output from the factually correct answer. For a numbered choice, in-scene action, code change,
 solution step, image edit, diagram/graph adjustment, or other operation on that task, continue the
 same work instead of restarting or asking the user to resend rules, code, constraints, or state already
 provided. If the work branch does not actually fit the request, fall through to the ordinary search and
@@ -1342,7 +1346,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 task_work = task_search.get("active_work_branch") if isinstance(task_search.get("active_work_branch"), dict) else {}
                 task_search["active_work_branch"] = {
                     key: value for key, value in task_work.items()
-                    if key in {"active", "priority", "kind", "work_id", "topic", "goal", "state_summary", "last_action", "expects_choice", "source_message_id", "origin_message_id", "match_reason", "matched_this_turn"}
+                    if key in {"active", "priority", "kind", "work_id", "topic", "goal", "state_summary", "last_action", "expects_choice", "source_message_id", "origin_message_id", "match_reason", "matched_this_turn", "last_user_text", "last_assistant_answer", "recent_steps"}
                     and value not in (None, "", {}, [])
                 } if task_work.get("active") and task_search.get("hot_work_followup") else {}
                 task_search["selected_pairs"] = [
@@ -1614,7 +1618,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "active_branch_repair": bool(task_search.get("active_branch_repair")),
                 "active_work_branch": {
                     key: value for key, value in (task_search.get("active_work_branch") or {}).items()
-                    if key in {"active", "priority", "kind", "work_id", "topic", "goal", "state_summary", "last_action", "expects_choice", "source_message_id", "origin_message_id", "match_reason", "matched_this_turn"}
+                    if key in {"active", "priority", "kind", "work_id", "topic", "goal", "state_summary", "last_action", "expects_choice", "source_message_id", "origin_message_id", "match_reason", "matched_this_turn", "last_user_text", "last_assistant_answer", "recent_steps"}
                     and value not in (None, "", {}, [])
                 } if isinstance(task_search.get("active_work_branch"), dict) and task_search.get("hot_work_followup") else {},
                 "hot_work_followup": bool(task_search.get("hot_work_followup")),
@@ -1784,7 +1788,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "DIALOGUE_RELATION": data.get("DIALOGUE_RELATION") or "NEW",
             "ACTIVE_WORK_BRANCH": {
                 key: value for key, value in (data.get("ACTIVE_WORK_BRANCH") or {}).items()
-                if key in {"active", "priority", "kind", "work_id", "topic", "goal", "state_summary", "last_action", "expects_choice", "source_message_id", "origin_message_id", "match_reason", "matched_this_turn"}
+                if key in {"active", "priority", "kind", "work_id", "topic", "goal", "state_summary", "last_action", "expects_choice", "source_message_id", "origin_message_id", "match_reason", "matched_this_turn", "last_user_text", "last_assistant_answer", "recent_steps"}
                 and value not in (None, "", {}, [])
             } if isinstance(data.get("ACTIVE_WORK_BRANCH"), dict) else {},
             "DIALOGUE_COMMUNICATION": data.get("DIALOGUE_COMMUNICATION") or {},
@@ -2287,6 +2291,18 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "goal": _clip(active_work_branch.get("goal"), 360),
         "state_summary": _clip(active_work_branch.get("state_summary"), 480),
         "last_action": _clip(active_work_branch.get("last_action"), 180),
+        "last_user_text": _clip(active_work_branch.get("last_user_text"), 300),
+        "last_assistant_answer": _clip(active_work_branch.get("last_assistant_answer"), 600),
+        "recent_steps": [
+            {
+                "message_id": _clip(item.get("message_id"), 100),
+                "user_text": _clip(item.get("user_text"), 240),
+                "april_text": _clip(item.get("april_text"), 500),
+                "topic": _clip(item.get("topic"), 100),
+            }
+            for item in (active_work_branch.get("recent_steps") or [])[-3:]
+            if isinstance(item, dict)
+        ],
         "expects_choice": bool(active_work_branch.get("expects_choice")),
         "source_message_id": _clip(active_work_branch.get("source_message_id"), 120),
         "origin_message_id": _clip(active_work_branch.get("origin_message_id"), 120),
