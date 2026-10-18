@@ -15,6 +15,7 @@ import hmac
 import base64
 import json
 import os
+import queue
 import re
 import traceback
 import time
@@ -398,6 +399,7 @@ def _handle_payload(
     attachments: list[Any] | None = None,
     *,
     voice_transcript: str = "",
+    progress_sink: Any = None,
 ) -> tuple[int, dict[str, Any]]:
     pipeline_started = time.perf_counter()
     identity_started = time.perf_counter()
@@ -547,26 +549,30 @@ def _handle_payload(
             processor=selected_executor_name,
             canonical_route=CANONICAL_CHAT_ROUTE,
         )
-        result = asyncio.run(selected_executor(
-            uid,
-            text=original,
-            internal_text=internal_text,
-            display_language=language,
-            flow_id=_text(data.get("flow_id")),
-            conversation_id=conversation_id or dialog_id,
-            dialog_id=dialog_id,
-            message_id=message_id,
-            resume_message_id=_text(data.get("resume_message_id")),
-            interpretation_id=_text(data.get("interpretation_id")),
-            visual_context=visual_context,
-            attachments=attachment_meta,
-            file_inputs=file_inputs,
-            file_contents=text_file_contents,
-            translation=translation,
-            user_display_name=user_display_name,
-            message_created_at=message_created_at,
-            user_utc_offset_minutes=user_utc_offset_minutes,
-        ))
+        execution_kwargs = {
+            "text": original,
+            "internal_text": internal_text,
+            "display_language": language,
+            "flow_id": _text(data.get("flow_id")),
+            "conversation_id": conversation_id or dialog_id,
+            "dialog_id": dialog_id,
+            "message_id": message_id,
+            "resume_message_id": _text(data.get("resume_message_id")),
+            "interpretation_id": _text(data.get("interpretation_id")),
+            "visual_context": visual_context,
+            "attachments": attachment_meta,
+            "file_inputs": file_inputs,
+            "file_contents": text_file_contents,
+            "translation": translation,
+            "user_display_name": user_display_name,
+            "message_created_at": message_created_at,
+            "user_utc_offset_minutes": user_utc_offset_minutes,
+        }
+        # Progressive events are a Premium-only extension of the existing executor
+        # call. The Free executor continues on its original response path unchanged.
+        if is_premium and callable(progress_sink):
+            execution_kwargs["progress_sink"] = progress_sink
+        result = asyncio.run(selected_executor(uid, **execution_kwargs))
         _apr_timing_log("executor_returned", executor_started, user_key=_apr_diag_ref(uid),
             message_key=_apr_diag_ref(message_id), result_type=type(result).__name__,
             answer_chars=len(_text(result.get("answer") or result.get("content"))) if isinstance(result, dict) else 0)
@@ -1584,6 +1590,75 @@ class AprilHandler(BaseHTTPRequestHandler):
                         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
                             client_disconnected = True
                             print("[APRIL_VOICE] stage=client_disconnected while_closing_ndjson=true", flush=True)
+                return
+
+            # Opt-in NDJSON transport for text-only Premium turns. It uses the
+            # same authenticated /api/v1/chat route and forwards in-flight renderer
+            # events without changing the legacy JSON response for Free users.
+            wants_progress_stream = (
+                "application/x-ndjson" in _text(self.headers.get("Accept")).lower()
+                and content_type.lower().startswith("application/json")
+                and _voice_attachment(attachments) is None
+                and _text(get_user_plan(canonical_user_id)).lower() == "premium"
+            )
+            if wants_progress_stream:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+
+                client_disconnected = False
+                event_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+
+                def write_progress_event(event: dict[str, Any]) -> bool:
+                    nonlocal client_disconnected
+                    if client_disconnected:
+                        return False
+                    encoded = (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+                    try:
+                        self.wfile.write(f"{len(encoded):X}\r\n".encode("ascii"))
+                        self.wfile.write(encoded)
+                        self.wfile.write(b"\r\n")
+                        self.wfile.flush()
+                        return True
+                    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
+                        client_disconnected = True
+                        _apr_timing_log("progress_stream_client_disconnected", user_key=_apr_diag_ref(canonical_user_id))
+                        return False
+
+                try:
+                    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="april-premium-stream") as stream_pool:
+                        worker = stream_pool.submit(_handle_payload, data, attachments, progress_sink=event_queue.put)
+                        while not worker.done() or not event_queue.empty():
+                            try:
+                                event = event_queue.get(timeout=8.0)
+                            except queue.Empty:
+                                if worker.done():
+                                    break
+                                if not write_progress_event({"type": "progress", "stage": "processing"}):
+                                    continue
+                                continue
+                            write_progress_event(event)
+                        status, payload = worker.result()
+                        while not event_queue.empty():
+                            write_progress_event(event_queue.get_nowait())
+                        write_progress_event({"type": "answer", "status": status, "data": payload})
+                except Exception as stream_error:
+                    traceback.print_exc()
+                    if not client_disconnected:
+                        write_progress_event({
+                            "type": "answer",
+                            "status": 500,
+                            "data": {"success": False, "error": _text(str(stream_error)) or "PREMIUM_STREAM_FAILED", "canonical_route": CANONICAL_CHAT_ROUTE},
+                        })
+                finally:
+                    if not client_disconnected:
+                        try:
+                            self.wfile.write(b"0\r\n\r\n")
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
+                            pass
                 return
 
             handler_started = time.perf_counter()
