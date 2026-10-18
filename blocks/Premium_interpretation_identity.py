@@ -2483,6 +2483,40 @@ def build_interpretation(
     if "text" not in requested_outputs:
         requested_outputs.insert(0, "text")
     routing_capabilities = _infer_routing_capabilities(original or text)
+    relation = _text(memory.get("relation") or "NEW").upper()
+    normalized_visual_request = _text(original or text).lower().replace("ё", "е")
+    has_saved_output_image = any(
+        _text(item.get("kind")).lower() == "image"
+        and _text(item.get("asset_role")).lower() in {"april_output", "assistant_output", "generated"}
+        for item in restored_assets
+    )
+    # A short follow-up such as "А фото его" means: restore the image promised
+    # in the active visual task, not inspect the previous generated image as an
+    # input and not silently suppress the image renderer because no verb appears.
+    explicit_new_image = bool(re.search(
+        r"\b(?:создай|сгенерир\w*|нарису\w*|изобрази|сделай\s+(?:нов\w*|друг\w*)|нов\w*\s+(?:фото|картинк\w*|изображени\w*)|друг\w*\s+(?:фото|картинк\w*|изображени\w*)|generate|create|draw|make\s+(?:a\s+)?new|another\s+(?:image|photo|picture))\b",
+        normalized_visual_request,
+    ))
+    explicit_image_edit = _detect_image_modification(normalized_visual_request)
+    image_noun_present = bool(re.search(
+        r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b)",
+        normalized_visual_request,
+    ))
+    retrieval_language = bool(re.search(
+        r"\b(?:покаж\w*|верни|восстанов\w*|подним\w*|открой|выведи|отобраз\w*|обещал|долж\н\w*|не\s+увидел|не\s+показал|не\s+загрузил\w*|пропал\w*|где\s+(?:мое|моя|моё|его|ее|её|фото|картинк\w*)|show|restore|recover|bring\s+back|didn.?t\s+see|not\s+shown|missing)\b",
+        normalized_visual_request,
+    ))
+    short_image_reference = (
+        len(normalized_visual_request.split()) <= (16 if retrieval_language else 9)
+        and image_noun_present
+        and not explicit_new_image
+        and not explicit_image_edit
+        and not re.search(r"\b(?:что\s+(?:на|изображено|видно)|опиши|анализиру\w*|прочитай|распознай|написано|what\s+(?:is|does)|describe|analy[sz]e|read\s+the)\b", normalized_visual_request)
+        and (retrieval_language or bool(re.search(r"\b(?:его|ее|её|их|эт\w*|тот|ту|this|that|his|her|their|it|а|и|еще|ещё|also|же)\b", normalized_visual_request)))
+    )
+    reuse_saved_image = relation == "CONTINUE" and has_saved_output_image and short_image_reference
+    if reuse_saved_image and "image" not in requested_outputs:
+        requested_outputs.append("image")
     wants_image = "image" in requested_outputs
     wants_file = "file" in requested_outputs
     wants_links = "link" in requested_outputs
@@ -2498,7 +2532,6 @@ def build_interpretation(
         allow_data_driven_3d=data_source_attached,
     ) if "graph" in requested_outputs else {}
 
-    relation = _text(memory.get("relation") or "NEW").upper()
     selected_pairs = _select_continuation_pairs(memory)
     history_request = (
         bool(memory.get("history_request"))
@@ -2567,6 +2600,8 @@ def build_interpretation(
         has_file=has_original_file,
         wants_image=wants_image,
     )
+    if reuse_saved_image:
+        task = "answer_request"
     # A modification verb requests a code edit; merely asking what a code file
     # does remains analyze_file and never silently becomes code generation.
     if _is_code_modification_request(original or text) and has_file:
@@ -2603,7 +2638,8 @@ def build_interpretation(
             "task": task,
             "requested_outputs": requested_outputs,
             "wants_image": wants_image,
-            "explicit_generation_request": wants_image,
+            "reuse_saved_image": bool(reuse_saved_image),
+            "explicit_generation_request": bool(wants_image and not reuse_saved_image),
             "adaptive_visual_policy": True,
             "wants_file": wants_file,
             "wants_links": wants_links,
@@ -2668,11 +2704,12 @@ def build_interpretation(
         "visual": {
             "items": visual_context,
             "analysis_required": has_original_image,
-            "generation_required": wants_image,
+            "generation_required": bool(wants_image and not reuse_saved_image),
+            "reuse_saved_image": bool(reuse_saved_image),
             "input_source": "current_upload" if any(not item.get("recalled_from_memory") for item in visual_context) else ("dialogue_memory" if has_image else "none"),
             "remembered_assets": [item for item in restored_assets if _text(item.get("kind")).lower() == "image"][:4],
-            "generator": "C_APRIL_IMAGES_GENERATOR" if wants_image else "",
-            "image_model": "gpt-image-2" if wants_image else "",
+            "generator": "C_APRIL_IMAGES_GENERATOR" if wants_image and not reuse_saved_image else "",
+            "image_model": "gpt-image-2" if wants_image and not reuse_saved_image else "",
         },
         "files": {
             "items": attachments,
