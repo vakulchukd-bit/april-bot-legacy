@@ -158,23 +158,30 @@ class AprilImagesGenerator:
             return ""
 
         if isinstance(value, dict):
+            # Prefer fields explicitly meant for image generation. A broad
+            # user-facing description or answer must not shadow a more specific
+            # visual prompt and send the wrong scene to the image model.
             preferred = (
-                "prompt",
-                "description",
-                "visual_prompt",
-                "image_prompt",
+                "openai_structured_visual_plan_semantic",
                 "visual_generation_prompt",
-                "image",
-                "visual",
-                "visual_context",
+                "image_prompt",
+                "visual_prompt",
+                "scene_prompt",
+                "image_description",
+                "visual_description",
+                "prompt",
                 "scene",
                 "subject",
+                "visual",
+                "visual_context",
+                "image",
                 "request",
+                "description",
                 "title",
                 "summary",
+                "alt",
                 "answer",
                 "content",
-                "alt",
             )
             for key in preferred:
                 if key not in value:
