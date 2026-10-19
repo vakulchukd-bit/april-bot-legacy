@@ -226,13 +226,7 @@ def _contains_marker(text: str, marker: str) -> bool:
 
 
 def _detect_image_modification(text: str) -> bool:
-    """Detect a user request to edit an existing image, including natural references to a sent photo.
-
-    This is used by the Free chain. Explicit requests to change the exact photo a
-    user previously sent must trigger the Premium-only edit notice even when the
-    original bytes are not attached to the current voice/text message. Generic
-    requests such as "добавь этому котёнку мячик" intentionally do not match.
-    """
+    """Detect an explicit request to modify/retouch an existing image, not a how-to question."""
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
@@ -246,43 +240,7 @@ def _detect_image_modification(text: str) -> bool:
     ))
     if how_to_question:
         return False
-
-    if any(_contains_marker(low, marker.replace("ё", "е")) for marker in _IMAGE_MODIFICATION_MARKERS):
-        return True
-
-    image_noun = r"(?:фото(?:графи\w*)?|картинк\w*|изображени\w*|photo(?:graph)?s?|images?|pictures?)"
-    # Direct forms like "измени именно ту фотографию" are missed by simple
-    # substring markers because polite/reference words are inserted between the
-    # verb and the image noun. Keep this pattern limited to actual edit verbs.
-    direct_edit = r"(?:edit|modify|change|alter|retouch|enhance|improve|измени\w*|поменя\w*|отредактир\w*|обработ\w*|ретуш\w*|улучш\w*|передел\w*)"
-    image_reference_words = r"(?:(?:the|this|that|same|exact|ту|эту|эту\s+самую|ту\s+самую|именно|саму|самую|присланную|загруженную|прикрепл[её]нную|мою|твою)\s+){0,4}"
-    if re.search(
-        rf"(?<![\w\u0080-\uffff]){direct_edit}\b\s+{image_reference_words}{image_noun}\b",
-        low,
-        flags=re.IGNORECASE,
-    ):
-        return True
-
-    # Also catch object-level changes explicitly tied to a source supplied by
-    # the user, e.g. "добавь мячик к той фотографии, что я тебе прислал".
-    # Requiring both a sent/uploaded-source reference and an edit action avoids
-    # restricting ordinary image creation based on a casual image mention.
-    sent_source = bool(re.search(
-        rf"\b{image_noun}\b.{{0,120}}\b(?:котор\w*|что|которую)\b.{{0,40}}"
-        r"\b(?:я\s+)?(?:тебе\s+)?(?:прислал\w*|отправил\w*|загрузил\w*|прикрепил\w*|передал\w*|sent|uploaded|attached|shared)\b"
-        r"|\b(?:именно\s+)?(?:ту|эту|ту\s+самую|эту\s+самую)\s+"
-        rf"{image_noun}\b.{{0,120}}\b(?:я\s+)?(?:тебе\s+)?(?:прислал\w*|отправил\w*|загрузил\w*|прикрепил\w*|sent|uploaded|attached|shared)\b",
-        low,
-        flags=re.IGNORECASE,
-    ))
-    edit_action = bool(re.search(
-        r"\b(?:edit\w*|modify\w*|change\w*|alter\w*|retouch\w*|enhance\w*|improve\w*|"
-        r"измени\w*|поменя\w*|отредактир\w*|обработ\w*|ретуш\w*|улучш\w*|передел\w*|"
-        r"добав\w*|убер\w*|замен\w*|встав\w*)\b",
-        low,
-        flags=re.IGNORECASE,
-    ))
-    return sent_source and edit_action
+    return any(_contains_marker(low, marker.replace("ё", "е")) for marker in _IMAGE_MODIFICATION_MARKERS)
 
 
 def _detect_image_compositing_request(text: str) -> bool:
