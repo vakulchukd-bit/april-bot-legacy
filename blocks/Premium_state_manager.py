@@ -4283,6 +4283,257 @@ def search_dialogue_context(
         reference_followup=reference_followup,
     )
 
+    # The persisted hot-work marker is not itself proof that the current request
+    # belongs to that task. Compare its immutable origin with the topic provenance
+    # built by the memory search. Earlier versions could save unrelated turns as
+    # CONTINUE; those turns then polluted state_summary and made every later query
+    # look like a continuation of the original task. Keep the old task searchable,
+    # but detach it from the live route unless either the current request genuinely
+    # matches its source or it is already attached to a newer, separately indexed
+    # topic in this dialogue.
+    active_work_origin_id = _text(active_work_branch.get("origin_message_id"))
+    latest_topic_origin_id = _text((latest_same_dialog or {}).get("topic_origin_message_id"))
+    active_work_root_row = next((
+        row for row in all_rows
+        if isinstance(row, dict) and active_work_origin_id
+        and _text(row.get("message_id")) == active_work_origin_id
+    ), None)
+    active_work_root_profile = _infer_active_work_branch(active_work_root_row) if active_work_root_row else {}
+    active_work_root_user_text = _text((active_work_root_row or {}).get("user_text") or (active_work_root_row or {}).get("user"))
+    active_work_root_text = " ".join(filter(None, (
+        _row_subject_text(active_work_root_row) if active_work_root_row else "",
+        active_work_root_user_text,
+        _text(active_work_root_profile.get("topic")) if active_work_root_profile.get("active") else ("" if active_work_root_row else _text(active_work_branch.get("topic"))),
+        _text(active_work_root_profile.get("goal")) if active_work_root_profile.get("active") else ("" if active_work_root_row else _text(active_work_branch.get("goal"))),
+    )))
+    active_work_root_subjects = _subject_tokens(active_work_root_text)
+    active_work_root_subject_overlap = _subject_overlap(query_subjects, active_work_root_subjects)
+    active_work_root_subject_conflict = _subject_conflicts(query_subjects, active_work_root_subjects)
+    active_work_root_topic_overlap = _topic_query_overlap(query, active_work_root_text) if active_work_root_text else 0.0
+    # A root match must come from its subject/source, not the mutable rolling
+    # state_summary or the latest row that may already have been attached by error.
+    active_work_root_match = bool(
+        active_work_root_text
+        and (
+            active_work_root_subject_overlap >= 0.34
+            or (active_work_root_topic_overlap >= 0.36 and not active_work_root_subject_conflict)
+        )
+    )
+
+    # The newest active branch may belong to a newer, unrelated topic. For an
+    # explicit semantic return, search the retained current-dialogue rows for a
+    # task whose immutable origin actually matches the request. Do not reactivate
+    # old work from recency alone, and do not use rows whose topic provenance
+    # contradicts the task origin even if a stale marker claims they belong to it.
+    historical_work_reactivated = False
+    semantic_features = query_interpretation.get("features") if isinstance(query_interpretation.get("features"), dict) else {}
+    explicit_historical_work_reference = bool(
+        not history_request
+        and not new_topic_request
+        and not new_work_root_request
+        and not _is_explicit_topic_closure(query)
+        and (
+            reference_followup
+            or topic_pointer_match
+            or bool(semantic_features.get("continuation_action"))
+            or bool(semantic_features.get("recall_action"))
+            or (bool(semantic_features.get("self_reference")) and bool(semantic_features.get("interrogative")))
+            or (interpreted_intent == "TOPIC_CONTINUATION" and bool(query_interpretation.get("requires_memory")))
+        )
+    )
+    if (
+        not active_work_root_match
+        and explicit_historical_work_reference
+        and not history_request
+        and not time_filter.get("applied")
+        and not resume_key
+    ):
+        historical_work_candidates: list[tuple[float, int, dict[str, Any], dict[str, Any], str, dict[str, Any], str]] = []
+        for candidate_index, candidate_row in enumerate(scoped_work_rows):  # newest-first
+            if not isinstance(candidate_row, dict) or _row_is_pending_clarification(candidate_row):
+                continue
+            candidate_profile = _infer_active_work_branch(candidate_row)
+            if not candidate_profile.get("active"):
+                continue
+            candidate_origin_id = _text(candidate_profile.get("origin_message_id")) or _text(candidate_row.get("message_id"))
+            if not candidate_origin_id or candidate_origin_id == active_work_origin_id:
+                continue
+            candidate_topic_origin = _text(candidate_row.get("topic_origin_message_id"))
+            if candidate_topic_origin and candidate_topic_origin != candidate_origin_id:
+                continue
+            candidate_root = next((
+                source for source in all_rows
+                if isinstance(source, dict) and _text(source.get("message_id")) == candidate_origin_id
+            ), None)
+            if not candidate_root:
+                continue
+            root_topic_origin = _text(candidate_root.get("topic_origin_message_id"))
+            if root_topic_origin and root_topic_origin != candidate_origin_id:
+                continue
+            root_profile = _infer_active_work_branch(candidate_root)
+            candidate_root_text = " ".join(filter(None, (
+                _row_subject_text(candidate_root),
+                _text(candidate_root.get("user_text") or candidate_root.get("user")),
+                _text(root_profile.get("topic")) if root_profile.get("active") else "",
+                _text(root_profile.get("goal")) if root_profile.get("active") else "",
+            )))
+            if not candidate_root_text:
+                continue
+            candidate_subjects = _subject_tokens(candidate_root_text)
+            candidate_subject_overlap = _subject_overlap(query_subjects, candidate_subjects)
+            candidate_subject_conflict = _subject_conflicts(query_subjects, candidate_subjects)
+            candidate_topic_overlap = _topic_query_overlap(query, candidate_root_text)
+            candidate_root_match = bool(
+                candidate_subject_overlap >= 0.34
+                or (candidate_topic_overlap >= 0.36 and not candidate_subject_conflict)
+            )
+            if not candidate_root_match:
+                continue
+            candidate_score = max(candidate_subject_overlap, candidate_topic_overlap)
+            historical_work_candidates.append((
+                candidate_score, candidate_index, candidate_row, candidate_profile,
+                candidate_origin_id, candidate_root, candidate_root_text,
+            ))
+
+        if historical_work_candidates:
+            historical_work_candidates.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+            (_, candidate_index, candidate_row, candidate_profile,
+             candidate_origin_id, candidate_root, candidate_root_text) = historical_work_candidates[0]
+            candidate_root_profile = _infer_active_work_branch(candidate_root)
+            active_work_branch = dict(candidate_profile)
+            # Use stable task identity from the origin, not rolling fields from the
+            # most recent turn. The rolling state is retained only from a turn that
+            # independently belongs to this same topic.
+            active_work_branch["active"] = True
+            active_work_branch["origin_message_id"] = candidate_origin_id[:120]
+            active_work_branch["work_id"] = "work:" + candidate_origin_id[:120]
+            active_work_branch["source_message_id"] = candidate_origin_id[:120]
+            if candidate_root_profile.get("active") and candidate_root_profile.get("topic"):
+                active_work_branch["topic"] = _text(candidate_root_profile.get("topic"))[:240]
+            elif _text(candidate_root.get("user_text") or candidate_root.get("user")):
+                active_work_branch["topic"] = _text(candidate_root.get("user_text") or candidate_root.get("user"))[:240]
+            if candidate_root_profile.get("active") and candidate_root_profile.get("goal"):
+                active_work_branch["goal"] = _text(candidate_root_profile.get("goal"))[:500]
+            elif _text(candidate_root.get("user_text") or candidate_root.get("user")):
+                active_work_branch["goal"] = _text(candidate_root.get("user_text") or candidate_root.get("user"))[:500]
+            active_work_pair = candidate_row
+            active_work_row_index = candidate_index
+            active_work_has_marker = True
+            active_work_origin_id = candidate_origin_id
+            active_work_root_row = candidate_root
+            active_work_root_text = candidate_root_text
+            active_work_root_subjects = candidate_subjects
+            active_work_root_subject_overlap = candidate_subject_overlap
+            active_work_root_subject_conflict = candidate_subject_conflict
+            active_work_root_topic_overlap = candidate_topic_overlap
+            active_work_root_match = True
+            historical_work_reactivated = True
+            hot_work_followup, hot_work_match_reason = _hot_work_followup_candidate(
+                query, active_work_branch, active_work_pair,
+                history_request=history_request,
+                new_topic_request=new_topic_request,
+                has_attachment=bool(query_modalities & {"image", "file"}),
+                reference_followup=reference_followup,
+            )
+            if not hot_work_followup:
+                # Semantic retrieval has independently proven the old task origin
+                # matches. Keep the recovered task selected for this explicit return
+                # rather than falling back to the unrelated newest branch.
+                hot_work_followup = True
+                hot_work_match_reason = "historical_task_reactivated"
+            hot_branch_candidate = True
+
+    active_work_topic_origin_mismatch = bool(
+        active_work_branch
+        and active_work_origin_id
+        and latest_topic_origin_id
+        and latest_topic_origin_id != active_work_origin_id
+    )
+    active_work_marker_is_from_another_topic = bool(
+        active_work_topic_origin_mismatch
+        and not active_work_root_match
+        and not topic_pointer_match
+    )
+
+    # If the user explicitly returns to an older task, do not resume from the
+    # newest row carrying its stale marker. Re-anchor the task to the latest row
+    # whose topic provenance really belongs to the task's immutable origin. This
+    # preserves intentional returns without importing turns from an intervening
+    # topic that was accidentally stored as CONTINUE.
+    active_work_reanchored_to_origin = False
+    if (
+        active_work_topic_origin_mismatch
+        and (active_work_root_match or topic_pointer_match)
+        and active_work_origin_id
+    ):
+        root_topic_rows = [
+            (idx, row) for idx, row in enumerate(scoped_work_rows)
+            if isinstance(row, dict)
+            and _text(row.get("topic_origin_message_id")) == active_work_origin_id
+            and (
+                _text(row.get("message_id")) == active_work_origin_id
+                or bool(_infer_active_work_branch(row).get("active"))
+            )
+        ]
+        if root_topic_rows:
+            reanchor_index, reanchor_row = root_topic_rows[0]  # scoped_work_rows is newest-first
+            reanchor_profile = _infer_active_work_branch(reanchor_row)
+            if reanchor_profile.get("active"):
+                active_work_branch = dict(reanchor_profile)
+            active_work_branch["active"] = True
+            active_work_branch["origin_message_id"] = active_work_origin_id[:120]
+            active_work_branch["work_id"] = "work:" + active_work_origin_id[:120]
+            active_work_branch["source_message_id"] = active_work_origin_id[:120]
+            active_work_pair = reanchor_row
+            active_work_row_index = reanchor_index
+            active_work_has_marker = bool(reanchor_profile.get("active"))
+            active_work_reanchored_to_origin = True
+            # Re-evaluate the explicit return against the recovered, topic-local
+            # state. The originally selected marker may have had contaminated
+            # topic/state fields and therefore failed the first matching pass.
+            reanchored_hot_followup, reanchored_match_reason = _hot_work_followup_candidate(
+                query, active_work_branch, active_work_pair,
+                history_request=history_request,
+                new_topic_request=new_topic_request,
+                has_attachment=bool(query_modalities & {"image", "file"}),
+                reference_followup=reference_followup,
+            )
+            if reanchored_hot_followup:
+                hot_work_followup = True
+                hot_work_match_reason = reanchored_match_reason
+                hot_branch_candidate = True
+    unrelated_active_work_topic = bool(
+        active_work_branch
+        and active_work_origin_id
+        and active_work_root_subject_conflict
+        and not active_work_root_match
+        and (not latest_topic_origin_id or latest_topic_origin_id == active_work_origin_id)
+        and not history_request
+        and not resume_anchor_row
+        and not topic_pointer_match
+        and not new_topic_request
+    )
+    if active_work_marker_is_from_another_topic or unrelated_active_work_topic:
+        stale_reason = (
+            "active_work_origin_differs_from_current_topic"
+            if active_work_marker_is_from_another_topic
+            else "current_request_conflicts_with_active_work_origin"
+        )
+        hot_work_followup = False
+        hot_work_match_reason = stale_reason
+        active_work_branch = {}
+        active_work_pair = None
+        active_work_row_index = -1
+        active_work_has_marker = False
+        # Do not allow the old task's interpretation to turn a new subject into
+        # CONTINUE. If a newer topic has already been established, ordinary dialogue
+        # search can still continue that newer topic; otherwise this request opens
+        # a clean topic while the old task remains in retained memory.
+        if unrelated_active_work_topic:
+            semantic_active_branch_intent = False
+            hot_branch_candidate = False
+            repair_active_branch = False
+
     # An explicit closure in a newer USER turn supersedes the saved active-work
     # marker. A later explicit request naming that task may reopen it; vague
     # follow-ups may not silently revive it.
@@ -4350,9 +4601,10 @@ def search_dialogue_context(
                 active_work_row_index = -1
                 active_work_has_marker = False
 
-    if new_work_root_request:
+    if new_work_root_request or unrelated_active_work_topic:
         hot_work_followup = False
-        hot_work_match_reason = "self_contained_new_work_root"
+        if new_work_root_request:
+            hot_work_match_reason = "self_contained_new_work_root"
         hot_branch_candidate = False
         semantic_active_branch_intent = False
         repair_active_branch = False
@@ -4511,9 +4763,9 @@ def search_dialogue_context(
     if topic_reference_fragment and not topic_pointer_match:
         hot_branch_candidate = False
     continuation = False
-    if pending_clarification and not new_topic_request:
+    if pending_clarification and not new_topic_request and not unrelated_active_work_topic:
         continuation = True
-    elif history_request or new_topic_request or new_work_root_request:
+    elif history_request or new_topic_request or new_work_root_request or unrelated_active_work_topic:
         continuation = False
     elif hot_work_followup:
         # A confirmed in-task choice/action outranks the generic attachment gate.
@@ -4921,6 +5173,13 @@ def search_dialogue_context(
                 if not trace_id or trace_id in selected_work_ids or trace_id in {pair_id, origin_id}:
                     continue
                 if _row_is_pending_clarification(trace_row):
+                    continue
+                # Topic provenance outranks a persisted work marker. A corrupted
+                # marker can claim that an unrelated turn belongs to this task;
+                # never copy that turn into the task trace when the topic index
+                # has independently identified a different origin.
+                trace_topic_origin_id = _text(trace_row.get("topic_origin_message_id"))
+                if origin_id and trace_topic_origin_id and trace_topic_origin_id != origin_id:
                     continue
                 # Do not include a neighboring conversation/dialogue just because
                 # its words match. Missing identifiers are tolerated for old rows.
@@ -5586,15 +5845,15 @@ def search_dialogue_context(
         source_retrieval_strategy = "CURRENT_REQUEST_NO_MEMORY_SOURCE"
 
     active_branch_descriptor = {
-        "status": "NONE" if new_work_root_request else ("ACTIVE" if relation == "CONTINUE" and latest_same_dialog else ("AVAILABLE" if latest_same_dialog else "NONE")),
-        "topic": _text(query)[:240] if new_work_root_request else _text((anchor or {}).get("topic") or (latest_same_dialog or {}).get("topic"))[:240],
-        "message_id": "" if new_work_root_request else _text((anchor or {}).get("message_id") or (latest_same_dialog or {}).get("message_id"))[:120],
-        "dialog_id": "" if new_work_root_request else _text((anchor or {}).get("dialog_id") or (latest_same_dialog or {}).get("dialog_id"))[:120],
-        "topic_id": "" if new_work_root_request else _text((anchor or {}).get("topic_id") or (latest_same_dialog or {}).get("topic_id"))[:100],
-        "topic_origin_message_id": "" if new_work_root_request else _text((anchor or {}).get("topic_origin_message_id") or (latest_same_dialog or {}).get("topic_origin_message_id"))[:120],
+        "status": "NONE" if (new_work_root_request or unrelated_active_work_topic) else ("ACTIVE" if relation == "CONTINUE" and latest_same_dialog else ("AVAILABLE" if latest_same_dialog else "NONE")),
+        "topic": _text(query)[:240] if (new_work_root_request or unrelated_active_work_topic) else _text((anchor or {}).get("topic") or (latest_same_dialog or {}).get("topic"))[:240],
+        "message_id": "" if (new_work_root_request or unrelated_active_work_topic) else _text((anchor or {}).get("message_id") or (latest_same_dialog or {}).get("message_id"))[:120],
+        "dialog_id": "" if (new_work_root_request or unrelated_active_work_topic) else _text((anchor or {}).get("dialog_id") or (latest_same_dialog or {}).get("dialog_id"))[:120],
+        "topic_id": "" if (new_work_root_request or unrelated_active_work_topic) else _text((anchor or {}).get("topic_id") or (latest_same_dialog or {}).get("topic_id"))[:100],
+        "topic_origin_message_id": "" if (new_work_root_request or unrelated_active_work_topic) else _text((anchor or {}).get("topic_origin_message_id") or (latest_same_dialog or {}).get("topic_origin_message_id"))[:120],
         "semantic_intent_match": bool(semantic_active_branch_intent),
         "subject_conflict_detected": bool(active_subject_conflict),
-        "branch_preserved": bool(not new_work_root_request and relation == "CONTINUE" and latest_same_dialog),
+        "branch_preserved": bool(not new_work_root_request and not unrelated_active_work_topic and relation == "CONTINUE" and latest_same_dialog),
         "hot_work_match": bool(hot_work_followup),
         "hot_work_match_reason": _text(hot_work_match_reason)[:80],
         "work_kind": _text(active_work_branch.get("kind"))[:60],
@@ -5639,7 +5898,7 @@ def search_dialogue_context(
             "match_reason": _text(hot_work_match_reason)[:80],
             "candidate_message_id": _text(active_work_pair.get("message_id"))[:120] if active_work_pair else "",
             "priority": "HOT_TASK_FIRST",
-        } if active_work_branch and relation == "CONTINUE" and not new_work_root_request else {}),
+        } if active_work_branch and hot_work_followup and relation == "CONTINUE" and not new_work_root_request else {}),
         "hot_work_followup": bool(hot_work_followup),
         "hot_work_match_reason": _text(hot_work_match_reason)[:80],
         "topic_closure_barrier": bool(closed_branch_barrier),
@@ -5737,7 +5996,17 @@ def search_dialogue_context(
         explicit_closed_branch_reopen=bool(explicit_closed_branch_reopen),
         active_work_kind=_text(active_work_branch.get("kind")),
         active_work_message_key=_apr_diag_ref(active_work_pair.get("message_id") if active_work_pair else ""),
-        active_work_origin_key=_apr_diag_ref(active_work_branch.get("origin_message_id")),
+        active_work_origin_key=_apr_diag_ref(active_work_origin_id),
+        latest_topic_origin_key=_apr_diag_ref(latest_topic_origin_id),
+        active_work_root_subject_conflict=bool(active_work_root_subject_conflict),
+        active_work_root_subject_overlap=round(float(active_work_root_subject_overlap), 6),
+        active_work_root_topic_overlap=round(float(active_work_root_topic_overlap), 6),
+        active_work_root_match=bool(active_work_root_match),
+        historical_work_reactivated=bool(historical_work_reactivated),
+        active_work_topic_origin_mismatch=bool(active_work_topic_origin_mismatch),
+        active_work_reanchored_to_origin=bool(active_work_reanchored_to_origin),
+        active_work_marker_detached=bool(active_work_marker_is_from_another_topic),
+        unrelated_active_work_topic=bool(unrelated_active_work_topic),
         top_candidate_alignment=[{
             "message_key": _apr_diag_ref(x.get("message_id")), "score": x.get("score"),
             "subject_overlap": x.get("subject_overlap"), "subject_mismatch": x.get("subject_mismatch"),
