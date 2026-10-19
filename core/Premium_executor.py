@@ -41,6 +41,8 @@ from blocks.Premium_interpretation_identity import (
     build_question_sequence,
     interpret_request_semantics,
     _has_explicit_topic_introduction,
+    _detect_image_modification,
+    _detect_contextual_image_edit,
 )
 from blocks.Premium_provider_router import generate_text
 from blocks.text_module import package_provider_response
@@ -811,6 +813,80 @@ async def _generate_image_artifact(
     return await generate_from_spec(spec, variant="processor_route")
 
 
+async def _edit_image_artifact(
+    interpretation: dict[str, Any],
+    visual_context: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Edit the selected source image through the existing GPT Image edit route."""
+    selected = _select_image_edit_source(visual_context or [])
+    if not selected:
+        return None
+    source_bytes, source_mime, source_item = selected
+    intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
+    request_text = _text(input_data.get("original_request") or input_data.get("normalized_request"))
+    if not request_text:
+        request_text = _text(intent.get("image_edit_instruction"))
+    if not request_text:
+        return None
+    edit_prompt = (
+        "Edit the supplied source image according to this exact user instruction: "
+        + request_text
+        + ". Preserve the original photograph and every unaffected detail, including composition, "
+          "background, perspective, lighting, and existing text. Apply only the requested changes. "
+          "Do not replace the source with a new scene or add unrequested objects."
+    )
+    from blocks.C_APRIL_IMAGES_GENERATOR import edit_image_result
+    result = await edit_image_result(source_bytes, edit_prompt, quality="low")
+    if not isinstance(result, dict) or not result.get("success") or not result.get("image_bytes"):
+        return None
+    result["operation"] = "edit"
+    result["source_asset_message_id"] = _text(source_item.get("asset_message_id"))
+    result["source_asset_role"] = _text(source_item.get("asset_role") or "user_input")
+    result["source_asset_filename"] = _text(source_item.get("filename"))[:200]
+    result["source_asset_mime_type"] = source_mime
+    return result
+
+
+def _image_edit_message(interpretation: dict[str, Any], state: str) -> str:
+    """Use a truthful, stable message for edit lifecycle states, in the user's language."""
+    input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
+    language = _text(input_data.get("display_language") or "").lower()
+    request = _text(input_data.get("original_request") or input_data.get("normalized_request")).lower().replace("ё", "е")
+    if language in {"uk", "ua", "uk-ua"}:
+        if state == "missing_source":
+            return "Щоб змінити саме твою фотографію, прикріпи вихідне зображення. Зараз його немає, тому я не створюватиму окрему картинку замість редагування."
+        if state == "processing":
+            return "Обробляю вихідне зображення та вношу лише запитану зміну."
+        if state == "success":
+            if "галоч" in request:
+                return "Готово — додала зелену позначку до вихідного зображення. Нижче — відредагований результат."
+            return "Готово — внесла запитану зміну у вихідне зображення. Нижче — результат."
+        return "Не вдалося обробити зображення цього разу. Вихідне зображення не змінене; спробуй повторити запит."
+    if language in {"en", "en-us", "en-gb"}:
+        if state == "missing_source":
+            return "Please attach the original photo so I can edit that image. It is not available in this turn, so I will not generate a separate picture as a substitute."
+        if state == "processing":
+            return "I’m editing the source image and applying only the requested change."
+        if state == "success":
+            if "галоч" in request or "check mark" in request or "tick" in request:
+                return "Done — I added the green check mark to the source image. The edited result is below."
+            return "Done — I applied the requested change to the source image. The edited result is below."
+        return "I couldn’t process the image this time. The source image was not changed; please try again."
+    # Russian is the default for auto-language requests written in Cyrillic.
+    if state == "missing_source":
+        return "Чтобы изменить именно твою фотографию, прикрепи исходное изображение. Сейчас его нет, поэтому я не буду создавать отдельную картинку вместо редактирования."
+    if state == "processing":
+        return "Обрабатываю исходное изображение и вношу только запрошенное изменение."
+    if state == "success":
+        if "галоч" in request:
+            return "Готово — добавила зелёную галочку на исходное изображение. Ниже — результат редактирования."
+        if "хаски" in request or "собак" in request:
+            return "Готово — добавила хаски на исходную фотографию. Ниже — результат редактирования."
+        return "Готово — внесла запрошенное изменение в исходное изображение. Ниже — результат редактирования."
+    return "Не удалось обработать изображение в этот раз. Исходное изображение не изменено; попробуй повторить запрос."
+
+
 def _build_scene(
     response: MachineResponse,
     identity: dict[str, str],
@@ -884,6 +960,51 @@ def _decode_saved_text(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def _looks_like_image_edit_request(value: Any) -> bool:
+    text = _text(value)
+    return bool(_detect_image_modification(text) or _detect_contextual_image_edit(text))
+
+
+def _looks_like_referential_image_edit(value: Any) -> bool:
+    """Only enable the latest-image fallback when the request points to a prior object."""
+    low = _text(value).lower().replace("ё", "е")
+    if not _looks_like_image_edit_request(low):
+        return False
+    return bool(re.search(
+        r"(?:\b(?:на|в|по|с)\s+(?:этом|этой|этих|этот|эта|эти)\s+(?:фото\b|фотограф\w*|картинк\w*|"
+        r"изображени\w*|снимк\w*|канистр\w*|этикетк\w*|рисунк\w*)|"
+        r"\b(?:на|в)\s+(?:ней|нем|н[её]м|них|этом|этой)\b|"
+        r"\b(?:this|that)\s+(?:photo|image|picture|canister|label)\b|\b(?:on it|in it|on this one)\b)",
+        low, re.IGNORECASE,
+    ))
+
+
+def _decode_image_source_item(item: dict[str, Any]) -> tuple[bytes, str] | None:
+    """Decode image bytes from a current or restored visual-context item."""
+    for key in ("image_url", "data_uri", "src", "image_data_uri"):
+        value = item.get(key)
+        if isinstance(value, str) and value.startswith("data:image/"):
+            decoded = _decode_asset_data_uri(value)
+            if decoded and decoded[0]:
+                return decoded
+    return None
+
+
+def _select_image_edit_source(visual_context: list[dict[str, Any]]) -> tuple[bytes, str, dict[str, Any]] | None:
+    """Prefer a current upload, then April's latest output, then a recalled user image."""
+    candidates = [item for item in (visual_context or []) if isinstance(item, dict)]
+    ranked = sorted(candidates, key=lambda item: (
+        0 if not item.get("recalled_from_memory") else 1,
+        0 if _text(item.get("asset_role")).lower() in {"april_output", "assistant_output", "generated"} else 1,
+    ))
+    for item in ranked:
+        decoded = _decode_image_source_item(item)
+        if decoded:
+            raw, mime = decoded
+            return raw, mime or _text(item.get("mime_type") or "image/png"), item
+    return None
+
+
 def _explicit_prior_asset_reference(value: Any) -> bool:
     low = _text(value).lower().replace("ё", "е")
     markers = (
@@ -892,6 +1013,9 @@ def _explicit_prior_asset_reference(value: Any) -> bool:
         "то фото", "та картинка", "тот файл", "предыдущий файл", "предыдущий код",
         "сравни с", "сравни это", "сравни с предыдущ", "вернись к фото", "вернись к файлу",
         "на той картинке", "на предыдущей картинке", "на старой картинке",
+        "на этой канистре", "на этом фото", "на этой фотографии", "на этой картинке",
+        "на этом изображении", "на ней", "на нем", "на нём", "эту канистру",
+        "this canister", "this photo", "this image", "on it",
         "that image", "previous image", "previous photo", "the earlier file",
         "the file i sent", "the image i sent", "compare with", "compare to previous",
     )
@@ -908,6 +1032,16 @@ def _requires_original_asset(value: Any, kind: str, cached_summary: str) -> bool
     that decision independently.
     """
     text = _text(value).lower().replace("ё", "е")
+    is_image_asset = str(kind or "").lower() in {"image", "image/png", "image/jpeg"}
+    if is_image_asset and _detect_image_modification(text) and not _looks_like_referential_image_edit(text):
+        # "Draw on a photo" without an attachment does not identify which old
+        # image is intended. Do not silently borrow a historical picture.
+        return False
+    if is_image_asset and (
+        _looks_like_referential_image_edit(text)
+        or (_detect_contextual_image_edit(text) and not _detect_image_modification(text))
+    ):
+        return True
     if not cached_summary or _explicit_prior_asset_reference(text):
         return True
 
@@ -1099,8 +1233,6 @@ def _restore_selected_assets(
     has_current_asset = bool(visual_context or file_inputs or file_contents)
     if has_current_asset and not _explicit_prior_asset_reference(current_request):
         return visual_context, attachments, file_inputs, file_contents, []
-    if _text(dialogue_context.get("relation")).upper() != "CONTINUE":
-        return visual_context, attachments, file_inputs, file_contents, []
 
     selected = dialogue_context.get("selected_pairs") or []
     anchor = dialogue_context.get("anchor") or {}
@@ -1110,10 +1242,50 @@ def _restore_selected_assets(
     for item in selected:
         if isinstance(item, dict) and _text(item.get("message_id")):
             message_ids.append(_text(item.get("message_id")))
-    # Restore the selected semantic anchor first and alone.  Only if that turn
-    # had no saved asset, fall back through ranked dialogue pairs one at a time.
-    # This prevents a later unrelated file from being sent alongside a cat photo.
     message_ids = list(dict.fromkeys(message_ids))[:8]
+
+    relation = _text(dialogue_context.get("relation")).upper()
+    # Semantic search can label a referential edit as NEW when the user's current
+    # sentence names a visible object (e.g. "на этой канистре") but the previous
+    # turn's user text was only "Что здесь?". In that narrow case, restore the most
+    # recent same-dialog image candidate within Premium's 24-hour retention window;
+    # never do this for a generic "draw on a photo" request, which must ask for the source.
+    referential_edit = _looks_like_referential_image_edit(current_request)
+    fallback_used = False
+    if relation != "CONTINUE" and not (not has_current_asset and referential_edit):
+        return visual_context, attachments, file_inputs, file_contents, []
+    if not has_current_asset and referential_edit and (relation != "CONTINUE" or not message_ids):
+        candidates = [item for item in (dialogue_context.get("candidates") or []) if isinstance(item, dict)]
+        now_ts = time.time()
+        recent_images = []
+        request_low = _text(current_request).lower().replace("ё", "е")
+        subject_terms = [term for term in ("канистр", "этикетк", "масл", "собак", "хаски", "автомобил", "машин", "кот", "собак") if term in request_low]
+        for candidate in candidates:
+            if not bool(candidate.get("same_dialog")):
+                continue
+            if "image" not in set(candidate.get("row_modalities") or []):
+                continue
+            try:
+                age = now_ts - float(candidate.get("created_at") or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if age < -60 or age > 24 * 60 * 60:
+                continue
+            candidate_id = _text(candidate.get("message_id"))
+            if not candidate_id:
+                continue
+            evidence = " ".join(_text(candidate.get(key)) for key in ("topic", "user", "april", "attachment_evidence")).lower().replace("ё", "е")
+            if subject_terms and not any(term in evidence for term in subject_terms):
+                continue
+            recent_images.append((float(candidate.get("created_at") or 0), candidate_id))
+        if recent_images:
+            recent_images.sort(reverse=True)
+            message_ids = [recent_images[0][1]]
+            fallback_used = True
+        elif relation != "CONTINUE":
+            return visual_context, attachments, file_inputs, file_contents, []
+    if not message_ids:
+        return visual_context, attachments, file_inputs, file_contents, []
     # Binary sidecars are scoped to the same message row as dialogue_memory.
     # Only the selected topic/turn IDs are read; no global asset scan is performed.
     rows = _load_premium_assets(uid, message_ids)
@@ -1173,6 +1345,9 @@ def _restore_selected_assets(
                     "prompt": _text(payload.get("prompt"))[:1200],
                     "width": int(payload.get("width") or 0),
                     "height": int(payload.get("height") or 0),
+                    "operation": _text(payload.get("operation") or "generate"),
+                    "derived_from_message_id": _text(payload.get("derived_from_message_id")),
+                    "source_asset_role": _text(payload.get("source_asset_role")),
                 },
             })
     def _asset_sequence_index(asset: dict[str, Any]) -> int:
@@ -1234,6 +1409,34 @@ def _restore_selected_assets(
             metadata_item["width"] = int(asset_metadata.get("width") or 0)
             metadata_item["height"] = int(asset_metadata.get("height") or 0)
             metadata_item["prompt"] = _text(asset_metadata.get("prompt"))[:1200]
+            # Generated images are not input images during ordinary follow-ups.
+            # For an explicit edit, however, the latest April output is often the
+            # correct source (e.g. "make it brighter" after a generated picture).
+            relation_for_asset = _text(dialogue_context.get("relation")).upper()
+            should_use_saved_output_as_edit_source = bool(
+                _looks_like_referential_image_edit(current_request)
+                or (
+                    relation_for_asset == "CONTINUE"
+                    and _detect_contextual_image_edit(current_request)
+                    and not _detect_image_modification(current_request)
+                )
+            )
+            if should_use_saved_output_as_edit_source:
+                visual_context.append({
+                    "type": "input_image",
+                    "image_url": metadata_item["_content_data_uri"],
+                    "filename": filename,
+                    "source_type": source_type,
+                    "mime_type": mime_type,
+                    "sequence_index": sequence_index,
+                    "recalled_from_memory": True,
+                    "asset_message_id": common["asset_message_id"],
+                    "asset_role": asset_role,
+                    "output_type": common["output_type"],
+                    "analysis_summary": analysis_summary,
+                    "analysis_key_details": analysis_key_details,
+                    "requires_original_analysis": True,
+                })
             restored_meta.append(metadata_item)
             continue
 
@@ -2604,6 +2807,35 @@ async def execute(
     if not answer:
         raise RuntimeError("CANONICAL_ANSWER_MISSING")
 
+    image_intent_for_answer = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    image_task = _text(image_intent_for_answer.get("task"))
+    if image_task == "request_source_image":
+        answer = _image_edit_message(interpretation, "missing_source")
+        raw["answer"] = answer
+        raw["content"] = answer
+        raw["summary"] = "Редактирование ожидает исходное изображение."
+        raw["render_blocks"] = [{
+            "type": "text",
+            "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
+            "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
+            "content": answer,
+        }]
+        raw["artifacts"] = []
+    elif image_task == "edit_image":
+        # The model can incorrectly claim editing is unavailable. The executor owns
+        # the actual edit operation, so show truthful processing text until it returns.
+        answer = _image_edit_message(interpretation, "processing")
+        raw["answer"] = answer
+        raw["content"] = answer
+        raw["summary"] = "Редактирование исходного изображения."
+        raw["render_blocks"] = [{
+            "type": "text",
+            "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
+            "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
+            "content": answer,
+        }]
+        raw["artifacts"] = []
+
     # The existing TextModule participates only as the canonical response
     # packaging/sanitization layer; it never creates a second Provider call.
     raw_blocks = [dict(x) for x in (raw.get("render_blocks") or []) if isinstance(x, dict)]
@@ -2706,9 +2938,22 @@ async def execute(
 
     image_result = None
     image_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
-    if image_intent.get("wants_image") and not bool(provider_metadata.get("provider_fallback")):
+    if image_intent.get("wants_image") and (
+        not bool(provider_metadata.get("provider_fallback"))
+        or image_intent.get("image_operation") == "edit"
+    ):
         image_started = time.perf_counter()
-        if image_intent.get("reuse_saved_image"):
+        if image_intent.get("image_operation") == "edit" or _text(image_intent.get("task")) == "edit_image":
+            try:
+                image_result = await _edit_image_artifact(interpretation, visual_context or [])
+            except Exception as image_edit_error:
+                _apr_timing_log(
+                    "image_edit_failed", None,
+                    error=type(image_edit_error).__name__,
+                    source_available=bool((interpretation.get("intent") or {}).get("source_image_available")),
+                )
+                image_result = None
+        elif image_intent.get("reuse_saved_image"):
             saved_output = next((
                 item for item in restored_assets
                 if isinstance(item, dict)
@@ -2765,7 +3010,13 @@ async def execute(
                 raw,
                 identity,
             )
-        _apr_timing_log("image_generation", image_started, succeeded=bool(image_result), reused=bool((image_result or {}).get("reused")))
+        _apr_timing_log(
+            "image_edit" if image_intent.get("image_operation") == "edit" else "image_generation",
+            image_started,
+            succeeded=bool(image_result),
+            reused=bool((image_result or {}).get("reused")),
+            source_message_key=_apr_diag_ref((image_result or {}).get("source_asset_message_id")),
+        )
         if image_result:
             source_artifact = image_result.get("artifact") if isinstance(image_result.get("artifact"), dict) else image_result
             artifact_payload = source_artifact.get("payload") if isinstance(source_artifact.get("payload"), dict) else {}
@@ -2843,6 +3094,30 @@ async def execute(
                 "payload": visible_image_payload,
             }
             packaged["render_blocks"].append(image_block)
+
+    if _text(image_intent.get("task")) == "edit_image":
+        edit_state = "success" if image_result and image_result.get("success") else "failed"
+        answer = _image_edit_message(interpretation, edit_state)
+        packaged["answer"] = answer
+        packaged["content"] = answer
+        packaged["summary"] = "Изображение отредактировано." if edit_state == "success" else "Не удалось завершить редактирование изображения."
+        text_blocks = [
+            block for block in (packaged.get("render_blocks") or [])
+            if isinstance(block, dict) and _text(block.get("type") or block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}
+        ]
+        if text_blocks:
+            text_blocks[0]["content"] = answer
+            text_blocks[0]["text"] = answer
+            packaged["render_blocks"] = [block for block in (packaged.get("render_blocks") or []) if not (
+                isinstance(block, dict) and _text(block.get("type") or block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}
+            )] + [text_blocks[0]]
+        else:
+            packaged.setdefault("render_blocks", []).insert(0, {
+                "type": "text",
+                "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
+                "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
+                "content": answer,
+            })
 
     normalized_blocks = _apply_presentation_sequence(
         packaged["render_blocks"] or [], answer, presentation_sequence
@@ -3061,6 +3336,9 @@ async def execute(
                 "width": generated_width,
                 "height": generated_height,
                 "prompt": _text((image_result or {}).get("prompt"))[:1200],
+                "operation": _text((image_result or {}).get("operation") or image_intent.get("image_operation") or "generate"),
+                "derived_from_message_id": _text((image_result or {}).get("source_asset_message_id")),
+                "source_asset_role": _text((image_result or {}).get("source_asset_role")),
                 "content_base64": base64.b64encode(generated_bytes).decode("ascii"),
             })
             generated_ref = _save_premium_asset(
@@ -3068,7 +3346,14 @@ async def execute(
                 filename=f"april-generated-{identity['message_id'][-10:]}.png",
                 content=generated_bytes, mime_type=generated_mime, kind="image",
                 asset_role="april_output", output_type="image",
-                metadata={"source_type": "april_generated", "asset_role": "april_output", "output_type": "image", "width": generated_width, "height": generated_height, "prompt": _text((image_result or {}).get("prompt"))[:1200]},
+                metadata={
+                    "source_type": "april_generated", "asset_role": "april_output", "output_type": "image",
+                    "width": generated_width, "height": generated_height,
+                    "prompt": _text((image_result or {}).get("prompt"))[:1200],
+                    "operation": _text((image_result or {}).get("operation") or image_intent.get("image_operation") or "generate"),
+                    "derived_from_message_id": _text((image_result or {}).get("source_asset_message_id")),
+                    "source_asset_role": _text((image_result or {}).get("source_asset_role")),
+                },
             )
             if generated_ref:
                 generated_asset_saved = True
