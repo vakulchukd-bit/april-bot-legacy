@@ -213,6 +213,7 @@ _IMAGE_EDIT_TARGET_RE = re.compile(
     r"(?:галоч\w*|отметк\w*|фон\w*|качеств\w*|ярче|светлее|темнее|резкост\w*|"
     r"контраст\w*|цвет\w*|надпис\w*|текст\w*|логотип\w*|объект\w*|"
     r"реалистич\w*|красив\w*|лишн\w*|размыти\w*|тень\w*|яркост\w*|"
+    r"мяч\w*|игрушк\w*|предмет\w*|котен\w*|котён\w*|объект\w*|"
     r"check\s?mark|tick|background|quality|sharpen|contrast|brightness|text|logo|realistic|remove)",
     re.IGNORECASE,
 )
@@ -328,7 +329,7 @@ def _detect_image_modification(text: str) -> bool:
         r"замен\w*|измен\w*|отредактир\w*|обработ\w*|улучш\w*|осветл\w*|затемн\w*|перекрас\w*|"
         r"нарис\w*)"
     )
-    image_target = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|снимк\w*|канистр\w*|этикетк\w*|\bimage\b|\bphoto\b|\bpicture\b|\bcanister\b|\blabel\b)"
+    image_target = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|иллюстрац\w*|рисунк\w*|снимк\w*|канистр\w*|этикетк\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b|\bdrawing\b|\bcanister\b|\blabel\b)"
     # Explicit image target can appear after an action ("нарисуй на фото") or
     # before it ("на фотографии дорисуй"). Keep this phrase-aware rather than
     # treating every occurrence of "draw" or "photo" as editing.
