@@ -229,6 +229,77 @@ def _detect_contextual_image_edit(text: str) -> bool:
     return bool(_IMAGE_EDIT_ACTION_RE.search(low) and _IMAGE_EDIT_TARGET_RE.search(low))
 
 
+def _should_generate_instead_of_requesting_missing_source(text: str) -> bool:
+    """Resolve an unanchored ``draw on a photo`` request when no source exists.
+
+    ``нарисуй на фото ...`` is ambiguous in Russian: it can mean an edit, but in
+    normal chat it is also used loosely to ask for a picture to be created. Do
+    not turn that wording into a hard source-photo requirement when no source
+    image was uploaded. Explicit edit verbs (``добавь``, ``дорисуй``, ``измени``)
+    and references to a particular photo still retain the edit route.
+
+    A clear instruction not to modify anything (for example, ``не надо ничего
+    изменять, просто нарисуй...``) resolves the ambiguity in favour of creating
+    a new image. This helper is intentionally used only when there is no original
+    image in the current input; it does not override edits to a real attachment.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+
+    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|снимк\w*|\bphoto\b|\bimage\b|\bpicture\b)"
+    create_action = r"(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|\bdraw\b|\bcreate\b|\bgenerate\b)"
+    has_create_action = bool(re.search(rf"(?<![\w\u0080-\uffff]){create_action}", low, re.IGNORECASE))
+    if not has_create_action:
+        return False
+
+    # Negative edit instructions are a strong signal that the user wants a new
+    # rendering, not a request to upload an image for editing.
+    no_edit_instruction = bool(re.search(
+        r"(?:\bне\s+(?:надо|нужно|требуется)\s+(?:ничего\s+)?(?:менять|изменять|редактировать|править|исправлять)\b|"
+        r"\bничего\s+не\s+(?:меняй|менять|изменяй|изменять|редактируй|редактировать|правь|править)\b|"
+        r"\bне\s+(?:меняй|изменяй|редактируй|правь)\b|"
+        r"\b(?:do\s+not|don't)\s+(?:edit|modify|change)\b)",
+        low,
+        re.IGNORECASE,
+    ))
+    if no_edit_instruction:
+        return True
+
+    # Only handle the ambiguous canvas wording. Other edit requests keep the
+    # established missing-source behaviour below.
+    generic_canvas = bool(re.search(
+        rf"\b(?:на|в|по)\s+(?:{image_noun})",
+        low,
+        re.IGNORECASE,
+    ))
+    if not generic_canvas:
+        return False
+
+    # A demonstrative, possessive or explicit upload/source reference means a
+    # particular existing image is intended, so keep asking for that source.
+    particular_source = bool(re.search(
+        rf"(?:\b(?:на|в|по|с)\s+(?:эт\w*|мо\w*|тво\w*|исходн\w*|прикрепл\w*|загруженн\w*|предыдущ\w*)\s+{image_noun}|"
+        rf"\b(?:это|эта|эту|тот|ту|мой|моя|мое|мое|мою|мои|исходн\w*|прикрепл\w*|загруженн\w*)\s+{image_noun}|"
+        rf"{image_noun}.{{0,50}}\b(?:котор\w*\s+(?:я\s+)?(?:отправил\w*|загрузил\w*|прикрепил\w*)|в\s+предыдущем\s+сообщении|выше)\b)",
+        low,
+        re.IGNORECASE | re.DOTALL,
+    ))
+    if particular_source:
+        return False
+
+    # Verbs that clearly modify an existing object are not reinterpreted as
+    # creation. Plain ``нарисуй``/``draw`` is the ambiguous case being fixed.
+    explicit_mutation_near_canvas = bool(re.search(
+        rf"\b(?:добав\w*|дорис\w*|убер\w*|удал\w*|замен\w*|измен\w*|отредактир\w*|"
+        rf"обработ\w*|улучш\w*|перекрас\w*|подправ\w*|crop|edit|modify|replace|remove|erase)\b"
+        rf".{{0,100}}\b(?:на|в|по|с)\s+(?:{image_noun})",
+        low,
+        re.IGNORECASE | re.DOTALL,
+    ))
+    return not explicit_mutation_near_canvas
+
+
 def _contains_marker(text: str, marker: str) -> bool:
     low = _text(text).lower()
     phrase = _text(marker).lower()
@@ -2594,9 +2665,6 @@ def build_interpretation(
         r"\b(?:создай|сгенерир\w*|нарису\w*|изобрази|сделай\s+(?:нов\w*|друг\w*)|нов\w*\s+(?:фото|картинк\w*|изображени\w*)|друг\w*\s+(?:фото|картинк\w*|изображени\w*)|generate|create|draw|make\s+(?:a\s+)?new|another\s+(?:image|photo|picture))\b",
         normalized_visual_request,
     ))
-    explicit_image_edit = _detect_image_modification(normalized_visual_request)
-    contextual_image_edit = bool(has_original_image and _detect_contextual_image_edit(normalized_visual_request))
-    image_edit_requested = bool(explicit_image_edit or contextual_image_edit)
     source_image_available = bool(
         has_original_image
         and any(
@@ -2605,6 +2673,18 @@ def build_interpretation(
             for item in visual_context if isinstance(item, dict)
         )
     )
+    explicit_image_edit = _detect_image_modification(normalized_visual_request)
+    if (
+        explicit_image_edit
+        and not has_original_image
+        and _should_generate_instead_of_requesting_missing_source(normalized_visual_request)
+    ):
+        # No real source image is attached and the wording requests drawing, not
+        # changing a named/attached photo. Keep the image output and let the
+        # registered generator create a new picture instead of asking for upload.
+        explicit_image_edit = False
+    contextual_image_edit = bool(has_original_image and _detect_contextual_image_edit(normalized_visual_request))
+    image_edit_requested = bool(explicit_image_edit or contextual_image_edit)
     # A contextual command such as "Добавь зелёную галочку" becomes an image
     # edit only when a source image is actually available. An explicit edit request
     # without source bytes must ask for the photo and must never run generation.
