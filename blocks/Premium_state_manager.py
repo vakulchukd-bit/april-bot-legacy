@@ -1342,7 +1342,16 @@ def _infer_active_work_branch(row: dict[str, Any]) -> dict[str, Any]:
     wants_visual = bool(intent.get("wants_image") or intent.get("wants_graph") or output_names & {
         "image", "gallery", "graph", "diagram", "chart", "formula", "table", "file", "code", "document"
     } or rendered_types & {"image", "graph", "diagram", "chart", "formula", "table", "code", "file", "document"})
-    game_signal = bool(re.search(r"(?:\bигр\w*|\bигрок\w*|\bквест\w*|\bбашн\w*|\bключ\w*|\bсердц\w*|\bхранител\w*|\bправил\w*|\bход\w*|\bgame\w*|\bquest\w*|\btower\w*|\bkey\w*|\byour turn\b|\bтвой ход\b)", all_text))
+    # The noun "игра" alone is not evidence of an interactive game: a user may
+    # ask for a toy/ball "для игры" as part of a visual illustration. Strong
+    # gameplay signals remain valid even when the task also produces an image.
+    strong_game_signal = bool(re.search(
+        r"(?:\bигрок\w*|\bквест\w*|\bбашн\w*|\bключ\w*|\bсердц\w*|"
+        r"\bхранител\w*|\bправил\w*|\bход\w*|\byour turn\b|\bтвой ход\b|"
+        r"\bquest\w*|\btower\w*|\bkey\w*)", all_text
+    ))
+    generic_game_signal = bool(re.search(r"(?:\bигр\w*|\bgame\w*)", all_text))
+    game_signal = bool(strong_game_signal or (generic_game_signal and not wants_visual and not re.search(r"\bдля\s+игр\w*\b", all_text)))
     scalar_game_move = bool(
         game_signal
         and re.search(r"(?:\bигр\w*|\bgame\w*|\bход\w*|\byour turn\b)", user_low, re.IGNORECASE)
@@ -1367,7 +1376,7 @@ def _infer_active_work_branch(row: dict[str, Any]) -> dict[str, Any]:
     if not active:
         return {}
 
-    if interaction_state:
+    if interaction_state and not (wants_visual and not strong_game_signal):
         kind = "interactive_game"
     elif wants_code or rendered_types & {"code", "file"} or re.search(r"(?:код\w*|скрипт\w*|программ\w*|source code|python)", all_text):
         kind = "code_or_software_task"
