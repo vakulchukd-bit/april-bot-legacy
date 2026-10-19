@@ -198,6 +198,10 @@ _IMAGE_MODIFICATION_MARKERS = {
     "отредактируй фотографию", "отредактируй картинку", "улучши фото",
     "улучши фотографию", "улучши картинку", "улучши изображение", "обработай фото",
     "обработай фотографию", "ретушируй фото", "сделай ретушь",
+    "измени диаграмму", "изменить диаграмму", "измени схему", "изменить схему",
+    "измени чертеж", "изменить чертеж", "переделай диаграмму", "переделай схему",
+    "modify the diagram", "change the diagram", "edit the diagram",
+    "modify the chart", "change the chart", "edit the chart",
 }
 
 # These phrases imply compositing only when an existing/source image is available.
@@ -226,10 +230,11 @@ def _contains_marker(text: str, marker: str) -> bool:
 
 
 def _detect_image_modification(text: str) -> bool:
-    """Detect a request to change an existing photo, including colloquial Russian.
+    """Detect a request to alter an existing image or diagram.
 
-    The Free chain must not perform source-image editing. The caller reroutes a
-    detected edit to a separate text-only image generation, with a concise notice.
+    In Free, detected edits are restricted instead of being silently converted
+    into new image generation. Ordinary new-image and new-diagram requests use
+    their existing routes.
     """
     low = _text(text).lower().replace("ё", "е")
     if not low:
@@ -251,12 +256,15 @@ def _detect_image_modification(text: str) -> bool:
     # `фотку`, `фотке`, `фотографии` and related colloquial/inflected forms must
     # match the same source-image concept; limiting this to `фото` missed the
     # exact phrasing observed in production logs ("измени эту фотку").
-    image_noun = r"(?:фот\w*|картинк\w*|изображени\w*|photo(?:graph)?s?|images?|pictures?)"
+    image_noun = (
+        r"(?:фот\w*|картинк\w*|изображени\w*|photo(?:graph)?s?|images?|pictures?|"
+        r"диаграмм\w*|схем\w*|черт[её]ж\w*|chart\w*|diagram\w*|sketch\w*)"
+    )
     # Direct forms like "измени именно ту фотографию" are missed by simple
     # substring markers because polite/reference words are inserted between the
     # verb and the image noun. Keep this pattern limited to actual edit verbs.
     direct_edit = r"(?:edit|modify|change|alter|retouch|enhance|improve|измени\w*|поменя\w*|отредактир\w*|обработ\w*|ретуш\w*|улучш\w*|передел\w*)"
-    image_reference_words = r"(?:(?:the|this|that|same|exact|ту|эту|эту\s+самую|ту\s+самую|именно|саму|самую|присланную|загруженную|прикрепл[её]нную|мою|твою)\s+){0,4}"
+    image_reference_words = r"(?:(?:the|this|that|same|exact|мне|нам|ту|эту|этот|эта|это|эти|той|такую|такой|эту\s+самую|ту\s+самую|именно|саму|самую|присланную|загруженную|прикрепл[её]нную|мою|твою)\s+){0,5}"
     if re.search(
         rf"(?<![\w\u0080-\uffff]){direct_edit}\b\s+{image_reference_words}{image_noun}\b",
         low,
@@ -1798,10 +1806,31 @@ def _is_code_modification_request(text: str) -> bool:
 
 
 def _prior_free_image_edit_notice_count(memory: dict[str, Any]) -> int:
-    """Count prior selected dialogue pairs containing the Free image-edit notice."""
-    pairs = memory.get("selected_pairs") if isinstance(memory, dict) else None
-    if not isinstance(pairs, list):
+    """Count prior replies that actually refused an image edit in Free.
+
+    A note that merely says generated images are new and source photos remain
+    unchanged is not a refusal, and must not make the next edit attempt sound
+    like a repeated warning.
+    """
+    if not isinstance(memory, dict):
         return 0
+    pairs: list[Any] = []
+    seen_pairs: set[str] = set()
+    # Check candidates too: a follow-up insistence may be classified as NEW,
+    # leaving the last assistant refusal outside selected_pairs.
+    for source_name in ("selected_pairs", "candidates"):
+        source = memory.get(source_name)
+        if not isinstance(source, list):
+            continue
+        for pair in source[:12]:
+            try:
+                fingerprint = json.dumps(pair, ensure_ascii=False, sort_keys=True, default=str)
+            except Exception:
+                fingerprint = str(pair)
+            if fingerprint in seen_pairs:
+                continue
+            seen_pairs.add(fingerprint)
+            pairs.append(pair)
     notice_markers = (
         "редактирование изображений доступно только в premium",
         "редактирование и улучшение изображений доступно только в premium",
@@ -1813,13 +1842,27 @@ def _prior_free_image_edit_notice_count(memory: dict[str, Any]) -> int:
         "la retouche d’image est disponible uniquement avec premium",
         "la modification des images est disponible uniquement avec premium",
     )
+    refusal_markers = (
+        "не могу изменить", "не могу изменять", "не могу изменять уже создан",
+        "не могу редактировать", "не могу изменить уже создан",
+        "не могу отредактировать", "не могу изменить фото", "не могу изменить диаграм",
+        "cannot edit", "can't edit", "cannot modify", "can't modify", "unable to edit",
+        "не можу змінити", "не можу змінювати", "не можу редагувати",
+        "impossible de modifier", "je ne peux pas modifier", "mais pas modifier",
+    )
     count = 0
     for pair in pairs:
         try:
             rendered = json.dumps(pair, ensure_ascii=False, default=str).lower().replace("ё", "е")
         except Exception:
             rendered = str(pair).lower().replace("ё", "е")
-        if any(marker.replace("ё", "е") in rendered for marker in notice_markers):
+        has_premium_notice = (
+            any(marker.replace("ё", "е") in rendered for marker in notice_markers)
+            or bool(re.search(r"редактир\w*.{0,80}доступн\w*.{0,30}premium", rendered))
+            or bool(re.search(r"(?:editing|edit|modification).{0,80}available.{0,30}premium", rendered))
+            or bool(re.search(r"premium.{0,30}(?:editing|edit|modification)", rendered))
+        )
+        if has_premium_notice and any(marker.replace("ё", "е") in rendered for marker in refusal_markers):
             count += 1
     return min(count, 5)
 
@@ -1851,6 +1894,28 @@ def build_interpretation(
     ]
     restored_kinds = {str(item.get("kind") or "").lower() for item in restored_assets}
     has_image = "image" in kinds or "image" in restored_kinds or bool(visual_context)
+    output_asset_roles = {"april_output", "assistant_output", "generated", "generated_image", "april_generated"}
+
+    def _is_user_source_image(item: dict[str, Any]) -> bool:
+        kind = _text(item.get("kind") or item.get("mime_type") or item.get("content_type")).lower()
+        item_type = _text(item.get("type")).lower()
+        is_image = (
+            kind == "image"
+            or kind.startswith("image/")
+            or item_type in {"input_image", "image"}
+            or bool(item.get("image_url"))
+        )
+        if not is_image:
+            return False
+        role = _text(item.get("asset_role") or "user_input").lower()
+        source_type = _text(item.get("source_type") or "").lower()
+        return role not in output_asset_roles and source_type not in output_asset_roles
+
+    has_user_source_image = any(
+        _is_user_source_image(item)
+        for item in [*attachments, *restored_assets, *visual_context]
+        if isinstance(item, dict)
+    )
     has_voice = "voice" in kinds
     has_file = bool(kinds & {"file", "text_file"}) or bool(restored_kinds & {"file", "text_file"})
     # Distinguish an asset's presence in dialogue memory from actual source bytes
@@ -1871,16 +1936,16 @@ def build_interpretation(
     requested_outputs = _enhance_requested_outputs(request_text, detected_outputs)
     routing_capabilities = _infer_routing_capabilities(request_text)
 
-    # Free may not edit the original source image, but the request must still be
-    # fulfilled as an independent generation. This is a product-policy reroute,
-    # not a refusal: do not request another upload and do not silently return text
-    # only when the user asked to change the pictured scene.
+    # Keep edit restrictions separate from permitted creation. A new picture
+    # described in the current dialogue remains a normal Free generation; a
+    # request to alter an existing photo/diagram is Premium-only and must not
+    # be rerouted into a replacement generation.
     image_modification_requested = _detect_image_modification(request_text)
     compositing_requested = _detect_image_compositing_request(request_text)
     # A geometry/technical drawing stays a structured diagram even if the
     # wording says "on the picture" or the dialogue contains an earlier image.
-    # The Free image-edit lock is for actual source-photo changes, not for
-    # drawing a requested SVG/geometry artifact as an independent output.
+    # Explicitly changing an existing photo/diagram is still restricted, while
+    # independently creating a new SVG/geometry artifact remains available.
     structured_diagram_noun = bool(re.search(
         r"(?:схем\w*|диаграмм\w*|черт[её]ж\w*|геометрическ\w*\s+фигур\w*|"
         r"треугольн\w*|квадрат\w*|прямоугольн\w*|параллелограмм\w*|ромб\w*|"
@@ -1890,24 +1955,18 @@ def build_interpretation(
     ))
     image_edit_restricted = bool(
         image_modification_requested
-        or (has_image and compositing_requested and not structured_diagram_noun)
+        or (has_user_source_image and compositing_requested and not structured_diagram_noun)
     )
-    free_image_recreation = bool(
-        image_modification_requested or (compositing_requested and not structured_diagram_noun)
-    )
-    if free_image_recreation:
-        requested_outputs = [
-            kind for kind in requested_outputs
-            if kind not in {"gallery", "generated_image"}
-        ]
+    # Kept as an explicit false compatibility field for older prompt and
+    # executor code. Free never converts an edit request into a new image.
+    free_image_recreation = False
+    image_edit_prior_attempts = _prior_free_image_edit_notice_count(memory) if image_edit_restricted else 0
+    wants_image = "image" in requested_outputs
+    if image_edit_restricted:
+        wants_image = False
+        requested_outputs = [kind for kind in requested_outputs if kind not in {"image", "gallery", "generated_image"}]
         if "text" not in requested_outputs:
             requested_outputs.insert(0, "text")
-        if "image" not in requested_outputs:
-            requested_outputs.append("image")
-    image_edit_prior_attempts = _prior_free_image_edit_notice_count(memory) if image_edit_restricted else 0
-    # Image generation remains allowed after the policy reroute because this is
-    # a fresh composition; the Premium-only operation is changing source pixels.
-    wants_image = "image" in requested_outputs
     wants_file = "file" in requested_outputs
     wants_links = "link" in requested_outputs
     structured_data_extensions = {".csv", ".tsv", ".json", ".xlsx", ".xls", ".ods", ".parquet"}
@@ -1994,8 +2053,8 @@ def build_interpretation(
     # does remains analyze_file and never silently becomes code generation.
     if _is_code_modification_request(original or text) and has_file:
         task = "modify_code"
-    if free_image_recreation:
-        task = "generate_image_new_composition_free"
+    if image_edit_restricted:
+        task = "image_edit_restricted"
 
     # An existing/remembered image must not override an explicit request for a
     # structured geometry or graph artifact. In particular, do not turn
@@ -2137,8 +2196,8 @@ def build_interpretation(
                 "Always preserve a concise explanatory text answer.",
                 "Use a structured table for a clear comparison when the answer has comparable attributes.",
                 "Use a diagram for explicit schemas, workflows, arrows, geometry, mathematical figures, points, segments, angles, dimensions, measurements, construction drawings, blueprints, and technical drawings. Keep their exact labels, lengths, units, and angle values in the concrete diagram payload; never switch these requests to raster image generation.",
-                "Use C_APRIL_IMAGES_GENERATOR (Images 2.0) for new artistic/scenic/photorealistic images and complex illustrations. If a Free request mentions adding/removing/changing something on a photo or image, fulfil the visual goal as a NEW text-only generation; never ask for a source upload and never claim the original image was modified. A structured math/technical drawing such as 'нарисуй схему на картинке' must remain a diagram request.",
-                "When intent.free_image_recreation=true, create a fresh image from the requested change and include a concise RETURN_LANGUAGE note that this is a new generation, the original photo remains unchanged, and editing existing images is available only in Premium. Do not suppress the image render block. Only when intent.image_edit_restricted=true AND intent.free_image_recreation is false should the source-edit request be refused without an image block.",
+                "Use C_APRIL_IMAGES_GENERATOR (Images 2.0) for new artistic/scenic/photorealistic images and complex illustrations. New images requested from the current dialogue are allowed in Free and must not receive an unsolicited package/plan disclaimer. A structured math/technical drawing such as 'нарисуй схему на картинке' must remain a diagram request.",
+                "In Free, an explicit request to alter an existing image, photo, diagram, chart, or drawing is Premium-only: return a concise, soft localized limitation, do not ask the user to upload the image again, and do not generate a replacement image or diagram. Never set free_image_recreation to enable a generation for an edit request. Ordinary new image generation and ordinary new diagrams remain enabled.",
                 "Use a formula renderer for mathematical notation; use a graph only when a function or grounded numeric data can define it.",
                 "For graph requests, follow intent.graph_policy: trends/time-ordered values use line; categorical comparisons use bar; choose only among those 2D types unless explicit 3D intent or real 3D source data supports 3D.",
                 "Never turn 2D x/y data into a 3D chart by inventing a zero z-axis; true 3D requires explicit XYZ values, a real surface grid/function of x and y, or structured spatial objects.",
@@ -2152,7 +2211,7 @@ def build_interpretation(
             "semantic_interpretation_version": "april_request_semantics_v1",
         },
     }
-    if image_edit_restricted and not free_image_recreation:
+    if image_edit_restricted:
         sequence_items = ((result.get("request_structure") or {}).get("question_sequence") or [])
         for sequence_item in sequence_items:
             if not isinstance(sequence_item, dict):
