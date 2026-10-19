@@ -187,11 +187,29 @@ _OUTPUT_MARKERS = {
     },
 }
 
+# Direct edit/retouch verbs mean the user wants to change an existing image.
+# In the Free chain this is a restricted operation, not a reason to call the generator.
 _IMAGE_MODIFICATION_MARKERS = {
     "edit image", "edit the image", "modify image", "change image", "alter image",
-    "edit photo", "modify photo", "change photo", "замени на фото", "измени фото",
-    "измени картинку", "измени изображение", "отредактируй фото", "отредактируй картинку",
-    "добавь на фото", "убери с фото", "замени на картинке", "измени на картинке",
+    "edit photo", "modify photo", "change photo", "retouch photo", "enhance photo",
+    "improve the image", "improve photo", "remove object from photo", "change the background",
+    "измени фото", "измени фотографию", "изменить фотографию", "измени картинку",
+    "измени изображение", "изменить изображение", "отредактируй фото",
+    "отредактируй фотографию", "отредактируй картинку", "улучши фото",
+    "улучши фотографию", "улучши картинку", "улучши изображение", "обработай фото",
+    "обработай фотографию", "ретушируй фото", "сделай ретушь",
+}
+
+# These phrases imply compositing only when an existing/source image is available.
+# Without an image, a request such as "нарисуй на фото кота" means create a new picture.
+_IMAGE_COMPOSITING_MARKERS = {
+    "draw on the photo", "draw on the image", "add to the photo", "add to the image",
+    "place on the photo", "put on the photo", "remove from the photo", "replace in the photo",
+    "нарисуй на фото", "нарисовать на фото", "нарисуй на фотографии", "нарисуй на картинке",
+    "нарисуй на изображении", "добавь на фото", "добавить на фото", "добавь на фотографии",
+    "добавь на картинке", "добавь на изображении", "помести на фото", "помести на картинку",
+    "убери с фото", "убери с фотографии", "убери с картинки", "замени на фото",
+    "замени на фотографии", "замени на картинке", "измени на картинке",
 }
 
 
@@ -208,8 +226,37 @@ def _contains_marker(text: str, marker: str) -> bool:
 
 
 def _detect_image_modification(text: str) -> bool:
-    low = _text(text).lower()
-    return any(_contains_marker(low, marker) for marker in _IMAGE_MODIFICATION_MARKERS)
+    """Detect an explicit request to modify/retouch an existing image, not a how-to question."""
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    how_to_question = bool(re.search(
+        r"^\s*(?:как\s+(?:(?:мне|можно|самому|самой)\s+)?(?:редактир|измен|улучш|обработ|ретуш|поменя)"
+        r"|как\s+делать\s+ретуш|объясни\w*\s*,?\s*как\b|расскажи\w*\s*,?\s*как\b"
+        r"|how\s+(?:do\s+i|can\s+i|to)\s+(?:edit|change|improve|enhance|retouch|modify)"
+        r"|what\s+is\s+the\s+best\s+way\s+to\s+(?:edit|change|improve|enhance|retouch))",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    if how_to_question:
+        return False
+    return any(_contains_marker(low, marker.replace("ё", "е")) for marker in _IMAGE_MODIFICATION_MARKERS)
+
+
+def _detect_image_compositing_request(text: str) -> bool:
+    """Detect object placement/removal wording, interpreted as edit only with a source image."""
+    low = _text(text).lower().replace("ё", "е")
+    if any(_contains_marker(low, marker.replace("ё", "е")) for marker in _IMAGE_COMPOSITING_MARKERS):
+        return True
+    # Object nouns often occur between the verb and "на фото" ("добавь кота на фото").
+    # Recognize that natural word order without classifying it as editing when no image exists.
+    object_placement = re.search(
+        r"(?:\b(?:add|put|place|draw|insert|remove|replace)\w*\b.{0,70}\b(?:to|on|in|from)\s+(?:the\s+)?(?:photo|photograph|image|picture)\b)"
+        r"|(?:\b(?:добав\w*|нарис\w*|гарис\w*|помест\w*|размест\w*|убер\w*|замен\w*|встав\w*)\b.{0,70}\b(?:на|в|с)\s+(?:этом\s+|этой\s+|это\s+)?(?:фото|фотографи\w*|картинк\w*|изображени\w*))",
+        low,
+        flags=re.IGNORECASE,
+    )
+    return bool(object_placement)
 
 
 def _detect_image_generation_request(text: str) -> bool:
@@ -222,11 +269,13 @@ def _detect_image_generation_request(text: str) -> bool:
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
+    # Explicit editing is not image generation in the Free chain. The caller will
+    # issue a Premium-limit explanation and suppress all image artifacts.
     if _detect_image_modification(low):
-        return True
+        return False
 
-    action = r"(?:draw|show|display|create|make|generate|render|нарис\w*|покаж\w*|отобраз\w*|созда\w*|сдела\w*|сгенерир\w*|изобраз\w*)"
-    image_noun = r"(?:picture|image|illustration|photo|картинк(?:у|а|и)\b|изображени(?:е|я|и)\b|иллюстраци(?:ю|я|и)\b|фото\b)"
+    action = r"(?:draw|show|display|create|make|generate|render|add|place|put|remove|replace|нарис\w*|гарис\w*|рисуй\w*|покаж\w*|отобраз\w*|созда\w*|сдела\w*|сгенерир\w*|изобраз\w*|добав\w*|помест\w*|размест\w*|убер\w*|замен\w*)"
+    image_noun = r"(?:picture|image|illustration|photo|photograph|картинк(?:у|а|и|е)\b|изображени(?:е|я|и|и\s+на)\b|иллюстраци(?:ю|я|и)\b|фотографи\w*|фото\b)"
     # Permit polite words and ordinary modifiers, but do not skip a preceding
     # explicit schema/graph/table noun to reinterpret its object as an image.
     filler = r"(?:(?!(?:схем\w*|диаграмм\w*|график\w*|таблиц\w*|черт[её]ж\w*)\b)[\w-]+\s+)"
@@ -345,13 +394,23 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     # blueprint, technical drawing, or measured-drawing intent. Graphs remain
     # a separate mathematical/data visualization route.
     visual_action = bool(re.search(
-        r"(?<![\w\u0080-\uffff])(?:draw(?:ing)?|show|display|create|make|render|visuali[sz]e|"
-        r"нарис\w*|покаж\w*|отобраз\w*|изобраз\w*|постро\w*|побуд\w*|созда\w*|сдела\w*|визуализир\w*)(?![\w\u0080-\uffff])",
+        r"(?<![\w\u0080-\uffff])(?:draw(?:ing)?|show|display|create|make|render|visuali[sz]e|add|place|put|remove|replace|"
+        r"нарис\w*|гарис\w*|рисуй\w*|покаж\w*|отобраз\w*|изобраз\w*|постро\w*|побуд\w*|созда\w*|сдела\w*|визуализир\w*|добав\w*|помест\w*|размест\w*|убер\w*|замен\w*|объясни\w*|поясни\w*)(?![\w\u0080-\uffff])",
         low,
     ))
+    # Geometry, measured figures and mathematical constructions are structured
+    # diagrams by default. This is intentionally independent of the renderer:
+    # the SceneContract still decides how the concrete diagram payload is shown.
     explicit_diagram_intent = bool(re.search(
-        r"(?:\b(?:diagram|schematic|blueprint|technical drawing|engineering drawing|flowchart)\b|"
-        r"диаграмм\w*|схем\w*|чертеж\w*|креслен\w*|блок[- ]схем\w*)",
+        r"(?:\b(?:diagram|schematic|blueprint|technical drawing|engineering drawing|flowchart|"
+        r"geometry|geometric figure|triangle|square|rectangle|circle|point|segment|angle|polygon|"
+        r"radius|diameter|perimeter|area|dimension|dimensions|measurement|vector)\b|"
+        r"диаграмм\w*|схем\w*|чертеж\w*|чертёж\w*|креслен\w*|блок[- ]схем\w*|"
+        r"геометр\w*|(?:математич\w*|геометрическ\w*)\s+фигур\w*|точк\w*|отрез\w*|"
+        r"треугольн\w*|квадрат\w*|прямоугольн\w*|ромб\w*|трапец\w*|многоугольн\w*|"
+        r"окружност\w*|круг\w*|эллипс\w*|угол\w*|вектор\w*|координат\w*|"
+        r"сторон\w*|радиус\w*|диаметр\w*|периметр\w*|площад\w*|размер\w*|"
+        r"измерен\w*|черт[её]ж\w*|стрелк\w*|размерн\w*\s+лини\w*)",
         low,
     ))
     explicit_graph_intent = bool(re.search(
@@ -359,7 +418,12 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         r"постро\w*\s+(?:график|поверхност))",
         low,
     ))
-    if visual_action and explicit_diagram_intent and not explicit_image_request and "diagram" not in outputs:
+    visual_explanation_intent = bool(re.search(
+        r"(?:наглядн\w*|с\s+помощью\s+(?:стрелок|фигур|схем)|стрелк\w*|"
+        r"визуальн\w*\s+объясн|объясни\w*.{0,35}(?:схем\w*|диаграмм\w*|фигур\w*))",
+        low,
+    ))
+    if (visual_action and explicit_diagram_intent or visual_explanation_intent) and not explicit_image_request and "diagram" not in outputs:
         outputs.append("diagram")
     if (
         visual_action
@@ -1663,6 +1727,33 @@ def _is_code_modification_request(text: str) -> bool:
     return any(marker.replace("ё", "е") in low for marker in _CODE_MODIFICATION_MARKERS)
 
 
+def _prior_free_image_edit_notice_count(memory: dict[str, Any]) -> int:
+    """Count prior selected dialogue pairs containing the Free image-edit notice."""
+    pairs = memory.get("selected_pairs") if isinstance(memory, dict) else None
+    if not isinstance(pairs, list):
+        return 0
+    notice_markers = (
+        "редактирование изображений доступно только в premium",
+        "редактирование и улучшение изображений доступно только в premium",
+        "изменение изображений доступно только в premium",
+        "image editing is available only in premium",
+        "editing and enhancing images is available only in premium",
+        "редагування зображень доступне тільки в premium",
+        "редагування зображень доступне лише в premium",
+        "la retouche d’image est disponible uniquement avec premium",
+        "la modification des images est disponible uniquement avec premium",
+    )
+    count = 0
+    for pair in pairs:
+        try:
+            rendered = json.dumps(pair, ensure_ascii=False, default=str).lower().replace("ё", "е")
+        except Exception:
+            rendered = str(pair).lower().replace("ё", "е")
+        if any(marker.replace("ё", "е") in rendered for marker in notice_markers):
+            count += 1
+    return min(count, 5)
+
+
 def build_interpretation(
     *,
     current_request: str,
@@ -1705,10 +1796,24 @@ def build_interpretation(
         for item in attachments
     )
 
-    detected_outputs = _detect_requested_outputs(original or text)
-    requested_outputs = _enhance_requested_outputs(original or text, detected_outputs)
-    routing_capabilities = _infer_routing_capabilities(original or text)
-    wants_image = "image" in requested_outputs
+    request_text = original or text
+    detected_outputs = _detect_requested_outputs(request_text)
+    requested_outputs = _enhance_requested_outputs(request_text, detected_outputs)
+    routing_capabilities = _infer_routing_capabilities(request_text)
+
+    # This module is used by the Free/non-Premium executor. Refuse edits to an
+    # existing or explicitly named image, but never mistake a creation request
+    # like "нарисуй на фото кота" for editing when no source image is present.
+    image_edit_restricted = bool(
+        _detect_image_modification(request_text)
+        or (has_image and _detect_image_compositing_request(request_text))
+    )
+    if image_edit_restricted:
+        requested_outputs = [kind for kind in requested_outputs if kind not in {"image", "gallery", "generated_image"}]
+        if "text" not in requested_outputs:
+            requested_outputs.insert(0, "text")
+    image_edit_prior_attempts = _prior_free_image_edit_notice_count(memory) if image_edit_restricted else 0
+    wants_image = "image" in requested_outputs and not image_edit_restricted
     wants_file = "file" in requested_outputs
     wants_links = "link" in requested_outputs
     structured_data_extensions = {".csv", ".tsv", ".json", ".xlsx", ".xls", ".ods", ".parquet"}
@@ -1795,6 +1900,8 @@ def build_interpretation(
     # does remains analyze_file and never silently becomes code generation.
     if _is_code_modification_request(original or text) and has_file:
         task = "modify_code"
+    if image_edit_restricted:
+        task = "image_edit_unavailable_free"
 
     if has_original_image and task == "answer_request":
         task = "analyze_image"
@@ -1828,6 +1935,8 @@ def build_interpretation(
             "requested_outputs": requested_outputs,
             "wants_image": wants_image,
             "explicit_generation_request": wants_image,
+            "image_edit_restricted": image_edit_restricted,
+            "image_edit_prior_attempts": image_edit_prior_attempts,
             "wants_file": wants_file,
             "wants_links": wants_links,
             "wants_code": "code" in requested_outputs,
@@ -1920,7 +2029,9 @@ def build_interpretation(
             "rendering_guidance": [
                 "Always preserve a concise explanatory text answer.",
                 "Use a structured table for a clear comparison when the answer has comparable attributes.",
-                "Use a diagram only for explicit schema/diagram/blueprint/technical-drawing intent or workflows/architecture/sequences. Ordinary requests to draw/create/show a picture or illustration must use C_APRIL_IMAGES_GENERATOR (Images 2.0), unless the request explicitly asks for a diagram, blueprint, technical drawing, or graph. Emit a concrete payload.svg, drawing elements, geometry, or nodes/edges; do not only describe the intended drawing.",
+                "Use a diagram for explicit schemas, workflows, arrows, geometry, mathematical figures, points, segments, angles, dimensions, measurements, construction drawings, blueprints, and technical drawings. Keep their exact labels, lengths, units, and angle values in the concrete diagram payload; never switch these requests to raster image generation.",
+                "Use C_APRIL_IMAGES_GENERATOR (Images 2.0) for new artistic/scenic/photorealistic images and complex illustrations. A request like 'draw on a photo' with no source image is a request to create a new image; when a source image exists and the request asks to add/remove/change/retouch it, apply the Free image-edit restriction instead.",
+                "When intent.image_edit_restricted=true, do not create or promise an edited image and do not ask the user to upload it. Give a short, friendly Premium-only feature explanation in RETURN_LANGUAGE; use identity.display_name naturally only when supplied. If intent.image_edit_prior_attempts > 0, acknowledge that this has already been explained, apologize briefly, and state clearly that editing/enhancement is available only in Premium through the user cabinet. Do not add an image render block.",
                 "Use a formula renderer for mathematical notation; use a graph only when a function or grounded numeric data can define it.",
                 "For graph requests, follow intent.graph_policy: trends/time-ordered values use line; categorical comparisons use bar; choose only among those 2D types unless explicit 3D intent or real 3D source data supports 3D.",
                 "Never turn 2D x/y data into a 3D chart by inventing a zero z-axis; true 3D requires explicit XYZ values, a real surface grid/function of x and y, or structured spatial objects.",
@@ -1934,6 +2045,24 @@ def build_interpretation(
             "semantic_interpretation_version": "april_request_semantics_v1",
         },
     }
+    if image_edit_restricted:
+        sequence_items = ((result.get("request_structure") or {}).get("question_sequence") or [])
+        for sequence_item in sequence_items:
+            if not isinstance(sequence_item, dict):
+                continue
+            item_outputs = sequence_item.get("output_types")
+            if not isinstance(item_outputs, list):
+                item_outputs = ["text"]
+            item_outputs = [kind for kind in item_outputs if str(kind).lower() not in {"image", "gallery", "generated_image"}]
+            if "text" not in item_outputs:
+                item_outputs.insert(0, "text")
+            sequence_item["output_types"] = item_outputs
+        render_plan = result.get("request_structure", {}).get("output_plan")
+        if isinstance(render_plan, list):
+            result["request_structure"]["output_plan"] = [
+                kind for kind in render_plan if str(kind).lower() not in {"image", "gallery", "generated_image"}
+            ] or ["text"]
+
     _apr_timing_log("build_interpretation", interpretation_started,
         relation=relation, task=task, requested_outputs=requested_outputs,
         input_chars=len(text), selected_pairs=len(selected_pairs), history_topics=len(history_topics),
