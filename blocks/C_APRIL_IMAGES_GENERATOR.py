@@ -971,6 +971,7 @@ class AprilImagesGenerator:
             "seed": None,
             "generator_signal": generator_signal,
             "request_anchor": request_anchor,
+            "image_caption": cls._safe_text(spec.get("image_caption") or ""),
             "image_subject_only": bool(spec.get("image_subject_only")),
             "flow_id": cls._safe_text(spec.get("flow_id") or ""),
             "turn_id": cls._safe_text(spec.get("turn_id") or ""),
@@ -1146,8 +1147,8 @@ class AprilImagesGenerator:
             "width": int(width),
             "height": int(height),
             "title": payload.get("title") or "Image",
-            "alt": payload.get("alt") or clean.get("request_anchor") or prompt,
-            "caption": payload.get("caption") or clean.get("request_anchor") or prompt,
+            "alt": clean.get("image_caption") or payload.get("alt") or clean.get("request_anchor") or prompt,
+            "caption": clean.get("image_caption") or payload.get("caption") or clean.get("request_anchor") or prompt,
         }
         payload.update({
             "kind": "generated_image",
@@ -1161,6 +1162,8 @@ class AprilImagesGenerator:
             "url": data_uri,
             "image": data_uri,
             "prompt": prompt,
+            "alt": clean.get("image_caption") or payload.get("alt") or clean.get("request_anchor") or prompt,
+            "caption": clean.get("image_caption") or payload.get("caption") or clean.get("request_anchor") or prompt,
             "engine": cls.ENGINE_NAME,
             "engine_version": cls.ENGINE_VERSION,
             "backend": cls.BACKEND,
