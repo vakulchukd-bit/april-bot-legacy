@@ -318,6 +318,32 @@ def _detect_image_generation_request(text: str) -> bool:
     if _detect_image_modification(low):
         return False
 
+    # "Draw on the picture this parallelogram with dimensions" refers to a
+    # structured geometry drawing, not to a raster picture whose subject is an
+    # image. The surface wording ("на картинке") must not outrank the requested
+    # technical object. Keep this guard narrow so "нарисуй кота на картинке"
+    # and other genuine image/compositing requests retain their existing route.
+    structured_drawing_subject = bool(re.search(
+        r"(?:параллелограмм\w*|треугольн\w*|квадрат\w*|прямоугольн\w*|ромб\w*|"
+        r"трапец\w*|многоугольн\w*|окружност\w*|\bpolygon\b|\btriangle\b|"
+        r"\bsquare\b|\brectangle\b|\bparallelogram\b|\brhombus\b|"
+        r"\btrapezoid\b|\bgraph\b|\bfunction\b|\bequation\b|"
+        r"геометр\w*\s+фигур\w*|черт[её]ж\w*|схем\w*|диаграмм\w*|график\w*|"
+        r"функци\w*|уравнен\w*|координат\w*|формул\w*|"
+        r"с\s+(?:произвольн\w*\s+)?размер\w*|размер\w*\s+(?:кажд\w*\s+)?сторон\w*)",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    drawing_on_image_surface = bool(re.search(
+        r"(?:нарис\w*|гарис\w*|draw|render|постро\w*|покаж\w*)\b.{0,35}"
+        r"\b(?:на|в)\s+(?:(?:этой|этот|эту|той|тои|такой|таком)\s+)?"
+        r"(?:картинк\w*|изображени\w*|фот\w*)",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    if structured_drawing_subject and drawing_on_image_surface:
+        return False
+
     action = r"(?:draw|show|display|create|make|generate|render|add|place|put|remove|replace|нарис\w*|гарис\w*|рисуй\w*|покаж\w*|отобраз\w*|созда\w*|сдела\w*|сгенерир\w*|изобраз\w*|добав\w*|помест\w*|размест\w*|убер\w*|замен\w*)"
     image_noun = r"(?:picture|image|illustration|photo|photograph|картинк(?:у|а|и|е)\b|изображени(?:е|я|и|и\s+на)\b|иллюстраци(?:ю|я|и)\b|фот\w*)"
     # Permit polite words and ordinary modifiers, but do not skip a preceding
@@ -451,7 +477,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         r"radius|diameter|perimeter|area|dimension|dimensions|measurement|vector)\b|"
         r"диаграмм\w*|схем\w*|чертеж\w*|чертёж\w*|креслен\w*|блок[- ]схем\w*|"
         r"геометр\w*|(?:математич\w*|геометрическ\w*)\s+фигур\w*|точк\w*|отрез\w*|"
-        r"треугольн\w*|квадрат\w*|прямоугольн\w*|ромб\w*|трапец\w*|многоугольн\w*|"
+        r"треугольн\w*|квадрат\w*|прямоугольн\w*|параллелограмм\w*|ромб\w*|трапец\w*|многоугольн\w*|"
         r"окружност\w*|круг\w*|эллипс\w*|угол\w*|вектор\w*|координат\w*|"
         r"сторон\w*|радиус\w*|диаметр\w*|периметр\w*|площад\w*|размер\w*|"
         r"измерен\w*|черт[её]ж\w*|стрелк\w*|размерн\w*\s+лини\w*)",
@@ -1851,17 +1877,21 @@ def build_interpretation(
     # only when the user asked to change the pictured scene.
     image_modification_requested = _detect_image_modification(request_text)
     compositing_requested = _detect_image_compositing_request(request_text)
-    image_edit_restricted = bool(
-        image_modification_requested or (has_image and compositing_requested)
-    )
-    # A placement request may refer to an image created in an earlier turn,
-    # even when no binary is attached to this message. Route placement requests
-    # to fresh generation unless a math/technical diagram is clearly requested.
+    # A geometry/technical drawing stays a structured diagram even if the
+    # wording says "on the picture" or the dialogue contains an earlier image.
+    # The Free image-edit lock is for actual source-photo changes, not for
+    # drawing a requested SVG/geometry artifact as an independent output.
     structured_diagram_noun = bool(re.search(
         r"(?:схем\w*|диаграмм\w*|черт[её]ж\w*|геометрическ\w*\s+фигур\w*|"
-        r"треугольн\w*|квадрат\w*|прямоугольн\w*|окружност\w*|график\w*)",
+        r"треугольн\w*|квадрат\w*|прямоугольн\w*|параллелограмм\w*|ромб\w*|"
+        r"трапец\w*|многоугольн\w*|окружност\w*|график\w*|"
+        r"размер\w*\s+(?:кажд\w*\s+)?сторон\w*|размер\w*|измерен\w*)",
         request_text.lower().replace("ё", "е"),
     ))
+    image_edit_restricted = bool(
+        image_modification_requested
+        or (has_image and compositing_requested and not structured_diagram_noun)
+    )
     free_image_recreation = bool(
         image_modification_requested or (compositing_requested and not structured_diagram_noun)
     )
@@ -1967,7 +1997,19 @@ def build_interpretation(
     if free_image_recreation:
         task = "generate_image_new_composition_free"
 
-    if has_original_image and task == "answer_request":
+    # An existing/remembered image must not override an explicit request for a
+    # structured geometry or graph artifact. In particular, do not turn
+    # "draw this parallelogram on the picture" into image analysis or raster
+    # generation simply because image context exists in the conversation.
+    structured_visual_output = bool(
+        structured_diagram_noun
+        and ("diagram" in requested_outputs or "graph" in requested_outputs)
+        and not image_modification_requested
+        and not free_image_recreation
+    )
+    if structured_visual_output:
+        task = "answer_request"
+    elif has_original_image and task == "answer_request":
         task = "analyze_image"
 
     result = {
