@@ -651,6 +651,31 @@ async def _generate_image_artifact(
     if spec is None:
         return None
 
+    intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    if bool(intent.get("free_image_recreation")):
+        # Never pass the original photo as an editable source in Free. The sole
+        # image engine receives a clear text prompt to produce a new standalone
+        # picture that fulfils the requested change; the uploaded/source asset
+        # remains unchanged and is not reused as image-edit input.
+        prefix = (
+            "Create a completely new, independent image from scratch, using only the user's requested scene change as a text brief. "
+            "Do not edit, retouch, transform, or claim to modify any existing/source photograph. "
+            "The source image must remain unchanged. Fulfil the requested subject, count, and visible details in this new image. "
+            "User's requested scene: "
+        )
+        semantic_prompt = _text(
+            spec.get("openai_structured_visual_plan_semantic")
+            or spec.get("prompt")
+            or (interpretation.get("input") or {}).get("original_request")
+        )
+        if semantic_prompt and not semantic_prompt.lower().startswith("create a completely new, independent image"):
+            spec["openai_structured_visual_plan_semantic"] = prefix + semantic_prompt
+            spec["prompt"] = prefix + semantic_prompt
+        # Avoid handing image context back to the generator as a source asset.
+        spec["visual_context"] = {}
+        spec["source_edit_allowed"] = False
+        spec["generation_mode"] = "fresh_text_only_recreation_free"
+
     from blocks.C_APRIL_IMAGES_GENERATOR import generate_from_spec
 
     return await generate_from_spec(spec, variant="processor_route")
@@ -2011,7 +2036,61 @@ async def execute(
     # packaging/sanitization layer; it never creates a second Provider call.
     raw_blocks = [dict(x) for x in (raw.get("render_blocks") or []) if isinstance(x, dict)]
     raw_artifacts = [dict(x) for x in (raw.get("artifacts") or []) if isinstance(x, dict)]
-    wants_image = bool((interpretation.get("intent") or {}).get("wants_image"))
+    intent_policy = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    free_image_recreation = bool(intent_policy.get("free_image_recreation"))
+    if free_image_recreation:
+        # Enforce the package rule in code, not only in the prompt: a Free user
+        # never sees a request to upload a photo for editing. The real image
+        # artifact is appended below after an independent generation attempt.
+        language = _text((interpretation.get("input") or {}).get("display_language")).lower()
+        if language.startswith(("uk", "ua")):
+            notice = (
+                "У Free цей запит виконується як створення нового зображення за описом. "
+                "Оригінальне фото не змінюється; редагування зображень доступне в Premium."
+            )
+        elif language.startswith("fr"):
+            notice = (
+                "En Free, cette demande produit une nouvelle image à partir de votre description. "
+                "La photo d’origine reste inchangée ; la retouche d’images est disponible avec Premium."
+            )
+        elif language.startswith("en"):
+            notice = (
+                "In Free, this request is handled by generating a new image from your description. "
+                "The original photo remains unchanged; editing existing images is available in Premium."
+            )
+        else:
+            notice = (
+                "В Free этот запрос выполняется как создание нового изображения по описанию. "
+                "Исходная фотография не изменяется; редактирование существующих изображений доступно в Premium."
+            )
+        answer = notice
+        raw["answer"] = notice
+        raw["content"] = notice
+        raw["summary"] = notice
+        text_block_found = False
+        for block in raw_blocks:
+            block_type = _text(block.get("type") or block.get("artifact_type")).lower()
+            if block_type not in {"text", "markdown", "message", "message_text"}:
+                continue
+            text_block_found = True
+            block["content"] = notice
+            for key in ("text", "markdown", "display_text"):
+                if key in block:
+                    block[key] = notice
+            payload = block.get("payload")
+            if isinstance(payload, dict):
+                payload["content"] = notice
+                for key in ("text", "markdown", "display_text"):
+                    if key in payload:
+                        payload[key] = notice
+        if not text_block_found:
+            raw_blocks.insert(0, {
+                "type": "text",
+                "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
+                "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
+                "content": notice,
+            })
+    wants_image = bool(intent_policy.get("wants_image"))
     if not wants_image:
         raw_blocks = [
             block for block in raw_blocks
