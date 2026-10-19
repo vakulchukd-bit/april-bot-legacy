@@ -391,6 +391,111 @@ def _renderer_plan(
     return plan
 
 
+
+def _final_portrait_prompt(request_text: str, interpretation: dict[str, Any] | None = None) -> str:
+    """Build a single-person portrait prompt for an explicit final-photo request or follow-up."""
+    source = _text(request_text)
+    low = source.lower().replace("ё", "е")
+    photo = r"(?:изображени\w*|картинк\w*|портрет\w*|фото\b|фотограф\w*|снимк\w*|image\w*|picture\w*|portrait\w*|photo\w*)"
+    final_image_cue = bool(re.search(
+        rf"(?:в\s+(?:самом\s+)?конце|напоследок|в\s+завершени\w*|at\s+the\s+end|finally)[\s\S]{{0,170}}?{photo}",
+        low, re.IGNORECASE,
+    ))
+    followup_cue = bool(re.search(
+        rf"(?:где|куда\s+дел\w*|не\s+показал\w*|не\s+прикрепил\w*|пропал\w*|missing|where\s+is|where's|where\s+are)[\s\S]{{0,45}}?{photo}|(?:^|\b)а\s+{photo}(?:\s+где)?\b|\b(?:его|ее|её|их|his|her|their)\s+{photo}",
+        low, re.IGNORECASE,
+    ))
+    possessive_or_appearance = bool(re.search(
+        rf"\b(?:его|ее|её|их|his|her|their)\s+{photo}|(?:как\s+выгляд\w*|внешност\w*|appearance|look\s+like|portrait\s+of)",
+        low, re.IGNORECASE,
+    ))
+    if not (final_image_cue or followup_cue or possessive_or_appearance):
+        return ""
+
+    def collect(value: Any, out: list[str], depth: int = 0) -> None:
+        if depth > 5 or len(out) >= 60:
+            return
+        if isinstance(value, str):
+            candidate = value.strip()
+            if candidate and candidate not in out:
+                out.append(candidate[:1200])
+        elif isinstance(value, dict):
+            preferred = ("active_topic", "topic", "title", "heading", "subject", "request", "original_request", "anchor", "selected_section", "text", "content", "answer", "summary", "april", "april_en", "assistant", "response", "memory_summary", "user", "user_en", "selected_pairs", "active_work_branch", "continuation_context")
+            for key in preferred:
+                if key in value:
+                    collect(value[key], out, depth + 1)
+            for key, child in value.items():
+                if key not in preferred and isinstance(child, (dict, list)):
+                    collect(child, out, depth + 1)
+        elif isinstance(value, list):
+            for child in value[:12]:
+                collect(child, out, depth + 1)
+
+    context_values: list[str] = []
+    if isinstance(interpretation, dict):
+        dialogue = interpretation.get("dialogue")
+        collect(dialogue, context_values)
+        collect(interpretation.get("request_structure"), context_values)
+        collect(interpretation.get("input"), context_values)
+    context = "\n".join(context_values)[:9000]
+
+    subject = ""
+    # First use a current-turn named person after "про/about"; stop at request clauses.
+    name_match = re.search(
+        r"(?:\b(?:про|об|о|about)\s+|\b(?:photo|portrait)\s+of\s+)([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё.'’-]*(?:[ \t]+[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё.'’-]*){0,3})",
+        source, re.IGNORECASE,
+    )
+    if name_match:
+        candidate = name_match.group(1).strip(" .,!?:;—-")
+        candidate = re.split(r"\s+(?:все|всю|всё|его|ее|её|их|опыты|жизнь|биограф\w*|ссылк\w*|ресурс\w*|and|all|his|her|their|experiments?|life|links?|resources?)\b", candidate, maxsplit=1, flags=re.IGNORECASE)[0]
+        if candidate and len(candidate) <= 70:
+            subject = candidate
+
+    if subject and len(subject.split()) == 1:
+        # The current request may use a declined surname ("Менделеева"). If the
+        # active answer supplies the matching canonical full name, use that form.
+        stem = subject.lower().rstrip("аоуыеияюы")
+        canonical_patterns = (
+            r"(?:кто\s+такой|кто\s+такая|биографи\w*|who\s+is|portrait\s+of)\s+([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.'’-]*(?:[ \t]+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.'’-]*){1,3})",
+            r"\b([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.'’-]+(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.'’-]+){1,3})\b",
+        )
+        for pattern in canonical_patterns:
+            for canonical_match in re.finditer(pattern, context, re.IGNORECASE | re.MULTILINE):
+                canonical = canonical_match.group(1).strip(" .,!?:;—-")
+                if stem and stem in canonical.lower():
+                    subject = canonical
+                    break
+            if subject and len(subject.split()) > 1:
+                break
+
+    if not subject:
+        # Prefer explicit article/title subject in the active context.
+        patterns = (
+            r"(?:кто\s+такой|кто\s+такая|биографи\w*|who\s+is|portrait\s+of)\s+([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.'’-]*(?:[ \t]+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.'’-]*){1,3})",
+            r"(?:^|\n)\s*#{1,4}\s*(?:кто\s+такой|кто\s+такая|биографи\w*|who\s+is)\s+([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.'’-]*(?:[ \t]+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.'’-]*){1,3})",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, context, re.IGNORECASE | re.MULTILINE)
+            if match:
+                subject = match.group(1).strip(" .,!?:;—-")
+                break
+    if not subject:
+        # Last-resort name extraction from context: only proper-name sequences, not prose.
+        match = re.search(r"\b([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.'’-]+(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.'’-]+){1,3})\b", context)
+        if match:
+            subject = match.group(1).strip()
+    if not subject:
+        return ""
+
+    compact_context = re.sub(r"\s+", " ", context)[:700]
+    return (
+        f"Create one standalone, historically grounded generated portrait of {subject}. "
+        f"Resolve identity from this conversation context: {compact_context}. "
+        "The result is an illustration inspired by historical references, not an authentic archival photograph. "
+        "Show only the person; no infographic, poster, collage, formula sheet, diagram, panel, labels, or text. "
+        "Use historically plausible clothing and appearance when reliable context supports it, natural proportions, coherent lighting, and a neutral background."
+    )
+
 def _build_image_spec(
     raw: dict[str, Any],
     interpretation: dict[str, Any],
@@ -438,6 +543,27 @@ def _build_image_spec(
         semantic = _first_prompt(clean)
         if not semantic:
             semantic = _first_prompt(clean.get("payload")) if isinstance(clean.get("payload"), dict) else ""
+        final_portrait_prompt = _final_portrait_prompt(request_text, interpretation)
+        if final_portrait_prompt:
+            semantic = final_portrait_prompt
+            portrait_match = re.search(r"portrait of ([^\n.]+)", final_portrait_prompt, re.IGNORECASE)
+            subject = _text(portrait_match.group(1) if portrait_match else "")
+            clean["image_subject_only"] = True
+            caption_subject = subject or "historical figure"
+            lang = str((interpretation.get("display_language") or interpretation.get("language") or (interpretation.get("input") or {}).get("display_language") or "")).lower()
+            if lang.startswith(("uk", "ua")):
+                clean["image_caption"] = f"Портрет: {caption_subject}."
+            elif lang.startswith("fr"):
+                clean["image_caption"] = f"Portrait de {caption_subject}."
+            elif lang.startswith("en"):
+                clean["image_caption"] = f"Portrait of {caption_subject}."
+            else:
+                clean["image_caption"] = f"Портрет: {caption_subject}."
+            clean["openai_structured_visual_plan_raw"] = {
+                "rendering_type": "single_portrait",
+                "subject": subject,
+                "exclude": ["infographic", "poster", "collage", "formulas", "diagrams", "panels", "labels", "text"],
+            }
         # Do not downgrade an empty artifact/spec to the original user request
         # here: callers may have a richer candidate later in the same response.
         # The request fallback is applied only after every explicit visual-plan
@@ -447,7 +573,7 @@ def _build_image_spec(
         clean["schema"] = "april_image_spec_v1"
         clean["generator_signal"] = "C_APRIL_IMAGES_GENERATOR"
         clean["request_anchor"] = _text(clean.get("request_anchor") or request_text)
-        clean["prompt"] = _text(clean.get("prompt") or semantic)
+        clean["prompt"] = final_portrait_prompt or _text(clean.get("prompt") or semantic)
         clean["openai_structured_visual_plan_semantic"] = semantic
         if isinstance(raw_plan, dict):
             clean.setdefault("openai_structured_visual_plan_raw", raw_plan)
