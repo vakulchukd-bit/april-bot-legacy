@@ -226,7 +226,11 @@ def _contains_marker(text: str, marker: str) -> bool:
 
 
 def _detect_image_modification(text: str) -> bool:
-    """Detect an explicit request to modify/retouch an existing image, not a how-to question."""
+    """Detect a request to change an existing photo, including colloquial Russian.
+
+    The Free chain must not perform source-image editing. The caller reroutes a
+    detected edit to a separate text-only image generation, with a concise notice.
+    """
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
@@ -240,7 +244,46 @@ def _detect_image_modification(text: str) -> bool:
     ))
     if how_to_question:
         return False
-    return any(_contains_marker(low, marker.replace("ё", "е")) for marker in _IMAGE_MODIFICATION_MARKERS)
+
+    if any(_contains_marker(low, marker.replace("ё", "е")) for marker in _IMAGE_MODIFICATION_MARKERS):
+        return True
+
+    # `фотку`, `фотке`, `фотографии` and related colloquial/inflected forms must
+    # match the same source-image concept; limiting this to `фото` missed the
+    # exact phrasing observed in production logs ("измени эту фотку").
+    image_noun = r"(?:фот\w*|картинк\w*|изображени\w*|photo(?:graph)?s?|images?|pictures?)"
+    # Direct forms like "измени именно ту фотографию" are missed by simple
+    # substring markers because polite/reference words are inserted between the
+    # verb and the image noun. Keep this pattern limited to actual edit verbs.
+    direct_edit = r"(?:edit|modify|change|alter|retouch|enhance|improve|измени\w*|поменя\w*|отредактир\w*|обработ\w*|ретуш\w*|улучш\w*|передел\w*)"
+    image_reference_words = r"(?:(?:the|this|that|same|exact|ту|эту|эту\s+самую|ту\s+самую|именно|саму|самую|присланную|загруженную|прикрепл[её]нную|мою|твою)\s+){0,4}"
+    if re.search(
+        rf"(?<![\w\u0080-\uffff]){direct_edit}\b\s+{image_reference_words}{image_noun}\b",
+        low,
+        flags=re.IGNORECASE,
+    ):
+        return True
+
+    # Also catch object-level changes explicitly tied to a source supplied by
+    # the user, e.g. "добавь мячик к той фотографии, что я тебе прислал".
+    # Requiring both a sent/uploaded-source reference and an edit action avoids
+    # restricting ordinary image creation based on a casual image mention.
+    sent_source = bool(re.search(
+        rf"\b{image_noun}\b.{{0,120}}\b(?:котор\w*|что|которую)\b.{{0,40}}"
+        r"\b(?:я\s+)?(?:тебе\s+)?(?:прислал\w*|отправил\w*|загрузил\w*|прикрепил\w*|передал\w*|sent|uploaded|attached|shared)\b"
+        r"|\b(?:именно\s+)?(?:ту|эту|ту\s+самую|эту\s+самую)\s+"
+        rf"{image_noun}\b.{{0,120}}\b(?:я\s+)?(?:тебе\s+)?(?:прислал\w*|отправил\w*|загрузил\w*|прикрепил\w*|sent|uploaded|attached|shared)\b",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    edit_action = bool(re.search(
+        r"\b(?:edit\w*|modify\w*|change\w*|alter\w*|retouch\w*|enhance\w*|improve\w*|"
+        r"измени\w*|поменя\w*|отредактир\w*|обработ\w*|ретуш\w*|улучш\w*|передел\w*|"
+        r"добав\w*|убер\w*|замен\w*|встав\w*)\b",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    return sent_source and edit_action
 
 
 def _detect_image_compositing_request(text: str) -> bool:
@@ -252,7 +295,8 @@ def _detect_image_compositing_request(text: str) -> bool:
     # Recognize that natural word order without classifying it as editing when no image exists.
     object_placement = re.search(
         r"(?:\b(?:add|put|place|draw|insert|remove|replace)\w*\b.{0,70}\b(?:to|on|in|from)\s+(?:the\s+)?(?:photo|photograph|image|picture)\b)"
-        r"|(?:\b(?:добав\w*|нарис\w*|гарис\w*|помест\w*|размест\w*|убер\w*|замен\w*|встав\w*)\b.{0,70}\b(?:на|в|с)\s+(?:этом\s+|этой\s+|это\s+)?(?:фото|фотографи\w*|картинк\w*|изображени\w*))",
+        r"|(?:\b(?:добав\w*|нарис\w*|гарис\w*|помест\w*|размест\w*|убер\w*|замен\w*|встав\w*)\b.{0,70}\b(?:на|в|с)\s+(?:этом\s+|этой\s+|это\s+|эту\s+|той\s+|такой\s+)?(?:фот\w*|картинк\w*|изображени\w*))"
+        r"|(?:\b(?:на|в|с)\s+(?:этот\s+|этой\s+|эту\s+|это\s+|той\s+|такой\s+)?(?:фот\w*|картинк\w*|изображени\w*).{0,70}\b(?:добав\w*|нарис\w*|помест\w*|размест\w*|убер\w*|замен\w*|встав\w*)\b)",
         low,
         flags=re.IGNORECASE,
     )
@@ -275,7 +319,7 @@ def _detect_image_generation_request(text: str) -> bool:
         return False
 
     action = r"(?:draw|show|display|create|make|generate|render|add|place|put|remove|replace|нарис\w*|гарис\w*|рисуй\w*|покаж\w*|отобраз\w*|созда\w*|сдела\w*|сгенерир\w*|изобраз\w*|добав\w*|помест\w*|размест\w*|убер\w*|замен\w*)"
-    image_noun = r"(?:picture|image|illustration|photo|photograph|картинк(?:у|а|и|е)\b|изображени(?:е|я|и|и\s+на)\b|иллюстраци(?:ю|я|и)\b|фотографи\w*|фото\b)"
+    image_noun = r"(?:picture|image|illustration|photo|photograph|картинк(?:у|а|и|е)\b|изображени(?:е|я|и|и\s+на)\b|иллюстраци(?:ю|я|и)\b|фот\w*)"
     # Permit polite words and ordinary modifiers, but do not skip a preceding
     # explicit schema/graph/table noun to reinterpret its object as an image.
     filler = r"(?:(?!(?:схем\w*|диаграмм\w*|график\w*|таблиц\w*|черт[её]ж\w*)\b)[\w-]+\s+)"
@@ -1801,19 +1845,39 @@ def build_interpretation(
     requested_outputs = _enhance_requested_outputs(request_text, detected_outputs)
     routing_capabilities = _infer_routing_capabilities(request_text)
 
-    # This module is used by the Free/non-Premium executor. Refuse edits to an
-    # existing or explicitly named image, but never mistake a creation request
-    # like "нарисуй на фото кота" for editing when no source image is present.
+    # Free may not edit the original source image, but the request must still be
+    # fulfilled as an independent generation. This is a product-policy reroute,
+    # not a refusal: do not request another upload and do not silently return text
+    # only when the user asked to change the pictured scene.
+    image_modification_requested = _detect_image_modification(request_text)
+    compositing_requested = _detect_image_compositing_request(request_text)
     image_edit_restricted = bool(
-        _detect_image_modification(request_text)
-        or (has_image and _detect_image_compositing_request(request_text))
+        image_modification_requested or (has_image and compositing_requested)
     )
-    if image_edit_restricted:
-        requested_outputs = [kind for kind in requested_outputs if kind not in {"image", "gallery", "generated_image"}]
+    # A placement request may refer to an image created in an earlier turn,
+    # even when no binary is attached to this message. Route placement requests
+    # to fresh generation unless a math/technical diagram is clearly requested.
+    structured_diagram_noun = bool(re.search(
+        r"(?:схем\w*|диаграмм\w*|черт[её]ж\w*|геометрическ\w*\s+фигур\w*|"
+        r"треугольн\w*|квадрат\w*|прямоугольн\w*|окружност\w*|график\w*)",
+        request_text.lower().replace("ё", "е"),
+    ))
+    free_image_recreation = bool(
+        image_modification_requested or (compositing_requested and not structured_diagram_noun)
+    )
+    if free_image_recreation:
+        requested_outputs = [
+            kind for kind in requested_outputs
+            if kind not in {"gallery", "generated_image"}
+        ]
         if "text" not in requested_outputs:
             requested_outputs.insert(0, "text")
+        if "image" not in requested_outputs:
+            requested_outputs.append("image")
     image_edit_prior_attempts = _prior_free_image_edit_notice_count(memory) if image_edit_restricted else 0
-    wants_image = "image" in requested_outputs and not image_edit_restricted
+    # Image generation remains allowed after the policy reroute because this is
+    # a fresh composition; the Premium-only operation is changing source pixels.
+    wants_image = "image" in requested_outputs
     wants_file = "file" in requested_outputs
     wants_links = "link" in requested_outputs
     structured_data_extensions = {".csv", ".tsv", ".json", ".xlsx", ".xls", ".ods", ".parquet"}
@@ -1900,8 +1964,8 @@ def build_interpretation(
     # does remains analyze_file and never silently becomes code generation.
     if _is_code_modification_request(original or text) and has_file:
         task = "modify_code"
-    if image_edit_restricted:
-        task = "image_edit_unavailable_free"
+    if free_image_recreation:
+        task = "generate_image_new_composition_free"
 
     if has_original_image and task == "answer_request":
         task = "analyze_image"
@@ -1936,6 +2000,7 @@ def build_interpretation(
             "wants_image": wants_image,
             "explicit_generation_request": wants_image,
             "image_edit_restricted": image_edit_restricted,
+            "free_image_recreation": free_image_recreation,
             "image_edit_prior_attempts": image_edit_prior_attempts,
             "wants_file": wants_file,
             "wants_links": wants_links,
@@ -2030,8 +2095,8 @@ def build_interpretation(
                 "Always preserve a concise explanatory text answer.",
                 "Use a structured table for a clear comparison when the answer has comparable attributes.",
                 "Use a diagram for explicit schemas, workflows, arrows, geometry, mathematical figures, points, segments, angles, dimensions, measurements, construction drawings, blueprints, and technical drawings. Keep their exact labels, lengths, units, and angle values in the concrete diagram payload; never switch these requests to raster image generation.",
-                "Use C_APRIL_IMAGES_GENERATOR (Images 2.0) for new artistic/scenic/photorealistic images and complex illustrations. A request like 'draw on a photo' with no source image is a request to create a new image; when a source image exists and the request asks to add/remove/change/retouch it, apply the Free image-edit restriction instead.",
-                "When intent.image_edit_restricted=true, do not create or promise an edited image and do not ask the user to upload it. Give a short, friendly Premium-only feature explanation in RETURN_LANGUAGE; use identity.display_name naturally only when supplied. If intent.image_edit_prior_attempts > 0, acknowledge that this has already been explained, apologize briefly, and state clearly that editing/enhancement is available only in Premium through the user cabinet. Do not add an image render block.",
+                "Use C_APRIL_IMAGES_GENERATOR (Images 2.0) for new artistic/scenic/photorealistic images and complex illustrations. If a Free request mentions adding/removing/changing something on a photo or image, fulfil the visual goal as a NEW text-only generation; never ask for a source upload and never claim the original image was modified. A structured math/technical drawing such as 'нарисуй схему на картинке' must remain a diagram request.",
+                "When intent.free_image_recreation=true, create a fresh image from the requested change and include a concise RETURN_LANGUAGE note that this is a new generation, the original photo remains unchanged, and editing existing images is available only in Premium. Do not suppress the image render block. Only when intent.image_edit_restricted=true AND intent.free_image_recreation is false should the source-edit request be refused without an image block.",
                 "Use a formula renderer for mathematical notation; use a graph only when a function or grounded numeric data can define it.",
                 "For graph requests, follow intent.graph_policy: trends/time-ordered values use line; categorical comparisons use bar; choose only among those 2D types unless explicit 3D intent or real 3D source data supports 3D.",
                 "Never turn 2D x/y data into a 3D chart by inventing a zero z-axis; true 3D requires explicit XYZ values, a real surface grid/function of x and y, or structured spatial objects.",
@@ -2045,7 +2110,7 @@ def build_interpretation(
             "semantic_interpretation_version": "april_request_semantics_v1",
         },
     }
-    if image_edit_restricted:
+    if image_edit_restricted and not free_image_recreation:
         sequence_items = ((result.get("request_structure") or {}).get("question_sequence") or [])
         for sequence_item in sequence_items:
             if not isinstance(sequence_item, dict):
