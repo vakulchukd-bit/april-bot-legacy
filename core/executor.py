@@ -651,31 +651,6 @@ async def _generate_image_artifact(
     if spec is None:
         return None
 
-    intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
-    if bool(intent.get("free_image_recreation")):
-        # Never pass the original photo as an editable source in Free. The sole
-        # image engine receives a clear text prompt to produce a new standalone
-        # picture that fulfils the requested change; the uploaded/source asset
-        # remains unchanged and is not reused as image-edit input.
-        prefix = (
-            "Create a completely new, independent image from scratch, using only the user's requested scene change as a text brief. "
-            "Do not edit, retouch, transform, or claim to modify any existing/source photograph. "
-            "The source image must remain unchanged. Fulfil the requested subject, count, and visible details in this new image. "
-            "User's requested scene: "
-        )
-        semantic_prompt = _text(
-            spec.get("openai_structured_visual_plan_semantic")
-            or spec.get("prompt")
-            or (interpretation.get("input") or {}).get("original_request")
-        )
-        if semantic_prompt and not semantic_prompt.lower().startswith("create a completely new, independent image"):
-            spec["openai_structured_visual_plan_semantic"] = prefix + semantic_prompt
-            spec["prompt"] = prefix + semantic_prompt
-        # Avoid handing image context back to the generator as a source asset.
-        spec["visual_context"] = {}
-        spec["source_edit_allowed"] = False
-        spec["generation_mode"] = "fresh_text_only_recreation_free"
-
     from blocks.C_APRIL_IMAGES_GENERATOR import generate_from_spec
 
     return await generate_from_spec(spec, variant="processor_route")
@@ -2037,60 +2012,58 @@ async def execute(
     raw_blocks = [dict(x) for x in (raw.get("render_blocks") or []) if isinstance(x, dict)]
     raw_artifacts = [dict(x) for x in (raw.get("artifacts") or []) if isinstance(x, dict)]
     intent_policy = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
-    free_image_recreation = bool(intent_policy.get("free_image_recreation"))
-    if free_image_recreation:
-        # Enforce the package rule in code, not only in the prompt: a Free user
-        # never sees a request to upload a photo for editing. The real image
-        # artifact is appended below after an independent generation attempt.
+    image_edit_restricted = bool(intent_policy.get("image_edit_restricted"))
+    if image_edit_restricted:
+        # Enforce the Free edit limit after the provider call as well. The model
+        # must not turn a referenced prior diagram/photo into an upload request
+        # or a replacement generation. This leaves ordinary new image and
+        # diagram generation untouched.
         language = _text((interpretation.get("input") or {}).get("display_language")).lower()
+        prior_attempts = int(intent_policy.get("image_edit_prior_attempts") or 0)
+        display_name = _text((interpretation.get("identity") or {}).get("display_name")).strip()
+        repeated = prior_attempts > 0
         if language.startswith(("uk", "ua")):
-            notice = (
-                "У Free цей запит виконується як створення нового зображення за описом. "
-                "Оригінальне фото не змінюється; редагування зображень доступне в Premium."
-            )
+            if repeated:
+                prefix = f"{display_name}, " if display_name else ""
+                notice = f"{prefix}у Free я не можу змінити вже створене фото чи діаграму. Це доступно в Premium."
+            else:
+                notice = "У Free я можу створювати нові зображення та схеми, але не змінювати вже створені. Редагування доступне в Premium."
         elif language.startswith("fr"):
-            notice = (
-                "En Free, cette demande produit une nouvelle image à partir de votre description. "
-                "La photo d’origine reste inchangée ; la retouche d’images est disponible avec Premium."
-            )
+            if repeated:
+                prefix = f"{display_name}, " if display_name else ""
+                notice = f"{prefix}en Free, je ne peux pas modifier une image ou un diagramme déjà créé. Cette fonction est disponible avec Premium."
+            else:
+                notice = "En Free, je peux créer de nouvelles images et de nouveaux schémas, mais pas modifier une image existante. La modification est disponible avec Premium."
         elif language.startswith("en"):
-            notice = (
-                "In Free, this request is handled by generating a new image from your description. "
-                "The original photo remains unchanged; editing existing images is available in Premium."
-            )
+            if repeated:
+                prefix = f"{display_name}, " if display_name else ""
+                notice = f"{prefix}in Free, I can’t modify an existing photo or diagram. Editing is available in Premium."
+            else:
+                notice = "In Free, I can create new images and diagrams, but I can’t modify an existing photo or diagram. Editing is available in Premium."
         else:
-            notice = (
-                "В Free этот запрос выполняется как создание нового изображения по описанию. "
-                "Исходная фотография не изменяется; редактирование существующих изображений доступно в Premium."
-            )
+            if repeated:
+                prefix = f"{display_name}, " if display_name else ""
+                notice = f"{prefix}в Free я не могу изменить уже созданную картинку или диаграмму. Эта возможность доступна в Premium."
+            else:
+                notice = "В Free я могу создавать новые картинки и схемы, но не могу изменять уже созданные фото или диаграммы. Редактирование доступно в Premium."
         answer = notice
         raw["answer"] = notice
         raw["content"] = notice
         raw["summary"] = notice
-        text_block_found = False
-        for block in raw_blocks:
-            block_type = _text(block.get("type") or block.get("artifact_type")).lower()
-            if block_type not in {"text", "markdown", "message", "message_text"}:
-                continue
-            text_block_found = True
-            block["content"] = notice
-            for key in ("text", "markdown", "display_text"):
-                if key in block:
-                    block[key] = notice
-            payload = block.get("payload")
-            if isinstance(payload, dict):
-                payload["content"] = notice
-                for key in ("text", "markdown", "display_text"):
-                    if key in payload:
-                        payload[key] = notice
-        if not text_block_found:
-            raw_blocks.insert(0, {
-                "type": "text",
-                "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
-                "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
-                "content": notice,
-            })
-    wants_image = bool(intent_policy.get("wants_image"))
+        text_renderer = get_web_renderer_registration("text")
+        raw_blocks = [{
+            "type": "text",
+            "renderer": text_renderer.get("renderer", "MessageTextBlock"),
+            "viewer": text_renderer.get("viewer", "MessageTextBlock"),
+            "content": notice,
+        }]
+        raw_artifacts = []
+        # Defense in depth: never invoke the image generator for a restricted
+        # edit, even if a provider accidentally re-adds an image output.
+        intent_policy["wants_image"] = False
+        intent_policy["explicit_generation_request"] = False
+
+    wants_image = bool(intent_policy.get("wants_image")) and not image_edit_restricted
     if not wants_image:
         raw_blocks = [
             block for block in raw_blocks
