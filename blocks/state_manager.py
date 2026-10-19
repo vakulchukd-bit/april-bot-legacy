@@ -3264,7 +3264,15 @@ def search_dialogue_context(
         # globally, or handed back to normal dialogue. It must not create another
         # local clarification from the old options.
     elif relation == "CONTINUE" and rows:
-        if topic_vector_hits:
+        underspecified_media_followup = bool(
+            latest_same_dialog
+            and len(_tokens(query)) <= 18
+            and re.search(r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b)", _text(query).lower().replace("ё", "е"))
+            and re.search(r"(?:\bего\b|\bее\b|\bеё\b|\bих\b|(?:^|\b)а\s|где|пропал\w*|не\s+(?:показал\w*|прикрепил\w*)|\bhis\b|\bher\b|\btheir\b|\bwhere\b|missing)", _text(query).lower().replace("ё", "е"))
+            and not _looks_like_topic_correction(query)
+            and not new_topic_request
+        )
+        if topic_vector_hits and not underspecified_media_followup:
             # A confidently named topic beats the most recent turn even when the
             # latest turn was a history lookup or an unrelated side branch.
             vector_row = topic_vector_hits[0].get("row")
@@ -3273,32 +3281,38 @@ def search_dialogue_context(
                     query, vector_row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""),
                     reference_followup=True, query_modalities=query_modalities,
                 )
-        elif not query_subjects and latest_same_dialog:
-            # For an underspecified turn, prefer role-aligned evidence when available.
-            # Otherwise compare the actual topical evidence with the active turn; if
-            # neither gives a clear relative preference, stay on the active turn.
-            role_aligned = best if best and int(best.get("participant_alignment") or 0) > 0 else None
-            if role_aligned:
-                anchor = role_aligned
+        elif (not query_subjects or underspecified_media_followup) and latest_same_dialog:
+            # Elliptical media follow-ups ("А фото где?", "where is his photo?")
+            # belong to the just-active answer unless the user names another topic.
+            # Do not let generic photo/resource tokens jump to an unrelated older topic.
+            if underspecified_media_followup:
+                anchor = latest_same_dialog
             else:
-                def _context_evidence(item: dict[str, Any] | None) -> float:
-                    if not isinstance(item, dict):
-                        return 0.0
-                    return max(
-                        float(item.get("context") or 0),
-                        float(item.get("entity_overlap") or 0),
-                        float(item.get("user_overlap") or 0),
-                        float(item.get("answer_overlap") or 0),
-                        float(item.get("subject_overlap") or 0),
-                        float(item.get("direction") or 0),
-                        float(item.get("numeric_anchor_overlap") or 0),
-                    )
-                best_evidence = _context_evidence(best)
-                active_evidence = _context_evidence(latest_same_dialog)
-                if best and best_evidence > active_evidence:
-                    anchor = best
+                # For other underspecified turns, prefer role-aligned evidence when available.
+                # Otherwise compare topical evidence with the active turn; if neither
+                # clearly wins, stay on the active turn.
+                role_aligned = best if best and int(best.get("participant_alignment") or 0) > 0 else None
+                if role_aligned:
+                    anchor = role_aligned
                 else:
-                    anchor = latest_same_dialog
+                    def _context_evidence(item: dict[str, Any] | None) -> float:
+                        if not isinstance(item, dict):
+                            return 0.0
+                        return max(
+                            float(item.get("context") or 0),
+                            float(item.get("entity_overlap") or 0),
+                            float(item.get("user_overlap") or 0),
+                            float(item.get("answer_overlap") or 0),
+                            float(item.get("subject_overlap") or 0),
+                            float(item.get("direction") or 0),
+                            float(item.get("numeric_anchor_overlap") or 0),
+                        )
+                    best_evidence = _context_evidence(best)
+                    active_evidence = _context_evidence(latest_same_dialog)
+                    if best and best_evidence > active_evidence:
+                        anchor = best
+                    else:
+                        anchor = latest_same_dialog
         elif explicit_topic_hits:
             chosen_global = explicit_topic_hits[0][1]
             anchor = _candidate_score(query, chosen_global, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""), reference_followup=reference_followup, query_modalities=query_modalities)
