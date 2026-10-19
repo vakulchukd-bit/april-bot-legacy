@@ -1248,8 +1248,10 @@ def _restore_selected_assets(
     # Semantic search can label a referential edit as NEW when the user's current
     # sentence names a visible object (e.g. "на этой канистре") but the previous
     # turn's user text was only "Что здесь?". In that narrow case, restore the most
-    # recent same-dialog image candidate within Premium's 24-hour retention window;
-    # never do this for a generic "draw on a photo" request, which must ask for the source.
+    # recent same-dialog image candidate within Premium's 24-hour retention window.
+    # A generic "draw on a photo" request must never silently borrow an older image:
+    # when no source is attached, the Premium Interpreter decides whether the user
+    # wants a new image or explicitly refers to a particular existing source.
     referential_edit = _looks_like_referential_image_edit(current_request)
     fallback_used = False
     if relation != "CONTINUE" and not (not has_current_asset and referential_edit):
