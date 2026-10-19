@@ -972,9 +972,11 @@ def _looks_like_referential_image_edit(value: Any) -> bool:
         return False
     return bool(re.search(
         r"(?:\b(?:на|в|по|с)\s+(?:этом|этой|этих|этот|эта|эти)\s+(?:фото\b|фотограф\w*|картинк\w*|"
-        r"изображени\w*|снимк\w*|канистр\w*|этикетк\w*|рисунк\w*)|"
+        r"изображени\w*|иллюстрац\w*|рисунк\w*|снимк\w*|канистр\w*|этикетк\w*)|"
+        r"\bк\s+(?:этой|той|такой)\s+иллюстрац\w*|"
+        r"\b(?:ту|эту|предыдущую|прошлую)\s+(?:иллюстрац\w*|картинк\w*|изображени\w*)\b|"
         r"\b(?:на|в)\s+(?:ней|нем|н[её]м|них|этом|этой)\b|"
-        r"\b(?:this|that)\s+(?:photo|image|picture|canister|label)\b|\b(?:on it|in it|on this one)\b)",
+        r"\b(?:this|that)\s+(?:photo|image|picture|illustration|drawing|canister|label)\b|\b(?:on it|in it|on this one)\b)",
         low, re.IGNORECASE,
     ))
 
@@ -1014,8 +1016,12 @@ def _explicit_prior_asset_reference(value: Any) -> bool:
         "сравни с", "сравни это", "сравни с предыдущ", "вернись к фото", "вернись к файлу",
         "на той картинке", "на предыдущей картинке", "на старой картинке",
         "на этой канистре", "на этом фото", "на этой фотографии", "на этой картинке",
-        "на этом изображении", "на ней", "на нем", "на нём", "эту канистру",
-        "this canister", "this photo", "this image", "on it",
+        "на этом изображении", "к этой иллюстрации", "к этой картинке", "к этому изображению",
+        "ту иллюстрацию, которую ты нарисовала", "ту иллюстрацию, которую ты нарисовал",
+        "ту картинку, которую ты нарисовала", "ту картинку, которую ты нарисовал",
+        "которую ты мне нарисовала", "которую ты мне нарисовал", "которую ты создала",
+        "на ней", "на нем", "на нём", "эту канистру",
+        "this canister", "this photo", "this image", "this illustration", "that illustration", "on it",
         "that image", "previous image", "previous photo", "the earlier file",
         "the file i sent", "the image i sent", "compare with", "compare to previous",
     )
