@@ -1214,9 +1214,18 @@ def _looks_like_context_dependent_question(
         "той", "тех", "this", "that", "these", "those", "it", "he", "she",
         "they", "him", "her", "them", "its", "same", "former", "latter",
     }
-    # Bound the signal to ordinary follow-up sized questions; a long request with a
-    # pronoun and a new explicit subject should be resolved by normal decomposition.
+    # Bound the signal to ordinary follow-up sized questions. A pronoun that comes
+    # after an independently named subject/predicate in the same utterance often
+    # points locally to that subject (“how are bricks made and what are they made
+    # of?”), not backward to the previous dialogue turn.
     if token_set & anaphoric_terms and len(tokens) <= 18:
+        first_anaphor_index = next((index for index, token in enumerate(tokens) if token in anaphoric_terms), -1)
+        if first_anaphor_index > 0:
+            prefix = " ".join(tokens[:first_anaphor_index])
+            prefix_signature = _context_signature(prefix)
+            prefix_subjects = prefix_signature.get("subject_terms") if isinstance(prefix_signature, dict) else []
+            if prefix_subjects:
+                return False
         return True
     if len(tokens) <= 5:
         signature = _context_signature(text)
@@ -1827,6 +1836,26 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     previous_answer_reference = bool(dialogue_act_profile.get("previous_answer_reference"))
     factual_verification_request = bool(dialogue_act_profile.get("factual_verification_request"))
 
+    else_deictic_reference_terms = {
+        "это", "этого", "этой", "этом", "эти", "этих", "этими", "этим",
+        "тот", "та", "ту", "те", "тех", "такие", "таких", "такими",
+        "там", "прежнему", "прежней", "ранее", "предыдущий",
+    }
+    first_deictic_index = next((index for index, token in enumerate(tokens) if token in else_deictic_reference_terms), -1)
+    deictic_prefix_has_subject = False
+    if first_deictic_index > 0:
+        deictic_prefix_signature = _context_signature(" ".join(tokens[:first_deictic_index]))
+        deictic_prefix_has_subject = bool(
+            deictic_prefix_signature.get("subject_terms")
+            if isinstance(deictic_prefix_signature, dict) else False
+        )
+    short_deictic_followup = bool(
+        len(tokens) <= 12
+        and first_deictic_index >= 0
+        and not deictic_prefix_has_subject
+        and not temporal_future
+    )
+
     if explicit_topic_switch and not history_recall:
         # Explicitly changing branch overrides reaction/anaphora cues in the same
         # wording. The state manager may still retrieve evidence, but must not keep
@@ -1915,11 +1944,12 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         intent_score = 3 + int(interrogative)
         relation_hint = "CONTINUE"
         reason = "previous_answer_explanation_followup"
-    elif (continuation_action or (any(token in token_set for token in {
-        "это", "этого", "этой", "этом", "эти", "этих", "этими", "этим",
-        "тот", "та", "ту", "те", "тех", "такие", "таких", "такими",
-        "там", "дальше", "прежнему", "прежней", "ранее", "предыдущий",
-    }) and not temporal_future)) and not explicit_topic_introduction:
+    elif (continuation_action or short_deictic_followup) and not explicit_topic_introduction:
+        # Deictic words inside a long, self-contained request can refer to material
+        # introduced in the same utterance (“...девочка с косичками. А там, как оно
+        # на самом деле...”); they are not sufficient evidence of a prior-turn
+        # reference. Short anaphoric replies remain continuations, and explicit
+        # continuation actions are still handled at any length.
         primary_intent = "TOPIC_CONTINUATION"
         direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
         topic_reference = "PREVIOUS_OR_ACTIVE_TOPIC"
