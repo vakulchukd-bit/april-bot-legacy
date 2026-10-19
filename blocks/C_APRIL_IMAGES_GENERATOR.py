@@ -35,7 +35,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from blocks.C_ARTIFACT_CONTRACT import (
     UniversalArtifactContract,
@@ -1294,14 +1294,24 @@ class AprilImagesGenerator:
             raise ValueError("APRIL_IMAGES_EDIT_SOURCE_EMPTY")
         clean_prompt = cls._clean_prompt(prompt)
         quality_value = cls._normalize_quality(quality)
-        with Image.open(io.BytesIO(image_bytes)) as source:
+        # The Web commonly supplies JPEG photographs. Passing JPEG bytes under a
+        # .png filename makes the API upload metadata inconsistent and can cause
+        # the edit route to reject an otherwise valid source. Normalize the image
+        # once, respecting EXIF orientation and alpha, then upload matching PNG bytes.
+        with Image.open(io.BytesIO(image_bytes)) as opened_source:
+            source = ImageOps.exif_transpose(opened_source)
             source.load()
             original_size = source.size
+            has_alpha = "A" in source.getbands() or "transparency" in source.info
+            normalized_source = source.convert("RGBA" if has_alpha else "RGB")
+            normalized_buffer = io.BytesIO()
+            normalized_source.save(normalized_buffer, format="PNG", optimize=True)
+            normalized_input_bytes = normalized_buffer.getvalue()
         api_width, api_height = cls._api_generation_size(*original_size)
 
         def _do_edit() -> tuple[bytes, dict[str, Any]]:
             client = cls._client()
-            handle = io.BytesIO(image_bytes)
+            handle = io.BytesIO(normalized_input_bytes)
             handle.name = "april_input.png"
             response = client.images.edit(
                 model=cls.MODEL,
