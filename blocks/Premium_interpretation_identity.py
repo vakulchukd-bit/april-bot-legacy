@@ -288,6 +288,35 @@ def _has_drawable_subject(text: str) -> bool:
     return bool(re.search(drawable_objects, low, flags=re.IGNORECASE))
 
 
+
+def _detect_portrait_request(text: str) -> bool:
+    """Detect a requested portrait/photo, including an omitted-verb follow-up."""
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    photo = r"(?:фотограф\w*|фотк\w*|фото\b|снимк\w*|портрет\w*|\bphoto\b|\bpicture\w*|\bimage\w*|\bportrait\w*)"
+    final_slot = bool(re.search(
+        rf"(?:в\s+(?:самом\s+)?конце|напоследок|в\s+завершени\w*|at\s+the\s+end|finally)[\s\S]{{0,150}}?{photo}",
+        low, re.IGNORECASE,
+    ))
+    possessive = bool(re.search(
+        rf"(?:\b(?:его|ее|её|их|мой|моя|мое|мои|наш|наша|наше|наши|his|her|their|my|our)\s+{photo}|{photo}\s+(?:его|ее|её|их|мой|моя|мое|мои|наш|наша|наше|наши|his|her|their|my|our)\b)",
+        low, re.IGNORECASE,
+    ))
+    explicit_photo_of = bool(re.search(
+        rf"(?:\bphoto\s+of\b|\bpicture\s+of\b|\bimage\s+of\b|\bportrait\s+of\b|фото\s+(?:о|об|про|для)\b|портрет\s+(?:о|об|для)\b)",
+        low, re.IGNORECASE,
+    ))
+    missing_or_elliptical = bool(re.search(
+        rf"(?:где|куда\s+дел\w*|не\s+показал\w*|не\s+прикрепил\w*|пропал\w*|missing|where\s+is|where's|where\s+are)[\s\S]{{0,40}}?{photo}|(?:^|\b)а\s+{photo}(?:\s+где)?\b|{photo}[\s\S]{{0,30}}?(?:где|missing|not\s+shown)",
+        low, re.IGNORECASE,
+    ))
+    appearance = bool(re.search(
+        r"(?:как\s+(?:он|она|они|это)\s+выгляд\w*|как\s+выгляд\w*|внешност\w*|what\s+(?:did|does)\s+.{0,60}\s+look\s+like|appearance|portrait)",
+        low, re.IGNORECASE,
+    ))
+    return final_slot or possessive or explicit_photo_of or missing_or_elliptical or appearance
+
 def _detect_requested_outputs(text: str) -> list[str]:
     result: list[str] = []
     low = _text(text).lower()
@@ -299,7 +328,8 @@ def _detect_requested_outputs(text: str) -> list[str]:
     # The object-order-aware detector captures explicit image requests even
     # when users insert "мне", an adjective, or other polite filler.
     explicit_image_request = _detect_image_generation_request(low)
-    if explicit_image_request and "image" not in result:
+    portrait_request = _detect_portrait_request(low)
+    if (explicit_image_request or portrait_request) and "image" not in result:
         result.append("image")
     explicit_link_request = _detect_link_request(low)
     if explicit_link_request and "link" not in result:
@@ -356,6 +386,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     low = _text(text).lower().replace("ё", "е")
     outputs = list(dict.fromkeys(explicit_outputs or ["text"]))
     explicit_image_request = _detect_image_generation_request(low)
+    portrait_request = _detect_portrait_request(low)
 
     comparison = bool(re.search(
         r"\b(?:compare|comparison|compare\s+with|versus|vs\.?|differences?\s+between|pros\s+and\s+cons)\b"
@@ -392,6 +423,8 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     if application_cue and "table" not in outputs:
         outputs.append("table")
     if appearance_cue and "image" not in outputs:
+        outputs.append("image")
+    if portrait_request and "image" not in outputs:
         outputs.append("image")
 
     if comparison and "table" not in outputs:
@@ -2525,8 +2558,12 @@ def build_interpretation(
         and not re.search(r"\b(?:что\s+(?:на|изображено|видно)|опиши|анализиру\w*|прочитай|распознай|написано|what\s+(?:is|does)|describe|analy[sz]e|read\s+the)\b", normalized_visual_request)
         and (retrieval_language or bool(re.search(r"\b(?:его|ее|её|их|эт\w*|тот|ту|this|that|his|her|their|it|а|и|еще|ещё|also|же)\b", normalized_visual_request)))
     )
-    reuse_saved_image = relation == "CONTINUE" and has_saved_output_image and short_image_reference
-    if reuse_saved_image and "image" not in requested_outputs:
+    # A short "where is his photo?" follow-up is an image deliverable even when
+    # no prior output asset was saved. Reuse the saved asset when available;
+    # otherwise let the image-generation path create the missing portrait.
+    image_followup = relation == "CONTINUE" and short_image_reference
+    reuse_saved_image = image_followup and has_saved_output_image
+    if image_followup and "image" not in requested_outputs:
         requested_outputs.append("image")
     wants_image = "image" in requested_outputs
     wants_file = "file" in requested_outputs
