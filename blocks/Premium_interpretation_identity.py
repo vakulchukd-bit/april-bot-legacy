@@ -1161,6 +1161,22 @@ def _looks_like_previous_answer_followup(text: str) -> bool:
     return bool(qualifier_only and len(tokens) <= 5)
 
 
+def _looks_like_selection_followup(text: str) -> bool:
+    """Flag selection language for State Manager validation against the latest answer.
+
+    This is a candidate signal, not proof of continuation. State Manager must match
+    it against the latest same-dialog answer/options before selecting that branch.
+    """
+    low = _text(text).lower().replace("ё", "е").strip()
+    if not low or _has_explicit_topic_switch(low):
+        return False
+    return bool(re.search(
+        r"\b(?:выбери(?:те)?|выбирай(?:те)?|подбери(?:те)?|"
+        r"остановись\s+на|бери|возьми|pick|choose|select|go\s+with)\b",
+        low, flags=re.IGNORECASE,
+    ))
+
+
 def _looks_like_next_step_followup(text: str) -> bool:
     """Recognise compact next-step questions as dialogue follow-ups, not new subjects.
 
@@ -1484,7 +1500,9 @@ def _infer_dialogue_act_profile(
         "раздражает", "бесит", "не то что я просил", "не то что я просила",
         "ты не поняла", "ты не понял", "вы не поняли", "опять не понял", "опять не поняла",
         "не понимаешь меня", "ты меня не понимаешь", "не то имел в виду", "не то имела в виду",
-        "not what i asked", "you misunderstood", "you did not understand", "i don't understand", "i do not understand",
+        "ты все напутал", "ты всё напутал", "ты напутал", "ты перепутал", "ты перепутала",
+        "я просил", "я просила", "я же просил", "я же просила", "ты должен был", "ты должна была",
+        "not what i asked", "you misunderstood", "you did not understand", "you mixed it up", "you got it mixed up", "i don't understand", "i do not understand",
         "you don't understand me", "you do not understand me", "i hate this", "i hate it", "this is annoying",
         "i'm frustrated", "im frustrated", "doesn't work", "does not work",
     )
@@ -1500,6 +1518,10 @@ def _infer_dialogue_act_profile(
         "поправка", "уточню", "я не про", "я не об", "не про это спрашивал",
         "не про это спрашивала", "я не это спрашивал", "я не это спрашивала",
         "not that", "not what i meant", "i meant", "that's not right",
+        "ты все напутал", "ты всё напутал", "ты напутал", "ты перепутал", "ты перепутала",
+        "я же просил", "я же просила", "ты должен был", "ты должна была",
+        "я просил выдать", "я просила выдать", "я просил дать", "я просила дать",
+        "you mixed it up", "you got it mixed up", "you were supposed to",
     )
     clarification_terms = (
         "поясни", "поясните", "уточни", "уточните", "разъясни", "разъясните",
@@ -1526,13 +1548,23 @@ def _infer_dialogue_act_profile(
     correction = previous_answer_reference or has_phrase(correction_terms) or dissatisfaction or (
         negation and bool(token_set & {"это", "то", "так", "другое", "имел", "имела", "виду"})
     )
+    explicit_previous_answer_correction = bool(re.search(
+        r"\b(?:ты\s+(?:все|всё)\s+напутал\w*|ты\s+перепутал\w*|"
+        r"я\s+(?:же\s+)?просил\w*|ты\s+(?:должен\s+был|должна\s+была)|"
+        r"не\s+то,?\s+что\s+я\s+просил\w*|you\s+(?:mixed\s+it\s+up|got\s+it\s+mixed\s+up)|"
+        r"you\s+were\s+supposed\s+to)\b",
+        low, flags=re.IGNORECASE,
+    ))
+    selection_followup_candidate = _looks_like_selection_followup(text)
     clarification = has_phrase(clarification_terms)
     explanation_request = has_phrase(explanation_terms) or (interrogative and bool(token_set & {"почему", "как", "зачем", "why", "how"}))
     own_topic_or_output = explicit_topic_introduction or (has_independent_payload and not topic_reference_fragment)
     correction_of_active = bool(
         not explicit_topic_introduction
+        and not _has_explicit_topic_switch(text)
         and (
             previous_answer_reference
+            or explicit_previous_answer_correction
             or (
                 short and (correction or dissatisfaction or revision_request)
                 and ((not meaningful_subjects and not numeric_anchors) or has_deictic_reference or topic_reference_fragment or bool(re.search(
@@ -1653,6 +1685,8 @@ def _infer_dialogue_act_profile(
             "has_independent_payload": bool(has_independent_payload),
             "previous_answer_reference": bool(previous_answer_reference),
             "active_branch_repair": bool(not explicit_topic_introduction and (correction_of_active or previous_answer_reference)),
+            "selection_followup_candidate": bool(selection_followup_candidate),
+            "explicit_previous_answer_correction": bool(explicit_previous_answer_correction),
             "factual_verification_request": bool(factual_verification_request),
         },
     }
@@ -2000,6 +2034,8 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "topic_reference_fragment": bool(topic_reference_fragment),
         "previous_answer_reference": bool(previous_answer_reference),
         "active_branch_repair": bool(active_branch_repair),
+        "selection_followup_candidate": bool((dialogue_act_profile.get("pragmatic_features") or {}).get("selection_followup_candidate")),
+        "explicit_previous_answer_correction": bool((dialogue_act_profile.get("pragmatic_features") or {}).get("explicit_previous_answer_correction")),
         "factual_verification_request": bool(factual_verification_request),
         "explicit_topic_switch": bool(explicit_topic_switch),
         "self_reference": bool(self_reference),
@@ -2259,6 +2295,23 @@ def _split_request_sequence(text: str) -> list[str]:
         cleaned[0], flags=re.IGNORECASE,
     ):
         cleaned = [f"{cleaned[0].strip(' ,.!?…')} {cleaned[1]}".strip()] + cleaned[2:]
+    # The task splitter can isolate a discourse opener from a continuation verb:
+    # “Ну так продолжи” -> “Ну так” + “продолжи”. This is one active-branch
+    # instruction, not two searches. Merge only a short filler with an explicit
+    # continuation clause; independently named tasks still stay separate.
+    if len(cleaned) > 1 and re.fullmatch(
+        r"(?:ну\s+так|ну|так|хорошо|ладно|ок(?:ей)?|да)[,.!?…\s]*",
+        cleaned[0], flags=re.IGNORECASE,
+    ):
+        second_semantics = interpret_request_semantics(cleaned[1])
+        if (
+            second_semantics.get("primary_intent") in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP"}
+            and second_semantics.get("requires_memory")
+            and not second_semantics.get("history_request")
+            and not _has_explicit_topic_introduction(cleaned[1])
+            and not _has_explicit_topic_switch(cleaned[1])
+        ):
+            cleaned = [f"{cleaned[0].strip(' ,.!?…')} {cleaned[1]}".strip()] + cleaned[2:]
     if (len(cleaned) > 1 and _is_short_continuation_preface(cleaned[0])
             and _has_explicit_topic_introduction(cleaned[1])):
         # “Good, continue further” is a transition, not a retrieval task, when the
@@ -2361,21 +2414,56 @@ def build_question_sequence(
     )
     parent_outputs = _enhance_requested_outputs(text, _detect_requested_outputs(text))
     pieces = _split_request_sequence(text)
-    parent_introduces_subject = _has_explicit_topic_introduction(text)
+    parent_signature = parent.get("context_signature") if isinstance(parent.get("context_signature"), dict) else _context_signature(text)
+    parent_is_self_contained_new = bool(
+        parent.get("primary_intent") == "NEW_INFORMATION"
+        and not parent.get("requires_memory")
+        and not parent.get("history_request")
+        and not parent.get("explicit_topic_switch")
+    )
+    # Substantive NEW turns introduce their current subject even when the verb is
+    # outside the narrow introduction whitelist (e.g. "придумай названия для кафе").
+    # Historical/continuation requests never use this turn-local subject inheritance.
+    parent_introduces_subject = bool(
+        _has_explicit_topic_introduction(text)
+        or (parent_is_self_contained_new and parent_signature.get("has_explicit_subject"))
+    )
     subject_intro_seen = False
     for index, item in enumerate(pieces, start=1):
         item_introduces_subject = _has_explicit_topic_introduction(item)
+        item_low = item.lower().replace("ё", "е")
         item_has_anaphor = bool(re.search(
-            r"\b(?:его|её|ее|он|она|они|ним|нему|него|ней|них|ему|ей|их|him|her|them|he|she|his|their)\b",
-            item.lower().replace("ё", "е"), flags=re.IGNORECASE,
+            r"\b(?:его|её|ее|он|она|они|ним|нему|него|ней|них|ему|ей|их|him|her|them|he|she|his|their|"
+            r"какой|какая|какое|какие|который|которая|которое|которые|which|what)\b",
+            item_low, flags=re.IGNORECASE,
         ))
+        # Evaluation/choice clauses can refer to alternatives from the preceding
+        # clause without a pronoun: "... и объясни, какое лучше выбрать".
+        evaluative_dependency = bool(re.search(
+            r"\b(?:какой|какая|какое|какие|который|которая|которое|которые|which|what)\b"
+            r".{0,48}\b(?:лучше|выбрать|выбирай|выбери|подходит|подойдет|подойдёт|"
+            r"предпочесть|оценить|сравнить|стоит\s+взять|should\s+i\s+choose|choose|pick)\b",
+            item_low, flags=re.IGNORECASE | re.DOTALL,
+        ))
+        item_has_anaphor = item_has_anaphor or evaluative_dependency
+        preceding_clause = " ".join(pieces[:index - 1])
+        preceding_signature = _context_signature(preceding_clause) if preceding_clause else {}
+        preceding_has_subject = bool(
+            subject_intro_seen
+            or _has_explicit_topic_introduction(preceding_clause)
+            or (parent_is_self_contained_new and preceding_signature.get("has_explicit_subject"))
+        )
         inherits_current_request_subject = bool(
-            parent_introduces_subject
-            and index > 1
+            index > 1
+            and parent_introduces_subject
             and item_has_anaphor
             and not item_introduces_subject
-            and (subject_intro_seen or _has_explicit_topic_introduction(" ".join(pieces[:index - 1])))
+            and preceding_has_subject
         )
+        # The first clause owns the subject for this turn even when its task verb is
+        # uncommon. Executor uses this metadata for a safe NEW-topic fast path.
+        if index == 1 and parent_is_self_contained_new and parent_signature.get("has_explicit_subject"):
+            item_introduces_subject = True
         # Per-question output signals must use the same semantic enhancement as
         # the turn-level contract. Without this, INTERPRETATION could request a
         # diagram while REQUEST_SEQUENCE still tells Provider to return text only.
@@ -2409,12 +2497,28 @@ def build_question_sequence(
             item_semantics.setdefault("features", {})["active_branch_repair"] = False
             item_semantics["features"]["explicit_topic_switch"] = True
             item_semantics.setdefault("pragmatic_features", {})["active_branch_repair"] = False
+        parent_subject_terms = set(parent_signature.get("subject_terms") or [])
+        child_subject_terms = set((item_semantics.get("context_signature") or {}).get("subject_terms") or [])
+        shared_repair_subject_terms = parent_subject_terms.intersection(child_subject_terms)
+        # Multi-clause corrections often repeat the concrete subject in the final
+        # clause (“you mixed it up; give me the warm grain name”). Link that clause
+        # back to the correction's active branch, but only when it has the same
+        # subject and does not explicitly introduce/switch to another topic.
+        same_repair_subject = bool(
+            len(shared_repair_subject_terms) >= 2
+            or (
+                shared_repair_subject_terms
+                and min(len(parent_subject_terms), len(child_subject_terms)) <= 2
+            )
+        )
         repair_linked_clause = bool(
             parent_repair
             and not _has_explicit_topic_introduction(item)
+            and not _has_explicit_topic_switch(item)
             and (
                 _detect_previous_answer_recheck(item)
                 or _is_repair_followup_clause(item)
+                or same_repair_subject
             )
         )
         if repair_linked_clause:
