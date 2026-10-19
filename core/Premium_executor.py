@@ -1860,6 +1860,28 @@ async def execute(
         )
     else:
         current_request_subject_context: dict[str, Any] | None = None
+        parent_repair_turn = bool(
+            semantic_interpretation.get("active_branch_repair")
+            or (semantic_interpretation.get("pragmatic_features") or {}).get("active_branch_repair")
+            or (semantic_interpretation.get("features") or {}).get("active_branch_repair")
+        )
+        # A self-contained NEW turn whose clauses do not request prior context should
+        # not run a full cross-history ranking once per clause. Any continuation,
+        # explicit history request, attachment, resume anchor, correction or choice
+        # candidate still uses State Manager and must pass its normal confirmation.
+        compound_turn_is_new = bool(
+            semantic_interpretation.get("primary_intent") == "NEW_INFORMATION"
+            and not semantic_interpretation.get("requires_memory")
+            and not semantic_interpretation.get("history_request")
+            and not _text(resume_message_id)
+            and not visual_context and not file_inputs and not file_contents and not attachments
+            and not any(
+                item.get("requires_memory") or item.get("history_request")
+                or item.get("active_branch_repair")
+                or (item.get("features") or {}).get("selection_followup_candidate")
+                for item in question_sequence if isinstance(item, dict)
+            )
+        )
         # Use the same original-language clause that was classified. Equal list lengths
         # do not guarantee that separately split normalized text is aligned item by item.
         for index, question_item in enumerate(question_sequence):
@@ -1904,13 +1926,41 @@ async def execute(
                     "parent_intent": question_item.get("parent_intent", ""),
                     "inherits_current_request_subject": inherits_subject,
                 }
-                if inherits_subject and current_request_subject_context:
-                    active_subject = _text(current_request_subject_context.get("active_topic") or search_query)[:140]
+                reuse_parent_branch_context = bool(
+                    index > 0
+                    and parent_repair_turn
+                    and current_request_subject_context
+                    and _text(current_request_subject_context.get("relation")).upper() == "CONTINUE"
+                    and bool(task_semantics.get("active_branch_repair") or (task_semantics.get("pragmatic_features") or {}).get("active_branch_repair"))
+                    and not task_semantics.get("explicit_topic_switch")
+                )
+                use_current_turn_context = bool(inherits_subject and current_request_subject_context)
+                use_new_root_fast_path = bool(index == 0 and compound_turn_is_new)
+                if reuse_parent_branch_context:
+                    # Once the first correction clause selected the active branch,
+                    # dependent correction clauses should share its exact anchor and
+                    # evidence instead of rehydrating/reranking the whole history.
+                    task_context = dict(current_request_subject_context)
+                    task_search = _compact_question_search(task_context, search_query, task_semantics)
+                    task_search["reused_parent_branch_context"] = True
+                    task_search["reason"] = "parent_active_branch_context_reuse"
+                elif use_current_turn_context or use_new_root_fast_path:
+                    active_subject = _text((current_request_subject_context or {}).get("active_topic") or search_query)[:140]
                     task_context = {
                         "window_hours": 24,
                         "relation": "NEW",
-                        "relation_confidence": 0.0,
-                        "reason": "current_request_subject_inheritance",
+                        "relation_confidence": 1.0 if use_new_root_fast_path else 0.0,
+                        "active_branch_repair": False,
+                        "active_branch": {},
+                        "active_work_branch": {},
+                        "hot_work_followup": False,
+                        "hot_work_match_reason": "",
+                        "user_operation": {},
+                        "source_retrieval": {},
+                        "previous_answer_reference": False,
+                        "factual_verification_request": False,
+                        "explicit_topic_switch": False,
+                        "reason": "self_contained_new_topic_fast_path" if use_new_root_fast_path else "current_request_subject_inheritance",
                         "active_topic": active_subject,
                         "selected_pairs": [],
                         "candidates": [],
@@ -1919,7 +1969,9 @@ async def execute(
                         "topic_index": [],
                         "known_topic_count": 0,
                         "history_request": False,
-                        "requested_topic_count": 0,
+                        "contextual_history_match": False,
+                        "matched_topic_count": 0,
+                        "requested_topic_count": 10,
                         "minimum_topic_count": 0,
                         "time_window": {},
                         "time_filter": {},
@@ -1933,17 +1985,21 @@ async def execute(
                         "search": {"relation": "NEW", "total_pairs": 0, "candidate_count": 0},
                     }
                     task_search = _compact_question_search(task_context, search_query, task_semantics)
-                    task_search["inherits_current_request_subject"] = True
-                    task_search["reason"] = "pronoun_inherits_subject_from_current_request"
+                    if use_current_turn_context:
+                        task_search["inherits_current_request_subject"] = True
+                        task_search["reason"] = "current_request_subject_inheritance"
+                    else:
+                        task_search["reason"] = "self_contained_new_topic_fast_path"
+                        current_request_subject_context = task_context
                 else:
                     task_context = prepare_dialogue_context(
                         uid, search_query, query_interpretation=task_semantics, **search_kwargs
                     )
+                    if index == 0 and parent_repair_turn and _text(task_context.get("relation")).upper() == "CONTINUE":
+                        current_request_subject_context = task_context
                     if question_item.get("introduces_current_request_subject"):
-                        # Bind all anaphoric substeps to the first explicit topic clause.
-                        # When that clause is NEW, its literal request—not the previous
-                        # unrelated turn—owns active_topic. If it is CONTINUE, preserve
-                        # that same-topic anchor, but never search independently per pronoun.
+                        # Bind dependent substeps to the first subject clause; do not
+                        # search independently for anaphoric or evaluative fragments.
                         if _text(task_context.get("relation")).upper() == "NEW":
                             task_context["active_topic"] = search_query[:140]
                         current_request_subject_context = task_context
@@ -1982,7 +2038,11 @@ async def execute(
                 selected_pairs=len(task_context.get("selected_pairs") or []) if isinstance(task_context, dict) else 0,
                 clarification_needed=bool(task_search.get("clarification_needed")),
                 status=task_search.get("status"),
-                context_source="current_request_subject" if question_item.get("inherits_current_request_subject") else "dialogue_memory",
+                context_source=(
+                    "parent_active_branch" if task_search.get("reused_parent_branch_context")
+                    else "current_request_subject" if question_item.get("inherits_current_request_subject")
+                    else "dialogue_memory"
+                ),
                 semantic_intent=task_semantics.get("primary_intent"),
                 search_direction=task_semantics.get("direction"),
                 active_branch_repair=bool(task_semantics.get("active_branch_repair") or (task_semantics.get("pragmatic_features") or {}).get("active_branch_repair")),
