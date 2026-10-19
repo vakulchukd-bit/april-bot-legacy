@@ -3157,6 +3157,25 @@ def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[st
     for candidate in candidates:
         if isinstance(candidate, dict):
             merged.update({key: deepcopy(value) for key, value in candidate.items() if value not in (None, "", [], {})})
+
+    if block_type == "diagram" and not str(merged.get("svg") or merged.get("svg_payload") or merged.get("drawing") or "").strip():
+        # Provider responses sometimes put a concrete SVG directly in `content`
+        # rather than `payload.svg`. _has_render_payload only examines structured
+        # payload fields, so the old path discarded a valid diagram between the
+        # Provider and SceneContract. Recover the exact SVG verbatim here.
+        candidates_text = [
+            block.get("content"), block.get("text"), block.get("markdown"),
+            block.get("code"), block.get("drawing"), block.get("svg"),
+            merged.get("content"), merged.get("text"), merged.get("markdown"),
+            merged.get("code"), merged.get("drawing"),
+        ]
+        for candidate_text in candidates_text:
+            if not isinstance(candidate_text, str) or "<svg" not in candidate_text.lower():
+                continue
+            svg_match = re.search(r"<svg\b[\s\S]*?</svg\s*>", candidate_text, re.IGNORECASE)
+            if svg_match:
+                merged["svg"] = svg_match.group(0)
+                break
     if merged:
         return merged
     keys = (WEB_RENDERER_REGISTRY.get(block_type) or {}).get("payload_keys") or []
