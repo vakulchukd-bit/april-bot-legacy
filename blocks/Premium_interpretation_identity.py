@@ -195,7 +195,38 @@ _IMAGE_MODIFICATION_MARKERS = {
     "edit photo", "modify photo", "change photo", "замени на фото", "измени фото",
     "измени картинку", "измени изображение", "отредактируй фото", "отредактируй картинку",
     "добавь на фото", "убери с фото", "замени на картинке", "измени на картинке",
+    "нарисуй на фото", "нарисовать на фото", "дорисуй на фото", "дорисовать на фото",
+    "добавь на фотографию", "добавь на картинку", "добавь на изображение",
+    "добавь на эту фотографию", "добавь на эту картинку", "добавь на это изображение",
+    "улучши фото", "улучши фотографию", "улучши картинку", "улучши изображение",
 }
+
+_IMAGE_EDIT_ACTION_RE = re.compile(
+    r"\b(?:add|insert|remove|erase|replace|change|edit|modify|retouch|improve|brighten|darken|"
+    r"draw|redraw|paint|place|move|crop|enhance|"
+    r"добав\w*|дорис\w*|нанес\w*|постав\w*|размест\w*|помест\w*|убер\w*|удал\w*|"
+    r"замен\w*|измен\w*|отредактир\w*|обработ\w*|улучш\w*|осветл\w*|затемн\w*|"
+    r"перекрас\w*|подправ\w*|обреж\w*|поверн\w*|сделай|сделать)\b",
+    re.IGNORECASE,
+)
+_IMAGE_EDIT_TARGET_RE = re.compile(
+    r"(?:галоч\w*|отметк\w*|фон\w*|качеств\w*|ярче|светлее|темнее|резкост\w*|"
+    r"контраст\w*|цвет\w*|надпис\w*|текст\w*|логотип\w*|объект\w*|"
+    r"реалистич\w*|красив\w*|лишн\w*|размыти\w*|тень\w*|яркост\w*|"
+    r"check\s?mark|tick|background|quality|sharpen|contrast|brightness|text|logo|realistic|remove)",
+    re.IGNORECASE,
+)
+
+
+def _detect_contextual_image_edit(text: str) -> bool:
+    """Detect a concrete modification whose image target is supplied by context.
+
+    Examples: "Добавь зелёную галочку", "сделай фон светлее". This detector is
+    used only when original image bytes are available, so it does not turn an
+    arbitrary short instruction into a raster-generation request.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    return bool(_IMAGE_EDIT_ACTION_RE.search(low) and _IMAGE_EDIT_TARGET_RE.search(low))
 
 
 def _contains_marker(text: str, marker: str) -> bool:
@@ -211,8 +242,30 @@ def _contains_marker(text: str, marker: str) -> bool:
 
 
 def _detect_image_modification(text: str) -> bool:
-    low = _text(text).lower()
-    return any(_contains_marker(low, marker) for marker in _IMAGE_MODIFICATION_MARKERS)
+    """Detect explicit editing language, including requests to draw *on* a photo.
+
+    A source object in the request ("на фото", "на этой канистре") means the
+    user wants a change to an existing image, not a new standalone illustration.
+    Whether the source bytes are available is decided later by build_interpretation.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if any(_contains_marker(low, marker.replace("ё", "е")) for marker in _IMAGE_MODIFICATION_MARKERS):
+        return True
+    action = (
+        r"(?:add|insert|remove|erase|replace|change|edit|modify|retouch|improve|brighten|darken|draw|redraw|paint|"
+        r"добав\w*|дорис\w*|нанес\w*|постав\w*|размест\w*|помест\w*|убер\w*|удал\w*|"
+        r"замен\w*|измен\w*|отредактир\w*|обработ\w*|улучш\w*|осветл\w*|затемн\w*|перекрас\w*|"
+        r"нарис\w*)"
+    )
+    image_target = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|снимк\w*|канистр\w*|этикетк\w*|\bimage\b|\bphoto\b|\bpicture\b|\bcanister\b|\blabel\b)"
+    # Explicit image target can appear after an action ("нарисуй на фото") or
+    # before it ("на фотографии дорисуй"). Keep this phrase-aware rather than
+    # treating every occurrence of "draw" or "photo" as editing.
+    if re.search(rf"\b{action}\b.{{0,120}}?\b(?:на|в|по|с|из|к)\s+(?:эт\w*\s+)?{image_target}", low, re.IGNORECASE | re.DOTALL):
+        return True
+    if re.search(rf"\b(?:на|в|по|с|из|к)\s+(?:эт\w*\s+)?{image_target}.{{0,80}}?\b{action}\b", low, re.IGNORECASE | re.DOTALL):
+        return True
+    return False
 
 
 def _detect_image_generation_request(text: str) -> bool:
@@ -2542,6 +2595,60 @@ def build_interpretation(
         normalized_visual_request,
     ))
     explicit_image_edit = _detect_image_modification(normalized_visual_request)
+    contextual_image_edit = bool(has_original_image and _detect_contextual_image_edit(normalized_visual_request))
+    image_edit_requested = bool(explicit_image_edit or contextual_image_edit)
+    source_image_available = bool(
+        has_original_image
+        and any(
+            isinstance(item.get("image_url") or item.get("data_uri") or item.get("src"), str)
+            and str(item.get("image_url") or item.get("data_uri") or item.get("src")).startswith("data:image/")
+            for item in visual_context if isinstance(item, dict)
+        )
+    )
+    # A contextual command such as "Добавь зелёную галочку" becomes an image
+    # edit only when a source image is actually available. An explicit edit request
+    # without source bytes must ask for the photo and must never run generation.
+    if image_edit_requested and source_image_available and "image" not in requested_outputs:
+        requested_outputs.append("image")
+        if question_sequence:
+            sequence_item = question_sequence[-1]
+            if isinstance(sequence_item, dict):
+                item_outputs = list(sequence_item.get("output_types") or [])
+                if "image" not in item_outputs:
+                    item_outputs.append("image")
+                sequence_item["output_types"] = item_outputs
+        if presentation_sequence:
+            sequence_item = presentation_sequence[-1]
+            if isinstance(sequence_item, dict):
+                item_outputs = list(sequence_item.get("output_types") or [])
+                if "image" not in item_outputs:
+                    item_outputs.append("image")
+                sequence_item["output_types"] = item_outputs
+    if image_edit_requested and not source_image_available:
+        requested_outputs = [name for name in requested_outputs if name != "image"]
+        # Do not leave a phantom image deliverable in the child request sequence;
+        # it could otherwise encourage the model to claim an image was generated.
+        for sequence_item in question_sequence:
+            if isinstance(sequence_item, dict):
+                item_outputs = [
+                    _text(name).lower() for name in (sequence_item.get("output_types") or [])
+                    if _text(name).lower() != "image"
+                ]
+                sequence_item["output_types"] = item_outputs or ["text"]
+        cleaned_presentation = []
+        for sequence_item in presentation_sequence:
+            if not isinstance(sequence_item, dict):
+                continue
+            item_outputs = [
+                _text(name).lower() for name in (sequence_item.get("output_types") or [])
+                if _text(name).lower() != "image"
+            ]
+            if not item_outputs:
+                continue
+            sequence_item["output_types"] = item_outputs
+            cleaned_presentation.append(sequence_item)
+        presentation_sequence = cleaned_presentation
+    wants_image = "image" in requested_outputs
     image_noun_present = bool(re.search(
         r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b)",
         normalized_visual_request,
@@ -2648,7 +2755,9 @@ def build_interpretation(
         has_file=has_original_file,
         wants_image=wants_image,
     )
-    if reuse_saved_image:
+    if image_edit_requested:
+        task = "edit_image" if source_image_available else "request_source_image"
+    elif reuse_saved_image:
         task = "answer_request"
     # A modification verb requests a code edit; merely asking what a code file
     # does remains analyze_file and never silently becomes code generation.
@@ -2686,8 +2795,14 @@ def build_interpretation(
             "task": task,
             "requested_outputs": requested_outputs,
             "wants_image": wants_image,
+            "image_operation": "edit" if (image_edit_requested and source_image_available) else ("request_source" if image_edit_requested else ("reuse" if reuse_saved_image else ("generate" if wants_image else "none"))),
+            "image_edit_requested": bool(image_edit_requested),
+            "source_image_available": bool(source_image_available),
+            "source_asset_message_id": next((_text(item.get("asset_message_id")) for item in visual_context if _text(item.get("asset_message_id"))), ""),
+            "source_asset_role": next((_text(item.get("asset_role") or "user_input") for item in visual_context if _text(item.get("image_url") or item.get("data_uri"))), ""),
+            "image_edit_instruction": original or text if image_edit_requested else "",
             "reuse_saved_image": bool(reuse_saved_image),
-            "explicit_generation_request": bool(wants_image and not reuse_saved_image),
+            "explicit_generation_request": bool(wants_image and not reuse_saved_image and not image_edit_requested),
             "adaptive_visual_policy": True,
             "wants_file": wants_file,
             "wants_links": wants_links,
@@ -2752,7 +2867,10 @@ def build_interpretation(
         "visual": {
             "items": visual_context,
             "analysis_required": has_original_image,
-            "generation_required": bool(wants_image and not reuse_saved_image),
+            "generation_required": bool(wants_image and not reuse_saved_image and not image_edit_requested),
+            "edit_required": bool(image_edit_requested and source_image_available),
+            "source_image_required": bool(image_edit_requested),
+            "source_image_available": bool(source_image_available),
             "reuse_saved_image": bool(reuse_saved_image),
             "input_source": "current_upload" if any(not item.get("recalled_from_memory") for item in visual_context) else ("dialogue_memory" if has_image else "none"),
             "remembered_assets": [item for item in restored_assets if _text(item.get("kind")).lower() == "image"][:4],
