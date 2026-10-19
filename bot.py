@@ -366,15 +366,52 @@ def _prepare_attachments(
 
 
 def _payload(result: dict[str, Any]) -> dict[str, Any]:
-    scene = result.get("scene_contract") or {}
-    # SceneContract is the only rendering authority. Prefer its complete block
-    # sequence even when a legacy top-level mirror is stale or shorter; this
-    # prevents a generated image/diagram signal from disappearing at bot.ru.
-    scene_blocks = scene.get("render_blocks") if isinstance(scene, dict) else None
-    legacy_blocks = result.get("render_blocks")
-    blocks = scene_blocks if isinstance(scene_blocks, list) and scene_blocks else (
-        legacy_blocks if isinstance(legacy_blocks, list) else []
-    )
+    scene_source = result.get("scene_contract") or {}
+    scene = dict(scene_source) if isinstance(scene_source, dict) else {}
+    scene_blocks = scene.get("render_blocks") if isinstance(scene.get("render_blocks"), list) else []
+    legacy_blocks = result.get("render_blocks") if isinstance(result.get("render_blocks"), list) else []
+
+    def block_type(block: Any) -> str:
+        if not isinstance(block, dict):
+            return ""
+        value = block.get("type") or block.get("artifact_type") or block.get("kind")
+        return str(value or "").strip().lower()
+
+    def is_subsequence(short: list[Any], long: list[Any]) -> bool:
+        """True if every typed block in short occurs in order in long."""
+        short_types = [block_type(item) for item in short]
+        long_types = [block_type(item) for item in long]
+        cursor = 0
+        for item_type in long_types:
+            if cursor < len(short_types) and short_types[cursor] == item_type:
+                cursor += 1
+        return cursor == len(short_types)
+
+    # The scene contract remains canonical, but never let a stale, shorter copy
+    # erase a real renderer block produced by the executor. In observed logs the
+    # executor returned [text, diagram] while this nested copy contained only
+    # [text], which made the Web show prose and omit the SVG diagram entirely.
+    if scene_blocks and legacy_blocks and len(legacy_blocks) > len(scene_blocks) and is_subsequence(scene_blocks, legacy_blocks):
+        blocks = list(legacy_blocks)
+    elif scene_blocks and legacy_blocks and len(scene_blocks) > len(legacy_blocks) and is_subsequence(legacy_blocks, scene_blocks):
+        blocks = list(scene_blocks)
+    elif scene_blocks:
+        blocks = list(scene_blocks)
+        scene_types = {block_type(item) for item in scene_blocks}
+        # If the two mirrors diverge rather than one being a strict extension,
+        # append only genuinely missing structured render types. Text remains
+        # controlled by SceneContract, and no duplicate image/diagram is added.
+        for item in legacy_blocks:
+            item_type = block_type(item)
+            if item_type in {"diagram", "graph", "image", "gallery", "table", "formula", "code", "file", "link"} and item_type not in scene_types:
+                blocks.append(item)
+                scene_types.add(item_type)
+    else:
+        blocks = list(legacy_blocks)
+
+    # Keep the nested and top-level contracts synchronized so clients that read
+    # either path see the same complete block sequence.
+    scene["render_blocks"] = blocks
     answer = _text(result.get("answer") or result.get("content"))
     if not answer:
         raise RuntimeError("CANONICAL_ANSWER_MISSING")
