@@ -1719,6 +1719,49 @@ def build_active_work_branch_record(
     return inferred
 
 
+def _selection_followup_confirmed(query: str, interpretation: dict[str, Any] | None, latest_row: dict[str, Any] | None) -> tuple[bool, str, float]:
+    """Confirm selection language against the latest same-dialog answer only."""
+    profile = interpretation if isinstance(interpretation, dict) else {}
+    features = profile.get("features") if isinstance(profile.get("features"), dict) else {}
+    candidate = bool(features.get("selection_followup_candidate")) or bool(re.search(
+        r"\b(?:выбери(?:те)?|выбирай(?:те)?|выбрать|подбери(?:те)?|остановись\s+на|бери|возьми|pick|choose|select|go\s+with)\b",
+        _text(query).lower().replace("ё", "е"), flags=re.IGNORECASE,
+    ))
+    if not candidate or not isinstance(latest_row, dict):
+        return False, "not_a_selection_candidate", 0.0
+    if bool(profile.get("explicit_topic_switch")) or bool(profile.get("history_request")):
+        return False, "selection_overridden_by_switch_or_history", 0.0
+    answer = _text(latest_row.get("april_text") or latest_row.get("april") or latest_row.get("assistant_text"))
+    if not answer:
+        return False, "latest_answer_missing", 0.0
+    selection_noise = set(_SECTION_TOPIC_NOISE) | set(_CONTEXT_GENERIC_TERMS) | {
+        "выбери", "выберите", "выбирай", "выбирайте", "выбрать", "выбирал", "выбрала",
+        "выберу", "подбери", "подберите", "выбор", "лучше", "лучший", "лучшая", "лучшее",
+        "вариант", "варианта", "название", "названия", "рекомендую", "пожалуйста",
+        "да", "ага", "ну", "тогда", "choose", "choosing", "choose", "pick", "select",
+        "option", "recommend", "best", "prefer", "please",
+    }
+    query_terms = _semantic_tokens(query) - selection_noise
+    answer_terms = _semantic_tokens(answer) - selection_noise
+    overlap = _fuzzy_token_overlap(query_terms, answer_terms) if query_terms else 0.0
+    topic_overlap = _topic_query_overlap(query, _text(latest_row.get("topic")))
+    overlap = max(overlap, topic_overlap if topic_overlap >= 0.50 else 0.0)
+    low_answer = answer.lower().replace("ё", "е")
+    has_choices = bool(re.search(r"(?m)^\s*(?:\d+[.)]|[а-яa-z][.)])\s+", low_answer) or re.search(r"(?:вариант\w*|назван\w*|выбор\w*|можно\s+выбрать|я\s+бы\s+выбрал|рекомендую)", low_answer))
+    numbered_choice = bool(re.search(r"\b(?:вариант\s*)?[1-9]\b", _text(query).lower()))
+    expects_user_input = _assistant_expects_user_input(answer)
+    # An invitation to choose/answer is not enough by itself: a user can change
+    # topics in the next message. Only an underspecified choice or one that shares
+    # content with the latest answer may bind to that answer.
+    if expects_user_input and not query_terms:
+        return True, "underspecified_choice_after_input_prompt", round(overlap, 6)
+    if overlap >= 0.20:
+        return True, "selection_matches_latest_answer", round(overlap, 6)
+    if has_choices and numbered_choice:
+        return True, "numbered_option_from_latest_answer", round(overlap, 6)
+    return False, "selection_does_not_match_latest_answer", round(overlap, 6)
+
+
 def _has_semantic_active_branch_intent(
     interpretation: dict[str, Any] | None,
     *,
@@ -4064,6 +4107,19 @@ def search_dialogue_context(
 
     latest_same_dialog = max((item for item in matches if bool(item.get("same_dialog"))),
         key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)), default=None)
+    selection_followup_confirmed, selection_followup_reason, selection_followup_score = _selection_followup_confirmed(query, query_interpretation, latest_same_dialog)
+    if selection_followup_confirmed and not history_request and not new_topic_request and not query_modalities and not resume_key:
+        query_interpretation = dict(query_interpretation)
+        query_interpretation["primary_intent"] = "TOPIC_CONTINUATION"
+        query_interpretation["direction"] = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
+        query_interpretation["topic_reference"] = "PREVIOUS_ASSISTANT_ANSWER"
+        query_interpretation["requires_memory"] = True
+        query_interpretation["history_request"] = False
+        query_interpretation["relation_hint"] = "CONTINUE"
+        query_interpretation["reason"] = "selection_followup_confirmed_against_latest_answer"
+        query_interpretation["selection_followup_confirmed"] = True
+        interpreted_intent = "TOPIC_CONTINUATION"
+        interpreted_direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
     # Search an ongoing task branch before generic topic ranking. The marker lives
     # in structured_response JSONB; the inference fallback recognizes legacy rows
     # written before the marker existed. Explicit time/history queries bypass it.
@@ -4206,11 +4262,38 @@ def search_dialogue_context(
             continue
         row_subjects = _row_subject_tokens(row)
         subject_overlap = _subject_overlap(query_subjects, row_subjects)
-        if _subject_conflicts(query_subjects, row_subjects):
+        answer_text_for_topic = _text(
+            row.get("april_text") or row.get("april") or row.get("assistant_text")
+        )
+        answer_topic_overlap = (
+            _topic_query_overlap(query, answer_text_for_topic[:1800])
+            if (is_correction or reference_followup or topic_reference_fragment)
+            else 0.0
+        )
+        answer_has_multiple_options = bool(
+            is_correction
+            and len(re.findall(r"(?m)^\s*\d+[.)]\s+", answer_text_for_topic)) >= 2
+        )
+        # On an explicit correction, the desired item may occur only in an older
+        # assistant list, while the user's original request named the broader task
+        # (e.g. coffee-shop names). Let the list itself ground that exception, but
+        # never bypass subject conflict for an ordinary request.
+        grounded_named_option = bool(answer_has_multiple_options and answer_topic_overlap >= 0.30)
+        if _subject_conflicts(query_subjects, row_subjects) and not grounded_named_option:
             continue
         searchable_topic = " ".join((_topic_label(row), _row_subject_text(row)))
+        if is_correction or reference_followup or topic_reference_fragment:
+            # A named correction can refer to a concrete choice that appeared only
+            # in April's previous answer, not in the user's original wording.
+            # Include that answer as retrieval evidence only on referential/repair
+            # turns; ordinary new-topic requests must not match old generated prose.
+            searchable_topic += " " + answer_text_for_topic[:1800]
         overlap = _topic_query_overlap(query, searchable_topic)
-        topic_hit = overlap >= 0.50 or (query_subjects and subject_overlap >= 0.60 and (reference_followup or _looks_like_topic_correction(query)))
+        topic_hit = (
+            overlap >= 0.50
+            or (query_subjects and subject_overlap >= 0.60 and (reference_followup or _looks_like_topic_correction(query)))
+            or (answer_has_multiple_options and answer_topic_overlap >= 0.30)
+        )
         mid = _text(row.get("message_id")) or f"{row.get('created_at')}|{row.get('turn_index')}"
         if topic_hit and mid not in seen_topic_hit_ids:
             seen_topic_hit_ids.add(mid)
@@ -4235,6 +4318,37 @@ def search_dialogue_context(
     # diagnostic, but don't let the latest topic veto the user's resolved pointer.
     decision_subject_switch = bool(semantic_subject_switch and not topic_pointer_match and not is_correction and not is_short_acknowledgement)
     repair_active_branch = bool((is_correction or is_short_acknowledgement) and latest_same_dialog and not new_topic_request and not history_request)
+    # A correction may explicitly name a choice from a prior assistant list after
+    # an intervening misinterpretation created a false active branch. Locate only a
+    # same-dialog answer that actually offered a numbered list and shares the named
+    # content; this is a grounded re-anchor, not a generic historical-topic fallback.
+    named_option_reanchor_row: dict[str, Any] | None = None
+    named_option_reanchor_score = 0.0
+    query_features = query_interpretation.get("features") if isinstance(query_interpretation.get("features"), dict) else {}
+    explicit_answer_correction = bool(query_features.get("explicit_previous_answer_correction"))
+    if repair_active_branch and explicit_answer_correction and query_subjects and not query_modalities:
+        ranked_named_options: list[tuple[float, float, dict[str, Any]]] = []
+        for _, candidate_row in explicit_topic_hits:
+            candidate_id = _text(candidate_row.get("message_id"))
+            candidate_match = candidate_match_by_id.get(candidate_id) or {}
+            if not candidate_id or not candidate_match.get("same_dialog"):
+                continue
+            candidate_answer = _text(
+                candidate_row.get("april_text") or candidate_row.get("april") or candidate_row.get("assistant_text")
+            )
+            option_count = len(re.findall(r"(?m)^\s*\d+[.)]\s+", candidate_answer))
+            if option_count < 2:
+                continue
+            content_overlap = _topic_query_overlap(query, candidate_answer[:5200])
+            if content_overlap < 0.30:
+                continue
+            # Prefer the original multi-option answer over a later repair that
+            # merely repeats the same word while explaining the misunderstanding.
+            score = min(1.0, content_overlap + min(0.20, 0.05 * option_count))
+            ranked_named_options.append((score, float(candidate_row.get("created_at") or 0), candidate_row))
+        if ranked_named_options:
+            ranked_named_options.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            named_option_reanchor_score, _, named_option_reanchor_row = ranked_named_options[0]
     has_new_attachment = bool(query_modalities)
     explicit_attachment_followup = has_new_attachment and reference_followup
     user_operation = _user_operation_profile(
@@ -4254,6 +4368,7 @@ def search_dialogue_context(
             reference_followup=reference_followup,
         )
     )
+    semantic_active_branch_intent = bool(semantic_active_branch_intent or selection_followup_confirmed)
 
     # Treat the ranked match as contextual when it contains actual semantic evidence,
     # rather than requiring a fixed hand-chosen score cutoff. Subject conflict remains
@@ -4332,6 +4447,8 @@ def search_dialogue_context(
         and not new_topic_request
         and not new_work_root_request
         and not _is_explicit_topic_closure(query)
+        and not selection_followup_confirmed
+        and not repair_active_branch
         and (
             reference_followup
             or topic_pointer_match
@@ -4529,7 +4646,7 @@ def search_dialogue_context(
         # CONTINUE. If a newer topic has already been established, ordinary dialogue
         # search can still continue that newer topic; otherwise this request opens
         # a clean topic while the old task remains in retained memory.
-        if unrelated_active_work_topic:
+        if unrelated_active_work_topic and not (selection_followup_confirmed or repair_active_branch):
             semantic_active_branch_intent = False
             hot_branch_candidate = False
             repair_active_branch = False
@@ -4757,6 +4874,64 @@ def search_dialogue_context(
                 semantic_active_branch_intent = True
                 decision_subject_switch = False
                 repair_active_branch = False
+    if (
+        named_option_reanchor_row
+        and repair_active_branch
+        and not history_request
+        and not new_topic_request
+        and (not closed_branch_barrier or explicit_closed_branch_reopen)
+    ):
+        # Replace a mistaken clarification/grammar branch with the actual earlier
+        # answer that offered the named choices. Re-anchor branch metadata and
+        # source selection together so Provider sees one coherent topic root.
+        named_id = _text(named_option_reanchor_row.get("message_id"))
+        named_user = _text(named_option_reanchor_row.get("user_text") or named_option_reanchor_row.get("user"))
+        named_answer = _text(
+            named_option_reanchor_row.get("april_text") or named_option_reanchor_row.get("april") or named_option_reanchor_row.get("assistant_text")
+        )
+        named_topic = _topic_label(named_option_reanchor_row) or named_user or "Previous answer options"
+        named_root_text = " ".join((named_topic, _row_subject_text(named_option_reanchor_row), named_answer[:1800]))
+        active_work_branch = {
+            "active": True,
+            "kind": "interactive_dialogue",
+            "priority": "NAMED_PREVIOUS_ANSWER_FIRST",
+            "work_id": "work:" + named_id,
+            "origin_message_id": named_id,
+            "source_message_id": named_id,
+            "last_message_id": named_id,
+            "topic": named_topic[:240],
+            "goal": (named_user or named_topic)[:500],
+            "last_action": named_user[:240],
+            "state_summary": (named_answer or named_topic)[:1000],
+            "expects_choice": False,
+            "dialog_id": _text(named_option_reanchor_row.get("dialog_id")),
+            "conversation_id": _text(named_option_reanchor_row.get("conversation_id")),
+            "reanchor_reason": "explicit_correction_matches_prior_option_list",
+        }
+        active_work_pair = named_option_reanchor_row
+        active_work_row_index = next((
+            idx for idx, row in enumerate(scoped_work_rows)
+            if _text(row.get("message_id")) == named_id
+        ), -1)
+        active_work_has_marker = True
+        active_work_origin_id = named_id
+        active_work_root_row = named_option_reanchor_row
+        active_work_root_text = named_root_text
+        active_work_root_subjects = _subject_tokens(named_root_text)
+        active_work_root_subject_overlap = _subject_overlap(query_subjects, active_work_root_subjects)
+        active_work_root_subject_conflict = False
+        active_work_root_topic_overlap = _topic_query_overlap(query, named_root_text)
+        active_work_root_match = True
+        active_work_topic_origin_mismatch = False
+        active_work_marker_is_from_another_topic = False
+        active_work_reanchored_to_origin = True
+        unrelated_active_work_topic = False
+        hot_work_followup = True
+        hot_work_match_reason = "named_option_reanchored_to_previous_answer"
+        hot_branch_candidate = True
+        semantic_active_branch_intent = True
+        decision_subject_switch = False
+
     # A bare topic pointer such as “про стих” may continue only when the 24-hour
     # database search found a matching source topic. Do not let recency attach it
     # to an unrelated latest turn just because its wording is short.
@@ -4765,7 +4940,9 @@ def search_dialogue_context(
     continuation = False
     if pending_clarification and not new_topic_request and not unrelated_active_work_topic:
         continuation = True
-    elif history_request or new_topic_request or new_work_root_request or unrelated_active_work_topic:
+    elif history_request or new_topic_request or (new_work_root_request and not selection_followup_confirmed) or (
+        unrelated_active_work_topic and not (selection_followup_confirmed or repair_active_branch)
+    ):
         continuation = False
     elif hot_work_followup:
         # A confirmed in-task choice/action outranks the generic attachment gate.
@@ -4783,6 +4960,8 @@ def search_dialogue_context(
         and bool(query_interpretation.get("requires_memory"))
         and _text(query_interpretation.get("topic_reference")) == "PREVIOUS_ASSISTANT_ANSWER"
     ):
+        continuation = True
+    elif selection_followup_confirmed and latest_same_dialog:
         continuation = True
     elif semantic_active_branch_intent and not decision_subject_switch:
         # A context-dependent interpretation may suggest continuation, but an
@@ -4865,6 +5044,8 @@ def search_dialogue_context(
     anchor: dict[str, Any] | None = None
     if historical_task_override and historical_task_anchor:
         anchor = historical_task_anchor
+    elif selection_followup_confirmed and latest_same_dialog:
+        anchor = latest_same_dialog
     elif hot_work_followup and active_work_pair:
         # The work branch is chosen before generic score ordering. A high lexical
         # score from an older topic must not replace the active task's live state.
@@ -5423,7 +5604,15 @@ def search_dialogue_context(
     # A NEW request may still name a topic retained from an earlier dialogue.
     # Keep relation=NEW (no forced continuation), but pass one grounded pair when
     # the topic index confirms a strong topical match.
-    if relation == "NEW" and not history_request and not selected_for_context and topic_index and not new_work_root_request:
+    if (
+        relation == "NEW"
+        and not history_request
+        and not selected_for_context
+        and topic_index
+        and not new_work_root_request
+        and not closed_branch_barrier
+        and (explicit_historical_work_reference or topic_pointer_match)
+    ):
         lookup_tokens = _history_query_topic_tokens(query)
         top_topic = topic_index[0]
         topic_tokens = _semantic_tokens(_history_topic_text(top_topic))
@@ -5897,10 +6086,20 @@ def search_dialogue_context(
             "matched_this_turn": bool(hot_work_followup),
             "match_reason": _text(hot_work_match_reason)[:80],
             "candidate_message_id": _text(active_work_pair.get("message_id"))[:120] if active_work_pair else "",
-            "priority": "HOT_TASK_FIRST",
+            "priority": _text(active_work_branch.get("priority") or "HOT_TASK_FIRST")[:60],
         } if active_work_branch and hot_work_followup and relation == "CONTINUE" and not new_work_root_request else {}),
         "hot_work_followup": bool(hot_work_followup),
         "hot_work_match_reason": _text(hot_work_match_reason)[:80],
+        "named_option_reanchor": bool(named_option_reanchor_row),
+        "named_option_reanchor_score": round(float(named_option_reanchor_score), 6),
+        "named_option_reanchor_message_id": _text(named_option_reanchor_row.get("message_id") if isinstance(named_option_reanchor_row, dict) else "")[:120],
+        "selection_followup_candidate": bool(
+            (query_interpretation.get("features") or {}).get("selection_followup_candidate")
+            if isinstance(query_interpretation.get("features"), dict) else False
+        ),
+        "selection_followup_confirmed": bool(selection_followup_confirmed),
+        "selection_followup_reason": _text(selection_followup_reason)[:100],
+        "selection_followup_score": round(float(selection_followup_score), 6),
         "topic_closure_barrier": bool(closed_branch_barrier),
         "current_topic_closure": bool(current_topic_closure),
         "explicit_closed_branch_reopen": bool(explicit_closed_branch_reopen),
@@ -5918,6 +6117,7 @@ def search_dialogue_context(
             else "clarification_researched" if clarification_resolution
             else "clarification_pending" if clarification_needed
             else "history_request" if history_request
+            else "named_option_reanchored_to_previous_answer" if named_option_reanchor_row and hot_work_followup
             else "hot_work_branch_first" if hot_work_followup
             else "semantic_history_match" if contextual_history_match
             else "self_contained_new_information" if self_contained_new_information
@@ -5989,6 +6189,16 @@ def search_dialogue_context(
         semantic_subject_switch=bool(semantic_subject_switch),
         self_contained_new_information=bool(self_contained_new_information),
         hot_branch_candidate=bool(hot_branch_candidate),
+        selection_followup_candidate=bool(
+            (query_interpretation.get("features") or {}).get("selection_followup_candidate")
+            if isinstance(query_interpretation.get("features"), dict) else False
+        ),
+        selection_followup_confirmed=bool(selection_followup_confirmed),
+        selection_followup_reason=_text(selection_followup_reason),
+        selection_followup_score=round(float(selection_followup_score), 6),
+        named_option_reanchor=bool(named_option_reanchor_row),
+        named_option_reanchor_score=round(float(named_option_reanchor_score), 6),
+        named_option_reanchor_message_key=_apr_diag_ref(named_option_reanchor_row.get("message_id") if isinstance(named_option_reanchor_row, dict) else ""),
         hot_work_followup=bool(hot_work_followup),
         hot_work_match_reason=_text(hot_work_match_reason),
         topic_closure_barrier=bool(closed_branch_barrier),
