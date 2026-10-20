@@ -43,6 +43,9 @@ from blocks.Premium_interpretation_identity import (
     _has_explicit_topic_introduction,
     _detect_image_modification,
     _detect_contextual_image_edit,
+    _is_image_result_retrieval_request,
+    _is_image_delivery_complaint,
+    _extract_image_edit_instruction,
 )
 from blocks.Premium_provider_router import generate_text
 from blocks.text_module import package_provider_response
@@ -824,9 +827,9 @@ async def _edit_image_artifact(
     source_bytes, source_mime, source_item = selected
     intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
     input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
-    request_text = _text(input_data.get("original_request") or input_data.get("normalized_request"))
+    request_text = _text(intent.get("image_edit_instruction"))
     if not request_text:
-        request_text = _text(intent.get("image_edit_instruction"))
+        request_text = _text(input_data.get("original_request") or input_data.get("normalized_request"))
     if not request_text:
         return None
     edit_prompt = (
@@ -886,6 +889,51 @@ def _image_edit_message(interpretation: dict[str, Any], state: str) -> str:
         return "Готово — внесла запрошенное изменение в исходное изображение. Ниже — результат редактирования."
     return "Не удалось обработать изображение в этот раз. Исходное изображение не изменено; попробуй повторить запрос."
 
+
+
+def _image_result_retrieval_message(interpretation: dict[str, Any], available: bool) -> str:
+    """User-facing lifecycle copy for replaying an earlier image artifact."""
+    input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
+    language = _text(input_data.get("display_language") or "").lower()
+    if available:
+        if language in {"uk", "ua", "uk-ua"}:
+            return "Знайшла збережений результат у попередньому діалозі. Нижче — зображення."
+        if language in {"en", "en-us", "en-gb"}:
+            return "I found the saved result in the earlier conversation. The image is below."
+        return "Нашла сохранённый результат в предыдущем диалоге. Ниже — изображение."
+    if language in {"uk", "ua", "uk-ua"}:
+        return "Не вдалося відновити файл попереднього результату з історії. Я не створюватиму інше зображення замість нього."
+    if language in {"en", "en-us", "en-gb"}:
+        return "I couldn't restore the earlier result file from history, so I won't generate a different image as a substitute."
+    return "Не удалось восстановить файл предыдущего результата из истории. Я не буду создавать другую картинку вместо него."
+
+
+def _replace_packaged_answer_text(packaged: dict[str, Any], answer: str) -> None:
+    """Replace user-visible answer text in the package without touching artifact blocks."""
+    packaged["answer"] = answer
+    packaged["content"] = answer
+    text_types = {"text", "message", "answer", "markdown", "message_text"}
+    blocks = packaged.get("render_blocks") if isinstance(packaged.get("render_blocks"), list) else []
+    text_block = next((block for block in blocks if isinstance(block, dict) and _text(block.get("type") or block.get("artifact_type")).lower() in text_types), None)
+    if text_block is not None:
+        text_block["content"] = answer
+        text_block["text"] = answer
+        # Keep one canonical user-facing text block. Stale provider narrations
+        # must not survive next to the edited/replayed artifact.
+        packaged["render_blocks"] = [
+            block for block in blocks
+            if not (isinstance(block, dict)
+                    and _text(block.get("type") or block.get("artifact_type")).lower() in text_types
+                    and block is not text_block)
+        ]
+    else:
+        blocks.insert(0, {
+            "type": "text",
+            "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
+            "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
+            "content": answer,
+        })
+        packaged["render_blocks"] = blocks
 
 def _build_scene(
     response: MachineResponse,
@@ -966,19 +1014,55 @@ def _looks_like_image_edit_request(value: Any) -> bool:
 
 
 def _looks_like_referential_image_edit(value: Any) -> bool:
-    """Only enable the latest-image fallback when the request points to a prior object."""
+    """Enable an edit from history only when the request identifies an earlier image."""
     low = _text(value).lower().replace("ё", "е")
     if not _looks_like_image_edit_request(low):
         return False
+    historical_pointer = bool(re.search(
+        r"(?:\bв\s+(?:истори\w*|предыдущ\w*|прошл\w*)|\bиз\s+истори\w*|"
+        r"\bнайд\w*.{0,100}\bистори\w*|\bиз\s+предыдущ\w*\s+(?:диалог\w*|сообщен\w*)|"
+        r"\bfrom\s+(?:the\s+)?history\b|\bprevious\s+(?:chat|conversation)\b)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    mentions_image = bool(re.search(
+        r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|иллюстрац\w*|рисунк\w*|"
+        r"снимк\w*|портрет\w*|\bimage\b|\bphoto\b|\bpicture\b|\bportrait\b)", low, re.IGNORECASE
+    ))
+    if historical_pointer and mentions_image:
+        return True
     return bool(re.search(
         r"(?:\b(?:на|в|по|с)\s+(?:этом|этой|этих|этот|эта|эти)\s+(?:фото\b|фотограф\w*|картинк\w*|"
-        r"изображени\w*|иллюстрац\w*|рисунк\w*|снимк\w*|канистр\w*|этикетк\w*)|"
+        r"изображени\w*|иллюстрац\w*|рисунк\w*|снимк\w*|портрет\w*|канистр\w*|этикетк\w*)|"
         r"\bк\s+(?:этой|той|такой)\s+иллюстрац\w*|"
-        r"\b(?:ту|эту|предыдущую|прошлую)\s+(?:иллюстрац\w*|картинк\w*|изображени\w*)\b|"
-        r"\b(?:на|в)\s+(?:ней|нем|н[её]м|них|этом|этой)\b|"
-        r"\b(?:this|that)\s+(?:photo|image|picture|illustration|drawing|canister|label)\b|\b(?:on it|in it|on this one)\b)",
+        r"\b(?:ту|эту|предыдущую|прошлую|сохраненную|сохраненную)\s+(?:иллюстрац\w*|картинк\w*|изображени\w*|фотограф\w*|фото)\b|"
+        r"\b(?:на|в)\s+(?:ней|нем|н[её]м|них|него|нее|неё|этом|этой)\b|"
+        r"\b(?:this|that)\s+(?:photo|image|picture|illustration|drawing|canister|label|portrait)\b|\b(?:on it|in it|on this one)\b)",
         low, re.IGNORECASE,
     ))
+
+
+def _looks_like_historical_asset_operation(value: Any) -> bool:
+    """True for a history-referenced modification, not a general history question."""
+    low = _text(value).lower().replace("ё", "е")
+    history_pointer = bool(re.search(
+        r"(?:\bв\s+истори\w*|\bиз\s+истори\w*|\bистори\w*\s+(?:диалог\w*|общени\w*)|"
+        r"\bfrom\s+(?:the\s+)?history\b|\bprevious\s+(?:chat|conversation)\b|\bearlier\b)",
+        low, re.IGNORECASE,
+    ))
+    target = bool(re.search(
+        r"(?:фото\b|фотограф\w*|картинк\w*|изображени\w*|иллюстрац\w*|портрет\w*|"
+        r"таблиц\w*|график\w*|диаграмм\w*|схем\w*|формул\w*|уравнен\w*|решен\w*|"
+        r"код\w*|скрипт\w*|ссылк\w*|текст\w*|ответ\w*|данн\w*|\bimage\b|\bphoto\b|"
+        r"\btable\b|\bgraph\b|\bchart\b|\bdiagram\b|\bformula\b|\bcode\b|\blink\b)",
+        low, re.IGNORECASE,
+    ))
+    operation = bool(re.search(
+        r"(?:надень|одень|добав\w*|дорис\w*|убер\w*|удал\w*|замен\w*|измен\w*|отредактир\w*|"
+        r"обработ\w*|улучш\w*|исправ\w*|доработ\w*|обнов\w*|перепиш\w*|перестро\w*|"
+        r"перерис\w*|преобраз\w*|передел\w*|сократ\w*|расшир\w*|fix|edit|change|modify|improve|update|refactor|rewrite|redraw|add|remove|replace)",
+        low, re.IGNORECASE,
+    ))
+    return history_pointer and target and operation
 
 
 def _decode_image_source_item(item: dict[str, Any]) -> tuple[bytes, str] | None:
@@ -1024,8 +1108,15 @@ def _explicit_prior_asset_reference(value: Any) -> bool:
         "this canister", "this photo", "this image", "this illustration", "that illustration", "on it",
         "that image", "previous image", "previous photo", "the earlier file",
         "the file i sent", "the image i sent", "compare with", "compare to previous",
+        "в истории диалога", "в истории общения", "из истории диалога", "найди в истории",
+        "найдите в истории", "результат редактирования", "результат изменения", "сохраненный результат",
+        "предыдущую таблицу", "предыдущий график", "предыдущую диаграмму", "предыдущую формулу",
+        "предыдущий ответ", "предыдущий текст", "предыдущий код", "предыдущую ссылку",
+        "the edited result", "the previous result", "in dialogue history", "in chat history",
     )
-    return any(marker.replace("ё", "е") in low for marker in markers)
+    if any(marker.replace("ё", "е") in low for marker in markers):
+        return True
+    return _looks_like_historical_asset_operation(low) or _is_image_result_retrieval_request(low)
 
 
 def _requires_original_asset(value: Any, kind: str, cached_summary: str) -> bool:
@@ -1243,26 +1334,46 @@ def _restore_selected_assets(
     selected = dialogue_context.get("selected_pairs") or []
     anchor = dialogue_context.get("anchor") or {}
     message_ids: list[str] = []
-    if isinstance(anchor, dict) and _text(anchor.get("message_id")):
-        message_ids.append(_text(anchor.get("message_id")))
+    if isinstance(anchor, dict):
+        anchor_id = _text(anchor.get("message_id") or anchor.get("message_key") or anchor.get("source_message_id"))
+        if anchor_id:
+            message_ids.append(anchor_id)
     for item in selected:
-        if isinstance(item, dict) and _text(item.get("message_id")):
-            message_ids.append(_text(item.get("message_id")))
+        if isinstance(item, dict):
+            selected_id = _text(item.get("message_id") or item.get("message_key") or item.get("source_message_id"))
+            if selected_id:
+                message_ids.append(selected_id)
     message_ids = list(dict.fromkeys(message_ids))[:8]
 
     relation = _text(dialogue_context.get("relation")).upper()
-    # Semantic search can label a referential edit as NEW when the user's current
-    # sentence names a visible object (e.g. "на этой канистре") but the previous
-    # turn's user text was only "Что здесь?". In that narrow case, restore the most
-    # recent same-dialog image candidate within Premium's 24-hour retention window.
-    # A generic "draw on a photo" request must never silently borrow an older image:
-    # when no source is attached, the Premium Interpreter decides whether the user
-    # wants a new image or explicitly refers to a particular existing source.
+    history_request = bool(dialogue_context.get("history_request"))
+    result_retrieval = _is_image_result_retrieval_request(current_request)
     referential_edit = _looks_like_referential_image_edit(current_request)
+    historical_operation = _looks_like_historical_asset_operation(current_request)
+    active_repair = bool(dialogue_context.get("active_branch_repair"))
+    inherited_edit_instruction = ""
+    if active_repair and _is_image_delivery_complaint(current_request):
+        for pair in reversed(selected):
+            if not isinstance(pair, dict):
+                continue
+            prior_user = _text(pair.get("user") or pair.get("source_user_text"))
+            if prior_user and _detect_image_modification(prior_user):
+                inherited_edit_instruction = _extract_image_edit_instruction(prior_user)
+                if inherited_edit_instruction:
+                    break
+    repair_image_delivery = bool(active_repair and _is_image_delivery_complaint(current_request) and inherited_edit_instruction)
+    # History searches often have relation=NEW by design; the selected messages
+    # still define a safe, authenticated restore scope for a named edit/retrieval.
+    allow_selected_history_restore = bool(
+        (history_request or _explicit_prior_asset_reference(current_request))
+        and (historical_operation or referential_edit or result_retrieval)
+        and bool(message_ids)
+    )
+    allow_selected_repair_restore = bool(repair_image_delivery)
     fallback_used = False
-    if relation != "CONTINUE" and not (not has_current_asset and referential_edit):
+    if relation != "CONTINUE" and not (not has_current_asset and (referential_edit or allow_selected_history_restore or allow_selected_repair_restore)):
         return visual_context, attachments, file_inputs, file_contents, []
-    if not has_current_asset and referential_edit and (relation != "CONTINUE" or not message_ids):
+    if not has_current_asset and (referential_edit or allow_selected_history_restore or allow_selected_repair_restore) and not message_ids:
         candidates = [item for item in (dialogue_context.get("candidates") or []) if isinstance(item, dict)]
         now_ts = time.time()
         recent_images = []
@@ -1390,7 +1501,8 @@ def _restore_selected_assets(
         if not isinstance(analysis_key_details, list):
             analysis_key_details = []
         analysis_key_details = [_text(item)[:220] for item in analysis_key_details if _text(item)][:8]
-        restore_original = _requires_original_asset(current_request, kind, analysis_summary)
+        asset_request = inherited_edit_instruction if inherited_edit_instruction and active_repair else current_request
+        restore_original = _requires_original_asset(asset_request, kind, analysis_summary)
         common = {
             "filename": filename,
             "content_type": mime_type,
@@ -1423,6 +1535,7 @@ def _restore_selected_assets(
             relation_for_asset = _text(dialogue_context.get("relation")).upper()
             should_use_saved_output_as_edit_source = bool(
                 _looks_like_referential_image_edit(current_request)
+                or (active_repair and _is_image_delivery_complaint(current_request))
                 or (
                     relation_for_asset == "CONTINUE"
                     and _detect_contextual_image_edit(current_request)
@@ -2135,11 +2248,17 @@ async def execute(
         asset_context = dialogue_context
         if len(question_sequence) > 1:
             for question_item, task_context in zip(question_sequence, question_contexts):
-                if (
-                    isinstance(task_context, dict)
-                    and _text(task_context.get("relation")).upper() == "CONTINUE"
-                    and _explicit_prior_asset_reference(question_item.get("request"))
-                ):
+                question_request = _text(question_item.get("request"))
+                if not isinstance(task_context, dict) or not _explicit_prior_asset_reference(question_request):
+                    continue
+                task_relation = _text(task_context.get("relation")).upper()
+                task_is_relevant_history = bool(
+                    task_relation == "CONTINUE"
+                    or task_context.get("history_request")
+                    or task_context.get("contextual_history_match")
+                    or task_context.get("active_branch_repair")
+                )
+                if task_is_relevant_history and (task_context.get("selected_pairs") or task_context.get("anchor")):
                     asset_context = task_context
                     break
         visual_context, attachments, file_inputs, file_contents, restored_assets = _restore_selected_assets(
@@ -2934,7 +3053,34 @@ async def execute(
     request_structure = interpretation.get("request_structure") if isinstance(interpretation.get("request_structure"), dict) else {}
     presentation_sequence = request_structure.get("presentation_sequence") if isinstance(request_structure.get("presentation_sequence"), list) else []
     graph_policy = (interpretation.get("intent") or {}).get("graph_policy") if isinstance((interpretation.get("intent") or {}).get("graph_policy"), dict) else {}
-    image_pending = bool((interpretation.get("intent") or {}).get("wants_image"))
+    image_pending = bool(
+        (interpretation.get("intent") or {}).get("wants_image")
+        and not (interpretation.get("intent") or {}).get("reuse_saved_image")
+        and not (interpretation.get("intent") or {}).get("image_result_retrieval")
+    )
+    preflight_image_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    if preflight_image_intent.get("image_result_retrieval"):
+        saved_retrieval_source = next((
+            item for item in restored_assets
+            if isinstance(item, dict)
+            and _text(item.get("kind")).lower() == "image"
+            and _text(item.get("asset_role")).lower() in {"april_output", "assistant_output", "generated"}
+            and _text(item.get("_content_data_uri")).startswith("data:image/")
+            and _decode_asset_data_uri(item.get("_content_data_uri"))
+        ), None)
+        answer = _image_result_retrieval_message(interpretation, bool(saved_retrieval_source))
+        packaged["summary"] = "Сохранённый результат восстановлен." if saved_retrieval_source else "Файл предыдущего результата не найден в выбранных записях истории."
+        _replace_packaged_answer_text(packaged, answer)
+    elif _text(preflight_image_intent.get("task")) == "edit_image":
+        # Do not stream provider-internal narration such as "I cannot return the
+        # edited file" before the raster editor has produced the actual artifact.
+        answer = _image_edit_message(interpretation, "processing")
+        packaged["summary"] = "Выполняется редактирование изображения."
+        _replace_packaged_answer_text(packaged, answer)
+    elif _text(preflight_image_intent.get("task")) == "request_source_image":
+        answer = _image_edit_message(interpretation, "missing_source")
+        packaged["summary"] = "Для редактирования требуется исходное изображение."
+        _replace_packaged_answer_text(packaged, answer)
 
     # First publish all text and non-image typed renderers. The Web replaces this
     # provisional SceneContract with the final one, while the image generator keeps
@@ -3009,6 +3155,8 @@ async def execute(
     if image_intent.get("wants_image") and (
         not bool(provider_metadata.get("provider_fallback"))
         or image_intent.get("image_operation") == "edit"
+        or image_intent.get("reuse_saved_image")
+        or image_intent.get("image_result_retrieval")
     ):
         image_started = time.perf_counter()
         if image_intent.get("image_operation") == "edit" or _text(image_intent.get("task")) == "edit_image":
@@ -3072,7 +3220,7 @@ async def execute(
                     "reused": True,
                 }
                 _apr_timing_log("saved_image_reuse", None, reused=True, image_bytes=len(saved_bytes), message_key=_apr_diag_ref((saved_output or {}).get("asset_message_id")))
-        if image_result is None:
+        if image_result is None and not image_intent.get("image_result_retrieval"):
             image_result = await _generate_image_artifact(
                 interpretation,
                 raw,
@@ -3166,26 +3314,17 @@ async def execute(
     if _text(image_intent.get("task")) == "edit_image":
         edit_state = "success" if image_result and image_result.get("success") else "failed"
         answer = _image_edit_message(interpretation, edit_state)
-        packaged["answer"] = answer
-        packaged["content"] = answer
+        _replace_packaged_answer_text(packaged, answer)
         packaged["summary"] = "Изображение отредактировано." if edit_state == "success" else "Не удалось завершить редактирование изображения."
-        text_blocks = [
-            block for block in (packaged.get("render_blocks") or [])
-            if isinstance(block, dict) and _text(block.get("type") or block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}
-        ]
-        if text_blocks:
-            text_blocks[0]["content"] = answer
-            text_blocks[0]["text"] = answer
-            packaged["render_blocks"] = [block for block in (packaged.get("render_blocks") or []) if not (
-                isinstance(block, dict) and _text(block.get("type") or block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}
-            )] + [text_blocks[0]]
-        else:
-            packaged.setdefault("render_blocks", []).insert(0, {
-                "type": "text",
-                "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
-                "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
-                "content": answer,
-            })
+    elif _text(image_intent.get("task")) == "request_source_image":
+        answer = _image_edit_message(interpretation, "missing_source")
+        _replace_packaged_answer_text(packaged, answer)
+        packaged["summary"] = "Для редактирования требуется исходное изображение."
+    elif image_intent.get("image_result_retrieval"):
+        retrieval_succeeded = bool(image_result and image_result.get("success") and image_result.get("reused"))
+        answer = _image_result_retrieval_message(interpretation, retrieval_succeeded)
+        _replace_packaged_answer_text(packaged, answer)
+        packaged["summary"] = "Сохранённый результат восстановлен." if retrieval_succeeded else "Файл предыдущего результата не найден в выбранных записях истории."
 
     normalized_blocks = _apply_presentation_sequence(
         packaged["render_blocks"] or [], answer, presentation_sequence
