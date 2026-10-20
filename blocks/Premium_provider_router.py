@@ -1,8 +1,7 @@
 """APRIL Premium single provider for the canonical WebReal Web route.
 
-The provider receives an already-normalized English request from bot.ru/Exkrutor.
-Bot.ru owns the input translation boundary. The provider performs reasoning and
-returns the answer in the requested display language. No second chat route exists.
+The provider receives the canonical, normalized request from bot.ru/Exkrutor.
+Bot.ru resolves the response language from the current user-authored message and uses the saved UI language only as a fallback. The multilingual provider reasons on the original input and returns user-visible content in RETURN_LANGUAGE; no separate paid translation call or second chat route is added.
 """
 from __future__ import annotations
 
@@ -39,7 +38,7 @@ PREMIUM_PROMPT_SCALE = MAX_PROMPT_TOKENS / 1800.0
 def _scaled_prompt_tokens(base_tokens: int) -> int:
     return max(1, int(round(int(base_tokens) * PREMIUM_PROMPT_SCALE)))
 
-TRANSLATION_ROUTE_VERSION = "botru_embedded_translation_v1"
+TRANSLATION_ROUTE_VERSION = "botru_embedded_language_negotiation_v2"
 PROVIDER_ROUTER_VERSION = "premium_provider_router_v4_hot_work_branch_priority"
 
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -49,6 +48,11 @@ _client: _OpenAICompat | None = None
 
 SYSTEM_PROMPT = r"""
 You are April's single response provider in the canonical route.
+
+PER-TURN LANGUAGE AND CROSS-LANGUAGE CONVERSATION:
+- RETURN_LANGUAGE is the language of the user's current typed or spoken message when it can be identified. The saved interface language is only a fallback for empty or ambiguous input; it must not override a clearly different message language.
+- Every user-visible string must use RETURN_LANGUAGE, including explanations, step titles, captions, descriptions, clarifying questions, system-generated fallback text, and labels around formulas, code, tables, diagrams, graphs, and media. Internal JSON field names may remain English, but never expose those field names as user-facing labels. Preserve code, URLs, identifiers, names, and explicitly requested quotations.
+- If the user is asking for help communicating with a foreign-language interlocutor, keep April's explanation in RETURN_LANGUAGE and provide a ready-to-copy message in the clearly identified interlocutor's language, plus a faithful back-translation into RETURN_LANGUAGE so the user understands what will be sent. Keep the two audiences distinct. If the interlocutor's language is not stated or reliably inferable, ask one concise clarifying question in RETURN_LANGUAGE rather than guessing. Do not activate translation mode merely because the user switches languages.
 
 USER-VISIBLE ANSWER INTEGRITY IS A HARD REQUIREMENT:
 - `answer` is the complete user-facing answer in RETURN_LANGUAGE, never merely an introduction.
