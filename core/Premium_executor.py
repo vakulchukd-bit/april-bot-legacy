@@ -1783,17 +1783,46 @@ async def execute(
             "features": semantic_interpretation.get("features", {}),
             "context_signature": semantic_interpretation.get("context_signature", {}),
         }
-        # A self-contained, explicitly introduced topic does not need a costly
-        # historical ranking pass. Besides reducing latency, this prevents an old
-        # active renderer branch from overriding a clearly new subject. Intentional
-        # recall/history requests, explicit resume anchors and continuations still
-        # use the normal State Manager path unchanged.
+        # When Interpretation says that this is independent new information and
+        # does not require memory, do not hydrate/rank every Premium dialogue row
+        # merely to answer a normal message. That full pass can take tens of seconds
+        # on a busy database and may incorrectly pull an unrelated hot-work branch
+        # into a casual exchange. Keep all explicit history, continuation, repair,
+        # reference, temporal and resume signals on the canonical State Manager path.
+        _single_features = single_semantics.get("features") if isinstance(single_semantics.get("features"), dict) else {}
+        _single_pragmatic = single_semantics.get("pragmatic_features") if isinstance(single_semantics.get("pragmatic_features"), dict) else {}
+        _single_topic_reference = _text(single_semantics.get("topic_reference")).upper()
+        _single_direction = _text(single_semantics.get("direction")).upper()
+        _single_relation_hint = _text(single_semantics.get("relation_hint")).upper()
+        _explicit_context_signal = bool(
+            single_semantics.get("history_request")
+            or single_semantics.get("history_inventory_request")
+            or single_semantics.get("has_explicit_time_window")
+            or single_semantics.get("explicit_topic_switch")
+            or single_semantics.get("active_branch_repair")
+            or single_semantics.get("previous_answer_reference")
+            or single_semantics.get("factual_verification_request")
+            or _single_topic_reference in {"PREVIOUS_OR_ACTIVE_TOPIC", "PREVIOUS_ASSISTANT_ANSWER", "TOPIC_FRAGMENT"}
+            or _single_direction in {"RESUME_OR_RETRIEVE_ACTIVE_TOPIC", "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"}
+            or _single_relation_hint in {"CONTINUE", "HISTORY_LOOKUP"}
+            or any(bool(_single_features.get(key)) for key in (
+                "context_dependent_question", "context_dependent_reaction", "topic_reference_fragment",
+                "previous_answer_reference", "active_branch_repair", "selection_followup_candidate",
+                "explicit_previous_answer_correction", "factual_verification_request",
+                "recall_action", "continuation_action", "answer_followup",
+            ))
+            or any(bool(_single_pragmatic.get(key)) for key in (
+                "previous_answer_reference", "active_branch_repair", "deictic_reference",
+                "topic_reference_fragment", "clarification_request", "continuation_request",
+                "revision_request", "factual_verification_request",
+            ))
+        )
         skip_memory_search = bool(
             single_semantics.get("primary_intent") == "NEW_INFORMATION"
             and not single_semantics.get("requires_memory")
             and not single_semantics.get("history_request")
             and not _text(resume_message_id)
-            and _has_explicit_topic_introduction(original or current_text)
+            and not _explicit_context_signal
         )
         if skip_memory_search:
             dialogue_context = {
