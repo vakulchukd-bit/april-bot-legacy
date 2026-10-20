@@ -61,8 +61,8 @@ MAX_CHAT_ATTACHMENTS = 10
 MAX_CHAT_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_TEXT_FILE_CHARS = 120_000
 CANONICAL_CHAT_ROUTE = "/api/v1/chat"
-CANONICAL_ROUTE_VERSION = "april_web_botru_exkrutor_v1"
-INPUT_NORMALIZATION_VERSION = "botru_input_normalization_v2"
+CANONICAL_ROUTE_VERSION = "april_web_botru_exkrutor_v2_message_language"
+INPUT_NORMALIZATION_VERSION = "botru_input_normalization_v3_language_resolution"
 
 
 def _apr_timing_log(stage: str, started: float | None = None, **fields: Any) -> None:
@@ -214,21 +214,103 @@ def _get_dialogue_pairs_for_plan(
     return reader(user_id, refresh=refresh, limit=limit)
 
 
-def _detect_language(text: str, requested: str = "") -> str:
-    requested = _text(requested).lower().replace("_", "-")
-    if requested and requested not in {"auto", "default"}:
-        # Accept browser locale tags (ru-RU, uk-UA, en-US) while keeping the
-        # provider language contract stable and short.
-        language = requested.split("-", 1)[0]
-        if language in {"ru", "uk", "en", "ja", "zh", "ko", "ar", "hi", "el"}:
-            return language
-        return language or "en"
-    value = text or ""
-    low = value.lower()
-    if re.search(r"[іїєґ]", low):
-        return "uk"
-    if re.search(r"[а-яё]", low):
-        return "ru"
+_LANGUAGE_ALIASES = {"ua": "uk", "uk-ua": "uk", "ua-ua": "uk"}
+_SUPPORTED_RESPONSE_LANGUAGES = {
+    "en", "ru", "uk", "es", "de", "fr", "it", "pl", "pt", "nl",
+    "ja", "zh", "ko", "ar", "hi", "el",
+}
+
+# Short, high-signal vocabulary helps distinguish supported Latin-script
+# languages without adding a detector dependency or another paid model call.
+_LANGUAGE_MARKERS = {
+    "es": {
+        "hola": 3, "gracias": 3, "necesito": 2, "ayuda": 2, "quiero": 2,
+        "puedo": 2, "cómo": 2, "como": 1, "qué": 2, "porque": 1, "porqué": 2,
+        "está": 2, "tengo": 2, "usted": 2, "ustedes": 2, "problema": 1,
+        "por favor": 2, "buenos días": 3, "no entiendo": 3, "me puedes": 3,
+        "puedes ayudar": 3, "dime": 2, "ayúdame": 3, "dónde está": 3,
+        "quiero saber": 3, "qué significa": 3, "necesito ayuda": 3,
+    },
+    "de": {
+        "hallo": 3, "danke": 3, "bitte": 2, "ich": 2, "nicht": 2,
+        "brauche": 2, "hilfe": 2, "warum": 2, "wie": 1, "kann": 2,
+        "möchte": 2, "über": 2, "straße": 3, "guten morgen": 3,
+        "ich brauche": 3, "ich möchte": 3, "kannst du": 3, "können sie": 3,
+        "was bedeutet": 3, "sag mir": 2, "hilf mir": 3, "ich verstehe nicht": 3,
+        "wie geht": 2, "was ist": 2,
+    },
+    "fr": {
+        "bonjour": 3, "salut": 3, "merci": 3, "besoin": 2, "aidez": 2,
+        "pourquoi": 2, "comment": 1, "avec": 1, "pouvez": 2, "problème": 2,
+        "s'il vous plaît": 3, "est-ce": 2, "je suis": 2, "aujourd'hui": 2,
+        "bonsoir": 3, "je ne": 3, "je voudrais": 3, "j'ai besoin": 3,
+        "pouvez-vous": 3, "peux-tu": 3, "aide-moi": 3, "dis-moi": 3,
+        "je comprends": 2, "je ne comprends pas": 3, "qu'est-ce": 3,
+        "où est": 2, "comment faire": 3, "ça veut dire": 3,
+    },
+    "it": {
+        "ciao": 3, "grazie": 3, "bisogno": 2, "aiuto": 2, "perché": 2,
+        "come": 1, "puoi": 2, "potete": 2, "problema": 1, "per favore": 3,
+        "buongiorno": 3, "sono": 1, "ho bisogno": 3, "vorrei": 2,
+        "mi puoi": 3, "aiutami": 3, "dimmi": 2, "non capisco": 3,
+        "cosa significa": 3, "dove si trova": 3, "come faccio": 3,
+        "puoi aiutarmi": 3, "buonasera": 3,
+    },
+    "pl": {
+        "cześć": 3, "dzień dobry": 3, "dziękuję": 3, "proszę": 2,
+        "potrzebuję": 3, "pomocy": 2, "dlaczego": 2, "jak": 1, "mogę": 2,
+        "jestem": 1, "nie": 1, "problem": 1, "czy możesz": 3,
+        "nie rozumiem": 3, "pomóż mi": 3, "powiedz mi": 3, "co oznacza": 3,
+        "jak zrobić": 3, "potrzebuję pomocy": 3, "gdzie jest": 2,
+        "jak się": 2, "jak to": 2, "dobry wieczór": 3,
+    },
+    "pt": {
+        "olá": 3, "obrigado": 3, "obrigada": 3, "preciso": 2, "ajuda": 2,
+        "você": 2, "vocês": 2, "não": 2, "está": 1, "por favor": 2,
+        "bom dia": 3, "tudo bem": 3, "não entendo": 3, "pode me ajudar": 3,
+        "me ajude": 3, "me diga": 3, "quero saber": 3, "o que significa": 3,
+        "como faço": 3, "preciso de ajuda": 3, "onde fica": 3,
+        "por que": 2, "boa tarde": 3, "boa noite": 3,
+    },
+    "nl": {
+        "hallo": 3, "dank je": 3, "bedankt": 3, "alsjeblieft": 3, "ik": 1,
+        "niet": 2, "nodig": 2, "hoe": 1, "waarom": 2, "kun je": 2,
+        "ik heb": 2, "het is": 2, "wat is": 2, "goedemorgen": 3,
+        "ik wil": 3, "ik heb nodig": 3, "help me": 2, "vertaal": 3,
+        "ik begrijp niet": 3, "wat betekent": 3, "vertel me": 3,
+        "kun je helpen": 3, "waar is": 2, "goedenavond": 3,
+    },
+    "en": {
+        "hello": 3, "hi": 2, "thanks": 3, "please": 2, "how": 1, "what": 1,
+        "why": 1, "the": 1, "this": 1, "that": 1, "where": 1, "when": 1,
+        "you are": 2, "can you": 2, "what is": 2, "is this": 2, "do you": 2,
+        "could you": 2, "i need": 2, "help me": 2, "good morning": 3,
+        "good evening": 3, "i want": 2, "tell me": 2, "explain": 2,
+        "how do i": 3, "how can i": 3, "what does": 2, "what do you": 2,
+        "can you help": 3, "please help": 3, "i don't understand": 3,
+        "i do not understand": 3, "translate this": 3, "where can i": 3,
+        "could you help": 3, "would you": 2, "is it possible": 3,
+    },
+}
+
+
+def _normalize_language_code(value: Any) -> str:
+    raw = _text(value).lower().replace("_", "-")
+    if not raw or raw in {"auto", "default"}:
+        return ""
+    code = raw.split("-", 1)[0]
+    code = _LANGUAGE_ALIASES.get(raw, _LANGUAGE_ALIASES.get(code, code))
+    return code if code in _SUPPORTED_RESPONSE_LANGUAGES else ""
+
+
+def _detect_message_language(text: str) -> str:
+    """Detect the language actually used in the current user-authored message."""
+    value = _text(text)
+    if not value:
+        return ""
+    low = value.lower().replace("’", "'").replace("‘", "'")
+
+    # Script-specific checks are much more reliable than UI preferences.
     if re.search(r"[\u3040-\u30ff]", value):
         return "ja"
     if re.search(r"[\u4e00-\u9fff]", value):
@@ -241,7 +323,47 @@ def _detect_language(text: str, requested: str = "") -> str:
         return "hi"
     if re.search(r"[\u0370-\u03ff]", value):
         return "el"
-    return "en"
+    if re.search(r"[іїєґ]", low):
+        return "uk"
+    if re.search(r"[а-яё]", low):
+        # Ukrainian messages may not contain ї/є/ґ; use common words as a
+        # second signal before defaulting Cyrillic to Russian.
+        ukrainian_markers = {"що", "цей", "ця", "це", "також", "будь ласка", "мені", "можна", "потрібно", "дякую", "допоможи", "чому", "якщо", "зараз"}
+        words = set(re.findall(r"[а-яіїєґё]+", low))
+        if len(words & ukrainian_markers) >= 1:
+            return "uk"
+        return "ru"
+
+    scores = {code: 0 for code in _LANGUAGE_MARKERS}
+    for code, markers in _LANGUAGE_MARKERS.items():
+        for phrase, weight in markers.items():
+            if " " in phrase or "'" in phrase or "-" in phrase:
+                if phrase in low:
+                    scores[code] += weight
+            elif re.search(rf"(?<![\w]){re.escape(phrase)}(?![\w])", low, flags=re.UNICODE):
+                scores[code] += weight
+    # Orthographic signals supplement, but don't alone overrule, a clear phrase.
+    accent_bonus = {
+        "es": ("ñ", "¿", "¡"), "de": ("ß", "ä", "ö", "ü"),
+        "fr": ("œ", "ç"), "it": (), "pl": ("ł", "ś", "ź", "ż", "ą", "ę"),
+        "pt": ("ã", "õ"), "nl": (), "en": (),
+    }
+    for code, chars in accent_bonus.items():
+        if any(ch in low for ch in chars):
+            scores[code] += 3
+    ranked = sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
+    if ranked and ranked[0][1] >= 2 and (ranked[0][1] - ranked[1][1] >= 1 or ranked[0][1] >= 4):
+        return ranked[0][0]
+    return ""
+
+
+def _detect_language(text: str, requested: str = "") -> str:
+    """Prefer the message's language; use the selected UI language only as fallback."""
+    detected = _detect_message_language(text)
+    if detected:
+        return detected
+    preferred = _normalize_language_code(requested)
+    return preferred or "en"
 
 
 
@@ -464,7 +586,8 @@ def _handle_payload(
     uid = identity["user_id"]
     message_created_at, timestamp_source = _resolve_message_timestamp(data.get("message_timestamp"))
     user_utc_offset_minutes = _resolve_user_utc_offset_minutes(data)
-    original = _text(data.get("text") or data.get("message") or data.get("content"))
+    user_authored_text = _text(data.get("text") or data.get("message") or data.get("content"))
+    original = user_authored_text
     _apr_timing_log("request_identity", identity_started, user_key=_apr_diag_ref(uid),
         dialog_key=_apr_diag_ref(identity.get("dialog_id")), message_key=_apr_diag_ref(identity.get("message_id")),
         flow_key=_apr_diag_ref(identity.get("flow_id")), input_chars=len(original), attachment_count=len(attachments or []))
@@ -574,18 +697,30 @@ def _handle_payload(
             attachment_count=len(attachments or []), visual_items=len(visual_context),
             file_inputs=len(file_inputs), file_contents=len(text_file_contents))
 
-        language = _detect_language(
-            original or voice_transcript,
-            data.get("language") or data.get("display_language"),
+        # Detect only what the user actually typed or said. Extracted attachment
+        # text is evidence about the file, not necessarily the user's language.
+        # The saved UI preference is a fallback for empty/ambiguous messages.
+        language_evidence = user_authored_text or _text(voice_transcript)
+        requested_language = data.get("language") or data.get("display_language")
+        detected_message_language = _detect_message_language(language_evidence)
+        language = detected_message_language or _detect_language("", requested_language)
+        language_source = (
+            "user_text" if user_authored_text and detected_message_language
+            else "voice_transcript" if voice_transcript and detected_message_language
+            else "ui_preference" if _normalize_language_code(requested_language)
+            else "default_en"
         )
-        # bot.ru is transport/input normalization only.  The semantic structure is
-        # created by the Interpretation layer after Exkrutor's memory search.
+        _apr_timing_log("language_resolved", None, language=language, language_source=language_source)
+        # bot.ru owns language negotiation and transport normalization. The model
+        # receives the original-language request (avoiding a paid translation call);
+        # SceneContract localizes every generated fallback label/body separately.
         internal_text = original
         translation = {
             "version": INPUT_NORMALIZATION_VERSION,
             "source_language": language,
-            "internal_language": "same_as_input",
+            "internal_language": "multilingual_model_input",
             "translated": False,
+            "language_source": language_source,
             "stage": "bot.ru",
         }
 
