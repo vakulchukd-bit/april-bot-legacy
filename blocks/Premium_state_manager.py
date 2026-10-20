@@ -2449,9 +2449,20 @@ def _row_attachment_evidence(row: dict[str, Any]) -> str:
     # April. This makes later requests about a function/symbol retrieve the pair
     # that owns the output asset, without putting raw binary into JSONB.
     for block in resp.get("render_blocks") or []:
-        if not isinstance(block, dict) or _text(block.get("type")).lower() != "code":
+        if not isinstance(block, dict):
             continue
-        chunks.extend([_text(block.get("filename")), _text(block.get("language")), _text(block.get("code") or block.get("content"))[:7000]])
+        kind = _text(block.get("type") or block.get("artifact_type")).lower()
+        payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+        if not payload and isinstance(block.get("spec"), dict):
+            payload = block["spec"]
+        if kind == "code" or _protected_structured_kind(block) == "code":
+            chunks.extend([
+                _text(block.get("filename") or payload.get("filename")),
+                _text(block.get("language") or payload.get("language")),
+                _text(block.get("code") or block.get("content") or block.get("text") or payload.get("code") or payload.get("source_code") or payload.get("content"))[:7000],
+            ])
+        elif kind in {"file", "document", "text_file", "code_file"}:
+            chunks.extend([_text(block.get("filename") or payload.get("filename") or payload.get("name")), _text(payload.get("url") or payload.get("download_url"))])
     asset_refs = resp.get("asset_refs") if isinstance(resp.get("asset_refs"), dict) else {}
     for item in asset_refs.get("april_outputs") or []:
         if isinstance(item, dict):
@@ -2469,6 +2480,9 @@ def _row_attachment_evidence(row: dict[str, Any]) -> str:
 # Exact structured values preserved separately from compressible dialogue prose.
 _PROTECTED_STRUCTURED_TYPE_ALIASES = {
     "graph": "graph", "graph_data": "graph", "chart": "graph", "plot": "graph",
+    "graph3d": "graph", "graph_3d": "graph", "3d_graph": "graph", "plot3d": "graph",
+    "plot_3d": "graph", "surface_plot": "graph", "surface_graph": "graph",
+    "scatter3d": "graph", "scatter_3d": "graph", "wireframe": "graph",
     "table": "table", "table_data": "table",
     "formula": "formula", "formula_data": "formula", "equation": "formula",
     "math": "formula", "latex": "formula", "physics_formula": "formula",
@@ -2482,23 +2496,35 @@ _PROTECTED_STRUCTURED_TYPE_ALIASES = {
     "diagram": "diagram", "diagram_data": "diagram", "scheme": "diagram", "schema_diagram": "diagram",
     "flowchart": "diagram", "mermaid": "diagram",
     "image": "image", "generated_image": "image", "gallery": "image", "visual": "image",
+    "screenshot": "image", "screen_shot": "image", "image_gallery": "image",
+    "file": "file", "document": "file", "document_file": "file", "text_file": "file",
+    "code_file": "file", "pdf": "file", "spreadsheet": "file", "presentation": "file",
+    "audio": "audio", "audio_file": "audio", "voice": "audio",
+    "video": "video", "video_file": "video",
 }
 
 _PROTECTED_DATA_KEYS = {
     "graph": {
         "points", "data_points", "series", "datasets", "traces", "x_values", "y_values",
-        "x_axis", "y_axis", "labels", "categories",
+        "x_axis", "y_axis", "z_axis", "axes", "labels", "categories", "z_values",
+        "surface_grid", "surface_function", "z_function", "z_expression", "grid_resolution",
+        "spheres", "objects_3d", "objects", "meshes", "geometry", "scene", "dimensions",
+        "three_d", "curves", "function", "expression", "equation", "formula", "x_domain",
+        "y_domain", "z_domain", "x_range", "y_range", "z_range", "domain", "visualization",
     },
-    "table": {"rows", "columns", "headers", "matrix", "cell_roles", "cells", "row_labels", "column_labels"},
-    "formula": {"latex", "latex_formulas", "formula", "formulas", "equation", "equations", "expression", "expressions"},
+    "table": {"rows", "columns", "headers", "matrix", "cell_roles", "cells", "row_labels", "column_labels", "data", "values", "items", "column_roles", "wrap", "download"},
+    "formula": {"latex", "latex_formulas", "formula", "formulas", "equation", "equations", "expression", "expressions", "math", "markdown", "content"},
     "solution": {
         "solution_steps", "derivation", "calculations", "given_values", "known_values",
         "unknowns", "variables", "parameters", "result",
     },
     "link": {"url", "href", "uri", "target_url", "destination", "links", "link"},
     "code": {"code", "source_code", "source", "language", "filename", "entry_point", "symbols"},
-    "diagram": {"svg", "nodes", "edges", "elements", "shapes", "vertices", "connectors", "mermaid", "source", "code", "geometry", "positions"},
-    "image": {"image_url", "url", "src", "asset_id", "asset_ref", "storage_key", "filename", "images", "uri"},
+    "diagram": {"svg", "svg_payload", "drawing", "nodes", "edges", "relations", "elements", "shapes", "vertices", "connectors", "mermaid", "source", "code", "geometry", "positions", "format", "layout", "direction"},
+    "image": {"image_url", "url", "src", "asset_id", "asset_ref", "storage_key", "filename", "images", "uri", "image_data_uri", "image_base64", "base64"},
+    "file": {"url", "href", "path", "filename", "name", "content", "text", "file_base64", "base64", "b64_json", "data_uri", "file_data_uri", "content_base64", "bytes", "download_url"},
+    "audio": {"url", "src", "path", "filename", "mime_type", "audio_url", "audio_base64", "base64", "content_base64", "transcript"},
+    "video": {"url", "src", "path", "filename", "mime_type", "video_url", "video_base64", "base64", "content_base64", "frames", "duration", "poster"},
 }
 
 
@@ -2513,22 +2539,26 @@ def _protected_structured_kind(value: Any) -> str:
             tags.append(tag)
 
     renderer_map = {
-        "graphblock": "graph", "graphrenderer": "graph",
+        "graphblock": "graph", "graphrenderer": "graph", "graph3dblock": "graph", "surfaceplotrenderer": "graph",
         "tableblock": "table", "tablerenderer": "table",
         "formularenderer": "formula", "formulablock": "formula",
         "mathsolutionblock": "solution", "problemsolutionblock": "solution",
         "linkcard": "link", "linkrenderer": "link",
         "codeblock": "code", "coderenderer": "code",
         "diagramrenderer": "diagram", "diagramblock": "diagram", "schemerenderer": "diagram",
-        "galleryblock": "image", "imagerenderer": "image",
+        "galleryblock": "image", "imagerenderer": "image", "screenshotblock": "image",
+        "fileblock": "file", "documentblock": "file", "audioblock": "audio", "videoblock": "video",
     }
+    # The declared artifact type is more specific than a generic viewer. For
+    # example, both a link and a downloadable file can use LinkCard, but they
+    # need different persistence and continuation behavior.
+    for tag in tags:
+        if tag in _PROTECTED_STRUCTURED_TYPE_ALIASES:
+            return _PROTECTED_STRUCTURED_TYPE_ALIASES[tag]
     for key in ("renderer", "viewer"):
         renderer = _text(value.get(key)).lower().replace("_", "").replace("-", "").replace(" ", "")
         if renderer in renderer_map:
             return renderer_map[renderer]
-    for tag in tags:
-        if tag in _PROTECTED_STRUCTURED_TYPE_ALIASES:
-            return _PROTECTED_STRUCTURED_TYPE_ALIASES[tag]
 
     payload = value.get("payload") if isinstance(value.get("payload"), dict) else value
     keys = {str(key).lower() for key in payload} if isinstance(payload, dict) else set()
@@ -2547,8 +2577,14 @@ def _protected_structured_kind(value: Any) -> str:
         return "code"
     if keys.intersection({"svg", "nodes", "edges", "elements", "shapes", "vertices", "connectors", "mermaid", "geometry"}):
         return "diagram"
-    if keys.intersection({"image_url", "src", "asset_id", "asset_ref", "storage_key", "images"}):
+    if keys.intersection({"image_url", "src", "asset_id", "asset_ref", "storage_key", "images", "image_data_uri", "image_base64"}):
         return "image"
+    if keys.intersection({"file_base64", "file_data_uri", "download_url", "content_base64", "b64_json", "path"}):
+        return "file"
+    if keys.intersection({"audio_url", "audio_base64", "transcript"}):
+        return "audio"
+    if keys.intersection({"video_url", "video_base64", "frames", "poster"}):
+        return "video"
     return ""
 
 
@@ -2614,13 +2650,16 @@ def _protected_node_payload(kind: str, node: dict[str, Any]) -> dict[str, Any]:
         signal = node.get("render_signal") if isinstance(node.get("render_signal"), dict) else {}
         if isinstance(signal.get("payload"), dict):
             payload = signal["payload"]
-    if payload and _protected_node_richness(kind, payload):
+    if payload:
+        # The renderer's nested payload is the source of truth. Do not discard it
+        # just because a newer renderer introduced keys unknown to this version.
         category["payload"] = deepcopy(payload)
         return category
 
-    # Some room artifacts store data under `spec`; retain it when it holds values.
+    # Some room artifacts store data under `spec`; preserve unknown future schema
+    # fields losslessly once the enclosing node has been classified as a renderer.
     spec = node.get("spec") if isinstance(node.get("spec"), dict) else {}
-    if spec and _protected_node_richness(kind, spec):
+    if spec:
         category["spec"] = deepcopy(spec)
         return category
 
@@ -2836,7 +2875,7 @@ def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
     }
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for kind in ("graph", "table", "formula", "solution", "link", "code", "diagram", "image"):
+    for kind in ("graph", "table", "formula", "solution", "link", "code", "diagram", "image", "file", "audio", "video"):
         if kind not in kinds:
             continue
         candidates_by_field = {
@@ -4000,6 +4039,16 @@ def _row_has_value_bearing_artifact(row: dict[str, Any], kind: str) -> bool:
         data = item.get("data") if isinstance(item.get("data"), dict) else {}
         richness = _protected_node_richness(kind, data)
         if richness >= 8:
+            return True
+        # Known renderer + nonempty nested source object is valid even when this
+        # version does not recognize the schema's individual value field names.
+        nested_payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+        nested_spec = data.get("spec") if isinstance(data.get("spec"), dict) else {}
+        if nested_payload or nested_spec:
+            if any(value not in (None, "", [], {}) for key, value in {**nested_payload, **nested_spec}.items()):
+                return True
+        ignored = {"type", "renderer", "viewer", "title", "name", "label", "description", "caption", "alt", "step_index", "step_title", "sequence_index"}
+        if any(key not in ignored and value not in (None, "", [], {}) for key, value in data.items()):
             return True
     return False
 
@@ -6397,6 +6446,21 @@ def search_dialogue_context(
             " ", _text(query).lower().replace("ё", "е"), flags=re.IGNORECASE,
         )
         artifact_query_subjects = set(_subject_tokens(artifact_subject_query))
+        # "Give me the whole/full code" is a reference to the saved artifact,
+        # not a new subject. Mixed-language voice requests often add filler such
+        # as "thank you", "when it writes welcome", or "put it there"; those
+        # words must not make us reject the only same-dialog CodeBlock.
+        whole_code_request = bool(
+            explicit_artifact_kind == "code"
+            and re.search(
+                r"(?:\b(?:весь|всю|все|полный|полную|целиком|полностью|исходный|исходн\w*)\b.{0,36}\b(?:код|скрипт|code|script)\b|"
+                r"\b(?:код|скрипт|code|script)\b.{0,24}\b(?:целиком|полностью|entire|whole|full|complete|all)\b|"
+                r"\b(?:full|entire|whole|complete|all)\s+(?:source\s+)?(?:code|script)\b)",
+                _text(query).lower().replace("ё", "е"), re.IGNORECASE,
+            )
+        )
+        if whole_code_request:
+            artifact_query_subjects = set()
         artifact_options: list[tuple[float, float, int, dict[str, Any], dict[str, Any]]] = []
         for source_row in artifact_scope:
             if not _row_has_value_bearing_artifact(source_row, explicit_artifact_kind):
