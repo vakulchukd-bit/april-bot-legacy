@@ -1093,7 +1093,8 @@ def _requires_prior_structured_payload(
     has_prior_pointer = bool(re.search(
         r"(?:\bэту\b|\bэтот\b|\bэта\b|\bэти\b|\bту\b|\bтот\b|\bта\b|\bте\b|"
         r"\bтой\b|\bэтой\b|\bпредыдущ\w*\b|\bпрошл\w*\b|\bпрежн\w*\b|\bсохранен\w*\b|"
-        r"\bиз\s+истории\b|\bкак\s+раньше\b|\bкак\s+выше\b|\bвыше\b|\bте\s+же\b|"
+        r"\bиз\s+истории\b|\bв\s+истории\b|\bистории\s+(?:диалога|общения)\b|"
+        r"\bкак\s+раньше\b|\bкак\s+выше\b|\bвыше\b|\bте\s+же\b|"
         r"\bпо\s+этим\b|\bпо\s+тем\b|\bзначения\s+из\b|\bданные\s+из\b|"
         r"\bверни\w*\b|\bвосстанови\w*\b|\bповтори\w*\b|\bснова\b|"
         r"\bеще\s+раз\b|\bпродолжи\w*\b|\bдобавь\w*\b|\bизмени\w*\b|"
@@ -1237,7 +1238,16 @@ def _select_protected_structured_data(
                 if step_sources:
                     break
 
-    if relation != "CONTINUE" and not focused_history and not step_sources:
+    # An explicit history request has already supplied the source scope; relation
+    # can remain NEW/HISTORY_LOOKUP without invalidating the selected exact payload.
+    explicit_prior_pointer = bool(re.search(
+        r"(?:\bэту\b|\bэтот\b|\bэта\b|\bэти\b|\bту\b|\bтот\b|\bта\b|\bте\b|"
+        r"\bпредыдущ\w*\b|\bпрошл\w*\b|\bсохранен\w*\b|\bиз\s+истории\b|"
+        r"\bв\s+истории\b|\bистории\s+(?:диалога|общения)\b|\bfrom\s+(?:the\s+)?history\b|"
+        r"\bprevious\w*\b|\bearlier\b|\bsaved\b|\bthis\b|\bthat\b)",
+        _text(current_request).lower().replace("ё", "е"), re.IGNORECASE,
+    ))
+    if relation != "CONTINUE" and not focused_history and not step_sources and not history_request and not explicit_prior_pointer:
         return []
 
     sources: list[dict[str, Any]] = step_sources
