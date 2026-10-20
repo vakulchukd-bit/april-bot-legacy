@@ -442,6 +442,54 @@ def _detect_portrait_request(text: str) -> bool:
     ))
     return final_slot or possessive or explicit_photo_of or missing_or_elliptical or appearance
 
+def _explicit_saved_artifact_followup_kind(text: str) -> str:
+    """Recognize edits to an existing structured artifact before the fast path.
+
+    A plain "build a graph" is a new task. Requests such as "add intermediate
+    points to the graph" or "show this graph again" require the saved dialogue
+    payload and must be sent through Premium State Manager.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return ""
+    artifact_patterns = (
+        ("graph", r"(?:\bграфик\w*\b|\bдиаграмм\w*\b|\bgraph\b|\bchart\b|\bplot\b)"),
+        ("table", r"(?:\bтаблиц\w*\b|\btable\b)"),
+        ("formula", r"(?:\bформул\w*\b|\bуравнен\w*\b|\bformula\b|\bequation\b)"),
+        ("diagram", r"(?:\bсхем\w*\b|\bdiagram\b|\bdrawing\b|\bчертеж\w*\b)"),
+        ("code", r"(?:\bкод\w*\b|\bскрипт\w*\b|\bcode\b|\bscript\b)"),
+        ("image", r"(?:\bфото\w*\b|\bкартинк\w*\b|\bизображен\w*\b|\bimage\b|\bphoto\b|\bpicture\b)"),
+        ("file", r"(?:\bфайл\w*\b|\bдокумент\w*\b|\bfile\b|\bdocument\b)"),
+    )
+    kind = next((name for name, pattern in artifact_patterns if re.search(pattern, low, re.IGNORECASE)), "")
+    if not kind:
+        return ""
+    # Explicitly creating a new/another artifact is not a saved-artifact edit.
+    fresh_artifact_request = bool(re.search(
+        r"(?:\bнов\w*\s+(?:график\w*|диаграмм\w*|таблиц\w*|формул\w*|схем\w*|код\w*|скрипт\w*|файл\w*|документ\w*|картинк\w*|фото\w*)\b|"
+        r"\bnew\s+(?:graph|chart|plot|table|formula|diagram|code|script|file|document|image|photo|picture)\b|"
+        r"\b(?:созда\w*|постро\w*|сдела\w*|build|create|make|generate)\b.{0,28}\b(?:нов\w*|new|another)\b)",
+        low, re.IGNORECASE,
+    ))
+    if fresh_artifact_request:
+        return ""
+    edit_or_extend = bool(re.search(
+        r"(?:добав\w*|допол\w*|исправ\w*|измен\w*|обнов\w*|перестро\w*|передел\w*|"
+        r"редакт\w*|улучш\w*|замен\w*|убер\w*|восстанов\w*|верни\w*|продолж\w*|"
+        r"add\w*|edit\w*|update\w*|change\w*|modify\w*|revise\w*|improve\w*|restore\w*|"
+        r"промежуточ\w*|по\s+дням|по\s+датам|кажд\w*\s+дн\w*|точк\w*|значени\w*|"
+        r"данн\w*\s+(?:на|в|к)|с\s+данн\w*|с\s+точк\w*|with\s+(?:intermediate|daily|dated)\s+(?:data|points))",
+        low, re.IGNORECASE,
+    ))
+    saved_reference = bool(re.search(
+        r"(?:\bэтот\b|\bэта\b|\bэту\b|\bэтой\b|\bэти\b|\bего\b|\bее\b|\bеё\b|"
+        r"\bснова\b|еще\s+раз|ещё\s+раз|предыдущ\w*|последн\w*|из\s+истори\w*|"
+        r"\bthis\b|\bthat\b|\bsame\b|\bprevious\b|\bearlier\b|\bagain\b)",
+        low, re.IGNORECASE,
+    ))
+    return kind if (edit_or_extend or saved_reference) else ""
+
+
 def _detect_requested_outputs(text: str) -> list[str]:
     result: list[str] = []
     low = _text(text).lower()
@@ -475,7 +523,7 @@ def _detect_requested_outputs(text: str) -> list[str]:
     has_graph_action = bool(re.search(
         # Stem matching catches inflected forms like "построим", "построила",
         # and polite/imperative variants without depending on exact endings.
-        r"\b(?:build|create|show|draw|plot|make|visualize|visualise|постро\w*|созда\w*|покаж\w*|нарис\w*|сдела\w*|визуализир\w*|побуд\w*)\b",
+        r"\b(?:build|create|show|draw|plot|make|visualize|visualise|постро\w*|созда\w*|покаж\w*|нарис\w*|сдела\w*|визуализир\w*|побуд\w*|пришл\w*|выдай\w*|вывед\w*|дай\w*|отобраз\w*|представ\w*|добав\w*|допол\w*|исправ\w*|измен\w*|обнов\w*|перестро\w*|передел\w*|редакт\w*|улучш\w*)\b",
         low,
     ))
     if has_graph_noun and has_graph_action and "graph" not in result:
@@ -2020,6 +2068,23 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         relation_hint = "NEW"
         reason = "explicit_topic_introduction_overrides_continuation" if explicit_topic_introduction and (continuation_action or any(token in token_set for token in {"дальше", "прежнему", "прежней", "resume", "continue"})) else "no_prior_dialogue_intent_detected"
 
+    # Structured-artifact edits need persisted data even when the lexical classifier
+    # would otherwise call the sentence self-contained NEW information. Override only
+    # explicit edits/extensions or demonstrative references; a fresh "build a graph"
+    # request remains NEW and does not pull unrelated history.
+    saved_artifact_followup_kind = _explicit_saved_artifact_followup_kind(source)
+    if saved_artifact_followup_kind and not explicit_topic_introduction and not explicit_topic_switch and not history_request:
+        primary_intent = "TOPIC_CONTINUATION"
+        direction = "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"
+        topic_reference = "TOPIC_FRAGMENT"
+        time_scope = "ACTIVE_DIALOGUE"
+        requires_memory = True
+        history_request = False
+        search_scope = "TOPIC_OR_ACTIVE_CONTEXT"
+        intent_score = max(int(intent_score or 0), 3)
+        relation_hint = "CONTINUE"
+        reason = f"explicit_saved_{saved_artifact_followup_kind}_artifact_followup"
+
     # A compact feature vector makes routing inspectable; values are deterministic
     # feature activations, not neural embeddings or calibrated probabilities.
     features = {
@@ -2027,11 +2092,11 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "recall_action": bool(recall_action),
         "decision_action": bool(decision_action),
         "plan_action": bool(plan_action),
-        "continuation_action": bool(continuation_action),
+        "continuation_action": bool(continuation_action or saved_artifact_followup_kind),
         "answer_followup": bool(answer_followup),
         "context_dependent_question": bool(context_dependent_question),
         "context_dependent_reaction": bool(context_dependent_reaction),
-        "topic_reference_fragment": bool(topic_reference_fragment),
+        "topic_reference_fragment": bool(topic_reference_fragment or saved_artifact_followup_kind),
         "previous_answer_reference": bool(previous_answer_reference),
         "active_branch_repair": bool(active_branch_repair),
         "selection_followup_candidate": bool((dialogue_act_profile.get("pragmatic_features") or {}).get("selection_followup_candidate")),
@@ -3145,10 +3210,10 @@ def build_interpretation(
                 "For substantial explanations, choose a useful additional table, diagram, graph, formula, code block, grounded link, or image when it materially improves understanding; never invent data or label a generated illustration as an authentic photograph.",
                 "Use a diagram only for explicit schema/diagram/blueprint/technical-drawing intent or workflows/architecture/sequences. Ordinary requests to draw/create/show a picture or illustration must use C_APRIL_IMAGES_GENERATOR (Images 2.0), unless the request explicitly asks for a diagram, blueprint, technical drawing, or graph. Emit a concrete payload.svg, drawing elements, geometry, or nodes/edges; do not only describe the intended drawing.",
                 "Use a formula renderer for mathematical notation; use a graph only when a function or grounded numeric data can define it.",
-                "For graph requests, follow intent.graph_policy: trends/time-ordered values use line; categorical comparisons use bar; choose only among those 2D types unless explicit 3D intent or real 3D source data supports 3D.",
+                'For graph requests, follow intent.graph_policy: trends/time-ordered values use line; categorical comparisons use bar; choose only among those 2D types unless explicit 3D intent or real 3D source data supports 3D. For a requested day/week/month/custom range, preserve every available date/value from CURRENT_REQUEST, CONTINUATION_CONTEXT and PROTECTED_STRUCTURED_DATA, and render one explicit series.points item for every available measurement instead of asking the user to repeat data already stored. For a multi-day time series, fill missing dates between two or more known measurements by interpolation by default so intermediate points appear immediately; label each interpolated point (point-level label such as "interpolated estimate") and the series/graph description and explanatory text as estimates, never as measured/verified observations. Keep all known source points exact, do not interpolate beyond the first/last known values, and do not invent a trend from a single measurement or from no numeric source. Use actual dates if present, weekday labels if supplied, otherwise neutral day indices.',
                 "Never turn 2D x/y data into a 3D chart by inventing a zero z-axis; true 3D requires explicit XYZ values, a real surface grid/function of x and y, or structured spatial objects.",
                 "Use code, link, file, image, and gallery renderers only when the response contains matching valid payloads and the request/context supports them.",
-                "Never invent numeric data, URLs, files, or images just to fill a renderer.",
+                "Never invent observed numeric data, URLs, files, or images just to fill a renderer. A narrowly allowed exception is linear interpolation strictly between at least two existing numeric measurements in a temporal line/area graph when intermediate dates are requested; every derived point must be labeled as an estimate in its point label and graph explanation, and it must never be presented as an observed/verified value. Never extrapolate or derive a trend from one or zero source measurements.",
                 "Every structured artifact must carry an explicit renderer type and its payload through the canonical SceneContract.",
                 "Every non-text renderer must also carry a specific 1–3 sentence explanation in the selected display language: explain the exact formula/variables, link destination and purpose, image subject and relation (or source-supported edits), code file/functions and changes, table comparison, graph axes/data/trend, or diagram components/relationships. The Premium SceneContract places a separate text explanation block directly after the corresponding renderer; do not repeat that explanation elsewhere verbatim.",
             ],
