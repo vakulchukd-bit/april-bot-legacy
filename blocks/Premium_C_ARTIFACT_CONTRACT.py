@@ -530,7 +530,7 @@ WEB_RENDERER_REGISTRY = {
     "text": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "answer"]},
     "markdown": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "markdown"]},
     "formula": {"renderer": "FormulaRenderer", "viewer": "FormulaRenderer", "fallback_renderer": "", "payload_keys": ["formula", "formulas", "latex", "latex_formulas", "equation", "expression", "math", "markdown", "content"], "mode": "force_math"},
-    "graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["series", "datasets", "traces", "curves", "points", "data_points", "x", "y", "x_values", "y_values", "categories", "labels", "data_table", "matrix", "x_axis", "y_axis", "z_axis", "axes", "representation", "chart_type", "visualization", "graph_type", "plot_type", "fn", "function", "expression", "equation", "formula", "x_domain", "y_domain", "z_domain", "x_range", "y_range", "z_range", "domain", "surface", "surface_grid", "surface_function", "z_function", "z_expression", "grid_resolution", "spheres", "objects_3d", "objects", "shapes", "meshes", "geometry", "scene", "dimensions", "three_d", "show_curved_grid", "curved_grid", "surface_mode", "wave_effect", "wave", "waves", "wave_type", "wave_function", "wave_amplitude", "wave_frequency", "wave_phase", "color_scale", "color_map", "colormap", "colour_scale", "colour_map", "temperature_field", "thermal_field", "heat_field", "field_type", "visualization_mode", "surface_style", "show_zero_plane", "zero_plane", "color_domain", "axis_labels"]},
+    "graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["series", "datasets", "traces", "curves", "points", "data_points", "x", "y", "x_values", "y_values", "categories", "labels", "data_table", "matrix", "x_axis", "y_axis", "z_axis", "axes", "representation", "chart_type", "visualization", "graph_type", "plot_type", "fn", "function", "expression", "equation", "formula", "x_domain", "y_domain", "z_domain", "x_range", "y_range", "z_range", "domain", "surface", "surface_grid", "surface_function", "z_function", "z_expression", "grid_resolution", "spheres", "objects_3d", "objects", "shapes", "meshes", "geometry", "scene", "dimensions", "three_d", "show_curved_grid", "curved_grid", "surface_mode", "wave_effect", "wave", "waves", "wave_type", "wave_function", "wave_amplitude", "wave_frequency", "wave_phase", "color_scale", "color_map", "colormap", "colour_scale", "colour_map", "temperature_field", "thermal_field", "heat_field", "field_type", "visualization_mode", "surface_style", "show_zero_plane", "zero_plane", "color_domain", "axis_labels", "bodies", "celestial_bodies", "planets", "satellites", "moons", "comets", "primitives", "orbits", "orbit_paths", "orbital_motion", "trajectories", "paths", "lines", "curves", "vectors", "gravity_vectors", "field_vectors", "field_lines", "arrows", "forces", "velocity_vectors", "normals", "rings", "labels", "annotations", "materials", "animation", "time", "duration", "keyframes"]},
     "knowledge_graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "series", "points", "labels", "title", "description"]},
     "relation_graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "series", "points", "labels", "title", "description"]},
     "relations": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "title", "description"]},
@@ -1901,6 +1901,9 @@ def get_web_renderer_registration(payload_type: str) -> Dict[str, Any]:
     key = str(payload_type or "").strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {
         "chart": "graph", "plot": "graph", "graph_data": "graph",
+        "3d_scene": "graph", "scene3d": "graph", "scene_3d": "graph", "3d_graph": "graph", "graph3d": "graph", "graph_3d": "graph",
+        "plot3d": "graph", "plot_3d": "graph", "scatter3d": "graph", "scatter_3d": "graph", "surface3d": "graph", "surface_3d": "graph",
+        "3d_surface": "graph", "surface_plot": "graph", "surface_graph": "graph", "mesh3d": "graph", "mesh_3d": "graph", "wireframe": "graph",
         "table_data": "table", "generated_image": "image", "image_artifact": "image",
         "image_data": "image", "figure": "image", "math": "formula", "latex": "formula",
         "svg": "diagram", "svgblock": "diagram", "schematic": "diagram",
@@ -2356,7 +2359,11 @@ def _render_requested_outputs(values: Any) -> set[str]:
     if not isinstance(values, (list, tuple, set)):
         return set()
     aliases = {
-        "chart": "graph", "plot": "graph", "graph_data": "graph", "table_data": "table",
+        "chart": "graph", "plot": "graph", "graph_data": "graph",
+        "3d_scene": "graph", "scene3d": "graph", "scene_3d": "graph", "3d_graph": "graph", "graph3d": "graph", "graph_3d": "graph",
+        "plot3d": "graph", "plot_3d": "graph", "scatter3d": "graph", "scatter_3d": "graph", "surface3d": "graph", "surface_3d": "graph",
+        "3d_surface": "graph", "surface_plot": "graph", "surface_graph": "graph", "mesh3d": "graph", "mesh_3d": "graph", "wireframe": "graph",
+        "table_data": "table",
         "math": "formula", "latex": "formula", "generated_image": "image", "image_artifact": "image",
         "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
         "svg": "diagram", "schematic": "diagram", "experimental_diagram": "diagram",
@@ -3255,6 +3262,229 @@ def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[st
     return bool(p)
 
 
+def _canonicalize_premium_3d_payload(payload: Dict[str, Any], *, explicit_3d_type: bool = False) -> Dict[str, Any]:
+    """Adapt common structured scene spellings to GraphBlock's lossless 3D schema.
+
+    This adapter only adds canonical aliases; it never estimates or changes source
+    coordinates, masses, equations, orbit points, or supplied time values.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    p = dict(payload)
+    scene = p.get("scene") if isinstance(p.get("scene"), dict) else {}
+    geometry = p.get("geometry") if isinstance(p.get("geometry"), dict) else {}
+
+    raw_representation = str(p.get("representation") or p.get("graph_type") or p.get("chart_type") or "").strip().lower().replace("-", "_").replace(" ", "_")
+    known_3d = {
+        "3d", "3d_scene", "scene3d", "scene_3d", "3d_graph", "graph3d", "graph_3d",
+        "surface3d", "surface_3d", "3d_surface", "surface", "scatter3d", "scatter_3d",
+        "3d_scatter", "mesh3d", "mesh_3d", "bar3d", "plot3d", "plot_3d", "spacetime_curvature",
+    }
+    if explicit_3d_type and raw_representation not in known_3d:
+        p["representation"] = "scene3d"
+        p.setdefault("dimensions", 3)
+    elif raw_representation in {"3d_scene", "scene_3d", "3d_graph", "graph3d", "graph_3d", "plot3d", "plot_3d"}:
+        p["representation"] = "scene3d"
+        p.setdefault("dimensions", 3)
+
+    # A scene may expose all bodies in a single list, or separate planet/moon
+    # lists. Merge those known spatial collections and remove only exact duplicates.
+    source_groups = [
+        ("objects_3d", p.get("objects_3d")), ("spheres", p.get("spheres")),
+        ("celestial_bodies", p.get("celestial_bodies")), ("bodies", p.get("bodies")),
+        ("planets", p.get("planets")), ("satellites", p.get("satellites")),
+        ("moons", p.get("moons")), ("comets", p.get("comets")),
+        ("objects", p.get("objects")), ("shapes", p.get("shapes")), ("primitives", p.get("primitives")),
+        ("meshes", p.get("meshes")), ("scene.objects_3d", scene.get("objects_3d")),
+        ("scene.objects", scene.get("objects")), ("scene.bodies", scene.get("bodies")),
+        ("scene.celestial_bodies", scene.get("celestial_bodies")), ("scene.planets", scene.get("planets")),
+        ("scene.satellites", scene.get("satellites")), ("scene.moons", scene.get("moons")),
+        ("scene.comets", scene.get("comets")), ("scene.shapes", scene.get("shapes")),
+        ("scene.primitives", scene.get("primitives")), ("scene.meshes", scene.get("meshes")),
+        ("geometry.objects", geometry.get("objects")), ("geometry.spheres", geometry.get("spheres")),
+        ("geometry.bodies", geometry.get("bodies")), ("geometry.shapes", geometry.get("shapes")),
+        ("geometry.primitives", geometry.get("primitives")), ("geometry.meshes", geometry.get("meshes")),
+    ]
+    merged_objects = []
+    seen_object_keys = {}
+    generic_body_labels = {"object", "body", "planet", "moon", "satellite", "natural satellite", "celestial body", "comet", "sphere", "unknown"}
+    def _has_scene_value(value: Any) -> bool:
+        return value is not None and value != "" and value != [] and value != {}
+    for group_name, values in source_groups:
+        if isinstance(values, dict):
+            values = list(values.values())
+        if not isinstance(values, list):
+            continue
+        group_hint = group_name.rsplit(".", 1)[-1].rstrip("s")
+        for index, value in enumerate(values):
+            if not isinstance(value, dict):
+                # Strings can be labels in body lists; do not turn arbitrary text
+                # into coordinates, but preserve them as a named spherical body.
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                item = {"label": value.strip(), "name": value.strip()}
+            else:
+                item = dict(value)
+            label = str(item.get("label") or item.get("name") or item.get("title") or item.get("id") or "").strip()
+            coords = item.get("position") if isinstance(item.get("position"), dict) else item.get("center") if isinstance(item.get("center"), dict) else {}
+            xyz = tuple(item.get(axis, coords.get(axis, "")) for axis in ("x", "y", "z"))
+            stable_id = str(item.get("id") or item.get("key") or "").strip().lower()
+            # Prefer a stable ID, then a specific body name. Generic labels
+            # ("satellite", "moon", etc.) retain coordinate/source identity so
+            # several unnamed bodies remain distinct.
+            normalized_label = label.lower()
+            dedupe_key = (
+                ("id", stable_id) if stable_id
+                else ("label", normalized_label) if normalized_label and normalized_label not in generic_body_labels
+                else ("value", normalized_label, tuple(str(v) for v in xyz), str(item.get("shape") or item.get("type") or group_hint).lower())
+            )
+            kind = str(item.get("shape") or item.get("geometry_type") or item.get("object_type") or item.get("type") or group_hint).strip().lower().replace("-", "_").replace(" ", "_")
+            if dedupe_key in seen_object_keys:
+                existing_index = seen_object_keys[dedupe_key]
+                existing = merged_objects[existing_index]
+                merged = dict(item)
+                # Existing earlier fields are authoritative when populated;
+                # secondary collections enrich missing coordinates/metadata.
+                for field_name, field_value in existing.items():
+                    if _has_scene_value(field_value):
+                        if field_name in {"position", "center", "dimensions", "size_3d", "velocity", "velocity_vector"} and isinstance(field_value, dict):
+                            later_nested = merged.get(field_name) if isinstance(merged.get(field_name), dict) else {}
+                            merged[field_name] = {**later_nested, **{key: value for key, value in field_value.items() if _has_scene_value(value)}}
+                        else:
+                            merged[field_name] = field_value
+                merged_objects[existing_index] = merged
+                continue
+            seen_object_keys[dedupe_key] = len(merged_objects)
+            item.setdefault("label", label or f"{group_hint.title()} {len(merged_objects) + 1}")
+            # Do not replace meaningful primitive geometry. Celestial role names
+            # become spheres at the renderer boundary; comets retain a tail type.
+            if not item.get("shape"):
+                if kind in {"planet", "moon", "satellite", "natural_satellite", "jovian_moon", "star", "sun", "asteroid", "dwarf_planet", "celestial_body", "body", "comet"}:
+                    item["shape"] = "comet" if kind == "comet" else "sphere"
+                elif kind in {"sphere", "ball", "cube", "box", "cylinder", "cone", "pyramid", "triangle", "funnel", "torus", "ringed_planet", "ringed_sphere"}:
+                    item["shape"] = "sphere" if kind in {"ball", "ringed_planet", "ringed_sphere"} else kind
+            merged_objects.append(item)
+
+    if merged_objects:
+        p["objects_3d"] = merged_objects
+        p.setdefault("dimensions", 3)
+        if not str(p.get("representation") or "").strip():
+            p["representation"] = "scene3d"
+
+    # Promote nested scene collections to the stable top-level schema. Source
+    # structures remain intact, so history and continuation can use their exact form.
+    for canonical, candidates in {
+        "orbits": (p.get("orbits"), p.get("orbit_paths"), p.get("orbital_motion"), scene.get("orbits"), scene.get("orbit_paths")),
+        "trajectories": (p.get("trajectories"), p.get("paths"), scene.get("trajectories"), scene.get("paths")),
+        "vectors": (p.get("vectors"), p.get("gravity_vectors"), p.get("field_vectors"), p.get("arrows"), scene.get("vectors"), scene.get("gravity_vectors")),
+        "field_lines": (p.get("field_lines"), p.get("gravity_field_lines"), scene.get("field_lines")),
+    }.items():
+        if p.get(canonical) not in (None, "", [], {}):
+            continue
+        for candidate in candidates:
+            if candidate not in (None, "", [], {}):
+                p[canonical] = candidate
+                break
+
+    # Also accept common Plotly-like 3D traces. Keep the original `data`/`traces`
+    # losslessly, while promoting a drawable canonical representation alongside it.
+    # A small payload marker avoids duplicating these promoted values when this
+    # adapter is called at both provider normalization and scene-contract stages.
+    if not p.get("_april_3d_traces_normalized"):
+        trace_groups = [p.get("data"), p.get("traces"), p.get("datasets")]
+        trace_list = []
+        for trace_group in trace_groups:
+            if isinstance(trace_group, list):
+                trace_list.extend(item for item in trace_group if isinstance(item, dict))
+            elif isinstance(trace_group, dict):
+                trace_list.extend(item for item in trace_group.values() if isinstance(item, dict))
+        for trace_index, trace in enumerate(trace_list):
+            trace_type = str(trace.get("type") or trace.get("kind") or trace.get("trace_type") or "").strip().lower().replace("-", "_")
+            mode = str(trace.get("mode") or "markers").strip().lower()
+            trace_name = str(trace.get("name") or trace.get("label") or f"Trace {trace_index + 1}")
+            marker = trace.get("marker") if isinstance(trace.get("marker"), dict) else {}
+            line_style = trace.get("line") if isinstance(trace.get("line"), dict) else {}
+            x_values, y_values, z_values = trace.get("x"), trace.get("y"), trace.get("z")
+            is_surface_trace = trace_type in {"surface", "surface3d", "surface_3d", "3d_surface", "mesh3d_surface"}
+            if is_surface_trace and isinstance(z_values, list) and z_values and all(isinstance(row, list) for row in z_values):
+                if not any(isinstance(p.get(key), list) and p.get(key) for key in ("surface_grid", "z_values", "matrix")):
+                    p["surface_grid"] = z_values
+                for axis, values in (("x", x_values), ("y", y_values)):
+                    if isinstance(values, list) and values and all(_number_for_render(value) is not None for value in values):
+                        low = min(float(_number_for_render(value)) for value in values)
+                        high = max(float(_number_for_render(value)) for value in values)
+                        if high > low:
+                            p.setdefault(f"{axis}_domain", [low, high])
+                p.setdefault("representation", "scene3d")
+                p.setdefault("dimensions", 3)
+                continue
+            if not (isinstance(x_values, list) and isinstance(y_values, list) and isinstance(z_values, list)):
+                continue
+            count = min(len(x_values), len(y_values), len(z_values))
+            coords = []
+            for point_index in range(count):
+                x = _number_for_render(x_values[point_index]); y = _number_for_render(y_values[point_index]); z = _number_for_render(z_values[point_index])
+                if x is None or y is None or z is None:
+                    continue
+                point = {"x": float(x), "y": float(y), "z": float(z)}
+                point_colors = marker.get("color")
+                point_sizes = marker.get("size")
+                if isinstance(point_colors, list) and point_index < len(point_colors): point["color"] = point_colors[point_index]
+                elif isinstance(point_colors, str): point["color"] = point_colors
+                if isinstance(point_sizes, list) and point_index < len(point_sizes): point["size"] = point_sizes[point_index]
+                elif isinstance(point_sizes, (int, float)): point["size"] = point_sizes
+                if trace.get("text") is not None:
+                    labels = trace.get("text")
+                    label = labels[point_index] if isinstance(labels, list) and point_index < len(labels) else labels if isinstance(labels, str) else None
+                    if label not in (None, ""): point["label"] = str(label)
+                coords.append(point)
+            if not coords:
+                continue
+            p.setdefault("representation", "scene3d")
+            p.setdefault("dimensions", 3)
+            if trace_type in {"cone", "vector", "quiver", "streamtube"} and all(isinstance(trace.get(key), list) for key in ("u", "v", "w")):
+                vector_rows = p.get("vectors") if isinstance(p.get("vectors"), list) else []
+                for idx, point in enumerate(coords):
+                    if idx >= min(len(trace["u"]), len(trace["v"]), len(trace["w"])): break
+                    vector_rows.append({"start": {"x": point["x"], "y": point["y"], "z": point["z"]}, "vector": {"x": float(_number_for_render(trace["u"][idx]) or 0), "y": float(_number_for_render(trace["v"][idx]) or 0), "z": float(_number_for_render(trace["w"][idx]) or 0)}, "label": trace_name if idx == 0 else ""})
+                p["vectors"] = vector_rows
+                continue
+            point_rows = p.get("points") if isinstance(p.get("points"), list) else []
+            path_rows = p.get("paths") if isinstance(p.get("paths"), list) else []
+            if trace_type in {"mesh3d", "mesh_3d", "triangulated_surface"}:
+                point_rows.extend(coords)
+                face_i, face_j, face_k = trace.get("i"), trace.get("j"), trace.get("k")
+                if all(isinstance(values, list) for values in (face_i, face_j, face_k)):
+                    for face_index in range(min(len(face_i), len(face_j), len(face_k), 2500)):
+                        indices = [face_i[face_index], face_j[face_index], face_k[face_index]]
+                        if all(isinstance(idx, int) and 0 <= idx < len(coords) for idx in indices):
+                            path_rows.append({"id": f"{trace_name}-face-{face_index}", "kind": "mesh_edge", "color": marker.get("color", "rgba(125,211,252,0.62)"), "points": [coords[indices[0]], coords[indices[1]], coords[indices[2]], coords[indices[0]]]})
+                p["points"] = point_rows
+                if path_rows: p["paths"] = path_rows
+                continue
+            if "lines" in mode and len(coords) >= 2:
+                path_rows.append({"id": str(trace.get("uid") or trace_name), "kind": "trajectory", "label": trace_name, "color": marker.get("color") or line_style.get("color") or "rgba(125,211,252,0.88)", "points": coords})
+                p["paths"] = path_rows
+            if "markers" in mode or trace_type in {"scatter3d", "scatter_3d", "scatter", "pointcloud", "isosurface", "volume"}:
+                point_rows.extend(coords)
+                p["points"] = point_rows
+        if trace_list:
+            p["_april_3d_traces_normalized"] = True
+
+    field = p.get("field") if isinstance(p.get("field"), dict) else {}
+    surface = p.get("surface") if isinstance(p.get("surface"), dict) else {}
+    if not any(str(p.get(key) or "").strip() for key in ("surface_function", "z_function", "z_expression")):
+        for candidate in (field.get("surface_function"), field.get("z_function"), field.get("expression"), field.get("formula"), field.get("function")):
+            if isinstance(candidate, str) and candidate.strip():
+                p["surface_function"] = candidate.strip()
+                break
+    if not p.get("title") and scene.get("title"):
+        p["title"] = scene.get("title")
+    if not p.get("description") and scene.get("description"):
+        p["description"] = scene.get("description")
+    return p
+
+
 def _apply_premium_3d_visual_profile(payload: Dict[str, Any], answer: str = "") -> Dict[str, Any]:
     """Add Premium-only rendering hints to genuine 3D payloads without changing data.
 
@@ -3266,6 +3496,7 @@ def _apply_premium_3d_visual_profile(payload: Dict[str, Any], answer: str = "") 
     if not isinstance(payload, dict) or not payload:
         return payload
 
+    payload = _canonicalize_premium_3d_payload(payload)
     representation = str(
         payload.get("representation") or payload.get("graph_type") or payload.get("chart_type") or ""
     ).strip().lower().replace("-", "_").replace(" ", "_")
@@ -3277,11 +3508,33 @@ def _apply_premium_3d_visual_profile(payload: Dict[str, Any], answer: str = "") 
     geometry = payload.get("geometry") if isinstance(payload.get("geometry"), dict) else {}
     surface = payload.get("surface") if isinstance(payload.get("surface"), dict) else {}
     object_groups = [
-        payload.get("objects_3d"), payload.get("spheres"), payload.get("objects"),
-        payload.get("shapes"), payload.get("meshes"), scene.get("objects"),
-        geometry.get("objects"), geometry.get("spheres"),
+        payload.get("objects_3d"), payload.get("spheres"), payload.get("celestial_bodies"),
+        payload.get("bodies"), payload.get("planets"), payload.get("satellites"),
+        payload.get("moons"), payload.get("comets"), payload.get("objects"),
+        payload.get("shapes"), payload.get("primitives"), payload.get("meshes"),
+        scene.get("objects"), scene.get("bodies"), scene.get("celestial_bodies"),
+        scene.get("satellites"), geometry.get("objects"), geometry.get("spheres"),
     ]
-    objects = [item for group in object_groups if isinstance(group, list) for item in group if isinstance(item, dict)]
+    canonical_objects = payload.get("objects_3d")
+    if isinstance(canonical_objects, list) and canonical_objects:
+        objects = [item for item in canonical_objects if isinstance(item, dict)]
+    else:
+        seen_profile_objects = set()
+        objects = []
+        for group in object_groups:
+            if not isinstance(group, list):
+                continue
+            for item in group:
+                if not isinstance(item, dict):
+                    continue
+                label_key = str(item.get("id") or item.get("key") or item.get("name") or item.get("label") or item.get("title") or "").strip().lower()
+                position = item.get("position") if isinstance(item.get("position"), dict) else {}
+                coords_key = tuple(str(item.get(axis, position.get(axis, ""))) for axis in ("x", "y", "z"))
+                identity_key = (label_key, coords_key)
+                if identity_key in seen_profile_objects:
+                    continue
+                seen_profile_objects.add(identity_key)
+                objects.append(item)
     grid = payload.get("surface_grid") or payload.get("z_values") or payload.get("matrix")
     if not isinstance(grid, list):
         grid = surface.get("surface_grid") or surface.get("z_values") or surface.get("matrix") or surface.get("grid")
@@ -3330,12 +3583,20 @@ def _apply_premium_3d_visual_profile(payload: Dict[str, Any], answer: str = "") 
     )).lower()
     # Only enable the orbital animation for a scene that actually describes
     # planets/solar motion, or already provides explicit orbit data.
-    mentions_planets = bool(re.search(r"planet|планет|планета", semantic_text))
+    mentions_planets = bool(re.search(r"planet|планет|юпитер|jupiter|сатурн|saturn|земл[яи]|earth|марс|mars|плутон|pluto", semantic_text))
     mentions_sun = bool(re.search(r"sun|solar|солнц|сонц", semantic_text))
-    mentions_gravity = bool(re.search(r"gravit|гравитац|тяготен", semantic_text))
-    mentions_orbit = bool(re.search(r"orbit|орбит|вращени", semantic_text))
+    mentions_satellites = bool(re.search(r"satellite|moon|moons|спутник|спутник[аоим]?|луна|луны|галилеев", semantic_text))
+    mentions_comet = bool(re.search(r"comet|комет|asteroid|астероид", semantic_text))
+    mentions_gravity = bool(re.search(r"gravit|гравитац|тяготен|поле притяж", semantic_text))
+    mentions_orbit = bool(re.search(r"orbit|орбит|вращени|траектор|trajectory|движени|летит|летящ", semantic_text))
     explicit_orbits = bool(payload.get("orbits") or payload.get("orbit_paths") or payload.get("orbital_motion"))
-    orbital_scene = explicit_orbits or (mentions_planets and mentions_sun and (mentions_orbit or mentions_gravity))
+    has_multi_body_scene = len(objects) >= 2
+    # Central-body scenes do not need to contain the Sun: Jupiter, Earth, a
+    # comet's target, or any other labelled massive body can anchor the system.
+    named_central_body = any(re.search(r"sun|sol|солнц|jupiter|юпитер|saturn|сатурн|earth|земл|mars|марс|planet|планет|central|центр", str(item.get("label") or item.get("name") or item.get("title") or ""), re.I) for item in objects)
+    orbital_scene = explicit_orbits or (
+        has_multi_body_scene and (mentions_orbit or mentions_satellites or (mentions_gravity and (mentions_planets or named_central_body)) or (mentions_comet and mentions_orbit))
+    )
     supplied = payload.get("april_premium_3d")
     supplied = supplied if isinstance(supplied, dict) else {}
     minor_step = supplied.get("minor_grid_step", payload.get("grid_minor_step", payload.get("minor_grid_step", 0.1)))
@@ -3348,8 +3609,8 @@ def _apply_premium_3d_visual_profile(payload: Dict[str, Any], answer: str = "") 
         "minor_grid_step": float(_number_for_render(minor_step) or 0.1),
         "vertical_exaggeration": supplied.get("vertical_exaggeration", 1.55),
         "animate_orbits": supplied.get("animate_orbits", orbital_scene),
-        "draw_gravity_vectors": supplied.get("draw_gravity_vectors", orbital_scene or mentions_gravity),
-        "show_gravity_waves": supplied.get("show_gravity_waves", orbital_scene and mentions_gravity),
+        "draw_gravity_vectors": supplied.get("draw_gravity_vectors", (has_multi_body_scene and mentions_gravity) or orbital_scene),
+        "show_gravity_waves": supplied.get("show_gravity_waves", has_multi_body_scene and mentions_gravity),
         "gravity_wave_amplitude": supplied.get("gravity_wave_amplitude", 0.22),
         "orbital_speed": supplied.get("orbital_speed", 0.34),
         "schema": "april.premium.3d.visual.v1",
@@ -3430,7 +3691,11 @@ def prepare_render_blocks_for_room_dispatch(
     ]
     source_blocks = [deepcopy(item) for item in render_blocks if isinstance(item, dict)] if isinstance(render_blocks, list) else []
     aliases = {
-        "chart": "graph", "plot": "graph", "graph_data": "graph", "table_data": "table",
+        "chart": "graph", "plot": "graph", "graph_data": "graph",
+        "3d_scene": "graph", "scene3d": "graph", "scene_3d": "graph", "3d_graph": "graph", "graph3d": "graph", "graph_3d": "graph",
+        "plot3d": "graph", "plot_3d": "graph", "scatter3d": "graph", "scatter_3d": "graph", "surface3d": "graph", "surface_3d": "graph",
+        "3d_surface": "graph", "surface_plot": "graph", "surface_graph": "graph", "mesh3d": "graph", "mesh_3d": "graph", "wireframe": "graph",
+        "table_data": "table",
         "math": "formula", "latex": "formula", "generated_image": "image", "image_artifact": "image",
         "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link", "file_card": "file",
         "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
@@ -3444,9 +3709,31 @@ def prepare_render_blocks_for_room_dispatch(
     for block in source_blocks:
         raw_type = _scene_block_type(block)
         block_type = aliases.get(raw_type, raw_type)
+        explicit_3d_type = raw_type in {
+            "3d_scene", "scene3d", "scene_3d", "3d_graph", "graph3d", "graph_3d",
+            "plot3d", "plot_3d", "scatter3d", "scatter_3d", "surface3d", "surface_3d",
+            "3d_surface", "surface_plot", "surface_graph", "mesh3d", "mesh_3d", "wireframe",
+        }
         block["type"] = block_type
         block["artifact_type"] = str(block.get("artifact_type") or block_type)
+        registration = get_web_renderer_registration(block_type)
+        block.setdefault("renderer", registration.get("renderer") or "MessageTextBlock")
+        block.setdefault("viewer", registration.get("viewer") or block.get("renderer") or "MessageTextBlock")
         payload = _payload_for_render_block(block, block_type)
+        if block_type == "graph" and explicit_3d_type:
+            payload.setdefault("representation", "scene3d")
+            payload.setdefault("dimensions", 3)
+        if block_type == "graph" and interpreted_graph_policy.get("mode") in {"explicit_3d", "inferred_spatial_scene", "structured_3d_data"}:
+            preferred_3d = str(interpreted_graph_policy.get("preferred_representation") or "scene3d")
+            has_structured_spatial_data = any(
+                payload.get(key) not in (None, "", [], {})
+                for key in ("objects_3d", "spheres", "bodies", "celestial_bodies", "planets", "satellites", "moons", "comets", "points", "coordinates", "data_points", "surface_grid", "z_values", "matrix", "surface_function", "z_function", "z_expression")
+            ) or any(isinstance(payload.get(key), dict) and bool(payload[key]) for key in ("scene", "geometry", "surface"))
+            if has_structured_spatial_data:
+                payload.setdefault("representation", preferred_3d)
+                payload.setdefault("dimensions", 3)
+        if block_type == "graph":
+            payload = _canonicalize_premium_3d_payload(payload, explicit_3d_type=explicit_3d_type)
 
         # Room payloads are hydrated only from evidence already returned for this turn.
         if block_type == "table" and not _has_render_payload("table", payload):
