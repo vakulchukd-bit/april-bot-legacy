@@ -199,6 +199,8 @@ _IMAGE_MODIFICATION_MARKERS = {
     "добавь на фотографию", "добавь на картинку", "добавь на изображение",
     "добавь на эту фотографию", "добавь на эту картинку", "добавь на это изображение",
     "улучши фото", "улучши фотографию", "улучши картинку", "улучши изображение",
+    "надень на фото", "надень на картинку", "надень на изображение", "надень шляпу",
+    "put a hat on", "put on a hat", "add a hat to",
 }
 
 _IMAGE_EDIT_ACTION_RE = re.compile(
@@ -206,15 +208,17 @@ _IMAGE_EDIT_ACTION_RE = re.compile(
     r"draw|redraw|paint|place|move|crop|enhance|"
     r"добав\w*|дорис\w*|нанес\w*|постав\w*|размест\w*|помест\w*|убер\w*|удал\w*|"
     r"замен\w*|измен\w*|отредактир\w*|обработ\w*|улучш\w*|осветл\w*|затемн\w*|"
-    r"перекрас\w*|подправ\w*|обреж\w*|поверн\w*|сделай|сделать)\b",
+    r"перекрас\w*|подправ\w*|обреж\w*|поверн\w*|надень|одень|надев\w*|одев\w*|сделай|сделать|"
+    r"put\s+on|wear)\b",
     re.IGNORECASE,
 )
 _IMAGE_EDIT_TARGET_RE = re.compile(
     r"(?:галоч\w*|отметк\w*|фон\w*|качеств\w*|ярче|светлее|темнее|резкост\w*|"
     r"контраст\w*|цвет\w*|надпис\w*|текст\w*|логотип\w*|объект\w*|"
     r"реалистич\w*|красив\w*|лишн\w*|размыти\w*|тень\w*|яркост\w*|"
-    r"мяч\w*|игрушк\w*|предмет\w*|котен\w*|котён\w*|объект\w*|"
-    r"check\s?mark|tick|background|quality|sharpen|contrast|brightness|text|logo|realistic|remove)",
+    r"мяч\w*|игрушк\w*|предмет\w*|котен\w*|котён\w*|объект\w*|шляп\w*|треуголк\w*|"
+    r"шапк\w*|кепк\w*|головн\w*|бород\w*|очк\w*|одежд\w*|"
+    r"check\s?mark|tick|background|quality|sharpen|contrast|brightness|text|logo|realistic|remove|hat|cap|helmet|headwear)",
     re.IGNORECASE,
 )
 
@@ -323,13 +327,28 @@ def _detect_image_modification(text: str) -> bool:
     low = _text(text).lower().replace("ё", "е")
     if any(_contains_marker(low, marker.replace("ё", "е")) for marker in _IMAGE_MODIFICATION_MARKERS):
         return True
+    # Wearable/accessory edits are common short follow-ups ("надень на него
+    # шляпу"). They must be treated as edits when this request identifies a
+    # portrait/photo, even if the verb is separated from the word "фото".
+    wearable_action = r"\b(?:надень|одень|надев\w*|одев\w*|put\s+on|wear)\b"
+    wearable_target = r"(?:шляп\w*|треуголк\w*|шапк\w*|кепк\w*|головн\w*|hat|cap|helmet|headwear)"
+    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|иллюстрац\w*|портрет\w*|снимк\w*|\bimage\b|\bphoto\b|\bpicture\b|\bportrait\b)"
+    if re.search(wearable_action, low, re.IGNORECASE) and re.search(wearable_target, low, re.IGNORECASE) and re.search(image_noun, low, re.IGNORECASE):
+        return True
     action = (
         r"(?:add|insert|remove|erase|replace|change|edit|modify|retouch|improve|brighten|darken|draw|redraw|paint|"
         r"добав\w*|дорис\w*|нанес\w*|постав\w*|размест\w*|помест\w*|убер\w*|удал\w*|"
         r"замен\w*|измен\w*|отредактир\w*|обработ\w*|улучш\w*|осветл\w*|затемн\w*|перекрас\w*|"
-        r"нарис\w*)"
+        r"надень|одень|надев\w*|одев\w*|нарис\w*|put\s+on|wear)"
     )
-    image_target = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|иллюстрац\w*|рисунк\w*|снимк\w*|канистр\w*|этикетк\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b|\bdrawing\b|\bcanister\b|\blabel\b)"
+    image_target = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|иллюстрац\w*|рисунк\w*|снимк\w*|портрет\w*|канистр\w*|этикетк\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b|\bdrawing\b|\bportrait\b|\bcanister\b|\blabel\b)"
+    # A named earlier asset is an edit target even when phrased compactly:
+    # "улучши предыдущую картинку" / "предыдущую картинку переделай".
+    prior_asset_pointer = r"(?:предыдущ\w*|прошл\w*|сохраненн\w*|эт\w*|тот|ту|этот|эта|this|that|previous|prior|saved)"
+    if re.search(rf"\b{action}\b.{{0,60}}\b{prior_asset_pointer}\b.{{0,28}}\b{image_target}\b", low, re.IGNORECASE | re.DOTALL):
+        return True
+    if re.search(rf"\b{prior_asset_pointer}\b.{{0,28}}\b{image_target}\b.{{0,60}}\b{action}\b", low, re.IGNORECASE | re.DOTALL):
+        return True
     # Explicit image target can appear after an action ("нарисуй на фото") or
     # before it ("на фотографии дорисуй"). Keep this phrase-aware rather than
     # treating every occurrence of "draw" or "photo" as editing.
@@ -338,6 +357,58 @@ def _detect_image_modification(text: str) -> bool:
     if re.search(rf"\b(?:на|в|по|с|из|к)\s+(?:эт\w*\s+)?{image_target}.{{0,80}}?\b{action}\b", low, re.IGNORECASE | re.DOTALL):
         return True
     return False
+
+
+def _is_image_result_retrieval_request(text: Any) -> bool:
+    """Recognize a request to display an already-created image, not edit it again."""
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    retrieval = bool(re.search(
+        r"\b(?:где|покаж\w*|вывед\w*|отобраз\w*|верни|восстанов\w*|найди|найдите|открой|"
+        r"show|display|return|restore|recover|find|where)\b", low, re.IGNORECASE
+    ))
+    result_reference = bool(re.search(
+        r"(?:результат\w*.{0,90}(?:редактирован\w*|изменен\w*|обработк\w*)|"
+        r"(?:отредактирован\w*|изменен\w*|обработан\w*).{0,70}(?:фото|картинк\w*|изображени\w*|image|photo|picture)|"
+        r"(?:предыдущ\w*|прошл\w*|сохранен\w*).{0,60}(?:фото|картинк\w*|изображени\w*|image|photo|picture))",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    actual_new_change = bool(re.search(
+        r"\b(?:надень|одень|добав\w*|измени|изменить|отредактир\w*|дорис\w*|убер\w*|удал\w*|"
+        r"замен\w*|улучш\w*|перекрас\w*|подправ\w*|crop|edit|modify|add|remove|replace|put\s+on|wear)\b",
+        low, re.IGNORECASE,
+    ))
+    return retrieval and result_reference and not actual_new_change
+
+
+def _is_image_delivery_complaint(text: Any) -> bool:
+    low = _text(text).lower().replace("ё", "е")
+    return bool(re.search(
+        r"(?:не\s+(?:показал\w*|выдал\w*|прислал\w*|вернул\w*|отправил\w*|видно|вижу|получил\w*)|"
+        r"где\s+(?:результат|картинк\w*|фото|изображени\w*)|"
+        r"ты\s+(?:же\s+)?(?:должн\w*|обещал\w*|говорил\w*)|я\s+просил\w*.{0,50}(?:показ\w*|выда\w*|верну\w*)|"
+        r"должн\w*.{0,40}(?:показ\w*|выда\w*|присла\w*)|didn.?t\s+(?:show|return|send|display)|not\s+(?:shown|delivered|returned))",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+
+
+def _extract_image_edit_instruction(text: Any) -> str:
+    """Drop history-search preamble from a modification request before image editing."""
+    source = _text(text)
+    low = source.lower().replace("ё", "е")
+    match = re.search(
+        r"\b(?:надень|одень|надев\w*|одев\w*|добав\w*|измени\w*|отредактир\w*|дорис\w*|"
+        r"убер\w*|удал\w*|замен\w*|улучш\w*|перекрас\w*|подправ\w*|put\s+on|wear|edit|modify|add|remove|replace)\b",
+        low, re.IGNORECASE,
+    )
+    if not match:
+        return source
+    instruction = source[match.start():].strip(" ,;:-—")
+    # If the user repeats a generic word such as "измени фото" after the concrete
+    # command, preserve only the concrete operation and its target.
+    instruction = re.split(r"\s+(?:и\s+)?(?:выдай|покажи|верни|пришли|отправь)\b", instruction, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    return instruction or source
 
 
 def _detect_image_generation_request(text: str) -> bool:
@@ -2715,13 +2786,19 @@ def _build_question_sequence(text: str) -> list[dict[str, Any]]:
 _CODE_MODIFICATION_MARKERS = (
     "исправь код", "исправь этот код", "улучши код", "улучши этот код",
     "улучшить код", "оптимизируй код", "перепиши код", "обнови код",
-    "исправь скрипт", "перепиши скрипт", "fix this code", "improve this code",
-    "refactor this code", "optimize this code", "rewrite this code",
+    "измени код", "отредактируй код", "доработай код", "поправь код",
+    "исправь скрипт", "перепиши скрипт", "обнови скрипт", "рефакторинг кода",
+    "fix this code", "improve this code", "modify this code", "edit the code",
+    "refactor this code", "optimize this code", "rewrite this code", "update the script",
 )
 
 def _is_code_modification_request(text: str) -> bool:
     low = _text(text).lower().replace("ё", "е")
-    return any(marker.replace("ё", "е") in low for marker in _CODE_MODIFICATION_MARKERS)
+    if any(marker.replace("ё", "е") in low for marker in _CODE_MODIFICATION_MARKERS):
+        return True
+    edit_action = r"(?:исправ\w*|поправ\w*|измен\w*|отредактир\w*|улучш\w*|оптимизир\w*|перепиш\w*|обнов\w*|доработ\w*|рефактор\w*|fix\w*|edit\w*|modify\w*|improve\w*|optimi\w*|rewrite\w*|refactor\w*|update\w*)"
+    code_target = r"(?:код\w*|скрипт\w*|программ\w*|исходник\w*|репозитор\w*|\bsource\s+code\b|\bscript\b|\bprogram\w*\b|\bcode\b)"
+    return bool(re.search(edit_action, low, re.IGNORECASE) and re.search(code_target, low, re.IGNORECASE))
 
 
 def build_interpretation(
@@ -2788,6 +2865,12 @@ def build_interpretation(
     routing_capabilities = _infer_routing_capabilities(original or text)
     relation = _text(memory.get("relation") or "NEW").upper()
     normalized_visual_request = _text(original or text).lower().replace("ё", "е")
+    selected_pairs = _select_continuation_pairs(memory)
+    history_request = (
+        bool(memory.get("history_request"))
+        or bool(request_semantics.get("history_request"))
+        or _is_history_request(original or text)
+    )
     has_saved_output_image = any(
         _text(item.get("kind")).lower() == "image"
         and _text(item.get("asset_role")).lower() in {"april_output", "assistant_output", "generated"}
@@ -2808,7 +2891,30 @@ def build_interpretation(
             for item in visual_context if isinstance(item, dict)
         )
     )
+    image_result_retrieval = _is_image_result_retrieval_request(normalized_visual_request)
+    active_branch_repair = bool(memory.get("active_branch_repair"))
+    active_repair_delivery = bool(
+        active_branch_repair
+        and _is_image_delivery_complaint(normalized_visual_request)
+        and has_saved_output_image
+    )
+    inherited_edit_instruction = ""
+    if active_branch_repair and _is_image_delivery_complaint(normalized_visual_request):
+        for pair in reversed(selected_pairs):
+            if not isinstance(pair, dict):
+                continue
+            prior_user_text = _text(pair.get("user") or pair.get("source_user_text"))
+            if prior_user_text and _detect_image_modification(prior_user_text):
+                inherited_edit_instruction = _extract_image_edit_instruction(prior_user_text)
+                if inherited_edit_instruction:
+                    break
     explicit_image_edit = _detect_image_modification(normalized_visual_request)
+    # "Show me the edit result" and a delivery-repair complaint are retrieval
+    # requests, not instructions to run the edit a second time.
+    if image_result_retrieval or active_repair_delivery:
+        explicit_image_edit = False
+    elif inherited_edit_instruction and source_image_available and _is_image_delivery_complaint(normalized_visual_request):
+        explicit_image_edit = True
     if (
         explicit_image_edit
         and not has_original_image
@@ -2869,7 +2975,7 @@ def build_interpretation(
         normalized_visual_request,
     ))
     retrieval_language = bool(re.search(
-        r"\b(?:покаж\w*|верни|восстанов\w*|подним\w*|открой|выведи|отобраз\w*|обещал|долж\н\w*|не\s+увидел|не\s+показал|не\s+загрузил\w*|пропал\w*|где\s+(?:мое|моя|моё|его|ее|её|фото|картинк\w*)|show|restore|recover|bring\s+back|didn.?t\s+see|not\s+shown|missing)\b",
+        r"\b(?:покаж\w*|верни|восстанов\w*|подним\w*|открой|выведи|отобраз\w*|обещал|должн\w*|не\s+увидел|не\s+показал|не\s+загрузил\w*|пропал\w*|где\s+(?:мое|моя|моё|его|ее|её|фото|картинк\w*)|show|restore|recover|bring\s+back|didn.?t\s+see|not\s+shown|missing)\b",
         normalized_visual_request,
     ))
     short_image_reference = (
@@ -2884,8 +2990,16 @@ def build_interpretation(
     # no prior output asset was saved. Reuse the saved asset when available;
     # otherwise let the image-generation path create the missing portrait.
     image_followup = relation == "CONTINUE" and short_image_reference
-    reuse_saved_image = image_followup and has_saved_output_image
-    if image_followup and "image" not in requested_outputs:
+    historical_result_retrieval = bool(
+        image_result_retrieval
+        and (history_request or relation == "CONTINUE" or selected_pairs or memory.get("contextual_history_match"))
+    )
+    reuse_saved_image = bool(
+        has_saved_output_image
+        and (image_followup or historical_result_retrieval or active_repair_delivery)
+    )
+    image_result_lookup = bool(image_result_retrieval or active_repair_delivery)
+    if (image_followup or historical_result_retrieval or active_repair_delivery) and "image" not in requested_outputs:
         requested_outputs.append("image")
     wants_image = "image" in requested_outputs
     wants_file = "file" in requested_outputs
@@ -2902,12 +3016,6 @@ def build_interpretation(
         allow_data_driven_3d=data_source_attached,
     ) if "graph" in requested_outputs else {}
 
-    selected_pairs = _select_continuation_pairs(memory)
-    history_request = (
-        bool(memory.get("history_request"))
-        or bool(request_semantics.get("history_request"))
-        or _is_history_request(original or text)
-    )
     history_count = max(1, min(10, int(memory.get("requested_topic_count") or request_semantics.get("requested_topic_count") or _history_count(original or text) or 10)))
     history_count_minimum = max(1, min(history_count, int(memory.get("minimum_topic_count") or request_semantics.get("minimum_topic_count") or _history_count_minimum(original or text) or min(5, history_count))))
     history_topics = _select_history_topics(memory)[:history_count]
@@ -2970,16 +3078,24 @@ def build_interpretation(
         has_file=has_original_file,
         wants_image=wants_image,
     )
+    has_prior_code_payload = any(
+        isinstance((pair.get("protected_structured_data") if isinstance(pair, dict) else None), dict)
+        and any(
+            isinstance(item, dict) and _text(item.get("kind")).lower() in {"code", "diagram"}
+            for item in ((pair.get("protected_structured_data") or {}).get("items") or [])
+        )
+        for pair in selected_pairs
+    )
     if image_edit_requested:
         task = "edit_image" if source_image_available else "request_source_image"
     elif reuse_saved_image:
         task = "answer_request"
     # A modification verb requests a code edit; merely asking what a code file
     # does remains analyze_file and never silently becomes code generation.
-    if _is_code_modification_request(original or text) and has_file:
+    if _is_code_modification_request(original or text) and (has_file or has_prior_code_payload):
         task = "modify_code"
 
-    if has_original_image and task == "answer_request":
+    if has_original_image and task == "answer_request" and not reuse_saved_image and not image_result_lookup:
         task = "analyze_image"
 
     result = {
@@ -3015,9 +3131,14 @@ def build_interpretation(
             "source_image_available": bool(source_image_available),
             "source_asset_message_id": next((_text(item.get("asset_message_id")) for item in visual_context if _text(item.get("asset_message_id"))), ""),
             "source_asset_role": next((_text(item.get("asset_role") or "user_input") for item in visual_context if _text(item.get("image_url") or item.get("data_uri"))), ""),
-            "image_edit_instruction": original or text if image_edit_requested else "",
+            "image_edit_instruction": (
+                inherited_edit_instruction if inherited_edit_instruction and image_edit_requested
+                else (_extract_image_edit_instruction(original or text) if image_edit_requested and history_request else (original or text if image_edit_requested else ""))
+            ),
+            "recovered_from_history_edit": bool(image_edit_requested and (history_request or inherited_edit_instruction)),
+            "image_result_retrieval": bool(image_result_lookup),
             "reuse_saved_image": bool(reuse_saved_image),
-            "explicit_generation_request": bool(wants_image and not reuse_saved_image and not image_edit_requested),
+            "explicit_generation_request": bool(wants_image and not reuse_saved_image and not image_edit_requested and not image_result_lookup),
             "adaptive_visual_policy": True,
             "wants_file": wants_file,
             "wants_links": wants_links,
@@ -3082,15 +3203,15 @@ def build_interpretation(
         "visual": {
             "items": visual_context,
             "analysis_required": has_original_image,
-            "generation_required": bool(wants_image and not reuse_saved_image and not image_edit_requested),
+            "generation_required": bool(wants_image and not reuse_saved_image and not image_edit_requested and not image_result_lookup),
             "edit_required": bool(image_edit_requested and source_image_available),
             "source_image_required": bool(image_edit_requested),
             "source_image_available": bool(source_image_available),
             "reuse_saved_image": bool(reuse_saved_image),
             "input_source": "current_upload" if any(not item.get("recalled_from_memory") for item in visual_context) else ("dialogue_memory" if has_image else "none"),
             "remembered_assets": [item for item in restored_assets if _text(item.get("kind")).lower() == "image"][:4],
-            "generator": "C_APRIL_IMAGES_GENERATOR" if wants_image and not reuse_saved_image else "",
-            "image_model": "gpt-image-2" if wants_image and not reuse_saved_image else "",
+            "generator": "C_APRIL_IMAGES_GENERATOR" if wants_image and not reuse_saved_image and not image_result_lookup else "",
+            "image_model": "gpt-image-2" if wants_image and not reuse_saved_image and not image_result_lookup else "",
         },
         "files": {
             "items": attachments,
