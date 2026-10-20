@@ -406,18 +406,21 @@ def hydrate(
                 return cached_state
     load_started = time.perf_counter()
     load_source = "provided_rows" if rows is not None else "postgres_load_dialogue_pairs"
-    if rows is None:
+    rows_from_store = rows is None
+    if rows_from_store:
         rows = load_dialogue_pairs(uid, limit=0)
     _apr_timing_log("history_rows_loaded", load_started, user_key=_apr_diag_ref(uid),
         source=load_source, rows_loaded=len(rows or []))
 
-    # Avoid get_state() here: it prunes/deep-copies the previous payload before
-    # hydrate immediately overwrites it, then a second prune deep-copies the large
-    # structured responses again. Premium history can contain image/table payloads;
-    # copy each newly-loaded row once and prune without another full payload clone.
+    # A database read already gives this function newly-owned row dictionaries.
+    # Deep-copying every JSONB structure a second time was expensive for Premium
+    # turns with saved graphs/images and added no isolation: the rows are not shared
+    # with the cursor or another caller. Retain ownership of those fresh rows and
+    # only deep-copy externally supplied rows, whose caller may still mutate them.
     stamp = time.time()
     live_rows = [
-        deepcopy(row) for row in (rows or [])
+        (row if rows_from_store else deepcopy(row))
+        for row in (rows or [])
         if isinstance(row, dict) and _row_is_live(row, stamp, DIALOGUE_WINDOW_HOURS)
     ]
     live_rows.sort(key=lambda x: (float(x.get("created_at") or 0), int(x.get("turn_index") or 0)))
@@ -815,6 +818,17 @@ def _row_subject_text(row: dict[str, Any]) -> str:
     )
     return " ".join(_text(item) for item in values if _text(item))
 
+def _row_subject_text_lightweight(row: dict[str, Any]) -> str:
+    """Build a topic signature from bounded plain-text columns; never scan a huge answer."""
+    values = (
+        row.get("user_text"), row.get("user_text_en"),
+        row.get("memory_summary"), row.get("topic_summary"), row.get("topic"),
+        str(row.get("april_text") or "")[:1800],
+        str(row.get("april_text_en") or "")[:900],
+    )
+    return " ".join(part for value in values if (part := _text(value)))
+
+
 def _row_subject_tokens(row: dict[str, Any]) -> set[str]:
     return _subject_tokens(_row_subject_text(row))
 
@@ -838,7 +852,12 @@ def _numeric_anchors(value: Any) -> set[str]:
         found.add(f"{number:.6f}".rstrip("0").rstrip("."))
     return found
 
-def _query_numeric_overlap(query: str, row: dict[str, Any], query_subjects: set[str]) -> float:
+def _query_numeric_overlap(
+    query: str,
+    row: dict[str, Any],
+    query_subjects: set[str],
+    row_subjects: set[str] | None = None,
+) -> float:
     query_numbers = _numeric_anchors(query)
     if not query_numbers:
         return 0.0
@@ -848,8 +867,8 @@ def _query_numeric_overlap(query: str, row: dict[str, Any], query_subjects: set[
     if not source_numbers:
         return 0.0
     # Numbers alone are weak evidence; they contribute only within a compatible subject.
-    row_subjects = _row_subject_tokens(row)
-    if _subject_conflicts(query_subjects, row_subjects):
+    resolved_row_subjects = row_subjects if row_subjects is not None else _row_subject_tokens(row)
+    if _subject_conflicts(query_subjects, resolved_row_subjects):
         return 0.0
     return len(query_numbers & source_numbers) / max(1, len(query_numbers))
 
@@ -2062,15 +2081,19 @@ def _concept_overlap(query_tokens: set[str], candidate_tokens: set[str]) -> floa
 
 
 
-def _explicit_entity_overlap(query: str, row: dict[str, Any]) -> float:
+def _explicit_entity_overlap(query: str, row: dict[str, Any], *, max_chars: int | None = None) -> float:
     """Measure overlap of meaningful subject terms, excluding pronouns and fillers."""
     q = _semantic_tokens(query)
-    candidate = _semantic_tokens(
-        " ".join(
-            _text(row.get(name))
-            for name in ("user_text", "april_text", "user_text_en", "april_text_en")
-        )
-    )
+    raw_parts = [
+        row.get("user_text"), row.get("april_text"),
+        row.get("user_text_en"), row.get("april_text_en"),
+    ]
+    # Slice before strip/tokenization: some saved multimedia answers are very large.
+    parts = [
+        _text(str(value or "")[:max_chars] if max_chars is not None else value)
+        for value in raw_parts
+    ]
+    candidate = _semantic_tokens(" ".join(parts))
     return _concept_overlap(q, candidate)
 
 
@@ -2150,6 +2173,19 @@ def _row_modalities(row: dict[str, Any]) -> set[str]:
     return result
 
 
+def _topic_label_lightweight(row: dict[str, Any]) -> str:
+    """Use direct text fields for ordinary topic search; reserve JSONB labels for artifact/history retrieval."""
+    for value in (
+        row.get("topic_summary"), row.get("topic"), row.get("user_text"),
+        row.get("user_text_en"), row.get("memory_summary"),
+        str(row.get("april_text") or "")[:140], str(row.get("april_text_en") or "")[:140],
+    ):
+        value = _text(value)
+        if value:
+            return re.sub(r"\s+", " ", value)[:140]
+    return "Безымянная тема"
+
+
 def _topic_label(row: dict[str, Any]) -> str:
     structured = _parse_json(row.get("structured_request"))
     dialogue = structured.get("dialogue") if isinstance(structured.get("dialogue"), dict) else {}
@@ -2200,7 +2236,9 @@ def _merge_compact_summaries(existing: Any, incoming: Any, limit: int = 640) -> 
     return result[:limit].rstrip(" ;,")
 
 
-def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _build_topic_index(
+    rows: list[dict[str, Any]], *, include_sections: bool = True, include_structured: bool = True
+) -> list[dict[str, Any]]:
     """Build a 24-hour topic/section index from the canonical persisted pairs.
 
     The index is derived from the existing PostgreSQL dialogue rows; it is not a
@@ -2252,17 +2290,20 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return sorted(merged, key=lambda x: int(x.get("order") or 0))[:12]
 
     for row in ordered:
-        label = _topic_label(row)
+        label = _topic_label(row) if include_structured else _topic_label_lightweight(row)
         tokens = _topic_tokens(label)
         relation = _text(row.get("relation") or "NEW").upper()
         same_as_prev = False
         if groups:
             prev = groups[-1]
             similarity = fuzz.token_set_ratio(label.lower(), str(prev.get("topic") or "").lower()) / 100.0
-            current_modalities = _row_modalities(row)
+            current_modalities = _row_modalities(row) if include_structured else set()
             previous_modalities = set(prev.get("modalities") or [])
             modality_changed = bool(current_modalities and previous_modalities and current_modalities.isdisjoint(previous_modalities))
-            current_subjects = _row_subject_tokens(row)
+            current_subjects = (
+                _row_subject_tokens(row) if include_structured
+                else _subject_tokens(_row_subject_text_lightweight(row))
+            )
             previous_subjects = set(prev.get("subject_terms") or [])
             subject_conflict = _subject_conflicts(current_subjects, previous_subjects)
             same_as_prev = relation != "NEW" and similarity >= 0.28 and not modality_changed and not subject_conflict
@@ -2270,12 +2311,18 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     and _looks_like_referential_followup(str(row.get("user_text") or ""))):
                 same_as_prev = True
 
-        row_sections = _dialogue_section_map(row)
+        # Section extraction can recursively inspect all saved renderers. It is
+        # useful for history/section lookups, but wasteful for ordinary continuation
+        # questions that need only a topic label and compact summary.
+        row_sections = _dialogue_section_map(row) if include_sections else []
         if not groups or not same_as_prev:
             groups.append({
                 "topic": label,
                 "topic_tokens": sorted(tokens),
-                "subject_terms": sorted(_row_subject_tokens(row)),
+                "subject_terms": sorted(
+                    _row_subject_tokens(row) if include_structured
+                    else _subject_tokens(_row_subject_text_lightweight(row))
+                ),
                 "start_turn": int(row.get("turn_index") or 0),
                 "end_turn": int(row.get("turn_index") or 0),
                 "first_at": float(row.get("created_at") or 0),
@@ -2287,9 +2334,9 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "message_ids": [_text(row.get("message_id"))] if _text(row.get("message_id")) else [],
                 "dialog_id": _text(row.get("dialog_id")),
                 "conversation_id": _text(row.get("conversation_id")),
-                "modalities": sorted(_row_modalities(row)),
+                "modalities": sorted(_row_modalities(row)) if include_structured else [],
                 "pair_count": 1,
-                "summary": _compact_memory_summary(row),
+                "summary": _compact_memory_summary(row) if include_structured else _compact_memory_summary_lightweight(row),
                 "sections": merge_sections([], row_sections, _text(row.get("message_id"))),
             })
         else:
@@ -2297,13 +2344,19 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             group["end_turn"] = int(row.get("turn_index") or group["end_turn"])
             group["last_at"] = float(row.get("created_at") or group["last_at"])
             group["last_question"] = _text(row.get("user_text"))[:360] or group["last_question"]
-            group["modalities"] = sorted(set(group.get("modalities") or []) | _row_modalities(row))
+            group["modalities"] = sorted(
+                set(group.get("modalities") or []) | (_row_modalities(row) if include_structured else set())
+            )
             group["pair_count"] = int(group.get("pair_count") or 0) + 1
             group["message_id"] = _text(row.get("message_id")) or group.get("message_id")
             row_message_id = _text(row.get("message_id"))
             if row_message_id and row_message_id not in (group.get("message_ids") or []):
                 group.setdefault("message_ids", []).append(row_message_id)
-            group["summary"] = _merge_compact_summaries(group.get("summary"), _compact_memory_summary(row), 640)
+            group["summary"] = _merge_compact_summaries(
+                group.get("summary"),
+                _compact_memory_summary(row) if include_structured else _compact_memory_summary_lightweight(row),
+                640,
+            )
             group["sections"] = merge_sections(group.get("sections") or [], row_sections, _text(row.get("message_id")))
 
     deduped: list[dict[str, Any]] = []
@@ -2899,6 +2952,76 @@ def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 
+def _query_needs_structured_evidence(query: str, query_modalities: set[str] | None = None) -> bool:
+    """Only inspect large saved renderer/attachment payloads when the request needs them.
+
+    A plain factual continuation ("tell me more about Newton") should be ranked from
+    dialogue text and topic identity, not by recursively decoding every old graph,
+    image and code block in the user's entire history. Asset edits, renderer requests,
+    and explicit references to saved files still use the lossless structured path.
+    """
+    modalities = set(query_modalities or set())
+    if modalities.intersection({"image", "file", "text_file"}):
+        return True
+    low = _text(query).lower().replace("ё", "е")
+    renderer_or_asset = re.search(
+        r"(?:\bфото\b|\bфотограф\w*|\bфотк\w*|картинк\w*|изображен\w*|снимк\w*|скриншот\w*|вложен\w*|"
+        r"документ\w*|файл\w*|график\w*|диаграмм\w*|таблиц\w*|формул\w*|"
+        r"уравнен\w*|схем\w*|чертеж\w*|код\w*|скрипт\w*|"
+        r"\bimage\b|\bphoto\b|\bpicture\b|\bscreenshot\b|\bfile\b|\bdocument\b|"
+        r"\bgraph\b|\bchart\b|\btable\b|\bformula\b|\bdiagram\b|\bcode\b)",
+        low, re.IGNORECASE,
+    )
+    operation = re.search(
+        r"(?:измен\w*|редакт\w*|передел\w*|улучш\w*|замен\w*|добав\w*|убер\w*|"
+        r"исправ\w*|перестро\w*|восстанов\w*|верни\w*|покажи\s+(?:снова|его|ее|её|это)|"
+        r"\bedit\w*|\bchange\w*|\bmodify\w*|\brevise\w*|\brestore\w*|\bremove\w*|\badd\b)",
+        low, re.IGNORECASE,
+    )
+    deictic = re.search(r"\b(?:это|этот|эта|эту|его|ее|её|них|нему|него|тот|та|it|this|that|its|them)\b", low)
+    return bool(renderer_or_asset or (operation and deictic) or _is_section_request(low))
+
+
+def _is_structured_work_branch(branch: dict[str, Any] | None) -> bool:
+    """Whether a saved active-work branch represents a concrete artifact/task lane."""
+    if not isinstance(branch, dict):
+        return False
+    kind = _text(branch.get("kind")).lower().replace("-", "_").replace(" ", "_")
+    return bool(re.search(
+        r"(?:^|_)(?:visual|image|graph|diagram|chart|formula|table|code|document|file|renderer|artifact)(?:_|$)",
+        kind,
+    ))
+
+
+def _structured_work_requested(
+    query: str,
+    interpretation: dict[str, Any] | None = None,
+    query_modalities: set[str] | None = None,
+) -> bool:
+    """Decide artifact/task relevance using the entire user turn and its interpreted outputs."""
+    data = interpretation if isinstance(interpretation, dict) else {}
+    modalities = set(query_modalities or set())
+    if modalities.intersection({"image", "file", "text_file"}):
+        return True
+    outputs = data.get("parent_requested_outputs") or data.get("requested_outputs") or data.get("output_types") or []
+    if not isinstance(outputs, (list, tuple, set)):
+        outputs = [outputs]
+    output_names = {_text(item).lower() for item in outputs if _text(item)}
+    structured_outputs = {
+        "image", "gallery", "graph", "diagram", "chart", "formula", "table",
+        "code", "source_code", "file", "document", "3d", "3d_graph",
+    }
+    if output_names.intersection(structured_outputs):
+        return True
+    if any(bool(data.get(flag)) for flag in (
+        "wants_image", "wants_graph", "wants_code", "wants_file",
+        "wants_links", "wants_formula", "wants_table", "wants_diagram", "wants_chart",
+    )):
+        return True
+    full_turn = _text(data.get("parent_request_text") or query)
+    return _query_needs_structured_evidence(full_turn, modalities)
+
+
 def _candidate_score(
     query: str,
     row: dict[str, Any],
@@ -2908,6 +3031,7 @@ def _candidate_score(
     now_ts: float | None = None,
     reference_followup: bool = False,
     query_modalities: set[str] | None = None,
+    structured_evidence_required: bool | None = None,
 ) -> dict[str, Any]:
     q = str(query or "").strip().lower()
     user = str(row.get("user_text") or "")
@@ -2915,12 +3039,25 @@ def _candidate_score(
     user_en = str(row.get("user_text_en") or "")
     april_en = str(row.get("april_text_en") or "")
 
+    requested_modalities = set(query_modalities or set())
+    needs_structured_evidence = (
+        bool(structured_evidence_required)
+        if structured_evidence_required is not None
+        else _query_needs_structured_evidence(q, requested_modalities)
+    )
+    # Keep the normal text-search path bounded. Exact renderer payloads and full
+    # attachments are restored from the selected source rows later, after ranking.
+    answer_for_search = april if needs_structured_evidence else april[:6000]
+    answer_en_for_search = april_en if needs_structured_evidence else april_en[:3000]
     query_tokens = _semantic_tokens(q)
     user_tokens = _semantic_tokens(user)
-    answer_tokens = _semantic_tokens(april)
-    attachment_evidence = _row_attachment_evidence(row)
-    memory_summary = _compact_memory_summary(row)
-    candidate_text = " ".join(x for x in (user, user_en, april, april_en, memory_summary, attachment_evidence) if x)
+    answer_tokens = _semantic_tokens(answer_for_search)
+    attachment_evidence = _row_attachment_evidence(row) if needs_structured_evidence else ""
+    memory_summary = (
+        _compact_memory_summary(row) if needs_structured_evidence
+        else _compact_memory_summary_lightweight(row)
+    )
+    candidate_text = " ".join(x for x in (user, user_en, answer_for_search, answer_en_for_search, memory_summary, attachment_evidence) if x)
     candidate_tokens = _semantic_tokens(candidate_text)
 
     lexical = fuzz.token_set_ratio(
@@ -2933,21 +3070,27 @@ def _candidate_score(
         if q and overlap > 0.0 else 0.0
     )
 
-    row_modalities = _row_modalities(row)
-    requested_modalities = set(query_modalities or set())
+    row_modalities = (
+        _row_modalities(row)
+        if needs_structured_evidence or requested_modalities.intersection({"image", "file", "text_file"})
+        else set()
+    )
     modality_match = (
         len(requested_modalities & row_modalities) / max(1, len(requested_modalities))
         if requested_modalities else 0.0
     )
     answer_overlap = _concept_overlap(query_tokens, answer_tokens)
     user_overlap = _concept_overlap(query_tokens, user_tokens)
-    entity_overlap = _explicit_entity_overlap(query, row)
+    entity_overlap = _explicit_entity_overlap(query, row, max_chars=None if needs_structured_evidence else 6000)
     query_subjects = _subject_tokens(query)
-    row_subjects = _row_subject_tokens(row)
+    row_subjects = (
+        _row_subject_tokens(row) if needs_structured_evidence
+        else _subject_tokens(_row_subject_text_lightweight(row))
+    )
     subject_overlap = _subject_overlap(query_subjects, row_subjects)
     subject_mismatch = _subject_conflicts(query_subjects, row_subjects)
-    numeric_anchor_overlap = _query_numeric_overlap(query, row, query_subjects)
-    protected_data = _protected_structured_data_from_row(row)
+    numeric_anchor_overlap = _query_numeric_overlap(query, row, query_subjects, row_subjects)
+    protected_data = _protected_structured_data_from_row(row) if needs_structured_evidence else {}
     if protected_data and _text(row.get("topic_id")):
         # Preserve the exact originating message while binding the payload to the
         # topic and time range where it entered the dialogue.
@@ -3042,15 +3185,18 @@ def _candidate_score(
         "dialog_id": row_dialog,
         "conversation_id": str(row.get("conversation_id") or ""),
         "interpretation_id": str(row.get("interpretation_id") or ""),
-        "topic": _topic_label(row),
+        "topic": _topic_label(row) if needs_structured_evidence else _topic_label_lightweight(row),
         "topic_id": _text(row.get("topic_id")),
         "topic_origin_message_id": _text(row.get("topic_origin_message_id")),
         "topic_origin_at": row.get("topic_origin_at"),
         "topic_last_at": row.get("topic_last_at"),
         "topic_summary": _text(row.get("topic_summary"))[:440],
-        "sections": _dialogue_section_map(row),
+        "sections": _dialogue_section_map(row) if _is_section_request(q) else [],
         "is_pending_clarification": _row_is_pending_clarification(row),
-        "memory_summary": _compact_memory_summary(row),
+        "memory_summary": (
+            _compact_memory_summary(row) if needs_structured_evidence
+            else _compact_memory_summary_lightweight(row)
+        ),
         "attachment_evidence": attachment_evidence[:3600],
         "protected_structured_data": protected_data,
     }
@@ -3132,6 +3278,14 @@ def _dialogue_section_map(row: dict[str, Any], limit: int = 8) -> list[dict[str,
         if heading:
             sections.append({"heading": heading[:180], "summary": summary[:280], "order": len(sections) + 1})
     return sections
+
+
+def _compact_memory_summary_lightweight(row: dict[str, Any]) -> str:
+    """Bounded summary from text columns, without scanning a full multimedia answer."""
+    direct = _text(str(row.get("memory_summary") or "")[:1800])
+    if not direct:
+        direct = _text(str(row.get("april_text") or row.get("april_text_en") or "")[:1800])
+    return re.sub(r"\s+", " ", direct[:1800])[:440]
 
 
 def _compact_memory_summary(row: dict[str, Any]) -> str:
@@ -3933,6 +4087,20 @@ def search_dialogue_context(
         _text(row.get("message_id")) == resume_key
         or (resume_key.startswith("legacy-memory-") and resume_key == f"legacy-memory-{_text(row.get('id'))}")
     )), None) if resume_key else None
+    query_modalities = {modality for modality, enabled in (
+        ("image", bool(has_image)), ("file", bool(has_file)), ("voice", bool(has_voice)),
+    ) if enabled}
+    needs_structured_search = bool(
+        _structured_work_requested(query, query_interpretation, query_modalities)
+        or history_request or time_filter.get("applied") or _is_section_request(query)
+    )
+
+    def search_topic_label(row: dict[str, Any]) -> str:
+        return _topic_label(row) if needs_structured_search else _topic_label_lightweight(row)
+
+    def search_subject_text(row: dict[str, Any]) -> str:
+        return _row_subject_text(row) if needs_structured_search else _row_subject_text_lightweight(row)
+
     _apr_timing_log(
         "memory_intent_received",
         user_key=_apr_diag_ref(uid),
@@ -3988,11 +4156,11 @@ def search_dialogue_context(
             mid = _text(row.get("message_id"))
             if mid and mid in scoped_ids:
                 continue
-            row_subjects = _row_subject_tokens(row)
+            row_subjects = _subject_tokens(search_subject_text(row))
             subject_overlap = _subject_overlap(query_subjects, row_subjects)
             if _subject_conflicts(query_subjects, row_subjects):
                 continue
-            searchable_topic = " ".join((_topic_label(row), _row_subject_text(row)))
+            searchable_topic = " ".join((search_topic_label(row), search_subject_text(row)))
             overlap = _topic_query_overlap(query, searchable_topic)
             if overlap >= 0.50 or (query_subjects and subject_overlap >= 0.60):
                 # Subject alignment is useful only when there is also meaningful
@@ -4017,9 +4185,56 @@ def search_dialogue_context(
         dialog_key=_apr_diag_ref(dialog_id), conversation_key=_apr_diag_ref(conversation_id),
         rows_in_window=len(all_rows), rows_in_scope=len(rows), history_request=history_request, query_chars=len(str(query or "")))
 
-    query_modalities = {modality for modality, enabled in (
-        ("image", bool(has_image)), ("file", bool(has_file)), ("voice", bool(has_voice)),
-    ) if enabled}
+    # Continuations are scoped by the semantic direction, not by word-triggered
+    # rules. If the user names the subject ("continue about Newton"), rank the
+    # source rows whose actual dialogue text names that subject; if the follow-up
+    # is elliptical ("what happened?"), search the latest same-dialogue window.
+    # Explicit history/time searches, deliberate History anchors and image/file
+    # operations retain the full canonical candidate set.
+    continuation_intent = interpreted_intent in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP"}
+    should_narrow_continuation = bool(
+        continuation_intent
+        and not history_request
+        and not time_filter.get("applied")
+        and not resume_key
+        and not (has_image or has_file)
+        and rows
+    )
+    if should_narrow_continuation:
+        before_count = len(rows)
+        narrowed_rows: list[dict[str, Any]] = []
+        scope_reason = ""
+        if query_subjects:
+            for row in rows:
+                searchable_subject = " ".join((
+                    _text(row.get("user_text") or row.get("user")),
+                    _text(row.get("user_text_en")),
+                    _text(row.get("april_text") or row.get("april"))[:1800],
+                    _text(row.get("april_text_en"))[:1000],
+                ))
+                row_subjects = _subject_tokens(searchable_subject)
+                if _subject_overlap(query_subjects, row_subjects) >= 0.20:
+                    narrowed_rows.append(row)
+            scope_reason = "explicit_subject_text_match"
+        else:
+            current_scope_rows = [row for row in rows if (
+                (dialog_id and _text(row.get("dialog_id")) == _text(dialog_id))
+                or (conversation_id and _text(row.get("conversation_id")) == _text(conversation_id))
+            )]
+            latest_scope = current_scope_rows or rows
+            narrowed_rows = sorted(
+                latest_scope,
+                key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
+            )[-8:]
+            scope_reason = "latest_active_dialogue_window"
+        if narrowed_rows:
+            rows = narrowed_rows
+        _apr_timing_log(
+            "continuation_candidate_scope", user_key=_apr_diag_ref(uid),
+            before_count=before_count, after_count=len(rows), reason=scope_reason,
+            explicit_subject=bool(query_subjects), narrowed=bool(narrowed_rows),
+        )
+
     pending_clarification = _latest_pending_clarification([row for row in rows if not dialog_id or _text(row.get("dialog_id")) == _text(dialog_id)])
     pending_option: dict[str, Any] = {}
     pending_resolved = False
@@ -4031,8 +4246,11 @@ def search_dialogue_context(
         # original request rather than becoming the new active topic.
 
     candidate_started = time.perf_counter()
-    matches = [_candidate_score(query, row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""), reference_followup=reference_followup, query_modalities=query_modalities)
-               for row in rows]
+    matches = [_candidate_score(
+        query, row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""),
+        reference_followup=reference_followup, query_modalities=query_modalities,
+        structured_evidence_required=needs_structured_search,
+    ) for row in rows]
     # For participant-centered, subjectless questions, first rank factual evidence
     # written from the relevant speaker perspective; use the existing relevance and
     # recency ordering for all other turns. No fixed score gate is introduced.
@@ -4044,7 +4262,16 @@ def search_dialogue_context(
     _apr_timing_log("candidate_score_rank", candidate_started, candidates_scored=len(rows), matches=len(matches))
 
     # Build the index once and share it between topic ranking, pair selection and Provider.
-    topics = _build_topic_index(all_rows)
+    needs_section_index = bool(
+        history_request
+        or _is_section_request(query)
+        or re.search(r"\b(?:раздел|подраздел|глава|пункт|section|subsection|chapter|heading)\b", _text(query), re.IGNORECASE)
+    )
+    topics = _build_topic_index(
+        all_rows,
+        include_sections=needs_section_index,
+        include_structured=needs_structured_search,
+    )
     requested_limit = query_interpretation.get("requested_topic_count")
     history_limit = max(1, min(10, int(requested_limit or _history_topic_limit(query, 10))))
     history_minimum = max(1, min(history_limit, int(
@@ -4127,7 +4354,12 @@ def search_dialogue_context(
     active_work_branch: dict[str, Any] = {}
     active_work_row_index = -1
     active_work_has_marker = False
-    if not history_request and not time_filter.get("applied") and not resume_key:
+    scoped_work_rows: list[dict[str, Any]] = []
+    # Artifact branch inference parses structured_response payloads. For a normal
+    # text request with an explicit subject, it cannot improve the answer and may
+    # accidentally resurrect an old image/code task from another topic.
+    should_scan_active_work = bool(needs_structured_search or not query_subjects)
+    if should_scan_active_work and not history_request and not time_filter.get("applied") and not resume_key:
         scoped_work_rows = [
             row for row in all_rows
             if isinstance(row, dict)
@@ -4159,6 +4391,14 @@ def search_dialogue_context(
                 active_work_branch.setdefault("origin_message_id", _text(work_row.get("message_id")))
                 active_work_branch["candidate_message_id"] = _text(work_row.get("message_id"))[:120]
                 break
+        _apr_timing_log(
+            "active_work_branch_scan",
+            user_key=_apr_diag_ref(uid),
+            scanned=bool(should_scan_active_work),
+            reason=("structured_or_elliptical_request" if should_scan_active_work else "named_text_request_skips_artifact_branch"),
+            scoped_rows=len(scoped_work_rows),
+            matched=bool(active_work_pair),
+        )
         # Upgrade old rows without a task marker: locate the nearest preceding
         # task-start row of the same kind, without crossing into an older unrelated
         # game. Persist this origin on the next accepted continuation.
@@ -4281,7 +4521,7 @@ def search_dialogue_context(
         grounded_named_option = bool(answer_has_multiple_options and answer_topic_overlap >= 0.30)
         if _subject_conflicts(query_subjects, row_subjects) and not grounded_named_option:
             continue
-        searchable_topic = " ".join((_topic_label(row), _row_subject_text(row)))
+        searchable_topic = " ".join((search_topic_label(row), search_subject_text(row)))
         if is_correction or reference_followup or topic_reference_fragment:
             # A named correction can refer to a concrete choice that appeared only
             # in April's previous answer, not in the user's original wording.
@@ -4390,6 +4630,22 @@ def search_dialogue_context(
         history_request=history_request, new_topic_request=new_topic_request,
     )
     new_work_root_request = _looks_like_new_work_root_request(query, active_work_branch)
+    structured_work_requested = _structured_work_requested(query, query_interpretation, query_modalities)
+    # A shared entity is not sufficient proof that a text question resumes an old
+    # artifact-editing task. Use the whole current turn's interpreted output needs;
+    # if it is text-only, detach a visual/code/artifact branch for this turn while
+    # keeping the canonical history available to ordinary topic search.
+    structured_branch_detached = bool(
+        _is_structured_work_branch(active_work_branch)
+        and not structured_work_requested
+        and not selection_followup_confirmed
+        and not repair_active_branch
+    )
+    if structured_branch_detached:
+        active_work_branch = {}
+        active_work_pair = None
+        active_work_row_index = -1
+        active_work_has_marker = False
     hot_work_followup, hot_work_match_reason = _hot_work_followup_candidate(
         query, active_work_branch, active_work_pair,
         history_request=history_request,
@@ -4397,6 +4653,9 @@ def search_dialogue_context(
         has_attachment=bool(query_modalities & {"image", "file"}),
         reference_followup=reference_followup,
     )
+    if structured_branch_detached:
+        hot_work_followup = False
+        hot_work_match_reason = "current_turn_does_not_request_structured_work"
 
     # The persisted hot-work marker is not itself proof that the current request
     # belongs to that task. Compare its immutable origin with the topic provenance
@@ -4443,7 +4702,8 @@ def search_dialogue_context(
     historical_work_reactivated = False
     semantic_features = query_interpretation.get("features") if isinstance(query_interpretation.get("features"), dict) else {}
     explicit_historical_work_reference = bool(
-        not history_request
+        should_scan_active_work
+        and not history_request
         and not new_topic_request
         and not new_work_root_request
         and not _is_explicit_topic_closure(query)
@@ -4472,6 +4732,13 @@ def search_dialogue_context(
             candidate_profile = _infer_active_work_branch(candidate_row)
             if not candidate_profile.get("active"):
                 continue
+            if (
+                _is_structured_work_branch(candidate_profile)
+                and not structured_work_requested
+                and not selection_followup_confirmed
+                and not repair_active_branch
+            ):
+                continue
             candidate_origin_id = _text(candidate_profile.get("origin_message_id")) or _text(candidate_row.get("message_id"))
             if not candidate_origin_id or candidate_origin_id == active_work_origin_id:
                 continue
@@ -4489,7 +4756,7 @@ def search_dialogue_context(
                 continue
             root_profile = _infer_active_work_branch(candidate_root)
             candidate_root_text = " ".join(filter(None, (
-                _row_subject_text(candidate_root),
+                search_subject_text(candidate_root),
                 _text(candidate_root.get("user_text") or candidate_root.get("user")),
                 _text(root_profile.get("topic")) if root_profile.get("active") else "",
                 _text(root_profile.get("goal")) if root_profile.get("active") else "",
@@ -4768,7 +5035,7 @@ def search_dialogue_context(
             }:
                 continue
             source_topic = " ".join((
-                _topic_label(source_row), _row_subject_text(source_row),
+                search_topic_label(source_row), search_subject_text(source_row),
                 _compact_memory_summary(source_row),
                 _text(source_row.get("user_text") or source_row.get("user")),
                 _text(source_row.get("april_text") or source_row.get("april")),
@@ -4840,7 +5107,7 @@ def search_dialogue_context(
                             root_profile = _infer_active_work_branch(root_row)
                             if _is_active_work_root_candidate(root_row, root_profile, historical_kind):
                                 root_id = _text(root_row.get("message_id"))
-                                root_text = " ".join((_topic_label(root_row), _row_subject_text(root_row)))
+                                root_text = " ".join((search_topic_label(root_row), search_subject_text(root_row)))
                                 if root_id and _topic_query_overlap(query, root_text) >= 0.12:
                                     recovered_historical_root = root_row
                                     break
