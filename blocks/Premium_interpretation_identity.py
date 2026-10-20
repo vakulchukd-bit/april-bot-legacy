@@ -517,7 +517,7 @@ def _detect_requested_outputs(text: str) -> list[str]:
     # Common compound requests say "build a table and graph" only once. Recognize
     # the chart noun together with an explicit construction/visualization verb.
     has_graph_noun = bool(re.search(
-        r"\b(?:graph|chart|plot|график|графика|графики|графиков)\b|(?:столбчат\w*|линейн\w*)\s+(?:диаграмм\w*|график\w*)|\bbar\s+chart\b",
+        r"\b(?:graph|chart|plot)\b|график\w*|(?:столбчат\w*|линейн\w*)\s+(?:диаграмм\w*|график\w*)|\bbar\s+chart\b",
         low,
     ))
     has_graph_action = bool(re.search(
@@ -533,15 +533,44 @@ def _detect_requested_outputs(text: str) -> list[str]:
     # Treat an explicit create/build/show action plus 3D + visualization/scene/model
     # terminology as a graph artifact request, not as a text-only explanation.
     has_3d_marker = bool(re.search(
-        r"(?:\b3\s*[- ]?d\b|\bthree[- ]dimensional\b|\b3d\s+(?:graph|plot|scene|model|visuali[sz]ation)\b|тр[её]хмерн\w*)",
+        r"(?:\b3\s*[- ]?[dд]\b|\bthree[- ]dimensional\b|\b3d\s+(?:graph|plot|scene|model|visuali[sz]ation)\b|\b3д\b|в\s+3д|тр[её]хмерн\w*)",
         low,
     ))
     has_visual_noun = bool(re.search(
-        r"(?:visuali[sz]ation|visualisation|visualization|3d[- ]?scene|3d[- ]?model|\bscene\b|\bmodel\b|визуализац\w*|\bсцен\w*|\bмодел\w*|поверхност\w*|сфер\w*|куб\w*|треугольн\w*|воронк\w*|волн\w*|\bmesh(?:es)?\b|\bsphere(?:s)?\b|\bcube(?:s)?\b|\btriangle(?:s)?\b|\bfunnel(?:s)?\b|\bsurface\w*|\bplot\b|\bchart\b|\bgraph\b|график\w*|диаграмм\w*)",
+        r"(?:visuali[sz]ation|visualisation|visualization|3d[- ]?scene|3d[- ]?model|\bscene\b|\bmodel\b|визуализац\w*|сцен\w*|модел\w*|поверхност\w*|сфер\w*|куб\w*|треугольн\w*|воронк\w*|волн\w*|\bmesh(?:es)?\b|\bsphere(?:s)?\b|\bcube(?:s)?\b|\btriangle(?:s)?\b|\bfunnel(?:s)?\b|\bsurface\w*|\bplot\b|\bchart\b|\bgraph\b|график\w*|диаграмм\w*|спутник\w*|лу[нн]\w*|планет\w*|юпитер\w*|комет\w*|астероид\w*|гравитац\w*|орбит\w*|траектор\w*|пространственн\w*)",
         low,
     ))
     if has_3d_marker and has_graph_action and has_visual_noun and "graph" not in result:
         result.append("graph")
+
+    # Strong spatial-physics phrasing also implies a structured graph even when
+    # the user does not spell out "3D": e.g. a comet approaching Earth over time.
+    # Keep this narrow to explicit visualization verbs + spatial bodies + dynamics.
+    has_spatial_body = bool(re.search(
+        r"(?:юпитер\w*|сатурн\w*|земл\w*|марс\w*|планет\w*|спутник\w*|лу[нн]\w*|комет\w*|астероид\w*|звезд\w*|\bsatellites?\b|\bmoons?\b|\bplanets?\b|\bcomets?\b|\basteroids?\b|\bstars?\b|\bcelestial bodies\b)",
+        low,
+    ))
+    has_spatial_dynamics = bool(re.search(
+        r"(?:гравитац\w*|тяготен\w*|орбит\w*|траектор\w*|вращен\w*|приближа\w*|удаля\w*|лет\w*|движен\w*|пол[яе]\s+сил|гравитац\w*\s+пол[яе]|\bgravity\b|\borbit\w*|\btrajectory\w*|\bmoving\b|\bapproach\w*|\bmotion\b|\bfield lines\b)",
+        low,
+    ))
+    has_spatial_primitive = bool(re.search(
+        r"(?:сфер\w*|куб\w*|конус\w*|цилиндр\w*|тор\w*|треугольн\w*|пирамид\w*|плоскост\w*|сетка\w*|поверхност\w*|\bsphere\w*\b|\bcube\w*\b|\bcone\w*\b|\bcylinder\w*\b|\btorus\b|\bplane\b|\bmesh\b)",
+        low,
+    ))
+    if has_graph_action and has_spatial_body and has_spatial_dynamics and not explicit_image_request and "graph" not in result:
+        result.append("graph")
+    elif has_graph_action and has_spatial_primitive and has_3d_marker and not explicit_image_request and "graph" not in result:
+        result.append("graph")
+    else:
+        image_or_photo_noun = bool(re.search(
+            r"(?:фото\b|фотограф\w*|снимк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b)",
+            low,
+        ))
+        if has_graph_action and has_spatial_primitive and not explicit_image_request and not image_or_photo_noun and "graph" not in result:
+            # Asking to show a geometric primitive without mentioning a raster image
+            # is a structured spatial object request in April's adaptive visual layer.
+            result.append("graph")
 
     if not result:
         result.append("text")
@@ -718,6 +747,24 @@ def _graph_representation_policy(text: str, *, allow_data_driven_3d: bool = Fals
         r"распределен\w*|дол\w*\s+категори\w*)",
         low,
     ))
+    spatial_scene_action = bool(re.search(
+        r"(?:\b(?:show|draw|build|create|visuali[sz]e|render|display)\b|покаж\w*|нарис\w*|постро\w*|созда\w*|визуализир\w*|отобраз\w*)",
+        low,
+    ))
+    spatial_scene_body = bool(re.search(
+        r"(?:юпитер\w*|сатурн\w*|земл\w*|марс\w*|планет\w*|спутник\w*|лу[нн]\w*|комет\w*|астероид\w*|звезд\w*|\bjupiter\b|\bsaturn\b|\bearth\b|\bmars\b|\bplanet\w*\b|\bsatellite\w*\b|\bmoon\b|\bcomet\w*\b|\basteroid\w*\b)",
+        low,
+    ))
+    spatial_scene_dynamics = bool(re.search(
+        r"(?:гравитац\w*|тяготен\w*|орбит\w*|траектор\w*|вращен\w*|приближа\w*|удаля\w*|лет\w*|движен\w*|пол[яе]\s+сил|\bgravity\b|\borbit\w*|\btrajectory\w*|\bmoving\b|\bapproach\w*|\bmotion\b|\bfield lines\b|за\s+сколько\s+времени)",
+        low,
+    ))
+    spatial_primitive_request = spatial_scene_action and bool(re.search(
+        r"(?:сфер\w*|куб\w*|конус\w*|цилиндр\w*|тор\w*|треугольн\w*|пирамид\w*|плоскост\w*|\bsphere\w*\b|\bcube\w*\b|\bcone\w*\b|\bcylinder\w*\b|\btorus\b|\bplane\b|\bmesh\b)",
+        low,
+    ))
+    inferred_spatial_scene = (spatial_scene_action and spatial_scene_body and spatial_scene_dynamics) or spatial_primitive_request
+
     structured_3d_signal = bool(re.search(
         r"(?:\bxyz\b|координат\w*\s*(?:x\s*[,; ]+\s*y\s*[,; ]+\s*z|x\s*y\s*z)|"
         r"\bz\s*=\s*f\s*\(\s*x\s*[,;]\s*y\s*\)|"
@@ -728,8 +775,8 @@ def _graph_representation_policy(text: str, *, allow_data_driven_3d: bool = Fals
         low,
     ))
 
-    if explicit_3d:
-        if re.search(r"(?:\bsphere\w*\b|\bcube\w*\b|\bobject\s+scene\b|\b3d\s+scene\b|сфер\w*|куб\w*|объект\w*\s+сцен\w*|пространствен\w*\s+объект)", low):
+    if explicit_3d or inferred_spatial_scene:
+        if re.search(r"(?:\bsphere\w*\b|\bcube\w*\b|\bobject\s+scene\b|\b3d\s+scene\b|сфер\w*|куб\w*|конус\w*|цилиндр\w*|тор\w*|сателлит\w*|спутник\w*|лу[нн]\w*|планет\w*|юпитер\w*|сатурн\w*|земл\w*|марс\w*|комет\w*|гравитац\w*|орбит\w*|траектор\w*|объект\w*\s+сцен\w*|пространствен\w*\s+объект|\bjupiter\b|\bsatellite\w*\b|\bcomet\w*\b|\bgravity\b|\borbit\w*|\btrajectory\w*\b)", low):
             representation = "scene3d"
         elif re.search(r"(?:\bscatter\b|\bxyz\b|\bcoordinates\b|\bpoint\s+cloud\b|координат\w*|облак\w*\s+точек|пространствен\w*\s+точк)", low):
             representation = "scatter3d"
@@ -739,14 +786,14 @@ def _graph_representation_policy(text: str, *, allow_data_driven_3d: bool = Fals
             representation = "surface3d"
         fallback = "bar" if explicit_bar or categorical_comparison else "line"
         return {
-            "mode": "explicit_3d",
+            "mode": "explicit_3d" if explicit_3d else "inferred_spatial_scene",
             "preferred_representation": representation,
             "fallback_representation": fallback,
             "allowed_2d_representations": ["line", "bar"],
-            "allow_3d_for_explicit_request": True,
+            "allow_3d_for_explicit_request": bool(explicit_3d),
             "allow_3d_when_structured_data_exists": True,
             "require_real_third_dimension": True,
-            "decision_reason": "explicit_3d_request",
+            "decision_reason": "explicit_3d_request" if explicit_3d else "spatial_physics_scene_request",
         }
 
     if structured_3d_signal:
