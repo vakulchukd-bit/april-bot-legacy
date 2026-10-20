@@ -939,7 +939,7 @@ def load_dialogue_history_index(
                           AND created_at > %s - INTERVAL '24 hours'
                           AND created_at + INTERVAL '24 hours' > %s
                         """,
-                        (uid, current, current, current),
+                        (uid, current, current),
                     )
 
                 # The explicit 24-hour lower bound allows the existing
