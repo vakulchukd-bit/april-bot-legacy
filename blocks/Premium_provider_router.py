@@ -3387,14 +3387,14 @@ def normalize_render_blocks(
     renderer_map = {
         "text": ("MessageTextBlock", "MessageTextBlock"),
         "markdown": ("MessageTextBlock", "MessageTextBlock"),
-        "code": ("CodeBlock", "CodeBlock"),
-        "link": ("LinkCard", "LinkCard"),
-        "formula": ("FormulaRenderer", "FormulaRenderer"),
-        "graph": ("GraphBlock", "GraphBlock"),
-        "table": ("TableBlock", "TableBlock"),
-        "diagram": ("DiagramRenderer", "DiagramRenderer"),
-        "image": ("GalleryBlock", "GalleryBlock"),
-        "gallery": ("GalleryBlock", "GalleryBlock"),
+        "code": ("CodeBlock", "CodeBlock"), "source_code": ("CodeBlock", "CodeBlock"), "code_block": ("CodeBlock", "CodeBlock"), "script": ("CodeBlock", "CodeBlock"),
+        "link": ("LinkCard", "LinkCard"), "file": ("LinkCard", "LinkCard"), "document": ("LinkCard", "LinkCard"), "file_card": ("LinkCard", "LinkCard"),
+        "formula": ("FormulaRenderer", "FormulaRenderer"), "equation": ("FormulaRenderer", "FormulaRenderer"), "math": ("FormulaRenderer", "FormulaRenderer"), "latex": ("FormulaRenderer", "FormulaRenderer"),
+        "graph": ("GraphBlock", "GraphBlock"), "graph_data": ("GraphBlock", "GraphBlock"), "chart": ("GraphBlock", "GraphBlock"), "plot": ("GraphBlock", "GraphBlock"), "graph3d": ("GraphBlock", "GraphBlock"), "graph_3d": ("GraphBlock", "GraphBlock"), "3d_graph": ("GraphBlock", "GraphBlock"), "plot3d": ("GraphBlock", "GraphBlock"), "plot_3d": ("GraphBlock", "GraphBlock"), "scatter3d": ("GraphBlock", "GraphBlock"), "scatter_3d": ("GraphBlock", "GraphBlock"), "surface_plot": ("GraphBlock", "GraphBlock"), "surface_graph": ("GraphBlock", "GraphBlock"), "wireframe": ("GraphBlock", "GraphBlock"), "knowledge_graph": ("GraphBlock", "GraphBlock"), "relation_graph": ("GraphBlock", "GraphBlock"), "relations": ("GraphBlock", "GraphBlock"),
+        "table": ("TableBlock", "TableBlock"), "table_data": ("TableBlock", "TableBlock"), "spreadsheet": ("LinkCard", "LinkCard"), "presentation": ("LinkCard", "LinkCard"), "document_file": ("LinkCard", "LinkCard"), "text_file": ("LinkCard", "LinkCard"), "code_file": ("LinkCard", "LinkCard"), "pdf": ("LinkCard", "LinkCard"),
+        "diagram": ("DiagramRenderer", "DiagramRenderer"), "mermaid": ("DiagramRenderer", "DiagramRenderer"), "svg": ("DiagramRenderer", "DiagramRenderer"), "scene": ("DiagramRenderer", "DiagramRenderer"), "layout": ("DiagramRenderer", "DiagramRenderer"),
+        "image": ("GalleryBlock", "GalleryBlock"), "gallery": ("GalleryBlock", "GalleryBlock"), "generated_image": ("GalleryBlock", "GalleryBlock"), "screenshot": ("GalleryBlock", "GalleryBlock"), "image_gallery": ("GalleryBlock", "GalleryBlock"),
+        "audio": ("MessageTextBlock", "MessageTextBlock"), "video": ("MessageTextBlock", "MessageTextBlock"),
     }
 
     for block in raw:
@@ -3402,17 +3402,43 @@ def normalize_render_blocks(
             continue
 
         item = dict(block)
-        block_type = str(item.get("type") or "text").strip().lower()
-        renderer, viewer = renderer_map.get(
-            block_type,
-            ("MessageTextBlock", "MessageTextBlock"),
-        )
+        block_type = str(item.get("type") or item.get("artifact_type") or item.get("kind") or "text").strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "graph_data": "graph", "chart": "graph", "plot": "graph", "graph3d": "graph", "graph_3d": "graph", "3d_graph": "graph", "plot3d": "graph", "plot_3d": "graph", "scatter3d": "graph", "scatter_3d": "graph", "surface_plot": "graph", "surface_graph": "graph", "wireframe": "graph",
+            "table_data": "table", "equation": "formula", "math": "formula", "latex": "formula", "math_equation": "formula",
+            "source_code": "code", "code_block": "code", "script": "code",
+            "file_card": "file", "document_file": "file", "text_file": "file", "code_file": "file", "pdf": "file",
+            "generated_image": "image", "image_gallery": "gallery", "screenshot": "image", "svg": "diagram", "mermaid": "diagram",
+        }
+        block_type = aliases.get(block_type, block_type)
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        if not payload and isinstance(item.get("spec"), dict):
+            payload = item["spec"]
+        if not payload and isinstance(item.get("render_signal"), dict) and isinstance(item["render_signal"].get("payload"), dict):
+            payload = item["render_signal"]["payload"]
+        # Promote canonical source fields for the viewer while preserving the entire
+        # nested payload/spec unchanged for history, subsequent edits and new schemas.
+        for key, nested_value in payload.items():
+            if key not in item and nested_value not in (None, "", [], {}):
+                item[key] = nested_value
+        renderer, viewer = renderer_map.get(block_type, ("MessageTextBlock", "MessageTextBlock"))
+        try:
+            registration = get_web_renderer_registration(block_type)
+            if registration.get("renderer") and registration.get("renderer") != "MessageTextBlock":
+                renderer = registration["renderer"]
+                viewer = registration.get("viewer") or renderer
+        except Exception:
+            pass
         item["type"] = block_type
         item.setdefault("renderer", renderer)
         item.setdefault("viewer", viewer)
         if block_type == "code":
-            code_value = _text(item.get("code") or item.get("content") or item.get("text"))
+            code_value = next((value for value in (
+                item.get("code"), item.get("source_code"), item.get("content"), item.get("text")
+            ) if isinstance(value, str) and value.strip()), "")
             if code_value:
+                # Code is a lossless source payload; retain its leading/trailing
+                # whitespace and newlines for download and future editing.
                 item["code"] = code_value
                 item.setdefault("content", code_value)
                 item.setdefault("language", "text")
