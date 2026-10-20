@@ -1894,6 +1894,16 @@ async def execute(
             or (semantic_interpretation.get("pragmatic_features") or {}).get("active_branch_repair")
             or (semantic_interpretation.get("features") or {}).get("active_branch_repair")
         )
+        parent_active_topic_turn = bool(
+            semantic_interpretation.get("primary_intent") in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP"}
+            and semantic_interpretation.get("requires_memory")
+            and not semantic_interpretation.get("history_request")
+            and not semantic_interpretation.get("explicit_topic_switch")
+            and _text(semantic_interpretation.get("topic_reference")).upper() in {
+                "PREVIOUS_OR_ACTIVE_TOPIC", "PREVIOUS_ASSISTANT_ANSWER", "TOPIC_FRAGMENT"
+            }
+            and not _text(resume_message_id)
+        )
         # A self-contained NEW turn whose clauses do not request prior context should
         # not run a full cross-history ranking once per clause. Any continuation,
         # explicit history request, attachment, resume anchor, correction or choice
@@ -1911,6 +1921,16 @@ async def execute(
                 for item in question_sequence if isinstance(item, dict)
             )
         )
+        # Keep whole-turn meaning alongside each decomposed clause. Search and work-branch
+        # compatibility must see that "continue about Newton; tell me facts" is one
+        # text-information request, not a command to resume an older image-editing task.
+        parent_request_text = _text(current_text)[:4000]
+        parent_requested_outputs = sorted({
+            _text(output).lower()
+            for item in question_sequence if isinstance(item, dict)
+            for output in (item.get("output_types") or [])
+            if _text(output)
+        }) or ["text"]
         # Use the same original-language clause that was classified. Equal list lengths
         # do not guarantee that separately split normalized text is aligned item by item.
         for index, question_item in enumerate(question_sequence):
@@ -1953,6 +1973,9 @@ async def execute(
                     "context_signature": question_item.get("context_signature", {}),
                     "parent_context_dependency": bool(question_item.get("parent_context_dependency")),
                     "parent_intent": question_item.get("parent_intent", ""),
+                    "requested_outputs": list(question_item.get("output_types") or ["text"]),
+                    "parent_request_text": parent_request_text,
+                    "parent_requested_outputs": parent_requested_outputs,
                     "inherits_current_request_subject": inherits_subject,
                 }
                 reuse_parent_branch_context = bool(
@@ -1963,16 +1986,33 @@ async def execute(
                     and bool(task_semantics.get("active_branch_repair") or (task_semantics.get("pragmatic_features") or {}).get("active_branch_repair"))
                     and not task_semantics.get("explicit_topic_switch")
                 )
+                # Once a continuation clause has anchored the named/current topic,
+                # dependent clauses like "tell me more" / "what facts do you know
+                # about him" inherit that exact source instead of each launching a
+                # fresh, full-history retrieval. A child with its own topic intro or
+                # an explicit switch still takes its own normal search path.
+                reuse_parent_topic_context = bool(
+                    index > 0
+                    and parent_active_topic_turn
+                    and current_request_subject_context
+                    and _text(current_request_subject_context.get("relation")).upper() == "CONTINUE"
+                    and not question_item.get("introduces_current_request_subject")
+                    and not question_item.get("explicit_topic_switch")
+                )
                 use_current_turn_context = bool(inherits_subject and current_request_subject_context)
                 use_new_root_fast_path = bool(index == 0 and compound_turn_is_new)
-                if reuse_parent_branch_context:
-                    # Once the first correction clause selected the active branch,
-                    # dependent correction clauses should share its exact anchor and
-                    # evidence instead of rehydrating/reranking the whole history.
+                if reuse_parent_branch_context or reuse_parent_topic_context:
+                    # The source pair, topic anchor and asset provenance are shared;
+                    # the ordered REQUEST_SEQUENCE still preserves every subtask for
+                    # the model, but memory is resolved once per coherent user turn.
                     task_context = dict(current_request_subject_context)
                     task_search = _compact_question_search(task_context, search_query, task_semantics)
-                    task_search["reused_parent_branch_context"] = True
-                    task_search["reason"] = "parent_active_branch_context_reuse"
+                    task_search["reused_parent_branch_context"] = bool(reuse_parent_branch_context)
+                    task_search["reused_parent_topic_context"] = bool(reuse_parent_topic_context)
+                    task_search["reason"] = (
+                        "parent_active_branch_context_reuse" if reuse_parent_branch_context
+                        else "parent_active_topic_context_reuse"
+                    )
                 elif use_current_turn_context or use_new_root_fast_path:
                     active_subject = _text((current_request_subject_context or {}).get("active_topic") or search_query)[:140]
                     task_context = {
@@ -2024,7 +2064,9 @@ async def execute(
                     task_context = prepare_dialogue_context(
                         uid, search_query, query_interpretation=task_semantics, **search_kwargs
                     )
-                    if index == 0 and parent_repair_turn and _text(task_context.get("relation")).upper() == "CONTINUE":
+                    if index == 0 and (
+                        parent_repair_turn or parent_active_topic_turn
+                    ) and _text(task_context.get("relation")).upper() == "CONTINUE":
                         current_request_subject_context = task_context
                     if question_item.get("introduces_current_request_subject"):
                         # Bind dependent substeps to the first subject clause; do not
@@ -2068,7 +2110,10 @@ async def execute(
                 clarification_needed=bool(task_search.get("clarification_needed")),
                 status=task_search.get("status"),
                 context_source=(
-                    "parent_active_branch" if task_search.get("reused_parent_branch_context")
+                    "parent_context_reused" if (
+                        task_search.get("reused_parent_branch_context")
+                        or task_search.get("reused_parent_topic_context")
+                    )
                     else "current_request_subject" if question_item.get("inherits_current_request_subject")
                     else "dialogue_memory"
                 ),
