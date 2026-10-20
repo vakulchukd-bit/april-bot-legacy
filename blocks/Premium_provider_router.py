@@ -3862,6 +3862,24 @@ async def generate_text(
             provider_retries = 0
             prior_usage_data: dict[str, int] = {}
             first_status = _text(getattr(response, "status", "")).lower()
+            first_raw_output = _text(getattr(response, "output_text", ""))
+            recovery_language = _text(
+                (request.constraints or {}).get("display_language")
+                or (request.constraints or {}).get("provider_output_language")
+                or ""
+            )
+            first_recovery_reason = ""
+            if first_status == "incomplete":
+                first_recovery_reason = _text(getattr(response, "incomplete_reason", "")) or "incomplete"
+            elif not first_raw_output:
+                first_recovery_reason = "empty_output"
+            else:
+                try:
+                    first_decoded = _json_load(first_raw_output)
+                    if not _canonical_display_answer(first_decoded, display_language=recovery_language):
+                        first_recovery_reason = "missing_public_answer"
+                except Exception:
+                    first_recovery_reason = "invalid_json_or_contract"
             first_usage = getattr(response, "usage", None)
             if first_usage is not None:
                 prior_usage_data = {
@@ -3873,13 +3891,14 @@ async def generate_text(
                     "reasoning_tokens": int(getattr(first_usage, "reasoning_tokens", 0) or 0),
                 }
                 usage_data = dict(prior_usage_data)
-            if first_status == "incomplete" and PREMIUM_RECOVERY_RETRIES > 0:
-                # One bounded recovery on the same canonical route. Re-emit the
-                # complete response from the original input instead of continuing
-                # malformed/truncated JSON and never start a new conversation.
+            if first_recovery_reason and PREMIUM_RECOVERY_RETRIES > 0:
+                # One bounded recovery on the same canonical route for truncated,
+                # empty, malformed, or non-public output. Re-emit a fresh complete
+                # response from the original input; never continue malformed output
+                # or start a new conversation.
                 retry_input = [dict(item) if isinstance(item, dict) else item for item in base_input]
                 recovery_rule = (
-                    "\n\nRECOVERY PASS after a truncated output: generate a NEW complete, concise JSON object from the original request. "
+                    "\n\nRECOVERY PASS after an empty, incomplete, malformed, or non-public output: generate a NEW complete, concise JSON object from the original request. "
                     "Do not continue or quote the cut-off JSON. Keep every requested topic and required renderer. "
                     "Use about 60% of the response for complete explanatory text and about 40% for useful structured render payloads; "
                     "the combined completed output must fit under 12000 tokens. Omit the duplicate `content` body (set content to an empty string; "
@@ -3896,7 +3915,7 @@ async def generate_text(
                     retry_input.append({"role": "user", "content": recovery_rule.strip()})
                 _log_json("OUTPUT_RECOVERY", {
                     "request_fingerprint": key[:16], "retry": 1,
-                    "reason": _text(getattr(response, "incomplete_reason", "")) or "incomplete",
+                    "reason": first_recovery_reason,
                     "output_limit_tokens": PREMIUM_OUTPUT_TOKEN_LIMIT,
                     "same_canonical_route": True,
                 })
@@ -3955,7 +3974,7 @@ async def generate_text(
                 )
             elif not raw:
                 failure_code = "OPENAI_EMPTY_OUTPUT"
-                print("[APRIL_PROVIDER] empty model output; retries=0", flush=True)
+                print(f"[APRIL_PROVIDER] empty model output; retries={provider_retries}", flush=True)
             else:
                 try:
                     decoded = _json_load(raw)
@@ -3969,8 +3988,15 @@ async def generate_text(
                     machine = machine if isinstance(machine, dict) else {}
                     out_blocks = machine.get("render_blocks") if isinstance(machine.get("render_blocks"), list) else []
                     out_artifacts = machine.get("artifacts") if isinstance(machine.get("artifacts"), list) else []
-                    answer_text = _text(decoded.get("answer") or decoded.get("content"))
-                    summary_text = _text(decoded.get("summary"))
+                    # Diagnostics must describe the normalized public answer. Models
+                    # sometimes use the valid `text` field instead of `answer`; the
+                    # normalizer recovers it correctly, so measuring only raw
+                    # answer/content falsely reports an empty response.
+                    answer_text = _text(machine.get("answer") or _canonical_display_answer(
+                        decoded, display_language=display_language
+                    ))
+                    normalized_content = _text(machine.get("content"))
+                    summary_text = _text(machine.get("summary") or decoded.get("summary"))
                     output_blocks_diagnostics = []
                     log_previews = str(os.getenv("APRIL_OPENAI_LOG_CONTENT_PREVIEW", "1")).strip().lower() not in {"0", "false", "no", "off"}
                     for block_index, block in enumerate(out_blocks, start=1):
@@ -3998,7 +4024,7 @@ async def generate_text(
                     parsed_output = {
                         "json_keys": sorted(decoded.keys()),
                         "answer_chars": len(answer_text),
-                        "content_chars": len(_text(decoded.get("content"))),
+                        "content_chars": len(normalized_content or _text(decoded.get("content"))),
                         "internal_answer_en_chars": len(_text(decoded.get("internal_answer_en"))),
                         "summary_chars": len(summary_text),
                         "answer_preview": _clip(answer_text, 320) if log_previews else None,
