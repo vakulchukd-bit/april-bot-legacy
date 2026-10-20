@@ -3932,6 +3932,77 @@ def _rank_sections_for_row(query: str, row: dict[str, Any]) -> list[dict[str, An
     ranked.sort(key=lambda item: (float(item.get("score") or 0), -int(item.get("order") or 0)), reverse=True)
     return ranked
 
+
+def _explicit_artifact_followup_kind(query: str) -> str:
+    """Return the artifact family when a turn explicitly edits/extends a saved artifact.
+
+    This deliberately stays narrow: an ordinary new graph request must remain NEW,
+    while edits such as "add intermediate points to the graph" must re-open the
+    value-bearing artifact from the same dialogue even if semantic intent calls it NEW.
+    """
+    low = _text(query).lower().replace("ё", "е")
+    if not low:
+        return ""
+    artifact_patterns = (
+        ("graph", r"(?:\bграфик\w*\b|\bдиаграмм\w*\b|\bgraph\b|\bchart\b|\bplot\b)"),
+        ("table", r"(?:\bтаблиц\w*\b|\btable\b)"),
+        ("formula", r"(?:\bформул\w*\b|\bуравнен\w*\b|\bformula\b|\bequation\b)"),
+        ("diagram", r"(?:\bсхем\w*\b|\bдиаграмм\w*\b|\bdiagram\b|\bdrawing\b|\bчертеж\w*\b)"),
+        ("code", r"(?:\bкод\w*\b|\bскрипт\w*\b|\bcode\b|\bscript\b)"),
+        ("image", r"(?:\bфото\w*\b|\bкартинк\w*\b|\bизображен\w*\b|\bimage\b|\bphoto\b|\bpicture\b)"),
+        ("file", r"(?:\bфайл\w*\b|\bдокумент\w*\b|\bfile\b|\bdocument\b)"),
+    )
+    kind = next((name for name, pattern in artifact_patterns if re.search(pattern, low, re.IGNORECASE)), "")
+    if not kind:
+        return ""
+    # Explicitly creating a new/another artifact is not a saved-artifact edit.
+    fresh_artifact_request = bool(re.search(
+        r"(?:\bнов\w*\s+(?:график\w*|диаграмм\w*|таблиц\w*|формул\w*|схем\w*|код\w*|скрипт\w*|файл\w*|документ\w*|картинк\w*|фото\w*)\b|"
+        r"\bnew\s+(?:graph|chart|plot|table|formula|diagram|code|script|file|document|image|photo|picture)\b|"
+        r"\b(?:созда\w*|постро\w*|сдела\w*|build|create|make|generate)\b.{0,28}\b(?:нов\w*|new|another)\b)",
+        low, re.IGNORECASE,
+    ))
+    if fresh_artifact_request:
+        return ""
+
+    edit_or_extend = bool(re.search(
+        r"(?:добав\w*|допол\w*|исправ\w*|измен\w*|обнов\w*|перестро\w*|передел\w*|"
+        r"редакт\w*|улучш\w*|замен\w*|убер\w*|восстанов\w*|верни\w*|продолж\w*|"
+        r"add\w*|edit\w*|update\w*|change\w*|modify\w*|revise\w*|improve\w*|restore\w*|"
+        r"промежуточ\w*|по\s+дням|по\s+датам|кажд\w*\s+дн\w*|точк\w*|значени\w*|"
+        r"данн\w*\s+(?:на|в|к)|с\s+данн\w*|с\s+точк\w*|with\s+(?:intermediate|daily|dated)\s+(?:data|points))",
+        low, re.IGNORECASE,
+    ))
+    # Delivery/show verbs alone are insufficient (they may start a fresh request),
+    # but with intermediate values/time points they unambiguously target a saved artifact.
+    delivery_with_detail = bool(
+        re.search(r"(?:пришл\w*|выдай\w*|вывед\w*|покаж\w*|дай\w*|send\w*|show\w*|display\w*)", low, re.IGNORECASE)
+        and re.search(r"(?:промежуточ\w*|по\s+дням|по\s+датам|точк\w*|значени\w*|данн\w*|intermediate|daily|dated\s+points)", low, re.IGNORECASE)
+    )
+    explicit_saved_reference = bool(re.search(
+        r"(?:\bэтот\b|\bэта\b|\bэту\b|\bэтой\b|\bэти\b|\bего\b|\bее\b|\bеё\b|"
+        r"\bснова\b|еще\s+раз|ещё\s+раз|предыдущ\w*|последн\w*|из\s+истори\w*|"
+        r"\bthis\b|\bthat\b|\bsame\b|\bprevious\b|\bearlier\b|\bagain\b)",
+        low, re.IGNORECASE,
+    ))
+    return kind if edit_or_extend or delivery_with_detail or explicit_saved_reference else ""
+
+
+def _row_has_value_bearing_artifact(row: dict[str, Any], kind: str) -> bool:
+    """Check the persisted canonical response, not text mentions of an artifact."""
+    protected = _protected_structured_data_from_row(row)
+    items = protected.get("items") if isinstance(protected, dict) else None
+    if not isinstance(items, list):
+        return False
+    for item in items:
+        if not isinstance(item, dict) or _text(item.get("kind")).lower() != kind:
+            continue
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        richness = _protected_node_richness(kind, data)
+        if richness >= 8:
+            return True
+    return False
+
 def search_dialogue_context(
     user_id: Any,
     query: str,
@@ -3966,6 +4037,8 @@ def search_dialogue_context(
     interpreted_direction = _text(query_interpretation.get("direction"))
     interpreted_intent = _text(query_interpretation.get("primary_intent"))
     topic_reference_fragment = _text(query_interpretation.get("topic_reference")) == "TOPIC_FRAGMENT"
+    explicit_artifact_kind = _explicit_artifact_followup_kind(query)
+    explicit_artifact_followup = bool(explicit_artifact_kind and not history_request and not new_topic_request)
     context_signature = _query_context_signature(query, query_interpretation)
     pragmatic_features = query_interpretation.get("pragmatic_features") if isinstance(query_interpretation.get("pragmatic_features"), dict) else {}
     speech_act = _text(query_interpretation.get("speech_act")).upper()
@@ -4022,6 +4095,7 @@ def search_dialogue_context(
     should_apply_time_filter = bool(
         parsed_window.get("has_constraint")
         and not resume_key
+        and not explicit_artifact_followup
         and (
             history_request
             or bool(query_interpretation.get("requires_memory"))
@@ -6278,6 +6352,205 @@ def search_dialogue_context(
         )
     topic_table_md = "\n".join(topic_table_lines)
 
+    # Recovery lane for an explicit edit/extension of a previously rendered artifact.
+    # The PostgreSQL dialogue pair already contains render_blocks/typed data; the bug
+    # was that NEW_INFORMATION overrode semantic continuity and returned zero pairs.
+    artifact_source_row: dict[str, Any] | None = None
+    artifact_source_candidate: dict[str, Any] | None = None
+    if explicit_artifact_followup and not resume_key and not time_filter.get("applied"):
+        # Never cross the authenticated conversation boundary: limit to the active
+        # dialogue/conversation before checking exact persisted renderer payloads.
+        artifact_scope = [
+            row for row in scoped_rows
+            if isinstance(row, dict)
+            and not _row_is_pending_clarification(row)
+            and (
+                # Prefer the exact active dialogue. A matching conversation_id alone
+                # must not let a graph from another dialogue/tab override the hot item.
+                (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
+                or (
+                    not _text(row.get("dialog_id"))
+                    and _text(conversation_id)
+                    and _text(row.get("conversation_id")) == _text(conversation_id)
+                )
+                or (
+                    not _text(dialog_id)
+                    and _text(conversation_id)
+                    and _text(row.get("conversation_id")) == _text(conversation_id)
+                )
+            )
+        ]
+        # For subject-bearing edits, use the query's real topic terms and reject
+        # semantically disjoint artifact rows; for elliptical edits, recency is valid
+        # only inside this same dialogue and only among rows with an actual artifact.
+        # Remove action, artifact-format and range words from the candidate subject
+        # before collision checks. Without this, generic phrasing such as "add
+        # intermediate points to the graph" incorrectly treats "intermediate" as
+        # a new entity and rejects the only saved graph in the active dialogue.
+        artifact_subject_query = re.sub(
+            r"(?:\b(?:graph|chart|plot|table|formula|equation|diagram|code|script|image|photo|picture|file|document)\w*\b|"
+            r"\b(?:график|диаграмм|таблиц|формул|уравнен|схем|чертеж|код|скрипт|картинк|изображен|фото|файл|документ)\w*\b|"
+            r"\b(?:данн|значен|точк|проме|добав|допол|исправ|измен|обнов|перестро|передел|редакт|улучш|замен|убер|восстанов|верни|пришл|выдай|вывед|отобраз|представ|покаж|сдела|постро|созда)\w*\b|"
+            r"\b(?:день|дня|дней|днями|недел|месяц|года|год|за)\w*\b|"
+            r"\b(?:daily|weekly|monthly|intermediate|estimated|points?|data|values?|days?|weeks?|months?|price|prices|growth)\w*\b|"
+            r"\b(?:грн|руб|рубл|доллар|евро|uah|usd)\w*\b|\b\d+(?:[.,]\d+)?\b)",
+            " ", _text(query).lower().replace("ё", "е"), flags=re.IGNORECASE,
+        )
+        artifact_query_subjects = set(_subject_tokens(artifact_subject_query))
+        artifact_options: list[tuple[float, float, int, dict[str, Any], dict[str, Any]]] = []
+        for source_row in artifact_scope:
+            if not _row_has_value_bearing_artifact(source_row, explicit_artifact_kind):
+                continue
+            row_subjects = _row_subject_tokens(source_row)
+            subject_overlap = _subject_overlap(artifact_query_subjects, row_subjects)
+            subject_mismatch = _subject_conflicts(artifact_query_subjects, row_subjects)
+            if artifact_query_subjects and row_subjects and subject_mismatch:
+                continue
+            if artifact_query_subjects and row_subjects and subject_overlap <= 0.0:
+                continue
+            scored = _candidate_score(
+                query, source_row,
+                dialog_id=str(dialog_id or ""),
+                conversation_id=str(conversation_id or ""),
+                reference_followup=True,
+                query_modalities=query_modalities,
+                structured_evidence_required=True,
+            )
+            # Subject match and typed exact data outrank a newer generic artifact.
+            exact_subject = 1.0 if not artifact_query_subjects else float(subject_overlap)
+            score = (
+                0.52 * exact_subject
+                + 0.23 * float(scored.get("source_data_alignment") or 0.0)
+                + 0.15 * min(1.0, float(scored.get("structured_data_richness") or 0) / 40.0)
+                + 0.10 * float(scored.get("recency") or 0.0)
+            )
+            artifact_options.append((score, exact_subject, int(source_row.get("turn_index") or 0), source_row, scored))
+        if artifact_options:
+            artifact_options.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+            _, _, _, artifact_source_row, artifact_source_candidate = artifact_options[0]
+            source_id = _text(artifact_source_row.get("message_id"))
+            # Recover user-entered values from the originating turn when it belongs
+            # to the same topic; include at most one origin plus the exact artifact.
+            source_rows: list[dict[str, Any]] = []
+            origin_id = _text(artifact_source_row.get("topic_origin_message_id") or artifact_source_row.get("origin_message_id"))
+            if origin_id and origin_id != source_id:
+                origin_row = next((row for row in artifact_scope if _text(row.get("message_id")) == origin_id), None)
+                if origin_row is not None:
+                    origin_subjects = _row_subject_tokens(origin_row)
+                    if not artifact_query_subjects or not origin_subjects or not _subject_conflicts(artifact_query_subjects, origin_subjects):
+                        source_rows.append(origin_row)
+            if not source_rows:
+                # Legacy topic indexes may not expose an origin id. Pick the nearest
+                # earlier user turn with matching subject and data-like content.
+                source_at = float(artifact_source_row.get("created_at") or 0.0)
+                prior_rows = []
+                for row in artifact_scope:
+                    if _text(row.get("message_id")) == source_id or float(row.get("created_at") or 0.0) >= source_at:
+                        continue
+                    row_subjects = _row_subject_tokens(row)
+                    if artifact_query_subjects and row_subjects and _subject_conflicts(artifact_query_subjects, row_subjects):
+                        continue
+                    raw_user = _text(row.get("user_text") or row.get("user"))
+                    if not re.search(r"\d", raw_user) and not re.search(r"(?:цен\w*|данн\w*|по\s+дням|по\s+датам|price|data|value)", raw_user, re.IGNORECASE):
+                        continue
+                    prior_rows.append(row)
+                if prior_rows:
+                    source_rows.append(max(prior_rows, key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0))))
+
+            selected_for_context = []
+            selected_seen: set[str] = set()
+            for source_row in [*source_rows, artifact_source_row]:
+                source_id = _text(source_row.get("message_id"))
+                if not source_id or source_id in selected_seen:
+                    continue
+                candidate = artifact_source_candidate if source_id == _text(artifact_source_row.get("message_id")) else _candidate_score(
+                    query, source_row,
+                    dialog_id=str(dialog_id or ""),
+                    conversation_id=str(conversation_id or ""),
+                    reference_followup=True,
+                    query_modalities=query_modalities,
+                    structured_evidence_required=True,
+                )
+                compact = _compact_pair(candidate)
+                raw_user = _text(source_row.get("user_text") or source_row.get("user"))
+                raw_april = _text(source_row.get("april_text") or source_row.get("april"))
+                compact.update({
+                    "preserve_source_text": True,
+                    "active_work_source": True,
+                    "source_user_text": raw_user[:1800],
+                    "source_april_text": raw_april[:5200],
+                    "source_user_text_chars": len(raw_user),
+                    "source_april_text_chars": len(raw_april),
+                    "source_user_text_complete": len(raw_user) <= 1800,
+                    "source_april_text_complete": len(raw_april) <= 5200,
+                    "source_content_complete": len(raw_user) <= 1800 and len(raw_april) <= 5200,
+                    "source_text_origin": "dialogue_memory_artifact_recovery",
+                })
+                selected_for_context.append(compact)
+                selected_seen.add(source_id)
+
+            anchor = artifact_source_candidate
+            relation = "CONTINUE"
+            continuation = True
+            self_contained_new_information = False
+            hot_work_followup = True
+            hot_work_match_reason = "same_dialog_saved_artifact_recovered"
+            hot_branch_candidate = True
+            semantic_active_branch_intent = True
+            active_subject_conflict = False
+            semantic_subject_switch = False
+            decision_subject_switch = False
+            active_work_marker_is_from_another_topic = False
+            active_work_root_subject_conflict = False
+            active_work_topic_origin_mismatch = False
+            unrelated_active_work_topic = False
+            new_work_root_request = False
+            closed_branch_barrier = False
+            active_work_pair = artifact_source_row
+            active_work_row_index = 0
+            active_work_origin_id = origin_id or _text(artifact_source_row.get("message_id"))
+            latest_topic_origin_id = _text(artifact_source_row.get("topic_origin_message_id") or active_work_origin_id)
+            recovered_branch = _infer_active_work_branch(artifact_source_row)
+            if not recovered_branch.get("active"):
+                recovered_branch = {
+                    "active": True,
+                    "priority": "HOT_TASK_FIRST",
+                    "kind": f"{explicit_artifact_kind}_artifact_edit",
+                    "work_id": f"artifact:{_text(artifact_source_row.get('message_id'))}",
+                    "topic": _topic_label(artifact_source_row) or _text(artifact_source_row.get("user_text") or artifact_source_row.get("user"))[:240],
+                    "goal": _text(artifact_source_row.get("user_text") or artifact_source_row.get("user"))[:500],
+                    "state_summary": _compact_memory_summary(artifact_source_row)[:800],
+                    "origin_message_id": active_work_origin_id,
+                    "last_message_id": _text(artifact_source_row.get("message_id")),
+                }
+            active_work_branch = dict(recovered_branch)
+            # Keep the existing interpretation contract aligned with the recovered
+            # data source so the Provider emits an edited structured artifact, not a
+            # text-only response that asks the user to repeat already saved values.
+            query_interpretation["primary_intent"] = "TOPIC_CONTINUATION"
+            query_interpretation["direction"] = "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"
+            query_interpretation["requires_memory"] = True
+            query_interpretation["relation_hint"] = "CONTINUE"
+            if explicit_artifact_kind == "graph":
+                requested_outputs = query_interpretation.get("requested_outputs")
+                requested_outputs = list(requested_outputs) if isinstance(requested_outputs, (list, tuple, set)) else []
+                if "graph" not in requested_outputs:
+                    requested_outputs.append("graph")
+                query_interpretation["requested_outputs"] = requested_outputs
+                query_interpretation["wants_graph"] = True
+            history_selection_method = "same_dialog_saved_artifact_recovery"
+            contextual_history_match = False
+            _apr_timing_log(
+                "saved_artifact_continuation_recovered",
+                search_started,
+                user_key=_apr_diag_ref(uid),
+                dialog_key=_apr_diag_ref(dialog_id),
+                source_message_key=_apr_diag_ref(artifact_source_row.get("message_id")),
+                artifact_kind=explicit_artifact_kind,
+                selected_pairs=len(selected_for_context),
+                has_exact_structured_data=bool((artifact_source_candidate or {}).get("protected_structured_data")),
+            )
+
     anchor_payload = _compact_pair(anchor) if relation == "CONTINUE" and anchor else {}
     _attach_topic_provenance(anchor_payload)
     # Source retrieval is tracked independently from the dialogue relation: a new
@@ -6410,7 +6683,7 @@ def search_dialogue_context(
         "active_topic": active_topic,
         "anchor": anchor_payload,
         "matches": matches[:max(1, int(limit or 12))] if matches else [],
-        "selected": selected_for_context[:4 if (history_request or resume_anchor_row or repair_active_branch) else 2],
+        "selected": selected_for_context[:4 if (history_request or resume_anchor_row or repair_active_branch or (explicit_artifact_followup and artifact_source_row)) else 2],
         "history_topics": history_topics,
         "topic_index": topic_index,
         "known_topic_count": len(topics),
