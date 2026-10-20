@@ -2819,6 +2819,16 @@ def _strip_rendered_segments(
 
     if "formula" in rendered_types:
         rendered_formulas: set[str] = set()
+
+        def formula_key(value: Any) -> str:
+            if not isinstance(value, str):
+                return ""
+            candidate = value.strip()
+            candidate = re.sub(r"^\s*(?:\$\$?|\\\[|\\\()", "", candidate)
+            candidate = re.sub(r"(?:\$\$?|\\\]|\\\))\s*$", "", candidate)
+            candidate = candidate.replace("²", "^2").replace("³", "^3").replace("⁴", "^4")
+            return re.sub(r"\s+", "", candidate)
+
         if isinstance(render_blocks, list):
             for block in render_blocks:
                 if not isinstance(block, dict) or _scene_block_type(block) != "formula":
@@ -2827,22 +2837,40 @@ def _strip_rendered_segments(
                 values = payload.get("formulas") or payload.get("latex_formulas")
                 if isinstance(values, list):
                     for value in values:
-                        formula = value.get("latex") if isinstance(value, dict) else value
-                        if isinstance(formula, str) and formula.strip():
-                            rendered_formulas.add(formula.strip())
-                for key in ("formula", "latex", "equation", "expression"):
-                    value = payload.get(key)
-                    if isinstance(value, str) and value.strip():
-                        rendered_formulas.add(value.strip())
-        formula_pattern = re.compile(r"\\\[([\s\S]*?)\\\]|\\\(([\s\S]*?)\\\)")
-        for match in list(formula_pattern.finditer(cleaned)):
-            formula = (match.group(1) or match.group(2) or "").strip()
-            if rendered_formulas and formula in rendered_formulas:
-                cleaned = cleaned.replace(match.group(0), "", 1)
+                        if isinstance(value, str):
+                            formula = value
+                        elif isinstance(value, dict):
+                            formula = next((value.get(key) for key in ("latex", "tex", "formula", "equation", "expression", "value") if isinstance(value.get(key), str) and value.get(key).strip()), "")
+                        else:
+                            formula = ""
+                        key = formula_key(formula)
+                        if key:
+                            rendered_formulas.add(key)
+                for key_name in ("formula", "latex", "equation", "expression", "math"):
+                    key = formula_key(payload.get(key_name))
+                    if key:
+                        rendered_formulas.add(key)
+
+        if rendered_formulas:
+            # Prefer display math first so $$...$$ is not misread as two inline
+            # dollar expressions. Only matching concrete renderer payloads are
+            # removed; unrelated equations and ordinary currency text survive.
+            formula_patterns = (
+                re.compile(r"\$\$([\s\S]*?)\$\$"),
+                re.compile(r"\\\[([\s\S]*?)\\\]"),
+                re.compile(r"\\\(([\s\S]*?)\\\)"),
+                re.compile(r"(?<!\$)\$([^$\n]{1,500})\$(?!\$)"),
+            )
+            for formula_pattern in formula_patterns:
+                for match in list(formula_pattern.finditer(cleaned)):
+                    formula = match.group(1).strip()
+                    if formula_key(formula) in rendered_formulas:
+                        cleaned = cleaned.replace(match.group(0), "", 1)
 
     if "link" in rendered_types:
         cleaned = _strip_rendered_link_urls(cleaned, render_blocks)
 
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 
@@ -4022,6 +4050,112 @@ def _fallback_render_explanation(block_type: str, block: Dict[str, Any], answer:
     return f"This block is associated with the current section{title_for_text}. {details or 'Open the renderer to inspect its content.'}"
 
 
+def _explanation_body_for_dedupe(value: Any) -> str:
+    text = str(value or "").strip()
+    # Strip only known renderer labels, including bold Markdown labels. Repeat
+    # because older responses occasionally contain two stacked labels.
+    labels = (
+        r"formula explanation|what the image shows|what the graph shows|how to read the table|"
+        r"what the code does|what the diagram shows|пояснение|пояснення|explication|explanation"
+    )
+    for _ in range(3):
+        updated = re.sub(
+            rf"^\s*\*\*\s*(?:{labels})\b[^*]*\*\*\s*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if updated == text:
+            updated = re.sub(
+                rf"^\s*(?:{labels})\b[^:\n]*\s*[:.]\s*",
+                "",
+                text,
+                flags=re.IGNORECASE,
+            )
+        if updated == text:
+            break
+        text = updated.strip()
+    return text.strip()
+
+
+def _strip_duplicate_explanations_from_narrative(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep one explanation per renderer and avoid repeating it in the narrative."""
+    text_types = {"text", "markdown", "message", "message_text"}
+
+    # Older provider responses can include an explicit explanation and the
+    # contract can also synthesize one immediately after the renderer. Keep the
+    # first linked explanation in stream order so it remains adjacent to its
+    # owner, then drop later copies for the same render id.
+    seen_targets: set[str] = set()
+    unique_blocks: List[Dict[str, Any]] = []
+    for block in blocks:
+        if isinstance(block, dict) and _scene_block_type(block) in text_types:
+            target = str(block.get("explanation_for_block_id") or block.get("explanation_for") or "").strip()
+            if target:
+                if target in seen_targets:
+                    continue
+                seen_targets.add(target)
+        unique_blocks.append(block)
+    blocks = unique_blocks
+
+    explanation_bodies: List[str] = []
+    for block in blocks:
+        if not isinstance(block, dict) or _scene_block_type(block) not in text_types:
+            continue
+        source = str(block.get("source") or "").lower()
+        if not (block.get("explanation_for_block_id") or block.get("explanation_for") or "render_explanation_contract" in source):
+            continue
+        body = _explanation_body_for_dedupe(_scene_text(block))
+        if len(body) >= 48:
+            explanation_bodies.append(body)
+
+    if not explanation_bodies:
+        return blocks
+
+    for block in blocks:
+        if not isinstance(block, dict) or _scene_block_type(block) not in text_types:
+            continue
+        source = str(block.get("source") or "").lower()
+        if block.get("explanation_for_block_id") or block.get("explanation_for") or "render_explanation_contract" in source:
+            continue
+        visible_source = _scene_text(block)
+        if not visible_source:
+            continue
+
+        cleaned_visible = visible_source
+        changed = False
+        for body in explanation_bodies:
+            # Match whitespace flexibly, while otherwise requiring an exact copy.
+            # This avoids risky semantic deletion of merely related prose.
+            pattern = re.compile(r"\s+".join(re.escape(part) for part in re.split(r"\s+", body)), re.IGNORECASE)
+            cleaned_visible, removed = pattern.subn("", cleaned_visible, count=1)
+            changed = changed or bool(removed)
+        if not changed:
+            continue
+
+        # If the copied sentence had a bold explanation label immediately before
+        # it, do not leave that label stranded as a second empty explanation.
+        cleaned_visible = re.sub(
+            r"(?i)\*\*(?:formula explanation|what the image shows|what the graph shows|how to read the table|what the code does|what the diagram shows|пояснение[^*]*|пояснення[^*]*)\*\*\s*(?=\n|$)",
+            "",
+            cleaned_visible,
+        )
+        cleaned_visible = re.sub(r"[ \t]{2,}", " ", cleaned_visible)
+        cleaned_visible = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", cleaned_visible).strip()
+        for key in ("answer", "content", "summary", "text", "markdown", "display_text"):
+            value = block.get(key)
+            if isinstance(value, str) and value.strip() == visible_source.strip():
+                block[key] = cleaned_visible
+        payload = block.get("payload")
+        if isinstance(payload, dict):
+            for key in ("answer", "content", "summary", "text", "markdown", "display_text"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip() == visible_source.strip():
+                    payload[key] = cleaned_visible
+
+    return blocks
+
+
 def _ensure_premium_render_explanations(blocks: List[Dict[str, Any]], answer: str, language_hint: Any = "") -> List[Dict[str, Any]]:
     """Guarantee a visible text explanation immediately after every concrete Premium renderer.
 
@@ -4064,10 +4198,11 @@ def _ensure_premium_render_explanations(blocks: List[Dict[str, Any]], answer: st
             explanation = _fallback_render_explanation(block_type, block, answer, language)
         if not explanation:
             continue
-        if not re.match(r"(?i)^\s*(?:пояснение|пояснення|explication|explanation)\b", explanation):
+        if not re.match(r"(?i)^\s*(?:\*\*|__)?\s*(?:пояснение|пояснення|explication|explanation|formula explanation|what the image shows|what the graph shows|how to read the table|what the code does|what the diagram shows)\b", explanation):
             prefix = _localized_explanation_prefix(language, block_type)
             explanation = f"**{prefix}.** {explanation}"
         explanation = explanation[:1400]
+
         step_index = block.get("step_index", 1)
         explanation_block = {
             "type": "text",
@@ -4086,6 +4221,8 @@ def _ensure_premium_render_explanations(blocks: List[Dict[str, Any]], answer: st
         }
         ordered.append(explanation_block)
         additions += 1
+
+    ordered = _strip_duplicate_explanations_from_narrative(ordered)
 
     try:
         if additions:
