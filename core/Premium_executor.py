@@ -53,6 +53,7 @@ from blocks.Premium_state_manager import (
     save_dialogue_pair,
     prepare_dialogue_context,
     build_active_work_branch_record,
+    _explicit_artifact_followup_kind,
 )
 
 
@@ -1081,11 +1082,58 @@ def _requires_original_asset(value: Any, kind: str, cached_summary: str) -> bool
     return False
 
 
+def _is_gratitude_only(text: Any) -> bool:
+    """Recognize pure thanks (optionally naming the delivered artifact), not new work."""
+    value = _text(text).lower().replace("ё", "е")
+    if not value or not re.search(r"(?:спасибо|спасиб\w*|благодар\w*|thank\s+you|thanks|дякую|дяку\w*|merci|gracias)", value):
+        return False
+    # A question, repair/change request, critique or additional instruction is not a pure thanks.
+    task_or_issue = re.search(
+        r"(?:\?|\b(?:исправ\w*|добав\w*|измени?\w*|передел\w*|перестро\w*|покаж\w*|выдай\w*|пришл\w*|создай\w*|построй\w*|объясн\w*|расскажи\w*|продолж\w*|сделай\w*|можешь\b|почему\b|ошиб\w*|плохо\b|неправ\w*|не\s+хвата\w*|пропал\w*|потерял\w*|missing\b|missed\b|lost\b|but\b|however\b|но\b|а\s+теперь\b|again\b|fix\b|add\b|show\b|change\b|edit\b|why\b|how\b))",
+        value,
+    )
+    return not bool(task_or_issue)
+
+
+def _polite_acknowledgement(language: str, user_text: Any = "") -> str:
+    raw_user_text = _text(user_text).lower().replace("ё", "е")
+    if re.search(r"(?:дякую|дяку\w*)", raw_user_text):
+        language = "uk"
+    elif re.search(r"(?:спасибо|спасиб\w*|благодар\w*)", raw_user_text):
+        language = "ru"
+    elif re.search(r"(?:thank\s+you|thanks)", raw_user_text):
+        language = "en"
+    elif re.search(r"merci", raw_user_text):
+        language = "fr"
+    elif re.search(r"gracias", raw_user_text):
+        language = "es"
+    lang = _text(language).lower().split("-", 1)[0]
+    return {
+        "uk": "Будь ласка! Продовжимо, коли буде потрібно.",
+        "en": "You're welcome! We can continue whenever you're ready.",
+        "fr": "Avec plaisir ! Nous pourrons continuer quand vous le souhaitez.",
+        "es": "¡De nada! Podemos continuar cuando lo necesites.",
+        "ru": "Пожалуйста! Продолжим тему, когда понадобится.",
+    }.get(lang, "Пожалуйста! Продолжим тему, когда понадобится.")
+
+
 def _source_code_from_block(block: dict[str, Any]) -> tuple[str, str, str] | None:
-    language = _text(block.get("language") or block.get("lang") or "text").lower()
-    filename = _text(block.get("filename") or "")
-    code = _text(block.get("code") or block.get("content") or block.get("text"))
-    if not code:
+    payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+    if not payload and isinstance(block.get("spec"), dict):
+        payload = block["spec"]
+    signal = block.get("render_signal") if isinstance(block.get("render_signal"), dict) else {}
+    signal_payload = signal.get("payload") if isinstance(signal.get("payload"), dict) else {}
+    language = _text(block.get("language") or block.get("lang") or payload.get("language") or payload.get("lang") or "text").lower()
+    filename = _text(block.get("filename") or payload.get("filename") or payload.get("name") or "")
+    code_value = next((value for value in (
+        block.get("code"), block.get("source_code"), block.get("content"), block.get("text"),
+        payload.get("code"), payload.get("source_code"), payload.get("source"), payload.get("content"), payload.get("text"),
+        signal_payload.get("code"), signal_payload.get("source_code"), signal_payload.get("source"), signal_payload.get("content"), signal_payload.get("text"),
+    ) if isinstance(value, str) and value.strip()), "")
+    # Do not call _text() on source code: leading/trailing whitespace and the final
+    # newline are part of the generated file's exact contents.
+    code = code_value
+    if not code.strip():
         return None
     # Accept a single fenced block while preserving internal source lines.
     match = re.fullmatch(r"```[\w.+-]*\s*\n(.*?)\n```", code, flags=re.S)
@@ -1321,7 +1369,7 @@ def _restore_selected_assets(
         if not isinstance(payloads, list):
             continue
         for payload in payloads:
-            if not isinstance(payload, dict) or _text(payload.get("kind")).lower() != "image":
+            if not isinstance(payload, dict) or _text(payload.get("kind")).lower() not in {"image", "text_file", "file"}:
                 continue
             encoded = _text(payload.get("content_base64"))
             if not encoded:
@@ -1338,18 +1386,21 @@ def _restore_selected_assets(
             if asset_key in existing_asset_keys:
                 continue
             existing_asset_keys.add(asset_key)
+            durable_kind = _text(payload.get("kind")).lower()
+            durable_mime = _text(payload.get("mime_type") or ("image/png" if durable_kind == "image" else "text/plain"))
             rows.append({
                 "message_id": message_key,
-                "filename": _text(payload.get("filename") or "april-generated-image.png"),
-                "kind": "image",
-                "mime_type": _text(payload.get("mime_type") or "image/png"),
+                "filename": _text(payload.get("filename") or ("april-generated-image.png" if durable_kind == "image" else "april-generated-file.txt")),
+                "kind": durable_kind,
+                "mime_type": durable_mime,
                 "content": content,
                 "size_bytes": len(content),
                 "asset_role": _text(payload.get("asset_role") or "april_output"),
                 "metadata": {
                     "source_type": "april_generated",
-                    "asset_role": "april_output",
-                    "output_type": "image",
+                    "asset_role": _text(payload.get("asset_role") or "april_output"),
+                    "output_type": _text(payload.get("output_type") or ("image" if durable_kind == "image" else "file")),
+                    "language": _text(payload.get("language")),
                     "prompt": _text(payload.get("prompt"))[:1200],
                     "width": int(payload.get("width") or 0),
                     "height": int(payload.get("height") or 0),
@@ -1554,7 +1605,7 @@ def _image_payload_bytes(value: Any) -> tuple[bytes, str] | None:
         visited += 1
         item = stack.pop()
         if isinstance(item, dict):
-            for key in ("image_data_uri", "data_uri", "src", "url", "image"):
+            for key in ("image_data_uri", "data_uri", "file_data_uri", "image_url", "src", "url", "image"):
                 candidate = item.get(key)
                 if isinstance(candidate, str) and candidate.startswith("data:image/") and ";base64," in candidate:
                     header, encoded = candidate.split(",", 1)
@@ -1565,13 +1616,20 @@ def _image_payload_bytes(value: Any) -> tuple[bytes, str] | None:
                             return raw, mime
                     except Exception:
                         pass
-            for key in ("image_base64", "base64", "b64_json"):
+            for key in ("image_base64", "base64", "b64_json", "content_base64"):
                 candidate = item.get(key)
                 if isinstance(candidate, str) and candidate:
                     try:
                         raw = base64.b64decode(candidate, validate=True)
-                        if raw and raw.startswith(b"\x89PNG\r\n\x1a\n"):
-                            return raw, "image/png"
+                        if raw:
+                            if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+                                return raw, "image/png"
+                            if raw.startswith(b"\xff\xd8\xff"):
+                                return raw, "image/jpeg"
+                            if raw.startswith((b"GIF87a", b"GIF89a")):
+                                return raw, "image/gif"
+                            if raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+                                return raw, "image/webp"
                     except Exception:
                         pass
             stack.extend(v for v in item.values() if isinstance(v, (dict, list)))
@@ -1586,7 +1644,11 @@ def _strip_inline_binary(value: Any) -> Any:
         cleaned: dict[str, Any] = {}
         for key, item in value.items():
             low = str(key).lower()
-            if low in {"image_base64", "image_data_uri", "data_uri", "file_data", "b64_json"}:
+            if low in {
+                "image_base64", "image_data_uri", "data_uri", "file_data", "file_data_uri",
+                "file_base64", "content_base64", "audio_base64", "video_base64",
+                "audio_data_uri", "video_data_uri", "base64", "b64_json",
+            }:
                 continue
             if (
                 low in {"image_url", "src", "url", "image"}
@@ -1703,6 +1765,20 @@ async def execute(
     memory_started = time.perf_counter()
     semantic_started = time.perf_counter()
     semantic_interpretation = interpret_request_semantics(original or current_text)
+    gratitude_only = _is_gratitude_only(original or current_text)
+    if gratitude_only:
+        # Keep the active branch attached to the turn, without requesting its visual again.
+        semantic_interpretation.update({
+            "primary_intent": "TOPIC_CONTINUATION",
+            "direction": "SEARCH_ACTIVE_OR_REFERENCED_TOPIC",
+            "topic_reference": "PREVIOUS_OR_ACTIVE_TOPIC",
+            "requires_memory": True,
+            "history_request": False,
+            "speech_act": "GRATITUDE_OR_APPRECIATION",
+            "communicative_act": "GRATITUDE_OR_APPRECIATION",
+            "recommended_response_action": "ACKNOWLEDGE_AND_CONTINUE",
+            "reason": "pure_gratitude_reaction_to_previous_turn",
+        })
     _apr_timing_log(
         "semantic_preinterpretation", semantic_started,
         user_key=_apr_diag_ref(uid),
@@ -1817,8 +1893,20 @@ async def execute(
                 "revision_request", "factual_verification_request",
             ))
         )
+        explicit_saved_artifact_followup = bool(_explicit_artifact_followup_kind(original or current_text))
+        if gratitude_only:
+            single_semantics.update({
+                "primary_intent": "TOPIC_CONTINUATION",
+                "requires_memory": True,
+                "topic_reference": "PREVIOUS_OR_ACTIVE_TOPIC",
+                "direction": "SEARCH_ACTIVE_OR_REFERENCED_TOPIC",
+                "speech_act": "GRATITUDE_OR_APPRECIATION",
+                "recommended_response_action": "ACKNOWLEDGE_AND_CONTINUE",
+            })
         skip_memory_search = bool(
-            single_semantics.get("primary_intent") == "NEW_INFORMATION"
+            not gratitude_only
+            and not explicit_saved_artifact_followup
+            and single_semantics.get("primary_intent") == "NEW_INFORMATION"
             and not single_semantics.get("requires_memory")
             and not single_semantics.get("history_request")
             and not _text(resume_message_id)
@@ -2244,6 +2332,23 @@ async def execute(
         identity=identity,
         semantic_interpretation=semantic_interpretation,
     )
+    if gratitude_only:
+        gratitude_intent = interpretation.setdefault("intent", {})
+        gratitude_intent["requested_outputs"] = ["text"]
+        gratitude_intent["task"] = "acknowledge_and_continue"
+        gratitude_intent["wants_image"] = False
+        gratitude_intent["wants_file"] = False
+        gratitude_intent["wants_code"] = False
+        gratitude_intent["wants_graph"] = False
+        gratitude_intent["wants_3d_graph"] = False
+        gratitude_intent["wants_table"] = False
+        gratitude_intent["wants_formula"] = False
+        gratitude_intent["wants_diagram"] = False
+        gratitude_intent["wants_links"] = False
+        for _question_item in question_sequence:
+            if isinstance(_question_item, dict):
+                _question_item["output_types"] = ["text"]
+                _question_item["outputs"] = ["text"]
     # Bind the user's preferred display name to the already-authenticated ID.
     # This is prompt metadata only: it does not alter stored message text,
     # dialogue identity, history, or the canonical chat route.
@@ -2255,6 +2360,8 @@ async def execute(
 
     request_structure = interpretation.setdefault("request_structure", {})
     request_structure["question_sequence"] = question_sequence
+    if gratitude_only:
+        request_structure["presentation_sequence"] = [{"step_index": 1, "output_types": ["text"], "title": "Acknowledgement"}]
     request_structure["answer_sequence_in_order"] = True
     request_structure["question_search_engine"] = "state_manager_per_question_semantic_v3_active_repair"
     request_structure["semantic_interpretation"] = semantic_interpretation
@@ -3261,6 +3368,22 @@ async def execute(
                 "content": answer,
             })
 
+    if gratitude_only:
+        # User reaction is a dialogue act, not a command to replay the referenced graph,
+        # formula, code, image, or other RenderMessage payload.
+        answer = _polite_acknowledgement(display_language, original or current_text)
+        packaged["answer"] = answer
+        packaged["content"] = answer
+        packaged["summary"] = "Acknowledged the user's thanks and kept the current topic available."
+        packaged["artifacts"] = []
+        packaged["render_blocks"] = [{
+            "type": "text",
+            "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
+            "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
+            "content": answer,
+            "text": answer,
+        }]
+
     normalized_blocks = _apply_presentation_sequence(
         packaged["render_blocks"] or [], answer, presentation_sequence
     )
@@ -3384,8 +3507,25 @@ async def execute(
 
     # Save original user inputs under the exact turn where they were uploaded.
     # The file bytes stay on disk; only small references enter dialogue_memory.
+    durable_asset_payloads: list[dict[str, Any]] = []
     persisted_input_refs: list[dict[str, Any]] = []
     seen_input_keys: set[tuple[str, str, str]] = set()
+
+    def _append_durable_asset(kind: str, filename: str, mime_type: str, raw_bytes: bytes,
+                              asset_role: str, output_type: str, **metadata: Any) -> None:
+        # Match premium_asset_store's 25 MiB per-asset limit. The selected-turn
+        # loader reads these JSONB bytes only on artifact continuation, never on
+        # ordinary history hydration, so binary payloads do not bloat every search.
+        if not raw_bytes or len(raw_bytes) > 25 * 1024 * 1024:
+            return
+        durable_asset_payloads.append({
+            "kind": kind, "mime_type": mime_type or "application/octet-stream",
+            "asset_role": asset_role, "output_type": output_type, "filename": filename,
+            "message_id": identity["message_id"], "size_bytes": len(raw_bytes),
+            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "content_base64": base64.b64encode(raw_bytes).decode("ascii"),
+            **{key: value for key, value in metadata.items() if value not in (None, "", [], {})},
+        })
     for item in (visual_context or []):
         if not isinstance(item, dict) or item.get("recalled_from_memory"):
             continue
@@ -3406,6 +3546,9 @@ async def execute(
                       "analysis_key_details": item.get("analysis_key_details") if isinstance(item.get("analysis_key_details"), list) else []})
         if ref:
             persisted_input_refs.append(ref)
+        _append_durable_asset("image", filename, _text(item.get("mime_type") or mime), raw_bytes,
+                              "user_input", "image", source_type=_text(item.get("source_type") or "user_upload"),
+                              sequence_index=int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999))
     for item in (file_inputs or []):
         if not isinstance(item, dict) or item.get("recalled_from_memory"):
             continue
@@ -3423,11 +3566,15 @@ async def execute(
             metadata={"source_type": "user_upload", "sequence_index": int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999), "analysis_summary": _text(item.get("analysis_summary"))[:1200]})
         if ref:
             persisted_input_refs.append(ref)
+        _append_durable_asset("file", filename, _text(item.get("mime_type") or mime), raw_bytes,
+                              "user_input", "file", source_type="user_upload",
+                              sequence_index=int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999))
     for item in (file_contents or []):
         if not isinstance(item, dict) or item.get("recalled_from_memory"):
             continue
-        body = _text(item.get("persistence_content") or item.get("content"))
-        if not body:
+        body_value = item.get("persistence_content") or item.get("content")
+        body = body_value if isinstance(body_value, str) else _text(body_value)
+        if not body.strip():
             continue
         filename = _text(item.get("filename") or f"uploaded-text-{identity['message_id'][-8:]}.txt")
         raw_bytes = body.encode("utf-8")
@@ -3442,13 +3589,15 @@ async def execute(
                       "reader_truncated": bool(item.get("reader_truncated")), "source_chars": int(item.get("source_chars") or len(body))})
         if ref:
             persisted_input_refs.append(ref)
+        _append_durable_asset("text_file", filename, _text(item.get("mime_type") or "text/plain"), raw_bytes,
+                              "user_input", "text_file", source_type="user_upload_text",
+                              sequence_index=int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999))
     for ref in persisted_input_refs:
         attachment_refs.append({key: ref.get(key) for key in ("asset_id", "filename", "kind", "mime_type", "asset_role", "output_type", "message_id", "storage_key", "size_bytes", "sha256", "metadata") if ref.get(key) is not None})
 
     output_asset_persist_started = time.perf_counter()
     generated_asset_saved = False
     output_asset_refs: list[dict[str, Any]] = []
-    durable_asset_payloads: list[dict[str, Any]] = []
     if image_result:
         # The generator returns validated raw bytes as well as a scene artifact.
         # Persist raw bytes first; artifact fields are the compatibility fallback.
@@ -3466,23 +3615,24 @@ async def execute(
                 import struct as _struct
                 generated_width = generated_width or int(_struct.unpack(">I", generated_bytes[16:20])[0])
                 generated_height = generated_height or int(_struct.unpack(">I", generated_bytes[20:24])[0])
-            durable_asset_payloads.append({
-                "kind": "image",
-                "mime_type": generated_mime or "image/png",
-                "asset_role": "april_output",
-                "output_type": "image",
-                "filename": f"april-generated-{identity['message_id'][-10:]}.png",
-                "message_id": identity["message_id"],
-                "size_bytes": len(generated_bytes),
-                "sha256": hashlib.sha256(generated_bytes).hexdigest(),
-                "width": generated_width,
-                "height": generated_height,
-                "prompt": _text((image_result or {}).get("prompt"))[:1200],
-                "operation": _text((image_result or {}).get("operation") or image_intent.get("image_operation") or "generate"),
-                "derived_from_message_id": _text((image_result or {}).get("source_asset_message_id")),
-                "source_asset_role": _text((image_result or {}).get("source_asset_role")),
-                "content_base64": base64.b64encode(generated_bytes).decode("ascii"),
-            })
+            if len(generated_bytes) <= 25 * 1024 * 1024:
+                durable_asset_payloads.append({
+                    "kind": "image",
+                    "mime_type": generated_mime or "image/png",
+                    "asset_role": "april_output",
+                    "output_type": "image",
+                    "filename": f"april-generated-{identity['message_id'][-10:]}.png",
+                    "message_id": identity["message_id"],
+                    "size_bytes": len(generated_bytes),
+                    "sha256": hashlib.sha256(generated_bytes).hexdigest(),
+                    "width": generated_width,
+                    "height": generated_height,
+                    "prompt": _text((image_result or {}).get("prompt"))[:1200],
+                    "operation": _text((image_result or {}).get("operation") or image_intent.get("image_operation") or "generate"),
+                    "derived_from_message_id": _text((image_result or {}).get("source_asset_message_id")),
+                    "source_asset_role": _text((image_result or {}).get("source_asset_role")),
+                    "content_base64": base64.b64encode(generated_bytes).decode("ascii"),
+                })
             generated_ref = _save_premium_asset(
                 uid, identity["message_id"],
                 filename=f"april-generated-{identity['message_id'][-10:]}.png",
@@ -3501,13 +3651,65 @@ async def execute(
                 generated_asset_saved = True
                 output_asset_refs.append(generated_ref)
 
+    # Some renderers carry the actual image in a typed render block without an
+    # image_generator result (for example, screenshot/gallery edit or a provider
+    # image payload). Persist these block payloads too, so the image is not lost
+    # when dialogue memory strips inline binary fields. Deduplicate against the
+    # image generator above and retain the source type for later restoration.
+    persisted_image_hashes = {
+        str(item.get("sha256")) for item in durable_asset_payloads
+        if isinstance(item, dict) and str(item.get("kind") or "").lower() == "image" and item.get("sha256")
+    }
+    image_block_types = {"image", "screenshot", "image_gallery", "gallery", "photo", "picture"}
+    for block_index, block in enumerate(normalized_blocks, 1):
+        if not isinstance(block, dict):
+            continue
+        block_type = _text(block.get("type") or block.get("artifact_type") or block.get("kind")).lower()
+        if block_type not in image_block_types:
+            continue
+        extracted_image = _image_payload_bytes(block)
+        if not extracted_image:
+            continue
+        image_bytes, image_mime = extracted_image
+        image_hash = hashlib.sha256(image_bytes).hexdigest()
+        if image_hash in persisted_image_hashes:
+            continue
+        persisted_image_hashes.add(image_hash)
+        image_name = _text(block.get("filename") or block.get("name") or block.get("title") or f"april-render-image-{identity['message_id'][-10:]}-{block_index}.bin")
+        image_role = _text(block.get("asset_role") or block.get("role") or "april_output")
+        image_ref = _save_premium_asset(
+            uid, identity["message_id"], filename=image_name, content=image_bytes,
+            mime_type=image_mime, kind="image", asset_role=image_role, output_type=block_type,
+            metadata={"source_type": "render_message_payload", "render_type": block_type,
+                      "title": _text(block.get("title") or block.get("name"))[:300]},
+        )
+        if image_ref:
+            output_asset_refs.append(image_ref)
+        if len(image_bytes) <= 25 * 1024 * 1024:
+            durable_asset_payloads.append({
+                "kind": "image", "mime_type": image_mime, "asset_role": image_role,
+                "output_type": block_type, "filename": image_name,
+                "message_id": identity["message_id"], "size_bytes": len(image_bytes),
+                "sha256": image_hash, "source_type": "render_message_payload",
+                "render_type": block_type, "content_base64": base64.b64encode(image_bytes).decode("ascii"),
+            })
+
     # Save code/file output as a separately versioned asset paired to this turn.
     # A visible CodeBlock remains in SceneContract; this binary/text asset lets
     # later CONTINUE requests retrieve the exact source rather than its summary.
     requested_outputs = set(str(x).lower() for x in (interpretation.get("intent") or {}).get("requested_outputs", []))
-    should_persist_code = bool((interpretation.get("intent") or {}).get("wants_code") or (interpretation.get("intent") or {}).get("wants_file"))
+    code_blocks = [block for block in normalized_blocks if isinstance(block, dict) and str(block.get("type") or "").lower() == "code"]
+    render_file_blocks = [
+        block for block in normalized_blocks
+        if isinstance(block, dict) and str(block.get("type") or block.get("artifact_type") or "").lower()
+        in {"file", "document", "text_file", "code_file", "pdf", "spreadsheet", "presentation"}
+    ]
+    should_persist_code = bool(
+        (interpretation.get("intent") or {}).get("wants_code")
+        or (interpretation.get("intent") or {}).get("wants_file")
+        or code_blocks or render_file_blocks
+    )
     if should_persist_code:
-        code_blocks = [block for block in normalized_blocks if isinstance(block, dict) and str(block.get("type") or "").lower() == "code"]
         seen_source_hashes: set[str] = set()
         for block_index, block in enumerate(code_blocks[:4], 1):
             extracted = _source_code_from_block(block)
@@ -3526,25 +3728,38 @@ async def execute(
             if saved_ref:
                 saved_ref["metadata"] = {**(saved_ref.get("metadata") or {}), "language": language}
                 output_asset_refs.append(saved_ref)
+            # Sidecars are a cache; retain exact generated source in the same durable
+            # USER↔APRIL pair so it survives container replacement. Cap large payloads.
+            if len(code_bytes) <= 25 * 1024 * 1024:
+                durable_asset_payloads.append({
+                    "kind": "text_file", "mime_type": "text/plain", "asset_role": "april_output",
+                    "output_type": "code", "filename": filename, "message_id": identity["message_id"],
+                    "size_bytes": len(code_bytes), "sha256": source_hash, "language": language,
+                    "content_base64": base64.b64encode(code_bytes).decode("ascii"),
+                })
 
         # Persist explicit file artifacts as actual bytes/text, not only as a
         # caption in JSONB. Do not duplicate an already-saved CodeBlock.
-        for artifact_index, artifact in enumerate((raw_artifacts or [])[:6], 1):
+        file_output_candidates = list(raw_artifacts or []) + render_file_blocks
+        for artifact_index, artifact in enumerate(file_output_candidates[:10], 1):
             if not isinstance(artifact, dict):
                 continue
-            artifact_type = _text(artifact.get("type") or artifact.get("artifact_type")).lower()
-            if artifact_type not in {"file", "document", "text_file", "code_file"}:
+            artifact_type = _text(artifact.get("type") or artifact.get("artifact_type") or artifact.get("kind")).lower()
+            if artifact_type not in {"file", "document", "text_file", "code_file", "pdf", "spreadsheet", "presentation"}:
                 continue
-            filename = _text(artifact.get("filename") or artifact.get("name") or f"april-output-{identity['message_id'][-10:]}-{artifact_index}.txt")
-            mime = _text(artifact.get("mime_type") or artifact.get("content_type") or "text/plain")
-            body_value = artifact.get("content") or artifact.get("text") or artifact.get("code")
+            payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+            if not payload and isinstance(artifact.get("spec"), dict):
+                payload = artifact["spec"]
+            filename = _text(artifact.get("filename") or artifact.get("name") or payload.get("filename") or payload.get("name") or f"april-output-{identity['message_id'][-10:]}-{artifact_index}.txt")
+            mime = _text(artifact.get("mime_type") or artifact.get("content_type") or payload.get("mime_type") or payload.get("content_type") or "text/plain")
+            body_value = artifact.get("content") or artifact.get("text") or artifact.get("code") or payload.get("content") or payload.get("text") or payload.get("code")
             file_bytes = b""
             text_content = ""
             if isinstance(body_value, str) and body_value.strip():
                 text_content = body_value
                 file_bytes = body_value.encode("utf-8")
-            encoded = artifact.get("file_base64") or artifact.get("base64") or artifact.get("b64_json")
-            data_uri = artifact.get("data_uri") or artifact.get("file_data_uri")
+            encoded = artifact.get("file_base64") or artifact.get("base64") or artifact.get("b64_json") or payload.get("file_base64") or payload.get("base64") or payload.get("b64_json")
+            data_uri = artifact.get("data_uri") or artifact.get("file_data_uri") or payload.get("data_uri") or payload.get("file_data_uri")
             try:
                 if isinstance(data_uri, str) and data_uri.startswith("data:") and ";base64," in data_uri:
                     header, b64 = data_uri.split(",", 1)
@@ -3563,12 +3778,21 @@ async def execute(
             source_hash = hashlib.sha256(file_bytes).hexdigest()
             if source_hash in seen_source_hashes:
                 continue
+            seen_source_hashes.add(source_hash)
             saved_ref = _save_premium_asset(uid, identity["message_id"], filename=filename, content=file_bytes,
                 mime_type=mime, kind="text_file" if (mime.startswith("text/") or text_content) else "file",
                 asset_role="april_output", output_type="file",
                 metadata={"source_type": "april_generated"})
             if saved_ref:
                 output_asset_refs.append(saved_ref)
+            if len(file_bytes) <= 25 * 1024 * 1024:
+                durable_asset_payloads.append({
+                    "kind": "text_file" if (mime.startswith("text/") or text_content) else "file",
+                    "mime_type": mime, "asset_role": "april_output", "output_type": "file",
+                    "filename": filename, "message_id": identity["message_id"],
+                    "size_bytes": len(file_bytes), "sha256": source_hash,
+                    "content_base64": base64.b64encode(file_bytes).decode("ascii"),
+                })
 
     _apr_timing_log("output_asset_persist", output_asset_persist_started,
         generated_asset_saved=generated_asset_saved, output_asset_refs=len(output_asset_refs),
