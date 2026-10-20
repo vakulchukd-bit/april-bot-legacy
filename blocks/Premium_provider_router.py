@@ -175,9 +175,11 @@ CRITICAL ADAPTIVE GRAPH CONTRACT:
 - For a time-series request over a stated day/week/month/custom range, keep all exact source points and labels from PROTECTED_STRUCTURED_DATA/CONTINUATION_CONTEXT, and show intermediate dates/values on the chart immediately. Never ask for values that are already in the saved source artifact. When a multi-day series has two or more known numeric points with gaps between their dates, interpolate the missing dates by default so the graph has intermediate points even when the user did not need to ask twice; label each interpolated point (point-level label such as "interpolated estimate"), the series/graph description, and explanatory text as estimates, not measured/verified observations. Preserve all known values exactly, never extrapolate beyond known endpoints, and do not invent a trend from a single value or absent numeric data. Use one point per requested day where daily points are requested, respect weekday/date ranges, use actual dates when provided (weekday labels when supplied, otherwise neutral day indices), and label X with date/day and Y with the correct measured quantity and unit.
 
 CRITICAL STRUCTURED 3D RENDER CONTRACT:
-- If INTERPRETATION.intent.wants_graph is true or C_ARTIFACT_RENDER_PLAN contains output="graph", and the user asks to build/show/create a graph or 3D visualization, emit a real render_blocks item of type="graph". A sentence claiming that a visualization was created is NOT a visual artifact.
-- For explicit 3D requests, set payload.representation to "surface3d", "scatter3d", "mesh3d", or "scene3d" as appropriate. Put all render data inside the block's payload; use renderer="GraphBlock" and viewer="GraphBlock".
-- For 3D object scenes, use payload.objects_3d (or payload.spheres for spheres). Each item should contain id, label, shape/type, x, y, z when applicable, size/radius/dimensions, color, and relevant numeric properties. The object list is dynamic: include exactly the requested objects and never assume a fixed count or that every object is a sphere. Supported shape names include sphere, cube/box, triangle, pyramid, cone, cylinder and funnel.
+- If INTERPRETATION.intent.wants_graph is true, INTERPRETATION.graph_policy.mode is explicit_3d/inferred_spatial_scene, or C_ARTIFACT_RENDER_PLAN contains output="graph", and the user asks to show/build/create a 3D or spatial visualization, emit a real render_blocks item of type="graph". A prose sentence saying a visualization was created is NOT a visual artifact. Never downgrade explicit Cyrillic "3д" to a text-only answer.
+- For explicit or inferred spatial-scene requests, set payload.representation="scene3d" for bodies/primitives/motion/gravity, "scatter3d" for XYZ point clouds, "surface3d" for z=f(x,y)/continuous fields, or "mesh3d" for meshes. Put render data inside payload and set renderer="GraphBlock", viewer="GraphBlock". Do not emit only type="3d_scene"; canonical type is "graph" (adapters support aliases defensively).
+- For 3D object scenes, use payload.objects_3d as the canonical combined object list. Each item should preserve its id/name/label, shape/type, x/y/z when supplied, size/radius/dimensions, color, mass, velocity and other requested properties. If coordinates are schematic or not supplied, label them illustrative; do not fabricate empirical coordinates or measured time. The object list is dynamic: never assume a fixed count or that every object is a sphere. Common supported shapes include sphere/ellipsoid, cube/box, triangle, pyramid, cone, cylinder, funnel, torus/ring, plane, particle/point and comet; unknown shapes should still include a readable label and a marker fallback.
+- For requests for "all" members of a named system, do not silently reduce the scene to four showcase bodies; include the known/requested members that can be named reliably. Keep all bodies as drawable entries and label a readable subset when the scene is crowded. If exact orbit data is unavailable, use explicitly schematic orbital layout rather than claiming exact scale.
+- For orbital motion, preserve/emit payload.orbits or payload.trajectories with points or radius and object_id. For gravity/force/velocity effects, preserve/emit payload.vectors/gravity_vectors, field_lines/gravity_field_lines and relevant mass/velocity values. Keep the zero plane, elevated metric grid, axis labels, curves, surface fields, object list and motion in the same payload when requested. Do not reduce these to explanatory prose.
 - For analytic 3D surfaces, prefer payload.surface_function or payload.z_function with a complete expression in x and y (for example "x^2 + y^2" or "sin(sqrt(x^2+y^2))"), x_domain, y_domain and grid_resolution. The Web renderer samples supported expressions into a numeric surface. If the expression cannot be represented, supply a complete numeric surface_grid/matrix instead. Do not provide only a prose description of a surface.
 - For deformed object grids, use show_curved_grid=true with either a complete numeric surface_grid/matrix or explicit curvature configuration. For 3D scatter plots, provide point coordinates with x, y and z. Keep the exact formula and coordinate ranges from CURRENT_REQUEST; do not replace them with a generic example.
 - The Web 3D renderer supplies a separate reference grid on z=0 and explicit top/side camera controls by default. Preserve that behavior; set payload.show_zero_plane=false only when the user explicitly asks to hide the zero plane.
@@ -1377,7 +1379,7 @@ def _should_protect_current_input(structured: dict[str, Any]) -> bool:
     is_single_3d_scene_task = bool(
         wants_graph
         and len(sequence) == 1
-        and re.search(r"(?:\b3\s*[- ]?d\b|\bthree[- ]dimensional\b|тр[её]хмерн\w*|surface3d|scene3d)", current, re.IGNORECASE)
+        and re.search(r"(?:\b3\s*[- ]?[dд]\b|\bthree[- ]dimensional\b|\b3д\b|в\s+3д|тр[её]хмерн\w*|surface3d|scene3d)", current, re.IGNORECASE)
         and not is_history
     )
     return bool(is_single_3d_scene_task or _looks_like_loss_sensitive_request(current))
@@ -1425,7 +1427,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     is_single_3d_scene_task = bool(
         wants_graph
         and len(sequence) == 1
-        and re.search(r"(?:\b3\s*[- ]?d\b|\bthree[- ]dimensional\b|тр[её]хмерн\w*|surface3d|scene3d)", source_current_request, re.IGNORECASE)
+        and re.search(r"(?:\b3\s*[- ]?[dд]\b|\bthree[- ]dimensional\b|\b3д\b|в\s+3д|тр[её]хмерн\w*|surface3d|scene3d)", source_current_request, re.IGNORECASE)
         and not is_history
     )
     source_has_loss_sensitive_data = _should_protect_current_input(data)
@@ -3395,7 +3397,7 @@ def normalize_render_blocks(
         "code": ("CodeBlock", "CodeBlock"), "source_code": ("CodeBlock", "CodeBlock"), "code_block": ("CodeBlock", "CodeBlock"), "script": ("CodeBlock", "CodeBlock"),
         "link": ("LinkCard", "LinkCard"), "file": ("LinkCard", "LinkCard"), "document": ("LinkCard", "LinkCard"), "file_card": ("LinkCard", "LinkCard"),
         "formula": ("FormulaRenderer", "FormulaRenderer"), "equation": ("FormulaRenderer", "FormulaRenderer"), "math": ("FormulaRenderer", "FormulaRenderer"), "latex": ("FormulaRenderer", "FormulaRenderer"),
-        "graph": ("GraphBlock", "GraphBlock"), "graph_data": ("GraphBlock", "GraphBlock"), "chart": ("GraphBlock", "GraphBlock"), "plot": ("GraphBlock", "GraphBlock"), "graph3d": ("GraphBlock", "GraphBlock"), "graph_3d": ("GraphBlock", "GraphBlock"), "3d_graph": ("GraphBlock", "GraphBlock"), "plot3d": ("GraphBlock", "GraphBlock"), "plot_3d": ("GraphBlock", "GraphBlock"), "scatter3d": ("GraphBlock", "GraphBlock"), "scatter_3d": ("GraphBlock", "GraphBlock"), "surface_plot": ("GraphBlock", "GraphBlock"), "surface_graph": ("GraphBlock", "GraphBlock"), "wireframe": ("GraphBlock", "GraphBlock"), "knowledge_graph": ("GraphBlock", "GraphBlock"), "relation_graph": ("GraphBlock", "GraphBlock"), "relations": ("GraphBlock", "GraphBlock"),
+        "graph": ("GraphBlock", "GraphBlock"), "graph_data": ("GraphBlock", "GraphBlock"), "chart": ("GraphBlock", "GraphBlock"), "plot": ("GraphBlock", "GraphBlock"), "graph3d": ("GraphBlock", "GraphBlock"), "graph_3d": ("GraphBlock", "GraphBlock"), "3d_graph": ("GraphBlock", "GraphBlock"), "3d_scene": ("GraphBlock", "GraphBlock"), "scene3d": ("GraphBlock", "GraphBlock"), "scene_3d": ("GraphBlock", "GraphBlock"), "plot3d": ("GraphBlock", "GraphBlock"), "plot_3d": ("GraphBlock", "GraphBlock"), "scatter3d": ("GraphBlock", "GraphBlock"), "scatter_3d": ("GraphBlock", "GraphBlock"), "surface3d": ("GraphBlock", "GraphBlock"), "surface_3d": ("GraphBlock", "GraphBlock"), "3d_surface": ("GraphBlock", "GraphBlock"), "mesh3d": ("GraphBlock", "GraphBlock"), "mesh_3d": ("GraphBlock", "GraphBlock"), "surface_plot": ("GraphBlock", "GraphBlock"), "surface_graph": ("GraphBlock", "GraphBlock"), "wireframe": ("GraphBlock", "GraphBlock"), "knowledge_graph": ("GraphBlock", "GraphBlock"), "relation_graph": ("GraphBlock", "GraphBlock"), "relations": ("GraphBlock", "GraphBlock"),
         "table": ("TableBlock", "TableBlock"), "table_data": ("TableBlock", "TableBlock"), "spreadsheet": ("LinkCard", "LinkCard"), "presentation": ("LinkCard", "LinkCard"), "document_file": ("LinkCard", "LinkCard"), "text_file": ("LinkCard", "LinkCard"), "code_file": ("LinkCard", "LinkCard"), "pdf": ("LinkCard", "LinkCard"),
         "diagram": ("DiagramRenderer", "DiagramRenderer"), "mermaid": ("DiagramRenderer", "DiagramRenderer"), "svg": ("DiagramRenderer", "DiagramRenderer"), "scene": ("DiagramRenderer", "DiagramRenderer"), "layout": ("DiagramRenderer", "DiagramRenderer"),
         "image": ("GalleryBlock", "GalleryBlock"), "gallery": ("GalleryBlock", "GalleryBlock"), "generated_image": ("GalleryBlock", "GalleryBlock"), "screenshot": ("GalleryBlock", "GalleryBlock"), "image_gallery": ("GalleryBlock", "GalleryBlock"),
@@ -3407,20 +3409,42 @@ def normalize_render_blocks(
             continue
 
         item = dict(block)
-        block_type = str(item.get("type") or item.get("artifact_type") or item.get("kind") or "text").strip().lower().replace("-", "_").replace(" ", "_")
+        raw_block_type = str(item.get("type") or item.get("artifact_type") or item.get("kind") or "text").strip().lower().replace("-", "_").replace(" ", "_")
+        block_type = raw_block_type
         aliases = {
-            "graph_data": "graph", "chart": "graph", "plot": "graph", "graph3d": "graph", "graph_3d": "graph", "3d_graph": "graph", "plot3d": "graph", "plot_3d": "graph", "scatter3d": "graph", "scatter_3d": "graph", "surface_plot": "graph", "surface_graph": "graph", "wireframe": "graph",
+            "graph_data": "graph", "chart": "graph", "plot": "graph", "graph3d": "graph", "graph_3d": "graph", "3d_graph": "graph", "3d_scene": "graph", "scene3d": "graph", "scene_3d": "graph", "plot3d": "graph", "plot_3d": "graph", "scatter3d": "graph", "scatter_3d": "graph", "surface3d": "graph", "surface_3d": "graph", "3d_surface": "graph", "mesh3d": "graph", "mesh_3d": "graph", "surface_plot": "graph", "surface_graph": "graph", "wireframe": "graph",
             "table_data": "table", "equation": "formula", "math": "formula", "latex": "formula", "math_equation": "formula",
             "source_code": "code", "code_block": "code", "script": "code",
             "file_card": "file", "document_file": "file", "text_file": "file", "code_file": "file", "pdf": "file",
             "generated_image": "image", "image_gallery": "gallery", "screenshot": "image", "svg": "diagram", "mermaid": "diagram",
         }
         block_type = aliases.get(block_type, block_type)
+        explicit_3d_type = raw_block_type in {
+            "3d_scene", "scene3d", "scene_3d", "3d_graph", "graph3d", "graph_3d",
+            "plot3d", "plot_3d", "scatter3d", "scatter_3d", "surface3d", "surface_3d",
+            "3d_surface", "surface_plot", "surface_graph", "mesh3d", "mesh_3d", "wireframe",
+        }
         payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
         if not payload and isinstance(item.get("spec"), dict):
             payload = item["spec"]
         if not payload and isinstance(item.get("render_signal"), dict) and isinstance(item["render_signal"].get("payload"), dict):
             payload = item["render_signal"]["payload"]
+        # Some OpenAI replies place spatial fields directly on the render block
+        # instead of nesting them under payload. Canonicalize them without losing
+        # the original fields or unrelated dialogue metadata.
+        if block_type == "graph":
+            graph_keys = {
+                "title", "description", "summary", "content", "representation", "chart_type", "visualization", "graph_type", "plot_type", "kind", "type",
+                "dimensions", "three_d", "x", "y", "z", "x_values", "y_values", "z_values", "x_axis", "y_axis", "z_axis", "x_domain", "y_domain", "z_domain", "x_range", "y_range", "z_range", "domain", "axes", "axis_labels",
+                "points", "coordinates", "data_points", "series", "datasets", "data", "traces", "curves", "objects_3d", "spheres", "objects", "shapes", "primitives", "meshes", "bodies", "celestial_bodies", "planets", "satellites", "moons", "comets", "isosurfaces", "volumes", "slices", "faces", "vertices", "triangles", "indices", "normals",
+                "scene", "geometry", "surface", "surface_grid", "surface_function", "z_function", "z_expression", "matrix", "grid_resolution", "resolution", "show_curved_grid", "curved_grid", "show_zero_plane", "zero_plane",
+                "orbits", "orbit_paths", "orbital_motion", "trajectories", "paths", "lines", "curves_3d", "vectors", "gravity_vectors", "field_vectors", "field_lines", "gravity_field_lines", "arrows", "forces", "velocity_vectors", "normals", "field", "wave", "wave_effect", "wave_function", "wave_amplitude", "wave_frequency", "wave_phase", "surface_mode", "color_scale", "color_map", "colormap", "temperature_field", "thermal_field", "heat_field", "color_domain", "style", "metadata", "animation", "time", "duration", "keyframes", "labels", "annotations", "rings", "april_premium_3d", "premium_3d_profile",
+            }
+            direct_payload = {key: value for key, value in item.items() if key in graph_keys and value not in (None, "", [], {})}
+            if explicit_3d_type:
+                direct_payload.setdefault("representation", "scene3d")
+                direct_payload.setdefault("dimensions", 3)
+            payload = {**direct_payload, **payload}
         # Promote canonical source fields for the viewer while preserving the entire
         # nested payload/spec unchanged for history, subsequent edits and new schemas.
         for key, nested_value in payload.items():
@@ -3437,6 +3461,9 @@ def normalize_render_blocks(
         item["type"] = block_type
         item.setdefault("renderer", renderer)
         item.setdefault("viewer", viewer)
+        if block_type == "graph" and payload:
+            item["payload"] = payload
+            item.setdefault("representation", payload.get("representation", ""))
         if block_type == "code":
             code_value = next((value for value in (
                 item.get("code"), item.get("source_code"), item.get("content"), item.get("text")
