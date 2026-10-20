@@ -3646,24 +3646,45 @@ _EXPLAINED_RENDER_TYPES = {
 
 
 def _explanation_language(answer: str, language_hint: Any = "") -> str:
+    """Resolve a user-facing fallback language, normalizing browser and legacy aliases."""
     hint = str(language_hint or "").strip().lower().replace("_", "-")
-    if hint.startswith(("uk", "ua", "ukrain")):
-        return "uk"
-    if hint.startswith(("ru", "russian")):
-        return "ru"
-    if hint.startswith(("fr", "french")):
-        return "fr"
-    if hint.startswith(("en", "english")):
-        return "en"
+    code = hint.split("-", 1)[0]
+    if code in {"ua"}:
+        code = "uk"
+    if code in {"ru", "uk", "en", "es", "de", "fr", "it", "pl", "pt", "nl", "ja", "zh", "ko", "ar", "hi", "el"}:
+        return code
+
     low = (answer or "").lower()
-    if any(ch in low for ch in "їєґ"):
+    if any(ch in low for ch in "їєґ") or re.search(r"\b(це|який|яка|формула|посилання|зображення|таблиця|графік|схема|рівняння|пояснює)\b", low):
         return "uk"
-    if re.search(r"\b(це|який|яка|формула|посилання|зображення|таблиця|графік|схема|рівняння|пояснює)\b", low):
-        return "uk"
-    if re.search(r"[А-Яа-яЁё]", answer or ""):
+    if re.search(r"[а-яё]", low):
         return "ru"
-    if any(ch in low for ch in "éèàçùœ") or re.search(r"\b(la formule|ce lien|ce graphique|ce tableau|cette image|ce schéma)\b", low):
+    if re.search(r"[\u3040-\u30ff]", answer or ""):
+        return "ja"
+    if re.search(r"[\u4e00-\u9fff]", answer or ""):
+        return "zh"
+    if re.search(r"[\uac00-\ud7af]", answer or ""):
+        return "ko"
+    if re.search(r"[\u0600-\u06ff]", answer or ""):
+        return "ar"
+    if re.search(r"[\u0900-\u097f]", answer or ""):
+        return "hi"
+    if re.search(r"[\u0370-\u03ff]", answer or ""):
+        return "el"
+    if any(ch in low for ch in "éèàçùœ") or re.search(r"\b(la formule|ce lien|ce graphique|ce tableau|cette image|ce schéma|bonjour|merci)\b", low):
         return "fr"
+    if any(ch in low for ch in "ñ¿¡") or re.search(r"\b(hola|gracias|necesito|por favor|explicación)\b", low):
+        return "es"
+    if any(ch in low for ch in "ßäöü") or re.search(r"\b(hallo|danke|bitte|erklärung)\b", low):
+        return "de"
+    if any(ch in low for ch in "ãõ") or re.search(r"\b(olá|obrigado|obrigada|explicação)\b", low):
+        return "pt"
+    if any(ch in low for ch in "łśźżąćęńó") or re.search(r"\b(cześć|dziękuję|wyjaśnienie)\b", low):
+        return "pl"
+    if re.search(r"\b(ciao|grazie|spiegazione|formula|immagine)\b", low):
+        return "it"
+    if re.search(r"\b(hallo|bedankt|uitleg|deze|het|een)\b", low):
+        return "nl"
     return "en"
 
 
@@ -3792,13 +3813,188 @@ def _render_section_context(block_type: str, block: Dict[str, Any], answer: str)
 
 
 def _localized_explanation_prefix(language: str, block_type: str) -> str:
+    """Human-facing labels for system-generated render explanations."""
     labels = {
-        "ru": {"formula": "Пояснение к формуле", "link": "Зачем нужна ссылка", "image": "Что показывает изображение", "gallery": "Что показывает изображение", "code": "Что делает код", "table": "Как читать таблицу", "graph": "Что показывает график", "diagram": "Что показывает схема", "file": "Что содержит файл", "audio": "Что содержит аудио-блок", "video": "Что показывает видео-блок"},
+        "ru": {"formula": "Пояснение к формуле", "link": "Зачем нужна ссылка", "image": "Что показывает изображение", "gallery": "Что показывает изображение", "code": "Что делает код", "table": "Как читать таблицу", "graph": "Что показывает график", "diagram": "Что показывает схема", "file": "Что содержит файл", "audio": "Что содержит аудиоблок", "video": "Что показывает видеоблок"},
         "uk": {"formula": "Пояснення до формули", "link": "Для чого потрібне посилання", "image": "Що показує зображення", "gallery": "Що показує зображення", "code": "Що робить код", "table": "Як читати таблицю", "graph": "Що показує графік", "diagram": "Що показує схема", "file": "Що містить файл", "audio": "Що містить аудіоблок", "video": "Що показує відеоблок"},
         "fr": {"formula": "Explication de la formule", "link": "Utilité du lien", "image": "Ce que montre l’image", "gallery": "Ce que montre l’image", "code": "Rôle du code", "table": "Lecture du tableau", "graph": "Ce que montre le graphique", "diagram": "Ce que montre le schéma", "file": "Contenu du fichier", "audio": "Contenu du bloc audio", "video": "Contenu du bloc vidéo"},
         "en": {"formula": "Formula explanation", "link": "Why this link is included", "image": "What the image shows", "gallery": "What the image shows", "code": "What the code does", "table": "How to read the table", "graph": "What the graph shows", "diagram": "What the diagram shows", "file": "What the file contains", "audio": "What the audio block contains", "video": "What the video block shows"},
+        "es": {"formula": "Explicación de la fórmula", "link": "Para qué sirve el enlace", "image": "Qué muestra la imagen", "gallery": "Qué muestra la imagen", "code": "Qué hace el código", "table": "Cómo leer la tabla", "graph": "Qué muestra el gráfico", "diagram": "Qué muestra el diagrama", "file": "Qué contiene el archivo", "audio": "Qué contiene el bloque de audio", "video": "Qué muestra el vídeo"},
+        "de": {"formula": "Erläuterung der Formel", "link": "Wozu dieser Link dient", "image": "Was das Bild zeigt", "gallery": "Was das Bild zeigt", "code": "Was der Code bewirkt", "table": "So lesen Sie die Tabelle", "graph": "Was das Diagramm zeigt", "diagram": "Was das Schema zeigt", "file": "Was die Datei enthält", "audio": "Was der Audioblock enthält", "video": "Was das Video zeigt"},
+        "it": {"formula": "Spiegazione della formula", "link": "A cosa serve il collegamento", "image": "Cosa mostra l’immagine", "gallery": "Cosa mostra l’immagine", "code": "Cosa fa il codice", "table": "Come leggere la tabella", "graph": "Cosa mostra il grafico", "diagram": "Cosa mostra lo schema", "file": "Cosa contiene il file", "audio": "Contenuto del blocco audio", "video": "Cosa mostra il video"},
+        "pl": {"formula": "Objaśnienie wzoru", "link": "Do czego służy link", "image": "Co przedstawia obraz", "gallery": "Co przedstawia obraz", "code": "Co robi kod", "table": "Jak czytać tabelę", "graph": "Co przedstawia wykres", "diagram": "Co przedstawia schemat", "file": "Co zawiera plik", "audio": "Co zawiera blok audio", "video": "Co przedstawia wideo"},
+        "pt": {"formula": "Explicação da fórmula", "link": "Para que serve o link", "image": "O que a imagem mostra", "gallery": "O que a imagem mostra", "code": "O que o código faz", "table": "Como ler a tabela", "graph": "O que o gráfico mostra", "diagram": "O que o diagrama mostra", "file": "O que o ficheiro contém", "audio": "O que contém o bloco de áudio", "video": "O que o vídeo mostra"},
+        "nl": {"formula": "Uitleg bij de formule", "link": "Waarvoor deze link dient", "image": "Wat de afbeelding laat zien", "gallery": "Wat de afbeelding laat zien", "code": "Wat de code doet", "table": "De tabel lezen", "graph": "Wat de grafiek laat zien", "diagram": "Wat het schema laat zien", "file": "Wat het bestand bevat", "audio": "Wat het audioblok bevat", "video": "Wat de video laat zien"},
+        "ja": {"formula": "数式の説明", "link": "リンクの目的", "image": "画像の内容", "gallery": "画像の内容", "code": "コードの動作", "table": "表の読み方", "graph": "グラフの内容", "diagram": "図の内容", "file": "ファイルの内容", "audio": "音声ブロックの内容", "video": "動画の内容"},
+        "zh": {"formula": "公式说明", "link": "链接用途", "image": "图像内容", "gallery": "图像内容", "code": "代码的作用", "table": "表格读法", "graph": "图表内容", "diagram": "示意图内容", "file": "文件内容", "audio": "音频块内容", "video": "视频内容"},
+        "ko": {"formula": "수식 설명", "link": "링크의 용도", "image": "이미지 설명", "gallery": "이미지 설명", "code": "코드의 기능", "table": "표 읽는 방법", "graph": "그래프 설명", "diagram": "도식 설명", "file": "파일 내용", "audio": "오디오 블록 내용", "video": "동영상 설명"},
+        "ar": {"formula": "شرح المعادلة", "link": "الغرض من الرابط", "image": "ما الذي توضحه الصورة", "gallery": "ما الذي توضحه الصورة", "code": "وظيفة الشيفرة", "table": "كيفية قراءة الجدول", "graph": "ما الذي يوضحه الرسم البياني", "diagram": "ما الذي يوضحه المخطط", "file": "محتوى الملف", "audio": "محتوى المقطع الصوتي", "video": "ما الذي يعرضه الفيديو"},
+        "hi": {"formula": "सूत्र की व्याख्या", "link": "लिंक का उद्देश्य", "image": "चित्र क्या दिखाता है", "gallery": "चित्र क्या दिखाता है", "code": "कोड क्या करता है", "table": "तालिका कैसे पढ़ें", "graph": "ग्राफ़ क्या दिखाता है", "diagram": "आरेख क्या दिखाता है", "file": "फ़ाइल में क्या है", "audio": "ऑडियो खंड में क्या है", "video": "वीडियो क्या दिखाता है"},
+        "el": {"formula": "Επεξήγηση τύπου", "link": "Χρήση του συνδέσμου", "image": "Τι δείχνει η εικόνα", "gallery": "Τι δείχνει η εικόνα", "code": "Τι κάνει ο κώδικας", "table": "Πώς διαβάζεται ο πίνακας", "graph": "Τι δείχνει το γράφημα", "diagram": "Τι δείχνει το διάγραμμα", "file": "Περιεχόμενο αρχείου", "audio": "Περιεχόμενο ήχου", "video": "Τι δείχνει το βίντεο"},
     }
-    return labels.get(language, labels["en"]).get(block_type, "Explanation")
+    generic = {"ru": "Пояснение", "uk": "Пояснення", "fr": "Explication", "en": "Explanation", "es": "Explicación", "de": "Erklärung", "it": "Spiegazione", "pl": "Objaśnienie", "pt": "Explicação", "nl": "Uitleg", "ja": "説明", "zh": "说明", "ko": "설명", "ar": "شرح", "hi": "व्याख्या", "el": "Επεξήγηση"}
+    selected = labels.get(language) or labels["en"]
+    return selected.get(block_type, generic.get(language, "Explanation"))
+
+
+def _fallback_render_explanation_extended(block_type: str, block: Dict[str, Any], answer: str, language: str) -> str:
+    """Localized source-grounded fallback text for the remaining UI languages."""
+    payload = _render_payload(block)
+    section, context = _render_section_context(block_type, block, answer)
+    block_title = str(_render_block_field(block, payload, "step_title", "title", "section") or "").strip()
+    title = str(section or block_title).strip()
+    title_ref = f" «{title[:100]}»" if title else ""
+
+    templates = {
+        "es": {
+            "link_plain": "Este enlace se incluye como fuente para comprobar o ampliar el tema{title}.",
+            "formula": "Esta fórmula se relaciona con la sección{title}. Explica: {context}", "link": "Este enlace lleva a una fuente asociada con la sección{title}. Contexto: {context}", "image": "La imagen se relaciona con la sección{title} y muestra: {context}", "gallery": "La imagen se relaciona con la sección{title} y muestra: {context}", "code": "El bloque de código complementa la sección{title}. Su finalidad es: {context}", "table": "La tabla organiza los datos de la sección{title} para compararlos. Contenido: {context}", "graph": "El gráfico representa los datos o la relación de la sección{title}. Contenido: {context}", "diagram": "El diagrama muestra un proceso o unas relaciones de la sección{title}. Descripción: {context}", "file": "El archivo está relacionado con la sección{title}. En esta respuesta sirve para: {context}", "audio": "El bloque de audio está relacionado con la sección{title}: {context}", "video": "El bloque de vídeo está relacionado con la sección{title}: {context}", "generated": "Es una ilustración generada, no una fotografía de archivo.", "edited": "Cambios indicados: {note}", "formula_plain": "Este bloque matemático representa una relación cuantitativa de la sección{title}. Interpreta los símbolos según el contexto de la respuesta.", "table_plain": "La tabla agrupa valores relacionados para facilitar su comparación.{details} Las conclusiones deben basarse solo en las filas mostradas.", "graph_plain": "El gráfico representa la relación entre las variables de los ejes. {details} La tendencia debe leerse a partir de los datos mostrados, sin inferir valores ausentes.", "diagram_plain": "El diagrama ilustra una estructura o una secuencia de pasos. {details}", "block_plain": "Este bloque está relacionado con la sección{title}. {details}", "open": "Abre el bloque para consultar su contenido.", "columns": " Columnas: {headers}.", "rows": " Número de filas de datos: {count}.", "relationship": "La imagen ilustra «{title}»; por sí sola no constituye una prueba factual."},
+        "de": {
+            "link_plain": "Dieser Link dient als Quelle, um das Thema{title} zu prüfen oder zu vertiefen.",
+            "formula": "Diese Formel gehört zum Abschnitt{title}. Sie erklärt: {context}", "link": "Dieser Link führt zu einer Quelle für den Abschnitt{title}. Kontext: {context}", "image": "Das Bild gehört zum Abschnitt{title} und zeigt: {context}", "gallery": "Das Bild gehört zum Abschnitt{title} und zeigt: {context}", "code": "Der Codeblock ergänzt den Abschnitt{title}. Sein Zweck: {context}", "table": "Die Tabelle ordnet die Daten aus dem Abschnitt{title} zum Vergleich. Inhalt: {context}", "graph": "Das Diagramm veranschaulicht Daten oder Beziehungen aus dem Abschnitt{title}. Inhalt: {context}", "diagram": "Das Schema zeigt einen Ablauf oder Beziehungen aus dem Abschnitt{title}. Beschreibung: {context}", "file": "Die Datei gehört zum Abschnitt{title}. In dieser Antwort dient sie dazu: {context}", "audio": "Der Audioblock gehört zum Abschnitt{title}: {context}", "video": "Der Videoblock gehört zum Abschnitt{title}: {context}", "generated": "Dies ist eine generierte Illustration und kein Archivfoto.", "edited": "Dokumentierte Änderungen: {note}", "formula_plain": "Dieser mathematische Block beschreibt einen quantitativen Zusammenhang im Abschnitt{title}. Deute die Symbole im Kontext der Antwort.", "table_plain": "Die Tabelle bündelt zusammengehörige Werte zum Vergleich.{details} Schlussfolgerungen dürfen sich nur auf die angezeigten Zeilen stützen.", "graph_plain": "Das Diagramm zeigt den Zusammenhang zwischen den Achsenvariablen. {details} Lies den Trend aus den angezeigten Daten ab und ergänze keine fehlenden Werte.", "diagram_plain": "Das Schema veranschaulicht eine Struktur oder eine Abfolge von Schritten. {details}", "block_plain": "Dieser Block gehört zum aktuellen Abschnitt{title}. {details}", "open": "Öffne den Block, um seinen Inhalt anzusehen.", "columns": " Spalten: {headers}.", "rows": " Anzahl der Datenzeilen: {count}.", "relationship": "Das Bild veranschaulicht „{title}“, ist für sich genommen aber kein faktischer Beleg."},
+        "it": {
+            "link_plain": "Questo collegamento è una fonte per verificare o approfondire il tema{title}.",
+            "formula": "Questa formula è collegata alla sezione{title}. Spiega: {context}", "link": "Questo collegamento porta a una fonte relativa alla sezione{title}. Contesto: {context}", "image": "L’immagine è collegata alla sezione{title} e mostra: {context}", "gallery": "L’immagine è collegata alla sezione{title} e mostra: {context}", "code": "Il blocco di codice integra la sezione{title}. La sua funzione è: {context}", "table": "La tabella organizza i dati della sezione{title} per confrontarli. Contenuto: {context}", "graph": "Il grafico visualizza dati o relazioni della sezione{title}. Contenuto: {context}", "diagram": "Lo schema mostra un processo o relazioni della sezione{title}. Descrizione: {context}", "file": "Il file è collegato alla sezione{title}. In questa risposta serve a: {context}", "audio": "Il blocco audio è collegato alla sezione{title}: {context}", "video": "Il blocco video è collegato alla sezione{title}: {context}", "generated": "È un’illustrazione generata, non una fotografia d’archivio.", "edited": "Modifiche indicate: {note}", "formula_plain": "Questo blocco matematico rappresenta una relazione quantitativa della sezione{title}. Interpreta i simboli nel contesto della risposta.", "table_plain": "La tabella raccoglie valori correlati per facilitarne il confronto.{details} Le conclusioni devono basarsi sulle righe effettivamente mostrate.", "graph_plain": "Il grafico rappresenta la relazione tra le variabili degli assi. {details} La tendenza va letta dai dati visualizzati, senza inventare valori mancanti.", "diagram_plain": "Lo schema illustra una struttura o una sequenza di passaggi. {details}", "block_plain": "Questo blocco è collegato alla sezione{title}. {details}", "open": "Apri il blocco per consultarne il contenuto.", "columns": " Colonne: {headers}.", "rows": " Numero di righe di dati: {count}.", "relationship": "L’immagine illustra «{title}», ma da sola non costituisce una prova fattuale."},
+        "pl": {
+            "link_plain": "Ten link prowadzi do źródła, które pozwala sprawdzić lub pogłębić temat{title}.",
+            "formula": "Ten wzór jest związany z sekcją{title}. Wyjaśnia: {context}", "link": "Ten link prowadzi do źródła związanego z sekcją{title}. Kontekst: {context}", "image": "Obraz jest związany z sekcją{title} i przedstawia: {context}", "gallery": "Obraz jest związany z sekcją{title} i przedstawia: {context}", "code": "Blok kodu uzupełnia sekcję{title}. Jego przeznaczenie: {context}", "table": "Tabela porządkuje dane z sekcji{title}, aby można je było porównać. Zawartość: {context}", "graph": "Wykres przedstawia dane lub zależność z sekcji{title}. Zawartość: {context}", "diagram": "Schemat pokazuje proces lub zależności z sekcji{title}. Opis: {context}", "file": "Plik jest związany z sekcją{title}. W tej odpowiedzi służy do: {context}", "audio": "Blok audio jest związany z sekcją{title}: {context}", "video": "Blok wideo jest związany z sekcją{title}: {context}", "generated": "To wygenerowana ilustracja, a nie fotografia archiwalna.", "edited": "Odnotowane zmiany: {note}", "formula_plain": "Ten blok matematyczny przedstawia zależność ilościową z sekcji{title}. Symbole należy interpretować w kontekście odpowiedzi.", "table_plain": "Tabela porządkuje powiązane wartości, aby ułatwić ich porównanie.{details} Wnioski powinny wynikać wyłącznie z widocznych wierszy.", "graph_plain": "Wykres przedstawia zależność między zmiennymi na osiach. {details} Trend należy odczytać z pokazanych danych, bez dopowiadania brakujących wartości.", "diagram_plain": "Schemat ilustruje strukturę lub kolejność kroków. {details}", "block_plain": "Ten blok jest związany z bieżącą sekcją{title}. {details}", "open": "Otwórz blok, aby zobaczyć jego zawartość.", "columns": " Kolumny: {headers}.", "rows": " Liczba wierszy danych: {count}.", "relationship": "Obraz ilustruje temat „{title}”, ale sam w sobie nie jest dowodem faktu."},
+        "pt": {
+            "link_plain": "Este link é uma fonte para verificar ou aprofundar o tema{title}.",
+            "formula": "Esta fórmula está relacionada com a secção{title}. Explica: {context}", "link": "Este link conduz a uma fonte relacionada com a secção{title}. Contexto: {context}", "image": "A imagem está relacionada com a secção{title} e mostra: {context}", "gallery": "A imagem está relacionada com a secção{title} e mostra: {context}", "code": "O bloco de código complementa a secção{title}. A sua finalidade é: {context}", "table": "A tabela organiza os dados da secção{title} para comparação. Conteúdo: {context}", "graph": "O gráfico representa dados ou relações da secção{title}. Conteúdo: {context}", "diagram": "O diagrama mostra um processo ou relações da secção{title}. Descrição: {context}", "file": "O ficheiro está relacionado com a secção{title}. Nesta resposta, serve para: {context}", "audio": "O bloco de áudio está relacionado com a secção{title}: {context}", "video": "O bloco de vídeo está relacionado com a secção{title}: {context}", "generated": "É uma ilustração gerada, não uma fotografia de arquivo.", "edited": "Alterações registadas: {note}", "formula_plain": "Este bloco matemático representa uma relação quantitativa da secção{title}. Interprete os símbolos no contexto da resposta.", "table_plain": "A tabela reúne valores relacionados para facilitar a comparação.{details} As conclusões devem basear-se apenas nas linhas apresentadas.", "graph_plain": "O gráfico representa a relação entre as variáveis dos eixos. {details} A tendência deve ser lida nos dados apresentados, sem inventar valores em falta.", "diagram_plain": "O diagrama ilustra uma estrutura ou uma sequência de etapas. {details}", "block_plain": "Este bloco está relacionado com a secção atual{title}. {details}", "open": "Abra o bloco para consultar o seu conteúdo.", "columns": " Colunas: {headers}.", "rows": " Número de linhas de dados: {count}.", "relationship": "A imagem ilustra «{title}», mas por si só não constitui prova factual."},
+        "nl": {
+            "link_plain": "Deze link is een bron om het onderwerp{title} te controleren of verder te verkennen.",
+            "formula": "Deze formule hoort bij het onderdeel{title}. De formule verklaart: {context}", "link": "Deze link verwijst naar een bron bij het onderdeel{title}. Context: {context}", "image": "De afbeelding hoort bij het onderdeel{title} en laat zien: {context}", "gallery": "De afbeelding hoort bij het onderdeel{title} en laat zien: {context}", "code": "Het codeblok vult het onderdeel{title} aan. Het doel is: {context}", "table": "De tabel ordent de gegevens uit het onderdeel{title}, zodat ze te vergelijken zijn. Inhoud: {context}", "graph": "De grafiek geeft gegevens of verbanden uit het onderdeel{title} weer. Inhoud: {context}", "diagram": "Het schema toont een proces of relaties uit het onderdeel{title}. Beschrijving: {context}", "file": "Het bestand hoort bij het onderdeel{title}. In dit antwoord wordt het gebruikt voor: {context}", "audio": "Het audioblok hoort bij het onderdeel{title}: {context}", "video": "Het videoblok hoort bij het onderdeel{title}: {context}", "generated": "Dit is een gegenereerde illustratie, geen archieffoto.", "edited": "Vermelde wijzigingen: {note}", "formula_plain": "Dit wiskundige blok geeft een kwantitatief verband uit het onderdeel{title} weer. Interpreteer de symbolen in de context van het antwoord.", "table_plain": "De tabel groepeert verwante waarden om ze gemakkelijker te vergelijken.{details} Conclusies moeten gebaseerd zijn op de daadwerkelijk getoonde rijen.", "graph_plain": "De grafiek toont het verband tussen de asvariabelen. {details} Lees de trend af uit de weergegeven gegevens en vul ontbrekende waarden niet zelf in.", "diagram_plain": "Het schema toont een structuur of een reeks stappen. {details}", "block_plain": "Dit blok hoort bij het huidige onderdeel{title}. {details}", "open": "Open het blok om de inhoud te bekijken.", "columns": " Kolommen: {headers}.", "rows": " Aantal gegevensrijen: {count}.", "relationship": "De afbeelding illustreert „{title}”, maar is op zichzelf geen feitelijk bewijs."},
+        "ja": {
+            "link_plain": "このリンクは、{title}の内容を確認したり詳しく調べたりするための資料です。",
+            "formula": "この数式はセクション{title}に関連しています。説明：{context}", "link": "このリンクはセクション{title}に関連する資料です。内容：{context}", "image": "この画像はセクション{title}に関連し、次の内容を示しています：{context}", "gallery": "この画像はセクション{title}に関連し、次の内容を示しています：{context}", "code": "このコードブロックはセクション{title}を補足します。目的：{context}", "table": "この表はセクション{title}のデータを整理して比較しやすくします。内容：{context}", "graph": "このグラフはセクション{title}のデータや関係を示しています。内容：{context}", "diagram": "この図はセクション{title}の手順や関係を示しています。説明：{context}", "file": "このファイルはセクション{title}に関連しています。この回答では次の目的で使用します：{context}", "audio": "この音声ブロックはセクション{title}に関連しています：{context}", "video": "この動画ブロックはセクション{title}に関連しています：{context}", "generated": "これは生成されたイラストであり、ストック写真ではありません。", "edited": "変更内容：{note}", "formula_plain": "この数式ブロックはセクション{title}の数量的な関係を表しています。記号は回答の文脈に沿って解釈してください。", "table_plain": "この表は関連する値をまとめ、比較しやすくしています。{details} 結論は表示された行だけに基づいてください。", "graph_plain": "このグラフは軸の変数間の関係を表しています。{details} 傾向は表示データから読み取り、欠けている値を推測で補わないでください。", "diagram_plain": "この図は構造または手順を示しています。{details}", "block_plain": "このブロックはセクション{title}に関連しています。{details}", "open": "ブロックを開いて内容を確認してください。", "columns": " 列：{headers}。", "rows": " データ行数：{count}。", "relationship": "この画像は「{title}」を示していますが、それだけで事実の証明にはなりません。"},
+        "zh": {
+            "link_plain": "此链接可用于核实或深入了解{title}相关内容。",
+            "formula": "此公式与{title}部分有关，说明了：{context}", "link": "此链接指向与{title}部分相关的资料。内容：{context}", "image": "此图像与{title}部分相关，展示了：{context}", "gallery": "此图像与{title}部分相关，展示了：{context}", "code": "此代码块补充了{title}部分。用途：{context}", "table": "此表整理了{title}部分的数据，便于比较。内容：{context}", "graph": "此图表展示了{title}部分的数据或关系。内容：{context}", "diagram": "此示意图展示了{title}部分的流程或关系。说明：{context}", "file": "此文件与{title}部分相关，在本回答中用于：{context}", "audio": "此音频块与{title}部分相关：{context}", "video": "此视频块与{title}部分相关：{context}", "generated": "这是生成的插图，不是图库照片。", "edited": "记录的修改：{note}", "formula_plain": "此数学内容表示{title}部分中的数量关系。请结合回答上下文理解各个符号。", "table_plain": "此表汇总了相关数值，便于比较。{details} 结论应仅依据实际显示的行。", "graph_plain": "此图表展示了坐标轴变量之间的关系。{details} 请根据显示的数据判断趋势，不要推测缺失数值。", "diagram_plain": "此示意图展示了结构或步骤顺序。{details}", "block_plain": "此内容块与当前部分{title}有关。{details}", "open": "打开此内容块以查看详细内容。", "columns": " 列：{headers}。", "rows": " 数据行数：{count}。", "relationship": "该图像用于说明“{title}”，但单凭图像本身不能证明事实。"},
+        "ko": {
+            "link_plain": "이 링크는 {title} 주제를 확인하거나 더 자세히 살펴볼 수 있는 자료입니다.",
+            "formula": "이 수식은 {title} 부분과 관련이 있으며 다음을 설명합니다: {context}", "link": "이 링크는 {title} 부분과 관련된 자료로 연결됩니다. 내용: {context}", "image": "이 이미지는 {title} 부분과 관련되며 다음을 보여 줍니다: {context}", "gallery": "이 이미지는 {title} 부분과 관련되며 다음을 보여 줍니다: {context}", "code": "이 코드 블록은 {title} 부분을 보완합니다. 목적: {context}", "table": "이 표는 {title} 부분의 데이터를 정리해 비교하기 쉽게 합니다. 내용: {context}", "graph": "이 그래프는 {title} 부분의 데이터나 관계를 나타냅니다. 내용: {context}", "diagram": "이 다이어그램은 {title} 부분의 과정이나 관계를 보여 줍니다. 설명: {context}", "file": "이 파일은 {title} 부분과 관련이 있으며, 이 답변에서는 다음 용도로 사용됩니다: {context}", "audio": "이 오디오 블록은 {title} 부분과 관련이 있습니다: {context}", "video": "이 비디오 블록은 {title} 부분과 관련이 있습니다: {context}", "generated": "이 이미지는 생성된 삽화이며 스톡 사진이 아닙니다.", "edited": "기록된 수정 사항: {note}", "formula_plain": "이 수학 블록은 {title} 부분의 정량적 관계를 나타냅니다. 기호는 답변의 문맥에 맞게 해석하세요.", "table_plain": "이 표는 관련 값을 모아 비교하기 쉽게 합니다. {details} 결론은 실제로 표시된 행에만 근거해야 합니다.", "graph_plain": "이 그래프는 축 변수 사이의 관계를 나타냅니다. {details} 추세는 표시된 데이터를 바탕으로 읽고 누락된 값은 추측하지 마세요.", "diagram_plain": "이 다이어그램은 구조 또는 단계의 순서를 보여 줍니다. {details}", "block_plain": "이 블록은 현재 섹션{title}과 관련이 있습니다. {details}", "open": "블록을 열어 내용을 확인하세요.", "columns": " 열: {headers}.", "rows": " 데이터 행 수: {count}.", "relationship": "이 이미지는 ‘{title}’을 보여 주지만, 이미지 자체만으로 사실을 입증하지는 않습니다."},
+        "ar": {
+            "link_plain": "يُدرج هذا الرابط كمصدر للتحقق من موضوع {title} أو التعمق فيه.",
+            "formula": "ترتبط هذه المعادلة بالقسم {title} وتوضح: {context}", "link": "ينقل هذا الرابط إلى مصدر مرتبط بالقسم {title}. السياق: {context}", "image": "ترتبط هذه الصورة بالقسم {title} وتوضح: {context}", "gallery": "ترتبط هذه الصورة بالقسم {title} وتوضح: {context}", "code": "تُكمل كتلة الشيفرة القسم {title}. الغرض منها: {context}", "table": "ينظم الجدول بيانات القسم {title} لتسهيل المقارنة. المحتوى: {context}", "graph": "يعرض الرسم البياني بيانات أو علاقات القسم {title}. المحتوى: {context}", "diagram": "يوضح المخطط عملية أو علاقات في القسم {title}. الوصف: {context}", "file": "يرتبط الملف بالقسم {title} ويُستخدم في هذه الإجابة من أجل: {context}", "audio": "ترتبط كتلة الصوت بالقسم {title}: {context}", "video": "ترتبط كتلة الفيديو بالقسم {title}: {context}", "generated": "هذا رسم توضيحي مولّد، وليس صورة أرشيفية.", "edited": "التعديلات المسجلة: {note}", "formula_plain": "تمثل هذه الكتلة الرياضية علاقة كمية في القسم {title}. فسّر الرموز وفق سياق الإجابة.", "table_plain": "يجمع الجدول القيم المرتبطة لتسهيل المقارنة. {details} يجب أن تستند الاستنتاجات إلى الصفوف المعروضة فقط.", "graph_plain": "يعرض الرسم العلاقة بين متغيرات المحاور. {details} استخلص الاتجاه من البيانات الظاهرة ولا تفترض قيماً غير معروضة.", "diagram_plain": "يوضح المخطط بنية أو تسلسلاً من الخطوات. {details}", "block_plain": "ترتبط هذه الكتلة بالقسم الحالي {title}. {details}", "open": "افتح الكتلة للاطلاع على محتواها.", "columns": " الأعمدة: {headers}.", "rows": " عدد صفوف البيانات: {count}.", "relationship": "توضح الصورة موضوع «{title}»، لكنها لا تُعد دليلاً واقعياً بمفردها."},
+        "hi": {
+            "link_plain": "यह लिंक {title} विषय की जाँच करने या उसके बारे में और जानने के लिए स्रोत के रूप में दिया गया है।",
+            "formula": "यह सूत्र {title} अनुभाग से संबंधित है। इसका अर्थ है: {context}", "link": "यह लिंक {title} अनुभाग से संबंधित स्रोत पर ले जाता है। संदर्भ: {context}", "image": "यह चित्र {title} अनुभाग से संबंधित है और दिखाता है: {context}", "gallery": "यह चित्र {title} अनुभाग से संबंधित है और दिखाता है: {context}", "code": "यह कोड ब्लॉक {title} अनुभाग को पूरा करता है। इसका उद्देश्य: {context}", "table": "यह तालिका {title} अनुभाग के आँकड़ों को तुलना के लिए व्यवस्थित करती है। सामग्री: {context}", "graph": "यह ग्राफ {title} अनुभाग के आँकड़े या संबंध दिखाता है। सामग्री: {context}", "diagram": "यह आरेख {title} अनुभाग की प्रक्रिया या संबंध दिखाता है। विवरण: {context}", "file": "यह फ़ाइल {title} अनुभाग से संबंधित है। इस उत्तर में इसका उपयोग: {context}", "audio": "यह ऑडियो ब्लॉक {title} अनुभाग से संबंधित है: {context}", "video": "यह वीडियो ब्लॉक {title} अनुभाग से संबंधित है: {context}", "generated": "यह AI द्वारा बनाया गया चित्रण है, संग्रह की वास्तविक तस्वीर नहीं।", "edited": "दर्ज किए गए बदलाव: {note}", "formula_plain": "यह गणितीय ब्लॉक {title} अनुभाग के मात्रात्मक संबंध को दर्शाता है। प्रतीकों को उत्तर के संदर्भ में समझें।", "table_plain": "तालिका संबंधित मानों को तुलना के लिए व्यवस्थित करती है। {details} निष्कर्ष केवल दिखाई गई पंक्तियों पर आधारित होने चाहिए।", "graph_plain": "ग्राफ अक्षों के चरों के बीच संबंध दिखाता है। {details} रुझान को दिखाए गए आँकड़ों से समझें; अनुपस्थित मानों का अनुमान न लगाएँ।", "diagram_plain": "यह आरेख संरचना या चरणों का क्रम दिखाता है। {details}", "block_plain": "यह ब्लॉक वर्तमान अनुभाग {title} से संबंधित है। {details}", "open": "सामग्री देखने के लिए ब्लॉक खोलें।", "columns": " कॉलम: {headers}।", "rows": " डेटा पंक्तियों की संख्या: {count}।", "relationship": "यह चित्र ‘{title}’ को दर्शाता है, लेकिन अपने आप में तथ्य का प्रमाण नहीं है।"},
+        "el": {
+            "link_plain": "Αυτός ο σύνδεσμος παρατίθεται ως πηγή για έλεγχο ή περαιτέρω διερεύνηση του θέματος{title}.",
+            "formula": "Ο τύπος σχετίζεται με την ενότητα{title}. Εξηγεί: {context}", "link": "Ο σύνδεσμος οδηγεί σε πηγή σχετική με την ενότητα{title}. Πλαίσιο: {context}", "image": "Η εικόνα σχετίζεται με την ενότητα{title} και δείχνει: {context}", "gallery": "Η εικόνα σχετίζεται με την ενότητα{title} και δείχνει: {context}", "code": "Το μπλοκ κώδικα συμπληρώνει την ενότητα{title}. Σκοπός: {context}", "table": "Ο πίνακας οργανώνει τα δεδομένα της ενότητας{title} για σύγκριση. Περιεχόμενο: {context}", "graph": "Το γράφημα απεικονίζει δεδομένα ή σχέσεις της ενότητας{title}. Περιεχόμενο: {context}", "diagram": "Το διάγραμμα δείχνει μια διαδικασία ή σχέσεις της ενότητας{title}. Περιγραφή: {context}", "file": "Το αρχείο σχετίζεται με την ενότητα{title}. Σε αυτή την απάντηση χρησιμεύει για: {context}", "audio": "Το μπλοκ ήχου σχετίζεται με την ενότητα{title}: {context}", "video": "Το μπλοκ βίντεο σχετίζεται με την ενότητα{title}: {context}", "generated": "Πρόκειται για εικόνα που δημιουργήθηκε τεχνητά, όχι για φωτογραφία αρχείου.", "edited": "Καταγεγραμμένες αλλαγές: {note}", "formula_plain": "Αυτό το μαθηματικό μπλοκ αναπαριστά μια ποσοτική σχέση της ενότητας{title}. Ερμηνεύστε τα σύμβολα με βάση το πλαίσιο της απάντησης.", "table_plain": "Ο πίνακας συγκεντρώνει σχετικά δεδομένα για ευκολότερη σύγκριση. {details} Τα συμπεράσματα πρέπει να βασίζονται μόνο στις εμφανιζόμενες γραμμές.", "graph_plain": "Το γράφημα δείχνει τη σχέση μεταξύ των μεταβλητών των αξόνων. {details} Η τάση πρέπει να προκύπτει από τα εμφανιζόμενα δεδομένα, χωρίς επινόηση τιμών που λείπουν.", "diagram_plain": "Το διάγραμμα παρουσιάζει μια δομή ή μια ακολουθία βημάτων. {details}", "block_plain": "Αυτό το μπλοκ σχετίζεται με την τρέχουσα ενότητα{title}. {details}", "open": "Ανοίξτε το μπλοκ για να δείτε το περιεχόμενό του.", "columns": " Στήλες: {headers}.", "rows": " Αριθμός γραμμών δεδομένων: {count}.", "relationship": "Η εικόνα απεικονίζει το θέμα «{title}», αλλά από μόνη της δεν αποτελεί πραγματολογική απόδειξη."},
+    }
+    t = templates[language]
+    context_templates = t
+    if context:
+        if block_type in context_templates:
+            return context_templates[block_type].format(title=title_ref, context=context)
+
+    if block_type == "link":
+        description = str(_render_block_field(block, payload, "description", "summary") or "").strip()
+        return description or t["link_plain"].format(title=title_ref)
+
+    if block_type == "formula":
+        formula_values = payload.get("formulas") or payload.get("latex_formulas") or []
+        if not isinstance(formula_values, list):
+            formula_values = [formula_values]
+        for key in ("formula", "latex", "equation", "expression", "math"):
+            value = payload.get(key)
+            if value and value not in formula_values:
+                formula_values.append(value)
+        formulas = []
+        for item in formula_values[:6]:
+            value = (item.get("latex") or item.get("formula") or item.get("equation")) if isinstance(item, dict) else item
+            if isinstance(value, str) and value.strip():
+                formulas.append(re.sub(r"\s+", " ", value.strip())[:100])
+        formula = ", ".join(formulas)
+        base = f"{formula}. " if formula else ""
+        return base + t["formula_plain"].format(title=title_ref)
+
+    if block_type in {"image", "gallery"}:
+        images = payload.get("images") or payload.get("items") or []
+        if not isinstance(images, list):
+            images = [images]
+        descriptions = []
+        for item in images[:5]:
+            if isinstance(item, dict):
+                desc = str(item.get("description") or item.get("alt") or item.get("title") or item.get("caption") or "").strip()
+            else:
+                desc = str(item).strip()
+            if desc:
+                descriptions.append(re.sub(r"\s+", " ", desc)[:220])
+        described = "; ".join(descriptions)
+        edit_note = str(_render_block_field(block, payload, "edit_description", "modification_summary", "changes", "change_summary") or "").strip()
+        generated = str(payload.get("kind") or payload.get("source") or "").lower() in {"generated_image", "april_generated", "c_april_images_generator"} or bool(block.get("generated"))
+        if edit_note:
+            core = t["edited"].format(note=edit_note)
+        elif described:
+            core = ((t["generated"] + " ") if generated else "") + described
+        else:
+            subject_defaults = {
+                "es": "el tema de la respuesta", "de": "das Thema der Antwort", "it": "il tema della risposta",
+                "pl": "temat odpowiedzi", "pt": "o tema da resposta", "nl": "het onderwerp van het antwoord",
+                "ja": "回答のテーマ", "zh": "回答中的主题", "ko": "답변의 주제", "ar": "موضوع الإجابة",
+                "hi": "उत्तर का विषय", "el": "το θέμα της απάντησης",
+            }
+            subject = title or subject_defaults[language]
+            core = t["relationship"].format(title=subject)
+        if generated and t["generated"].lower() not in core.lower():
+            core += " " + t["generated"]
+        return core
+
+    if block_type == "table":
+        headers = payload.get("headers") or payload.get("columns") or payload.get("column_names") or []
+        if isinstance(headers, dict):
+            headers = list(headers.keys())
+        if isinstance(headers, list):
+            header_text = ", ".join(str(item.get("label") or item.get("name") or item) if isinstance(item, dict) else str(item) for item in headers[:8])
+        else:
+            header_text = str(headers)
+        rows = payload.get("rows") or payload.get("data") or payload.get("values") or []
+        row_count = len(rows) if isinstance(rows, list) else 0
+        details = t["columns"].format(headers=header_text) if header_text else ""
+        details += t["rows"].format(count=row_count) if row_count else ""
+        return t["table_plain"].format(details=details)
+
+    if block_type == "graph":
+        axis_defaults = {
+            "es": ("eje X", "eje Y"), "de": ("X-Achse", "Y-Achse"), "it": ("asse X", "asse Y"),
+            "pl": ("oś X", "oś Y"), "pt": ("eixo X", "eixo Y"), "nl": ("X-as", "Y-as"),
+            "ja": ("X軸", "Y軸"), "zh": ("X轴", "Y轴"), "ko": ("X축", "Y축"),
+            "ar": ("المحور X", "المحور Y"), "hi": ("X-अक्ष", "Y-अक्ष"), "el": ("άξονας X", "άξονας Y"),
+        }
+        default_x, default_y = axis_defaults[language]
+        x_axis = str(_render_block_field(block, payload, "x_axis", "xAxisLabel", "x_axis_label") or default_x)
+        y_axis = str(_render_block_field(block, payload, "y_axis", "yAxisLabel", "y_axis_label") or default_y)
+        graph_title = str(_render_block_field(block, payload, "title", "name") or title or "")
+        details = f"{graph_title + ': ' if graph_title else ''}X — {x_axis}; Y — {y_axis}."
+        return t["graph_plain"].format(details=details)
+
+    if block_type == "diagram":
+        labels = []
+        for key in ("nodes", "elements", "steps", "items"):
+            values = payload.get(key)
+            if isinstance(values, list):
+                for item in values[:10]:
+                    if isinstance(item, dict):
+                        label = str(item.get("label") or item.get("title") or item.get("name") or item.get("text") or "").strip()
+                    else:
+                        label = str(item).strip()
+                    if label:
+                        labels.append(label[:80])
+        detail = str(payload.get("description") or payload.get("caption") or "").strip()
+        if not detail and labels:
+            heads = {
+                "es": "Elementos principales", "de": "Hauptelemente", "it": "Elementi principali", "pl": "Główne elementy", "pt": "Elementos principais", "nl": "Belangrijkste onderdelen",
+                "ja": "主な要素", "zh": "主要元素", "ko": "주요 요소", "ar": "العناصر الرئيسية", "hi": "मुख्य तत्व", "el": "Κύρια στοιχεία",
+            }
+            detail = heads[language] + ": " + "; ".join(dict.fromkeys(labels[:7]))
+        return t["diagram_plain"].format(details=detail or t["open"])
+
+    details = str(_render_block_field(block, payload, "description", "caption", "alt", "title", "filename", "name") or title or "")
+    if not details:
+        details = t["open"]
+    return t["block_plain"].format(title=title_ref, details=details)
 
 
 def _fallback_render_explanation(block_type: str, block: Dict[str, Any], answer: str, language: str) -> str:
@@ -3807,6 +4003,8 @@ def _fallback_render_explanation(block_type: str, block: Dict[str, Any], answer:
     block_title = str(_render_block_field(block, payload, "step_title", "title", "section") or "").strip()
     title = str(section or block_title).strip()
     title_for_text = f" «{title[:100]}»" if title else ""
+    if language in {"es", "de", "it", "pl", "pt", "nl", "ja", "zh", "ko", "ar", "hi", "el"}:
+        return _fallback_render_explanation_extended(block_type, block, answer, language)
     if context:
         if language == "uk":
             bodies = {
@@ -3991,8 +4189,10 @@ def _fallback_render_explanation(block_type: str, block: Dict[str, Any], answer:
         return f"This table groups related values for comparison.{details} Any takeaway should be based on the rows actually shown."
 
     if block_type == "graph":
-        x_axis = str(_render_block_field(block, payload, "x_axis", "xAxisLabel", "x_axis_label") or "ось X")
-        y_axis = str(_render_block_field(block, payload, "y_axis", "yAxisLabel", "y_axis_label") or "ось Y")
+        axis_defaults = {"ru": ("ось X", "ось Y"), "uk": ("вісь X", "вісь Y"), "fr": ("axe X", "axe Y"), "en": ("X axis", "Y axis")}
+        default_x, default_y = axis_defaults.get(language, axis_defaults["en"])
+        x_axis = str(_render_block_field(block, payload, "x_axis", "xAxisLabel", "x_axis_label") or default_x)
+        y_axis = str(_render_block_field(block, payload, "y_axis", "yAxisLabel", "y_axis_label") or default_y)
         title_value = str(_render_block_field(block, payload, "title", "name") or title or "")
         details = f"{title_value + ': ' if title_value else ''}X — {x_axis}; Y — {y_axis}."
         if language == "uk":
@@ -4039,16 +4239,27 @@ def _fallback_render_explanation(block_type: str, block: Dict[str, Any], answer:
 
 
 def _fallback_link_card_description(link: Dict[str, Any], section: str, language: str) -> str:
-    """A conservative per-card description when a model omits one."""
-    label = str(link.get("title") or link.get("domain") or link.get("url") or link.get("href") or "Источник").strip()
-    topic = str(section or "тему ответа").strip()[:100]
-    if language == "uk":
-        return f"{label} — джерело для перевірки та докладнішого вивчення теми «{topic}». Відкрийте сторінку, щоб ознайомитися з матеріалами джерела."
-    if language == "fr":
-        return f"{label} — source pour vérifier et approfondir le sujet « {topic} ». Ouvrez la page pour consulter son contenu."
-    if language == "en":
-        return f"{label} is a source for checking and exploring “{topic}” further. Open the page to review the source material."
-    return f"{label} — источник для проверки и более подробного изучения темы «{topic}». Откройте страницу, чтобы ознакомиться с материалами источника."
+    """Conservative per-card description in the active user-facing language."""
+    defaults = {
+        "ru": ("Источник", "тему ответа", " для проверки и более подробного изучения темы «{topic}». Откройте страницу, чтобы ознакомиться с материалами источника."),
+        "uk": ("Джерело", "тему відповіді", " для перевірки та докладнішого вивчення теми «{topic}». Відкрийте сторінку, щоб ознайомитися з матеріалами джерела."),
+        "fr": ("Source", "le sujet de la réponse", " permet de vérifier et d’approfondir le sujet « {topic} ». Ouvrez la page pour consulter son contenu."),
+        "en": ("Source", "the answer topic", " helps verify and explore “{topic}” further. Open the page to review the source material."),
+        "es": ("Fuente", "el tema de la respuesta", " permite verificar y ampliar la información sobre «{topic}». Abre la página para consultar el material."),
+        "de": ("Quelle", "das Thema der Antwort", " hilft, das Thema „{topic}“ zu prüfen und zu vertiefen. Öffne die Seite, um das Material zu lesen."),
+        "it": ("Fonte", "il tema della risposta", " aiuta a verificare e approfondire «{topic}». Apri la pagina per consultare il materiale."),
+        "pl": ("Źródło", "temat odpowiedzi", " pomaga sprawdzić i pogłębić temat „{topic}”. Otwórz stronę, aby zapoznać się z materiałem."),
+        "pt": ("Fonte", "o tema da resposta", " ajuda a verificar e aprofundar o tema «{topic}». Abra a página para consultar o conteúdo."),
+        "nl": ("Bron", "het onderwerp van het antwoord", " helpt om „{topic}” te controleren en verder te verkennen. Open de pagina om het materiaal te bekijken."),
+    }
+    fallback_label, default_topic, template = defaults.get(language, defaults["en"])
+    supplied_label = str(link.get("title") or link.get("domain") or link.get("url") or link.get("href") or "").strip()
+    topic = str(section or default_topic).strip()[:100]
+    if supplied_label:
+        return f"{supplied_label}{template.format(topic=topic)}"
+    # Avoid the unnatural duplicate “Source is a source...” when metadata is absent.
+    return f"{fallback_label}{template.format(topic=topic)}"
+
 
 def _ensure_render_explanations(blocks: List[Dict[str, Any]], answer: str, language_hint: Any = "") -> List[Dict[str, Any]]:
     """Guarantee a visible text explanation immediately after every concrete Premium renderer.
@@ -4121,8 +4332,14 @@ def _ensure_render_explanations(blocks: List[Dict[str, Any]], answer: str, langu
             explanation = _fallback_render_explanation(block_type, block, answer, language)
         if not explanation:
             continue
-        if not re.match(r"(?i)^\s*(?:пояснение|пояснення|explication|explanation)\b", explanation):
-            prefix = _localized_explanation_prefix(language, block_type)
+        already_labeled = bool(re.match(
+            r"(?i)^\s*(?:пояснение|пояснення|explication|explanation|explicación|explicação|explicacao|erklärung|spiegazione|objaśnienie|wyjaśnienie|uitleg|説明|说明|설명|شرح|व्याख्या|επεξήγηση)\b",
+            explanation,
+        ))
+        # CJK labels do not have a conventional word boundary, so check those explicitly.
+        already_labeled = already_labeled or explanation.lstrip().startswith(("数式の説明", "画像の内容", "コードの動作", "公式说明", "图像内容", "代码的作用", "수식 설명", "이미지 설명", "코드의 기능"))
+        prefix = _localized_explanation_prefix(language, block_type)
+        if not already_labeled and not explanation.lstrip().lower().startswith(prefix.lower()):
             explanation = f"**{prefix}.** {explanation}"
         explanation = explanation[:1400]
         step_index = block.get("step_index", 1)
