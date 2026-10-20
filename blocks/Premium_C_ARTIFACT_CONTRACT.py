@@ -3255,6 +3255,109 @@ def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[st
     return bool(p)
 
 
+def _apply_premium_3d_visual_profile(payload: Dict[str, Any], answer: str = "") -> Dict[str, Any]:
+    """Add Premium-only rendering hints to genuine 3D payloads without changing data.
+
+    The hints are presentation metadata only: source coordinates, masses, surface
+    values, and the canonical GraphBlock contract remain untouched. Free payloads
+    are processed by the separate non-Premium artifact contract and never receive
+    this marker.
+    """
+    if not isinstance(payload, dict) or not payload:
+        return payload
+
+    representation = str(
+        payload.get("representation") or payload.get("graph_type") or payload.get("chart_type") or ""
+    ).strip().lower().replace("-", "_").replace(" ", "_")
+    three_d_representations = {
+        "3d", "scene3d", "scene_3d", "3d_scene", "surface3d", "surface_3d",
+        "3d_surface", "scatter3d", "scatter_3d", "3d_scatter", "mesh3d", "mesh_3d", "bar3d",
+    }
+    scene = payload.get("scene") if isinstance(payload.get("scene"), dict) else {}
+    geometry = payload.get("geometry") if isinstance(payload.get("geometry"), dict) else {}
+    surface = payload.get("surface") if isinstance(payload.get("surface"), dict) else {}
+    object_groups = [
+        payload.get("objects_3d"), payload.get("spheres"), payload.get("objects"),
+        payload.get("shapes"), payload.get("meshes"), scene.get("objects"),
+        geometry.get("objects"), geometry.get("spheres"),
+    ]
+    objects = [item for group in object_groups if isinstance(group, list) for item in group if isinstance(item, dict)]
+    grid = payload.get("surface_grid") or payload.get("z_values") or payload.get("matrix")
+    if not isinstance(grid, list):
+        grid = surface.get("surface_grid") or surface.get("z_values") or surface.get("matrix") or surface.get("grid")
+    has_surface_grid = isinstance(grid, list) and sum(
+        1 for row in grid if isinstance(row, list) and sum(
+            1 for value in row if isinstance(value, (int, float)) or (isinstance(value, str) and value.strip() and _number_for_render(value) is not None)
+        ) >= 2
+    ) >= 2
+    point_groups = [payload.get("points"), payload.get("coordinates"), payload.get("data_points")]
+    has_xyz_points = any(
+        isinstance(item, (list, tuple)) and len(item) >= 3 and _number_for_render(item[2]) is not None
+        or isinstance(item, dict) and any(_number_for_render(item.get(key)) is not None for key in ("z", "value_z"))
+        for group in point_groups if isinstance(group, list) for item in group
+    )
+    has_surface_formula = any(
+        isinstance(value, str) and value.strip()
+        for value in (
+            payload.get("surface_function"), payload.get("z_function"), payload.get("z_expression"),
+            surface.get("surface_function"), surface.get("z_function"), surface.get("expression"),
+            surface.get("formula"), surface.get("function"),
+        )
+    )
+    is_3d = (
+        representation in three_d_representations
+        or payload.get("dimensions") == 3
+        or payload.get("three_d") is True
+        or (has_surface_grid and representation in three_d_representations)
+        or has_xyz_points
+        or (bool(objects) and (representation in three_d_representations or payload.get("dimensions") == 3 or payload.get("three_d") is True))
+        or (has_surface_formula and representation in three_d_representations)
+    )
+    if not is_3d:
+        return payload
+
+    labels = []
+    for item in objects:
+        for key in ("label", "name", "title", "id", "type", "object_type"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                labels.append(value.strip())
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    scene_title = scene.get("title") if isinstance(scene.get("title"), str) else ""
+    semantic_text = " ".join(str(value or "") for value in (
+        answer, payload.get("title"), payload.get("description"), payload.get("topic"),
+        payload.get("domain"), scene_title, metadata.get("topic"), metadata.get("domain"), *labels,
+    )).lower()
+    # Only enable the orbital animation for a scene that actually describes
+    # planets/solar motion, or already provides explicit orbit data.
+    mentions_planets = bool(re.search(r"planet|планет|планета", semantic_text))
+    mentions_sun = bool(re.search(r"sun|solar|солнц|сонц", semantic_text))
+    mentions_gravity = bool(re.search(r"gravit|гравитац|тяготен", semantic_text))
+    mentions_orbit = bool(re.search(r"orbit|орбит|вращени", semantic_text))
+    explicit_orbits = bool(payload.get("orbits") or payload.get("orbit_paths") or payload.get("orbital_motion"))
+    orbital_scene = explicit_orbits or (mentions_planets and mentions_sun and (mentions_orbit or mentions_gravity))
+    supplied = payload.get("april_premium_3d")
+    supplied = supplied if isinstance(supplied, dict) else {}
+    minor_step = supplied.get("minor_grid_step", payload.get("grid_minor_step", payload.get("minor_grid_step", 0.1)))
+    if _number_for_render(minor_step) is None or _number_for_render(minor_step) <= 0:
+        minor_step = 0.1
+    payload["april_premium_3d"] = {
+        **supplied,
+        "enabled": True,
+        "show_elevated_grid": supplied.get("show_elevated_grid", True),
+        "minor_grid_step": float(_number_for_render(minor_step) or 0.1),
+        "vertical_exaggeration": supplied.get("vertical_exaggeration", 1.55),
+        "animate_orbits": supplied.get("animate_orbits", orbital_scene),
+        "draw_gravity_vectors": supplied.get("draw_gravity_vectors", orbital_scene or mentions_gravity),
+        "show_gravity_waves": supplied.get("show_gravity_waves", orbital_scene and mentions_gravity),
+        "gravity_wave_amplitude": supplied.get("gravity_wave_amplitude", 0.22),
+        "orbital_speed": supplied.get("orbital_speed", 0.34),
+        "schema": "april.premium.3d.visual.v1",
+        "presentation_only": True,
+    }
+    return payload
+
+
 def prepare_render_blocks_for_room_dispatch(
     render_blocks: Any,
     answer: str = "",
@@ -3419,6 +3522,8 @@ def prepare_render_blocks_for_room_dispatch(
                 or interpreted_graph_policy.get("preferred_representation")
                 or "line",
             )
+        if block_type == "graph" and payload:
+            payload = _apply_premium_3d_visual_profile(payload, source_answer)
         if payload:
             block["payload"] = payload
         if block_type in {"table", "graph", "diagram", "image", "gallery", "formula", "code", "link", "file"}:
@@ -3484,6 +3589,7 @@ def prepare_render_blocks_for_room_dispatch(
                 or "line",
             )
         if graph_payload and _has_render_payload("graph", graph_payload):
+            graph_payload = _apply_premium_3d_visual_profile(graph_payload, source_answer)
             prepared.append({"type": "graph", "artifact_type": "graph", "renderer": "GraphBlock", "viewer": "GraphBlock", "payload": graph_payload, "source_room": "C_GRAPH_ROOM"})
             existing_types.add("graph")
     if ("link" in requested or urls_from_answer) and "link" not in existing_types:
