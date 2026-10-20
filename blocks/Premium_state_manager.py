@@ -5932,12 +5932,24 @@ def search_dialogue_context(
     # authored text when the user is referring to that branch. Compact summaries
     # are useful for search, but cannot replace the source when discussing wording,
     # reactions, edits, or whether a text was preserved correctly.
+    query_low = _text(query).lower().replace("ё", "е")
+    explicit_text_edit_request = bool(re.search(
+        r"(?:\b(?:текст\w*|ответ\w*|сообщен\w*|формулировк\w*|абзац\w*|text\w*|answer\w*|message\w*|wording)\b)"
+        r"[\s\S]{0,100}?\b(?:исправ\w*|поправ\w*|измен\w*|отредактир\w*|улучш\w*|перепиш\w*|передел\w*|переработ\w*|"
+        r"сократ\w*|расшир\w*|переформулир\w*|перевед\w*|доработ\w*|rewrite\w*|edit\w*|"
+        r"change\w*|improve\w*|shorten\w*|expand\w*|rephrase\w*|translate\w*)\b|"
+        r"\b(?:исправ\w*|поправ\w*|измен\w*|отредактир\w*|улучш\w*|перепиш\w*|передел\w*|переработ\w*|сократ\w*|"
+        r"расшир\w*|переформулир\w*|перевед\w*|доработ\w*|rewrite\w*|edit\w*|change\w*|"
+        r"improve\w*|shorten\w*|expand\w*|rephrase\w*|translate\w*)\b"
+        r"[\s\S]{0,100}?\b(?:текст\w*|ответ\w*|сообщен\w*|формулировк\w*|абзац\w*|text\w*|answer\w*|message\w*|wording)\b",
+        query_low, re.IGNORECASE,
+    ))
     preserve_text_request = bool(re.search(
         r"(?:стих\w*|поэм\w*|сонет\w*|лирик\w*|текст\w*|строк\w*|"
         r"дословн\w*|целиком|полностью|повтори|перечитай|как ты написал|что ты написал|"
         r"poem\w*|poetr\w*|verse\w*|sonnet\w*|the text|word for word|verbatim|full text)",
-        _text(query).lower().replace("ё", "е"),
-    ))
+        query_low,
+    ) or explicit_text_edit_request)
     source_sensitive_acts = {
         "REFERENTIAL_CONTINUATION", "EXPLANATION_REQUEST", "CLARIFICATION_REQUEST",
         "CORRECTION_OR_REVISION", "FRUSTRATION_OR_DISSATISFACTION", "REVISION_REQUEST",
@@ -5950,6 +5962,9 @@ def search_dialogue_context(
     if (
         relation == "CONTINUE" or contextual_history_match
         or (history_request and (preserve_text_request or topic_reference_fragment or reference_followup))
+        # A selected, semantically matched history row is also a valid source for
+        # an explicit text revision even if the relation classifier returned NEW.
+        or (explicit_text_edit_request and bool(selected_for_context))
     ) and needs_textual_evidence:
         source_by_id = {
             _text(row.get("message_id")): row for row in all_rows
@@ -5970,7 +5985,7 @@ def search_dialogue_context(
             is_authored_text = bool(re.search(
                 r"(?:стих\w*|поэм\w*|сонет\w*|лирик\w*|рифм\w*|куплет\w*|"
                 r"poem\w*|poetr\w*|verse\w*|sonnet\w*|lyrics)", topic_and_text
-            ))
+            ) or explicit_text_edit_request)
             # Require both a real selected DB source and a textual reference in
             # either the query or that source. This is not a global history dump.
             if not is_authored_text:
