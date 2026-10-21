@@ -172,6 +172,11 @@ def _structured_payload(task: Dict[str, Any]) -> Dict[str, Any]:
             "periods", "events", "funnel", "waterfall", "bins", "ranges",
             "error", "errors", "error_low", "error_high", "values_3d",
             "camera", "z_axis", "semantic", "interpretation", "data_semantics",
+            "wave_effect", "wave", "waves", "impact_wave", "blast_wave", "shock_wave", "shockwave",
+            "wall", "walls", "wall_x", "impact_x", "impact_y", "wave_speed", "wave_decay",
+            "wave_amplitude", "wave_frequency", "wave_phase", "amplitude", "frequency", "phase",
+            "decay", "speed", "animate", "scene_kind", "collision_objects", "wave_front",
+            "wavefront", "reflection", "propagation_direction",
         )
         if key in task
     }
