@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 import asyncio
+import math
 import hashlib
 import json
 import os
@@ -2995,29 +2996,147 @@ def normalize_render_blocks(
 
 
 def _has_concrete_graph_payload(block: dict[str, Any]) -> bool:
-    """Check whether GraphBlock has actual renderable data, not merely a typed shell."""
-    sources: list[dict[str, Any]] = [block]
-    for key in ("payload", "data", "artifact", "presentation_signal", "room_signal", "signal", "render_signal"):
-        child = block.get(key)
-        if isinstance(child, dict):
-            sources.append(child)
-            for nested_key in ("payload", "payload_contract", "artifact_payload"):
-                nested = child.get(nested_key)
-                if isinstance(nested, dict):
-                    sources.append(nested)
-                    if isinstance(nested.get("payload"), dict):
-                        sources.append(nested["payload"])
-    graph_keys = (
-        "series", "datasets", "traces", "curves", "points", "coordinates", "x", "y", "fn",
-        "function", "equation", "expression", "formula", "x_values", "y_values", "values", "matrix", "surface_grid", "surface_function",
-        "z_function", "z_expression", "objects_3d", "spheres", "objects", "shapes",
-        "primitives", "vertices", "faces", "nodes", "edges", "wave_function",
+    """Return True only when GraphBlock has drawable coordinates or an equation.
+
+    Do not treat metadata-only containers such as ``series=[{"label": "Цена"}]``
+    or ``objects_3d=[{"label": "Солнце"}]`` as a completed graph. The former
+    implementation only checked that a recognized key held a non-empty list/dict,
+    so an empty visual shell prevented the Free repair path from creating the real
+    payload from the request and answer.
+    """
+    sources: list[dict[str, Any]] = []
+    queue: list[Any] = [block]
+    seen: set[int] = set()
+    nested_keys = (
+        "payload", "data", "artifact", "artifact_payload", "presentation_signal",
+        "room_signal", "signal", "render_signal", "graph", "graph_data", "chart",
+        "plot", "payload_contract", "protected_structured_data",
     )
-    return any(
-        isinstance(source.get(key), (list, dict)) and bool(source.get(key))
-        or isinstance(source.get(key), str) and bool(source.get(key).strip())
-        for source in sources for key in graph_keys
-    )
+    for _ in range(5):
+        if not queue:
+            break
+        next_queue: list[Any] = []
+        for item in queue:
+            if isinstance(item, list):
+                next_queue.extend(x for x in item if isinstance(x, (dict, list)))
+                continue
+            if not isinstance(item, dict) or id(item) in seen:
+                continue
+            seen.add(id(item))
+            sources.append(item)
+            for key in nested_keys:
+                child = item.get(key)
+                if isinstance(child, (dict, list)) and child:
+                    next_queue.append(child)
+        queue = next_queue
+
+    def _number(value: Any) -> bool:
+        if isinstance(value, bool) or value is None:
+            return False
+        if isinstance(value, (int, float)):
+            return math.isfinite(float(value))
+        if isinstance(value, str) and value.strip():
+            try:
+                return math.isfinite(float(value.strip().replace(",", ".")))
+            except ValueError:
+                return False
+        return False
+
+    def _points_have_data(value: Any, *, require_z: bool = False) -> bool:
+        if not isinstance(value, list):
+            return False
+        valid = 0
+        for point in value:
+            if isinstance(point, dict):
+                x = point.get("x", point.get("t", point.get("label", point.get("date"))))
+                y = point.get("y", point.get("value", point.get("v")))
+                z = point.get("z", point.get("value_z"))
+                if x is not None and _number(y) and (not require_z or _number(z)):
+                    valid += 1
+            elif isinstance(point, (list, tuple)):
+                if len(point) >= (3 if require_z else 2) and _number(point[1]) and (not require_z or _number(point[2])):
+                    valid += 1
+        return valid >= (1 if require_z else 2)
+
+    def _series_have_data(value: Any) -> bool:
+        if isinstance(value, dict):
+            entries = list(value.values())
+        elif isinstance(value, list):
+            entries = value
+        else:
+            return False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            points = entry.get("points") or entry.get("data_points") or entry.get("data")
+            if _points_have_data(points):
+                return True
+            xs = entry.get("x", entry.get("x_values", entry.get("categories")))
+            ys = entry.get("y", entry.get("y_values", entry.get("values")))
+            if isinstance(xs, list) and isinstance(ys, list) and min(len(xs), len(ys)) >= 2 and any(_number(v) for v in ys):
+                return True
+            expression = next((entry.get(key) for key in ("fn", "function", "expression", "equation", "formula", "z_function", "surface_function") if isinstance(entry.get(key), str) and entry.get(key).strip()), "")
+            if expression and re.search(r"[A-Za-zА-Яа-я0-9]", expression):
+                return True
+        return False
+
+    for source in sources:
+        # A real line/scatter/function series. A non-empty series label alone is
+        # not data and must not suppress visual repair.
+        if any(_series_have_data(source.get(key)) for key in ("series", "datasets", "traces", "curves")):
+            return True
+
+        # Paired direct coordinate arrays are a renderable 2D chart.
+        for x_key, y_key in (("x_values", "y_values"), ("x", "y"), ("categories", "values")):
+            xs, ys = source.get(x_key), source.get(y_key)
+            if isinstance(xs, list) and isinstance(ys, list) and min(len(xs), len(ys)) >= 2 and any(_number(v) for v in ys):
+                return True
+
+        if _points_have_data(source.get("points")) or _points_have_data(source.get("data_points")):
+            return True
+        if _points_have_data(source.get("coordinates"), require_z=True) or _points_have_data(source.get("points_3d"), require_z=True):
+            return True
+
+        # A surface grid must have at least two rows with two numeric values each.
+        for key in ("surface_grid", "z_values", "matrix", "grid"):
+            grid = source.get(key)
+            if isinstance(grid, list):
+                numeric_rows = [row for row in grid if isinstance(row, list) and sum(_number(v) for v in row) >= 2]
+                if len(numeric_rows) >= 2:
+                    return True
+
+        # Analytic curves and surfaces render directly from their expression.
+        representation = _text(source.get("representation") or source.get("graph_type") or source.get("chart_type") or source.get("plot_type")).lower().replace("-", "_").replace(" ", "_")
+        for key in ("surface_function", "z_function", "z_expression", "wave_function", "function_expression", "fn", "function", "expression", "equation", "formula"):
+            expression = source.get(key)
+            if isinstance(expression, str) and expression.strip() and re.search(r"[A-Za-zА-Яа-я0-9]", expression):
+                if key in {"surface_function", "z_function", "z_expression", "wave_function"} or representation in {"function", "function2d", "function_2d", "line", "line_chart", "surface3d", "surface_3d", "scene3d", "3d", "plot3d"}:
+                    return True
+
+        # A spatial object needs actual shape/coordinate evidence; its label alone
+        # is only metadata and was the 3D equivalent of the empty-series bug.
+        for key in ("objects_3d", "spheres", "objects", "shapes", "primitives", "meshes", "bodies", "celestial_bodies", "planets", "satellites", "moons", "comets"):
+            items = source.get(key)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                position = item.get("position") if isinstance(item.get("position"), dict) else item.get("center") if isinstance(item.get("center"), dict) else {}
+                has_xyz = any(_number(item.get(axis, position.get(axis))) for axis in ("x", "y", "z"))
+                shape = _text(item.get("shape") or item.get("geometry_type") or item.get("type") or item.get("kind")).lower()
+                has_size = any(_number(item.get(name)) for name in ("radius", "size", "width", "height", "depth", "edge_length", "side_length"))
+                geometry = item.get("geometry")
+                has_geometry = isinstance(geometry, dict) and bool(geometry.get("vertices") or geometry.get("faces") or geometry.get("mesh") or geometry.get("parameters"))
+                if has_xyz or (shape and has_size) or has_geometry:
+                    return True
+
+        # Concept graphs require both nodes and edges, not a metadata-only nodes list.
+        nodes, edges = source.get("nodes"), source.get("edges")
+        if isinstance(nodes, list) and len(nodes) >= 2 and isinstance(edges, list) and len(edges) >= 1:
+            return True
+
+    return False
 
 
 def _has_concrete_diagram_payload(block: dict[str, Any]) -> bool:
@@ -3122,6 +3241,34 @@ def _fallback_graph_payload(current_request: str, answer: str, graph_policy: dic
             "series": [{"label": f"Цена{', ' + currency if currency else ''}", "type": "line", "points": points}],
             "graph_policy": policy,
             "data_semantics": data_semantics,
+        }
+
+    # When the provider explicitly says that a weekly price chart is an illustrative
+    # example (not factual market data) but returns only the axes/legend shell, supply
+    # a clearly labelled synthetic series so the chart and its point table can render.
+    # Never use this fallback for a request for actual/reported prices.
+    is_weekly_price_example = (
+        re.search(r"недел|week|weekly", request, re.IGNORECASE)
+        and re.search(r"цен|price|стоимост", request, re.IGNORECASE)
+        and re.search(r"условн\w* пример|иллюстрац\w*|illustrative example|for illustration|not factual|не являются фактическими", answer, re.IGNORECASE)
+        and not re.search(r"фактическ\w* данн|реальн\w* цен|actual price|current price|reported price", request, re.IGNORECASE)
+    )
+    if is_weekly_price_example:
+        currency = "₽" if re.search(r"₽|рубл|руб\b|\brub", f"{request} {answer}", re.IGNORECASE) else ("грн" if re.search(r"грн|гривн|\buah\b", f"{request} {answer}", re.IGNORECASE) else "")
+        x_values = ["День 1", "День 2", "День 3", "День 4", "День 5", "День 6", "День 7"]
+        y_values = [100, 108, 115, 121, 134, 142, 150]
+        points = [{"x": x, "y": y, "label": "Иллюстративное значение", "is_estimate": True} for x, y in zip(x_values, y_values)]
+        y_label = f"Цена, {currency}" if currency else "Цена (условные единицы)"
+        return {
+            "title": _clip(_text(current_request) or "Иллюстративный рост цены за неделю", 140),
+            "description": "Условные демонстрационные значения, созданные только для иллюстрации; это не фактические цены и не рыночные измерения.",
+            "representation": "line", "chart_type": "line", "graph_type": "line", "dimensions": 2,
+            "x_label": "День", "y_label": y_label, "x_axis": {"label": "День", "type": "categorical", "values": x_values},
+            "y_axis": {"label": y_label, "type": "numeric"},
+            "series": [{"label": "Условная цена", "type": "line", "points": points, "x": x_values, "y": y_values}],
+            "points": points, "x_values": x_values, "y_values": y_values,
+            "data_semantics": {"kind": "illustrative_example", "is_factual": False, "interpolation": "none", "note": "Все семь значений условные и не являются фактическими данными."},
+            "graph_policy": policy,
         }
 
     # Honor a user-supplied 2D function exactly. Trim only trailing natural-language
@@ -3248,6 +3395,68 @@ def _fallback_diagram_payload(current_request: str) -> dict[str, Any] | None:
     return {"title": _clip(_text(current_request) or shape, 140), "svg": svg, "shape": shape, "representation": "diagram", "illustrative": True}
 
 
+
+def _fallback_link_payload(current_request: str) -> dict[str, Any] | None:
+    """Recover the public homepage URL for an explicitly named social network.
+
+    This is intentionally limited to a direct request for a site's link. It does
+    not guess a user's private/profile URL, and it never scrapes or fabricates a
+    specific account address.
+    """
+    request = _text(current_request).lower().replace("ё", "е")
+    if not re.search(r"ссылк|url|website|web site|link|официальн\w* сайт", request, re.IGNORECASE):
+        return None
+    if re.search(r"\b(?:мой|моя|мою|моего|моей|мне|my|mine|my profile|my page|мой профиль|моя страница|личн\w* аккаунт)\b", request, re.IGNORECASE):
+        return None
+    targets = (
+        (r"facebook|фейсбук|фэйсбук", "Facebook", "https://www.facebook.com/"),
+        (r"instagram|инстаграм|инстаграмм", "Instagram", "https://www.instagram.com/"),
+    )
+    for pattern, title, url in targets:
+        if re.search(pattern, request, re.IGNORECASE):
+            return {
+                "title": title,
+                "url": url,
+                "href": url,
+                "links": [{"title": title, "url": url, "href": url}],
+                "source": "explicit_social_homepage_fallback",
+            }
+    return None
+
+
+def _has_concrete_link_payload(block: dict[str, Any]) -> bool:
+    """Check for an actual HTTP(S) URL in the block or its payload wrappers."""
+    pending: list[Any] = [block]
+    seen: set[int] = set()
+    for _ in range(4):
+        if not pending:
+            break
+        next_pending: list[Any] = []
+        for item in pending:
+            if isinstance(item, list):
+                next_pending.extend(item)
+                continue
+            if not isinstance(item, dict) or id(item) in seen:
+                continue
+            seen.add(id(item))
+            for key in ("url", "href", "canonical_url", "website_url"):
+                value = _text(item.get(key))
+                if re.match(r"^https?://\S+$", value, re.IGNORECASE):
+                    return True
+            links = item.get("links")
+            if isinstance(links, list):
+                for link in links:
+                    if isinstance(link, str) and re.match(r"^https?://\S+$", link.strip(), re.IGNORECASE):
+                        return True
+                    if isinstance(link, dict) and any(re.match(r"^https?://\S+$", _text(link.get(key)), re.IGNORECASE) for key in ("url", "href")):
+                        return True
+            for key in ("payload", "data", "artifact", "signal", "room_signal", "render_signal", "presentation_signal", "payload_contract"):
+                child = item.get(key)
+                if isinstance(child, (dict, list)) and child:
+                    next_pending.append(child)
+        pending = next_pending
+    return False
+
 def _repair_visual_render_blocks(
     blocks: list[dict[str, Any]],
     *,
@@ -3261,19 +3470,47 @@ def _repair_visual_render_blocks(
     outputs = set(requested_outputs)
 
     if "graph" in outputs:
-        graph_blocks = [block for block in repaired if _text(block.get("type")).lower() == "graph"]
+        graph_blocks = [block for block in repaired if _text(block.get("type") or block.get("artifact_type")).lower() in {"graph", "chart", "plot", "graph_data", "3d_graph", "graph3d", "surface3d", "scene3d"}]
         usable = any(_has_concrete_graph_payload(block) for block in graph_blocks)
         if not usable:
             payload = _fallback_graph_payload(current_request, answer, graph_policy)
             if payload:
                 if graph_blocks:
+                    graph_blocks[0]["type"] = "graph"
                     graph_blocks[0]["payload"] = payload
                     graph_blocks[0]["renderer"] = "GraphBlock"
                     graph_blocks[0]["viewer"] = "GraphBlock"
                     graph_blocks[0]["integrity_repaired"] = True
+                    # Remove duplicate metadata-only graph shells but preserve text
+                    # and any other useful renderer blocks.
+                    for duplicate in graph_blocks[1:]:
+                        if duplicate in repaired:
+                            repaired.remove(duplicate)
                 else:
                     repaired.append({"type": "graph", "renderer": "GraphBlock", "viewer": "GraphBlock", "payload": payload, "integrity_repaired": True})
-                _log_json("VISUAL_PAYLOAD_REPAIR", {"type": "graph", "reason": "missing_canonical_graph_data", "payload_keys": sorted(payload.keys())})
+                _log_json("VISUAL_PAYLOAD_REPAIR", {"type": "graph", "reason": "empty_shell_replaced_with_concrete_data", "payload_keys": sorted(payload.keys())})
+            elif graph_blocks:
+                # Keep the contract honest: an empty chart shell is not a graph.
+                repaired = [block for block in repaired if block not in graph_blocks]
+                _log_json("EMPTY_TYPED_RENDER_BLOCK_DROPPED", {"block_type": "graph", "reason": "no_concrete_data_and_no_grounded_fallback"})
+
+    if "link" in outputs:
+        link_blocks = [block for block in repaired if _text(block.get("type") or block.get("artifact_type")).lower() in {"link", "links", "hyperlink", "link_list"}]
+        if not any(_has_concrete_link_payload(block) for block in link_blocks):
+            payload = _fallback_link_payload(current_request)
+            if payload:
+                if link_blocks:
+                    link_blocks[0]["type"] = "link"
+                    link_blocks[0]["payload"] = payload
+                    link_blocks[0]["renderer"] = "LinkCard"
+                    link_blocks[0]["viewer"] = "LinkCard"
+                    link_blocks[0]["integrity_repaired"] = True
+                    for duplicate in link_blocks[1:]:
+                        if duplicate in repaired:
+                            repaired.remove(duplicate)
+                else:
+                    repaired.append({"type": "link", "renderer": "LinkCard", "viewer": "LinkCard", "payload": payload, "integrity_repaired": True})
+                _log_json("VISUAL_PAYLOAD_REPAIR", {"type": "link", "reason": "known_official_homepage_from_explicit_request", "url_present": True})
 
     formula_blocks = [block for block in repaired if _text(block.get("type")).lower() == "formula"]
     if "formula" in outputs:
