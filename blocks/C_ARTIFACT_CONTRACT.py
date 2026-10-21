@@ -526,7 +526,7 @@ WEB_RENDERER_REGISTRY = {
     "text": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "answer"]},
     "markdown": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "markdown"]},
     "formula": {"renderer": "FormulaRenderer", "viewer": "FormulaRenderer", "fallback_renderer": "", "payload_keys": ["formula", "formulas", "latex", "latex_formulas", "equation", "expression", "math", "markdown", "content"], "mode": "force_math"},
-    "graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["series", "datasets", "traces", "curves", "points", "data_points", "x", "y", "x_values", "y_values", "categories", "labels", "data_table", "matrix", "x_axis", "y_axis", "z_axis", "axes", "representation", "chart_type", "visualization", "graph_type", "plot_type", "fn", "function", "expression", "equation", "formula", "x_domain", "y_domain", "z_domain", "x_range", "y_range", "z_range", "domain", "surface", "surface_grid", "surface_function", "z_function", "z_expression", "grid_resolution", "spheres", "objects_3d", "objects", "shapes", "meshes", "geometry", "scene", "dimensions", "three_d", "show_curved_grid", "curved_grid"]},
+    "graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["series", "datasets", "traces", "curves", "points", "data_points", "x", "y", "x_values", "y_values", "categories", "labels", "data_table", "matrix", "x_axis", "y_axis", "z_axis", "axes", "representation", "chart_type", "visualization", "graph_type", "plot_type", "fn", "function", "expression", "equation", "formula", "x_domain", "y_domain", "z_domain", "x_range", "y_range", "z_range", "domain", "surface", "surface_grid", "surface_function", "z_function", "z_expression", "grid_resolution", "spheres", "objects_3d", "objects", "shapes", "meshes", "geometry", "scene", "dimensions", "three_d", "show_curved_grid", "curved_grid", "wave_effect", "wave", "waves", "impact_wave", "blast_wave", "shock_wave", "shockwave", "wall", "walls", "wall_x", "impact_x", "impact_y", "wave_speed", "wave_decay", "wave_amplitude", "wave_frequency", "wave_phase", "amplitude", "frequency", "phase", "decay", "speed", "animate", "scene_kind", "collision_objects", "wave_front", "wavefront", "reflection", "propagation_direction"]},
     "knowledge_graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "series", "points", "labels", "title", "description"]},
     "relation_graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "series", "points", "labels", "title", "description"]},
     "relations": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "title", "description"]},
@@ -2527,6 +2527,61 @@ def _graph_payload_from_answer(answer: str, graph_policy: Dict[str, Any] | None 
     is_3d = preferred in {"scene3d", "scene_3d", "surface3d", "surface_3d", "scatter3d", "scatter_3d", "3d"} or bool(re.search(
         r"(?:\b3\s*[- ]?d\b|\b3д\b|тр[её]хмерн\w*)", text, re.IGNORECASE
     ))
+    if is_3d and str(policy.get("scene_kind") or "").strip().lower() == "shockwave_wall":
+        is_russian = bool(re.search(r"[А-Яа-яІіЇїЄєҐґ]", text))
+        wall_label = "Стена" if is_russian else "Wall"
+        source_label = "Источник волны" if is_russian else "Wave source"
+        title = "Ударная волна у стены" if is_russian else "Shock wave approaching a wall"
+        description = (
+            "Качественная концептуальная схема: фронт волны распространяется к стене и частично отражается. "
+            "Это иллюстрация явления, а не результат численного моделирования."
+            if is_russian else
+            "Qualitative concept scene: a wavefront travels toward a wall and partially reflects. "
+            "This is an illustration, not a numerical simulation."
+        )
+        return {
+            "representation": "scene3d",
+            "graph_type": "scene3d",
+            "dimensions": 3,
+            "three_d": True,
+            "scene_kind": "shockwave_wall",
+            "title": title,
+            "description": description,
+            "objects_3d": [
+                {
+                    "id": "shockwave-wall", "shape": "wall", "label": wall_label,
+                    "x": 3.55, "y": 0.0, "z": 2.35,
+                    "width": 0.22, "height": 4.7, "depth": 7.6,
+                    "color": "#a8b4c4",
+                },
+                {
+                    "id": "wave-source", "shape": "sphere", "label": source_label,
+                    "x": -4.0, "y": 0.0, "z": 0.22,
+                    "radius": 0.22, "color": "#fb923c",
+                },
+            ],
+            "wave_effect": {
+                "enabled": True, "amplitude": 2.0, "frequency": 2.2,
+                "decay": 9.0, "speed": 2.4, "phase": 0.0,
+                "x": -4.0, "y": 0.0,
+            },
+            "impact_wave": True,
+            "wall_x": 3.55,
+            "impact_x": -4.0,
+            "impact_y": 0.0,
+            "wave_speed": 2.4,
+            "surface_mode": "shock_wave",
+            "field_type": "impact_wave",
+            "x_domain": [-5.3, 4.7],
+            "y_domain": [-4.4, 4.4],
+            "z_domain": [-2.5, 2.5],
+            "grid_resolution": 39,
+            "show_zero_plane": True,
+            "animate": True,
+            "annotations": ["wavefront", "wall impact"],
+            "source": "deterministic_concept_scene_fallback",
+        }
+
     if is_3d:
         sphere_pattern = re.compile(
             r"(?im)^\s*[-*•]?\s*(?:сфера|sphere)\s*(\d+)?\s*:\s*"
