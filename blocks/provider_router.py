@@ -2994,6 +2994,337 @@ def normalize_render_blocks(
     return result
 
 
+def _has_concrete_graph_payload(block: dict[str, Any]) -> bool:
+    """Check whether GraphBlock has actual renderable data, not merely a typed shell."""
+    sources: list[dict[str, Any]] = [block]
+    for key in ("payload", "data", "artifact", "presentation_signal", "room_signal", "signal", "render_signal"):
+        child = block.get(key)
+        if isinstance(child, dict):
+            sources.append(child)
+            for nested_key in ("payload", "payload_contract", "artifact_payload"):
+                nested = child.get(nested_key)
+                if isinstance(nested, dict):
+                    sources.append(nested)
+                    if isinstance(nested.get("payload"), dict):
+                        sources.append(nested["payload"])
+    graph_keys = (
+        "series", "datasets", "traces", "curves", "points", "coordinates", "x", "y", "fn",
+        "function", "equation", "expression", "formula", "x_values", "y_values", "values", "matrix", "surface_grid", "surface_function",
+        "z_function", "z_expression", "objects_3d", "spheres", "objects", "shapes",
+        "primitives", "vertices", "faces", "nodes", "edges", "wave_function",
+    )
+    return any(
+        isinstance(source.get(key), (list, dict)) and bool(source.get(key))
+        or isinstance(source.get(key), str) and bool(source.get(key).strip())
+        for source in sources for key in graph_keys
+    )
+
+
+def _has_concrete_diagram_payload(block: dict[str, Any]) -> bool:
+    """A diagram must contain drawable content, not just an explanation string."""
+    candidates: list[dict[str, Any]] = [block]
+    for key in ("payload", "data", "artifact", "presentation_signal", "room_signal", "signal", "render_signal"):
+        child = block.get(key)
+        if isinstance(child, dict):
+            candidates.append(child)
+            if isinstance(child.get("payload"), dict):
+                candidates.append(child["payload"])
+            if isinstance(child.get("payload_contract"), dict):
+                contract = child["payload_contract"]
+                candidates.append(contract)
+                if isinstance(contract.get("payload"), dict):
+                    candidates.append(contract["payload"])
+    for source in candidates:
+        if any(_text(source.get(key)) for key in ("svg", "svg_payload", "drawing")):
+            return True
+        if any(isinstance(source.get(key), list) and source.get(key) for key in ("elements", "drawing_elements", "drawingElements", "vertices", "primitives")):
+            return True
+        if isinstance(source.get("nodes"), list) and len(source["nodes"]) >= 2 and isinstance(source.get("edges"), list) and source["edges"]:
+            return True
+        geometry = source.get("geometry")
+        if isinstance(geometry, dict) and (geometry.get("vertices") or geometry.get("elements")):
+            return True
+        shape = _text(source.get("shape") or source.get("kind") or source.get("diagram_type")).lower().replace("-", "_").replace(" ", "_")
+        if shape in {"triangle", "equilateral_triangle", "square", "rectangle", "parallelogram", "circle", "sphere", "cube"}:
+            return True
+    return False
+
+
+def _math_expressions_from_text(value: str) -> list[str]:
+    """Extract equation-only strings from an answer; never turn explanatory prose into math."""
+    text = _text(value)
+    found: list[str] = []
+    for pattern in (
+        r"\$\$([\s\S]*?)\$\$",
+        r"\\\[([\s\S]*?)\\\]",
+        r"\\\(([\s\S]*?)\\\)",
+        r"(?<!\\)\$([^$\n]+)\$",
+    ):
+        found.extend(match.strip() for match in re.findall(pattern, text) if _text(match))
+    for line in text.splitlines():
+        candidate = line.strip().strip("`* ")
+        if not candidate or re.search(r"[А-Яа-яЁё]{2,}", candidate):
+            continue
+        if re.search(r"(?:=|\\frac|\\sqrt|\\sum|\\int|\\pi|\\theta|\\phi|\\cdot|\\times|\^|_[{A-Za-z0-9])", candidate):
+            found.append(candidate)
+    # A provider may wrap the same equation several ways; keep order and uniqueness.
+    return list(dict.fromkeys(item for item in found if len(item) <= 700))
+
+
+def _fallback_graph_payload(current_request: str, answer: str, graph_policy: dict[str, Any]) -> dict[str, Any] | None:
+    """Repair common missing graph payloads from explicit user-supplied math/data only."""
+    request = _text(current_request).lower().replace("ё", "е")
+    policy = graph_policy if isinstance(graph_policy, dict) else {}
+    representation = _text(policy.get("preferred_representation")) or "line"
+
+    # Recover explicit start/end values. No hidden measurements are fabricated; the
+    # line connects only the endpoints the user actually supplied.
+    endpoint = re.search(
+        r"(?:\bfrom\s*|\bbetween\s*|\bот\s*|\bс\s*|между\s*)"
+        r"(-?\d+(?:[.,]\d+)?)\s*(?:грн\.?|грив\w*|uah|гривен\w*|usd|\$)?"
+        r"\s*(?:до|to|and|и)\s*(-?\d+(?:[.,]\d+)?)",
+        request,
+        flags=re.IGNORECASE,
+    )
+    if endpoint:
+        start_value = float(endpoint.group(1).replace(",", "."))
+        end_value = float(endpoint.group(2).replace(",", "."))
+        currency = "грн" if re.search(r"грн|гривн|uah", request) else ("$" if "$" in request or "usd" in request else "")
+        uniform_assumption = bool(re.search(r"равномерн\w*|линейн\w*|uniform\w*|linear\w*", answer, re.IGNORECASE))
+        if re.search(r"недел|weekly|week", request) and uniform_assumption:
+            x_values = [f"День {day}" for day in range(1, 8)]
+            step = (end_value - start_value) / 6.0
+            points = [{"x": label, "y": round(start_value + step * index, 2)} for index, label in enumerate(x_values)]
+            x_label = "День недели"
+            note = "Между заданными крайними значениями использована линейная интерполяция; промежуточные значения расчётные, не измеренные."
+            data_semantics = {"source": "explicit_user_supplied_endpoints", "interpolation": "linear_assumption_from_answer", "intermediate_values_measured": False, "note": note}
+        else:
+            if re.search(r"недел|weekly|week", request):
+                x_values = ["Начало недели", "Конец недели"]
+                x_label = "Период недели"
+            elif re.search(r"день|daily|day", request):
+                x_values = ["Начало периода", "Конец периода"]
+                x_label = "Период"
+            else:
+                x_values = ["Начало", "Конец"]
+                x_label = "Период"
+            points = [{"x": x_values[0], "y": start_value}, {"x": x_values[1], "y": end_value}]
+            note = "Показаны только заданные начальная и конечная точки; промежуточные значения не заданы."
+            data_semantics = {"source": "explicit_user_supplied_endpoints", "intermediate_values_available": False, "note": note}
+        return {
+            "title": _clip(_text(current_request) or "График", 140),
+            "representation": "line" if representation not in {"surface3d", "scatter3d", "mesh3d", "scene3d"} else _text(policy.get("fallback_representation")) or "line",
+            "chart_type": "line",
+            "x_axis": {"label": x_label, "type": "categorical", "values": x_values},
+            "y_axis": {"label": f"Цена ({currency})" if currency else "Значение", "type": "numeric"},
+            "x_label": x_label,
+            "y_label": f"Цена ({currency})" if currency else "Значение",
+            "series": [{"label": f"Цена{', ' + currency if currency else ''}", "type": "line", "points": points}],
+            "graph_policy": policy,
+            "data_semantics": data_semantics,
+        }
+
+    # Honor a user-supplied 2D function exactly. Trim only trailing natural-language
+    # instructions, not the equation itself.
+    function_match = re.search(r"(?:\by\s*=\s*|\bf\s*\(\s*x\s*\)\s*=\s*)([^;\n]+)", request, flags=re.IGNORECASE)
+    if function_match and representation not in {"surface3d", "scatter3d", "mesh3d", "scene3d"}:
+        expression = function_match.group(1).strip().rstrip(".,")
+        expression = re.split(r"\b(?:и\s+(?:построй|нарисуй|покажи|визуализируй)|построй|нарисуй|покажи|визуализируй|plot|show|draw)\b", expression)[0].strip().rstrip(".,")
+        if expression and re.search(r"[xy0-9]", expression) and len(expression) <= 180:
+            return {
+                "title": _clip(_text(current_request) or "График функции", 140),
+                "representation": "line", "chart_type": "line",
+                "series": [{"label": f"y = {expression}", "fn": expression, "type": "function"}],
+                "graph_policy": policy,
+            }
+
+    # An explicitly stated analytic 3D surface is safe to visualize without changing
+    # its equation. The range is an illustrative plotting window, not source data.
+    surface = re.search(r"\bz\s*=\s*([^;\n,]+)", request, flags=re.IGNORECASE)
+    if representation == "surface3d" and surface:
+        expression = surface.group(1).strip().rstrip(".")
+        expression = re.split(r"\b(?:и\s+(?:построй|нарисуй|покажи|визуализируй)|построй|нарисуй|покажи|визуализируй|plot|show|draw)\b", expression)[0].strip().rstrip(".,")
+        if re.search(r"\bx\b", expression) and re.search(r"\by\b", expression):
+            return {
+                "title": _clip(_text(current_request) or "3D-поверхность", 140),
+                "representation": "surface3d",
+                "surface_function": expression,
+                "z_function": expression,
+                "x_domain": [-5, 5], "y_domain": [-5, 5], "grid_resolution": 35,
+                "illustrative_domain": True,
+                "graph_policy": policy,
+            }
+
+    if representation == "scene3d":
+        objects = []
+        if re.search(r"\b(?:sphere|сфер\w*|шар\w*)", request):
+            objects.append({"id": "sphere-1", "label": "Сфера (схематично)", "shape": "sphere", "x": 0, "y": 0, "z": 0, "radius": 1, "size": 1})
+        if re.search(r"\b(?:cube|куб\w*)", request):
+            objects.append({"id": "cube-1", "label": "Куб (схематично)", "shape": "cube", "x": 0, "y": 0, "z": 0, "size": 1, "dimensions": [1, 1, 1]})
+        if re.search(r"\b(?:cone|конус\w*)", request):
+            objects.append({"id": "cone-1", "label": "Конус (схематично)", "shape": "cone", "x": 0, "y": 0, "z": 0, "radius": 1, "height": 2, "size": 1})
+        if re.search(r"\b(?:cylinder|цилиндр\w*)", request):
+            objects.append({"id": "cylinder-1", "label": "Цилиндр (схематично)", "shape": "cylinder", "x": 0, "y": 0, "z": 0, "radius": 1, "height": 2, "size": 1})
+        if re.search(r"\b(?:pyramid|пирамид\w*)", request):
+            objects.append({"id": "pyramid-1", "label": "Пирамида (схематично)", "shape": "pyramid", "x": 0, "y": 0, "z": 0, "size": 1, "dimensions": [1, 1, 1]})
+        if objects:
+            return {"title": _clip(_text(current_request) or "3D-сцена", 140), "representation": "scene3d", "objects_3d": objects, "illustrative_scene": True, "graph_policy": policy}
+
+    if re.search(r"(?:волна|волн\w*|\bwave\b|\bwaves\b)", request):
+        if representation == "surface3d":
+            return {"title": "Волновая поверхность z = sin(√(x²+y²)) (пример)", "representation": "surface3d", "surface_function": "sin(sqrt(x^2+y^2))", "z_function": "sin(sqrt(x^2+y^2))", "x_domain": [-8, 8], "y_domain": [-8, 8], "grid_resolution": 45, "illustrative_example": True, "illustrative_domain": True}
+        return {"title": "Синусоидальная волна y = sin(x) (пример)", "representation": "line", "chart_type": "line", "series": [{"label": "y = sin(x) (пример)", "fn": "sin(x)", "type": "function"}], "illustrative_example": True}
+
+    if representation == "surface3d" and re.search(r"параболоид\w*|\bparaboloid\b", request):
+        return {"title": "Параболоид z = x² + y² (схематично)", "representation": "surface3d", "surface_function": "x^2 + y^2", "z_function": "x^2 + y^2", "x_domain": [-5, 5], "y_domain": [-5, 5], "grid_resolution": 35, "illustrative_domain": True, "illustrative_example": True}
+
+    # Common requests for a standard parabola specify the curve family but no
+    # equation. The standard y=x^2 example is labelled explicitly as illustrative.
+    if re.search(r"парабол\w*|\bparabola\b", request) and representation != "surface3d":
+        return {
+            "title": "Стандартная парабола — пример y = x²",
+            "representation": "line", "chart_type": "line",
+            "series": [{"label": "y = x² (пример)", "fn": "x^2", "type": "function"}],
+            "illustrative_example": True,
+        }
+    if re.search(r"гипербол\w*|\bhyperbola\b", request):
+        return {"title": "Прямоугольная гипербола y = 1/x (пример)", "representation": "line", "chart_type": "line", "series": [{"label": "y = 1/x (пример)", "fn": "1/x", "type": "function"}], "illustrative_example": True}
+    return None
+
+
+def _fallback_diagram_payload(current_request: str) -> dict[str, Any] | None:
+    """Provide concrete vector/primitive payload for common geometric drawing requests."""
+    request = _text(current_request).lower().replace("ё", "е")
+    shape_rules = (
+        (r"шахматн\w*\s+доск\w*|\bchess ?board\b", "chessboard"),
+        (r"параллелограмм\w*|\bparallelogram\b", "parallelogram"),
+        (r"прямоугольн\w*|\brectangle\b", "rectangle"),
+        (r"треугольн\w*|\btriangle\b", "triangle"),
+        (r"квадрат\w*|\bsquare\b", "square"),
+        (r"ромб\w*|\brhombus\b", "rhombus"),
+        (r"трапец\w*|\btrapezoid\b", "trapezoid"),
+        (r"эллипс\w*|\bellipse\b", "ellipse"),
+        (r"окружност\w*|круг\w*|\bcircle\b", "circle"),
+        (r"сфер\w*|шар\w*|\bsphere\b", "sphere"),
+        (r"куб\w*|\bcube\b", "cube"),
+    )
+    shape = next((name for pattern, name in shape_rules if re.search(pattern, request)), "")
+    if not shape:
+        return None
+    if shape in {"sphere", "cube"}:
+        return {"title": _clip(_text(current_request) or shape, 140), "shape": shape, "representation": "diagram", "illustrative": True}
+    if shape == "chessboard":
+        cells = []
+        for row in range(8):
+            for col in range(8):
+                fill = "#e8edf2" if (row + col) % 2 == 0 else "#394654"
+                cells.append(f'<rect x="{72 + col * 46}" y="{48 + row * 46}" width="46" height="46" fill="{fill}"/>')
+        pieces = []
+        black_back = "♜♞♝♛♚♝♞♜"
+        white_back = "♖♘♗♕♔♗♘♖"
+        if re.search(r"фигур|pieces|шахматн\w*\s+доск\w*", request):
+            for col in range(8):
+                x = 95 + col * 46
+                pieces.append(f'<text x="{x}" y="81" text-anchor="middle" font-size="32" fill="#111820">{black_back[col]}</text>')
+                pieces.append(f'<text x="{x}" y="127" text-anchor="middle" font-size="32" fill="#111820">♟</text>')
+                pieces.append(f'<text x="{x}" y="357" text-anchor="middle" font-size="32" fill="#ffffff">♙</text>')
+                pieces.append(f'<text x="{x}" y="403" text-anchor="middle" font-size="32" fill="#ffffff">{white_back[col]}</text>')
+        return {
+            "title": "Шахматная доска 8×8 с начальной расстановкой",
+            "svg": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 480" role="img" aria-label="Шахматная доска 8 на 8 с фигурами"><rect width="512" height="480" rx="18" fill="#111820"/>' + "".join(cells) + "".join(pieces) + '<rect x="71" y="47" width="370" height="370" fill="none" stroke="#8b9aaa" stroke-width="2"/></svg>',
+            "illustrative": True,
+        }
+    svg_shapes = {
+        "triangle": '<polygon points="256,48 72,300 440,300"/>',
+        "square": '<rect x="130" y="62" width="252" height="252"/>',
+        "rectangle": '<rect x="78" y="92" width="356" height="196"/>',
+        "parallelogram": '<polygon points="150,70 420,70 350,310 80,310"/>',
+        "rhombus": '<polygon points="256,48 432,190 256,332 80,190"/>',
+        "trapezoid": '<polygon points="152,70 360,70 430,310 82,310"/>',
+        "ellipse": '<ellipse cx="256" cy="190" rx="180" ry="118"/>',
+        "circle": '<circle cx="256" cy="190" r="120"/>',
+    }
+    svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 380" role="img" aria-label="Геометрическая фигура"><rect width="512" height="380" rx="18" fill="#111820"/><g fill="#45a7f5" fill-opacity="0.13" stroke="#72c7ff" stroke-width="4" stroke-linejoin="round">' + svg_shapes[shape] + '</g></svg>'
+    return {"title": _clip(_text(current_request) or shape, 140), "svg": svg, "shape": shape, "representation": "diagram", "illustrative": True}
+
+
+def _repair_visual_render_blocks(
+    blocks: list[dict[str, Any]],
+    *,
+    current_request: str,
+    answer: str,
+    requested_outputs: list[str],
+    graph_policy: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Make sure requested typed views have concrete payload before SceneContract."""
+    repaired = [dict(block) for block in blocks if isinstance(block, dict)]
+    outputs = set(requested_outputs)
+
+    if "graph" in outputs:
+        graph_blocks = [block for block in repaired if _text(block.get("type")).lower() == "graph"]
+        usable = any(_has_concrete_graph_payload(block) for block in graph_blocks)
+        if not usable:
+            payload = _fallback_graph_payload(current_request, answer, graph_policy)
+            if payload:
+                if graph_blocks:
+                    graph_blocks[0]["payload"] = payload
+                    graph_blocks[0]["renderer"] = "GraphBlock"
+                    graph_blocks[0]["viewer"] = "GraphBlock"
+                    graph_blocks[0]["integrity_repaired"] = True
+                else:
+                    repaired.append({"type": "graph", "renderer": "GraphBlock", "viewer": "GraphBlock", "payload": payload, "integrity_repaired": True})
+                _log_json("VISUAL_PAYLOAD_REPAIR", {"type": "graph", "reason": "missing_canonical_graph_data", "payload_keys": sorted(payload.keys())})
+
+    formula_blocks = [block for block in repaired if _text(block.get("type")).lower() == "formula"]
+    if "formula" in outputs:
+        formula_sources: list[str] = [answer]
+        for block in formula_blocks:
+            for source in (block.get("payload"), block.get("data"), block):
+                if not isinstance(source, dict):
+                    continue
+                for key in ("formulas", "latex_formulas", "equations", "formula", "latex", "equation", "expression", "math", "markdown", "content", "text"):
+                    value = source.get(key)
+                    if isinstance(value, str) and value.strip():
+                        formula_sources.append(value)
+                    elif isinstance(value, list):
+                        formula_sources.extend(_text(item.get("latex") or item.get("formula") or item.get("equation") or item.get("expression") or item) for item in value if item is not None)
+        formulas = _math_expressions_from_text("\n\n".join(formula_sources))
+        if formula_blocks and formulas:
+            # Keep the typed formula payload equation-only. Prose remains in the
+            # normal text answer / explanation blocks and cannot enter forceMath.
+            formula_blocks[0]["payload"] = {"formulas": formulas}
+            formula_blocks[0]["renderer"] = "FormulaRenderer"
+            formula_blocks[0]["viewer"] = "FormulaRenderer"
+            formula_blocks[0]["formula_payload_sanitized"] = True
+            for duplicate in formula_blocks[1:]:
+                repaired.remove(duplicate)
+            _log_json("VISUAL_PAYLOAD_REPAIR", {"type": "formula", "reason": "formula_payload_sanitized", "formula_count": len(formulas)})
+        elif not formula_blocks and formulas:
+            repaired.append({
+                "type": "formula", "renderer": "FormulaRenderer", "viewer": "FormulaRenderer",
+                "payload": {"formulas": formulas}, "integrity_repaired": True,
+            })
+            _log_json("VISUAL_PAYLOAD_REPAIR", {"type": "formula", "reason": "missing_formula_block", "formula_count": len(formulas)})
+        elif formula_blocks and not formulas:
+            repaired = [block for block in repaired if _text(block.get("type")).lower() != "formula"]
+            _log_json("EMPTY_TYPED_RENDER_BLOCK_DROPPED", {"block_type": "formula", "reason": "no_equation_only_content_after_sanitization"})
+
+    if "diagram" in outputs:
+        diagram_blocks = [block for block in repaired if _text(block.get("type")).lower() == "diagram"]
+        payload = _fallback_diagram_payload(current_request)
+        if payload and not any(_has_concrete_diagram_payload(block) for block in diagram_blocks):
+            if diagram_blocks:
+                diagram_blocks[0]["payload"] = payload
+                diagram_blocks[0]["renderer"] = "DiagramRenderer"
+                diagram_blocks[0]["viewer"] = "DiagramRenderer"
+                diagram_blocks[0]["integrity_repaired"] = True
+            else:
+                repaired.append({"type": "diagram", "renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "payload": payload, "integrity_repaired": True})
+            _log_json("VISUAL_PAYLOAD_REPAIR", {"type": "diagram", "reason": "missing_canonical_diagram_data", "payload_keys": sorted(payload.keys())})
+
+    return repaired
+
+
 def _plain_public_text(value: Any) -> str:
     """Accept visible text fields, but never stringify a serialized object."""
     candidate = _text(value)
@@ -3141,7 +3472,14 @@ def _artifact_render_block(artifact: dict[str, Any]) -> dict[str, Any] | None:
     return block
 
 
-def _normalize(data: dict[str, Any], *, display_language: str = "") -> dict[str, Any]:
+def _normalize(
+    data: dict[str, Any],
+    *,
+    display_language: str = "",
+    current_request: str = "",
+    requested_outputs: list[str] | None = None,
+    graph_policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     answer = _canonical_display_answer(data, display_language=display_language)
     if not answer:
         raw_blocks = data.get("render_blocks") if isinstance(data.get("render_blocks"), list) else []
@@ -3165,6 +3503,13 @@ def _normalize(data: dict[str, Any], *, display_language: str = "") -> dict[str,
     )
 
     blocks = normalize_render_blocks(data.get("render_blocks"), answer)
+    blocks = _repair_visual_render_blocks(
+        blocks,
+        current_request=current_request,
+        answer=answer,
+        requested_outputs=requested_outputs or [],
+        graph_policy=graph_policy or {},
+    )
     content_value = _text(data.get("content") or answer)
     if len(answer) >= 400 and len(content_value) < int(len(answer) * 0.75):
         _log_json("CONTENT_INTEGRITY", {
@@ -3389,7 +3734,24 @@ async def generate_text(
                         or (request.constraints or {}).get("provider_output_language")
                         or ""
                     )
-                    contract = _normalize(decoded, display_language=display_language)
+                    interpretation = intent_data.get("interpretation") if isinstance(intent_data.get("interpretation"), dict) else intent_data
+                    structured_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else interpretation
+                    request_input = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
+                    current_request = _text(
+                        conversation.get("current_request")
+                        or request_input.get("original_request")
+                        or conversation.get("resolved_request")
+                        or request.goal
+                    )
+                    requested_outputs = structured_intent.get("requested_outputs") if isinstance(structured_intent.get("requested_outputs"), list) else []
+                    graph_policy = structured_intent.get("graph_policy") if isinstance(structured_intent.get("graph_policy"), dict) else {}
+                    contract = _normalize(
+                        decoded,
+                        display_language=display_language,
+                        current_request=current_request,
+                        requested_outputs=[_text(item).lower() for item in requested_outputs],
+                        graph_policy=graph_policy,
+                    )
                     machine = contract.get("machine_response") if isinstance(contract, dict) else {}
                     machine = machine if isinstance(machine, dict) else {}
                     out_blocks = machine.get("render_blocks") if isinstance(machine.get("render_blocks"), list) else []
