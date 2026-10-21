@@ -2341,7 +2341,16 @@ async def execute(
         "answer": response.answer,
         "content": response.content,
         "summary": response.summary,
-        "render_blocks": list(response.render_blocks or []),
+        "render_blocks": list(
+            (
+                result.get("scene_contract")
+                if isinstance(result.get("scene_contract"), dict)
+                else {}
+            ).get("render_blocks")
+            or result.get("render_blocks")
+            or response.render_blocks
+            or []
+        ),
         "artifacts": list(response.artifacts or []),
         "metadata": dict(response.metadata or {}),
         "scene_contract": result.get("scene_contract") or {},
