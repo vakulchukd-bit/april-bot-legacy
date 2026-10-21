@@ -165,8 +165,11 @@ _OUTPUT_MARKERS = {
         "выдай новый код", "выдай новый файл с кодом", "напиши скрипт", "создай скрипт",
     },
     "formula": {
-        "write formula", "show formula", "solve equation", "write an equation",
-        "напиши формулу", "покажи формулу", "реши уравнение", "запиши уравнение",
+        "write formula", "show formula", "draw formula", "display formula", "derive formula",
+        "solve equation", "write an equation", "draw an equation", "show equation",
+        "напиши формулу", "покажи формулу", "нарисуй формулу", "нарисовать формулу",
+        "изобрази формулу", "отобрази формулу", "выведи формулу", "запиши формулу",
+        "реши уравнение", "запиши уравнение", "нарисуй уравнение", "покажи уравнение",
     },
     "diagram": {
         "create diagram", "draw diagram", "show diagram", "создай диаграмму",
@@ -314,9 +317,9 @@ def _detect_image_compositing_request(text: str) -> bool:
 def _detect_image_generation_request(text: str) -> bool:
     """Detect a picture as the requested output, not a picture used as context.
 
-    This intentionally checks the first visual object after the action. For
-    example, "нарисуй картинку со схемой" is an image-generation request, while
-    "нарисуй схему на картинке" remains a structured diagram request.
+    Explicit image-surface wording ("on a picture/photo/image") wins over a
+    generic diagram interpretation. A bare drawing verb remains semantic and
+    can route to geometry, a diagram, a graph, or image generation by subject.
     """
     low = _text(text).lower().replace("ё", "е")
     if not low:
@@ -326,34 +329,22 @@ def _detect_image_generation_request(text: str) -> bool:
     if _detect_image_modification(low):
         return False
 
-    # "Draw on the picture this parallelogram with dimensions" refers to a
-    # structured geometry drawing, not to a raster picture whose subject is an
-    # image. The surface wording ("на картинке") must not outrank the requested
-    # technical object. Keep this guard narrow so "нарисуй кота на картинке"
-    # and other genuine image/compositing requests retain their existing route.
-    structured_drawing_subject = bool(re.search(
-        r"(?:параллелограмм\w*|треугольн\w*|квадрат\w*|прямоугольн\w*|ромб\w*|"
-        r"трапец\w*|многоугольн\w*|окружност\w*|\bpolygon\b|\btriangle\b|"
-        r"\bsquare\b|\brectangle\b|\bparallelogram\b|\brhombus\b|"
-        r"\btrapezoid\b|\bgraph\b|\bfunction\b|\bequation\b|"
-        r"геометр\w*\s+фигур\w*|черт[её]ж\w*|схем\w*|диаграмм\w*|график\w*|"
-        r"функци\w*|уравнен\w*|координат\w*|формул\w*|"
-        r"с\s+(?:произвольн\w*\s+)?размер\w*|размер\w*\s+(?:кажд\w*\s+)?сторон\w*)",
-        low,
-        flags=re.IGNORECASE,
-    ))
-    drawing_on_image_surface = bool(re.search(
-        r"(?:нарис\w*|гарис\w*|draw|render|постро\w*|покаж\w*)\b.{0,35}"
-        r"\b(?:на|в)\s+(?:(?:этой|этот|эту|той|тои|такой|таком)\s+)?"
-        r"(?:картинк\w*|изображени\w*|фот\w*)",
-        low,
-        flags=re.IGNORECASE,
-    ))
-    if structured_drawing_subject and drawing_on_image_surface:
-        return False
+    # Explicitly asking to render the subject *on a picture/photo/image* means
+    # raster image generation. Existing-image edits have already been excluded
+    # above; without a source image this is still a new image request.
 
     action = r"(?:draw|show|display|create|make|generate|render|add|place|put|remove|replace|нарис\w*|гарис\w*|рисуй\w*|покаж\w*|отобраз\w*|созда\w*|сдела\w*|сгенерир\w*|изобраз\w*|добав\w*|помест\w*|размест\w*|убер\w*|замен\w*)"
     image_noun = r"(?:picture|image|illustration|photo|photograph|картинк(?:у|а|и|е)\b|изображени(?:е|я|и|и\s+на)\b|иллюстраци(?:ю|я|и)\b|фот\w*)"
+    # Explicitly placing any requested subject on an image surface is an image
+    # request even if the subject itself is a diagram, formula, or chart.
+    explicit_surface = re.search(
+        rf"(?<![\w\u0080-\uffff]){action}\b.{{0,90}}?\b(?:on|in|onto|на|в)\s+"
+        r"(?:(?:the|this|that|этой|этот|эту|этом|такой|таком|той|тои)\s+)?"
+        r"(?:picture|image|illustration|photo|photograph|картинк\w*|изображени\w*|иллюстраци\w*|фот\w*)",
+        low, flags=re.IGNORECASE,
+    )
+    if explicit_surface:
+        return True
     # Permit polite words and ordinary modifiers, but do not skip a preceding
     # explicit schema/graph/table noun to reinterpret its object as an image.
     filler = r"(?:(?!(?:схем\w*|диаграмм\w*|график\w*|таблиц\w*|черт[её]ж\w*)\b)[\w-]+\s+)"
@@ -380,9 +371,8 @@ def _detect_requested_outputs(text: str) -> list[str]:
     if explicit_image_request:
         # The requested output is the picture itself. Do not also classify
         # words describing the picture (e.g. "картинку со схемой") as a
-        # separate schematic artifact. A scheme named before "на картинке"
-        # does not enter this branch and keeps the diagram route.
-        result = [kind for kind in result if kind != "diagram"]
+        # separate diagram, graph, formula, or table artifact.
+        result = [kind for kind in result if kind not in {"diagram", "graph", "formula", "table"}]
 
     # Common compound requests say "build a table and graph" only once. Recognize
     # the chart noun together with an explicit construction/visualization verb.
@@ -467,10 +457,10 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     if table_request and "table" not in outputs:
         outputs.append("table")
 
-    # Semantic drawing policy: ordinary requests to draw/create/show a picture
-    # go to Images Generator. Diagram is reserved for explicit schematic,
-    # blueprint, technical drawing, or measured-drawing intent. Graphs remain
-    # a separate mathematical/data visualization route.
+    # Semantic visual policy: generic drawing verbs do not imply raster image
+    # generation. Formulae, geometry, diagrams, plots and 3D constructions use
+    # typed renderers; Images Generator is reserved for explicit picture/photo/
+    # illustration wording or unmistakable artistic/photorealistic intent.
     visual_action = bool(re.search(
         r"(?<![\w\u0080-\uffff])(?:draw(?:ing)?|show|display|create|make|render|visuali[sz]e|add|place|put|remove|replace|"
         r"нарис\w*|гарис\w*|рисуй\w*|покаж\w*|отобраз\w*|изобраз\w*|постро\w*|побуд\w*|созда\w*|сдела\w*|визуализир\w*|добав\w*|помест\w*|размест\w*|убер\w*|замен\w*|объясни\w*|поясни\w*)(?![\w\u0080-\uffff])",
@@ -482,17 +472,22 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     explicit_diagram_intent = bool(re.search(
         r"(?:\b(?:diagram|schematic|blueprint|technical drawing|engineering drawing|flowchart|"
         r"geometry|geometric figure|triangle|square|rectangle|circle|point|segment|angle|polygon|"
-        r"radius|diameter|perimeter|area|dimension|dimensions|measurement|vector)\b|"
+        r"radius|diameter|perimeter|area|dimension|dimensions|measurement|vector|chessboard|chess board|grid|"
+        r"sphere|cube|pyramid|cone|cylinder)\b|"
         r"диаграмм\w*|схем\w*|чертеж\w*|чертёж\w*|креслен\w*|блок[- ]схем\w*|"
         r"геометр\w*|(?:математич\w*|геометрическ\w*)\s+фигур\w*|точк\w*|отрез\w*|"
         r"треугольн\w*|квадрат\w*|прямоугольн\w*|параллелограмм\w*|ромб\w*|трапец\w*|многоугольн\w*|"
-        r"окружност\w*|круг\w*|эллипс\w*|угол\w*|вектор\w*|координат\w*|"
+        r"окружност\w*|круг\w*|эллипс\w*|сфер\w*|шар\w*|куб\w*|пирамид\w*|конус\w*|цилиндр\w*|угол\w*|вектор\w*|координат\w*|"
         r"сторон\w*|радиус\w*|диаметр\w*|периметр\w*|площад\w*|размер\w*|"
-        r"измерен\w*|черт[её]ж\w*|стрелк\w*|размерн\w*\s+лини\w*)",
+        r"измерен\w*|черт[её]ж\w*|стрелк\w*|размерн\w*\s+лини\w*|"
+        r"шахматн\w*\s+доск\w*|электрическ\w*\s+цеп\w*|сетка\w*|контур\w*)",
         low,
     ))
     explicit_graph_intent = bool(re.search(
-        r"(?:\b(?:graph|chart|plot|3d graph)\b|график\w*|график\s+функци\w*|"
+        r"(?:\b(?:graph|chart|plot|3d graph|curve|surface plot)\b|график\w*|график\s+функци\w*|"
+        r"парабол\w*|гипербол\w*|(?:волна|волн\w*|\bwave\b|\bwaves\b)(?:\s+(?:график\w*|функци\w*|поверхност\w*|эффект\w*))?|"
+        r"волнов\w*\s+(?:график\w*|функци\w*|поверхност\w*)|"
+        r"поверхност\w*\s+(?:график\w*|функци\w*|визуализац\w*)|"
         r"постро\w*\s+(?:график|поверхност))",
         low,
     ))
@@ -501,8 +496,41 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         r"визуальн\w*\s+объясн|объясни\w*.{0,35}(?:схем\w*|диаграмм\w*|фигур\w*))",
         low,
     ))
-    if (visual_action and explicit_diagram_intent or visual_explanation_intent) and not explicit_image_request and "diagram" not in outputs:
+    if (visual_action and explicit_diagram_intent or visual_explanation_intent) and not explicit_image_request and "diagram" not in outputs and "graph" not in outputs:
         outputs.append("diagram")
+
+    # A formula/equation is a typed mathematical object even when the user says
+    # "draw/show it" rather than "write the formula". Keep it out of Images 2.0.
+    formula_noun = bool(re.search(r"(?:\bformula\b|\bequation\b|формул\w*|уравнен\w*)", low, re.I))
+    formula_action = bool(re.search(
+        r"(?:\b(?:write|show|draw|display|render|derive|solve|give|present)\w*\b|"
+        r"напиш\w*|покаж\w*|нарис\w*|гарис\w*|запиш\w*|вывед\w*|получ\w*|реш\w*|представ\w*|отобраз\w*)",
+        low, re.I,
+    ))
+    if formula_noun and formula_action and not explicit_image_request and "formula" not in outputs:
+        outputs.append("formula")
+
+    if visual_action and explicit_graph_intent and not explicit_image_request and "graph" not in outputs:
+        outputs.append("graph")
+
+    # A generic visual verb defaults to a structured diagram, not raster image
+    # generation. Raster generation requires an explicit image/photo request or
+    # clear artwork/photorealism intent; that intent remains compatible with the
+    # explicit-image branch below.
+    artistic_intent = bool(re.search(
+        r"(?:photorealistic|photo[- ]realistic|oil painting|watercolor|watercolour|"
+        r"digital painting|concept art|anime style|comic style|poster|album cover|"
+        r"фотореалист\w*|акварел\w*|маслян\w*\s+живопис\w*|"
+        r"цифров\w*\s+живопис\w*|концепт[- ]арт|стил\w*\s+аниме|"
+        r"комиксн\w*\s+стил\w*|постер|обложк\w*|селфи|аватар\w*|лиц\w*|"
+        r"ui\s+mockup|app\s+mockup|interface\s+design|user interface|screen design|smartphone mockup|"
+        r"макет\w*\s+(?:интерфейс\w*|телефон\w*)|интерфейс\w*\s+приложен\w*|дизайн\w*\s+телефон\w*|"
+        r"\b(?:cat|kitten|dog|puppy|person|portrait|landscape|sunset|forest|city|spacecraft|car|bird|flower|animal|building|house|planet|selfie|avatar|face|smartphone)\b|"
+        r"кот\w*|собак\w*|портрет\w*|пейзаж\w*|закат\w*|лес\w*|город\w*|"
+        r"космическ\w*\s+корабл\w*|автомобил\w*|машин\w*|птиц\w*|цвет\w*|"
+        r"персонаж\w*|животн\w*|здани\w*|дом\w*|планет\w*)",
+        low, re.I,
+    ))
     if (
         visual_action
         and not explicit_diagram_intent
@@ -510,9 +538,9 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         and "image" not in outputs
         and not any(kind in outputs for kind in ("diagram", "graph", "table", "formula", "code", "file", "link"))
     ):
-        outputs.append("image")
+        outputs.append("image" if artistic_intent else "diagram")
     if explicit_image_request:
-        outputs = [kind for kind in outputs if kind != "diagram"]
+        outputs = [kind for kind in outputs if kind not in {"diagram", "graph", "formula", "table"}]
         if "image" not in outputs:
             outputs.append("image")
     # Formula view only for a clearly mathematical request. Graphs remain explicit
@@ -575,7 +603,7 @@ def _graph_representation_policy(text: str, *, allow_data_driven_3d: bool = Fals
     ))
 
     if explicit_3d:
-        if re.search(r"(?:\bsphere\w*\b|\bcube\w*\b|\bobject\s+scene\b|\b3d\s+scene\b|сфер\w*|куб\w*|объект\w*\s+сцен\w*|пространствен\w*\s+объект)", low):
+        if re.search(r"(?:\bsphere\w*\b|\bcube\w*\b|\bpyramid\w*\b|\bcone\w*\b|\bcylinder\w*\b|\bobject\s+scene\b|\b3d\s+scene\b|сфер\w*|шар\w*|куб\w*|пирамид\w*|конус\w*|цилиндр\w*|объект\w*\s+сцен\w*|пространствен\w*\s+объект)", low):
             representation = "scene3d"
         elif re.search(r"(?:\bscatter\b|\bxyz\b|\bcoordinates\b|\bpoint\s+cloud\b|координат\w*|облак\w*\s+точек|пространствен\w*\s+точк)", low):
             representation = "scatter3d"
