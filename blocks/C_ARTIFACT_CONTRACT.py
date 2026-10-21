@@ -2866,6 +2866,297 @@ def _number_for_render(value: Any) -> Optional[float]:
         return None
 
 
+
+
+def _graph_payload_from_request(
+    current_request: str,
+    answer: str = "",
+    graph_policy: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Build only a graph that is grounded in the current request/answer.
+
+    Explicit equations are kept verbatim. For a stated start/end range, the
+    graph contains those two endpoints only; it never fabricates intermediate
+    measurements. Common 3D surfaces are allowed as labelled illustrative
+    defaults when the user names the surface but supplies no equation.
+    """
+    request_text = str(current_request or "").strip()
+    answer_text = str(answer or "").strip()
+    text = "\n".join(part for part in (request_text, answer_text) if part)
+    if not text:
+        return {}
+
+    policy = graph_policy if isinstance(graph_policy, dict) else {}
+    preferred = str(policy.get("preferred_representation") or "").strip().lower().replace("-", "_")
+    is_3d = preferred in {
+        "scene3d", "scene_3d", "surface3d", "surface_3d",
+        "scatter3d", "scatter_3d", "mesh3d", "mesh_3d", "3d",
+    } or bool(re.search(r"(?:\b3\s*[- ]?d\b|\b3д\b|тр[её]хмерн\w*|3-мерн\w*)", text, re.IGNORECASE))
+
+    if is_3d:
+        equation_match = re.search(
+            r"(?im)(?:^|[\s;])(?:z|f\s*\(\s*x\s*,\s*y\s*\))\s*=\s*([^\n;]+)",
+            text,
+        )
+        expression = ""
+        illustrative = False
+        if equation_match:
+            expression = equation_match.group(1).strip().strip("`$ ")
+            expression = re.sub(r"\s+(?:в|in)\s*(?:3\s*[- ]?d|3д|3d)\b.*$", "", expression, flags=re.IGNORECASE).strip()
+            expression = re.sub(r"[.!?]+$", "", expression).strip()
+        elif re.search(r"парабол|paraboloid|parabola", text, re.IGNORECASE):
+            expression = "x^2 + y^2"
+            illustrative = True
+        elif re.search(r"седлов|saddle", text, re.IGNORECASE):
+            expression = "x^2 - y^2"
+            illustrative = True
+        elif re.search(r"волнообраз|волнов|wave surface|waveform surface", text, re.IGNORECASE):
+            expression = "sin(sqrt(x^2 + y^2))"
+            illustrative = True
+        if expression:
+            return {
+                "representation": "surface3d",
+                "graph_type": "surface3d",
+                "chart_type": "surface3d",
+                "dimensions": 3,
+                "three_d": True,
+                "title": "Иллюстративная 3D-поверхность" if illustrative else "3D-график функции",
+                "description": (
+                    "Показана стандартная иллюстративная поверхность; уравнение не задавалось явно."
+                    if illustrative else "Поверхность построена по уравнению из текущего запроса."
+                ),
+                "equation": f"z = {expression}",
+                "expression": expression,
+                "surface_function": expression,
+                "z_function": expression,
+                "x_domain": [-5, 5],
+                "y_domain": [-5, 5],
+                "source": "current_request_equation" if not illustrative else "labelled_illustrative_shape_default",
+            }
+        return {}
+
+    # Require a semantically explicit endpoint relation; arbitrary numbers in
+    # prose are not enough to be treated as chart data.
+    range_pattern = re.compile(
+        r"(?i)(?:\b(?:с|от|from)\s*)"
+        r"(-?\d+(?:[.,]\d+)?)\s*(?:грн\.?|uah|usd|eur|€|\$)?\s*"
+        r"(?:до|to|по|through)\s*"
+        r"(-?\d+(?:[.,]\d+)?)\s*(грн\.?|uah|usd|eur|€|\$)?"
+    )
+    range_match = range_pattern.search(text)
+    if not range_match:
+        # Equation-only 2D function: preserve the user/model's actual expression.
+        equation_match = re.search(
+            r"(?im)(?:^|[\s;])(?:y|f\s*\(\s*x\s*\))\s*=\s*([^\n;]+)",
+            text,
+        )
+        if equation_match and re.search(r"\bx\b", equation_match.group(1), re.IGNORECASE):
+            expression = equation_match.group(1).strip().strip("`$ ")
+            expression = re.sub(r"[.!?]+$", "", expression).strip()
+            if expression:
+                return {
+                    "representation": "function2d",
+                    "graph_type": "function",
+                    "chart_type": "line",
+                    "dimensions": 2,
+                    "title": "График функции",
+                    "equation": f"y = {expression}",
+                    "expression": expression,
+                    "series": [{
+                        "label": f"y = {expression}",
+                        "type": "function",
+                        "fn": expression,
+                        "equation": f"y = {expression}",
+                        "expression": expression,
+                    }],
+                    "x_axis": {"title": "x"},
+                    "y_axis": {"title": "y"},
+                    "source": "current_request_equation",
+                }
+        return {}
+
+    start_value = _number_for_render(range_match.group(1))
+    end_value = _number_for_render(range_match.group(2))
+    if start_value is None or end_value is None:
+        return {}
+
+    combined_low = text.lower()
+    if re.search(r"недел|week", combined_low):
+        x_labels = ["Начало недели", "Конец недели"]
+        x_title = "Период недели"
+    elif re.search(r"месяц|month", combined_low):
+        x_labels = ["Начало месяца", "Конец месяца"]
+        x_title = "Период месяца"
+    elif re.search(r"год|year", combined_low):
+        x_labels = ["Начало года", "Конец года"]
+        x_title = "Период года"
+    elif re.search(r"день|дня|дней|day|daily", combined_low):
+        x_labels = ["Начало периода", "Конец периода"]
+        x_title = "Период"
+    else:
+        x_labels = ["Начальное значение", "Конечное значение"]
+        x_title = "Период"
+
+    currency = range_match.group(3) or ""
+    if not currency:
+        currency_match = re.search(r"(?i)(грн\.?|uah|usd|eur|€|\$)", text)
+        currency = currency_match.group(1) if currency_match else ""
+    y_title = f"Значение, {currency}" if currency else "Значение"
+    title_match = re.search(
+        r"(?i)(?:построй|построить|покажи|нарисуй|построить)\s+(?:мне\s+)?(?:график|диаграмму)\s+(.{3,150})",
+        request_text,
+    )
+    title = title_match.group(1).strip() if title_match else "Изменение значения за период"
+    title = re.sub(r"\s*(?:с|от)\s*-?\d+(?:[.,]\d+)?[\w\s.,]*$", "", title, flags=re.IGNORECASE).strip(" .,:;-") or "Изменение значения за период"
+    points = [
+        {"x": x_labels[0], "y": start_value},
+        {"x": x_labels[1], "y": end_value},
+    ]
+    return {
+        "representation": "line",
+        "chart_type": "line",
+        "graph_type": "line",
+        "dimensions": 2,
+        "title": title[:140],
+        "description": "Показаны только заданные начальное и конечное значения; линия соединяет их без выдумывания промежуточных измерений.",
+        "series": [{
+            "label": y_title,
+            "type": "line",
+            "points": points,
+            "x": x_labels,
+            "y": [start_value, end_value],
+        }],
+        "points": points,
+        "x_values": x_labels,
+        "y_values": [start_value, end_value],
+        "x_axis": {"title": x_title, "values": x_labels},
+        "y_axis": {"title": y_title},
+        "source": "explicit_current_request_range",
+        "data_semantics": {"kind": "endpoint_range", "interpolation": "visual_line_only"},
+    }
+
+
+def _geometry_diagram_payload_from_request(
+    current_request: str,
+    answer: str = "",
+) -> Dict[str, Any]:
+    """Create small SVG drawings for explicitly named elementary geometry.
+
+    Shape identity comes from the current request. Dimension labels are shown
+    only when the user supplies them; no unspecified side lengths are invented.
+    """
+    request_text = str(current_request or "").strip()
+    text = "\n".join(part for part in (request_text, str(answer or "").strip()) if part)
+    if not text:
+        return {}
+    low = text.lower()
+
+    if re.search(r"треугол|triangle", low):
+        shape = "triangle"
+    elif re.search(r"квадрат|square", low):
+        shape = "square"
+    elif re.search(r"прямоугольник|прямоугольн|rectangle", low):
+        shape = "rectangle"
+    elif re.search(r"окружност|круг|circle", low):
+        shape = "circle"
+    else:
+        return {}
+
+    measures = re.findall(
+        r"(?<![\w])(\d+(?:[.,]\d+)?)\s*(см|cm|мм|mm|м|meter|meters|m)\b",
+        request_text,
+        re.IGNORECASE,
+    )
+    def label_measure(item: tuple[str, str]) -> str:
+        value = item[0].replace(",", ".")
+        unit = item[1].lower()
+        unit_map = {"cm": "см", "mm": "мм", "m": "м", "meter": "м", "meters": "м"}
+        return f"{value} {unit_map.get(unit, unit)}"
+
+    side_labels: list[str] = []
+    per_each_match = re.search(
+        r"(?i)(?:по|each|every side(?: is)?)\s*(\d+(?:[.,]\d+)?)\s*(см|cm|мм|mm|м|m)\b",
+        request_text,
+    )
+    if per_each_match and shape in {"triangle", "square"}:
+        side_labels = [label_measure((per_each_match.group(1), per_each_match.group(2)))] * (3 if shape == "triangle" else 4)
+    elif measures:
+        side_labels = [label_measure(item) for item in measures[:4]]
+
+    if shape == "triangle":
+        polygon = '<polygon points="260,48 78,318 442,318" fill="rgba(103,232,249,0.08)" stroke="#67e8f9" stroke-width="3" stroke-linejoin="round"/>'
+        labels = ""
+        if side_labels:
+            labels_data = [
+                (160, 172, side_labels[0]),
+                (360, 172, side_labels[min(1, len(side_labels)-1)]),
+                (260, 342, side_labels[min(2, len(side_labels)-1)]),
+            ]
+            labels = "".join(
+                f'<text x="{x}" y="{y}" text-anchor="middle" fill="#e5e7eb" font-size="18" font-family="Arial,sans-serif">{value}</text>'
+                for x, y, value in labels_data
+            )
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="520" height="370" viewBox="0 0 520 370">'
+            '<title>Чертёж треугольника</title>'
+            '<line x1="260" y1="48" x2="78" y2="318" stroke="#67e8f9" stroke-width="3"/>'
+            '<line x1="260" y1="48" x2="442" y2="318" stroke="#67e8f9" stroke-width="3"/>'
+            '<line x1="78" y1="318" x2="442" y2="318" stroke="#67e8f9" stroke-width="3"/>'
+            f'{labels}'
+            '<text x="260" y="25" text-anchor="middle" fill="#e5e7eb" font-size="16" font-family="Arial,sans-serif">Треугольник</text>'
+            '</svg>'
+        )
+        equilateral = len(side_labels) >= 3 and len(set(side_labels[:3])) == 1
+        return {
+            "representation": "diagram",
+            "shape": "equilateral_triangle" if equilateral else "triangle",
+            "diagram_type": "geometry",
+            "title": "Чертёж равностороннего треугольника" if equilateral else "Чертёж треугольника",
+            "description": "Размеры подписаны только по данным текущего запроса." if side_labels else "Схематический треугольник; размеры сторон не задавались.",
+            "svg": svg,
+            "source": "current_request_geometry_fallback",
+        }
+
+    if shape == "square":
+        side = side_labels[0] if side_labels else ""
+        svg_shape = (
+            '<rect x="135" y="65" width="250" height="250" rx="1" fill="rgba(103,232,249,0.08)" stroke="#67e8f9" stroke-width="3"/>'
+        )
+        labels = f'<text x="260" y="52" text-anchor="middle" fill="#e5e7eb" font-size="18">{side}</text>' if side else ""
+        title = "Чертёж квадрата"
+        shape_name = "square"
+    elif shape == "rectangle":
+        left = side_labels[0] if side_labels else ""
+        right = side_labels[1] if len(side_labels) > 1 else ""
+        svg_shape = '<rect x="90" y="95" width="340" height="190" fill="rgba(103,232,249,0.08)" stroke="#67e8f9" stroke-width="3"/>'
+        labels = (
+            (f'<text x="260" y="82" text-anchor="middle" fill="#e5e7eb" font-size="18">{left}</text>' if left else "")
+            + (f'<text x="448" y="196" text-anchor="middle" fill="#e5e7eb" font-size="18">{right}</text>' if right else "")
+        )
+        title = "Чертёж прямоугольника"
+        shape_name = "rectangle"
+    else:
+        radius = side_labels[0] if side_labels else ""
+        svg_shape = '<circle cx="260" cy="190" r="120" fill="rgba(103,232,249,0.08)" stroke="#67e8f9" stroke-width="3"/>'
+        labels = f'<text x="260" y="190" text-anchor="middle" fill="#e5e7eb" font-size="18">{radius}</text>' if radius else ""
+        title = "Чертёж окружности"
+        shape_name = "circle"
+
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="520" height="380" viewBox="0 0 520 380">'
+        f'<title>{title}</title>{svg_shape}{labels}</svg>'
+    )
+    return {
+        "representation": "diagram",
+        "shape": shape_name,
+        "diagram_type": "geometry",
+        "title": title,
+        "description": "Размеры подписаны только по данным текущего запроса." if side_labels else "Схематическая геометрическая фигура; размеры не задавались.",
+        "svg": svg,
+        "source": "current_request_geometry_fallback",
+    }
+
+
 def _graph_payload_from_table(table: Dict[str, Any]) -> Dict[str, Any]:
     columns = table.get("columns") or table.get("headers") or []
     rows = table.get("rows") or []
@@ -3176,10 +3467,47 @@ def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[st
             if svg_match:
                 merged["svg"] = svg_match.group(0)
                 break
+    # Normalize common provider aliases before validation. The Web renderers
+    # consume typed canonical keys, so payload data must not be rejected just
+    # because a provider called it `source`, `mermaid`, or Markdown links.
+    if block_type == "code" and not str(merged.get("code") or merged.get("content") or "").strip():
+        source_code = merged.get("source") or block.get("source")
+        if isinstance(source_code, str) and source_code.strip():
+            merged["code"] = source_code
+    if block_type == "link":
+        link_markdown = str(merged.get("markdown") or block.get("markdown") or "")
+        if link_markdown:
+            found_links = [
+                {"title": label.strip(), "url": url.rstrip(".,;:!?"), "href": url.rstrip(".,;:!?" )}
+                for label, url in re.findall(r"\[([^\]]{1,300})\]\((https?://[^\s)]+)\)", link_markdown, re.IGNORECASE)
+            ]
+            if found_links:
+                existing = merged.get("links") if isinstance(merged.get("links"), list) else []
+                merged["links"] = [*existing, *found_links]
+        if isinstance(merged.get("links"), list):
+            merged["links"] = [
+                ({"url": item, "href": item} if isinstance(item, str) and item.strip().lower().startswith(("http://", "https://")) else item)
+                for item in merged["links"]
+            ]
+    if block_type == "diagram" and not (merged.get("svg") or merged.get("svg_payload") or merged.get("drawing") or merged.get("nodes")):
+        mermaid_source = str(merged.get("mermaid") or merged.get("source") or block.get("mermaid") or "").strip()
+        if mermaid_source and re.search(r"(?im)^\s*(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|journey|mindmap|timeline)\b", mermaid_source):
+            parsed_mermaid = _mermaid_payload(mermaid_source)
+            if isinstance(parsed_mermaid, dict) and parsed_mermaid:
+                merged.update(parsed_mermaid)
+    # Some older render blocks placed transfer data directly on the envelope.
+    # Preserve actual content/URLs but never treat a filename alone as file data.
+    for key in ("file_data_uri", "data_uri", "file_base64", "base64", "download_url", "file_url", "source", "content"):
+        value = block.get(key)
+        if key not in merged and value not in (None, "", [], {}):
+            merged[key] = deepcopy(value)
     if merged:
         return merged
     keys = (WEB_RENDERER_REGISTRY.get(block_type) or {}).get("payload_keys") or []
-    return {key: deepcopy(block[key]) for key in keys if key in block and block[key] not in (None, "", [], {})}
+    fallback = {key: deepcopy(block[key]) for key in keys if key in block and block[key] not in (None, "", [], {})}
+    if block_type == "code" and not fallback.get("code") and isinstance(block.get("source"), str):
+        fallback["code"] = block["source"]
+    return fallback
 
 
 def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[str, Any] | None = None) -> bool:
@@ -3221,6 +3549,10 @@ def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[st
             or bool(p.get("matrix") or p.get("data_table") or p.get("surface_grid") or p.get("z_values"))
             or bool(p.get("surface_function") or p.get("z_function") or p.get("z_expression"))
             or explicit_surface_expression
+            or (
+                representation in {"function", "function2d", "function_2d", "line", "line_chart", "scatter", "2d"}
+                and bool(p.get("equation") or p.get("expression") or p.get("fn") or p.get("function") or p.get("function_expression"))
+            )
             or has_nested_surface_expression
             or has_nested_3d_objects
             or bool(p.get("objects_3d") or p.get("spheres") or p.get("objects") or p.get("shapes") or p.get("meshes"))
@@ -3236,9 +3568,22 @@ def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[st
         return bool(str(p.get("formula") or p.get("latex") or p.get("equation") or p.get("expression") or p.get("markdown") or "").strip() or (isinstance(p.get("formulas"), list) and bool(p["formulas"])) or (isinstance(p.get("latex_formulas"), list) and bool(p["latex_formulas"])))
     if block_type == "code":
         return bool(str(p.get("code") or p.get("content") or (block or {}).get("code") or "").strip())
-    if block_type in {"link", "file"}:
+    if block_type == "link":
         links = p.get("links")
-        return bool(str(p.get("url") or p.get("href") or "").strip() or (isinstance(links, list) and any(isinstance(item, dict) and str(item.get("url") or item.get("href") or "").strip() for item in links)))
+        has_link_item = isinstance(links, list) and any(
+            (isinstance(item, str) and item.strip().lower().startswith(("http://", "https://")))
+            or (isinstance(item, dict) and str(item.get("url") or item.get("href") or "").strip().lower().startswith(("http://", "https://")))
+            for item in links
+        )
+        markdown_urls = re.findall(r"https?://[^\s)<>]+", str(p.get("markdown") or ""), re.IGNORECASE)
+        return bool(str(p.get("url") or p.get("href") or "").strip() or has_link_item or markdown_urls)
+    if block_type == "file":
+        # A file renderer needs a real content/transfer reference, not just an
+        # empty filename shell. Inline text files and encoded files are valid.
+        return bool(any(
+            str(p.get(key) or (block or {}).get(key) or "").strip()
+            for key in ("url", "href", "file_url", "download_url", "file_data_uri", "data_uri", "file_base64", "base64", "content", "code")
+        ))
     return bool(p)
 
 
@@ -3247,6 +3592,7 @@ def prepare_render_blocks_for_room_dispatch(
     answer: str = "",
     requested_outputs: Any = None,
     graph_policy: Any = None,
+    current_request: str = "",
 ) -> List[Dict[str, Any]]:
     """Bind same-turn structured content to the canonical Web renderer types.
 
@@ -3273,6 +3619,7 @@ def prepare_render_blocks_for_room_dispatch(
     if code_match and code_match.group(1).strip().lower() in {"mermaid", "diagram"}:
         code_match = None
     electrical_diagram_from_answer = _electrical_schematic_payload(source_answer) if "diagram" in requested else {}
+    diagram_from_request = _geometry_diagram_payload_from_request(current_request, source_answer) if "diagram" in requested else {}
     if code_match and "graph" in requested and _is_ascii_line_chart_fence(code_match.group(2)):
         # This code fence is a visual representation of the graph, not source code.
         # Values are transferred to GraphBlock below; don't render it a second time.
@@ -3345,6 +3692,8 @@ def prepare_render_blocks_for_room_dispatch(
                     block["source_room"] = block.get("source_room") or "C_GRAPH_ROOM"
             if "graph" in requested and not _has_render_payload("graph", payload):
                 candidate_graph = _graph_payload_from_answer(source_answer, interpreted_graph_policy)
+                if not candidate_graph:
+                    candidate_graph = _graph_payload_from_request(current_request, source_answer, interpreted_graph_policy)
                 if candidate_graph:
                     payload = candidate_graph
                     block["source_room"] = block.get("source_room") or "C_GRAPH_ROOM"
@@ -3361,6 +3710,9 @@ def prepare_render_blocks_for_room_dispatch(
                 block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
             elif experiment_steps_from_answer:
                 payload = {**payload, **deepcopy(experiment_steps_from_answer)}
+                block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
+            elif diagram_from_request:
+                payload = {**payload, **deepcopy(diagram_from_request)}
                 block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
         elif block_type == "gallery" and not _has_render_payload("gallery", payload):
             if markdown_images:
@@ -3461,6 +3813,8 @@ def prepare_render_blocks_for_room_dispatch(
             graph_payload = deepcopy(section_graph_from_answer)
         if not graph_payload:
             graph_payload = _graph_payload_from_answer(source_answer, interpreted_graph_policy)
+        if not graph_payload:
+            graph_payload = _graph_payload_from_request(current_request, source_answer, interpreted_graph_policy)
         if graph_payload and interpreted_graph_policy:
             graph_payload_policy = graph_payload.get("graph_policy") if isinstance(graph_payload.get("graph_policy"), dict) else {}
             graph_payload["graph_policy"] = {**graph_payload_policy, **interpreted_graph_policy}
@@ -3500,8 +3854,8 @@ def prepare_render_blocks_for_room_dispatch(
                 "source_room": "C_LINK_ROOM",
             })
             existing_types.add("link")
-    if ("diagram" in requested or diagram_from_answer or electrical_diagram_from_answer) and "diagram" not in existing_types:
-        diagram_payload = diagram_from_answer or electrical_diagram_from_answer
+    if ("diagram" in requested or diagram_from_answer or electrical_diagram_from_answer or diagram_from_request) and "diagram" not in existing_types:
+        diagram_payload = diagram_from_answer or electrical_diagram_from_answer or diagram_from_request
         if diagram_payload:
             prepared.append({"type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "payload": diagram_payload, "source_room": "C_DIAGRAM_ROOM"})
             existing_types.add("diagram")
@@ -4431,11 +4785,26 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
         if text_candidates:
             answer = max(text_candidates, key=len)
     active_task = scene.active_task if isinstance(scene.active_task, dict) else {}
+    metadata_for_request = scene.metadata if isinstance(scene.metadata, dict) else {}
+    interpretation_for_request = metadata_for_request.get("interpretation") if isinstance(metadata_for_request.get("interpretation"), dict) else {}
+    interpretation_input = interpretation_for_request.get("input") if isinstance(interpretation_for_request.get("input"), dict) else {}
+    request_structure = interpretation_for_request.get("request_structure") if isinstance(interpretation_for_request.get("request_structure"), dict) else {}
+    dialogue_structure = interpretation_for_request.get("dialogue") if isinstance(interpretation_for_request.get("dialogue"), dict) else {}
+    new_dialogue = dialogue_structure.get("new_dialogue") if isinstance(dialogue_structure.get("new_dialogue"), dict) else {}
+    current_request = str(
+        interpretation_input.get("original_request")
+        or interpretation_input.get("normalized_request")
+        or request_structure.get("user_goal")
+        or request_structure.get("new_dialogue_request")
+        or new_dialogue.get("request")
+        or ""
+    ).strip()
     blocks = prepare_render_blocks_for_room_dispatch(
         blocks,
         answer,
         active_task.get("requested_outputs"),
         graph_policy=active_task.get("graph_policy"),
+        current_request=current_request,
     )
     visible_types = {str(item.get("type") or "").lower() for item in blocks if isinstance(item, dict)}
     requested_outputs = _render_requested_outputs(active_task.get("requested_outputs"))
