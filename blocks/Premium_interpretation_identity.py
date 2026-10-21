@@ -540,6 +540,13 @@ def _detect_requested_outputs(text: str) -> list[str]:
         r"(?:visuali[sz]ation|visualisation|visualization|3d[- ]?scene|3d[- ]?model|\bscene\b|\bmodel\b|визуализац\w*|сцен\w*|модел\w*|поверхност\w*|сфер\w*|куб\w*|треугольн\w*|воронк\w*|волн\w*|\bmesh(?:es)?\b|\bsphere(?:s)?\b|\bcube(?:s)?\b|\btriangle(?:s)?\b|\bfunnel(?:s)?\b|\bsurface\w*|\bplot\b|\bchart\b|\bgraph\b|график\w*|диаграмм\w*|спутник\w*|лу[нн]\w*|планет\w*|юпитер\w*|комет\w*|астероид\w*|гравитац\w*|орбит\w*|траектор\w*|пространственн\w*)",
         low,
     ))
+    has_shockwave_wall_scene = bool(re.search(
+        r"(?:shock[\s-]?wave|blast[\s-]?wave|impact[\s-]?wave|ударн\w*\s+вол\w*)",
+        low, re.IGNORECASE,
+    )) and bool(re.search(r"(?:\bwall\b|\bbarrier\b|стен\w*|преград\w*)", low, re.IGNORECASE))
+    if has_graph_action and has_shockwave_wall_scene and not explicit_image_request and "graph" not in result:
+        result.append("graph")
+
     if has_3d_marker and has_graph_action and has_visual_noun and "graph" not in result:
         result.append("graph")
 
@@ -774,6 +781,23 @@ def _graph_representation_policy(text: str, *, allow_data_driven_3d: bool = Fals
         r"трехмерн\w*\s+данн\w*|пространствен\w*\s+координат\w*)",
         low,
     ))
+
+    shockwave_wall_scene = bool(re.search(
+        r"(?:shock[\s-]?wave|blast[\s-]?wave|impact[\s-]?wave|ударн\w*\s+вол\w*)",
+        low, re.IGNORECASE,
+    )) and bool(re.search(r"(?:\bwall\b|\bbarrier\b|стен\w*|преград\w*)", low, re.IGNORECASE))
+    if shockwave_wall_scene:
+        return {
+            "mode": "explicit_3d" if explicit_3d else "inferred_spatial_scene",
+            "preferred_representation": "scene3d",
+            "fallback_representation": "line",
+            "allowed_2d_representations": ["line", "bar"],
+            "allow_3d_for_explicit_request": bool(explicit_3d),
+            "allow_3d_when_structured_data_exists": True,
+            "require_real_third_dimension": True,
+            "scene_kind": "shockwave_wall",
+            "decision_reason": "shockwave_wall_physical_scene",
+        }
 
     if explicit_3d or inferred_spatial_scene:
         if re.search(r"(?:\bsphere\w*\b|\bcube\w*\b|\bobject\s+scene\b|\b3d\s+scene\b|сфер\w*|куб\w*|конус\w*|цилиндр\w*|тор\w*|сателлит\w*|спутник\w*|лу[нн]\w*|планет\w*|юпитер\w*|сатурн\w*|земл\w*|марс\w*|комет\w*|гравитац\w*|орбит\w*|траектор\w*|объект\w*\s+сцен\w*|пространствен\w*\s+объект|\bjupiter\b|\bsatellite\w*\b|\bcomet\w*\b|\bgravity\b|\borbit\w*|\btrajectory\w*\b)", low):
@@ -2899,7 +2923,52 @@ def build_interpretation(
         requested_outputs.insert(0, "text")
     routing_capabilities = _infer_routing_capabilities(original or text)
     relation = _text(memory.get("relation") or "NEW").upper()
+    continuation_anchor = dict(memory.get("anchor") or {}) if isinstance(memory.get("anchor"), dict) else {}
+    continuation_topic_context = " ".join(
+        _text(value)
+        for value in (
+            memory.get("active_topic"), continuation_anchor.get("topic"),
+            continuation_anchor.get("user"), continuation_anchor.get("april"),
+        )
+        if _text(value)
+    )
     normalized_visual_request = _text(original or text).lower().replace("ё", "е")
+    has_3d_followup_marker = bool(re.search(
+        r"(?:\b3\s*[- ]?d\b|\b3д\b|тр[её]хмерн\w*)", normalized_visual_request
+    ))
+    followup_has_visual_action = bool(re.search(
+        r"(?:покаж\w*|нарис\w*|визуализир\w*|отобраз\w*|сдела\w*|созда\w*|\b(?:show|draw|render|visuali[sz]e|make)\b|\b(?:теперь|сейчас|а теперь|вот)\b)",
+        normalized_visual_request,
+    ))
+    short_visual_3d_followup = bool(
+        has_3d_followup_marker
+        and len(re.findall(r"\w+", normalized_visual_request)) <= 5
+        and not re.search(r"(?:что такое|что значит|объясни|расскажи|определение|\bwhat is\b|\bexplain\b|\bmeaning of\b)", normalized_visual_request)
+    )
+    continuation_mentions_shockwave = bool(re.search(
+        r"(?:shock[\s-]?wave|blast[\s-]?wave|impact[\s-]?wave|ударн\w*\s+вол\w*)",
+        continuation_topic_context, re.IGNORECASE,
+    )) and bool(re.search(
+        r"(?:\bwall\b|\bbarrier\b|стен\w*|преград\w*)",
+        continuation_topic_context, re.IGNORECASE,
+    ))
+    continuation_3d_scene = bool(
+        relation == "CONTINUE" and continuation_mentions_shockwave
+        and has_3d_followup_marker and (followup_has_visual_action or short_visual_3d_followup)
+    )
+    continuation_policy_text = (
+        f"{original or text}\nActive topic: {continuation_topic_context}"
+        if continuation_3d_scene else (original or text)
+    )
+    if continuation_3d_scene and "graph" not in requested_outputs:
+        requested_outputs.append("graph")
+        if question_sequence:
+            final_sequence_item = question_sequence[-1]
+            if isinstance(final_sequence_item, dict):
+                sequence_outputs = list(final_sequence_item.get("output_types") or [])
+                if "graph" not in sequence_outputs:
+                    sequence_outputs.append("graph")
+                final_sequence_item["output_types"] = sequence_outputs
     has_saved_output_image = any(
         _text(item.get("kind")).lower() == "image"
         and _text(item.get("asset_role")).lower() in {"april_output", "assistant_output", "generated"}
@@ -2999,6 +3068,25 @@ def build_interpretation(
     reuse_saved_image = image_followup and has_saved_output_image
     if image_followup and "image" not in requested_outputs:
         requested_outputs.append("image")
+    explicit_image_artifact = bool(re.search(
+        r"(?:картинк\w*|изображени\w*|фото\b|фотограф\w*|\bimage\b|\bphoto\b|\bpicture\b)",
+        normalized_visual_request,
+    ))
+    if continuation_3d_scene and not explicit_image_artifact:
+        requested_outputs = [kind for kind in requested_outputs if kind not in {"image", "gallery", "generated_image"}]
+        if "text" not in requested_outputs:
+            requested_outputs.insert(0, "text")
+        for sequence in (question_sequence, presentation_sequence):
+            for sequence_item in sequence:
+                if not isinstance(sequence_item, dict):
+                    continue
+                sequence_outputs = [_text(value).lower() for value in (sequence_item.get("output_types") or [])]
+                sequence_item["output_types"] = [value for value in sequence_outputs if value not in {"image", "gallery", "generated_image"}] or ["text"]
+    if continuation_3d_scene:
+        if question_sequence and "graph" not in (question_sequence[-1].get("output_types") or []):
+            question_sequence[-1].setdefault("output_types", []).append("graph")
+        if presentation_sequence and "graph" not in (presentation_sequence[-1].get("output_types") or []):
+            presentation_sequence[-1].setdefault("output_types", []).append("graph")
     wants_image = "image" in requested_outputs
     wants_file = "file" in requested_outputs
     wants_links = "link" in requested_outputs
@@ -3010,7 +3098,7 @@ def build_interpretation(
         for item in attachments
     )
     graph_policy = _graph_representation_policy(
-        original or text,
+        continuation_policy_text,
         allow_data_driven_3d=data_source_attached,
     ) if "graph" in requested_outputs else {}
 
