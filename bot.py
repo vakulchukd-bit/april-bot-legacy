@@ -497,7 +497,109 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(block, dict):
             return ""
         value = block.get("type") or block.get("artifact_type") or block.get("kind")
-        return str(value or "").strip().lower()
+        raw = str(value or "").strip().lower().replace("-", "_")
+        aliases = {
+            "chart": "graph", "plot": "graph", "graph_data": "graph",
+            "math": "formula", "latex": "formula", "svg": "diagram",
+            "schematic": "diagram", "mermaid": "diagram", "links": "link",
+            "hyperlink": "link", "link_list": "link", "table_data": "table",
+            "image_gallery": "gallery", "generated_image": "image",
+        }
+        return aliases.get(raw, raw)
+
+    def block_payload(block: dict[str, Any]) -> dict[str, Any]:
+        candidates = [
+            block.get("artifact", {}).get("payload") if isinstance(block.get("artifact"), dict) else None,
+            block.get("render_signal", {}).get("payload") if isinstance(block.get("render_signal"), dict) else None,
+            block.get("signal", {}).get("payload") if isinstance(block.get("signal"), dict) else None,
+            block.get("payload"),
+        ]
+        merged: dict[str, Any] = {}
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                merged.update(candidate)
+        # Compatibility: older providers put the typed payload directly on the block.
+        for key in (
+            "columns", "headers", "rows", "data", "series", "datasets", "traces",
+            "points", "x", "y", "x_values", "y_values", "surface_function",
+            "z_function", "equation", "expression", "formula", "latex", "formulas",
+            "code", "source", "content", "text_content", "url", "href", "links", "markdown",
+            "svg", "svg_payload", "drawing", "mermaid", "elements", "shapes", "nodes", "edges",
+            "src", "image_base64", "image_data_uri", "base64", "images", "items", "filename",
+            "file_url", "download_url", "file_base64", "file_data_uri", "data_uri", "path", "mime_type",
+        ):
+            if key not in merged and block.get(key) not in (None, "", [], {}):
+                merged[key] = block[key]
+        return merged
+
+    def has_concrete_payload(block: Any) -> bool:
+        if not isinstance(block, dict):
+            return False
+        kind = block_type(block)
+        payload = block_payload(block)
+        content = str(block.get("content") or block.get("text") or block.get("markdown") or "").strip()
+        if kind in {"text", "markdown", "message", "message_text", ""}:
+            return bool(content)
+        if kind == "table":
+            headers = payload.get("columns") or payload.get("headers")
+            rows = payload.get("rows") or payload.get("data")
+            if isinstance(headers, list) and headers and isinstance(rows, list) and rows:
+                return True
+            return bool(re.search(r"(?m)^\s*\|?.+\|.+\n\s*\|?\s*[-:| ]{3,}\s*\|?", content))
+        if kind == "graph":
+            series = payload.get("series") or payload.get("datasets") or payload.get("traces")
+            has_series = isinstance(series, list) and any(
+                isinstance(item, dict) and any(item.get(k) not in (None, "", [], {}) for k in ("points", "x", "y", "data", "values", "fn", "equation", "expression", "formula"))
+                for item in series
+            )
+            has_xy = any(isinstance(payload.get(xk), list) and isinstance(payload.get(yk), list) and min(len(payload[xk]), len(payload[yk])) >= 2
+                         for xk, yk in (("x_values", "y_values"), ("x", "y")))
+            has_points = isinstance(payload.get("points"), list) and len(payload["points"]) >= 2
+            has_surface = any(str(payload.get(k) or "").strip() for k in ("surface_function", "z_function", "z_expression"))
+            has_expression = str(payload.get("equation") or payload.get("expression") or payload.get("fn") or "").strip() and str(payload.get("representation") or payload.get("graph_type") or "").lower() in {"function", "function2d", "function_2d", "surface3d", "surface_3d", "scene3d", "3d"}
+            has_3d_objects = any(isinstance(payload.get(k), list) and payload.get(k) for k in ("objects_3d", "objects", "shapes", "meshes", "spheres", "surface_grid", "z_values"))
+            return bool(has_series or has_xy or has_points or has_surface or has_expression or has_3d_objects)
+        if kind == "diagram":
+            has_svg = any(str(payload.get(k) or "").strip() for k in ("svg", "svg_payload", "drawing"))
+            has_nodes = isinstance(payload.get("nodes"), list) and len(payload["nodes"]) >= 2 and isinstance(payload.get("edges"), list) and bool(payload["edges"])
+            has_shapes = any(isinstance(payload.get(k), list) and payload.get(k) for k in ("elements", "drawing_elements", "shapes", "vertices"))
+            return bool(has_svg or has_nodes or has_shapes or content.lstrip().lower().startswith("<svg"))
+        if kind == "formula":
+            formulas = payload.get("formulas") or payload.get("latex_formulas")
+            body = str(payload.get("formula") or payload.get("latex") or payload.get("equation") or payload.get("expression") or "").strip()
+            if isinstance(formulas, list) and any(str(item or "").strip() for item in formulas):
+                return True
+            return bool(body or re.search(r"(?s)(?:\$\$[\s\S]+?\$\$|(?<!\$)\$[^$\n]+\$(?!\$)|\\\[[\s\S]+?\\\]|\\\([^\n]+?\\\))", content) or re.search(r"(?m)^\s*[^\n]{1,120}(?:=|≈|≠|≤|≥|∝)\s*[^\n]+$", content))
+        if kind == "code":
+            body = str(payload.get("code") or payload.get("source") or payload.get("content") or block.get("code") or block.get("source") or "").strip()
+            return bool(body or re.search(r"```[\w.+-]*\s*\n[\s\S]+?\n```", content))
+        if kind == "link":
+            links = payload.get("links")
+            has_link_item = isinstance(links, list) and any(
+                (isinstance(x, str) and x.strip().lower().startswith(("http://", "https://")))
+                or (isinstance(x, dict) and str(x.get("url") or x.get("href") or "").strip().lower().startswith(("http://", "https://")))
+                for x in links
+            )
+            markdown_urls = re.findall(r"https?://[^\s)<>]+", str(payload.get("markdown") or ""), re.IGNORECASE)
+            return bool(str(payload.get("url") or payload.get("href") or "").strip() or has_link_item or markdown_urls)
+        if kind in {"image", "gallery"}:
+            images = payload.get("images") or payload.get("items") or payload.get("gallery") or payload.get("sources")
+            if isinstance(images, list) and any((isinstance(x, str) and x.strip()) or (isinstance(x, dict) and any(str(x.get(k) or "").strip() for k in ("src", "url", "image", "asset_url", "image_data_uri", "image_base64", "base64"))) for x in images):
+                return True
+            return any(str(payload.get(k) or "").strip() for k in ("src", "url", "image", "image_data_uri", "image_base64", "base64"))
+        if kind == "file":
+            return bool(any(str(payload.get(k) or "").strip() for k in ("url", "href", "file_url", "download_url", "file_data_uri", "data_uri", "file_base64", "base64", "content", "code")))
+        if kind in {"audio", "video"}:
+            return bool(any(str(payload.get(k) or "").strip() for k in ("url", "src", "media_url", "asset_url", "transcript", "caption", "description")))
+        return bool(payload or content)
+
+    structured_types = {"diagram", "graph", "image", "gallery", "table", "formula", "code", "file", "link", "audio", "video"}
+
+    # Treat SceneContract as the canonical source. Invalid legacy shells (for
+    # example an empty `type=graph` with no points/functions) must not be merged
+    # back into the response after the contract has rejected them.
+    scene_blocks = [item for item in scene_blocks if block_type(item) not in structured_types or has_concrete_payload(item)]
+    legacy_blocks = [item for item in legacy_blocks if block_type(item) not in structured_types or has_concrete_payload(item)]
 
     def is_subsequence(short: list[Any], long: list[Any]) -> bool:
         """True if every typed block in short occurs in order in long."""
@@ -1258,6 +1360,24 @@ def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str,
             structured_response = item["structured_response"]
             scene_contract = structured_response.get("scene_contract") if isinstance(structured_response.get("scene_contract"), dict) else {}
             render_blocks = structured_response.get("render_blocks") if isinstance(structured_response.get("render_blocks"), list) else []
+            # Old rows may contain provider-raw blocks rather than the canonical
+            # SceneContract stream. Re-run the same envelope filter before putting
+            # those blocks back into History, otherwise empty graph/diagram shells
+            # can resurrect after the live response has already rejected them.
+            history_answer = _text(structured_response.get("answer") or structured_response.get("content") or item["april_text"])
+            if render_blocks and history_answer:
+                try:
+                    normalized_history = _payload({
+                        "scene_contract": scene_contract,
+                        "render_blocks": render_blocks,
+                        "answer": history_answer,
+                        "content": history_answer,
+                    })
+                    scene_contract = normalized_history.get("scene_contract") or scene_contract
+                    render_blocks = normalized_history.get("render_blocks") or []
+                except Exception as history_contract_error:
+                    print("[APRIL_HISTORY] SCENE_CONTRACT_NORMALIZE_ERROR type=" + type(history_contract_error).__name__, flush=True)
+                    render_blocks = [block for block in render_blocks if isinstance(block, dict) and str(block.get("type") or "").lower() not in {"graph", "diagram", "formula", "table", "code", "link", "file", "image", "gallery"}]
             if render_blocks and not scene_contract.get("render_blocks"):
                 scene_contract = {**scene_contract, "render_blocks": render_blocks}
             if item["message_id"] in image_restore_ids:
