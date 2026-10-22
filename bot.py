@@ -1221,8 +1221,13 @@ def _history_attach_saved_image(
     return current_contract, root_blocks
 
 
-def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str, Any]]:
-    """Restore a selected topic from lightweight candidates plus selected full payloads.
+def _history_payload(
+    user_id: str,
+    message_id: str = "",
+    *,
+    single_turn: bool = False,
+) -> tuple[int, dict[str, Any]]:
+    """Restore a selected topic, or just one exact turn for interrupted chat recovery.
 
     Older versions forced the Premium/Free state manager to hydrate every retained
     row, including all JSONB scenes and image data, on every history click. Here the
@@ -1279,7 +1284,9 @@ def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str,
         target_topic = _text(target_row.get("topic_label") or topic_label(target_match_row) or target_row.get("title") or target_row.get("user_text"))
         target_subjects = row_subject_tokens(target_match_row)
         candidates = []
-        for row_position, row in enumerate(light_rows):
+        # Free's interrupted-current-chat repair must not turn into a history
+        # download: for that path, skip topic matching and return only the target pair.
+        for row_position, row in enumerate([] if single_turn else light_rows):
             candidate_id = _text(row.get("message_id"))
             if not candidate_id or candidate_id == message_id:
                 continue
@@ -1303,7 +1310,7 @@ def _history_payload(user_id: str, message_id: str = "") -> tuple[int, dict[str,
             float(value[1].get("created_at") or 0),
             int(value[1].get("turn_index") or 0),
         ), reverse=True)
-        MAX_RESTORE_PAIRS = 24 if is_premium else 4
+        MAX_RESTORE_PAIRS = 1 if single_turn else (24 if is_premium else 4)
         chosen_rows = [target_row] + [row for _score, row in candidates[:MAX_RESTORE_PAIRS - 1]]
         selected_ids = list(dict.fromkeys(_text(row.get("message_id")) for row in chosen_rows if _text(row.get("message_id"))))
 
@@ -1616,6 +1623,29 @@ class AprilHandler(BaseHTTPRequestHandler):
                 # explicitly opens one saved entry.
                 user_key = supplied_user_id
                 status_only = _text(self.headers.get("X-April-History-Status-Only")) == "1"
+                recovery_only = bool(message_id) and _text(query.get("purpose", [""])[0]) == "chat_recovery"
+
+                # Defense in depth: do not emit the history index or saved transcript
+                # to Free users even if another trusted Web caller reaches this endpoint.
+                # Keep the metadata-only completion poll and one-turn current-chat
+                # recovery available so the regular Free chat can continue as before.
+                if not (message_id and status_only) and not recovery_only:
+                    entitlement = get_user_subscription_status(supplied_user_id)
+                    if not entitlement:
+                        self._send_json(503, {
+                            "success": False,
+                            "error": "PREMIUM_ENTITLEMENT_UNAVAILABLE",
+                        })
+                        return
+                    active_plan = _text(entitlement.get("plan")).lower() or "free"
+                    raw_until = float(entitlement.get("subscription_until") or 0)
+                    if active_plan != "premium" or raw_until <= time.time() * 1000:
+                        self._send_json(403, {
+                            "success": False,
+                            "error": "PREMIUM_HISTORY_REQUIRED",
+                        })
+                        return
+
                 if message_id and status_only:
                     user_id = resolve_user_id(supplied_user_id) or ""
                     user_key = user_id or supplied_user_id
@@ -1629,7 +1659,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                 elif message_id:
                     user_id = resolve_user_id(supplied_user_id) or ""
                     user_key = user_id or supplied_user_id
-                    status, payload = _history_payload(user_id, message_id)
+                    status, payload = _history_payload(user_id, message_id, single_turn=recovery_only)
                 else:
                     status, payload = _history_index_payload(supplied_user_id)
                     user_key = str(payload.get("user_id") or supplied_user_id)
