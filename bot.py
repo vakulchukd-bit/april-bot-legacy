@@ -1644,23 +1644,15 @@ class AprilHandler(BaseHTTPRequestHandler):
                             "error": "AUTHENTICATED_USER_REQUIRED",
                         })
                         return
-                    entitlement = get_user_subscription_status(canonical_user_id)
-                    if not isinstance(entitlement, dict):
-                        _apr_timing_log(
-                            "history_entitlement_unavailable",
-                            user_key=_apr_diag_ref(canonical_user_id),
-                        )
-                        self._send_json(503, {
-                            "success": False,
-                            "error": "HISTORY_ENTITLEMENT_UNAVAILABLE",
-                        })
-                        return
-                    active_plan = _text(entitlement.get("plan")).lower() or "free"
+                    # The live chat's authoritative plan decision is get_user_plan().
+                    # Do not use a separate status payload as a second entitlement gate:
+                    # newly granted 28-day plans can otherwise be reported differently
+                    # if status metadata and plan resolution are temporarily out of sync.
+                    active_plan = _text(get_user_plan(canonical_user_id)).lower() or "free"
                     _apr_timing_log(
                         "history_entitlement_checked",
                         user_key=_apr_diag_ref(canonical_user_id),
                         active_plan=active_plan,
-                        expires_at_present=bool(entitlement.get("subscription_until")),
                     )
                     if active_plan != "premium":
                         self._send_json(403, {
