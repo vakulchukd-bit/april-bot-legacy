@@ -1625,21 +1625,20 @@ class AprilHandler(BaseHTTPRequestHandler):
                 status_only = _text(self.headers.get("X-April-History-Status-Only")) == "1"
                 recovery_only = bool(message_id) and _text(query.get("purpose", [""])[0]) == "chat_recovery"
 
-                # Defense in depth: do not emit the history index or saved transcript
-                # to Free users even if another trusted Web caller reaches this endpoint.
-                # Keep the metadata-only completion poll and one-turn current-chat
-                # recovery available so the regular Free chat can continue as before.
+                # Defense in depth: do not read or emit the history index / saved
+                # transcript to Free. Use the same DB-backed plan resolver as the
+                # canonical chat pipeline so the new UI gate cannot disagree with
+                # an otherwise active Premium chat account. The resolver also
+                # expires stale plans before it returns.
                 if not (message_id and status_only) and not recovery_only:
-                    entitlement = get_user_subscription_status(supplied_user_id)
-                    if not entitlement:
-                        self._send_json(503, {
+                    if not supplied_user_id or not is_authenticated_user(supplied_user_id):
+                        self._send_json(401, {
                             "success": False,
-                            "error": "PREMIUM_ENTITLEMENT_UNAVAILABLE",
+                            "error": "AUTHENTICATED_USER_REQUIRED",
                         })
                         return
-                    active_plan = _text(entitlement.get("plan")).lower() or "free"
-                    raw_until = float(entitlement.get("subscription_until") or 0)
-                    if active_plan != "premium" or raw_until <= time.time() * 1000:
+                    active_plan = _text(get_user_plan(supplied_user_id)).lower() or "free"
+                    if active_plan != "premium":
                         self._send_json(403, {
                             "success": False,
                             "error": "PREMIUM_HISTORY_REQUIRED",
