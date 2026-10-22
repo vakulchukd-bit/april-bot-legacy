@@ -38,7 +38,7 @@ FREE_IMAGES_LIMIT = int(os.getenv("APRIL_FREE_IMAGES_LIMIT", "5"))
 LITE_PRICE = int(os.getenv("APRIL_LITE_PRICE", "12"))
 PREMIUM_PRICE = int(os.getenv("APRIL_PREMIUM_PRICE", "69"))
 LITE_DAYS = int(os.getenv("APRIL_LITE_DAYS", "5"))
-PREMIUM_DAYS = int(os.getenv("APRIL_PREMIUM_DAYS", "30"))
+PREMIUM_DAYS = int(os.getenv("APRIL_PREMIUM_DAYS", "28"))
 
 FILE_PATH = "data/subscriptions.json"
 
@@ -48,7 +48,7 @@ DIALOGUE_WINDOW_SECONDS = DIALOGUE_WINDOW_HOURS * 3600
 DIALOGUE_SEED_SECONDS = DIALOGUE_SEED_HOURS * 3600
 PREMIUM_MEMORY_WINDOW_HOURS = 24
 PREMIUM_MEMORY_WINDOW_SECONDS = PREMIUM_MEMORY_WINDOW_HOURS * 3600
-PREMIUM_TEST_DURATION_HOURS = 24
+PREMIUM_TEST_DURATION_HOURS = 28 * 24
 
 _USERS_COLUMNS = (
     "user_id",
@@ -2318,7 +2318,7 @@ def _new_premium_id() -> str:
 
 
 def activate_test_premium(user_id: Any, hours: int = PREMIUM_TEST_DURATION_HOURS) -> dict[str, Any]:
-    """Grant or extend a 24-hour test Premium entitlement for an authenticated user.
+    """Grant or extend a 28-day test Premium entitlement for an authenticated user.
 
     The Premium ID is stored once in the canonical users row, copied into a
     zero-value test-grant ledger row, and retained after expiry for reuse. When
@@ -2377,7 +2377,7 @@ def activate_test_premium(user_id: Any, hours: int = PREMIUM_TEST_DURATION_HOURS
                     if current_plan in {"lite", "premium"} and current_expiry > current_seconds
                     else current_seconds
                 )
-                expires_at = renewal_base + max(1, min(int(hours), 24)) * 3600
+                expires_at = renewal_base + max(1, min(int(hours), PREMIUM_TEST_DURATION_HOURS)) * 3600
                 cur.execute(
                     "UPDATE users SET premium_id = %s, plan = 'premium', subscription_until = %s, warned = FALSE WHERE user_id = %s",
                     (premium_id, expires_at, uid),
