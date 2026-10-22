@@ -21,7 +21,7 @@ from typing import Any
 
 import psycopg2
 from rapidfuzz import fuzz
-from storage import get_conn, is_authenticated_user as _is_authenticated_user, now, cleanup_dialogue_memory_utc as _cleanup_dialogue_memory_utc
+from storage import get_conn, is_authenticated_user as _is_authenticated_user, now, cleanup_dialogue_memory_utc as _cleanup_dialogue_memory_utc, _dialogue_owner_ids_cursor
 from blocks.Premium_interpretation_identity import extract_temporal_window, extract_topic_count_bounds, intersect_retention_window
 
 
@@ -97,6 +97,22 @@ def load_dialogue_pairs(
         with conn.cursor() as cur:
             if not _active_premium_cursor(cur, uid, current):
                 return []
+            # Older deployments stored some retained pairs under the public April ID.
+            # Resolve aliases with the same collision-safe account check as history.
+            owner_ids = _dialogue_owner_ids_cursor(cur, uid)
+            if not owner_ids:
+                return []
+            # Upgrade only unexpired legacy Premium rows still inside the 24 h
+            # retention window before the memory-search query filters them out.
+            cur.execute(
+                """UPDATE dialogue_memory
+                   SET retention_hours = 24
+                   WHERE user_id = ANY(%s)
+                     AND COALESCE(retention_hours, 12) < 24
+                     AND created_at > %s - INTERVAL '24 hours'
+                     AND created_at + INTERVAL '24 hours' > %s""",
+                (owner_ids, current, current),
+            )
             cur.execute(
                 """
                 SELECT id, user_id, created_at, retention_hours, turn_index, user_text, april_text,
@@ -104,15 +120,17 @@ def load_dialogue_pairs(
                        conversation_id, message_id, interpretation_id,
                        structured_request, structured_response
                 FROM dialogue_memory
-                WHERE user_id = %s
+                WHERE user_id = ANY(%s)
                   AND created_at <= %s
                   AND created_at + (GREATEST(12, LEAST(24, COALESCE(retention_hours, 12))) * INTERVAL '1 hour') > %s
                 ORDER BY created_at ASC, turn_index ASC, id ASC
                 """,
-                (uid, current, current),
+                (owner_ids, current, current),
             )
             rows = [dict(row) for row in cur.fetchall()]
             for row in rows:
+                # Canonicalize legacy alias rows before they enter Premium context.
+                row["user_id"] = uid
                 created = row.get("created_at")
                 if isinstance(created, datetime):
                     row["created_at"] = created.astimezone(timezone.utc).timestamp()
