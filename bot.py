@@ -1087,6 +1087,19 @@ def _history_index_payload(user_id: str) -> tuple[int, dict[str, Any]]:
             return 503, {"success": False, "error": "HISTORY_UNAVAILABLE"}
         if not snapshot.get("authenticated"):
             return 401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+        # Authorize from the same account snapshot used to read the history index.
+        # Avoid a separate plan query followed by a second database read: those
+        # reads can disagree for newly granted/renewed entitlements and cause a
+        # false Premium lock after the list has already loaded.
+        active_plan = _text(snapshot.get("plan")).lower() or "free"
+        _apr_timing_log(
+            "history_snapshot_entitlement",
+            started,
+            user_key=_apr_diag_ref(snapshot.get("user_id") or user_id),
+            active_plan=active_plan,
+        )
+        if active_plan != "premium":
+            return 403, {"success": False, "error": "PREMIUM_HISTORY_REQUIRED"}
         rows = snapshot.get("rows") if isinstance(snapshot.get("rows"), list) else []
         history = []
         for row in reversed(rows):
@@ -1247,6 +1260,14 @@ def _history_payload(
 
         active_plan = _text(snapshot.get("plan")).lower() or "free"
         is_premium = active_plan == "premium"
+        if not is_premium and not single_turn:
+            _apr_timing_log(
+                "history_restore_entitlement_denied",
+                index_started,
+                user_key=_apr_diag_ref(snapshot.get("user_id") or user_id),
+                active_plan=active_plan,
+            )
+            return 403, {"success": False, "error": "PREMIUM_HISTORY_REQUIRED"}
         window_hours = 24 if is_premium else 12
         topic_label = _premium_topic_label if is_premium else _free_topic_label
         row_subject_tokens = _premium_row_subject_tokens if is_premium else _free_row_subject_tokens
@@ -1632,34 +1653,10 @@ class AprilHandler(BaseHTTPRequestHandler):
                 status_only = _text(self.headers.get("X-April-History-Status-Only")) == "1"
                 recovery_only = bool(message_id) and _text(query.get("purpose", [""])[0]) == "chat_recovery"
 
-                # Defense in depth: do not read or emit the history index / saved
-                # transcript to Free. Resolve the same canonical account ID as the
-                # chat route and use the same subscription-status function as
-                # /api/subscription/status. This avoids rejecting Premium accounts
-                # when their public april_id differs from users.user_id.
-                if not (message_id and status_only) and not recovery_only:
-                    if not canonical_user_id or not is_authenticated_user(canonical_user_id):
-                        self._send_json(401, {
-                            "success": False,
-                            "error": "AUTHENTICATED_USER_REQUIRED",
-                        })
-                        return
-                    # The live chat's authoritative plan decision is get_user_plan().
-                    # Do not use a separate status payload as a second entitlement gate:
-                    # newly granted 28-day plans can otherwise be reported differently
-                    # if status metadata and plan resolution are temporarily out of sync.
-                    active_plan = _text(get_user_plan(canonical_user_id)).lower() or "free"
-                    _apr_timing_log(
-                        "history_entitlement_checked",
-                        user_key=_apr_diag_ref(canonical_user_id),
-                        active_plan=active_plan,
-                    )
-                    if active_plan != "premium":
-                        self._send_json(403, {
-                            "success": False,
-                            "error": "PREMIUM_HISTORY_REQUIRED",
-                        })
-                        return
+                # History readers below resolve the canonical account and enforce
+                # Premium from the same database snapshot used to return records.
+                # Keep this endpoint as transport only to avoid duplicate entitlement
+                # reads that can conflict immediately after a new/renewed subscription.
 
                 if message_id and status_only:
                     user_id = canonical_user_id or resolve_user_id(supplied_user_id) or ""
