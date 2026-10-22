@@ -605,7 +605,17 @@ def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | i
                         """UPDATE dialogue_memory AS d
                            SET retention_hours = 24
                            FROM users AS u
-                           WHERE u.user_id = d.user_id
+                           WHERE (
+                               u.user_id = d.user_id
+                               OR (
+                                   u.april_id = d.user_id
+                                   AND NOT EXISTS (
+                                       SELECT 1 FROM users AS owner
+                                       WHERE owner.user_id = d.user_id
+                                         AND owner.user_id <> u.user_id
+                                   )
+                               )
+                           )
                              AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
                              AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM %s)
                              AND COALESCE(d.retention_hours, 12) < 24
@@ -614,21 +624,23 @@ def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | i
                         (current, current, current),
                     )
                 else:
-                    uid = str(user_id)
-                    if not _is_authenticated_cursor(cur, uid):
+                    owner_ids = _dialogue_owner_ids_cursor(cur, str(user_id))
+                    if not owner_ids:
                         return 0
+                    canonical_uid = owner_ids[0]
                     cur.execute(
-                        """UPDATE dialogue_memory AS d
-                           SET retention_hours = 24
-                           FROM users AS u
-                           WHERE d.user_id = %s
-                             AND u.user_id = d.user_id
-                             AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
-                             AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM %s)
+                        """UPDATE dialogue_memory AS d SET retention_hours = 24
+                           WHERE d.user_id = ANY(%s)
+                             AND EXISTS (
+                               SELECT 1 FROM users AS u
+                               WHERE u.user_id = %s
+                                 AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
+                                 AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM %s)
+                             )
                              AND COALESCE(d.retention_hours, 12) < 24
                              AND d.created_at + INTERVAL '24 hours' > %s
                              AND d.created_at <= %s""",
-                        (uid, current, current, current),
+                        (owner_ids, canonical_uid, current, current, current),
                     )
                 if user_id is None:
                     cur.execute(
@@ -637,14 +649,14 @@ def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | i
                         (current,),
                     )
                 else:
-                    uid = str(user_id)
-                    if not _is_authenticated_cursor(cur, uid):
+                    owner_ids = _dialogue_owner_ids_cursor(cur, str(user_id))
+                    if not owner_ids:
                         return 0
                     cur.execute(
                         """SELECT user_id, message_id FROM dialogue_memory AS d
-                           WHERE d.user_id = %s
+                           WHERE d.user_id = ANY(%s)
                              AND d.created_at + (GREATEST(12, LEAST(24, COALESCE(d.retention_hours, 12))) * INTERVAL '1 hour') <= %s""",
-                        (uid, current),
+                        (owner_ids, current),
                     )
                 expired_pairs = [
                     (str(row.get("user_id") or ""), str(row.get("message_id") or ""))
@@ -660,9 +672,9 @@ def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | i
                 else:
                     cur.execute(
                         """DELETE FROM dialogue_memory AS d
-                           WHERE d.user_id = %s
+                           WHERE d.user_id = ANY(%s)
                              AND d.created_at + (GREATEST(12, LEAST(24, COALESCE(d.retention_hours, 12))) * INTERVAL '1 hour') <= %s""",
-                        (str(user_id), current),
+                        (owner_ids, current),
                     )
                 deleted = int(cur.rowcount or 0)
         # Remove physical files only after the database transaction commits.
@@ -717,6 +729,41 @@ def _is_authenticated_cursor(cur, uid: str) -> bool:
         (uid,),
     )
     return _is_authenticated_row(cur.fetchone())
+
+
+def _dialogue_owner_ids_cursor(cur, user_id: Any) -> list[str]:
+    """Return internal/public IDs for exactly one authenticated account.
+
+    Older Web deployments could persist dialogue rows under public april_id.
+    Query both identifiers only after they resolve to the same authenticated row.
+    Never widen access through email, Google ID, or Premium ID aliases.
+    """
+    raw = str(user_id or "").strip()
+    if not raw:
+        return []
+    cur.execute(
+        """SELECT user_id, april_id, email, provider
+           FROM users
+           WHERE user_id = %s OR april_id = %s
+           ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
+           LIMIT 1""",
+        (raw, raw, raw),
+    )
+    account = cur.fetchone()
+    if not _is_authenticated_row(account):
+        return []
+    canonical = str(account.get("user_id") or "").strip()
+    public = str(account.get("april_id") or "").strip()
+    if public and public != canonical:
+        # Do not include a public alias if it collides with another account's
+        # internal key; owner IDs must never cross account boundaries.
+        cur.execute(
+            "SELECT 1 FROM users WHERE user_id = %s AND user_id <> %s LIMIT 1",
+            (public, canonical),
+        )
+        if cur.fetchone():
+            public = ""
+    return list(dict.fromkeys(value for value in (canonical, public) if value))
 
 
 def _pair_hash(uid: str, created_ts: float, turn_index: int, user_text: str, april_text: str) -> str:
@@ -843,7 +890,8 @@ def load_dialogue_pairs(user_id: Any, *, limit: int = 0, timestamp: float | int 
     try:
         with conn:
             with conn.cursor() as cur:
-                if not _is_authenticated_cursor(cur, uid):
+                owner_ids = _dialogue_owner_ids_cursor(cur, uid)
+                if not owner_ids:
                     return []
                 cur.execute(
                     """
@@ -851,15 +899,18 @@ def load_dialogue_pairs(user_id: Any, *, limit: int = 0, timestamp: float | int 
                            language, relation, dialog_id, conversation_id, message_id, interpretation_id,
                            structured_request, structured_response
                     FROM dialogue_memory
-                    WHERE user_id = %s
+                    WHERE user_id = ANY(%s)
                       AND created_at <= %s
                       AND created_at + (GREATEST(12, LEAST(24, COALESCE(retention_hours, 12))) * INTERVAL '1 hour') > %s
                     ORDER BY created_at ASC, turn_index ASC, id ASC
                     """,
-                    (uid, current, current),
+                    (owner_ids, current, current),
                 )
                 rows = [dict(row) for row in cur.fetchall()]
                 for row in rows:
+                    # Present one canonical identity to downstream state/search code,
+                    # even when the underlying retained row used the old public alias.
+                    row["user_id"] = owner_ids[0]
                     if isinstance(row.get("created_at"), datetime):
                         row["created_at"] = row["created_at"].astimezone(timezone.utc).timestamp()
                 if limit and len(rows) > int(limit):
@@ -917,6 +968,9 @@ def load_dialogue_history_index(
                     return {"authenticated": False}
 
                 uid = str(account.get("user_id") or raw_uid).strip()
+                owner_ids = _dialogue_owner_ids_cursor(cur, uid)
+                if not owner_ids:
+                    return {"authenticated": False}
                 raw_plan = str(account.get("plan") or "free").strip().lower()
                 expiry = float(account.get("subscription_until") or 0)
                 plan = raw_plan if raw_plan in {"lite", "premium"} and expiry > current.timestamp() else "free"
@@ -934,12 +988,12 @@ def load_dialogue_history_index(
                         """
                         UPDATE dialogue_memory
                         SET retention_hours = 24
-                        WHERE user_id = %s
+                        WHERE user_id = ANY(%s)
                           AND COALESCE(retention_hours, 12) < 24
                           AND created_at > %s - INTERVAL '24 hours'
                           AND created_at + INTERVAL '24 hours' > %s
                         """,
-                        (uid, current, current),
+                        (owner_ids, current, current),
                     )
 
                 # The explicit 24-hour lower bound allows the existing
@@ -975,7 +1029,7 @@ def load_dialogue_history_index(
                         EXTRACT(EPOCH FROM created_at) AS created_at,
                         turn_index
                     FROM dialogue_memory
-                    WHERE user_id = %s
+                    WHERE user_id = ANY(%s)
                       AND created_at <= %s
                       AND created_at > %s - INTERVAL '24 hours'
                       AND created_at + (
@@ -984,7 +1038,7 @@ def load_dialogue_history_index(
                       ) > %s
                     ORDER BY created_at ASC, turn_index ASC, id ASC
                     """,
-                    (uid, current, current, current),
+                    (owner_ids, current, current, current),
                 )
                 rows = []
                 for source in cur.fetchall():
@@ -1151,7 +1205,8 @@ def load_dialogue_history_details(
     try:
         with conn:
             with conn.cursor() as cur:
-                if not _is_authenticated_cursor(cur, uid):
+                owner_ids = _dialogue_owner_ids_cursor(cur, uid)
+                if not owner_ids:
                     return []
                 cur.execute(
                     """
@@ -1161,7 +1216,7 @@ def load_dialogue_history_details(
                            message_id, interpretation_id,
                            structured_request, structured_response, asset_payloads
                     FROM dialogue_memory
-                    WHERE user_id = %s
+                    WHERE user_id = ANY(%s)
                       AND created_at <= %s
                       AND created_at > %s - INTERVAL '24 hours'
                       AND created_at + (
@@ -1174,7 +1229,7 @@ def load_dialogue_history_details(
                       )
                     ORDER BY created_at ASC, turn_index ASC, id ASC
                     """,
-                    (uid, current, current, current, ids, ids),
+                    (owner_ids, current, current, current, ids, ids),
                 )
                 rows = [dict(row) for row in cur.fetchall()]
                 for row in rows:
