@@ -1781,7 +1781,7 @@ class AprilHandler(BaseHTTPRequestHandler):
             except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 self._send_json(400, {"success": False, "error": "INVALID_JSON"})
                 return
-            result = activate_test_premium(user_id, hours=24)
+            result = activate_test_premium(user_id, hours=28 * 24)
             if result.get("success"):
                 # Confirm that the committed entitlement is immediately visible to
                 # the exact same plan resolver used by /api/v1/chat. This verifies
