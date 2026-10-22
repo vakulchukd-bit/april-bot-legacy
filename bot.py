@@ -1540,10 +1540,13 @@ class AprilHandler(BaseHTTPRequestHandler):
             if not _text(os.getenv("DATABASE_URL")):
                 self._send_json(503, {"success": False, "error": "DATABASE_UNAVAILABLE"})
                 return
-            if not is_authenticated_user(user_id):
+            # Normalize the public April ID to the same internal users.user_id
+            # used by the canonical chat route before resolving the entitlement.
+            canonical_user_id = resolve_user_id(user_id)
+            if not canonical_user_id or not is_authenticated_user(canonical_user_id):
                 self._send_json(401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"})
                 return
-            status = get_user_subscription_status(user_id)
+            status = get_user_subscription_status(canonical_user_id)
             if not status:
                 self._send_json(503, {"success": False, "error": "SUBSCRIPTION_STATUS_UNAVAILABLE"})
                 return
@@ -1617,6 +1620,10 @@ class AprilHandler(BaseHTTPRequestHandler):
                     return
                 history_request_started = time.perf_counter()
                 supplied_user_id = _text(self.headers.get("X-April-User-Id"))
+                # Normalize once at the API boundary, exactly as the canonical
+                # chat route does. Public april_id and internal user_id can differ
+                # for legacy accounts, so they must not be used interchangeably.
+                canonical_user_id = resolve_user_id(supplied_user_id) if supplied_user_id else None
                 message_id = _text(self.headers.get("X-April-Message-Id"))
                 # Listing uses a single lightweight indexed query. The full scene
                 # payload and topic-vector retrieval are loaded only after a user
@@ -1626,18 +1633,35 @@ class AprilHandler(BaseHTTPRequestHandler):
                 recovery_only = bool(message_id) and _text(query.get("purpose", [""])[0]) == "chat_recovery"
 
                 # Defense in depth: do not read or emit the history index / saved
-                # transcript to Free. Use the same DB-backed plan resolver as the
-                # canonical chat pipeline so the new UI gate cannot disagree with
-                # an otherwise active Premium chat account. The resolver also
-                # expires stale plans before it returns.
+                # transcript to Free. Resolve the same canonical account ID as the
+                # chat route and use the same subscription-status function as
+                # /api/subscription/status. This avoids rejecting Premium accounts
+                # when their public april_id differs from users.user_id.
                 if not (message_id and status_only) and not recovery_only:
-                    if not supplied_user_id or not is_authenticated_user(supplied_user_id):
+                    if not canonical_user_id or not is_authenticated_user(canonical_user_id):
                         self._send_json(401, {
                             "success": False,
                             "error": "AUTHENTICATED_USER_REQUIRED",
                         })
                         return
-                    active_plan = _text(get_user_plan(supplied_user_id)).lower() or "free"
+                    entitlement = get_user_subscription_status(canonical_user_id)
+                    if not isinstance(entitlement, dict):
+                        _apr_timing_log(
+                            "history_entitlement_unavailable",
+                            user_key=_apr_diag_ref(canonical_user_id),
+                        )
+                        self._send_json(503, {
+                            "success": False,
+                            "error": "HISTORY_ENTITLEMENT_UNAVAILABLE",
+                        })
+                        return
+                    active_plan = _text(entitlement.get("plan")).lower() or "free"
+                    _apr_timing_log(
+                        "history_entitlement_checked",
+                        user_key=_apr_diag_ref(canonical_user_id),
+                        active_plan=active_plan,
+                        expires_at_present=bool(entitlement.get("subscription_until")),
+                    )
                     if active_plan != "premium":
                         self._send_json(403, {
                             "success": False,
@@ -1646,7 +1670,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                         return
 
                 if message_id and status_only:
-                    user_id = resolve_user_id(supplied_user_id) or ""
+                    user_id = canonical_user_id or resolve_user_id(supplied_user_id) or ""
                     user_key = user_id or supplied_user_id
                     completed = bool(user_id and dialogue_message_saved(user_id, message_id))
                     status, payload = 200, {
@@ -1656,12 +1680,12 @@ class AprilHandler(BaseHTTPRequestHandler):
                         "canonical_route": CANONICAL_CHAT_ROUTE,
                     }
                 elif message_id:
-                    user_id = resolve_user_id(supplied_user_id) or ""
+                    user_id = canonical_user_id or resolve_user_id(supplied_user_id) or ""
                     user_key = user_id or supplied_user_id
                     status, payload = _history_payload(user_id, message_id, single_turn=recovery_only)
                 else:
-                    status, payload = _history_index_payload(supplied_user_id)
-                    user_key = str(payload.get("user_id") or supplied_user_id)
+                    status, payload = _history_index_payload(canonical_user_id or supplied_user_id)
+                    user_key = str(payload.get("user_id") or canonical_user_id or supplied_user_id)
                 _apr_timing_log("history_response", history_request_started,
                                 user_key=_apr_diag_ref(user_key), status=status,
                                 count=int(payload.get("count") or 0), message_count=len(payload.get("messages") or []),
