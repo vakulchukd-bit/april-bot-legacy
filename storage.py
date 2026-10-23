@@ -546,6 +546,18 @@ def init_db() -> None:
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_community_friendships_user_a ON community_friendships(user_a, status)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_community_friendships_user_b ON community_friendships(user_b, status)")
+                # User-controlled public-chat blocks. Blocking hides the target's public
+                # messages and attachments for the blocker; it does not delete records.
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS community_user_blocks (
+                        blocker_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        blocked_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (blocker_user_id, blocked_user_id),
+                        CHECK (blocker_user_id <> blocked_user_id)
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_community_user_blocks_blocked ON community_user_blocks(blocked_user_id, blocker_user_id)")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS community_direct_messages (
                         id BIGSERIAL PRIMARY KEY,
@@ -2827,7 +2839,6 @@ def get_all_users():
 
 COMMUNITY_MAX_MESSAGE_CHARS = 4000
 COMMUNITY_MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024
-COMMUNITY_HISTORY_MAX_MESSAGES = 30
 COMMUNITY_RATE_LIMIT_PER_MINUTE = 10
 COMMUNITY_USER_ATTACHMENT_QUOTA_BYTES = 30 * 1024 * 1024
 _COMMUNITY_BLOCKED_EXTENSIONS = {
@@ -2835,9 +2846,13 @@ _COMMUNITY_BLOCKED_EXTENSIONS = {
     ".scr", ".pif", ".dll", ".sys", ".so", ".dylib", ".apk", ".app",
 }
 
+# Public community and each individual friend conversation retain their latest
+# 30 messages. This is separate from the 12/24-hour private April memory TTL.
+COMMUNITY_HISTORY_MAX_MESSAGES = 30
+
 
 def _community_lock_history(cur, scope: str, key: str = "global") -> None:
-    """Serialize retention cleanup/writes so concurrent sends cannot exceed the cap."""
+    """Serialize writes to one history scope while its oldest rows are pruned."""
     cur.execute(
         "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
         ("april-community-history:" + str(scope), str(key)),
@@ -2845,34 +2860,64 @@ def _community_lock_history(cur, scope: str, key: str = "global") -> None:
 
 
 def _community_prune_public_history(cur) -> None:
-    """Physically remove old community rows, retaining only the latest 30 globally."""
+    """Physically delete older public rows, preserving the latest 30 globally."""
     cur.execute(
         """DELETE FROM community_messages
            WHERE id IN (
-               SELECT id FROM community_messages
-               ORDER BY id DESC OFFSET %s
+               SELECT id
+               FROM community_messages
+               ORDER BY id DESC
+               OFFSET %s
            )""",
         (COMMUNITY_HISTORY_MAX_MESSAGES,),
     )
 
 
 def _community_direct_pair_key(user_a: Any, user_b: Any) -> str:
+    """Return one stable lock key regardless of which friend opened the chat."""
     return "|".join(sorted((str(user_a), str(user_b))))
 
 
 def _community_prune_direct_history(cur, user_a: Any, user_b: Any) -> None:
-    """Physically remove direct messages older than the latest 30 in this pair."""
+    """Physically delete older rows, preserving the latest 30 for this pair."""
     a, b = str(user_a), str(user_b)
     cur.execute(
         """DELETE FROM community_direct_messages
            WHERE id IN (
-               SELECT id FROM community_direct_messages
-               WHERE (sender_id=%s AND recipient_id=%s)
-                  OR (sender_id=%s AND recipient_id=%s)
-               ORDER BY id DESC OFFSET %s
+               SELECT id
+               FROM community_direct_messages
+               WHERE (sender_id = %s AND recipient_id = %s)
+                  OR (sender_id = %s AND recipient_id = %s)
+               ORDER BY id DESC
+               OFFSET %s
            )""",
         (a, b, b, a, COMMUNITY_HISTORY_MAX_MESSAGES),
     )
+
+
+def _community_ensure_public_history_limit(cur) -> None:
+    """Repair old overflow only when needed; ordinary polling does not lock."""
+    cur.execute("SELECT COUNT(*) AS amount FROM community_messages")
+    amount = int((cur.fetchone() or {}).get("amount") or 0)
+    if amount > COMMUNITY_HISTORY_MAX_MESSAGES:
+        _community_lock_history(cur, "public")
+        _community_prune_public_history(cur)
+
+
+def _community_ensure_direct_history_limit(cur, user_a: Any, user_b: Any) -> None:
+    """Repair old overflow for one pair only when needed."""
+    a, b = str(user_a), str(user_b)
+    cur.execute(
+        """SELECT COUNT(*) AS amount
+           FROM community_direct_messages
+           WHERE (sender_id = %s AND recipient_id = %s)
+              OR (sender_id = %s AND recipient_id = %s)""",
+        (a, b, b, a),
+    )
+    amount = int((cur.fetchone() or {}).get("amount") or 0)
+    if amount > COMMUNITY_HISTORY_MAX_MESSAGES:
+        _community_lock_history(cur, "direct", _community_direct_pair_key(a, b))
+        _community_prune_direct_history(cur, a, b)
 
 
 def _community_canonical_user(user_id: Any) -> str | None:
@@ -2897,6 +2942,7 @@ def _community_payload(row: dict[str, Any]) -> dict[str, Any]:
     attachment_size = None if deleted else row.get("attachment_size")
     return {
         "id": int(row.get("id") or 0),
+        "author_april_id": str(row.get("author_april_id") or "").strip(),
         "display_name": str(row.get("display_name") or "Участник")[:32],
         "plan": "premium" if str(row.get("author_plan") or row.get("plan") or "free").lower() == "premium" else "free",
         "message": "Сообщение удалено автором." if deleted else str(row.get("message") or ""),
@@ -2998,6 +3044,8 @@ def get_community_members(user_id: Any, *, limit: int = 100) -> dict[str, Any]:
                         relations[other] = "outgoing"
                     else:
                         relations[other] = "incoming"
+                cur.execute("SELECT blocked_user_id FROM community_user_blocks WHERE blocker_user_id = %s", (uid,))
+                blocked_user_ids = {str((row or {}).get("blocked_user_id") or "") for row in (cur.fetchall() or [])}
                 members = []
                 for row in rows:
                     public_id = str(row.get("april_id") or "").strip()
@@ -3011,6 +3059,7 @@ def get_community_members(user_id: Any, *, limit: int = 100) -> dict[str, Any]:
                         "display_name": str(row.get("display_name") or default_name).strip()[:32],
                         "plan": _community_active_plan(row),
                         "relation": relations.get(str(row.get("user_id") or ""), "none"),
+                        "is_blocked": str(row.get("user_id") or "") in blocked_user_ids,
                     })
                 cur.execute(
                     """SELECT u.name, u.april_id, LOWER(COALESCE(u.plan, 'free')) AS plan,
@@ -3115,6 +3164,40 @@ def accept_community_friend_request(user_id: Any, requester_april_id: Any) -> di
         conn.close()
 
 
+def set_community_user_block(user_id: Any, peer_april_id: Any, *, blocked: bool) -> dict[str, Any]:
+    """Block/unblock another user in the public community without deleting content."""
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                target = _community_find_target(cur, peer_april_id, uid)
+                if not target:
+                    return {"success": False, "error": "COMMUNITY_USER_NOT_FOUND"}
+                peer = str(target.get("user_id") or "")
+                if blocked:
+                    cur.execute(
+                        """INSERT INTO community_user_blocks(blocker_user_id, blocked_user_id)
+                           VALUES (%s, %s) ON CONFLICT (blocker_user_id, blocked_user_id) DO NOTHING""",
+                        (uid, peer),
+                    )
+                else:
+                    cur.execute(
+                        "DELETE FROM community_user_blocks WHERE blocker_user_id=%s AND blocked_user_id=%s",
+                        (uid, peer),
+                    )
+                return {"success": True, "is_blocked": bool(blocked), "peer_id": str(target.get("april_id") or peer_april_id)}
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] USER_BLOCK_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
 def remove_community_friend(user_id: Any, peer_april_id: Any) -> dict[str, Any]:
     uid = _community_canonical_user(user_id)
     if not uid:
@@ -3168,7 +3251,7 @@ def _community_direct_payload(row: dict[str, Any], *, current_user_id: str, peer
     }
 
 
-def get_community_direct_messages(user_id: Any, peer_april_id: Any, *, limit: int = 30) -> dict[str, Any]:
+def get_community_direct_messages(user_id: Any, peer_april_id: Any, *, limit: int = COMMUNITY_HISTORY_MAX_MESSAGES) -> dict[str, Any]:
     uid = _community_canonical_user(user_id)
     if not uid:
         return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
@@ -3185,9 +3268,7 @@ def get_community_direct_messages(user_id: Any, peer_april_id: Any, *, limit: in
                 peer_uid = _community_require_friends(cur, uid, peer)
                 if not peer_uid:
                     return {"success": False, "error": "FRIENDS_REQUIRED"}
-                pair_key = _community_direct_pair_key(uid, peer_uid)
-                _community_lock_history(cur, "direct", pair_key)
-                _community_prune_direct_history(cur, uid, peer_uid)
+                _community_ensure_direct_history_limit(cur, uid, peer_uid)
                 cur.execute(
                     """SELECT m.id, m.sender_id, m.recipient_id, m.message, m.created_at,
                               m.attachment_name, m.attachment_size, m.is_deleted,
@@ -3251,8 +3332,7 @@ def create_community_direct_message(
                 peer_uid = _community_require_friends(cur, uid, peer)
                 if not peer_uid:
                     return {"success": False, "error": "FRIENDS_REQUIRED"}
-                pair_key = _community_direct_pair_key(uid, peer_uid)
-                _community_lock_history(cur, "direct", pair_key)
+                _community_lock_history(cur, "direct", _community_direct_pair_key(uid, peer_uid))
                 _community_prune_direct_history(cur, uid, peer_uid)
                 cur.execute("SELECT COUNT(*) AS amount FROM community_direct_messages WHERE sender_id=%s AND created_at > NOW() - INTERVAL '1 minute' AND is_deleted=FALSE", (uid,))
                 if int((cur.fetchone() or {}).get("amount") or 0) >= 30:
@@ -3274,6 +3354,7 @@ def create_community_direct_message(
                 cur.execute("SELECT COALESCE(NULLIF(p.display_name,''),NULLIF(u.name,''),'Участник') AS sender_name, CASE WHEN LOWER(COALESCE(u.plan,'free'))='premium' AND COALESCE(u.subscription_until,0)>EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) THEN 'premium' ELSE 'free' END AS sender_plan FROM users u LEFT JOIN community_profiles p ON p.user_id=u.user_id WHERE u.user_id=%s", (uid,))
                 details = dict(cur.fetchone() or {})
                 row.update(details)
+                # The newly inserted row has the newest ID, so it survives pruning.
                 _community_prune_direct_history(cur, uid, peer_uid)
                 return {"success": True, "message": _community_direct_payload(row, current_user_id=uid, peer_april_id=str(peer.get("april_id") or peer_april_id))}
     except Exception as exc:
@@ -3348,20 +3429,19 @@ def delete_community_direct_message(user_id: Any, message_id: Any) -> dict[str, 
     finally:
         conn.close()
 
-def get_community_snapshot(user_id: Any, *, limit: int = 50, before_id: int | None = None) -> dict[str, Any] | None:
-    """Read at most the latest 30 public community messages and the server nickname."""
+def get_community_snapshot(user_id: Any, *, limit: int = COMMUNITY_HISTORY_MAX_MESSAGES, before_id: int | None = None) -> dict[str, Any] | None:
+    """Read at most the latest 30 public messages and the server nickname."""
     uid = _community_canonical_user(user_id)
     if not uid:
         return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    safe_limit = max(1, min(COMMUNITY_HISTORY_MAX_MESSAGES, int(limit or 50)))
+    safe_limit = max(1, min(COMMUNITY_HISTORY_MAX_MESSAGES, int(limit or COMMUNITY_HISTORY_MAX_MESSAGES)))
     conn = get_conn()
     if not conn:
         return {"success": False, "error": "DATABASE_UNAVAILABLE"}
     try:
         with conn:
             with conn.cursor() as cur:
-                _community_lock_history(cur, "public")
-                _community_prune_public_history(cur)
+                _community_ensure_public_history_limit(cur)
                 cur.execute(
                     """SELECT u.name, u.april_id, LOWER(COALESCE(u.plan, 'free')) AS plan,
                               COALESCE(u.subscription_until, 0) AS subscription_until,
@@ -3384,25 +3464,34 @@ def get_community_snapshot(user_id: Any, *, limit: int = 50, before_id: int | No
                     )
                 if before_id and int(before_id) > 0:
                     cur.execute(
-                        """SELECT m.id, m.user_id, m.display_name, m.message, m.created_at,
+                        """SELECT m.id, m.user_id, u.april_id AS author_april_id, m.display_name, m.message, m.created_at,
                                   m.attachment_name, m.attachment_size, m.is_deleted,
                                   CASE WHEN LOWER(COALESCE(u.plan,'free'))='premium'
                                             AND COALESCE(u.subscription_until,0)>EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
                                        THEN 'premium' ELSE 'free' END AS author_plan
                            FROM community_messages m JOIN users u ON u.user_id=m.user_id
-                           WHERE m.id < %s ORDER BY m.id DESC LIMIT %s""",
-                        (int(before_id), safe_limit),
+                           WHERE m.id < %s
+                             AND NOT EXISTS (
+                               SELECT 1 FROM community_user_blocks b
+                               WHERE b.blocker_user_id=%s AND b.blocked_user_id=m.user_id
+                             )
+                           ORDER BY m.id DESC LIMIT %s""",
+                        (int(before_id), uid, safe_limit),
                     )
                 else:
                     cur.execute(
-                        """SELECT m.id, m.user_id, m.display_name, m.message, m.created_at,
+                        """SELECT m.id, m.user_id, u.april_id AS author_april_id, m.display_name, m.message, m.created_at,
                                   m.attachment_name, m.attachment_size, m.is_deleted,
                                   CASE WHEN LOWER(COALESCE(u.plan,'free'))='premium'
                                             AND COALESCE(u.subscription_until,0)>EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
                                        THEN 'premium' ELSE 'free' END AS author_plan
                            FROM community_messages m JOIN users u ON u.user_id=m.user_id
+                           WHERE NOT EXISTS (
+                             SELECT 1 FROM community_user_blocks b
+                             WHERE b.blocker_user_id=%s AND b.blocked_user_id=m.user_id
+                           )
                            ORDER BY m.id DESC LIMIT %s""",
-                        (safe_limit,),
+                        (uid, safe_limit),
                     )
                 rows = list(cur.fetchall() or [])
                 rows.reverse()
@@ -3540,6 +3629,7 @@ def create_community_message(
     try:
         with conn:
             with conn.cursor() as cur:
+                # Serialize public writes; prune old rows before storage-quota checks.
                 _community_lock_history(cur, "public")
                 _community_prune_public_history(cur)
                 cur.execute(
@@ -3589,6 +3679,8 @@ def create_community_message(
                 row = dict(cur.fetchone() or {})
                 row["is_own"] = True
                 row["author_plan"] = _community_active_plan(profile)
+                # Keep only the latest 30 public messages, physically removing older
+                # rows (including stored attachment bytes and report rows).
                 _community_prune_public_history(cur)
                 return {"success": True, "message": _community_payload(row)}
     except Exception as exc:
@@ -3616,8 +3708,14 @@ def get_community_file(user_id: Any, message_id: Any) -> dict[str, Any] | None:
             with conn.cursor() as cur:
                 cur.execute(
                     """SELECT attachment_name, attachment_mime, attachment_size, attachment_data
-                       FROM community_messages WHERE id = %s AND is_deleted = FALSE LIMIT 1""",
-                    (mid,),
+                       FROM community_messages m
+                       WHERE m.id = %s AND m.is_deleted = FALSE
+                         AND NOT EXISTS (
+                           SELECT 1 FROM community_user_blocks b
+                           WHERE b.blocker_user_id = %s AND b.blocked_user_id = m.user_id
+                         )
+                       LIMIT 1""",
+                    (mid, uid),
                 )
                 row = cur.fetchone()
                 if not row or row.get("attachment_data") is None:
