@@ -25,6 +25,7 @@ import threading
 import json
 import time
 from datetime import datetime, timezone, timedelta
+from urllib.parse import quote
 from typing import Any
 
 import psycopg2
@@ -482,6 +483,100 @@ def init_db() -> None:
                 _drop_unwanted_columns(cur, "users")
                 _drop_unwanted_columns(cur, "payments")
                 _drop_unwanted_columns(cur, "dialogue_memory")
+
+                # Public community is deliberately isolated from private dialogue_memory.
+                # Names are server-owned and keyed by canonical authenticated users.
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS community_profiles (
+                        user_id TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+                        display_name TEXT NOT NULL,
+                        is_custom BOOLEAN NOT NULL DEFAULT FALSE,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                cur.execute("ALTER TABLE community_profiles ADD COLUMN IF NOT EXISTS is_custom BOOLEAN NOT NULL DEFAULT FALSE")
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS community_messages (
+                        id BIGSERIAL PRIMARY KEY,
+                        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        display_name TEXT NOT NULL,
+                        message TEXT NOT NULL DEFAULT '',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        attachment_name TEXT,
+                        attachment_mime TEXT,
+                        attachment_size BIGINT,
+                        attachment_data BYTEA,
+                        is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+                        CHECK (length(message) <= 4000),
+                        CHECK (attachment_size IS NULL OR attachment_size <= 3145728)
+                    )
+                """)
+                cur.execute("ALTER TABLE community_messages ADD COLUMN IF NOT EXISTS attachment_name TEXT")
+                cur.execute("ALTER TABLE community_messages ADD COLUMN IF NOT EXISTS attachment_mime TEXT")
+                cur.execute("ALTER TABLE community_messages ADD COLUMN IF NOT EXISTS attachment_size BIGINT")
+                cur.execute("ALTER TABLE community_messages ADD COLUMN IF NOT EXISTS attachment_data BYTEA")
+                cur.execute("ALTER TABLE community_messages ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_community_messages_created ON community_messages(created_at DESC, id DESC)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_community_messages_user_created ON community_messages(user_id, created_at DESC)")
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS community_message_reports (
+                        id BIGSERIAL PRIMARY KEY,
+                        message_id BIGINT NOT NULL REFERENCES community_messages(id) ON DELETE CASCADE,
+                        reporter_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        reason TEXT NOT NULL DEFAULT 'inappropriate',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE (message_id, reporter_user_id)
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_community_reports_created ON community_message_reports(created_at DESC)")
+                # Friend circle and private 1:1 messages are separate from public
+                # community messages and from the private April↔user memory store.
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS community_friendships (
+                        user_a TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        user_b TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        requested_by_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted')),
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (user_a, user_b),
+                        CHECK (user_a < user_b),
+                        CHECK (requested_by_user_id = user_a OR requested_by_user_id = user_b)
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_community_friendships_user_a ON community_friendships(user_a, status)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_community_friendships_user_b ON community_friendships(user_b, status)")
+                # User-controlled public-chat blocks. Blocking hides the target's public
+                # messages and attachments for the blocker; it does not delete records.
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS community_user_blocks (
+                        blocker_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        blocked_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (blocker_user_id, blocked_user_id),
+                        CHECK (blocker_user_id <> blocked_user_id)
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_community_user_blocks_blocked ON community_user_blocks(blocked_user_id, blocker_user_id)")
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS community_direct_messages (
+                        id BIGSERIAL PRIMARY KEY,
+                        sender_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        recipient_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        message TEXT NOT NULL DEFAULT '',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        attachment_name TEXT,
+                        attachment_mime TEXT,
+                        attachment_size BIGINT,
+                        attachment_data BYTEA,
+                        is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+                        CHECK (sender_id <> recipient_id),
+                        CHECK (length(message) <= 4000),
+                        CHECK (attachment_size IS NULL OR attachment_size <= 3145728)
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_community_dm_pair_created ON community_direct_messages(sender_id, recipient_id, created_at DESC, id DESC)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_community_dm_recipient_created ON community_direct_messages(recipient_id, created_at DESC, id DESC)")
 
                 # Remove orphan dialogue rows before adding the authenticated-user FK.
                 cur.execute(
@@ -2734,5 +2829,885 @@ def get_all_users():
             with conn.cursor() as cur:
                 cur.execute("SELECT user_id FROM users ORDER BY created_at ASC")
                 return [row["user_id"] for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+# =========================================================
+# PUBLIC COMMUNITY SPACE (separate from private April memory)
+# =========================================================
+
+COMMUNITY_MAX_MESSAGE_CHARS = 4000
+COMMUNITY_MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024
+COMMUNITY_RATE_LIMIT_PER_MINUTE = 10
+COMMUNITY_USER_ATTACHMENT_QUOTA_BYTES = 30 * 1024 * 1024
+_COMMUNITY_BLOCKED_EXTENSIONS = {
+    ".exe", ".msi", ".com", ".bat", ".cmd", ".ps1", ".vbs", ".vbe",
+    ".scr", ".pif", ".dll", ".sys", ".so", ".dylib", ".apk", ".app",
+}
+
+
+def _community_canonical_user(user_id: Any) -> str | None:
+    raw = str(user_id or "").strip()
+    if not raw:
+        return None
+    canonical = resolve_user_id(raw)
+    if not canonical or not is_authenticated_user(canonical):
+        return None
+    return canonical
+
+
+def _community_iso(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat()
+    return str(value) if value is not None else None
+
+
+def _community_payload(row: dict[str, Any]) -> dict[str, Any]:
+    deleted = bool(row.get("is_deleted"))
+    attachment_name = None if deleted else row.get("attachment_name")
+    attachment_size = None if deleted else row.get("attachment_size")
+    return {
+        "id": int(row.get("id") or 0),
+        "author_april_id": str(row.get("author_april_id") or "").strip(),
+        "display_name": str(row.get("display_name") or "Участник")[:32],
+        "plan": "premium" if str(row.get("author_plan") or row.get("plan") or "free").lower() == "premium" else "free",
+        "message": "Сообщение удалено автором." if deleted else str(row.get("message") or ""),
+        "created_at": _community_iso(row.get("created_at")),
+        "is_deleted": deleted,
+        "is_own": bool(row.get("is_own")),
+        "attachment": ({
+            "name": str(attachment_name or "file"),
+            "size": int(attachment_size or 0),
+            "download_url": f"/api/community?file_id={int(row.get('id') or 0)}",
+        } if attachment_name else None),
+    }
+
+
+# =========================================================
+# COMMUNITY FRIEND CIRCLE + PRIVATE USER-TO-USER MESSAGES
+# =========================================================
+
+def _community_pair(user_a: str, user_b: str) -> tuple[str, str]:
+    return (user_a, user_b) if user_a < user_b else (user_b, user_a)
+
+
+def _community_find_target(cur, peer_april_id: Any, current_user_id: str) -> dict[str, Any] | None:
+    public_id = str(peer_april_id or "").strip()
+    if not public_id or len(public_id) > 100:
+        return None
+    cur.execute(
+        """SELECT user_id, april_id, name, LOWER(COALESCE(plan, 'free')) AS plan,
+                  COALESCE(subscription_until, 0) AS subscription_until
+           FROM users
+           WHERE LOWER(COALESCE(april_id, '')) = LOWER(%s)
+             AND COALESCE(email, '') <> '' AND COALESCE(provider, '') <> ''
+           LIMIT 1""",
+        (public_id,),
+    )
+    target = cur.fetchone()
+    if not target or str(target.get("user_id") or "") == current_user_id:
+        return None
+    return dict(target)
+
+
+def _community_active_plan(row: dict[str, Any]) -> str:
+    active = (
+        str(row.get("plan") or "free").lower() == "premium"
+        and float(row.get("subscription_until") or 0) > now().timestamp()
+    )
+    return "premium" if active else "free"
+
+
+def get_community_members(user_id: Any, *, limit: int = 100) -> dict[str, Any]:
+    """Return public community members with safe April IDs and friendship state."""
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    safe_limit = max(1, min(100, int(limit or 100)))
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT u.user_id, u.april_id, u.name,
+                              LOWER(COALESCE(u.plan, 'free')) AS plan,
+                              COALESCE(u.subscription_until, 0) AS subscription_until,
+                              p.display_name, p.is_custom,
+                              COALESCE(u.last_seen_at, u.last_login_at, u.created_at) AS activity_at
+                       FROM users u LEFT JOIN community_profiles p ON p.user_id = u.user_id
+                       WHERE u.user_id <> %s
+                         AND COALESCE(u.april_id, '') <> ''
+                         AND COALESCE(u.email, '') <> '' AND COALESCE(u.provider, '') <> ''
+                       ORDER BY
+                         CASE WHEN EXISTS (
+                           SELECT 1 FROM community_friendships cf WHERE cf.status='accepted'
+                             AND ((cf.user_a=%s AND cf.user_b=u.user_id) OR (cf.user_b=%s AND cf.user_a=u.user_id))
+                         ) THEN 0
+                         WHEN EXISTS (
+                           SELECT 1 FROM community_friendships cf WHERE cf.status='pending'
+                             AND ((cf.user_a=%s AND cf.user_b=u.user_id) OR (cf.user_b=%s AND cf.user_a=u.user_id))
+                         ) THEN 1 ELSE 2 END,
+                         COALESCE(u.last_seen_at, u.last_login_at, u.created_at) DESC NULLS LAST
+                       LIMIT %s""",
+                    (uid, uid, uid, uid, uid, safe_limit),
+                )
+                rows = [dict(row) for row in (cur.fetchall() or [])]
+                cur.execute(
+                    """SELECT user_a, user_b, requested_by_user_id, status
+                       FROM community_friendships
+                       WHERE user_a = %s OR user_b = %s""",
+                    (uid, uid),
+                )
+                relations: dict[str, str] = {}
+                for row in cur.fetchall() or []:
+                    row = dict(row)
+                    other = str(row.get("user_b") if str(row.get("user_a")) == uid else row.get("user_a") or "")
+                    if row.get("status") == "accepted":
+                        relations[other] = "friend"
+                    elif str(row.get("requested_by_user_id") or "") == uid:
+                        relations[other] = "outgoing"
+                    else:
+                        relations[other] = "incoming"
+                cur.execute("SELECT blocked_user_id FROM community_user_blocks WHERE blocker_user_id = %s", (uid,))
+                blocked_user_ids = {str((row or {}).get("blocked_user_id") or "") for row in (cur.fetchall() or [])}
+                members = []
+                for row in rows:
+                    public_id = str(row.get("april_id") or "").strip()
+                    if not public_id:
+                        continue
+                    default_name = str(row.get("name") or "").strip()
+                    if not default_name:
+                        default_name = f"Участник {public_id[-4:]}"
+                    members.append({
+                        "april_id": public_id,
+                        "display_name": str(row.get("display_name") or default_name).strip()[:32],
+                        "plan": _community_active_plan(row),
+                        "relation": relations.get(str(row.get("user_id") or ""), "none"),
+                        "is_blocked": str(row.get("user_id") or "") in blocked_user_ids,
+                    })
+                cur.execute(
+                    """SELECT u.name, u.april_id, LOWER(COALESCE(u.plan, 'free')) AS plan,
+                              COALESCE(u.subscription_until, 0) AS subscription_until,
+                              p.display_name, p.is_custom
+                       FROM users u LEFT JOIN community_profiles p ON p.user_id = u.user_id
+                       WHERE u.user_id = %s LIMIT 1""",
+                    (uid,),
+                )
+                own = dict(cur.fetchone() or {})
+                default_own = str(own.get("name") or "").strip() or f"Участник {str(own.get('april_id') or uid)[-4:]}"
+                own_name = str(own.get("display_name") or default_own).strip()[:32]
+                if not own.get("display_name"):
+                    cur.execute(
+                        """INSERT INTO community_profiles(user_id, display_name, is_custom)
+                           VALUES (%s, %s, FALSE) ON CONFLICT (user_id) DO NOTHING""",
+                        (uid, own_name),
+                    )
+                return {
+                    "success": True,
+                    "members": members,
+                    "profile": {"display_name": own_name, "is_custom": bool(own.get("is_custom"))},
+                    "plan": _community_active_plan(own),
+                }
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] MEMBERS_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def send_community_friend_request(user_id: Any, peer_april_id: Any) -> dict[str, Any]:
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                target = _community_find_target(cur, peer_april_id, uid)
+                if not target:
+                    return {"success": False, "error": "COMMUNITY_USER_NOT_FOUND"}
+                peer = str(target["user_id"])
+                a, b = _community_pair(uid, peer)
+                cur.execute("SELECT status, requested_by_user_id FROM community_friendships WHERE user_a=%s AND user_b=%s FOR UPDATE", (a, b))
+                existing = cur.fetchone()
+                if existing:
+                    state = str(existing.get("status") or "")
+                    requested_by = str(existing.get("requested_by_user_id") or "")
+                    if state == "accepted":
+                        return {"success": True, "relation": "friend"}
+                    if requested_by == uid:
+                        return {"success": True, "relation": "outgoing"}
+                    return {"success": True, "relation": "incoming", "error": "FRIEND_REQUEST_INCOMING"}
+                cur.execute(
+                    """INSERT INTO community_friendships(user_a, user_b, requested_by_user_id, status)
+                       VALUES (%s,%s,%s,'pending')""",
+                    (a, b, uid),
+                )
+                return {"success": True, "relation": "outgoing"}
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] FRIEND_REQUEST_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def accept_community_friend_request(user_id: Any, requester_april_id: Any) -> dict[str, Any]:
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                target = _community_find_target(cur, requester_april_id, uid)
+                if not target:
+                    return {"success": False, "error": "COMMUNITY_USER_NOT_FOUND"}
+                requester = str(target["user_id"])
+                a, b = _community_pair(uid, requester)
+                cur.execute(
+                    """UPDATE community_friendships SET status='accepted', updated_at=CURRENT_TIMESTAMP
+                       WHERE user_a=%s AND user_b=%s AND status='pending' AND requested_by_user_id=%s
+                       RETURNING user_a""",
+                    (a, b, requester),
+                )
+                if not cur.fetchone():
+                    cur.execute("SELECT status FROM community_friendships WHERE user_a=%s AND user_b=%s", (a, b))
+                    row = cur.fetchone() or {}
+                    if row.get("status") == "accepted":
+                        return {"success": True, "relation": "friend"}
+                    return {"success": False, "error": "FRIEND_REQUEST_NOT_FOUND"}
+                return {"success": True, "relation": "friend"}
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] FRIEND_ACCEPT_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def set_community_user_block(user_id: Any, peer_april_id: Any, *, blocked: bool) -> dict[str, Any]:
+    """Block/unblock another user in the public community without deleting content."""
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                target = _community_find_target(cur, peer_april_id, uid)
+                if not target:
+                    return {"success": False, "error": "COMMUNITY_USER_NOT_FOUND"}
+                peer = str(target.get("user_id") or "")
+                if blocked:
+                    cur.execute(
+                        """INSERT INTO community_user_blocks(blocker_user_id, blocked_user_id)
+                           VALUES (%s, %s) ON CONFLICT (blocker_user_id, blocked_user_id) DO NOTHING""",
+                        (uid, peer),
+                    )
+                else:
+                    cur.execute(
+                        "DELETE FROM community_user_blocks WHERE blocker_user_id=%s AND blocked_user_id=%s",
+                        (uid, peer),
+                    )
+                return {"success": True, "is_blocked": bool(blocked), "peer_id": str(target.get("april_id") or peer_april_id)}
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] USER_BLOCK_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def remove_community_friend(user_id: Any, peer_april_id: Any) -> dict[str, Any]:
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                target = _community_find_target(cur, peer_april_id, uid)
+                if not target:
+                    return {"success": False, "error": "COMMUNITY_USER_NOT_FOUND"}
+                a, b = _community_pair(uid, str(target["user_id"]))
+                cur.execute("DELETE FROM community_friendships WHERE user_a=%s AND user_b=%s AND status='accepted'", (a, b))
+                return {"success": True, "relation": "none"}
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] FRIEND_REMOVE_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def _community_require_friends(cur, uid: str, peer: dict[str, Any]) -> str | None:
+    peer_uid = str(peer.get("user_id") or "")
+    a, b = _community_pair(uid, peer_uid)
+    cur.execute("SELECT status FROM community_friendships WHERE user_a=%s AND user_b=%s", (a, b))
+    row = cur.fetchone() or {}
+    return peer_uid if row.get("status") == "accepted" else None
+
+
+def _community_direct_payload(row: dict[str, Any], *, current_user_id: str, peer_april_id: str) -> dict[str, Any]:
+    deleted = bool(row.get("is_deleted"))
+    attachment_name = None if deleted else row.get("attachment_name")
+    attachment_size = None if deleted else row.get("attachment_size")
+    sender_uid = str(row.get("sender_id") or "")
+    sender_plan = str(row.get("sender_plan") or "free")
+    return {
+        "id": int(row.get("id") or 0),
+        "sender_name": str(row.get("sender_name") or "Участник")[:32],
+        "sender_plan": sender_plan,
+        "is_own": sender_uid == current_user_id,
+        "message": "Сообщение удалено автором." if deleted else str(row.get("message") or ""),
+        "created_at": _community_iso(row.get("created_at")),
+        "is_deleted": deleted,
+        "attachment": ({
+            "name": str(attachment_name or "file"),
+            "size": int(attachment_size or 0),
+            "download_url": f"/api/community?dm_file_id={int(row.get('id') or 0)}&peer_id={quote(str(peer_april_id), safe='')}",
+        } if attachment_name else None),
+    }
+
+
+def get_community_direct_messages(user_id: Any, peer_april_id: Any, *, limit: int = 100) -> dict[str, Any]:
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    safe_limit = max(1, min(100, int(limit or 100)))
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                peer = _community_find_target(cur, peer_april_id, uid)
+                if not peer:
+                    return {"success": False, "error": "COMMUNITY_USER_NOT_FOUND"}
+                peer_uid = _community_require_friends(cur, uid, peer)
+                if not peer_uid:
+                    return {"success": False, "error": "FRIENDS_REQUIRED"}
+                cur.execute(
+                    """SELECT m.id, m.sender_id, m.recipient_id, m.message, m.created_at,
+                              m.attachment_name, m.attachment_size, m.is_deleted,
+                              COALESCE(NULLIF(sp.display_name,''), NULLIF(su.name,''), 'Участник') AS sender_name,
+                              CASE WHEN LOWER(COALESCE(su.plan,'free'))='premium'
+                                      AND COALESCE(su.subscription_until,0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
+                                   THEN 'premium' ELSE 'free' END AS sender_plan
+                       FROM community_direct_messages m
+                       JOIN users su ON su.user_id=m.sender_id
+                       LEFT JOIN community_profiles sp ON sp.user_id=su.user_id
+                       WHERE ((m.sender_id=%s AND m.recipient_id=%s) OR (m.sender_id=%s AND m.recipient_id=%s))
+                       ORDER BY m.id DESC LIMIT %s""",
+                    (uid, peer_uid, peer_uid, uid, safe_limit),
+                )
+                messages = [dict(row) for row in (cur.fetchall() or [])]
+                messages.reverse()
+                peer_name = str(peer.get("name") or "").strip() or f"Участник {str(peer.get('april_id') or '')[-4:]}"
+                cur.execute("SELECT display_name FROM community_profiles WHERE user_id=%s", (peer_uid,))
+                profile_row = cur.fetchone() or {}
+                peer_name = str(profile_row.get("display_name") or peer_name).strip()[:32]
+                return {
+                    "success": True,
+                    "messages": [_community_direct_payload(row, current_user_id=uid, peer_april_id=str(peer.get("april_id") or peer_april_id)) for row in messages],
+                    "peer": {"april_id": str(peer.get("april_id") or ""), "display_name": peer_name, "plan": _community_active_plan(peer)},
+                }
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] DIRECT_READ_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def create_community_direct_message(
+    user_id: Any, peer_april_id: Any, message: Any, *,
+    attachment_name: str | None = None, attachment_mime: str | None = None,
+    attachment_data: bytes | None = None,
+) -> dict[str, Any]:
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    text_value = str(message or "").replace("\x00", "").strip()
+    if len(text_value) > COMMUNITY_MAX_MESSAGE_CHARS:
+        return {"success": False, "error": "MESSAGE_TOO_LONG"}
+    original_name = str(attachment_name or "").replace("\\", "/").split("/")[-1].strip()
+    binary = bytes(attachment_data) if attachment_data is not None else None
+    if binary is not None and (not binary or len(binary) > COMMUNITY_MAX_ATTACHMENT_BYTES):
+        return {"success": False, "error": "ATTACHMENT_TOO_LARGE_OR_EMPTY"}
+    if binary is not None and os.path.splitext(original_name)[1].lower() in _COMMUNITY_BLOCKED_EXTENSIONS:
+        return {"success": False, "error": "ATTACHMENT_TYPE_BLOCKED"}
+    if not text_value and binary is None:
+        return {"success": False, "error": "MESSAGE_OR_FILE_REQUIRED"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                peer = _community_find_target(cur, peer_april_id, uid)
+                if not peer:
+                    return {"success": False, "error": "COMMUNITY_USER_NOT_FOUND"}
+                peer_uid = _community_require_friends(cur, uid, peer)
+                if not peer_uid:
+                    return {"success": False, "error": "FRIENDS_REQUIRED"}
+                cur.execute("SELECT COUNT(*) AS amount FROM community_direct_messages WHERE sender_id=%s AND created_at > NOW() - INTERVAL '1 minute' AND is_deleted=FALSE", (uid,))
+                if int((cur.fetchone() or {}).get("amount") or 0) >= 30:
+                    return {"success": False, "error": "RATE_LIMITED"}
+                if binary is not None:
+                    cur.execute("SELECT COALESCE(SUM(attachment_size),0) AS used FROM community_direct_messages WHERE sender_id=%s AND is_deleted=FALSE", (uid,))
+                    used_bytes = int((cur.fetchone() or {}).get("used") or 0)
+                    if used_bytes + len(binary) > COMMUNITY_USER_ATTACHMENT_QUOTA_BYTES:
+                        return {"success": False, "error": "COMMUNITY_ATTACHMENT_QUOTA_REACHED"}
+                cur.execute(
+                    """INSERT INTO community_direct_messages(
+                           sender_id, recipient_id, message, attachment_name, attachment_mime, attachment_size, attachment_data)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s)
+                       RETURNING id, sender_id, recipient_id, message, created_at, attachment_name, attachment_size, is_deleted""",
+                    (uid, peer_uid, text_value, original_name or None, str(attachment_mime or "application/octet-stream")[:160] if binary is not None else None, len(binary) if binary is not None else None, binary),
+                )
+                row = dict(cur.fetchone() or {})
+                row["sender_name"] = ""
+                cur.execute("SELECT COALESCE(NULLIF(p.display_name,''),NULLIF(u.name,''),'Участник') AS sender_name, CASE WHEN LOWER(COALESCE(u.plan,'free'))='premium' AND COALESCE(u.subscription_until,0)>EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) THEN 'premium' ELSE 'free' END AS sender_plan FROM users u LEFT JOIN community_profiles p ON p.user_id=u.user_id WHERE u.user_id=%s", (uid,))
+                details = dict(cur.fetchone() or {})
+                row.update(details)
+                return {"success": True, "message": _community_direct_payload(row, current_user_id=uid, peer_april_id=str(peer.get("april_id") or peer_april_id))}
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] DIRECT_CREATE_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def get_community_direct_file(user_id: Any, peer_april_id: Any, message_id: Any) -> dict[str, Any] | None:
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    try:
+        mid = int(message_id)
+        if mid <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return {"success": False, "error": "MESSAGE_ID_INVALID"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                peer = _community_find_target(cur, peer_april_id, uid)
+                if not peer or not _community_require_friends(cur, uid, peer):
+                    return {"success": False, "error": "COMMUNITY_FILE_NOT_FOUND"}
+                peer_uid = str(peer.get("user_id") or "")
+                cur.execute(
+                    """SELECT attachment_data AS data, attachment_name AS name, attachment_mime AS mime
+                       FROM community_direct_messages
+                       WHERE id=%s AND is_deleted=FALSE AND attachment_data IS NOT NULL
+                         AND ((sender_id=%s AND recipient_id=%s) OR (sender_id=%s AND recipient_id=%s))
+                       LIMIT 1""",
+                    (mid, uid, peer_uid, peer_uid, uid),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {"success": False, "error": "COMMUNITY_FILE_NOT_FOUND"}
+                return {"success": True, "data": bytes(row.get("data") or b""), "name": str(row.get("name") or "shared-file"), "mime": str(row.get("mime") or "application/octet-stream")}
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] DIRECT_FILE_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def delete_community_direct_message(user_id: Any, message_id: Any) -> dict[str, Any]:
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    try:
+        mid = int(message_id)
+        if mid <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return {"success": False, "error": "MESSAGE_ID_INVALID"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE community_direct_messages SET is_deleted=TRUE, message='', attachment_name=NULL, attachment_mime=NULL, attachment_size=NULL, attachment_data=NULL WHERE id=%s AND sender_id=%s AND is_deleted=FALSE RETURNING id", (mid, uid))
+                if not cur.fetchone():
+                    return {"success": False, "error": "MESSAGE_NOT_FOUND_OR_NOT_OWNED"}
+                return {"success": True}
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] DIRECT_DELETE_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+def get_community_snapshot(user_id: Any, *, limit: int = 50, before_id: int | None = None) -> dict[str, Any] | None:
+    """Read public community messages and the server-persisted nickname."""
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    safe_limit = max(1, min(100, int(limit or 50)))
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT u.name, u.april_id, LOWER(COALESCE(u.plan, 'free')) AS plan,
+                              COALESCE(u.subscription_until, 0) AS subscription_until,
+                              p.display_name, p.is_custom
+                       FROM users u LEFT JOIN community_profiles p ON p.user_id = u.user_id
+                       WHERE u.user_id = %s LIMIT 1""",
+                    (uid,),
+                )
+                profile = cur.fetchone() or {}
+                default_name = str(profile.get("name") or "").strip()
+                if not default_name:
+                    suffix = str(profile.get("april_id") or uid)[-4:]
+                    default_name = f"Участник {suffix}"
+                display_name = str(profile.get("display_name") or default_name).strip()[:32]
+                if not profile.get("display_name"):
+                    cur.execute(
+                        """INSERT INTO community_profiles(user_id, display_name, is_custom)
+                           VALUES (%s, %s, FALSE) ON CONFLICT (user_id) DO NOTHING""",
+                        (uid, display_name),
+                    )
+                if before_id and int(before_id) > 0:
+                    cur.execute(
+                        """SELECT m.id, m.user_id, u.april_id AS author_april_id, m.display_name, m.message, m.created_at,
+                                  m.attachment_name, m.attachment_size, m.is_deleted,
+                                  CASE WHEN LOWER(COALESCE(u.plan,'free'))='premium'
+                                            AND COALESCE(u.subscription_until,0)>EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
+                                       THEN 'premium' ELSE 'free' END AS author_plan
+                           FROM community_messages m JOIN users u ON u.user_id=m.user_id
+                           WHERE m.id < %s
+                             AND NOT EXISTS (
+                               SELECT 1 FROM community_user_blocks b
+                               WHERE b.blocker_user_id=%s AND b.blocked_user_id=m.user_id
+                             )
+                           ORDER BY m.id DESC LIMIT %s""",
+                        (int(before_id), uid, safe_limit),
+                    )
+                else:
+                    cur.execute(
+                        """SELECT m.id, m.user_id, u.april_id AS author_april_id, m.display_name, m.message, m.created_at,
+                                  m.attachment_name, m.attachment_size, m.is_deleted,
+                                  CASE WHEN LOWER(COALESCE(u.plan,'free'))='premium'
+                                            AND COALESCE(u.subscription_until,0)>EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
+                                       THEN 'premium' ELSE 'free' END AS author_plan
+                           FROM community_messages m JOIN users u ON u.user_id=m.user_id
+                           WHERE NOT EXISTS (
+                             SELECT 1 FROM community_user_blocks b
+                             WHERE b.blocker_user_id=%s AND b.blocked_user_id=m.user_id
+                           )
+                           ORDER BY m.id DESC LIMIT %s""",
+                        (uid, safe_limit),
+                    )
+                rows = list(cur.fetchall() or [])
+                rows.reverse()
+                messages = []
+                for row in rows:
+                    item = dict(row)
+                    item["is_own"] = str(item.get("user_id") or "") == uid
+                    messages.append(_community_payload(item))
+                active_premium = (
+                    str(profile.get("plan") or "free").lower() == "premium"
+                    and float(profile.get("subscription_until") or 0) > now().timestamp()
+                )
+                return {
+                    "success": True,
+                    "messages": messages,
+                    "profile": {"display_name": display_name, "is_custom": bool(profile.get("is_custom"))},
+                    "plan": "premium" if active_premium else "free",
+                    "can_post": True,
+                    "max_message_chars": COMMUNITY_MAX_MESSAGE_CHARS,
+                    "max_attachment_bytes": COMMUNITY_MAX_ATTACHMENT_BYTES,
+                }
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] SNAPSHOT_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def save_community_display_name(user_id: Any, display_name: Any) -> dict[str, Any]:
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    name = re.sub(r"\s+", " ", str(display_name or "")).strip()
+    if not (2 <= len(name) <= 32) or not re.fullmatch(r"[\w .’'-]+", name, flags=re.UNICODE):
+        return {"success": False, "error": "INVALID_DISPLAY_NAME"}
+    if name.casefold() in {"admin", "administrator", "moderator", "support", "админ", "администратор", "модератор", "техподдержка"}:
+        return {"success": False, "error": "RESERVED_DISPLAY_NAME"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO community_profiles(user_id, display_name, is_custom, updated_at)
+                       VALUES (%s, %s, TRUE, CURRENT_TIMESTAMP)
+                       ON CONFLICT (user_id) DO UPDATE SET
+                         display_name = EXCLUDED.display_name,
+                         is_custom = TRUE,
+                         updated_at = CURRENT_TIMESTAMP
+                       RETURNING display_name""",
+                    (uid, name),
+                )
+                row = cur.fetchone() or {}
+                return {"success": True, "profile": {"display_name": str(row.get("display_name") or name)}}
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] PROFILE_SAVE_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def reset_community_display_name(user_id: Any) -> dict[str, Any]:
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT name, april_id FROM users WHERE user_id = %s LIMIT 1", (uid,))
+                user = cur.fetchone() or {}
+                name = str(user.get("name") or "").strip()
+                if not name:
+                    name = f"Участник {str(user.get('april_id') or uid)[-4:]}"
+                name = name[:32]
+                cur.execute(
+                    """INSERT INTO community_profiles(user_id, display_name, is_custom, updated_at)
+                       VALUES (%s, %s, FALSE, CURRENT_TIMESTAMP)
+                       ON CONFLICT (user_id) DO UPDATE SET
+                         display_name = EXCLUDED.display_name,
+                         is_custom = FALSE,
+                         updated_at = CURRENT_TIMESTAMP
+                       RETURNING display_name""",
+                    (uid, name),
+                )
+                row = cur.fetchone() or {}
+                return {"success": True, "profile": {"display_name": str(row.get("display_name") or name), "is_custom": False}}
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] PROFILE_RESET_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def create_community_message(
+    user_id: Any,
+    message: Any,
+    *,
+    attachment_name: Any = None,
+    attachment_mime: Any = None,
+    attachment_data: bytes | None = None,
+) -> dict[str, Any]:
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    text_value = str(message or "").strip()
+    binary = bytes(attachment_data) if attachment_data is not None else None
+    if len(text_value) > COMMUNITY_MAX_MESSAGE_CHARS:
+        return {"success": False, "error": "MESSAGE_TOO_LONG"}
+    if not text_value and not binary:
+        return {"success": False, "error": "MESSAGE_OR_FILE_REQUIRED"}
+    if binary is not None and (not binary or len(binary) > COMMUNITY_MAX_ATTACHMENT_BYTES):
+        return {"success": False, "error": "ATTACHMENT_TOO_LARGE_OR_EMPTY"}
+
+    safe_name = None
+    safe_mime = None
+    if binary is not None:
+        original_name = str(attachment_name or "shared-file").replace("\\", "/").split("/")[-1].strip()
+        original_name = "".join(ch for ch in original_name if ch.isprintable() and ch not in "\r\n\x00")[:160]
+        if not original_name or original_name in {".", ".."}:
+            original_name = "shared-file"
+        if os.path.splitext(original_name)[1].lower() in _COMMUNITY_BLOCKED_EXTENSIONS:
+            return {"success": False, "error": "ATTACHMENT_TYPE_BLOCKED"}
+        safe_name = original_name
+        safe_mime = str(attachment_mime or "application/octet-stream").split(";", 1)[0].strip().lower()[:120]
+        if not re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", safe_mime):
+            safe_mime = "application/octet-stream"
+
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT u.name, u.april_id, p.display_name,
+                              LOWER(COALESCE(u.plan,'free')) AS plan,
+                              COALESCE(u.subscription_until,0) AS subscription_until
+                       FROM users u LEFT JOIN community_profiles p ON p.user_id = u.user_id
+                       WHERE u.user_id = %s LIMIT 1""",
+                    (uid,),
+                )
+                profile = cur.fetchone() or {}
+                display_name = str(profile.get("display_name") or profile.get("name") or "").strip()
+                if not display_name:
+                    display_name = f"Участник {str(profile.get('april_id') or uid)[-4:]}"
+                display_name = display_name[:32]
+                if not profile.get("display_name"):
+                    cur.execute(
+                        """INSERT INTO community_profiles(user_id, display_name, is_custom)
+                           VALUES (%s, %s, FALSE) ON CONFLICT (user_id) DO NOTHING""",
+                        (uid, display_name),
+                    )
+                cur.execute(
+                    "SELECT COUNT(*) AS amount FROM community_messages WHERE user_id = %s AND created_at > NOW() - INTERVAL '1 minute'",
+                    (uid,),
+                )
+                if int((cur.fetchone() or {}).get("amount") or 0) >= COMMUNITY_RATE_LIMIT_PER_MINUTE:
+                    return {"success": False, "error": "RATE_LIMITED"}
+                if binary is not None:
+                    cur.execute(
+                        """SELECT COALESCE(SUM(attachment_size), 0) AS used_bytes
+                           FROM community_messages
+                           WHERE user_id = %s AND is_deleted = FALSE""",
+                        (uid,),
+                    )
+                    used_bytes = int((cur.fetchone() or {}).get("used_bytes") or 0)
+                    if used_bytes + len(binary) > COMMUNITY_USER_ATTACHMENT_QUOTA_BYTES:
+                        return {"success": False, "error": "COMMUNITY_ATTACHMENT_QUOTA_REACHED"}
+                cur.execute(
+                    """INSERT INTO community_messages(
+                           user_id, display_name, message, attachment_name,
+                           attachment_mime, attachment_size, attachment_data
+                       ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                       RETURNING id, user_id, display_name, message, created_at,
+                                 attachment_name, attachment_size, is_deleted""",
+                    (uid, display_name, text_value, safe_name, safe_mime, len(binary) if binary is not None else None, binary),
+                )
+                row = dict(cur.fetchone() or {})
+                row["is_own"] = True
+                row["author_plan"] = _community_active_plan(profile)
+                return {"success": True, "message": _community_payload(row)}
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] MESSAGE_CREATE_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def get_community_file(user_id: Any, message_id: Any) -> dict[str, Any] | None:
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    try:
+        mid = int(message_id)
+    except (TypeError, ValueError):
+        return {"success": False, "error": "MESSAGE_ID_INVALID"}
+    if mid <= 0:
+        return {"success": False, "error": "MESSAGE_ID_INVALID"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT attachment_name, attachment_mime, attachment_size, attachment_data
+                       FROM community_messages m
+                       WHERE m.id = %s AND m.is_deleted = FALSE
+                         AND NOT EXISTS (
+                           SELECT 1 FROM community_user_blocks b
+                           WHERE b.blocker_user_id = %s AND b.blocked_user_id = m.user_id
+                         )
+                       LIMIT 1""",
+                    (mid, uid),
+                )
+                row = cur.fetchone()
+                if not row or row.get("attachment_data") is None:
+                    return {"success": False, "error": "COMMUNITY_FILE_NOT_FOUND"}
+                return {
+                    "success": True,
+                    "name": str(row.get("attachment_name") or "shared-file"),
+                    "mime": str(row.get("attachment_mime") or "application/octet-stream"),
+                    "size": int(row.get("attachment_size") or 0),
+                    "data": bytes(row.get("attachment_data") or b""),
+                }
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] FILE_READ_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def delete_community_message(user_id: Any, message_id: Any) -> dict[str, Any]:
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    try:
+        mid = int(message_id)
+    except (TypeError, ValueError):
+        return {"success": False, "error": "MESSAGE_ID_INVALID"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE community_messages
+                       SET is_deleted = TRUE, message = '', attachment_name = NULL,
+                           attachment_mime = NULL, attachment_size = NULL, attachment_data = NULL
+                       WHERE id = %s AND user_id = %s AND is_deleted = FALSE""",
+                    (mid, uid),
+                )
+                if cur.rowcount != 1:
+                    return {"success": False, "error": "MESSAGE_NOT_FOUND_OR_NOT_OWNED"}
+                return {"success": True, "message_id": mid}
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] MESSAGE_DELETE_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def report_community_message(user_id: Any, message_id: Any, reason: Any = "inappropriate") -> dict[str, Any]:
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    try:
+        mid = int(message_id)
+    except (TypeError, ValueError):
+        return {"success": False, "error": "MESSAGE_ID_INVALID"}
+    safe_reason = str(reason or "inappropriate").strip().lower()[:40]
+    if safe_reason not in {"inappropriate", "spam", "abuse", "malware", "other"}:
+        safe_reason = "other"
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM community_messages WHERE id = %s AND user_id <> %s AND is_deleted = FALSE", (mid, uid))
+                if not cur.fetchone():
+                    return {"success": False, "error": "MESSAGE_NOT_FOUND"}
+                cur.execute(
+                    """INSERT INTO community_message_reports(message_id, reporter_user_id, reason)
+                       VALUES (%s, %s, %s) ON CONFLICT (message_id, reporter_user_id) DO NOTHING""",
+                    (mid, uid, safe_reason),
+                )
+                return {"success": True, "reported": cur.rowcount == 1}
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] MESSAGE_REPORT_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
     finally:
         conn.close()
