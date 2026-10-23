@@ -2452,15 +2452,13 @@ def reply_premium_support_message(
 
 
 def _premium_test_enabled() -> bool:
-    """Keep test activation enabled while real payment processing is absent.
+    """Enable simulated Premium grants only by explicit environment opt-in.
 
-    The Web button is the current test adapter, not a payment confirmation. The
-    grant is still limited to an authenticated database user and is audited in
-    payments as a zero-value ``test_grant``. Disable/remove this adapter when
-    real billing replaces it; an old environment value must not silently block
-    the current test workflow.
+    Keep this disabled in the public/Google Play production deployment until
+    real Google Play Billing and server-side purchase verification are live.
+    For a private test deployment, set APRIL_ALLOW_TEST_ACTIVATION=1.
     """
-    return True
+    return str(os.getenv("APRIL_ALLOW_TEST_ACTIVATION", "")).strip().lower() in {"1", "true", "yes"}
 
 
 def _new_premium_id() -> str:
@@ -3794,5 +3792,78 @@ def report_community_message(user_id: Any, message_id: Any, reason: Any = "inapp
     except Exception as exc:
         print(f"[APRIL_COMMUNITY] MESSAGE_REPORT_FAILED type={type(exc).__name__}", flush=True)
         return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+
+def submit_ai_content_report(user_id: Any, message_id: Any, reason: Any, content_excerpt: Any) -> dict[str, Any]:
+    """Persist a report about AI-generated content from an authenticated April account.
+
+    Reports are scoped to the canonical users.user_id and are deleted with that
+    account. A modest per-account quota limits abuse of the reporting mechanism.
+    """
+    raw = str(user_id or "").strip()
+    msg_id = str(message_id or "").strip()[:160]
+    report_reason = str(reason or "").strip().lower()
+    excerpt = str(content_excerpt or "").strip()[:2000]
+    if not raw or not msg_id or not excerpt or report_reason not in {"harmful", "offensive", "misleading", "other"}:
+        return {"success": False, "error": "REPORT_FIELDS_INVALID"}
+
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # The account row is authoritative; clients cannot choose report ownership.
+                cur.execute(
+                    """SELECT user_id, email, provider FROM users
+                       WHERE user_id = %s OR april_id = %s
+                       ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END LIMIT 1""",
+                    (raw, raw, raw),
+                )
+                user = cur.fetchone()
+                if not _is_authenticated_row(user):
+                    return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+                canonical_id = str(user.get("user_id") or "").strip()
+                if not canonical_id:
+                    return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+
+                cur.execute(
+                    """CREATE TABLE IF NOT EXISTS april_ai_content_reports (
+                        id BIGSERIAL PRIMARY KEY,
+                        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        message_id TEXT NOT NULL,
+                        reason TEXT NOT NULL CHECK (reason IN ('harmful', 'offensive', 'misleading', 'other')),
+                        content_excerpt TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'open',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )"""
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_april_ai_content_reports_created_at ON april_ai_content_reports(created_at DESC)"
+                )
+                cur.execute(
+                    """SELECT COUNT(*) AS report_count FROM april_ai_content_reports
+                       WHERE user_id = %s AND created_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'""",
+                    (canonical_id,),
+                )
+                count_row = cur.fetchone() or {}
+                if int(count_row.get("report_count") or 0) >= 10:
+                    return {"success": False, "error": "REPORT_RATE_LIMITED"}
+                cur.execute(
+                    """INSERT INTO april_ai_content_reports (user_id, message_id, reason, content_excerpt)
+                       VALUES (%s, %s, %s, %s) RETURNING id""",
+                    (canonical_id, msg_id, report_reason, excerpt),
+                )
+                inserted = cur.fetchone() or {}
+                report_id = int(inserted.get("id") or 0)
+                if report_id <= 0:
+                    return {"success": False, "error": "REPORT_SAVE_FAILED"}
+        return {"success": True, "report_id": report_id}
+    except Exception as exc:
+        print(f"[APRIL_CONTENT_REPORT] SAVE_ERROR type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "CONTENT_REPORT_UNAVAILABLE"}
     finally:
         conn.close()
