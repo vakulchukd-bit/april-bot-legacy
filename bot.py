@@ -56,6 +56,7 @@ from storage import (
     list_premium_support_messages, reply_premium_support_message,
     get_community_snapshot, save_community_display_name, reset_community_display_name, create_community_message,
     get_community_file, delete_community_message, report_community_message,
+    submit_ai_content_report,
     get_community_members, send_community_friend_request, accept_community_friend_request,
     remove_community_friend, set_community_user_block, get_community_direct_messages, create_community_direct_message,
     get_community_direct_file, delete_community_direct_message,
@@ -1791,6 +1792,48 @@ class AprilHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlsplit(self.path)
         parsed_path = parsed.path
+        if parsed_path == "/api/v1/content-report":
+            if not self._service_authorized():
+                self.close_connection = True
+                self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                return
+            supplied_user_id = _text(self.headers.get("X-April-User-Id"))
+            if not supplied_user_id:
+                self._send_json(400, {"success": False, "error": "USER_ID_REQUIRED"})
+                return
+            if not _text(os.getenv("DATABASE_URL")):
+                self._send_json(503, {"success": False, "error": "DATABASE_UNAVAILABLE"})
+                return
+            canonical_user_id = resolve_user_id(supplied_user_id)
+            if not canonical_user_id or not is_authenticated_user(canonical_user_id):
+                self._send_json(401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length < 0 or length > 12_000:
+                    self.close_connection = True
+                    self._send_json(413, {"success": False, "error": "REQUEST_BODY_TOO_LARGE"})
+                    return
+                raw = self.rfile.read(length) if length else b""
+                body = json.loads(raw.decode("utf-8") or "{}") if raw else {}
+                if not isinstance(body, dict):
+                    self._send_json(400, {"success": False, "error": "INVALID_REQUEST"})
+                    return
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                self._send_json(400, {"success": False, "error": "INVALID_JSON"})
+                return
+
+            result = submit_ai_content_report(
+                canonical_user_id, body.get("message_id"), body.get("reason"), body.get("content_excerpt"),
+            )
+            if result.get("success") is True:
+                self._send_json(200, result)
+                return
+            error = _text(result.get("error") or "CONTENT_REPORT_UNAVAILABLE")
+            status_code = 401 if error == "AUTHENTICATED_USER_REQUIRED" else 429 if error == "REPORT_RATE_LIMITED" else 400 if error == "REPORT_FIELDS_INVALID" else 503
+            self._send_json(status_code, result)
+            return
+
         if parsed_path == "/api/v1/community":
             if not self._service_authorized():
                 self.close_connection = True
