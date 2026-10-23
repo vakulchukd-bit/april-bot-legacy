@@ -21,9 +21,11 @@ import traceback
 import time
 import uuid
 from datetime import datetime, timezone
+from email.parser import BytesParser
+from email.policy import default as email_policy_default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from blocks.input_reader import parse_json_payload, parse_multipart_payload
 from blocks.voice_reader import transcribe_voice_bytes
@@ -52,6 +54,12 @@ from storage import (
     get_premium_support_status, get_premium_support_message_detail,
     mark_premium_support_message_read, send_premium_support_message,
     list_premium_support_messages, reply_premium_support_message,
+    get_community_snapshot, save_community_display_name, reset_community_display_name, create_community_message,
+    get_community_file, delete_community_message, report_community_message,
+    get_community_members, send_community_friend_request, accept_community_friend_request,
+    remove_community_friend, set_community_user_block, get_community_direct_messages, create_community_direct_message,
+    get_community_direct_file, delete_community_direct_message,
+    COMMUNITY_MAX_ATTACHMENT_BYTES, COMMUNITY_MAX_MESSAGE_CHARS,
 )
 
 HOST = os.getenv("HOST", "0.0.0.0")
@@ -1547,6 +1555,23 @@ class AprilHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         self._send_json(204, {})
 
+    def _send_community_file(self, payload: dict[str, Any]) -> None:
+        data = bytes(payload.get("data") or b"")
+        filename = str(payload.get("name") or "shared-file").replace("\\", "/").split("/")[-1]
+        filename = "".join(ch for ch in filename if ch.isprintable() and ch not in "\r\n\x00")[:160] or "shared-file"
+        fallback = re.sub(r"[^A-Za-z0-9._-]", "_", filename) or "shared-file"
+        mime = str(payload.get("mime") or "application/octet-stream")
+        if not re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", mime.lower()):
+            mime = "application/octet-stream"
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
         if parsed.path == "/api/subscription/status":
@@ -1573,6 +1598,83 @@ class AprilHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(200, {"success": True, **status})
             return
+        if parsed.path == "/api/v1/community":
+            if not self._service_authorized():
+                self.close_connection = True
+                self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                return
+            supplied_user_id = _text(self.headers.get("X-April-User-Id"))
+            if not supplied_user_id:
+                self._send_json(400, {"success": False, "error": "USER_ID_REQUIRED"})
+                return
+            if not _text(os.getenv("DATABASE_URL")):
+                self._send_json(503, {"success": False, "error": "DATABASE_UNAVAILABLE"})
+                return
+            canonical_user_id = resolve_user_id(supplied_user_id)
+            if not canonical_user_id or not is_authenticated_user(canonical_user_id):
+                self._send_json(401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"})
+                return
+            query = parse_qs(parsed.query, keep_blank_values=False)
+            file_id = _text(query.get("file_id", [""])[0])
+            dm_file_id = _text(query.get("dm_file_id", [""])[0])
+            peer_april_id = _text(query.get("peer_id", [""])[0])
+            if dm_file_id:
+                file_payload = get_community_direct_file(canonical_user_id, peer_april_id, dm_file_id)
+                if not file_payload or file_payload.get("success") is not True:
+                    error = _text((file_payload or {}).get("error") or "COMMUNITY_FILE_NOT_FOUND")
+                    status = 401 if error == "AUTHENTICATED_USER_REQUIRED" else 404 if error in {"MESSAGE_ID_INVALID", "COMMUNITY_FILE_NOT_FOUND", "COMMUNITY_USER_NOT_FOUND", "FRIENDS_REQUIRED"} else 503
+                    self._send_json(status, file_payload or {"success": False, "error": error})
+                    return
+                self._send_community_file(file_payload)
+                return
+            if file_id:
+                file_payload = get_community_file(canonical_user_id, file_id)
+                if not file_payload or file_payload.get("success") is not True:
+                    error = _text((file_payload or {}).get("error") or "COMMUNITY_FILE_NOT_FOUND")
+                    status = 401 if error == "AUTHENTICATED_USER_REQUIRED" else 404 if error in {"MESSAGE_ID_INVALID", "COMMUNITY_FILE_NOT_FOUND"} else 503
+                    self._send_json(status, file_payload or {"success": False, "error": error})
+                    return
+                self._send_community_file(file_payload)
+                return
+            view = _text(query.get("view", [""])[0]).lower()
+            if view == "members":
+                result = get_community_members(canonical_user_id, limit=100)
+                if result and result.get("success") is True:
+                    self._send_json(200, result)
+                else:
+                    error = _text((result or {}).get("error") or "COMMUNITY_UNAVAILABLE")
+                    self._send_json(401 if error == "AUTHENTICATED_USER_REQUIRED" else 503, result or {"success": False, "error": error})
+                return
+            if view == "direct":
+                try:
+                    limit = int(query.get("limit", ["100"])[0])
+                except (ValueError, TypeError):
+                    self._send_json(400, {"success": False, "error": "INVALID_PAGINATION"})
+                    return
+                result = get_community_direct_messages(canonical_user_id, peer_april_id, limit=limit)
+                if result and result.get("success") is True:
+                    self._send_json(200, result)
+                else:
+                    error = _text((result or {}).get("error") or "COMMUNITY_UNAVAILABLE")
+                    status = 401 if error == "AUTHENTICATED_USER_REQUIRED" else 404 if error == "COMMUNITY_USER_NOT_FOUND" else 403 if error == "FRIENDS_REQUIRED" else 503
+                    self._send_json(status, result or {"success": False, "error": error})
+                return
+            try:
+                limit = int(query.get("limit", ["50"])[0])
+                before_raw = _text(query.get("before_id", [""])[0])
+                before_id = int(before_raw) if before_raw else None
+            except (ValueError, TypeError):
+                self._send_json(400, {"success": False, "error": "INVALID_PAGINATION"})
+                return
+            result = get_community_snapshot(canonical_user_id, limit=limit, before_id=before_id)
+            if result and result.get("success") is True:
+                self._send_json(200, result)
+            else:
+                error = _text((result or {}).get("error") or "COMMUNITY_UNAVAILABLE")
+                status = 401 if error == "AUTHENTICATED_USER_REQUIRED" else 503
+                self._send_json(status, result or {"success": False, "error": error})
+            return
+
         if parsed.path == CANONICAL_CHAT_ROUTE:
             query = parse_qs(parsed.query, keep_blank_values=False)
             mode = query.get("mode", [""])[0]
@@ -1689,6 +1791,118 @@ class AprilHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlsplit(self.path)
         parsed_path = parsed.path
+        if parsed_path == "/api/v1/community":
+            if not self._service_authorized():
+                self.close_connection = True
+                self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                return
+            supplied_user_id = _text(self.headers.get("X-April-User-Id"))
+            if not supplied_user_id:
+                self._send_json(400, {"success": False, "error": "USER_ID_REQUIRED"})
+                return
+            if not _text(os.getenv("DATABASE_URL")):
+                self._send_json(503, {"success": False, "error": "DATABASE_UNAVAILABLE"})
+                return
+            canonical_user_id = resolve_user_id(supplied_user_id)
+            if not canonical_user_id or not is_authenticated_user(canonical_user_id):
+                self._send_json(401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"})
+                return
+            content_type = str(self.headers.get("Content-Type", "application/json"))
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                max_request = COMMUNITY_MAX_ATTACHMENT_BYTES + 96 * 1024
+                if length < 0 or length > max_request:
+                    self.close_connection = True
+                    self._send_json(413, {"success": False, "error": "REQUEST_BODY_TOO_LARGE"})
+                    return
+                raw = self.rfile.read(length) if length else b""
+                fields: dict[str, Any] = {}
+                attachment_data: bytes | None = None
+                attachment_name: str | None = None
+                attachment_mime: str | None = None
+                if content_type.lower().startswith("multipart/form-data"):
+                    mime_message = BytesParser(policy=email_policy_default).parsebytes(
+                        b"MIME-Version: 1.0\r\nContent-Type: " + content_type.encode("latin-1", "replace") + b"\r\n\r\n" + raw
+                    )
+                    if not mime_message.is_multipart():
+                        self._send_json(400, {"success": False, "error": "INVALID_MULTIPART"})
+                        return
+                    for part in mime_message.iter_parts():
+                        disposition = part.get("Content-Disposition")
+                        name = str(disposition.params.get("name", "")) if disposition else ""
+                        filename = str(disposition.params.get("filename", "")) if disposition else ""
+                        value = part.get_payload(decode=True) or b""
+                        if name == "file" and filename:
+                            attachment_data = value
+                            attachment_name = filename
+                            attachment_mime = str(part.get_content_type() or "application/octet-stream")
+                        elif name:
+                            charset = part.get_content_charset() or "utf-8"
+                            try:
+                                fields[name] = value.decode(charset, "replace")
+                            except LookupError:
+                                fields[name] = value.decode("utf-8", "replace")
+                elif content_type.lower().startswith("application/json"):
+                    parsed_body = json.loads(raw.decode("utf-8") or "{}") if raw else {}
+                    if not isinstance(parsed_body, dict):
+                        self._send_json(400, {"success": False, "error": "INVALID_REQUEST"})
+                        return
+                    fields = parsed_body
+                else:
+                    self._send_json(415, {"success": False, "error": "UNSUPPORTED_CONTENT_TYPE"})
+                    return
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+                self._send_json(400, {"success": False, "error": "INVALID_REQUEST_BODY"})
+                return
+
+            action = _text(fields.get("action")).lower()
+            peer_april_id = fields.get("peer_id", fields.get("peer_april_id", ""))
+            if action == "send_friend_request":
+                result = send_community_friend_request(canonical_user_id, peer_april_id)
+            elif action == "block_member":
+                result = set_community_user_block(canonical_user_id, peer_april_id, blocked=True)
+            elif action == "unblock_member":
+                result = set_community_user_block(canonical_user_id, peer_april_id, blocked=False)
+            elif action == "accept_friend_request":
+                result = accept_community_friend_request(canonical_user_id, fields.get("requester_id", peer_april_id))
+            elif action == "remove_friend":
+                result = remove_community_friend(canonical_user_id, peer_april_id)
+            elif action == "send_direct_message":
+                result = create_community_direct_message(
+                    canonical_user_id, peer_april_id, fields.get("message", fields.get("text", "")),
+                    attachment_name=attachment_name, attachment_mime=attachment_mime,
+                    attachment_data=attachment_data,
+                )
+            elif action == "delete_direct_message":
+                result = delete_community_direct_message(canonical_user_id, fields.get("message_id"))
+            elif action == "save_profile":
+                result = save_community_display_name(canonical_user_id, fields.get("display_name"))
+            elif action == "reset_profile":
+                result = reset_community_display_name(canonical_user_id)
+            elif action == "delete_message":
+                result = delete_community_message(canonical_user_id, fields.get("message_id"))
+            elif action == "report_message":
+                result = report_community_message(canonical_user_id, fields.get("message_id"), fields.get("reason"))
+            elif action in {"send_message", ""}:
+                message = fields.get("message", fields.get("text", ""))
+                result = create_community_message(
+                    canonical_user_id, message,
+                    attachment_name=attachment_name,
+                    attachment_mime=attachment_mime,
+                    attachment_data=attachment_data,
+                )
+            else:
+                self._send_json(400, {"success": False, "error": "INVALID_COMMUNITY_ACTION"})
+                return
+
+            if result and result.get("success") is True:
+                self._send_json(200, result)
+                return
+            error = _text((result or {}).get("error") or "COMMUNITY_UNAVAILABLE")
+            status = 401 if error == "AUTHENTICATED_USER_REQUIRED" else 403 if error in {"ATTACHMENT_TYPE_BLOCKED", "RESERVED_DISPLAY_NAME", "FRIENDS_REQUIRED"} else 404 if error in {"MESSAGE_ID_INVALID", "MESSAGE_NOT_FOUND_OR_NOT_OWNED", "MESSAGE_NOT_FOUND", "COMMUNITY_USER_NOT_FOUND", "FRIEND_REQUEST_NOT_FOUND"} else 413 if error in {"ATTACHMENT_TOO_LARGE_OR_EMPTY", "MESSAGE_TOO_LONG", "COMMUNITY_ATTACHMENT_QUOTA_REACHED"} else 429 if error == "RATE_LIMITED" else 400 if error in {"INVALID_DISPLAY_NAME", "MESSAGE_OR_FILE_REQUIRED"} else 503
+            self._send_json(status, result or {"success": False, "error": error})
+            return
+
         if parsed_path == CANONICAL_CHAT_ROUTE and parse_qs(parsed.query, keep_blank_values=False).get("mode", [""])[0] == "support":
             if not self._service_authorized():
                 self.close_connection = True
