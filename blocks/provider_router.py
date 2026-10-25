@@ -22,7 +22,7 @@ from blocks.C_ARTIFACT_CONTRACT import (
 )
 
 
-MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-5.6-luna")
+MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-6-luna")
 # Free has its own output ceiling, deliberately below Premium's 12,000-token cap.
 # Allocate the budget as 80% explanatory text and 20% concrete render payloads.
 FREE_OUTPUT_TOKEN_LIMIT = 6000
@@ -1853,10 +1853,13 @@ def _log_json(event: str, data: dict[str, Any]) -> None:
         print(f"[APRIL_OPENAI_{event}] {{\"log_error\":true}}", flush=True)
 
 
-# OpenAI model-page list prices, USD per 1M tokens. For gpt-5.6-luna the
-# public model page lists $0.20 input, $0.02 cached input, and $1.20 output.
+# OpenAI model-page list prices, USD per 1M tokens.
+# GPT-6 Luna standard rates: $0.10 input, $0.01 cached input,
+# $0.125 cache write, and $0.50 output. Prior model rates remain available
+# for explicitly configured rollback/deployment scenarios.
 # Prices are configurable in deployment in case processing mode differs.
 MODEL_PRICES_USD_PER_MILLION: dict[str, dict[str, float]] = {
+    "gpt-6-luna": {"input": 0.10, "cached_input": 0.01, "cache_write": 0.125, "output": 0.50},
     "gpt-5.6-luna": {"input": 0.20, "cached_input": 0.02, "cache_write": 0.25, "output": 1.20},
     "gpt-5.6-terra": {"input": 2.00, "cached_input": 0.20, "cache_write": 2.50, "output": 12.00},
     "gpt-5.6-sol": {"input": 4.00, "cached_input": 0.40, "cache_write": 5.00, "output": 20.00},
