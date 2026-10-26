@@ -1851,6 +1851,10 @@ async def execute(
             "search_scope": semantic_interpretation.get("search_scope"),
             "relation_hint": semantic_interpretation.get("relation_hint"),
             "explicit_topic_switch": bool(semantic_interpretation.get("explicit_topic_switch")),
+            "explicit_topic_introduction": bool(semantic_interpretation.get("explicit_topic_introduction")),
+            "explicit_topic_closure": bool(semantic_interpretation.get("explicit_topic_closure")),
+            "saved_artifact_followup_kind": semantic_interpretation.get("saved_artifact_followup_kind", ""),
+            "routing_policy": semantic_interpretation.get("routing_policy", {}),
             "reason": semantic_interpretation.get("reason"),
             "speech_act": semantic_interpretation.get("speech_act"),
             "communicative_act": semantic_interpretation.get("communicative_act"),
@@ -1908,14 +1912,10 @@ async def execute(
                 "speech_act": "GRATITUDE_OR_APPRECIATION",
                 "recommended_response_action": "ACKNOWLEDGE_AND_CONTINUE",
             })
-        skip_memory_search = bool(
-            not gratitude_only
-            and not explicit_saved_artifact_followup
-            and single_semantics.get("explicit_topic_switch")
-            and not single_semantics.get("history_request")
-            and not _text(resume_message_id)
-            and not _explicit_context_signal
-        )
+        # Do not bypass the canonical State Manager on a subject/topic switch.
+        # A switched-to subject may have a real older branch; State Manager checks
+        # the latest topic, then matching history, then a clean NEW-topic fallback.
+        skip_memory_search = False
         if skip_memory_search:
             dialogue_context = {
                 "window_hours": 24,
@@ -2051,6 +2051,10 @@ async def execute(
                     "relation_hint": "NEW" if inherits_subject else ("HISTORY_LOOKUP" if question_item.get("history_request") else "CONTINUE" if question_item.get("requires_memory") else "NEW"),
                     "reason": "pronoun_inherits_subject_from_current_request" if inherits_subject else question_item.get("semantic_reason", ""),
                     "explicit_topic_switch": bool(question_item.get("explicit_topic_switch")),
+                    "explicit_topic_introduction": bool(question_item.get("explicit_topic_introduction")),
+                    "explicit_topic_closure": bool(question_item.get("explicit_topic_closure")),
+                    "saved_artifact_followup_kind": question_item.get("saved_artifact_followup_kind", ""),
+                    "routing_policy": question_item.get("routing_policy") or semantic_interpretation.get("routing_policy", {}),
                     "active_branch_repair": bool(question_item.get("active_branch_repair")),
                     "previous_answer_reference": bool(question_item.get("previous_answer_reference")),
                     "factual_verification_request": bool(question_item.get("factual_verification_request")),
