@@ -697,7 +697,7 @@ ROOM_REGISTRY: Dict[str, RoomRegistration] = {
         class_name="ITRoom",
         room_type="knowledge",
         role="software and code analysis",
-        capabilities=("software", "code", "git", "analysis"),
+        capabilities=("software", "code", "git", "analysis", "site_navigation", "april_site_help", "user_guidance", "interface_help", "april_site_navigation", "user_interface_help", "account_guidance"),
     ),
     "C_LINK_ROOM": RoomRegistration(
         room_id="LINK_ROOM",
