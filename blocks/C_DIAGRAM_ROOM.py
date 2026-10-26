@@ -917,7 +917,7 @@ def build_readable_diagram_svg(payload: dict[str, Any], *, title: str = "") -> s
 
     esc = html.escape
     parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="{height}" style="display:block;width:100%;height:auto;max-width:100%" viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMin meet" role="img" aria-label="{esc(title_text)}">',
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" style="display:block;width:100%;max-width:100%" viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMin meet" role="img" aria-label="{esc(title_text)}">',
         '<defs><marker id="april-flow-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#168f80"/></marker>',
         '<filter id="april-flow-shadow" x="-15%" y="-15%" width="130%" height="140%"><feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.10"/></filter></defs>',
         f'<rect x="0" y="0" width="{width}" height="{height}" rx="20" fill="#f8fafc"/>',
@@ -981,12 +981,117 @@ def build_readable_diagram_svg(payload: dict[str, Any], *, title: str = "") -> s
     return "".join(parts)
 
 
+
+def _build_navigation_ui_svg(payload: dict[str, Any], *, title: str = "") -> str:
+    """Render route data as a compact April-like UI card, not a generic tiny graph."""
+    nodes_raw = payload.get("nodes") or payload.get("components") or payload.get("vertices")
+    if not isinstance(nodes_raw, list) or not nodes_raw:
+        return ""
+    normalized = []
+    seen = set()
+    for index, raw in enumerate(nodes_raw[:8]):
+        node = dict(raw) if isinstance(raw, dict) else {"label": _text(raw)}
+        node_id = _text(node.get("id") or node.get("key") or f"node_{index + 1}")
+        href = _text(node.get("href") or node.get("path"))
+        label = _text(node.get("label") or node.get("name") or node.get("title") or node_id)
+        if not href or "[" in href or "]" in href or href.lower().rstrip("/") == "/admin-profile":
+            href = ""
+        key = (node_id, href)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append({"id": node_id, "href": href, "label": label})
+    if len(normalized) < 2:
+        return ""
+
+    profile = next((item for item in normalized if item["id"].lower() == "settings" or item["href"] == "/settings"), None)
+    routes = [item for item in normalized if item is not profile and item["href"] and item["href"] != "/"][:4]
+    if not routes:
+        routes = [item for item in normalized if item is not profile][:4]
+    def route_label(item: dict[str, str]) -> str:
+        href = item["href"]
+        source = (item["label"] + " " + href).lower()
+        if href == "/space" or "community" in source or "сообществ" in source:
+            return "Community / Сообщество"
+        if href == "/history" or "history" in source or "истори" in source or "saved dialogues" in source:
+            return "Dialog history / История диалогов"
+        if href == "/" or "основной чат" in source or "chat with april" in source:
+            return "Chat with April / Основной чат"
+        if "support" in source or "/insights" in href:
+            return "Contact support / Поддержка"
+        if href == "/aprill" or "help" in source or "справк" in source:
+            return "Help & Information / Справка"
+        return item["label"].splitlines()[0][:42]
+
+    title_text = _text(title or payload.get("title") or "Карта переходов April")
+    width = 440
+    margin = 18
+    header_y, header_h = 18, 54
+    profile_y, profile_h = 84, 64
+    plan_y = profile_y + profile_h + 14
+    row_h, row_gap = 48, 8
+    list_top = plan_y + 52
+    panel_h = 68 + max(1, len(routes)) * (row_h + row_gap) + 12
+    height = plan_y + panel_h + 18
+    esc = html.escape
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" style="display:block;width:100%;max-width:100%" viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMin meet" role="img" aria-label="{esc(title_text)}">',
+        '<defs><linearGradient id="april-ui-brand" x1="0" x2="1"><stop offset="0" stop-color="#a4f3c1"/><stop offset="1" stop-color="#7bd9e5"/></linearGradient><marker id="april-ui-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#58d7a6"/></marker></defs>',
+        f'<rect width="{width}" height="{height}" rx="24" fill="#080a10" stroke="#242a35" stroke-width="2"/>',
+        f'<rect x="{margin}" y="{header_y}" width="{width-2*margin}" height="{header_h}" rx="27" fill="#171922" stroke="#30333e"/>',
+        f'<text x="35" y="{header_y+34}" font-family="Inter,Arial,sans-serif" font-size="26" font-weight="750" fill="url(#april-ui-brand)">A</text>',
+        f'<text x="58" y="{header_y+34}" font-family="Inter,Arial,sans-serif" font-size="20" font-weight="650" fill="#f3f4f6">PRIL</text>',
+        f'<circle cx="{width-47}" cy="{header_y+27}" r="17" fill="#22252e" stroke="#3a3d48"/>',
+        f'<text x="{width-47}" y="{header_y+32}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="16" fill="#b3f2cb">●</text>',
+        f'<rect x="{margin}" y="{profile_y}" width="{width-2*margin}" height="{profile_h}" rx="16" fill="#13161e" stroke="#34475a" stroke-width="1.5"/>',
+        f'<circle cx="43" cy="{profile_y+32}" r="17" fill="#152c25" stroke="#38745d"/>',
+        f'<text x="43" y="{profile_y+37}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="700" fill="#a5efc0">Л</text>',
+        f'<text x="70" y="{profile_y+26}" font-family="Inter,Arial,sans-serif" font-size="16" font-weight="650" fill="#f1f3f6">{esc(profile["label"].splitlines()[0] if profile else "Personal profile / Настройки")}</text>',
+        f'<text x="70" y="{profile_y+47}" font-family="Inter,Arial,sans-serif" font-size="12" fill="#a0a7b4">{esc(profile["href"] if profile else "/settings")} · Профиль пользователя</text>',
+        f'<rect x="{margin}" y="{plan_y}" width="{width-2*margin}" height="{panel_h}" rx="18" fill="#0d1413" stroke="#2c604d" stroke-width="1.6"/>',
+        f'<text x="34" y="{plan_y+28}" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="750" letter-spacing="1.5" fill="#91e8b1">CURRENT PLAN</text>',
+        f'<text x="34" y="{plan_y+47}" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="650" fill="#eef5f1">Быстрые переходы из профиля</text>',
+    ]
+    # Connect from the profile card to a vertical menu rail, then branch to each
+    # independent shortcut. This avoids falsely implying that one route leads to another.
+    rail_x = 30
+    if routes:
+        parts.append(f'<path d="M {width/2:.0f} {profile_y+profile_h} L {width/2:.0f} {plan_y-4}" stroke="#58d7a6" stroke-width="2.5" fill="none" marker-end="url(#april-ui-arrow)"/>')
+        for index, item in enumerate(routes):
+            y = list_top + index * (row_h + row_gap)
+            label = route_label(item)
+            href = item["href"] or ""
+            cy = y + row_h / 2
+            parts.extend([
+                f'<path d="M {rail_x} {list_top+row_h/2:.0f} L {rail_x} {cy:.0f} L {margin+5} {cy:.0f}" stroke="#58d7a6" stroke-width="1.8" fill="none"/>',
+                f'<rect x="{margin+8}" y="{y}" width="{width-2*margin-16}" height="{row_h}" rx="12" fill="#151b20" stroke="#293c36" stroke-width="1.1"/>',
+                f'<circle cx="{margin+28}" cy="{cy}" r="11" fill="#193c2c" stroke="#3f8a64"/>',
+                f'<text x="{margin+28}" y="{cy+4}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="700" fill="#b2f2ce">{index+1}</text>',
+                f'<text x="{margin+47}" y="{y+19}" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="650" fill="#edf5f1">{esc(label)}</text>',
+                f'<text x="{margin+47}" y="{y+37}" font-family="Inter,Arial,sans-serif" font-size="12" fill="#83dcb3">{esc(href)}</text>',
+                f'<text x="{width-36}" y="{cy+5}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="18" fill="#78dfa9">→</text>',
+            ])
+    parts.append("</svg>")
+    return "".join(parts)
+
 def ensure_readable_diagram_payload(payload: Any, *, title: str = "") -> dict[str, Any]:
     """Return the original payload plus an SVG when actual nodes/edges are present."""
     if not isinstance(payload, dict):
         return {}
     result = deepcopy(payload)
     svg_fields = ("svg", "svg_payload", "drawing")
+    navigation_flow = str(result.get("representation") or "").strip().lower() == "navigation_flow" or bool(result.get("navigation_map_schema"))
+    if navigation_flow:
+        for svg_field in svg_fields:
+            result.pop(svg_field, None)
+        svg = _build_navigation_ui_svg(result, title=title or _text(result.get("title")))
+        if svg:
+            result["svg"] = svg
+            result["renderer"] = "SvgBlock"
+            result["viewer"] = "SvgBlock"
+            result["readability_profile"] = "april_navigation_ui_svg_v2"
+            result["layout"] = {**(result.get("layout") if isinstance(result.get("layout"), dict) else {}), "direction": "TB", "responsive": True}
+        return result
     has_existing_drawing = False
     for svg_field in svg_fields:
         existing_svg = _text(result.get(svg_field)) if isinstance(result.get(svg_field), str) else ""
@@ -1008,9 +1113,11 @@ def ensure_readable_diagram_payload(payload: Any, *, title: str = "") -> dict[st
             existing_viewbox_width = float(viewbox_match.group(1)) if viewbox_match else float("inf")
         except (TypeError, ValueError):
             existing_viewbox_width = float("inf")
-        # Preserve an already compact SVG unless actual node/edge data lets us
-        # regenerate a wide diagram that would shrink labels on a mobile screen.
-        if not (has_rebuildable_graph and existing_viewbox_width > 520):
+        # Percent intrinsic width is interpreted inconsistently by Web SVG/image viewers
+        # and produced the tiny diagram in the mobile screenshot. Rebuild when source
+        # nodes/edges are available rather than preserving this defective shell.
+        broken_intrinsic_width = bool(re.search(r"""\bwidth\s*=\s*['"]100%['"]""", current_svg, re.IGNORECASE))
+        if not (has_rebuildable_graph and (existing_viewbox_width > 520 or broken_intrinsic_width)):
             return result
     # A nonempty <svg></svg> shell, a label-only SVG, or an over-wide node graph
     # is not enough. Rebuild only from concrete same-turn nodes and edges.
@@ -1023,7 +1130,7 @@ def ensure_readable_diagram_payload(payload: Any, *, title: str = "") -> dict[st
         current_renderer = _text(result.get("renderer") or _obj(result.get("presentation")).get("renderer"))
         result["renderer"] = current_renderer if current_renderer not in {"", "DiagramRenderer", "diagram"} else "SvgBlock"
         result["layout"] = {**(result.get("layout") if isinstance(result.get("layout"), dict) else {}), "direction": "TB", "rankdir": "TB", "responsive": True}
-        result["readability_profile"] = "mobile_portrait_svg_v1"
+        result["readability_profile"] = "mobile_portrait_svg_v2"
     return result
 
 
