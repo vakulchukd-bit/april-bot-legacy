@@ -216,11 +216,49 @@ _SITE_AREA_HINTS = {
 
 _SITE_NAVIGATION_ACTION_RE = re.compile(
     r"(?:куда\s+(?:мне\s+)?(?:зайти|нажать|перейти|открыть)|как\s+(?:зайти|попасть|перейти|открыть|найти|посмотреть|просмотреть)|"
-    r"где\s+(?:находится|найти|открыть|посмотреть)|покажи\s+(?:мне\s+)?(?:куда|путь|раздел|ссылк)|"
+    r"где\s+(?:(?:у\s+(?:меня|тебя|вас|april|април)\s+)?(?:находится|расположен|найти|открыть|посмотреть|вход|кнопк|ссылк)|.{0,55}(?:вход|кнопк|ссылк))|покажи\s+(?:мне\s+)?(?:куда|путь|раздел|ссылк)|"
     r"проведи\s+меня|как\s+пользоваться|по\s+сайту|по\s+интерфейсу|навигац|"
     r"where\s+(?:do\s+i|can\s+i)|how\s+do\s+i\s+(?:open|find|navigate)|where\s+is|show\s+me\s+where)",
     re.IGNORECASE,
 )
+def _site_navigation_picture_request(query: str, referenced_area_ids: Any = None) -> bool:
+    """Route visual questions about April UI to its real SVG navigation map."""
+    low = str(query or "").strip().lower().replace("ё", "е")
+    referenced_ids = {str(value).strip().lower() for value in (referenced_area_ids or []) if str(value).strip()} if isinstance(referenced_area_ids, (list, tuple, set)) else set()
+    ui_target = bool(referenced_ids.intersection({"space", "history", "settings", "support", "guide", "help-center", "how-to-use", "plans", "deletion", "privacy", "terms", "memory", "chat"})) or bool(re.search(
+        r"(?:сообществ\w*|community|saved\s+dialogues?|истори\w*\s+диалог\w*|history|"
+        r"кабинет|профил\w*|настройк\w*|settings|account|help\s+center|справк\w*|"
+        r"support|поддержк\w*|тариф\w*|premium|памят\w*|удален\w*\s+аккаунт|"
+        r"privacy\s+policy|terms\s+of\s+service|chat\s+with\s+april|основн\w*\s+чат)",
+        low, re.IGNORECASE,
+    ))
+    if not ui_target or _SITE_NO_DIAGRAM_RE.search(low):
+        return False
+    if re.search(
+        r"(?:только\s+(?:изображен\w*|картинк\w*|фото|портрет)|only\s+(?:an?\s+)?image)",
+        low, re.IGNORECASE,
+    ):
+        return False
+    # A real portrait/person/landscape request still goes to image generation.
+    explicit_art = bool(re.search(
+        r"(?:сгенерируй|создай|нарисуй|изобрази)\s+(?:мне\s+)?(?:фото|портрет|иллюстрац\w*|"
+        r"картинк\w*\s+(?:человека|персонажа|пейзажа)|изображение\s+(?:человека|персонажа|пейзажа)|арт\b)|"
+        r"(?:generate|create|draw)\s+(?:a\s+)?(?:portrait|person|character|landscape|artwork)",
+        low, re.IGNORECASE,
+    ))
+    if explicit_art:
+        return False
+    asks_visual_path = bool(re.search(
+        r"(?:на\s+(?:картинк\w*|изображени\w*|схем\w*)|визуальн\w*\s+путь|"
+        r"покажи.{0,100}(?:путь|куда|интерфейс|меню|вход|картинк\w*|изображени\w*|схем\w*)|"
+        r"(?:где|куда|как\s+(?:зайти|попасть|открыть|перейти)).{0,100}(?:картинк\w*|изображени\w*|схем\w*)|"
+        r"show.{0,100}(?:path|where|interface|menu|picture|image|diagram)|"
+        r"(?:where\s+(?:is|do\s+i|can\s+i)|how\s+do\s+i\s+(?:open|find|navigate)).{0,100}(?:picture|image|diagram))",
+        low, re.IGNORECASE,
+    ))
+    return asks_visual_path
+
+
 _SITE_ROUTE_WORDS = (
     "сообществ", "community", "личный кабинет", "кабинет april", "april id", "premium id",
     "история диалогов", "saved dialogues", "help center", "how to use april", "plans & payments",
@@ -272,6 +310,9 @@ def _site_should_render_diagram(query: str, requested_outputs: Any = None) -> bo
     low = str(query or "").lower().replace("ё", "е")
     if _SITE_NO_DIAGRAM_RE.search(low):
         return False
+    # A visual explanation of an interface path is a vector route map, not an image-generation task.
+    if _site_navigation_picture_request(query):
+        return True
     if re.search(r"(?:только\s+(?:ссылк\w*|код|таблиц\w*|изображен\w*|картинк\w*|график\w*|формул\w*|файл\w*)|only\s+(?:a\s+)?(?:link|code|table|image|graph|formula|file))", low) and not _SITE_EXPLICIT_DIAGRAM_RE.search(low):
         return False
     if _SITE_EXPLICIT_DIAGRAM_RE.search(low):
@@ -394,9 +435,22 @@ def prepare_site_help_interpretation(
         interpretation["intent"] = intent
     outputs = intent.get("requested_outputs")
     outputs = list(outputs) if isinstance(outputs, (list, tuple, set)) else ["text"]
+    route_picture = _site_navigation_picture_request(query, referent_ids)
+    if route_picture:
+        # Keep the user's request for a visual explanation, but use the route-aware SVG renderer.
+        outputs = [output for output in outputs if str(output).lower().replace("-", "_") not in {"image", "gallery", "generated_image", "image_gallery"}]
+        intent["wants_image"] = False
+        intent["explicit_generation_request"] = False
+        intent["image_operation"] = "none"
+        visual = interpretation.get("visual")
+        if isinstance(visual, dict):
+            visual["generation_required"] = False
+            visual["wants_image"] = False
+            visual["generator"] = ""
+            visual["image_model"] = ""
     wants_diagram = _site_should_render_diagram(query, outputs)
     if "text" not in outputs:
-        outputs.append("text")
+        outputs.insert(0, "text")
     if wants_diagram and "diagram" not in outputs:
         outputs.append("diagram")
     if not wants_diagram:
@@ -441,11 +495,40 @@ def prepare_site_help_interpretation(
             if not wants_diagram:
                 diagram_aliases = {"diagram", "svg", "schematic", "flowchart", "scene", "layout", "visual", "renderer_scene", "experimental_diagram"}
                 step_outputs = [output for output in step_outputs if str(output).lower().replace("-", "_") not in diagram_aliases]
+            if route_picture:
+                step_outputs = [output for output in step_outputs if str(output).lower().replace("-", "_") not in {"image", "gallery", "generated_image", "image_gallery"}]
+                if "diagram" not in step_outputs:
+                    step_outputs.append("diagram")
+                item["outputs"] = step_outputs
             item["output_types"] = step_outputs
+            item["history_request"] = False if route_picture else item.get("history_request", False)
+            if isinstance(item.get("dialogue_search"), dict) and route_picture:
+                item["dialogue_search"]["history_request"] = False
+                item["dialogue_search"]["search_scope"] = "CURRENT_DIALOGUE"
     structure = interpretation.get("request_structure")
     if isinstance(structure, dict):
         structure["site_navigation_help"] = True
         structure["site_navigation_diagram_required"] = wants_diagram
+        if route_picture:
+            structure["history_request"] = False
+            structure["requested_outputs"] = ["text", "diagram"]
+            for sequence_key in ("question_sequence", "presentation_sequence", "answer_sequence"):
+                seq = structure.get(sequence_key)
+                if isinstance(seq, list):
+                    for item in seq:
+                        if not isinstance(item, dict):
+                            continue
+                        key = "output_types" if "output_types" in item or sequence_key == "question_sequence" else "outputs"
+                        child_outputs = item.get(key) if isinstance(item.get(key), list) else ["text"]
+                        child_outputs = [value for value in child_outputs if str(value).lower().replace("-", "_") not in {"image", "gallery", "generated_image", "image_gallery"}]
+                        if "text" not in child_outputs: child_outputs.insert(0, "text")
+                        if "diagram" not in child_outputs: child_outputs.append("diagram")
+                        item[key] = child_outputs
+    if route_picture:
+        intent["task"] = "answer_request" if intent.get("task") in {"generate_image", "create_image", "image_generation"} else intent.get("task", "answer_request")
+        intent["wants_image"] = False
+        intent["wants_diagram"] = True
+        intent["requested_outputs"] = ["text", "diagram"]
     return True
 
 
@@ -494,6 +577,13 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
         selected_ids = referent_ids + [area_id for area_id in selected_ids if area_id not in referent_ids and area_id != "guide"]
     if not selected_ids:
         selected_ids = ["guide", "chat", "settings", "history"]
+    # Target route order follows the user's wording. The screenshots confirm that
+    # History, Support and Community are quick links inside the profile/CURRENT PLAN card.
+    if not referent_ids and selected_ids:
+        targets = [area_id for area_id in selected_ids if area_id not in {"settings", "chat", "guide", "memory"}]
+        targets.sort(key=lambda area_id: min((query.find(hint) for hint in _SITE_AREA_HINTS.get(area_id, ()) if query.find(hint) >= 0), default=10**6))
+        if targets and any(area_id in {"history", "space", "support"} for area_id in targets):
+            selected_ids = ["settings"] + targets + [area_id for area_id in selected_ids if area_id not in {"settings", *targets, "guide", "memory"}]
     broad_self_help = bool(re.search(
         r"(?:\b(?:april|април)\b.{0,100}\b(?:функци\w*|возможност\w*|устроен\w*|работа\w*|создан\w*|умеешь|умеет|можешь|может)\b|"
         r"(?:what can april do|how does april work|how is april built))",
@@ -510,6 +600,13 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
         for related in area.get("related", []):
             if related in areas_by_id and related not in pending and len(pending) < 5:
                 pending.append(related)
+    # Specific route questions get only the profile gateway and requested destinations;
+    # do not clutter their diagram with unrelated related routes such as Memory or Support.
+    query_targets = [area_id for area_id in selected_ids if area_id in {"settings", "chat", "history", "space", "support", "guide", "plans", "deletion", "privacy", "terms"}]
+    if any(area_id not in {"settings", "chat", "guide"} for area_id in query_targets):
+        pending = query_targets
+    else:
+        pending = query_targets + [area_id for area_id in pending if area_id not in query_targets]
     chosen = [areas_by_id[area_id] for area_id in pending if area_id in areas_by_id]
     return {
         "schema": APRIL_SITE_MAP["schema"],
@@ -688,6 +785,44 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
                     if answer_key not in {"answer", "content"}:
                         decoded[answer_key] = answer
 
+    # For a visual navigation request that names several destinations, provide one ordered
+    # how-to sequence in prose as well as the SVG. The route list comes from the actual map
+    # and the screenshot-confirmed CURRENT PLAN shortcuts; it is never a generated mock photo.
+    if _site_navigation_picture_request(query_for_routes):
+        ordered_targets = []
+        for area_id, hints in _SITE_AREA_HINTS.items():
+            if area_id not in {"space", "history", "support", "chat", "settings", "guide", "plans", "deletion", "privacy", "terms"}:
+                continue
+            positions = [query_for_routes.find(hint) for hint in hints if query_for_routes.find(hint) >= 0]
+            if positions:
+                ordered_targets.append((min(positions), area_id))
+        ordered_targets = [area_id for _, area_id in sorted(ordered_targets)][:3]
+        area_by_id = {str(area.get("id")): area for area in APRIL_SITE_MAP.get("areas", []) if isinstance(area, dict)}
+        steps = []
+        if any(area_id in {"space", "history", "support"} for area_id in ordered_targets):
+            steps.append("Откройте [Настройки и профиль](/settings) — на странице профиля найдите карточку CURRENT PLAN.")
+        for area_id in ordered_targets:
+            area = area_by_id.get(area_id)
+            if not area:
+                continue
+            route = _text(area.get("path"))
+            label = _text(area.get("label"))
+            if area_id == "space":
+                steps.append(f"Для сообщества нажмите **Community / Сообщество** в карточке CURRENT PLAN или откройте [{label}]({route}).")
+            elif area_id == "history":
+                steps.append(f"Для истории нажмите **Dialog history / История диалогов** или откройте [{label}]({route}); затем выберите нужную запись и нажмите **Continue this dialogue**.")
+            elif area_id == "support":
+                steps.append(f"Для поддержки нажмите **Contact support** или откройте [{label}]({route}).")
+            elif area_id in {"chat", "guide", "plans", "deletion", "privacy", "terms"} and route:
+                steps.append(f"Откройте [{label}]({route}).")
+        if steps and not re.search(r"(?:как пройти по интерфейсу|порядок перехода|route steps)", answer, re.IGNORECASE):
+            guide = "**Как пройти по интерфейсу:**\n" + "\n".join(f"{index}. {step}" for index, step in enumerate(steps, 1))
+            answer = answer.rstrip() + "\n\n" + guide
+            decoded["answer"] = answer
+            decoded["content"] = answer
+            if answer_key not in {"answer", "content"}:
+                decoded[answer_key] = answer
+
     # Build a route graph without duplicating the homepage. From the profile page,
     # the screenshot/map confirms quick links to Chat, History, Support and Community;
     # other selected destinations remain reachable from the main screen.
@@ -735,6 +870,30 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     }
     blocks = decoded.get("render_blocks")
     blocks = list(blocks) if isinstance(blocks, list) else []
+    # A prompt/caption-only image block is not a rendered image. On route guidance it is almost always the LLM trying to send a fake raster substitute for a concrete UI map.
+    query_for_visual_policy = _current_user_query(machine_request)
+    if _site_help_requested(machine_request):
+        def _has_site_image_source(value: Any, depth: int = 0) -> bool:
+            if depth > 5:
+                return False
+            if isinstance(value, str):
+                candidate = value.strip()
+                return bool(candidate and (candidate.startswith(("data:image/", "https://", "http://", "/")) or len(candidate) > 256 and re.fullmatch(r"[A-Za-z0-9+/=\s]+", candidate)))
+            if isinstance(value, (list, tuple)):
+                return any(_has_site_image_source(item, depth + 1) for item in value)
+            if isinstance(value, dict):
+                allowed = {"src", "url", "image_url", "image_base64", "base64", "data_uri", "data", "images", "gallery", "items", "payload", "artifact", "artifacts", "source", "media"}
+                return any(str(key).lower().replace("-", "_") in allowed and _has_site_image_source(child, depth + 1) for key, child in value.items())
+            return False
+        cleaned_blocks = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            block_kind = _text(block.get("type") or block.get("artifact_type")).lower()
+            if block_kind in {"image", "gallery", "generated_image"} and not _has_site_image_source(block):
+                continue
+            cleaned_blocks.append(block)
+        blocks = cleaned_blocks
     diagram_explanation = (
         "Диаграмма показывает, откуда начать и какие проверенные разделы доступны по текущему вопросу. Нажимайте ссылки в текстовом ответе: стрелки объясняют переход, а не выполняют его автоматически."
         if language.startswith(("ru", "uk")) or not language else
