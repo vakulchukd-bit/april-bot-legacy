@@ -678,6 +678,16 @@ def _infer_routing_capabilities(text: str) -> list[str]:
     low = _text(text).lower().replace("ё", "е")
     capabilities: list[str] = []
     rules = [
+        (
+            r"(?:\bwhere\s+do\s+i\s+(?:click|go|find|open)\b|\bhow\s+do\s+i\s+(?:navigate|get\s+to|open|return)\b|"
+            r"\bhelp\s+me\s+(?:navigate|find|open)\b|\buser\s+interface\b|\bsite\s+navigation\b|\bmenu\b|\bsettings\b|"
+            r"where.*(?:button|section|page|screen)|how.*(?:click|open|find)|"
+            r"where.*(?:наж|кнопк|раздел|страниц|экран|перейти|вернут)|куда.*(?:наж|перейти|откры|зайти)|"
+            r"как.*(?:найти|откры|перейти|вернут|выйти|купить|продлить)|помог.*(?:найти|перейти|откры|вернут)|"
+            r"где.*(?:наход|кнопк|раздел|страниц|настройк)|интерфейс|навигац|меню|настройк|личн.*кабинет|"
+            r"профил.*пользователя|потерял.*(?:страниц|раздел|чат)|запутал.*(?:сайт|раздел|настройк))",
+            ("site_navigation", "april_site_help", "user_guidance", "interface_help", "april_site_navigation", "user_interface_help", "account_guidance"),
+        ),
         (r"(?:\bbiology\b|\bdna\b|\bgene\w*\b|\bprotein\w*\b|\bcell\w*\b|\bevolution\b|биолог\w*|днк|ген\w*|белок\w*|клетк\w*|эволюц\w*|организм\w*)", ("biology", "research", "knowledge")),
         (r"(?:\bpython\b|\btypescript\b|\bjavascript\b|\bapi\b|\bgit\b|\bdatabase\b|\bserver\b|\bdeploy\w*\b|\bsoftware\b|\bcode\b|\bpostgres(?:ql)?\b|\bsqlite\b|\bmysql\b|\bredis\b|\bkubernetes\b|программ\w*|код\w*|разработ\w*|баз\w*\s+данн\w*|сервер\w*|депло\w*|репозитор\w*)", ("software", "code", "git", "analysis")),
         (r"(?:\bliterature\b|\bnovel\b|\bpoem\b|\bpoetry\b|\bauthor\b|\bbook\b|литератур\w*|роман\w*|поэм\w*|стих\w*|автор\w*|книг\w*)", ("literature", "authors", "literary_analysis")),
@@ -704,7 +714,22 @@ def _detect_task(
 ) -> str:
     low = _text(text).lower()
     if wants_image:
-        return "generate_image"
+        # The requested image supplements a compound answer; it must not replace
+        # an explanation, code sample, table or diagram with an image-only response.
+        asks_for_explanation = bool(re.search(
+            r"(?:расскаж\w*|объясн\w*|напиш\w*|опиш\w*|привед\w*|перечисл\w*|сравн\w*|разбер\w*|проанализир\w*|"
+            r"\btell\b|\bexplain\b|\bwrite\b|\bdescribe\b|\blist\b|\bcompare\b|\banaly[sz]e\b)",
+            low,
+            re.IGNORECASE,
+        ))
+        asks_for_other_renderer = bool(re.search(
+            r"(?:таблиц\w*|\btable\b|график\w*|диаграмм\w*|схем\w*|черт[её]ж\w*|"
+            r"формул\w*|уравнен\w*|код\w*|\bcode\b|ссылк\w*|\blink\b|презентац\w*|\breport\b|\bexamples?\b|пример\w*)",
+            low,
+            re.IGNORECASE,
+        ))
+        if not asks_for_explanation and not asks_for_other_renderer:
+            return "generate_image"
 
     explicit_visual_analysis = any(
         token in low
