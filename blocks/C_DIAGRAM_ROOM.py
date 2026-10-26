@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import html
+import re
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -797,7 +798,339 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
     if svg_payload is not None:
         payload["svg_payload"] = deepcopy(svg_payload)
 
+    # Normalize every node/edge diagram to a mobile-readable SVG before it leaves
+    # the room. Original labels, values, nodes and relations remain in the payload.
+    payload = ensure_readable_diagram_payload(payload, title=_text(payload.get("title") or source.get("title") or "Схема"))
+    if payload.get("svg") or payload.get("svg_payload"):
+        selected_renderer = _text(payload.get("renderer") or renderer)
+        if selected_renderer in {"", "DiagramRenderer", "diagram"}:
+            selected_renderer = "SvgBlock"
+        payload["renderer"] = selected_renderer
+        presentation = _obj(payload.get("presentation"))
+        presentation["renderer"] = selected_renderer
+        presentation["responsive"] = True
+        payload["presentation"] = presentation
+        scene_meta = _obj(payload.get("scene"))
+        scene_meta["renderer"] = selected_renderer
+        payload["scene"] = scene_meta
+
     return payload
+
+
+def _wrap_lines(value: str, *, limit: int = 42, max_lines: int = 4) -> list[str]:
+    """Wrap supplied labels without breaking identifiers or inserting facts."""
+    result: list[str] = []
+    for segment in str(value or "").splitlines() or [str(value or "")]:
+        words = segment.split()
+        if not words:
+            if not result:
+                result.append("")
+            continue
+        line = ""
+        for word in words:
+            candidate = f"{line} {word}".strip()
+            if len(candidate) > limit and line:
+                result.append(line)
+                line = word
+            else:
+                line = candidate
+        if line:
+            result.append(line)
+    result = result or [""]
+    if len(result) > max_lines:
+        result = result[:max_lines]
+        result[-1] = result[-1].rstrip(" .…") + "…"
+    return result
+
+
+def build_readable_diagram_svg(payload: dict[str, Any], *, title: str = "") -> str:
+    """Build a responsive, portrait SVG from concrete node/edge data.
+
+    The portrait layout is intentional: a wide, fixed-height graph scales down to
+    unreadable text on a phone. Nodes therefore use a single responsive column;
+    long-range relationships travel along the outside rail and do not cross cards.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    nodes_raw = payload.get("nodes") or payload.get("components") or payload.get("vertices")
+    edges_raw = payload.get("edges") or payload.get("connections") or payload.get("relations")
+    if not isinstance(nodes_raw, list) or len(nodes_raw) < 2 or not isinstance(edges_raw, list) or not edges_raw:
+        return ""
+
+    nodes: list[dict[str, Any]] = []
+    ids_seen: set[str] = set()
+    for index, raw in enumerate(nodes_raw[:16]):
+        node = dict(raw) if isinstance(raw, dict) else {"label": _text(raw)}
+        node_id = _text(node.get("id") or node.get("node_id") or node.get("key")) or f"node_{index + 1}"
+        if node_id in ids_seen:
+            node_id = f"{node_id}_{index + 1}"
+        ids_seen.add(node_id)
+        label = _text(node.get("label") or node.get("name") or node.get("title") or node_id)
+        lines = _wrap_lines(label, limit=31, max_lines=4)
+        node.update({"id": node_id, "label": label, "_display_lines": lines})
+        nodes.append(node)
+    if len(nodes) < 2:
+        return ""
+
+    id_to_index = {node["id"]: index for index, node in enumerate(nodes)}
+    edges: list[dict[str, str]] = []
+    seen_edges: set[tuple[str, str, str]] = set()
+    for raw in edges_raw[:40]:
+        if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+            edge = {"from": raw[0], "to": raw[1]}
+        elif isinstance(raw, dict):
+            edge = raw
+        else:
+            continue
+        source = _text(edge.get("from") or edge.get("source") or edge.get("start"))
+        target = _text(edge.get("to") or edge.get("target") or edge.get("end"))
+        if source not in id_to_index or target not in id_to_index or source == target:
+            continue
+        label = _text(edge.get("label") or edge.get("relation") or edge.get("kind"))
+        key = (source, target, label)
+        if key in seen_edges:
+            continue
+        seen_edges.add(key)
+        edges.append({"from": source, "to": target, "label": label})
+    if not edges:
+        return ""
+
+    # The viewBox is deliberately phone-width. With a 760px viewBox, a 360px
+    # mobile viewport would halve every label, reproducing the tiny-corner graph.
+    width = 440
+    card_x = 20
+    card_w = 360
+    card_right = card_x + card_w
+    title_text = _text(title or payload.get("title") or payload.get("description") or "Схема ответа")
+    title_lines = _wrap_lines(title_text, limit=31, max_lines=2)
+    top_y = 78 if len(title_lines) == 1 else 98
+    y_gap = 42
+    for node in nodes:
+        line_count = len(node["_display_lines"])
+        node["_height"] = max(70, 32 + line_count * 24)
+    y_cursor = top_y
+    for node in nodes:
+        node["_y"] = y_cursor
+        y_cursor += int(node["_height"]) + y_gap
+    height = y_cursor - y_gap + 28
+    center_x = card_x + card_w / 2
+
+    esc = html.escape
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="{height}" style="display:block;width:100%;height:auto;max-width:100%" viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMin meet" role="img" aria-label="{esc(title_text)}">',
+        '<defs><marker id="april-flow-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#168f80"/></marker>',
+        '<filter id="april-flow-shadow" x="-15%" y="-15%" width="130%" height="140%"><feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.10"/></filter></defs>',
+        f'<rect x="0" y="0" width="{width}" height="{height}" rx="20" fill="#f8fafc"/>',
+    ]
+    for index, line in enumerate(title_lines):
+        parts.append(
+            f'<text x="{width / 2}" y="{36 + index * 30}" text-anchor="middle" '
+            f'font-family="Inter,Arial,sans-serif" font-size="25" font-weight="700" fill="#0f172a">{esc(line)}</text>'
+        )
+
+    # Draw connectors behind the cards. Consecutive flow steps use a centered
+    # arrow; branches/returns use unique outer rails so arrows never cross text.
+    for edge_index, edge in enumerate(edges):
+        source_node = nodes[id_to_index[edge["from"]]]
+        target_node = nodes[id_to_index[edge["to"]]]
+        source_index = id_to_index[edge["from"]]
+        target_index = id_to_index[edge["to"]]
+        sy = int(source_node["_y"]) + int(source_node["_height"])
+        ty = int(target_node["_y"])
+        if target_index == source_index + 1:
+            sx = center_x
+            ex = center_x
+            path = f"M {sx} {sy} L {ex} {ty - 4}"
+        else:
+            lane_x = min(432, 390 + (edge_index % 5) * 7)
+            sy_mid = int(source_node["_y"]) + int(source_node["_height"]) // 2
+            ty_mid = int(target_node["_y"]) + int(target_node["_height"]) // 2
+            # Right-side rail stays outside the node cards. Enter the target at
+            # its right edge so the relationship remains visible on small screens.
+            path = f"M {card_right} {sy_mid} L {lane_x} {sy_mid} L {lane_x} {ty_mid} L {card_right - 4} {ty_mid}"
+        label_title = f'<title>{esc(edge["label"])}</title>' if edge.get("label") else ""
+        parts.append(
+            f'<path d="{path}" fill="none" stroke="#168f80" stroke-width="3" '
+            f'stroke-linecap="round" stroke-linejoin="round" marker-end="url(#april-flow-arrow)">{label_title}</path>'
+        )
+        # Action labels are visible on mobile, rather than available only as tooltips.
+        if edge.get("label") and target_index == source_index + 1:
+            visible_label = _wrap_lines(edge["label"], limit=25, max_lines=1)[0]
+            parts.append(
+                f'<text x="{center_x - 14}" y="{sy + 25}" text-anchor="end" '
+                f'font-family="Inter,Arial,sans-serif" font-size="12" font-weight="600" '
+                f'fill="#0f766e">{esc(visible_label)}</text>'
+            )
+
+    for node_index, node in enumerate(nodes):
+        y = int(node["_y"])
+        node_h = int(node["_height"])
+        fill = "#ecfdf5" if node_index == 0 else "#ffffff"
+        stroke = "#168f80" if node_index == 0 else "#cbd5e1"
+        parts.append(
+            f'<g filter="url(#april-flow-shadow)"><rect x="{card_x}" y="{y}" width="{card_w}" height="{node_h}" '
+            f'rx="16" fill="{fill}" stroke="{stroke}" stroke-width="2"/></g>'
+        )
+        for line_index, line in enumerate(node["_display_lines"]):
+            baseline = y + 28 + line_index * 28
+            parts.append(
+                f'<text x="{card_x + 22}" y="{baseline}" font-family="Inter,Arial,sans-serif" '
+                f'font-size="21" font-weight="{700 if line_index == 0 else 500}" fill="#0f172a">{esc(line)}</text>'
+            )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def ensure_readable_diagram_payload(payload: Any, *, title: str = "") -> dict[str, Any]:
+    """Return the original payload plus an SVG when actual nodes/edges are present."""
+    if not isinstance(payload, dict):
+        return {}
+    result = deepcopy(payload)
+    svg_fields = ("svg", "svg_payload", "drawing")
+    has_existing_drawing = False
+    for svg_field in svg_fields:
+        existing_svg = _text(result.get(svg_field)) if isinstance(result.get(svg_field), str) else ""
+        has_drawable_element = bool(re.search(
+            r"<(?:path|rect|circle|ellipse|polygon|polyline|line|image|use)\b",
+            existing_svg,
+            re.IGNORECASE,
+        ))
+        if existing_svg and has_drawable_element:
+            has_existing_drawing = True
+            break
+    nodes_for_rebuild = result.get("nodes") or result.get("components") or result.get("vertices")
+    edges_for_rebuild = result.get("edges") or result.get("connections") or result.get("relations")
+    has_rebuildable_graph = isinstance(nodes_for_rebuild, list) and len(nodes_for_rebuild) >= 2 and isinstance(edges_for_rebuild, list) and bool(edges_for_rebuild)
+    if has_existing_drawing:
+        current_svg = next((_text(result.get(key)) for key in svg_fields if _text(result.get(key))), "")
+        viewbox_match = re.search(r"viewBox\s*=\s*['\"]\s*[-+0-9.]+[ ,]+[-+0-9.]+[ ,]+([-+0-9.]+)[ ,]+([-+0-9.]+)", current_svg, re.IGNORECASE)
+        try:
+            existing_viewbox_width = float(viewbox_match.group(1)) if viewbox_match else float("inf")
+        except (TypeError, ValueError):
+            existing_viewbox_width = float("inf")
+        # Preserve an already compact SVG unless actual node/edge data lets us
+        # regenerate a wide diagram that would shrink labels on a mobile screen.
+        if not (has_rebuildable_graph and existing_viewbox_width > 520):
+            return result
+    # A nonempty <svg></svg> shell, a label-only SVG, or an over-wide node graph
+    # is not enough. Rebuild only from concrete same-turn nodes and edges.
+    for svg_field in svg_fields:
+        if isinstance(result.get(svg_field), str):
+            result.pop(svg_field, None)
+    svg = build_readable_diagram_svg(result, title=title)
+    if svg:
+        result["svg"] = svg
+        current_renderer = _text(result.get("renderer") or _obj(result.get("presentation")).get("renderer"))
+        result["renderer"] = current_renderer if current_renderer not in {"", "DiagramRenderer", "diagram"} else "SvgBlock"
+        result["layout"] = {**(result.get("layout") if isinstance(result.get("layout"), dict) else {}), "direction": "TB", "rankdir": "TB", "responsive": True}
+        result["readability_profile"] = "mobile_portrait_svg_v1"
+    return result
+
+
+
+def build_answer_outline_payload(answer: str, *, language: str = "") -> dict[str, Any] | None:
+    """Build a navigation-like outline from actual sections in this answer only."""
+    body = _text(answer)
+    if len(body) < 450:
+        return None
+    lang = _text(language).lower().split("-", 1)[0]
+    is_ru = lang in {"ru", "uk"} or bool(re.search(r"[А-Яа-яЁёІіЇїЄєҐґ]", body))
+    heading_matches = list(re.finditer(r"(?m)^\s{0,3}#{1,4}\s+([^\n#].{0,110})\s*$", body))
+    sections: list[tuple[str, str]] = []
+    if len(heading_matches) >= 3:
+        for index, match in enumerate(heading_matches[:7]):
+            end = heading_matches[index + 1].start() if index + 1 < len(heading_matches) else len(body)
+            chunk = body[match.end():end]
+            chunk = re.sub(r"```.*?```", " ", chunk, flags=re.DOTALL)
+            chunk = re.sub(r"`([^`]*)`", r"\1", chunk)
+            chunk = re.sub(r"[*_>#]+", "", chunk)
+            sentence = next((s.strip() for s in re.split(r"(?<=[.!?])\s+|\n", chunk) if len(s.strip()) >= 18), "")
+            sections.append((re.sub(r"[*_`]", "", match.group(1)).strip(), sentence))
+    if len(sections) < 3:
+        numbered = []
+        for match in re.finditer(r"(?m)^\s*(?:\d+[.)]|[-*•])\s+(.{18,220})$", body):
+            item = re.sub(r"[*_`>#]+", "", match.group(1)).strip()
+            item = re.sub(r"\s+", " ", item)
+            if item:
+                numbered.append((item[:90], ""))
+        if len(numbered) >= 3:
+            sections = numbered[:7]
+    if len(sections) < 3:
+        paragraphs = [re.sub(r"\s+", " ", part).strip() for part in re.split(r"\n\s*\n", body) if len(part.strip()) >= 55]
+        # Remove boilerplate-like standalone link paragraphs and fenced code.
+        clean: list[str] = []
+        for paragraph in paragraphs:
+            if paragraph.startswith("```") or re.fullmatch(r"(?:\[[^\]]+\]\([^)]*\)\s*)+", paragraph):
+                continue
+            paragraph = re.sub(r"^#{1,6}\s*", "", paragraph)
+            paragraph = re.sub(r"[*_`>]+", "", paragraph).strip()
+            if len(paragraph) >= 55:
+                clean.append(paragraph)
+        sections = []
+        for paragraph in clean[:6]:
+            first_sentence = re.split(r"(?<=[.!?])\s+", paragraph, maxsplit=1)[0].strip()
+            # The node title is derived from this same answer, not a topic template.
+            heading = first_sentence[:68].rstrip(" ,;:")
+            remainder = paragraph[len(first_sentence):].strip()
+            sections.append((heading or ("Фрагмент ответа" if is_ru else "Answer section"), remainder))
+    sections = sections[:7]
+    if len(sections) < 3:
+        return None
+    nodes = []
+    edges = []
+    for index, (heading, summary) in enumerate(sections, 1):
+        label = heading[:90]
+        if summary and summary.lower() not in label.lower():
+            label = f"{label}\n{summary[:100]}"
+        nodes.append({"id": f"answer_part_{index}", "label": label, "kind": "answer_section", "order": index})
+        if index > 1:
+            edges.append({"from": f"answer_part_{index-1}", "to": f"answer_part_{index}", "label": "Далее" if is_ru else "Next"})
+    return {
+        "title": "Структура ответа" if is_ru else "Answer structure",
+        "description": "Схема построена по реальным разделам этого ответа; стрелки показывают порядок чтения, не причинно-следственную связь." if is_ru else "This diagram follows the actual sections in this answer; arrows show reading order, not causality.",
+        "representation": "explanation_outline",
+        "layout": {"direction": "TB", "rankdir": "TB", "responsive": True},
+        "nodes": nodes,
+        "edges": edges,
+        "source": "same_turn_answer_sections",
+        "illustrative_outline": True,
+    }
+
+
+def should_add_adaptive_diagram(request: str, answer: str, requested_outputs: Any) -> bool:
+    """Add a diagram only when it complements the answer and respects the requested format."""
+    low_request = _text(request).lower().replace("ё", "е")
+    low_answer = _text(answer).lower()
+    outputs = {str(item or "").strip().lower().replace("-", "_") for item in (requested_outputs or []) if str(item or "").strip()}
+    explicit_diagram = bool(re.search(r"(?:диаграмм\w*|схем\w*|flowchart|diagram)", low_request)) or "diagram" in outputs
+    explicit_no = bool(re.search(
+        r"(?:только\s+текст|без\s+(?:схем|диаграмм|визуализац)|не\s+(?:нужна|нужно|надо)\s+(?:схема|диаграмма)|no\s+(?:diagram|visual)|text\s+only)",
+        low_request,
+    ))
+    explicit_other_only = bool(re.search(
+        r"(?:только\s+(?:ссылк\w*|код|таблиц\w*|изображен\w*|картинк\w*|график\w*|формул\w*|файл\w*)|"
+        r"only\s+(?:a\s+)?(?:link|code|table|image|graph|formula|file))",
+        low_request,
+    ))
+    if explicit_no or (explicit_other_only and not explicit_diagram):
+        return False
+    # Another renderer explicitly requested by the user wins when no diagram was
+    # requested. If the user explicitly asks for both a diagram and (say) a table,
+    # an absent/empty diagram must still be recovered instead of silently lost.
+    competing = outputs.intersection({"image", "gallery", "code", "table", "graph", "formula", "link", "file"})
+    if competing and not explicit_diagram:
+        return False
+    if len(_text(answer)) < (360 if explicit_diagram else 450):
+        return False
+    heading_count = len(re.findall(r"(?m)^\s{0,3}#{1,4}\s+", answer))
+    paragraph_count = sum(1 for part in re.split(r"\n\s*\n", answer) if len(part.strip()) >= 55)
+    numbered_steps = len(re.findall(r"(?m)^\s*\d+[.)]\s+", answer))
+    if heading_count >= 3 or paragraph_count >= 4 or numbered_steps >= 5:
+        # Don't add a redundant outline if the user already requested a visual
+        # and it is not a diagram; that intent was handled above.
+        return True
+    # No fixed subject/keyword list: eligibility comes from structure of this turn.
+    return False
 
 
 class DiagramRoom:
