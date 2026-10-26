@@ -2412,6 +2412,15 @@ async def execute(
             if isinstance(_question_item, dict):
                 _question_item["output_types"] = ["text"]
                 _question_item["outputs"] = ["text"]
+    # C_IT_ROOM is the deterministic source for April's own interface map. Do not
+    # make navigation depend on the LLM's semantic classifier: force text + diagram
+    # whenever the current turn asks how to find/use an April screen.
+    try:
+        from blocks.C_IT_ROOM import prepare_site_help_interpretation as _prepare_site_help_interpretation
+        _prepare_site_help_interpretation(interpretation, current_text, question_sequence, dialogue_context)
+    except Exception as _site_interpretation_error:
+        _apr_timing_log("site_help_interpretation_unavailable", None, error=type(_site_interpretation_error).__name__)
+
     # Bind the user's preferred display name to the already-authenticated ID.
     # This is prompt metadata only: it does not alter stored message text,
     # dialogue identity, history, or the canonical chat route.
@@ -2641,15 +2650,16 @@ async def execute(
             "input_modalities": (interpretation.get("input") or {}).get("modalities", []),
         },
     )
-    # Contribute the navigation map through the same selected C-ARTIFACT room.
-    # The contribution is request-scoped; it does not create another route or memory store.
+    # Always consult C_IT_ROOM for the current user turn, even when another render
+    # room was selected. Site help is a knowledge lookup, not a mutually exclusive
+    # renderer choice; this fixes missing map context for simple voice questions.
     try:
-        if any(str(item.get("room") or "").lower() == "it" for item in selected_rooms):
-            from blocks.C_IT_ROOM import build_machine_contribution as _build_it_room_contribution
-            _it_contribution = _build_it_room_contribution(request)
-            _it_context = _it_contribution.get("knowledge_context") if isinstance(_it_contribution, dict) else None
-            if isinstance(_it_context, dict) and _it_context.get("site_help_requested"):
-                request.routing["room_knowledge_context"] = {"it": _it_context}
+        from blocks.C_IT_ROOM import build_machine_contribution as _build_it_room_contribution
+        _it_contribution = _build_it_room_contribution(request)
+        _it_context = _it_contribution.get("knowledge_context") if isinstance(_it_contribution, dict) else None
+        if isinstance(_it_context, dict) and _it_context.get("site_help_requested"):
+            request.routing["site_help_requested"] = True
+            request.routing["room_knowledge_context"] = {"it": _it_context}
     except Exception as _room_context_error:
         # Navigation help must never prevent the normal answer path from running.
         _apr_timing_log("room_knowledge_context_unavailable", None, error=type(_room_context_error).__name__)
