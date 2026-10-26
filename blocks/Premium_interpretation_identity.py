@@ -481,8 +481,11 @@ def _explicit_saved_artifact_followup_kind(text: str) -> str:
         r"данн\w*\s+(?:на|в|к)|с\s+данн\w*|с\s+точк\w*|with\s+(?:intermediate|daily|dated)\s+(?:data|points))",
         low, re.IGNORECASE,
     ))
+    # Possessives describe the subject of a new deliverable; they do not by
+    # themselves identify a previously rendered artifact. Reuse needs an actual
+    # saved-item reference or a clear edit/extension operation.
     saved_reference = bool(re.search(
-        r"(?:\bэтот\b|\bэта\b|\bэту\b|\bэтой\b|\bэти\b|\bего\b|\bее\b|\bеё\b|"
+        r"(?:\bэтот\b|\bэта\b|\bэту\b|\bэтой\b|\bэти\b|"
         r"\bснова\b|еще\s+раз|ещё\s+раз|предыдущ\w*|последн\w*|из\s+истори\w*|"
         r"\bthis\b|\bthat\b|\bsame\b|\bprevious\b|\bearlier\b|\bagain\b)",
         low, re.IGNORECASE,
@@ -1220,6 +1223,39 @@ def _has_explicit_topic_switch(text: str) -> bool:
     ))
 
 
+
+def _looks_like_explicit_topic_closure(text: str) -> bool:
+    """Classify a clear topic closure in the interpretation layer.
+
+    Search/state code consumes this semantic feature instead of making its own
+    keyword-based routing decision. A concrete fresh task in the same utterance
+    remains actionable and is not treated as a closure-only message.
+    """
+    value = _text(text).lower().replace("ё", "е")
+    if not value:
+        return False
+    closure = bool(re.search(
+        r"(?:"
+        r"\b(?:эта\s+)?тема\s+(?:закры\w*|заверш\w*|заканчива\w*)\b|"
+        r"\b(?:эту\s+|данную\s+)?тему\s+(?:закры\w*|заверш\w*|заканчива\w*)\b|"
+        r"\b(?:всё|все)\s*,?\s*(?:эту\s+)?тему\s+(?:закрыли|закрываем|завершили|закончим)\b|"
+        r"\b(?:на\s+этом\s+)?(?:всё|все)\s*[.!…]*$|"
+        r"\b(?:давай(?:те)?\s+)?(?:на\s+этом\s+)?(?:остановимся|закончим|прекратим)\b|"
+        r"\b(?:больше\s+не\s+)?(?:будем\s+)?(?:продолжать|развивать)\s+(?:эту\s+)?тему\b|"
+        r"\btopic\s+is\s+closed\b|\b(?:let'?s\s+)?stop\s+here\b|\bend\s+this\s+topic\b"
+        r")",
+        value, re.IGNORECASE,
+    ))
+    if not closure:
+        return False
+    fresh_action = bool(re.search(
+        r"\b(?:построй\w*|созда\w*|сделай\w*|нарис\w*|исправ\w*|проверь\w*|"
+        r"просмотр\w*|изучи\w*|проанализируй|напиши\w*|разработ\w*|найди\w*|"
+        r"build\w*|create\w*|draw\w*|fix\w*|review\w*|analy[sz]e\w*|write\w*)\b",
+        value, re.IGNORECASE,
+    ))
+    return not fresh_action
+
 def _has_explicit_topic_introduction(text: str) -> bool:
     """Return true when a request explicitly introduces a subject instead of only referring back.
 
@@ -1392,18 +1428,13 @@ def _looks_like_context_dependent_question(
         "той", "тех", "this", "that", "these", "those", "it", "he", "she",
         "they", "him", "her", "them", "its", "same", "former", "latter",
     }
-    # Bound the signal to ordinary follow-up sized questions. A pronoun that comes
-    # after an independently named subject/predicate in the same utterance often
-    # points locally to that subject (“how are bricks made and what are they made
-    # of?”), not backward to the previous dialogue turn.
+    # Pronouns in a follow-up sized question normally need an antecedent. Do not
+    # veto this relation merely because the sentence also contains a descriptive
+    # noun (for example, “Which law was he the author of?”): that noun may be the
+    # requested property, while the pronoun still refers to the active subject.
+    # State Manager validates the antecedent against the actual latest turn and
+    # checks subject conflicts; this feature alone never chooses a historical row.
     if token_set & anaphoric_terms and len(tokens) <= 18:
-        first_anaphor_index = next((index for index, token in enumerate(tokens) if token in anaphoric_terms), -1)
-        if first_anaphor_index > 0:
-            prefix = " ".join(tokens[:first_anaphor_index])
-            prefix_signature = _context_signature(prefix)
-            prefix_subjects = prefix_signature.get("subject_terms") if isinstance(prefix_signature, dict) else []
-            if prefix_subjects:
-                return False
         return True
     if len(tokens) <= 5:
         signature = _context_signature(text)
@@ -1910,6 +1941,14 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
             "time_window": extract_temporal_window(""),
             "requested_topic_count": 10, "minimum_topic_count": 5,
             "intent_score": 0, "features": {}, "reason": "empty_request",
+        "routing_policy": {
+            "version": "hot_branch_then_semantic_history_v1",
+            "order": ["ACTIVE_BRANCH_RELEVANCE", "MATCHED_HISTORY", "NEW_TOPIC"],
+            "ambiguous_turn": "LATEST_SAME_DIALOG_TURN",
+            "named_subject_conflict": "SEARCH_MATCHING_HISTORY",
+            "history_miss": "NEW_TOPIC",
+            "cross_topic_injection": "DISALLOW",
+        },
         }
 
     dialogue_action = _semantic_group_hit(tokens, "dialogue_action")
@@ -1948,6 +1987,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     continuation_action = bool(continuation_action or implicit_development_request)
     explicit_topic_switch = _has_explicit_topic_switch(source)
     explicit_topic_introduction = _has_explicit_topic_introduction(source)
+    explicit_topic_closure = _looks_like_explicit_topic_closure(source)
     answer_followup = _looks_like_previous_answer_followup(source)
     past_reference = _semantic_group_hit(tokens, "past_reference")
     future_reference = _semantic_group_hit(tokens, "future_reference")
@@ -2328,6 +2368,19 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "active_branch_repair": bool(active_branch_repair),
         "factual_verification_request": bool(factual_verification_request),
         "explicit_topic_switch": bool(explicit_topic_switch),
+        "explicit_topic_introduction": bool(explicit_topic_introduction),
+        "explicit_topic_closure": bool(explicit_topic_closure),
+        "saved_artifact_followup_kind": saved_artifact_followup_kind,
+        # Shared routing contract: active dialogue first, semantically matched
+        # retained history only on conflict, and a clean new topic on a history miss.
+        "routing_policy": {
+            "version": "hot_branch_then_semantic_history_v1",
+            "order": ["ACTIVE_BRANCH_RELEVANCE", "MATCHED_HISTORY", "NEW_TOPIC"],
+            "ambiguous_turn": "LATEST_SAME_DIALOG_TURN",
+            "named_subject_conflict": "SEARCH_MATCHING_HISTORY",
+            "history_miss": "NEW_TOPIC",
+            "cross_topic_injection": "DISALLOW",
+        },
         "pragmatic_intent": dialogue_act_profile.get("pragmatic_intent"),
         "message_function": dialogue_act_profile.get("message_function"),
         "pragmatic_features": dialogue_act_profile.get("pragmatic_features", {}),
@@ -2958,6 +3011,10 @@ def build_question_sequence(
             "active_branch_repair": bool(item_semantics.get("active_branch_repair") or repair_linked_clause),
             "factual_verification_request": bool(item_semantics.get("factual_verification_request")),
             "explicit_topic_switch": bool(parent_explicit_topic_switch or item_semantics.get("explicit_topic_switch")),
+            "explicit_topic_introduction": bool(item_semantics.get("explicit_topic_introduction")),
+            "explicit_topic_closure": bool(item_semantics.get("explicit_topic_closure")),
+            "saved_artifact_followup_kind": item_semantics.get("saved_artifact_followup_kind", ""),
+            "routing_policy": item_semantics.get("routing_policy", {}),
             "context_signature": item_semantics.get("context_signature") or _context_signature(item),
             "parent_context_dependency": bool(item_semantics.get("parent_context_dependency")),
             "parent_intent": item_semantics.get("parent_intent", ""),
