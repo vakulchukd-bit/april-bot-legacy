@@ -918,10 +918,55 @@ def _detect_task(
 
 
 _HISTORY_MARKERS = (
-    "о чем мы говорили", "о чём мы говорили", "о чем говорили", "о чём говорили",
-    "что мы обсуждали", "что обсуждали", "какие темы", "напомни темы",
-    "напомни о чем", "напомни о чём", "история диалога", "история разговора",
-    "наши темы", "о чем шла речь", "о чём шла речь",
+    'о чем мы говорили',
+    'о чём мы говорили',
+    'что мы обсуждали',
+    'какие темы мы обсуждали',
+    'история диалога',
+    'история разговора',
+    'про що ми говорили',
+    'що ми обговорювали',
+    'які теми ми обговорювали',
+    'історія діалогу',
+    'історія розмови',
+    'what did we talk about',
+    'what did we discuss',
+    'conversation history',
+    'topics we discussed',
+    'remind me what we discussed',
+    'de qué hablamos',
+    'de que hablamos',
+    'qué discutimos',
+    'que discutimos',
+    'historial de conversación',
+    'historial de conversacion',
+    'recuérdame los temas',
+    'recuerdame los temas',
+    'worüber haben wir gesprochen',
+    'woruber haben wir gesprochen',
+    'was haben wir besprochen',
+    'gesprächsverlauf',
+    'gesprachsverlauf',
+    'de quoi avons-nous parlé',
+    'de quoi avons nous parlé',
+    'historique de conversation',
+    'rappelle-moi les sujets',
+    'di cosa abbiamo parlato',
+    'di cosa abbiamo discusso',
+    'cronologia della conversazione',
+    'o czym rozmawialiśmy',
+    'o czym rozmawialismy',
+    'co omawialiśmy',
+    'co omawialismy',
+    'historia rozmowy',
+    'sobre o que conversamos',
+    'sobre o que falamos',
+    'o que discutimos',
+    'histórico da conversa',
+    'historico da conversa',
+    'waar hebben we over gesproken',
+    'wat hebben we besproken',
+    'gespreksgeschiedenis',
 )
 _HISTORY_COUNTS = {
     "один": 1, "одну": 1, "два": 2, "две": 2, "три": 3, "четыре": 4,
@@ -942,7 +987,7 @@ _SEMANTIC_ROOTS = {
     "recall_action": ("напом", "вспом", "припомн", "помни", "восстанов", "remember", "recall", "remind", "summariz", "перескаж", "перечисл"),
     "decision_action": ("решил", "решен", "вывод", "итог", "договор", "результат", "concluded", "decided", "decision", "outcome"),
     "plan_action": ("план", "заплан", "собира", "намер", "предусмотр", "planned", "plan", "schedule"),
-    "continuation_action": ("продолж", "вернись", "возвращ", "останов", "resume", "continue", "return to"),
+    "continuation_action": ("продолж", "продовж", "вернись", "повер", "возвращ", "останов", "resume", "continue", "continu", "sigamos", "volvamos", "fortsetz", "weiter", "poursuiv", "repren", "riprend", "kontynu", "wroc", "wróc", "voltem", "doorgaan", "verder", "herneem", "return to"),
     "past_reference": ("предыдущ", "прошл", "раньше", "ранее", "истори", "прошедш", "yesterday", "previous", "earlier", "before", "history"),
     "future_reference": ("завтра", "будущ", "следующ", "потом", "дальнейш", "tomorrow", "future", "next"),
     "today_reference": ("сегодня", "сегодн", "сегодняшн", "утром", "вечером", "today", "this morning", "tonight"),
@@ -1813,7 +1858,17 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "пришли" in token_set and bool(token_set & {"к", "чему", "выводу"})
     ) or "к чему мы пришли" in low or "what did we conclude" in low
     plan_action = _semantic_group_hit(tokens, "plan_action")
-    continuation_action = _semantic_group_hit(tokens, "continuation_action")
+    continuation_action = _semantic_group_hit(tokens, "continuation_action") or any(phrase in low for phrase in (
+        "продолжай", "продолжим", "давай продолжим", "продовжуй", "продовжимо", "давай продовжимо",
+        "resume this", "let us continue", "let's continue", "continue this", "keep going",
+        "continua", "continuemos", "sigamos", "volvamos",
+        "mach weiter", "machen wir weiter", "setzen wir fort", "weiter so",
+        "reprenons", "continuons", "poursuivons", "on continue",
+        "continuiamo", "riprendiamo", "andiamo avanti",
+        "kontynuuj", "kontynuujmy", "wróćmy", "wrocmy", "dalej z tym",
+        "vamos continuar", "continuemos", "voltemos", "continue a partir daqui",
+        "ga door", "laten we doorgaan", "verdergaan", "gaan we verder",
+    ))
     explicit_topic_switch = _has_explicit_topic_switch(source)
     explicit_topic_introduction = _has_explicit_topic_introduction(source)
     answer_followup = _looks_like_previous_answer_followup(source)
@@ -1937,6 +1992,9 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         # 14:00 to 16:00” or “show 5–10 conversations from the last 4 hours”.
         or history_inventory_request
     ) and not future_topic_question
+    # Exact recall phrases activate history search even when grammar differs by language.
+    if any(marker.replace("ё", "е") in low for marker in _HISTORY_MARKERS):
+        history_recall = True
 
     context_dependent_question = (
         _looks_like_context_dependent_question(
@@ -2157,6 +2215,20 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "future_reference": bool(temporal_future),
         "interrogative": bool(interrogative),
     }
+    context_signature = _context_signature(source)
+    intent_upper = _text(primary_intent).upper()
+    retrieval_profile = {
+        "mode": "HISTORY_LOOKUP" if history_request else ("ACTIVE_TOPIC_CONTINUATION" if requires_memory and not explicit_topic_switch and intent_upper in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP", "PRIOR_DECISION_RECALL", "PLAN_RECALL"} else "NEW_TOPIC"),
+        "primary_intent": intent_upper or "NEW_INFORMATION",
+        "direction": _text(direction),
+        "topic_reference": _text(topic_reference),
+        "prefer_active_branch": bool(requires_memory and not history_request and not explicit_topic_switch),
+        "prefer_named_history": bool(history_request or topic_reference in {"TOPIC_FRAGMENT", "PREVIOUS_OR_ACTIVE_TOPIC", "PREVIOUS_ASSISTANT_ANSWER"}),
+        "previous_answer_reference": bool(previous_answer_reference or answer_followup),
+        "active_branch_repair": bool(active_branch_repair),
+        "avoid_cross_topic_injection": True,
+        "coverage_policy": "recall_requested_history" if history_request else ("continue_uncovered_sections" if requires_memory and not explicit_topic_switch else "answer_new_request"),
+    }
     return {
         "schema": "april_request_semantics_v1",
         "primary_intent": primary_intent,
@@ -2186,7 +2258,8 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "recommended_response_action": dialogue_act_profile.get("recommended_response_action", "ANSWER_NORMALLY"),
         "features": features,
         "reason": reason,
-        "context_signature": _context_signature(source),
+        "context_signature": context_signature,
+        "retrieval_profile": retrieval_profile,
     }
 
 
