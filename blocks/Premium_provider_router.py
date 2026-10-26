@@ -39,7 +39,29 @@ def _scaled_prompt_tokens(base_tokens: int) -> int:
     return max(1, int(round(int(base_tokens) * PREMIUM_PROMPT_SCALE)))
 
 TRANSLATION_ROUTE_VERSION = "botru_embedded_language_negotiation_v2"
-PROVIDER_ROUTER_VERSION = "premium_provider_router_v4_hot_work_branch_priority"
+PROVIDER_ROUTER_VERSION = "premium_provider_router_v5_dynamic_quality_input_guard"
+
+# Shared rules are appended to all three prompt sizes so quality does not disappear
+# when the structured input has to fall back to compact/minimal mode.
+PREMIUM_RESPONSE_QUALITY_CONTRACT = r"""
+PREMIUM RESPONSE QUALITY AND CONTINUITY:
+- Answer like a careful domain expert: give the useful conclusion first, then explain the relevant why/how, implications, trade-offs and concrete next step when useful. Match depth to the question; completeness is required, padding is not.
+- For a continuation, use the selected topic/section and previous answer as the coverage ledger. Do not repeat material already answered: extend it with a genuinely new detail, deeper explanation, comparison, example, consequence, risk or next decision. Preserve established facts, user constraints, corrections, decisions, exact values and unresolved questions. Keep the topic's logical thread moving from turn to turn.
+- A short reaction such as “more interesting”, “continue”, “what else?”, “you already said that”, or an elliptical reference usually points to the active topic when same-dialog evidence supports that reading. Retrieve and verify the relevant prior pair; if the selected history does not fit, do not force it.
+- On a genuinely new topic, answer independently and do not import unrelated history. Make the answer naturally useful for a possible follow-up without artificially tying it to the previous subject. If the referent is genuinely ambiguous and no reliable anchor exists, ask one focused clarification rather than guessing.
+- Keep the input signal clean: prioritize CURRENT_REQUEST and lossless source values, then the strongest topic-specific context, then only background that changes the answer. Remove duplicate summaries, stale/irrelevant topics, redundant metadata and filler before compressing facts. Never silently omit a requested step, negate a constraint, alter a value, invent missing source data, or present an inference as a saved fact.
+- Use headings, lists, tables and renderers only when they improve comprehension. Introduce each visual, explain its real meaning, and avoid repeating the same explanation in prose. For substantive multi-section answers, store concise ordered heading/summary entries in dialogue_memory_record.sections so the next turn can continue from uncovered material.
+""".strip()
+
+# Reserve the same bounded recovery instruction before fitting the first request, so
+# a malformed/empty first result cannot make the retry exceed the input text budget.
+PREMIUM_RECOVERY_RULE = (
+    "RECOVERY PASS after an empty, incomplete, malformed, or non-public output: generate a NEW complete JSON object from the original request. "
+    "Do not continue or quote cut-off JSON. Preserve every requested topic and required renderer. "
+    "Use concise complete explanations, about 60% prose and 40% useful render payloads when visuals are relevant; "
+    "keep the completed output under 12000 tokens, set content to an empty string when answer is complete, "
+    "keep internal_answer_en and summary short, interleave blocks by step_index, and close valid JSON."
+)
 
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _inflight: set[str] = set()
@@ -1545,13 +1567,13 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         card = _json_card(obj)
         return card, _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
 
-    system = SYSTEM_PROMPT
+    system = SYSTEM_PROMPT + "\n\n" + PREMIUM_RESPONSE_QUALITY_CONTRACT
     card, total = count(system, data)
     stage = "full"
     if total <= MAX_PROMPT_TOKENS:
         return system, card, total, stage
 
-    system = SYSTEM_PROMPT_COMPACT
+    system = SYSTEM_PROMPT_COMPACT + "\n\n" + PREMIUM_RESPONSE_QUALITY_CONTRACT
     stage = "compact_system"
     if _text(data.get("NEW_DIALOGUE_REQUEST")) == _text(data.get("CURRENT_REQUEST")):
         data["NEW_DIALOGUE_REQUEST"] = "Same as CURRENT_REQUEST"
@@ -2075,7 +2097,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     # to a few sampled keywords. The request is carried once in CURRENT_REQUEST;
     # REQUEST_SEQUENCE points back to it instead of duplicating and truncating it.
     if is_single_3d_scene_task:
-        visual_system = SYSTEM_PROMPT_MINIMAL
+        visual_system = SYSTEM_PROMPT_MINIMAL + "\n\n" + PREMIUM_RESPONSE_QUALITY_CONTRACT
         for scene_request_budget in tuple(_scaled_prompt_tokens(n) for n in (820, 760, 700, 640, 580, 540)):
             visual_min = build_minimal(scene_request_budget, _scaled_prompt_tokens(18), _scaled_prompt_tokens(8), min(1, len(original_pairs)))
             visual_min["CURRENT_REQUEST"] = ("Use PROTECTED_CURRENT_INPUT.content as the exact complete 3D specification; preserve all constraints." if protected_current_input else _compress_3d_scene_specification(source_current_request, scene_request_budget))
@@ -2110,7 +2132,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         (_scaled_prompt_tokens(100), _scaled_prompt_tokens(55), _scaled_prompt_tokens(12), minimum_history_pair),
         (_scaled_prompt_tokens(70), _scaled_prompt_tokens(36), _scaled_prompt_tokens(8), minimum_history_pair),
     ]
-    system = SYSTEM_PROMPT_MINIMAL
+    system = SYSTEM_PROMPT_MINIMAL + "\n\n" + PREMIUM_RESPONSE_QUALITY_CONTRACT
     for current_budget, topic_budget, summary_budget, pair_limit in candidates:
         minimal = build_minimal(current_budget, topic_budget, summary_budget, pair_limit)
         card = _json_card(minimal)
@@ -2312,7 +2334,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         system = ("April: answer CURRENT_REQUEST in RETURN_LANGUAGE. Preserve every REQUEST_SEQUENCE step in order. "
                   "Use PROTECTED_STRUCTURED_DATA exactly; if PROTECTED_STRUCTURED_DATA_EXTERNAL is present, "
                   "read PROTECTED_STRUCTURED_DATA_SOURCE as its exact payload. Preserve protected values and "
-                  "valid render_blocks/artifacts; do not invent data. Return valid JSON matching OUTPUT_CONTRACT.")
+                  "valid render_blocks/artifacts; do not invent data. Return valid JSON matching OUTPUT_CONTRACT.\n\n"
+                  + PREMIUM_RESPONSE_QUALITY_CONTRACT)
         card = _json_card(minimal)
         total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
         if externalized_structures:
@@ -2492,6 +2515,8 @@ def _safe_prompt_manifest(items: Any, limit: int = 12) -> list[dict[str, Any]]:
 
 
 def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    if not isinstance(diagnostics_out, dict):
+        diagnostics_out = {}
     intent = req.intent if isinstance(req.intent, dict) else {}
     conversation = req.conversation if isinstance(req.conversation, dict) else {}
     memory = req.memory if isinstance(req.memory, dict) else {}
@@ -3052,6 +3077,17 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         protected_source_label = _protected_current_input_label(_build_protected_current_input(current))
         reserved_labels.append(protected_source_label)
     reserved_label_tokens = _estimate_tokens("\n".join(reserved_labels))
+    recovery_headroom_tokens = _estimate_tokens(PREMIUM_RECOVERY_RULE) + 32
+    # Reserve the token estimates for every lossless text body that will be sent
+    # outside the compact card. This lets the card shrink around exact source text
+    # instead of discovering an over-budget request only after compaction is done.
+    external_text_body_tokens = sum(
+        _estimate_tokens(_clip(item.get("content") or "", MAX_PROVIDER_TEXT_FILE_CHARS))
+        for item in file_contents if isinstance(item, dict) and _text(item.get("content"))
+    )
+    if protected_source_label:
+        external_text_body_tokens += _estimate_tokens(current)
+    reserved_prompt_tokens = reserved_label_tokens + external_text_body_tokens + recovery_headroom_tokens
     # Defensive ceiling: old exact structures are useful only when small enough to
     # fit as context. Never externalize a multi-megabyte historical renderer payload
     # around the normal prompt budget; the renderer asset store remains authoritative.
@@ -3063,7 +3099,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
     source_card_text = _json_card(structured)
     source_card_token_estimate = _estimate_tokens(source_card_text)
     selected_system_prompt, text, card_token_estimate, compression_stage = _fit_structured_prompt(
-        structured, reserved_prompt_tokens=reserved_label_tokens
+        structured, reserved_prompt_tokens=reserved_prompt_tokens
     )
 
     content: list[dict[str, Any]] = [
@@ -3306,6 +3342,10 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "prompt_budget_tokens": MAX_PROMPT_TOKENS,
             "topic_budget_tokens_max": MAX_TOPIC_PROMPT_TOKENS,
             "attachment_instruction_labels_token_estimate": reserved_label_tokens,
+            "recovery_headroom_token_reserve": recovery_headroom_tokens,
+            "lossless_external_text_body_token_reserve": external_text_body_tokens,
+            "estimated_text_input_tokens_with_recovery_headroom": full_text_input_token_estimate + recovery_headroom_tokens,
+            "input_budget_scope": "tokenized_text_parts; image and binary-file tokens are provider-reported separately",
             "system_prompt_chars": len(selected_system_prompt),
             "system_prompt_token_estimate": _estimate_tokens(selected_system_prompt),
             "source_system_prompt_token_estimate": _estimate_tokens(SYSTEM_PROMPT),
@@ -3321,11 +3361,9 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "full_text_input_token_estimate_including_external_parts": full_text_input_token_estimate,
             "external_text_payload_token_estimate": external_text_token_estimate,
             "protected_lossless_source_token_estimate": protected_source_token_estimate,
-            "prompt_budget_met_by_estimate": full_text_input_token_estimate <= MAX_PROMPT_TOKENS,
-            "full_text_estimate_over_budget": full_text_input_token_estimate > MAX_PROMPT_TOKENS,
-            "lossless_source_budget_exception": bool(
-                protected_source_parts or text_file_diagnostics or file_diagnostics or image_diagnostics
-            ),
+            "prompt_budget_met_by_estimate": full_text_input_token_estimate + recovery_headroom_tokens <= MAX_PROMPT_TOKENS,
+            "full_text_estimate_over_budget": full_text_input_token_estimate + recovery_headroom_tokens > MAX_PROMPT_TOKENS,
+            "lossless_source_budget_exception": False,
             "compression_stage": compression_stage,
             "field_breakdown": field_diagnostics,
             "duplicate_field_groups": duplicate_field_groups,
@@ -3341,8 +3379,11 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "input_text_parts": sum(1 for part in content if part.get("type") == "input_text"),
             "input_image_parts": sum(1 for part in content if part.get("type") == "input_image"),
             "input_file_parts": sum(1 for part in content if part.get("type") == "input_file"),
-            "note": "Compaction budget covers system prompt + structured card + reserved labels. Exact current-task data and explicitly referenced saved structures may be sent as lossless source parts; their token estimate is reported separately and may exceed the card budget only as a deliberate data-preservation exception. API usage remains authoritative.",
+            "note": "The Premium text-input preflight includes the selected system prompt, structured card, exact protected source text, attached text contents, labels, and recovery headroom. Binary image/file tokenization is not exactly knowable from this text preflight and is reported separately by provider usage.",
         })
+        preflight_text_tokens = full_text_input_token_estimate + recovery_headroom_tokens
+        if preflight_text_tokens > MAX_PROMPT_TOKENS:
+            raise RuntimeError(f"APRIL_INPUT_BUDGET_EXCEEDED:{preflight_text_tokens}>{MAX_PROMPT_TOKENS}")
     return result
 
 
@@ -4122,14 +4163,7 @@ async def generate_text(
                 # response from the original input; never continue malformed output
                 # or start a new conversation.
                 retry_input = [dict(item) if isinstance(item, dict) else item for item in base_input]
-                recovery_rule = (
-                    "\n\nRECOVERY PASS after an empty, incomplete, malformed, or non-public output: generate a NEW complete, concise JSON object from the original request. "
-                    "Do not continue or quote the cut-off JSON. Keep every requested topic and required renderer. "
-                    "Use about 60% of the response for complete explanatory text and about 40% for useful structured render payloads; "
-                    "the combined completed output must fit under 12000 tokens. Omit the duplicate `content` body (set content to an empty string; "
-                    "the canonical normalizer fills it from `answer`). Keep internal_answer_en and summary short. "
-                    "Interleave each step's explanation and visual block by step_index. Close valid JSON."
-                )
+                recovery_rule = "\n\n" + PREMIUM_RECOVERY_RULE
                 if retry_input and isinstance(retry_input[0], dict) and retry_input[0].get("role") == "system":
                     sys_content = retry_input[0].get("content")
                     if isinstance(sys_content, str):
@@ -4302,6 +4336,12 @@ async def generate_text(
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
                 "error_type": type(exc).__name__,
                 "failure_code": (re.match(r"[A-Z0-9_]+", failure_code.upper()).group(0) if re.match(r"[A-Z0-9_]+", failure_code.upper()) else "PROVIDER_REQUEST_FAILED"),
+                "input_budget": {
+                    "budget_tokens": MAX_PROMPT_TOKENS,
+                    "estimated_text_input_tokens_with_recovery_headroom": input_diagnostics.get("estimated_text_input_tokens_with_recovery_headroom"),
+                    "token_count_method": input_diagnostics.get("token_count_method"),
+                    "compression_stage": input_diagnostics.get("compression_stage"),
+                } if input_diagnostics else None,
                 "usage": usage_data or None,
                 "cost": _calculate_cost(usage_data) if usage_data else {"estimated_cost_usd": None, "pricing_configured": False},
             })
@@ -4320,9 +4360,32 @@ async def generate_text(
             ).lower()
             attachments = (request.metadata or {}).get("attachments", []) if isinstance(request.metadata, dict) else []
             has_attachment = bool(attachments or (request.visual_context or {}).get("items") or (request.metadata or {}).get("file_inputs") or (request.metadata or {}).get("file_contents"))
-            if language.startswith("ru"):
+            if failure_code.startswith(("APRIL_INPUT_BUDGET_EXCEEDED", "APRIL_PROMPT_BUDGET_UNSATISFIABLE")):
+                match_budget = re.search(r":(\d+)>(\d+)", failure_code)
+                over_budget_detail = (
+                    f"оценивается в {match_budget.group(1)} токенов при лимите {match_budget.group(2)}"
+                    if match_budget else f"не помещается в лимит {MAX_PROMPT_TOKENS} токенов"
+                )
+                over_budget_detail_uk = (
+                    f"оцінюється у {match_budget.group(1)} токенів за ліміту {match_budget.group(2)}"
+                    if match_budget else f"не вміщується в ліміт {MAX_PROMPT_TOKENS} токенів"
+                )
+                over_budget_detail_en = (
+                    f"is estimated at {match_budget.group(1)} tokens against a {match_budget.group(2)}-token limit"
+                    if match_budget else f"does not fit within the {MAX_PROMPT_TOKENS}-token limit"
+                )
+                if language.startswith("ru"):
+                    answer = (f"Запрос не отправлен модели: подготовленный текстовый ввод {over_budget_detail}. "
+                              "Я не стал молча обрезать исходные данные. Разделите материал на несколько частей или укажите конкретный файл/раздел для разбора; затем продолжим в этом же диалоге.")
+                elif language.startswith("uk"):
+                    answer = (f"Запит не надіслано моделі: підготовлений текстовий ввід {over_budget_detail_uk}. "
+                              "Я не став мовчки обрізати вихідні дані. Розділіть матеріал на кілька частин або вкажіть конкретний файл/розділ для аналізу; продовжимо в цьому самому діалозі.")
+                else:
+                    answer = (f"The request was not sent to the model: the prepared text input {over_budget_detail_en}. "
+                              "I did not silently truncate the source data. Split the material into smaller parts or specify a file/section, then continue in this same conversation.")
+            elif language.startswith("ru"):
                 answer = (
-                    "Не удалось завершить ответ модели в этом запросе (" + failure_code + "). "
+                    "Не удалось завершить ответ модели (" + failure_code + "). "
                     "Оригинал вложения сохранён; повторно загружать его не нужно. Повторите запрос в этом же диалоге."
                     if has_attachment else
                     "Не удалось завершить ответ модели в этом запросе (" + failure_code + "). Повторите исходный запрос в этом же диалоге; не начинайте новую переписку."
@@ -4378,6 +4441,8 @@ async def generate_text(
             "budget_tokens": MAX_PROMPT_TOKENS,
             "topic_budget_tokens_max": MAX_TOPIC_PROMPT_TOKENS,
             "system_plus_card_token_estimate": input_diagnostics.get("system_plus_card_token_estimate"),
+            "estimated_text_input_tokens_with_recovery_headroom": input_diagnostics.get("estimated_text_input_tokens_with_recovery_headroom"),
+            "prompt_budget_met_by_estimate": input_diagnostics.get("prompt_budget_met_by_estimate"),
             "compression_stage": input_diagnostics.get("compression_stage"),
         }
 
