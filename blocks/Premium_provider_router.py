@@ -110,7 +110,15 @@ When PROTECTED_STRUCTURED_DATA_EXTERNAL is present, read the adjacent input_text
 When PROTECTED_STRUCTURED_DATA is present, preserve only its selected source values exactly: graph points and labels, table rows and headings, formulas, variables, units, calculations, and solution steps. Do not retrieve or copy more structures from unrelated history. All other context remains compressible.
 When PROTECTED_CURRENT_INPUT is present, its metadata identifies a separate adjacent input_text part labeled PROTECTED_CURRENT_INPUT_SOURCE. That labeled source part is the authoritative full current request/data. Preserve every row, value, coordinate, label, unit, sign, formula, equation, ordering and constraint exactly. Do not substitute sampled values, regenerate missing rows, or rely on a compressed paraphrase. Use CURRENT_REQUEST and REQUEST_SEQUENCE for task intent and order; use PROTECTED_CURRENT_INPUT_SOURCE for exact data. Keep that source intact; it is counted in actual API input usage but is not duplicated inside the 3600-token system-plus-structured-card budget.
 
-For CONTINUE, continue the selected subject and do not repeat questions already answered.
+CONTINUATION / HOT-DISCUSSION PROGRESSION:
+For CONTINUE, use CONTINUATION_GUIDANCE and its selected message IDs/coverage ledger as the authoritative trail.
+Continue the selected topic from the latest relevant user or April message. Add the next reasoning step, missing section,
+requested revision, or new evidence; do not restate the completed answer or regenerate an existing artifact unless requested.
+Treat new-topic markers and explicit subject changes as a hard boundary: do not pull an unrelated hot branch into the answer.
+When the user refers to earlier topics, search the named subject/time first; use only ranked, relevant history pairs and preserve
+source IDs and exact supplied values. Related renderers must complement each other (text connects, table compares, diagram shows
+structure, graph shows numeric relations, formula shows mathematics, image shows the requested visual, code gives source).
+Do not repeat the same explanation or payload in multiple renderers, and do not omit an explicitly requested renderer.
 ACTIVE_WORK_BRANCH is present only when State Manager matched this request to a live task/interaction.
 When active, use it as the FIRST context source: apply the current task state and selected canonical
 work pairs before general topic/history ranking. Treat last_assistant_answer and recent_steps.april_text as
@@ -1729,6 +1737,37 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
 
     def build_minimal(current_budget: int, topic_budget: int, summary_budget: int, pair_limit: int) -> dict[str, Any]:
         seq = []
+        raw_guidance = data.get("CONTINUATION_GUIDANCE") if isinstance(data.get("CONTINUATION_GUIDANCE"), dict) else {}
+        guidance_min = {
+            "mode": _text(raw_guidance.get("mode"))[:40],
+            "semantic_intent": _text(raw_guidance.get("semantic_intent"))[:60],
+            "search_direction": _text(raw_guidance.get("search_direction"))[:80],
+            "topic_reference": _text(raw_guidance.get("topic_reference"))[:60],
+            "active_topic_seed": _semantic_compress(raw_guidance.get("active_topic_seed"), max(8, summary_budget // 2)),
+            "selection_method": _text(raw_guidance.get("selection_method"))[:80],
+            "search_method": _text(raw_guidance.get("search_method"))[:100],
+            "query_composition": _text(raw_guidance.get("query_composition"))[:100],
+            "selected_message_ids": [str(value)[:120] for value in (raw_guidance.get("selected_message_ids") or [])[:5]],
+            "covered_sections": [_semantic_compress(value, max(8, summary_budget // 3)) for value in (raw_guidance.get("covered_sections") or [])[:12]],
+            "selected_section": _semantic_compress(raw_guidance.get("selected_section"), max(12, summary_budget // 2)),
+            "coverage_policy": _text(raw_guidance.get("coverage_policy"))[:60],
+            "avoid_cross_topic_injection": bool(raw_guidance.get("avoid_cross_topic_injection", True)),
+            "do_not_repeat_completed_answer_or_artifact": bool(raw_guidance.get("do_not_repeat_completed_answer_or_artifact")),
+        }
+        raw_renderer_policy = data.get("SCENE_COMPLEMENTARITY_POLICY") if isinstance(data.get("SCENE_COMPLEMENTARITY_POLICY"), dict) else {}
+        renderer_policy_min = {
+            "enabled": bool(raw_renderer_policy.get("enabled", True)),
+            "renderer_outputs_must_be_complementary": True,
+            "no_duplicate_payloads_or_verbatim_explanations": True,
+            "roles": dict(raw_renderer_policy.get("roles") or {
+                "text": "connect reasoning and conclusions", "table": "organize values",
+                "diagram": "show structure", "graph": "show numeric relations",
+                "formula": "show mathematics", "image": "show requested visuals",
+                "code": "provide requested source", "links": "give real destinations",
+            }),
+            "preserve_each_explicitly_requested_renderer": True,
+            "do_not_add_unrequested_visuals_just_to_fill_a_quota": True,
+        }
         share = min(MAX_TOPIC_PROMPT_TOKENS - _scaled_prompt_tokens(24), topic_budget, max(_scaled_prompt_tokens(28), (current_budget + _scaled_prompt_tokens(300)) // max(1, len(original_sequence))))
         for idx, item in enumerate(original_sequence):
             if not isinstance(item, dict):
@@ -1737,12 +1776,31 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             if isinstance(outputs, list) and len(outputs) == 1:
                 outputs = outputs[0]
             task_search = item.get("dialogue_search") if isinstance(item.get("dialogue_search"), dict) else {}
+            raw_search_profile = task_search.get("retrieval_profile") if isinstance(task_search.get("retrieval_profile"), dict) else {}
+            search_profile_min = {
+                "mode": _text(raw_search_profile.get("mode"))[:40],
+                "primary_intent": _text(raw_search_profile.get("primary_intent") or task_search.get("semantic_intent"))[:60],
+                "direction": _text(raw_search_profile.get("direction") or task_search.get("search_direction"))[:80],
+                "topic_reference": _text(raw_search_profile.get("topic_reference"))[:60],
+                "active_topic_seed": _semantic_compress(raw_search_profile.get("active_topic_seed"), max(8, summary_budget // 2)),
+                "selection_method": _text(raw_search_profile.get("selection_method"))[:80],
+                "search_method": _text(raw_search_profile.get("search_method"))[:100],
+                "query_composition": _text(raw_search_profile.get("query_composition"))[:100],
+                "selected_message_ids": [str(value)[:120] for value in (raw_search_profile.get("selected_message_ids") or [])[:5]],
+                "prefer_active_branch": bool(raw_search_profile.get("prefer_active_branch")),
+                "prefer_named_history": bool(raw_search_profile.get("prefer_named_history")),
+                "previous_answer_reference": bool(raw_search_profile.get("previous_answer_reference") or task_search.get("previous_answer_reference")),
+                "active_branch_repair": bool(raw_search_profile.get("active_branch_repair") or task_search.get("active_branch_repair")),
+                "avoid_cross_topic_injection": bool(raw_search_profile.get("avoid_cross_topic_injection", True)),
+                "coverage_policy": _text(raw_search_profile.get("coverage_policy"))[:60],
+            }
             search_min = {
                 "status": task_search.get("status", "unavailable"),
                 "relation": task_search.get("relation", "NEW"),
                 "history_request": bool(task_search.get("history_request")),
                 "semantic_intent": task_search.get("semantic_intent", ""),
                 "search_direction": task_search.get("search_direction", ""),
+                "retrieval_profile": search_profile_min,
                 "active_branch_repair": bool(task_search.get("active_branch_repair")),
                 "active_work_branch": {
                     key: value for key, value in (task_search.get("active_work_branch") or {}).items()
@@ -1914,6 +1972,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "RETURN_LANGUAGE": data.get("RETURN_LANGUAGE") or "en",
             "INTERPRETATION": keep_intent,
             "DIALOGUE_RELATION": data.get("DIALOGUE_RELATION") or "NEW",
+            "CONTINUATION_GUIDANCE": guidance_min,
+            "SCENE_COMPLEMENTARITY_POLICY": renderer_policy_min,
             "ACTIVE_WORK_BRANCH": {
                 key: value for key, value in (data.get("ACTIVE_WORK_BRANCH") or {}).items()
                 if key in {"active", "priority", "kind", "work_id", "topic", "goal", "state_summary", "last_action", "expects_choice", "source_message_id", "origin_message_id", "match_reason", "matched_this_turn", "last_user_text", "last_assistant_answer", "recent_steps"}
@@ -1980,7 +2040,14 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 {k: item[k] for k in ("output", "renderer", "viewer", "source_rooms") if k in item}
                 for item in (data.get("C_ARTIFACT_RENDER_PLAN") or [])[:4] if isinstance(item, dict)
             ],
-            "SCENE_CONTRACT": {"required": True, "authenticated_scope_required": True, "ordered_render_blocks_required": True},
+            "SCENE_CONTRACT": {
+                "required": True,
+                "authenticated_scope_required": True,
+                "ordered_render_blocks_required": True,
+                "continuation_uses_coverage_ledger": True,
+                "renderers_are_complementary_not_redundant": True,
+                "one_clear_explanation_per_renderer": True,
+            },
             "OUTPUT_BUDGET_POLICY": {
                 "application_output_token_limit": PREMIUM_OUTPUT_TOKEN_LIMIT,
                 "response_style": "premium_detailed_visual",
@@ -2051,6 +2118,36 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         if total <= MAX_PROMPT_TOKENS:
             return system, card, total, "minimal_semantic"
 
+    def _compact_search_context(item: dict[str, Any], budget: int) -> dict[str, Any]:
+        """Keep the minimum interpretation/search signals through hard prompt compaction."""
+        ds = item.get("dialogue_search") if isinstance(item.get("dialogue_search"), dict) else {}
+        raw_profile = ds.get("retrieval_profile") if isinstance(ds.get("retrieval_profile"), dict) else {}
+        seed = raw_profile.get("active_topic_seed") or raw_profile.get("topic_reference") or ds.get("topic") or ""
+        profile = {
+            "mode": _text(raw_profile.get("mode"))[:28],
+            "primary_intent": _text(raw_profile.get("primary_intent"))[:32],
+            "direction": _text(raw_profile.get("direction"))[:28],
+            "topic_reference": _semantic_compress(raw_profile.get("topic_reference") or ds.get("topic") or "", max(4, budget)),
+            "active_topic_seed": _semantic_compress(seed, max(4, budget)),
+            "selected_message_ids": [str(x)[:72] for x in (raw_profile.get("selected_message_ids") or [])[:2]],
+            "prefer_active_branch": bool(raw_profile.get("prefer_active_branch", ds.get("active_branch_repair", False))),
+            "previous_answer_reference": bool(raw_profile.get("previous_answer_reference", ds.get("previous_answer_reference", False))),
+            "explicit_topic_switch": bool(raw_profile.get("explicit_topic_switch", ds.get("explicit_topic_switch", False))),
+            "avoid_cross_topic_injection": bool(raw_profile.get("avoid_cross_topic_injection", True)),
+            "coverage_policy": _text(raw_profile.get("coverage_policy"))[:36],
+            "search_method": _text(raw_profile.get("search_method"))[:36],
+        }
+        result = {
+            "relation": _text(ds.get("relation") or "NEW")[:12],
+            "topic": _semantic_compress(ds.get("topic") or "", max(4, budget)),
+            "clarification_needed": bool(ds.get("clarification_needed", False)),
+            "retrieval_profile": profile,
+        }
+        for key in ("active_branch_repair", "previous_answer_reference", "factual_verification_request", "explicit_topic_switch"):
+            if key in ds:
+                result[key] = bool(ds.get(key))
+        return result
+
     # Last-resort hard budget: keep every step and every attachment identity,
     # progressively lowering text per topic instead of dropping topics.
     for tiny_topic_budget in tuple(_scaled_prompt_tokens(n) for n in (24, 18, 14, 10, 8, 6, 4, 3, 2, 1)):
@@ -2066,10 +2163,20 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     outputs = ",".join(str(x) for x in outputs)
                 request_text = _semantic_compress(item.get("request"), tiny_topic_budget).replace("\n", " ").replace("|", "/")
                 step_index = item.get("step_index", idx + 1)
+                compact_search = _compact_search_context(item, tiny_topic_budget)
+                compact_profile = compact_search.get("retrieval_profile") or {}
+                seed_hint = _text(compact_profile.get("active_topic_seed") or compact_profile.get("topic_reference") or "").replace("|", "/").replace("\n", " ")[:16]
+                intent_hint = _text(compact_profile.get("primary_intent") or "").replace("|", "/")[:8]
+                mode_hint = _text(compact_profile.get("mode") or "")[:6]
+                ids_hint = ",".join(str(x)[:6] for x in (compact_profile.get("selected_message_ids") or [])[:2])[:14]
+                coverage_hint = _text(compact_profile.get("coverage_policy") or "")[:10]
+                relation_hint = _text(compact_search.get("relation") or "NEW")[:4]
+                flags_hint = ("A" if compact_profile.get("prefer_active_branch") else "") + ("P" if compact_profile.get("previous_answer_reference") else "") + ("X" if compact_profile.get("avoid_cross_topic_injection", True) else "")
+                cue = f"|ctx={relation_hint},{mode_hint},{intent_hint},{seed_hint},{ids_hint},{coverage_hint},{flags_hint}" if (relation_hint != "NEW" or mode_hint or intent_hint or seed_hint) else ""
                 if outputs.strip().lower() == "text":
-                    compact_lines.append(f"{step_index}|{request_text}")
+                    compact_lines.append(f"{step_index}|{request_text}{cue}")
                 else:
-                    compact_lines.append(f"{step_index}|{outputs}|{request_text}")
+                    compact_lines.append(f"{step_index}|{outputs}|{request_text}{cue}")
             minimal["REQUEST_SEQUENCE"] = "\n".join(compact_lines)
         else:
             minimal["REQUEST_SEQUENCE"] = [
@@ -2079,15 +2186,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     "o": (item.get("output_types") or ["text"])[0] if isinstance(item.get("output_types") or ["text"], list) and len(item.get("output_types") or ["text"]) == 1 else (item.get("output_types") or ["text"]),
                     "r": ((item.get("dialogue_search") or {}).get("relation", "NEW") if isinstance(item.get("dialogue_search"), dict) else "NEW"),
                     "p": bool(item.get("inherits_current_request_subject")),
-                    "c": {
-                        "relation": ((item.get("dialogue_search") or {}).get("relation", "NEW") if isinstance(item.get("dialogue_search"), dict) else "NEW"),
-                        "active_branch_repair": bool(((item.get("dialogue_search") or {}).get("active_branch_repair", False) if isinstance(item.get("dialogue_search"), dict) else False)),
-                        "previous_answer_reference": bool(((item.get("dialogue_search") or {}).get("previous_answer_reference", False) if isinstance(item.get("dialogue_search"), dict) else False)),
-                        "factual_verification_request": bool(((item.get("dialogue_search") or {}).get("factual_verification_request", False) if isinstance(item.get("dialogue_search"), dict) else False)),
-                        "explicit_topic_switch": bool(((item.get("dialogue_search") or {}).get("explicit_topic_switch", False) if isinstance(item.get("dialogue_search"), dict) else False)),
-                        "topic": _semantic_compress(((item.get("dialogue_search") or {}).get("topic", "") if isinstance(item.get("dialogue_search"), dict) else ""), max(_scaled_prompt_tokens(4), tiny_topic_budget)),
-                        "clarification_needed": bool(((item.get("dialogue_search") or {}).get("clarification_needed", False) if isinstance(item.get("dialogue_search"), dict) else False)),
-                    },
+                    "c": _compact_search_context(item, tiny_topic_budget),
                 }
                 for idx, item in enumerate(original_sequence) if isinstance(item, dict)
             ]
@@ -2702,6 +2801,56 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
     mcdowell_policy = dict(mcdowell) if isinstance(mcdowell, dict) else {}
     mcdowell_policy.update({"always": True, "required": True, "role": "presentation_and_render_layout"})
 
+    raw_retrieval_profile = memory.get("retrieval_profile") if isinstance(memory.get("retrieval_profile"), dict) else {}
+    use_history_coverage = relation == "CONTINUE" or history_request or bool(memory.get("contextual_history_match"))
+    covered_sections = []
+    coverage_pairs = selected_pairs if use_history_coverage and isinstance(selected_pairs, list) else []
+    for _pair in coverage_pairs[:5]:
+        if not isinstance(_pair, dict):
+            continue
+        for _section_item in (_pair.get("sections") or [])[:8]:
+            if not isinstance(_section_item, dict):
+                continue
+            _heading = _clip(_section_item.get("heading") or _section_item.get("h"), 100)
+            if _heading and _heading.casefold() not in {x.casefold() for x in covered_sections}:
+                covered_sections.append(_heading)
+    selected_heading = _clip(selected_section.get("heading"), 100) if isinstance(selected_section, dict) else ""
+    if selected_heading and use_history_coverage and selected_heading.casefold() not in {x.casefold() for x in covered_sections}:
+        covered_sections.insert(0, selected_heading)
+    continuation_guidance = {
+        "mode": "HISTORY_LOOKUP" if history_request else ("CONTINUE_ACTIVE_THREAD" if relation == "CONTINUE" else "NEW_TOPIC"),
+        "semantic_intent": _clip(raw_retrieval_profile.get("primary_intent") or structured_intent.get("primary_intent") or "", 60),
+        "search_direction": _clip(raw_retrieval_profile.get("direction") or "", 80),
+        "topic_reference": _clip(raw_retrieval_profile.get("topic_reference") or "", 60),
+        "active_topic_seed": _clip(raw_retrieval_profile.get("active_topic_seed") or memory.get("active_topic") or continuation.get("active_topic") or selected_section.get("topic"), 240),
+        "selection_method": _clip(raw_retrieval_profile.get("selection_method") or memory.get("history_selection_method") or "", 100),
+        "search_method": _clip(raw_retrieval_profile.get("search_method") or "", 100),
+        "query_composition": _clip(raw_retrieval_profile.get("query_composition") or "", 100),
+        "selected_message_ids": [str(x)[:120] for x in (raw_retrieval_profile.get("selected_message_ids") or [])[:5]],
+        "covered_sections": covered_sections[:12],
+        "selected_section": selected_heading,
+        "coverage_policy": "recall_requested_history" if history_request else ("continue_uncovered_sections" if relation == "CONTINUE" else "answer_new_request"),
+        "avoid_cross_topic_injection": True,
+        "do_not_repeat_completed_answer_or_artifact": relation == "CONTINUE" and not history_request,
+    }
+    scene_complementarity_policy = {
+        "enabled": True,
+        "renderer_outputs_must_be_complementary": True,
+        "no_duplicate_payloads_or_verbatim_explanations": True,
+        "roles": {
+            "text": "connect the answer, assumptions, new steps, and overall conclusion",
+            "table": "compare or organize exact structured values",
+            "diagram": "show structure, flow, or relationships",
+            "graph": "show grounded numeric relationships or trends",
+            "formula": "show exact math notation and variables",
+            "image": "show the requested visual scene or illustration",
+            "code": "provide the complete requested source or implementation",
+            "links": "provide real destinations with a brief explanation of relevance",
+        },
+        "preserve_each_explicitly_requested_renderer": True,
+        "do_not_add_unrequested_visuals_just_to_fill_a_quota": True,
+    }
+
     structured = {
         "AUTHENTICATED_IDENTITY": {key: _clip(value, 180) for key, value in identity.items() if value},
         "CURRENT_REQUEST": current,
@@ -2724,6 +2873,8 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "explicit_generation_request": bool(structured_intent.get("explicit_generation_request")),
         },
         "DIALOGUE_RELATION": relation,
+        "CONTINUATION_GUIDANCE": continuation_guidance,
+        "SCENE_COMPLEMENTARITY_POLICY": scene_complementarity_policy,
         "ACTIVE_WORK_BRANCH": active_work_branch,
         "DIALOGUE_COMMUNICATION": dialogue_communication,
         "HISTORY_REQUEST": history_request,
@@ -2817,7 +2968,14 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "katex": {"required_for_math": True, "latex_delimiters": ["\\(...\\)", "\\[...\\]"], "inline_math_in_prose_required": True, "never_emit_unwrapped_latex": True, "renderer": "FormulaRenderer+MarkdownBlock"},
             **presentation_contract,
         },
-        "SCENE_CONTRACT": {"required": True, "authenticated_scope_required": True, "ordered_render_blocks_required": True},
+        "SCENE_CONTRACT": {
+            "required": True,
+            "authenticated_scope_required": True,
+            "ordered_render_blocks_required": True,
+            "continuation_uses_coverage_ledger": True,
+            "renderers_are_complementary_not_redundant": True,
+            "one_clear_explanation_per_renderer": True,
+        },
         "OUTPUT_BUDGET_POLICY": {
             "application_output_token_limit": PREMIUM_OUTPUT_TOKEN_LIMIT,
             "response_style": "premium_detailed_visual",
