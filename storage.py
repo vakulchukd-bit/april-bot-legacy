@@ -101,6 +101,8 @@ def _drop_unwanted_columns(cur, table: str) -> None:
 
 _CLEANUP_LOCK = threading.RLock()
 _CLEANUP_WORKER_STARTED = False
+_DB_INIT_LOCK = threading.RLock()
+_DB_INITIALIZED = False
 
 
 def get_conn():
@@ -230,7 +232,8 @@ def _schema_cleanup(cur) -> None:
     cur.execute("DROP TABLE IF EXISTS dialogue_assets")
 
 
-def init_db() -> None:
+def _init_db_impl() -> None:
+    """Run the full schema bootstrap and one-time migrations."""
     conn = get_conn()
     if not conn:
         return
@@ -644,6 +647,26 @@ def init_db() -> None:
     # Existing installations may predate the authenticated April ID columns.
     backfill_april_ids()
     _start_cleanup_worker()
+
+
+def init_db() -> None:
+    """Initialize schema once per process, never on every chat turn.
+
+    The implementation contains schema migrations, cleanup and ID backfills.
+    Running it on every message caused repeated PostgreSQL DDL and metadata
+    queries on the critical chat path. The startup call still performs the full
+    initialization; if it fails, the flag is not set and a later call can retry.
+    """
+    global _DB_INITIALIZED
+    if not os.getenv("DATABASE_URL"):
+        return
+    if _DB_INITIALIZED:
+        return
+    with _DB_INIT_LOCK:
+        if _DB_INITIALIZED:
+            return
+        _init_db_impl()
+        _DB_INITIALIZED = True
 
 
 def _start_cleanup_worker() -> None:
