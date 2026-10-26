@@ -80,6 +80,7 @@ from blocks.text_module import package_provider_response
 from storage import (
     init_db,
     is_authenticated_user,
+    load_dialogue_asset_payloads,
     save_dialogue_pair,
 )
 
@@ -531,6 +532,45 @@ def _build_image_spec(
                 return candidate.strip()
         return ""
 
+    def _continuation_visual_prompt() -> str:
+        """Build a visual brief from the selected prior answer, not unrelated history."""
+        dialogue = interpretation.get("dialogue") if isinstance(interpretation.get("dialogue"), dict) else {}
+        if _text(dialogue.get("relation")).upper() != "CONTINUE":
+            return ""
+        intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+        semantic_intent = _text(intent.get("semantic_intent")).upper()
+        search_direction = _text(intent.get("search_direction")).upper()
+        contextual = semantic_intent in {"TOPIC_CONTINUATION", "ANSWER_FOLLOWUP", "REFERENTIAL_CONTINUATION"} or search_direction in {"RESUME_OR_RETRIEVE_ACTIVE_TOPIC", "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"}
+        if not contextual:
+            return ""
+        continuation = dialogue.get("continuation_context") if isinstance(dialogue.get("continuation_context"), dict) else {}
+        candidates: list[dict[str, Any]] = []
+        anchor = continuation.get("anchor") if isinstance(continuation.get("anchor"), dict) else {}
+        if anchor:
+            candidates.append(anchor)
+        selected = continuation.get("selected_pairs") if isinstance(continuation.get("selected_pairs"), list) else []
+        candidates.extend(item for item in reversed(selected) if isinstance(item, dict))
+        description = ""
+        for item in candidates:
+            for key in ("april", "april_text", "assistant", "answer", "april_text_en", "summary"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    description = value.strip()[:1800]
+                    break
+            if description:
+                break
+        if not description:
+            section = continuation.get("selected_section") if isinstance(continuation.get("selected_section"), dict) else {}
+            description = _text(section.get("summary") or section.get("topic"))[:900]
+        if not description or description.casefold() == request_text.casefold():
+            return ""
+        return (
+            "Create an illustration that directly visualizes the relevant prior description. "
+            "Preserve its key subjects, setting, and relationships; do not introduce unrelated themes.\n"
+            f"Prior assistant description:\n{description}\n"
+            f"Current user request:\n{request_text}"
+        )[:3000]
+
     def _canonicalize(candidate: Any, *, raw_plan: Any = None) -> dict[str, Any] | None:
         if not isinstance(candidate, dict):
             return None
@@ -546,6 +586,10 @@ def _build_image_spec(
         semantic = _first_prompt(clean)
         if not semantic:
             semantic = _first_prompt(clean.get("payload")) if isinstance(clean.get("payload"), dict) else ""
+        continuation_visual_prompt = _continuation_visual_prompt()
+        if continuation_visual_prompt and semantic.strip().casefold() == request_text.casefold():
+            semantic = continuation_visual_prompt
+            clean["prompt"] = continuation_visual_prompt
         final_portrait_prompt = _final_portrait_prompt(request_text, interpretation)
         if final_portrait_prompt:
             semantic = final_portrait_prompt
@@ -636,12 +680,16 @@ def _build_image_spec(
             "openai_structured_visual_plan_semantic": direct_prompt,
         }, raw_plan=raw)
 
-    # Safe fallback: the explicit user request remains the semantic authority.
+    # Safe fallback: keep the exact request as anchor, and enrich only a confirmed
+    # semantic continuation using its selected prior answer. No topic keywords or
+    # global history search are used to manufacture visual context.
     if not request_text:
         return None
+    contextual_prompt = _continuation_visual_prompt()
+    fallback_prompt = contextual_prompt or request_text
     return _canonicalize({
-        "prompt": request_text,
-        "openai_structured_visual_plan_semantic": request_text,
+        "prompt": fallback_prompt,
+        "openai_structured_visual_plan_semantic": fallback_prompt,
     }, raw_plan=raw)
 
 
@@ -733,6 +781,7 @@ def _decode_saved_text(raw: bytes) -> str:
 
 
 def _explicit_prior_asset_reference(value: Any) -> bool:
+    """Return true only for wording that points to an earlier user/assistant asset."""
     low = _text(value).lower().replace("ё", "е")
     markers = (
         "предыдущее фото", "предыдущую картинку", "предыдущем фото", "прошлое фото",
@@ -746,17 +795,35 @@ def _explicit_prior_asset_reference(value: Any) -> bool:
     return any(marker.replace("ё", "е") in low for marker in markers)
 
 
+def _image_analysis_reference(value: Any) -> bool:
+    """Detect a request to inspect an image when no new image was attached.
+
+    Kept separate from explicit prior-asset references so a user uploading a new
+    image and asking what it shows will not accidentally receive an older image.
+    """
+    low = _text(value).lower().replace("ё", "е")
+    markers = (
+        "что на картинке", "что на этой картинке", "что изображено",
+        "расскажи что на картинке", "опиши картинку", "опиши эту картинку",
+        "что на изображении", "что показывает картинка", "что на фото",
+        "на основе этой картинки", "по этой картинке", "возьми эту картинку",
+        "what is in the image", "what's in the image", "describe the image",
+        "describe this image", "what does this picture show", "what is shown in the picture",
+        "based on this image", "use this image", "edit this image",
+    )
+    return any(marker.replace("ё", "е") in low for marker in markers)
+
+
 def _requires_original_asset(value: Any, kind: str, cached_summary: str) -> bool:
     """Decide whether a follow-up needs original bytes rather than its sidecar.
 
     A cached summary is the default continuity representation. Original bytes are
-    reattached only when the user explicitly references an earlier asset or asks
-    for exact extraction/verification/editing that a summary cannot safely supply.
-    This gate does not decide whether to generate an image; Interpretation owns
-    that decision independently.
+    reattached only when the user explicitly references an earlier asset, asks to
+    inspect an image, or requests exact extraction/verification/editing that a
+    summary cannot safely supply. Interpretation independently decides generation.
     """
     text = _text(value).lower().replace("ё", "е")
-    if not cached_summary or _explicit_prior_asset_reference(text):
+    if not cached_summary or _explicit_prior_asset_reference(text) or _image_analysis_reference(text):
         return True
 
     exact_read_markers = (
@@ -944,29 +1011,90 @@ def _restore_selected_assets(
     when precise inspection, editing, comparison, or an uncached first analysis is
     required.
     """
+    import base64
+
     has_current_asset = bool(visual_context or file_inputs or file_contents)
     if has_current_asset and not _explicit_prior_asset_reference(current_request):
         return visual_context, attachments, file_inputs, file_contents, []
     if _text(dialogue_context.get("relation")).upper() != "CONTINUE":
         return visual_context, attachments, file_inputs, file_contents, []
+    # Binary recovery is intentionally demand-driven. Ordinary textual follow-ups
+    # use the selected dialogue text and must not fetch/decode an old PNG.
+    explicit_prior_reference = _explicit_prior_asset_reference(current_request)
+    if not explicit_prior_reference and (has_current_asset or not _image_analysis_reference(current_request)):
+        return visual_context, attachments, file_inputs, file_contents, []
 
     selected = dialogue_context.get("selected_pairs") or []
     anchor = dialogue_context.get("anchor") or {}
-    message_ids: list[str] = []
+    candidate_message_ids: list[str] = []
     if isinstance(anchor, dict) and _text(anchor.get("message_id")):
-        message_ids.append(_text(anchor.get("message_id")))
+        candidate_message_ids.append(_text(anchor.get("message_id")))
     for item in selected:
         if isinstance(item, dict) and _text(item.get("message_id")):
-            message_ids.append(_text(item.get("message_id")))
-    # Restore the selected semantic anchor first and alone.  Only if that turn
-    # had no saved asset, fall back through ranked dialogue pairs one at a time.
-    # This prevents a later unrelated file from being sent alongside a cat photo.
-    message_ids = list(dict.fromkeys(message_ids))[:8]
-    # Canonical dialogue memory contains searchable text/metadata, not binary
-    # sidecars. Historical raw bytes are therefore not rehydrated from a second table.
-    rows = []
+            candidate_message_ids.append(_text(item.get("message_id")))
+    candidate_message_ids = list(dict.fromkeys(candidate_message_ids))[:8]
+
+    def _load_one_selected_image(message_id: str) -> list[dict[str, Any]]:
+        """Read at most one image from one selected turn, never blend topic assets."""
+        try:
+            database_rows = load_dialogue_asset_payloads(uid, [message_id])
+        except Exception:
+            database_rows = []
+        for database_row in database_rows:
+            payloads = database_row.get("asset_payloads") if isinstance(database_row, dict) else []
+            if isinstance(payloads, str):
+                try:
+                    payloads = json.loads(payloads)
+                except (TypeError, ValueError):
+                    payloads = []
+            if not isinstance(payloads, list):
+                continue
+            for payload in payloads[:8]:
+                if not isinstance(payload, dict) or _text(payload.get("kind")).lower() != "image":
+                    continue
+                encoded = _text(payload.get("content_base64"))
+                if not encoded or len(encoded) > 12 * 1024 * 1024:
+                    continue
+                try:
+                    content = base64.b64decode(encoded, validate=True)
+                except Exception:
+                    continue
+                if not content or len(content) > 8 * 1024 * 1024:
+                    continue
+                expected_hash = _text(payload.get("sha256"))
+                if expected_hash and hashlib.sha256(content).hexdigest() != expected_hash:
+                    continue
+                stored_message_id = _text(payload.get("message_id") or database_row.get("message_id"))
+                if stored_message_id != message_id:
+                    continue
+                return [{
+                    "message_id": stored_message_id,
+                    "filename": _text(payload.get("filename") or "april-generated-image.png"),
+                    "kind": "image",
+                    "mime_type": _text(payload.get("mime_type") or "image/png"),
+                    "content": content,
+                    "size_bytes": len(content),
+                    "asset_role": _text(payload.get("asset_role") or "april_output"),
+                    "metadata": {
+                        "source_type": _text(payload.get("source_type") or "april_generated"),
+                        "asset_role": _text(payload.get("asset_role") or "april_output"),
+                        "output_type": _text(payload.get("output_type") or "image"),
+                        "analysis_summary": _text(payload.get("analysis_summary") or payload.get("prompt"))[:1200],
+                        "prompt": _text(payload.get("prompt"))[:1200],
+                        "width": int(payload.get("width") or 0),
+                        "height": int(payload.get("height") or 0),
+                    },
+                }]
+        return []
+
+    # Anchor first. If it has no valid image, inspect selected ranked pairs one by
+    # one and stop at the first match. Never combine images from multiple turns.
+    rows: list[dict[str, Any]] = []
+    for candidate_message_id in candidate_message_ids:
+        rows = _load_one_selected_image(candidate_message_id)
+        if rows:
+            break
     restored_meta: list[dict[str, Any]] = []
-    import base64
     for asset in rows:
         raw = bytes(asset.get("content") or b"")
         if not raw:
@@ -999,6 +1127,32 @@ def _restore_selected_assets(
             "analysis_key_details": analysis_key_details,
             "requires_original_analysis": restore_original,
         }
+        if asset_role.lower() in {"april_output", "assistant_output", "generated"} and (kind == "image" or mime_type.startswith("image/")):
+            # An assistant-generated image is a saved output, not a fresh user upload.
+            # Keep it available for the selected continuation, but only send its bytes
+            # back to the model when the current request refers to the image.
+            metadata_item = {k: common[k] for k in ("filename", "mime_type", "kind", "asset_role", "output_type", "asset_message_id", "analysis_summary", "analysis_key_details")}
+            metadata_item["_content_data_uri"] = _mime_data_uri(raw, mime_type if mime_type.startswith("image/") else "image/png")
+            metadata_item["width"] = int(asset_metadata.get("width") or 0)
+            metadata_item["height"] = int(asset_metadata.get("height") or 0)
+            metadata_item["prompt"] = _text(asset_metadata.get("prompt"))[:1200]
+            restored_meta.append(metadata_item)
+            if restore_original:
+                visual_context.append({
+                    "type": "input_image",
+                    "image_url": metadata_item["_content_data_uri"],
+                    "filename": filename,
+                    "source_type": source_type,
+                    "mime_type": mime_type,
+                    "recalled_from_memory": True,
+                    "asset_message_id": common["asset_message_id"],
+                    "asset_role": asset_role,
+                    "output_type": common["output_type"],
+                    "analysis_summary": analysis_summary,
+                    "requires_original_analysis": True,
+                })
+            continue
+
         attachments.append(common)
         restored_meta.append({k: common[k] for k in ("filename", "mime_type", "kind", "asset_role", "output_type", "asset_message_id", "analysis_summary", "analysis_key_details")})
 
@@ -2226,6 +2380,8 @@ async def execute(
 
     output_asset_persist_started = time.perf_counter()
     generated_asset_saved = False
+    output_asset_refs: list[dict[str, Any]] = []
+    durable_asset_payloads: list[dict[str, Any]] = []
     if image_result:
         # The generator returns validated raw bytes as well as a scene artifact.
         # Persist raw bytes first; artifact fields are the compatibility fallback.
@@ -2237,14 +2393,46 @@ async def execute(
             generated_image = _image_payload_bytes(image_result.get("artifact") or image_result)
         if generated_image:
             generated_bytes, generated_mime = generated_image
-            # Keep generated image bytes in the live response/rendering path only.
-            # Persisting them to the removed dialogue_assets sidecar is disabled.
-            generated_asset_saved = False
+            # Free keeps image bytes in the existing per-turn dialogue_memory JSONB
+            # for its normal 12-hour retention window. There is no sidecar table and
+            # no global asset scan; restore reads only the selected message IDs.
+            if len(generated_bytes) <= 8 * 1024 * 1024:
+                image_hash = hashlib.sha256(generated_bytes).hexdigest()
+                image_artifact = image_result.get("artifact") if isinstance(image_result.get("artifact"), dict) else {}
+                prompt_text = _text(
+                    image_result.get("prompt")
+                    or image_result.get("openai_structured_visual_plan_semantic")
+                    or image_artifact.get("prompt")
+                    or image_artifact.get("openai_structured_visual_plan_semantic")
+                )[:1200]
+                width = int(image_result.get("width") or 0)
+                height = int(image_result.get("height") or 0)
+                if len(generated_bytes) >= 24 and generated_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+                    import struct as _struct
+                    width = width or int(_struct.unpack(">I", generated_bytes[16:20])[0])
+                    height = height or int(_struct.unpack(">I", generated_bytes[20:24])[0])
+                durable_asset_payloads.append({
+                    "kind": "image", "mime_type": generated_mime or "image/png",
+                    "asset_role": "april_output", "output_type": "image",
+                    "filename": f"april-generated-{identity['message_id'][-10:]}.png",
+                    "message_id": identity["message_id"], "size_bytes": len(generated_bytes),
+                    "sha256": image_hash, "width": width, "height": height,
+                    "prompt": prompt_text, "analysis_summary": prompt_text,
+                    "source_type": "april_generated",
+                    "content_base64": base64.b64encode(generated_bytes).decode("ascii"),
+                })
+                output_asset_refs.append({
+                    "filename": f"april-generated-{identity['message_id'][-10:]}.png",
+                    "kind": "image", "mime_type": generated_mime or "image/png",
+                    "asset_role": "april_output", "output_type": "image",
+                    "message_id": identity["message_id"], "size_bytes": len(generated_bytes),
+                    "sha256": image_hash, "width": width, "height": height,
+                })
+                generated_asset_saved = True
 
     # Save code/file output as a separately versioned asset paired to this turn.
     # A visible CodeBlock remains in SceneContract; this binary/text asset lets
     # later CONTINUE requests retrieve the exact source rather than its summary.
-    output_asset_refs: list[dict[str, Any]] = []
     requested_outputs = set(str(x).lower() for x in (interpretation.get("intent") or {}).get("requested_outputs", []))
     should_persist_code = bool((interpretation.get("intent") or {}).get("wants_code") or (interpretation.get("intent") or {}).get("wants_file"))
     if should_persist_code:
@@ -2361,7 +2549,7 @@ async def execute(
         "generated_asset_saved": generated_asset_saved,
         "asset_refs": {
             "source_inputs": attachment_refs,
-            "april_outputs": output_asset_refs + ([{"filename": f"april-generated-{identity['message_id']}.png", "kind": "image", "asset_role": "april_output", "output_type": "image", "message_id": identity["message_id"]}] if generated_asset_saved else []),
+            "april_outputs": output_asset_refs,
         },
         "dialogue_memory_record": (response.metadata or {}).get("dialogue_memory_record", {}),
     })
@@ -2384,12 +2572,13 @@ async def execute(
         interpretation_id=identity["interpretation_id"],
         structured_request=structured_request,
         structured_response=structured_response,
+        asset_payloads=durable_asset_payloads,
     )
     pair_save_ms = round((time.perf_counter() - pair_save_started) * 1000, 1)
     _apr_timing_log("dialogue_pair_persist", saved=bool(saved), elapsed_ms=pair_save_ms,
         answer_chars=len(answer), structured_request_fields=len(structured_request),
         structured_response_fields=len(structured_response), render_blocks=len(response.render_blocks or []),
-        artifacts=len(response.artifacts or []))
+        artifacts=len(response.artifacts or []), durable_asset_payloads=len(durable_asset_payloads))
 
     result.update(
         {
