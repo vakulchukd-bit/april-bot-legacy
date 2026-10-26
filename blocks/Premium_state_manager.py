@@ -4230,8 +4230,10 @@ def _explicit_artifact_followup_kind(query: str) -> str:
         re.search(r"(?:пришл\w*|выдай\w*|вывед\w*|покаж\w*|дай\w*|send\w*|show\w*|display\w*)", low, re.IGNORECASE)
         and re.search(r"(?:промежуточ\w*|по\s+дням|по\s+датам|точк\w*|значени\w*|данн\w*|intermediate|daily|dated\s+points)", low, re.IGNORECASE)
     )
+    # Possessives describe the entity; they are not proof that the user wants an
+    # old artifact. “Show a picture of him / his discoveries” is a new deliverable.
     explicit_saved_reference = bool(re.search(
-        r"(?:\bэтот\b|\bэта\b|\bэту\b|\bэтой\b|\bэти\b|\bего\b|\bее\b|\bеё\b|"
+        r"(?:\bэтот\b|\bэта\b|\bэту\b|\bэтой\b|\bэти\b|"
         r"\bснова\b|еще\s+раз|ещё\s+раз|предыдущ\w*|последн\w*|из\s+истори\w*|"
         r"\bthis\b|\bthat\b|\bsame\b|\bprevious\b|\bearlier\b|\bagain\b)",
         low, re.IGNORECASE,
@@ -4294,11 +4296,26 @@ def search_dialogue_context(
     reference_followup = _looks_like_referential_followup(query)
     query_interpretation = dict(query_interpretation or {})
     history_request = bool(query_interpretation.get("history_request")) or _is_history_request(query)
-    new_topic_request = _looks_like_new_topic(query) or bool(query_interpretation.get("explicit_topic_switch"))
+    # In normal Premium routing the interpretation result is authoritative.
+    # The lexical helper remains only as compatibility fallback for direct legacy callers.
+    new_topic_request = (
+        bool(query_interpretation.get("explicit_topic_switch"))
+        if "explicit_topic_switch" in query_interpretation
+        else _looks_like_new_topic(query)
+    )
+    interpreted_topic_closure = (
+        bool(query_interpretation.get("explicit_topic_closure"))
+        if "explicit_topic_closure" in query_interpretation
+        else _is_explicit_topic_closure(query)
+    )
     interpreted_direction = _text(query_interpretation.get("direction"))
     interpreted_intent = _text(query_interpretation.get("primary_intent"))
     topic_reference_fragment = _text(query_interpretation.get("topic_reference")) == "TOPIC_FRAGMENT"
-    explicit_artifact_kind = _explicit_artifact_followup_kind(query)
+    explicit_artifact_kind = (
+        _text(query_interpretation.get("saved_artifact_followup_kind"))
+        if "saved_artifact_followup_kind" in query_interpretation
+        else _explicit_artifact_followup_kind(query)
+    )
     explicit_artifact_followup = bool(explicit_artifact_kind and not history_request and not new_topic_request)
     context_signature = _query_context_signature(query, query_interpretation)
     pragmatic_features = query_interpretation.get("pragmatic_features") if isinstance(query_interpretation.get("pragmatic_features"), dict) else {}
@@ -5042,7 +5059,7 @@ def search_dialogue_context(
         and not history_request
         and not new_topic_request
         and not new_work_root_request
-        and not _is_explicit_topic_closure(query)
+        and not interpreted_topic_closure
         and not selection_followup_confirmed
         and not repair_active_branch
         and (
@@ -5257,7 +5274,7 @@ def search_dialogue_context(
     # An explicit closure in a newer USER turn supersedes the saved active-work
     # marker. A later explicit request naming that task may reopen it; vague
     # follow-ups may not silently revive it.
-    current_topic_closure = _is_explicit_topic_closure(query)
+    current_topic_closure = interpreted_topic_closure
     closed_branch_barrier = False
     explicit_closed_branch_reopen = False
     if active_work_pair and active_work_branch and active_work_row_index > 0:
@@ -6854,6 +6871,251 @@ def search_dialogue_context(
                 has_exact_structured_data=bool((artifact_source_candidate or {}).get("protected_structured_data")),
             )
 
+    # -------------------------------------------------------------------------
+    # Canonical route arbitration (the same policy emitted by Interpretation).
+    # 1) An ambiguous/context-dependent turn uses the latest source in this exact
+    #    authenticated dialogue. 2) A distinct named subject may retrieve an older
+    #    row only through semantic subject overlap. 3) No match means NEW topic.
+    # A persisted active-work marker is never enough to resurrect an old branch.
+    # -------------------------------------------------------------------------
+    routing_policy = query_interpretation.get("routing_policy") if isinstance(query_interpretation.get("routing_policy"), dict) else {}
+    route_policy_version = _text(routing_policy.get("version"))
+    route_features = query_interpretation.get("features") if isinstance(query_interpretation.get("features"), dict) else {}
+    route_pragmatic = query_interpretation.get("pragmatic_features") if isinstance(query_interpretation.get("pragmatic_features"), dict) else {}
+    route_is_repair = bool(
+        is_correction
+        or query_interpretation.get("active_branch_repair")
+        or query_interpretation.get("previous_answer_reference")
+        or route_features.get("active_branch_repair")
+        or route_pragmatic.get("active_branch_repair")
+    )
+    route_is_contextual = bool(
+        route_is_repair
+        or route_features.get("context_dependent_question")
+        or route_features.get("context_dependent_reaction")
+        or route_features.get("continuation_action")
+        or route_features.get("answer_followup")
+        or route_features.get("topic_reference_fragment")
+        or query_interpretation.get("requires_memory")
+        or interpreted_intent in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP"}
+        or reference_followup
+    )
+    route_has_independent_payload = bool(
+        route_pragmatic.get("has_independent_payload")
+        or query_interpretation.get("explicit_topic_introduction")
+        or new_work_root_request
+        or query_modalities
+    )
+    route_blocked = bool(
+        history_request
+        or time_filter.get("applied")
+        or resume_key
+        or explicit_artifact_followup
+        or interpreted_topic_closure
+    )
+    current_dialog_rows = [
+        row for row in scoped_rows
+        if isinstance(row, dict)
+        and not _row_is_pending_clarification(row)
+        and not _is_failed_provider_row(row)
+        and (
+            (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
+            or (not _text(row.get("dialog_id")) and _text(conversation_id) and _text(row.get("conversation_id")) == _text(conversation_id))
+        )
+    ]
+    latest_route_row = max(
+        current_dialog_rows,
+        key=lambda row: (float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)),
+        default=None,
+    )
+    latest_route_subjects = _row_subject_tokens(latest_route_row) if latest_route_row else set()
+    # If the user refers to the current subject by pronoun/deixis and does not
+    # introduce another subject, nouns naming the requested output or an attribute
+    # ("picture", "discoveries", "law") are not independent topic names. Keep those
+    # terms for answer generation, but do not use them to jump to an old branch.
+    route_query_subjects = set(query_subjects)
+    route_reference_terms = context_signature.get("reference_terms") if isinstance(context_signature.get("reference_terms"), list) else []
+    if route_reference_terms and not query_interpretation.get("explicit_topic_introduction") and not query_interpretation.get("explicit_topic_switch"):
+        route_query_subjects = set()
+    route_subject_overlap = _subject_overlap(route_query_subjects, latest_route_subjects) if route_query_subjects and latest_route_subjects else 0.0
+    route_subject_conflict = _subject_conflicts(route_query_subjects, latest_route_subjects)
+    # An anaphoric question/repair may ask about an attribute whose noun differs
+    # from the topic entity ("Which law was he the author of?"). A new, explicitly
+    # introduced subject is not attached to the active branch.
+    contextual_antecedent = bool(
+        route_is_contextual
+        and not query_interpretation.get("explicit_topic_introduction")
+        and not query_interpretation.get("explicit_topic_switch")
+        and (
+            not query_subjects
+            or not route_subject_conflict
+            or bool(route_features.get("context_dependent_question"))
+        )
+        and not (is_correction and bool(positive_replacement))
+    )
+    underspecified_turn = bool(
+        not route_query_subjects
+        and not self_contained_new_information
+        and not route_has_independent_payload
+    )
+    prefer_hot_branch = bool(
+        not route_blocked
+        and latest_route_row
+        and not new_work_root_request
+        and not query_modalities
+        and not query_interpretation.get("explicit_topic_switch")
+        and (
+            underspecified_turn
+            or (contextual_antecedent and (not route_subject_conflict or route_is_repair or route_features.get("context_dependent_question")))
+            or (route_is_contextual and route_subject_overlap >= 0.20 and not route_subject_conflict)
+        )
+    )
+    route_decision = "UNCHANGED"
+    if prefer_hot_branch:
+        latest_candidate = _candidate_score(
+            query, latest_route_row,
+            dialog_id=str(dialog_id or ""),
+            conversation_id=str(conversation_id or ""),
+            reference_followup=True,
+            query_modalities=query_modalities,
+            structured_evidence_required=needs_structured_search,
+        )
+        selected_for_context = [_compact_pair(latest_candidate)]
+        anchor = latest_candidate
+        active_topic = _text(latest_route_row.get("topic")) or _topic_label(latest_route_row) or _text(latest_route_row.get("user_text") or latest_route_row.get("user"))[:140]
+        relation = "CONTINUE"
+        continuation = True
+        contextual_history_match = False
+        history_selection_method = "latest_same_dialog_active_branch"
+        # Detach stale structured work from another topic. It remains in memory,
+        # but no longer controls this turn or its saved-asset restoration.
+        if active_work_branch:
+            active_origin = _text(active_work_branch.get("origin_message_id"))
+            latest_origin = _text(latest_route_row.get("topic_origin_message_id") or latest_route_row.get("message_id"))
+            if active_origin and latest_origin and active_origin != latest_origin:
+                active_work_branch = {}
+                active_work_pair = None
+                active_work_row_index = -1
+                active_work_has_marker = False
+                hot_work_followup = False
+                hot_work_match_reason = "detached_stale_work_branch_latest_topic_wins"
+        route_decision = "ACTIVE_BRANCH_FIRST"
+    elif (
+        not route_blocked
+        and latest_route_row
+        and route_query_subjects
+        and route_subject_conflict
+        and not contextual_antecedent
+        and not query_modalities
+    ):
+        # Distinct named subject: find an older source by subject overlap, never by
+        # recency alone. The answer is a new operation, with only the matched source
+        # available for grounding. If no match reaches the semantic threshold, do
+        # not pass any old pair to the model.
+        named_history_candidates = []
+        for historical_row in scoped_rows:
+            if not isinstance(historical_row, dict) or _row_is_pending_clarification(historical_row):
+                continue
+            if _text(historical_row.get("message_id")) == _text(latest_route_row.get("message_id")):
+                continue
+            row_subjects = _row_subject_tokens(historical_row)
+            subject_score = _subject_overlap(route_query_subjects, row_subjects) if row_subjects else 0.0
+            if subject_score < 0.34:
+                continue
+            topic_text = " ".join((_row_subject_text_lightweight(historical_row), _topic_label_lightweight(historical_row)))
+            topic_score = _topic_query_overlap(query, topic_text) if topic_text.strip() else 0.0
+            historical_candidate = _candidate_score(
+                query, historical_row,
+                dialog_id=str(dialog_id or ""),
+                conversation_id=str(conversation_id or ""),
+                reference_followup=False,
+                query_modalities=query_modalities,
+                structured_evidence_required=needs_structured_search,
+            )
+            recency = float(historical_candidate.get("recency") or 0.0)
+            named_history_candidates.append((subject_score, topic_score, float(historical_candidate.get("score") or 0.0), recency, historical_candidate, historical_row))
+        if named_history_candidates:
+            named_history_candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
+            _, _, _, _, named_candidate, named_source_row = named_history_candidates[0]
+            selected_for_context = [_compact_pair(named_candidate)]
+            anchor = named_candidate
+            active_topic = _text(named_source_row.get("topic")) or _topic_label(named_source_row) or _text(named_source_row.get("user_text") or named_source_row.get("user"))[:140]
+            relation = "NEW"
+            continuation = False
+            contextual_history_match = True
+            history_selection_method = "named_subject_semantic_history_fallback"
+            active_work_branch = {}
+            active_work_pair = None
+            active_work_row_index = -1
+            active_work_has_marker = False
+            hot_work_followup = False
+            hot_work_match_reason = "named_subject_history_match"
+            route_decision = "MATCHED_HISTORY"
+        else:
+            selected_for_context = []
+            anchor = None
+            selected_section = {}
+            # A history miss must not leave the prior topic in the active-topic field.
+            active_topic = _text(query)[:140]
+            relation = "NEW"
+            continuation = False
+            contextual_history_match = False
+            active_work_branch = {}
+            active_work_pair = None
+            active_work_row_index = -1
+            active_work_has_marker = False
+            hot_work_followup = False
+            hot_work_match_reason = "named_subject_history_miss"
+            hot_branch_candidate = False
+            semantic_active_branch_intent = False
+            active_subject_conflict = True
+            semantic_subject_switch = True
+            decision_subject_switch = True
+            unrelated_active_work_topic = True
+            route_decision = "NEW_TOPIC"
+    elif (
+        not route_blocked
+        and not new_topic_request
+        and latest_route_row
+        and underspecified_turn
+        and route_policy_version == "hot_branch_then_semantic_history_v1"
+    ):
+        # A short, subjectless response belongs to the current exchange even when
+        # pragmatic labeling did not assign an explicit acknowledgement category.
+        latest_candidate = _candidate_score(
+            query, latest_route_row,
+            dialog_id=str(dialog_id or ""),
+            conversation_id=str(conversation_id or ""),
+            reference_followup=True,
+            query_modalities=query_modalities,
+            structured_evidence_required=False,
+        )
+        anchor = latest_candidate
+        selected_for_context = [_compact_pair(latest_candidate)]
+        active_topic = _text(latest_route_row.get("topic")) or _topic_label(latest_route_row) or _text(latest_route_row.get("user_text") or latest_route_row.get("user"))[:140]
+        relation = "CONTINUE"
+        continuation = True
+        contextual_history_match = False
+        history_selection_method = "underspecified_latest_same_dialog"
+        route_decision = "ACTIVE_BRANCH_FIRST"
+
+    _apr_timing_log(
+        "route_arbitration",
+        user_key=_apr_diag_ref(uid),
+        dialog_key=_apr_diag_ref(dialog_id),
+        route_policy_version=route_policy_version or "legacy_missing_policy",
+        route_decision=route_decision,
+        latest_message_key=_apr_diag_ref((latest_route_row or {}).get("message_id")),
+        query_subject_count=len(route_query_subjects),
+        latest_subject_count=len(latest_route_subjects),
+        subject_overlap=round(route_subject_overlap, 4),
+        subject_conflict=bool(route_subject_conflict),
+        contextual_antecedent=bool(contextual_antecedent),
+        underspecified_turn=bool(underspecified_turn),
+        selected_pairs=len(selected_for_context),
+        selected_message_keys=[_apr_diag_ref(item.get("message_id")) for item in selected_for_context if isinstance(item, dict)],
+    )
+
     anchor_payload = _compact_pair(anchor) if relation == "CONTINUE" and anchor else {}
     _attach_topic_provenance(anchor_payload)
     # Source retrieval is tracked independently from the dialogue relation: a new
@@ -6907,7 +7169,12 @@ def search_dialogue_context(
     semantic_retrieval_profile = query_interpretation.get("retrieval_profile") if isinstance(query_interpretation.get("retrieval_profile"), dict) else {}
     retrieval_profile = dict(semantic_retrieval_profile)
     retrieval_profile.update({
-        "mode": "HISTORY_LOOKUP" if history_request else ("ACTIVE_TOPIC_CONTINUATION" if relation == "CONTINUE" else "NEW_TOPIC"),
+        "mode": (
+            "HISTORY_LOOKUP" if history_request
+            else "NAMED_HISTORY_SOURCE" if contextual_history_match and selected_for_context
+            else "ACTIVE_TOPIC_CONTINUATION" if relation == "CONTINUE"
+            else "NEW_TOPIC"
+        ),
         "primary_intent": _text(query_interpretation.get("primary_intent") or retrieval_profile.get("primary_intent") or "NEW_INFORMATION").upper(),
         "direction": _text(query_interpretation.get("direction") or retrieval_profile.get("direction")),
         "selection_method": _text(history_selection_method or ("topic_vector" if relation == "CONTINUE" else "current_request"))[:100],
@@ -6928,6 +7195,17 @@ def search_dialogue_context(
         "conversation_id": str(conversation_id or ""),
         "query": str(query or ""),
         "context_signature": context_signature,
+        "routing_policy": routing_policy,
+        "routing_decision": route_decision,
+        "routing_evidence": {
+            "latest_message_id": _text((latest_route_row or {}).get("message_id"))[:120],
+            "query_subjects": sorted(route_query_subjects)[:12],
+            "latest_subjects": sorted(latest_route_subjects)[:12],
+            "subject_overlap": round(float(route_subject_overlap), 4),
+            "subject_conflict": bool(route_subject_conflict),
+            "contextual_antecedent": bool(contextual_antecedent),
+            "underspecified_turn": bool(underspecified_turn),
+        },
         "retrieval_profile": retrieval_profile,
         "active_subject_conflict": bool(active_subject_conflict),
         "semantic_subject_switch": bool(semantic_subject_switch),
