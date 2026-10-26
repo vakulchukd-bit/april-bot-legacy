@@ -1363,6 +1363,28 @@ def _looks_like_context_dependent_question(
     if not tokens:
         return False
     token_set = set(tokens)
+    # Requests for a missing deliverable often omit its subject because it is
+    # obvious from the immediately previous answer: “where are the formulas/examples?”,
+    # “and the table?”, “what about the graph?”. Treat the missing subject as a
+    # contextual reference when the phrasing is short and does not introduce a new
+    # topic. The State Manager still has to find a compatible source.
+    output_followup = bool(re.search(
+        r"\b(?:формул\w*|пример\w*|таблиц\w*|график\w*|диаграмм\w*|"
+        r"схем\w*|расчет\w*|расчёт\w*|доказательств\w*|вычислен\w*|"
+        r"картинк\w*|изображен\w*|код\w*|файл\w*|результат\w*|"
+        r"formula\w*|example\w*|table\w*|graph\w*|chart\w*|diagram\w*|"
+        r"calculation\w*|proof\w*|image\w*|code\w*|result\w*)\b",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    contextual_opening = bool(re.match(
+        r"^\s*(?:(?:ну|ладно|хорошо|ок(?:ей)?|тогда|так|а|и|давай)\s+)*"
+        r"(?:где|как|что|какие|какой|какая|почему|зачем|а|и)\b",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    if len(tokens) <= 10 and output_followup and contextual_opening:
+        return True
     anaphoric_terms = {
         "он", "она", "оно", "они", "его", "ее", "ему", "ей", "им", "их",
         "нее", "него", "ней", "ним", "них", "это", "этот", "эта", "эту",
@@ -1406,14 +1428,17 @@ def _looks_like_topic_reference_fragment(
     low, tokens = _semantic_normalize(text)
     if not low or len(tokens) > 10 or explicit_topic_introduction:
         return False
+    if re.fullmatch(r"(?:привет|здравствуй\w*|здравствуйте|доброе утро|добрый день|добрый вечер|hello|hi|hey|thanks|thank you)", low):
+        return False
     if _detect_requested_outputs(text) != ["text"]:
         return False
     # Requests with an independent action are tasks, not bare topic pointers.
     action = re.search(
         r"\b(?:расскажи|расскажите|объясни|объясните|напиши|напишите|опиши|опишите|"
         r"покажи|построй|создай|сделай|вычисли|сравни|найди|проверь|проанализируй|"
-        r"продолжи|перечисли|нарисуй|tell|describe|explain|write|show|build|create|"
-        r"make|calculate|compare|find|check|analyze|continue)\b",
+        r"продолжи|продолжай|продолжим|перечисли|нарисуй|развивай|раскрой|разверни|"
+        r"углуби|расширь|дополни|рассказывай|давай|tell|describe|explain|write|show|build|create|"
+        r"make|calculate|compare|find|check|analyze|continue|develop|expand|elaborate)\b",
         low,
     )
     # A self-correction is a memory pointer even when it names the intended topic.
@@ -1432,7 +1457,42 @@ def _looks_like_topic_reference_fragment(
         r"(?:про|об|обо|насч[её]т|относительно|по\s+поводу|about|regarding)\s+\S+",
         low,
     )
-    return bool(pointer)
+    if pointer:
+        return True
+
+    # A terse noun/name (for example, “Эйнштейна”) can be the user's answer to a
+    # clarification or a pointer back to a previously discussed topic. Search for
+    # an actual matching topic first; if none exists, the State Manager must leave
+    # the request as NEW instead of attaching it to an unrelated hot branch.
+    bare_topic_noise = {
+        "а", "и", "ну", "так", "да", "нет", "ок", "окей", "спасибо", "пожалуйста",
+        "дальше", "далее", "продолжай", "продолжим", "еще", "ещё", "подробнее",
+        "что", "чем", "где", "когда", "почему", "как", "зачем", "кто", "какой", "какая",
+        "тема", "темы", "тему", "вопрос", "вопросы", "расскажи", "объясни", "покажи",
+        "сделай", "создай", "найди", "проверь", "help", "thanks", "please", "continue", "more",
+        "интересно", "интересного", "интереснее", "новое", "новый", "привет", "здравствуйте",
+        "развивай", "раскрой", "разверни", "углуби", "расширь", "дополни", "углубимся",
+        "рассказывай", "говори", "побольше", "more interesting", "hi", "hey", "hello",
+    }
+    artifact_words = bool(re.search(
+        r"\b(?:формул\w*|пример\w*|таблиц\w*|график\w*|диаграмм\w*|"
+        r"formula\w*|example\w*|table\w*|graph\w*|chart\w*)\b", low
+    ))
+    artifact_question = bool(artifact_words and re.match(
+        r"^\s*(?:(?:ну|ладно|хорошо|ок(?:ей)?|тогда|так|а|и|давай)\s+)*"
+        r"(?:где|как|что|какие|какой|какая|почему|зачем|а|и)\b", low
+    ))
+    if len(tokens) <= 4 and not re.search(r"[?!？]", _text(text)) and not action and not artifact_question:
+        signature = _context_signature(text)
+        subjects = signature.get("subject_terms") if isinstance(signature, dict) else []
+        meaningful_tokens = {
+            token for token in tokens
+            if token not in bare_topic_noise
+            and not token.startswith(("интерес", "привет", "здравств", "развивай", "раскрой", "разверни", "углуб", "расшир", "дополни"))
+        }
+        if subjects and meaningful_tokens:
+            return True
+    return False
 
 def _detect_previous_answer_recheck(text: str) -> bool:
     """Detect a challenge/check of April's earlier response, including long turns.
@@ -1869,6 +1929,23 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "vamos continuar", "continuemos", "voltemos", "continue a partir daqui",
         "ga door", "laten we doorgaan", "verdergaan", "gaan we verder",
     ))
+    # Premium users often continue by asking for development rather than saying
+    # “continue”. Treat these as discourse moves unless the utterance explicitly
+    # introduces a different subject. This is an interpretation feature, not a
+    # required user trigger or a route-level command.
+    implicit_development_request = bool(re.search(
+        r"\b(?:дальше|далее)\b|"
+        r"\b(?:развивай|раскрой|разверни|углуби|расширь|дополни|углубимся)\b.{0,48}"
+        r"\b(?:тему|мысль|идею|обсуждение|это|эту|дальше|подробн\w*)\b|"
+        r"\b(?:еще|ещё)\s+(?:интересн\w*|подробн\w*|пример\w*|факт\w*|детал\w*|информац\w*|что-то|что-нибудь)\b|"
+        r"\b(?:что\s+еще|что\s+ещё|давай\s+(?:дальше|подробнее|глубже)|"
+        r"рассказывай\s+дальше|говори\s+дальше|побольше|more\s+interesting|tell\s+me\s+more|"
+        r"go\s+deeper|elaborate\s+further|expand\s+on\s+that)\b|"
+        r"^\s*(?:а\s+)?(?:еще|ещё|дальше|далее)\s*[.!?]*\s*$",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    continuation_action = bool(continuation_action or implicit_development_request)
     explicit_topic_switch = _has_explicit_topic_switch(source)
     explicit_topic_introduction = _has_explicit_topic_introduction(source)
     answer_followup = _looks_like_previous_answer_followup(source)
