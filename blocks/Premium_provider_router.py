@@ -45,11 +45,17 @@ PROVIDER_ROUTER_VERSION = "premium_provider_router_v5_dynamic_quality_input_guar
 # when the structured input has to fall back to compact/minimal mode.
 PREMIUM_RESPONSE_QUALITY_CONTRACT = r"""
 PREMIUM RESPONSE QUALITY AND CONTINUITY:
+APRIL SITE NAVIGATION CONTEXT:
+When ROOM_KNOWLEDGE_CONTEXT contains site_navigation_map, answer interface-help questions from that map. Give the exact available route and clear ordered clicks/steps; if the user is lost, give a safe way back to the main chat (/). Never claim to have clicked, changed a setting, purchased Premium, or deleted data on the user's behalf. Do not promise functions marked empty or unimplemented, and do not route ordinary users to the admin page.
+
+IMAGE / MULTIMEDIA SEPARATION:
+The text answer is still the main answer. When image generation is explicitly requested, put only the requested visual subject/scene into the image-generation spec. Do not turn the whole explanation, tutorial, answer, code, table, diagram, or ordered steps into an image. Keep each requested explanatory or structured output in its own text/render block; put words inside the picture only when the user explicitly requests text within the image.
 - Answer like a careful domain expert: give the useful conclusion first, then explain the relevant why/how, implications, trade-offs and concrete next step when useful. Match depth to the question; completeness is required, padding is not.
 - For a continuation, use the selected topic/section and previous answer as the coverage ledger. Do not repeat material already answered: extend it with a genuinely new detail, deeper explanation, comparison, example, consequence, risk or next decision. Preserve established facts, user constraints, corrections, decisions, exact values and unresolved questions. Keep the topic's logical thread moving from turn to turn.
 - A short reaction such as “more interesting”, “continue”, “what else?”, “you already said that”, or an elliptical reference usually points to the active topic when same-dialog evidence supports that reading. Retrieve and verify the relevant prior pair; if the selected history does not fit, do not force it.
 - On a genuinely new topic, answer independently and do not import unrelated history. Make the answer naturally useful for a possible follow-up without artificially tying it to the previous subject. If the referent is genuinely ambiguous and no reliable anchor exists, ask one focused clarification rather than guessing.
 - Keep the input signal clean: prioritize CURRENT_REQUEST and lossless source values, then the strongest topic-specific context, then only background that changes the answer. Remove duplicate summaries, stale/irrelevant topics, redundant metadata and filler before compressing facts. Never silently omit a requested step, negate a constraint, alter a value, invent missing source data, or present an inference as a saved fact.
+- For explanatory, planning, troubleshooting, comparison, or multi-part requests, do not default to a short summary. Cover each requested part with the necessary rationale, concrete steps/examples, important limitations and a practical next action. Keep acknowledgements and simple factual replies short; never add padding merely to consume the token allowance.
 - Use headings, lists, tables and renderers only when they improve comprehension. Introduce each visual, explain its real meaning, and avoid repeating the same explanation in prose. For substantive multi-section answers, store concise ordered heading/summary entries in dialogue_memory_record.sections so the next turn can continue from uncovered material.
 """.strip()
 
@@ -1776,6 +1782,39 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "avoid_cross_topic_injection": bool(raw_guidance.get("avoid_cross_topic_injection", True)),
             "do_not_repeat_completed_answer_or_artifact": bool(raw_guidance.get("do_not_repeat_completed_answer_or_artifact")),
         }
+        # Preserve request-scoped site-help knowledge even in the emergency/minimal prompt.
+        # C_IT_ROOM already selects only relevant areas, so this keeps navigation usable
+        # without forcing the full room map into every ordinary answer.
+        raw_room_context = data.get("ROOM_KNOWLEDGE_CONTEXT") if isinstance(data.get("ROOM_KNOWLEDGE_CONTEXT"), dict) else {}
+        room_context_min = {}
+        for room_key, room_value in raw_room_context.items():
+            if not isinstance(room_value, dict):
+                continue
+            raw_site_map = room_value.get("site_navigation_map")
+            if not isinstance(raw_site_map, dict) or not room_value.get("site_help_requested"):
+                continue
+            areas_min = []
+            for area in (raw_site_map.get("areas") or [])[:3]:
+                if not isinstance(area, dict):
+                    continue
+                areas_min.append({
+                    "id": _text(area.get("id"))[:60],
+                    "path": _text(area.get("path"))[:100],
+                    "label": _text(area.get("label"))[:100],
+                    "purpose": _text(area.get("purpose"))[:180],
+                    "steps": [_text(step)[:140] for step in (area.get("steps") or [])[:3]],
+                    "related": [_text(item)[:45] for item in (area.get("related") or [])[:3]],
+                })
+            room_context_min[str(room_key)[:60]] = {
+                "site_help_requested": True,
+                "site_navigation_map": {
+                    "schema": _text(raw_site_map.get("schema"))[:60],
+                    "source": _text(raw_site_map.get("source"))[:120],
+                    "areas": areas_min,
+                    "navigation_policy": [_text(item)[:140] for item in (raw_site_map.get("navigation_policy") or [])[:3]],
+                    "map_area_count": raw_site_map.get("map_area_count", len(areas_min)),
+                },
+            }
         raw_renderer_policy = data.get("SCENE_COMPLEMENTARITY_POLICY") if isinstance(data.get("SCENE_COMPLEMENTARITY_POLICY"), dict) else {}
         renderer_policy_min = {
             "enabled": bool(raw_renderer_policy.get("enabled", True)),
@@ -2058,6 +2097,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             ],
             "INPUT_MODALITIES": data.get("INPUT_MODALITIES") or {},
             "ATTACHMENT_INDEX": assets_min,
+            "ROOM_KNOWLEDGE_CONTEXT": room_context_min,
             "C_ARTIFACT_RENDER_PLAN": [
                 {k: item[k] for k in ("output", "renderer", "viewer", "source_rooms") if k in item}
                 for item in (data.get("C_ARTIFACT_RENDER_PLAN") or [])[:4] if isinstance(item, dict)
@@ -2984,6 +3024,8 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "ATTACHED_TEXT_FILES": text_file_manifest,
         "C_ARTIFACT_RENDER_PLAN": _safe_prompt_manifest(render_plan, limit=16),
         "SELECTED_ROOMS": routing.get("selected_rooms") or [],
+        # Present only when Interpretation selected April site-navigation help.
+        "ROOM_KNOWLEDGE_CONTEXT": routing.get("room_knowledge_context") or {},
         # Semantic rendering guidance is created by Interpretation, not inferred
         # by the UI. This keeps output choice in the single request pipeline.
         "REQUESTED_RENDERING_GUIDANCE": request_structure.get("rendering_guidance") or [],
