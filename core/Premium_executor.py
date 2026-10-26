@@ -1862,12 +1862,14 @@ async def execute(
             "features": semantic_interpretation.get("features", {}),
             "context_signature": semantic_interpretation.get("context_signature", {}),
         }
-        # When Interpretation says that this is independent new information and
-        # does not require memory, do not hydrate/rank every Premium dialogue row
-        # merely to answer a normal message. That full pass can take tens of seconds
-        # on a busy database and may incorrectly pull an unrelated hot-work branch
-        # into a casual exchange. Keep all explicit history, continuation, repair,
-        # reference, temporal and resume signals on the canonical State Manager path.
+        # Do not trust a lexical NEW label as proof that the message has no dialogue
+        # dependency. A short named topic (“Einstein”), a requested missing deliverable
+        # (“where are the formulas/examples?”), or a topic-development request can be
+        # related to the last active thread even when it contains no literal trigger.
+        # Let the canonical State Manager inspect the retained Premium window on normal
+        # turns; its subject-conflict, explicit-switch, topic-match and closure checks
+        # decide whether any context is actually safe to pass. Only an explicit switch
+        # to a different topic may bypass this retrieval pass.
         _single_features = single_semantics.get("features") if isinstance(single_semantics.get("features"), dict) else {}
         _single_pragmatic = single_semantics.get("pragmatic_features") if isinstance(single_semantics.get("pragmatic_features"), dict) else {}
         _single_topic_reference = _text(single_semantics.get("topic_reference")).upper()
@@ -1909,8 +1911,7 @@ async def execute(
         skip_memory_search = bool(
             not gratitude_only
             and not explicit_saved_artifact_followup
-            and single_semantics.get("primary_intent") == "NEW_INFORMATION"
-            and not single_semantics.get("requires_memory")
+            and single_semantics.get("explicit_topic_switch")
             and not single_semantics.get("history_request")
             and not _text(resume_message_id)
             and not _explicit_context_signal
@@ -1930,7 +1931,7 @@ async def execute(
                 "previous_answer_reference": False,
                 "factual_verification_request": False,
                 "explicit_topic_switch": False,
-                "reason": "self_contained_new_topic_fast_path",
+                "reason": "explicit_topic_switch_fast_path",
                 "active_topic": _text(original or current_text)[:140],
                 "selected_pairs": [],
                 "candidates": [],
@@ -1976,7 +1977,7 @@ async def execute(
             candidates=len(dialogue_context.get("candidates") or []),
             selected_pairs=len(dialogue_context.get("selected_pairs") or []),
             topic_index_count=len(dialogue_context.get("topic_index") or []),
-            status="self_contained_new_topic_fast_path" if skip_memory_search else "ok",
+            status="explicit_topic_switch_fast_path" if skip_memory_search else "ok",
         )
     else:
         current_request_subject_context: dict[str, Any] | None = None
