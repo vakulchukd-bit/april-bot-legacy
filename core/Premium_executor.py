@@ -297,6 +297,9 @@ def _compact_question_search(
         "time_window": context.get("time_window") if isinstance(context.get("time_window"), dict) else {},
         "time_filter": context.get("time_filter") if isinstance(context.get("time_filter"), dict) else {},
         "semantic_intent": _text(semantics.get("primary_intent") or ("HISTORY_RECALL" if history_request else "NEW_INFORMATION")),
+        "retrieval_profile": dict(context.get("retrieval_profile") or semantics.get("retrieval_profile") or {}),
+        "active_topic_seed": _text((context.get("retrieval_profile") or {}).get("active_topic_seed") or context.get("active_topic"))[:240],
+        "search_method": _text((context.get("retrieval_profile") or {}).get("search_method"))[:80],
         "search_direction": _text(semantics.get("direction") or ("SEARCH_DIALOGUE_HISTORY" if history_request else "ANSWER_NEW_REQUEST")),
         "time_scope": _text(semantics.get("time_scope") or "UNSPECIFIED"),
         "speech_act": _text(semantics.get("speech_act") or "STATEMENT_OR_REQUEST"),
@@ -2414,6 +2417,7 @@ async def execute(
             "window_hours": int(dialogue_context.get("window_hours") or 24),
             "relation": dialogue_context["relation"],
             "relation_confidence": dialogue_context["relation_confidence"],
+            "retrieval_profile": dict(dialogue_context.get("retrieval_profile") or {}),
             "active_branch": dict(dialogue_context.get("active_branch") or {}),
             "active_work_branch": (
                 dict(dialogue_context.get("active_work_branch") or {})
