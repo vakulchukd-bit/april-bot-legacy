@@ -231,19 +231,81 @@ _SITE_ROUTE_WORDS = (
 
 
 def is_site_help_query(query: str) -> bool:
-    """Detect general April UI/navigation requests without relying on the LLM classifier."""
+    """Detect April self-help/navigation questions independently of LLM classification."""
     low = str(query or "").strip().lower().replace("ё", "е")
     if not low:
         return False
     # Direct route/section names are enough: a user can simply type "Сообщество".
     if any(term in low for term in _SITE_ROUTE_WORDS):
         return True
+    # Broad questions about April's own capabilities should be grounded in the
+    # real site map as well, so users receive both a description and entry points.
+    april_self_help = bool(re.search(
+        r"(?:\b(?:april|април)\b.{0,100}\b(?:функци\w*|возможност\w*|устроен\w*|работа\w*|создан\w*|умеешь|умеет|можешь|может)\b|"
+        r"\b(?:функци\w*|возможност\w*)\b.{0,100}\b(?:april|април)\b|"
+        r"(?:what can april do|how does april work|how is april built))",
+        low,
+        re.IGNORECASE,
+    ))
+    if april_self_help:
+        return True
     ui_target = bool(re.search(
         r"(?:кабинет|профил|аккаунт|раздел|кнопк|меню|сайт|интерфейс|страниц|истор|диалог|сообществ|"
-        r"тариф|подписк|памят|удален|поддержк|community|profile|account|settings|history|support|help center)",
+        r"тариф|подписк|памят|удален|поддержк|функци|возможност|как работает|как устроен|умеет|умеешь|"
+        r"community|profile|account|settings|history|support|help center|features|capabilities|how does april work)",
         low,
     ))
     return bool(_SITE_NAVIGATION_ACTION_RE.search(low) and ui_target)
+
+
+_SITE_NO_DIAGRAM_RE = re.compile(
+    r"(?:только\s+текст|без\s+(?:схем|диаграмм|визуализац)|не\s+(?:нужна|нужно|надо)\s+(?:схема|диаграмма)|"
+    r"не\s+(?:схему|диаграмму)|не\s+показывай\s+(?:схему|диаграмму)|text\s+only|no\s+diagram|not\s+(?:a\s+)?diagram)",
+    re.IGNORECASE,
+)
+_SITE_EXPLICIT_DIAGRAM_RE = re.compile(r"(?:диаграмм\w*|схем\w*|diagram|flowchart)", re.IGNORECASE)
+_SITE_OTHER_RENDERERS = {"image", "gallery", "code", "table", "graph", "formula", "link", "file", "3d_graph"}
+
+
+def _site_should_render_diagram(query: str, requested_outputs: Any = None) -> bool:
+    """Prefer a diagram by default, but respect an explicit alternative renderer or opt-out."""
+    low = str(query or "").lower().replace("ё", "е")
+    if _SITE_NO_DIAGRAM_RE.search(low):
+        return False
+    if re.search(r"(?:только\s+(?:ссылк\w*|код|таблиц\w*|изображен\w*|картинк\w*|график\w*|формул\w*|файл\w*)|only\s+(?:a\s+)?(?:link|code|table|image|graph|formula|file))", low) and not _SITE_EXPLICIT_DIAGRAM_RE.search(low):
+        return False
+    if _SITE_EXPLICIT_DIAGRAM_RE.search(low):
+        return True
+    outputs = {
+        str(value or "").strip().lower().replace("-", "_")
+        for value in (requested_outputs or [])
+        if str(value or "").strip()
+    } if isinstance(requested_outputs, (list, tuple, set)) else set()
+    aliases = {"plot": "graph", "chart": "graph", "generated_image": "image", "image_gallery": "gallery", "latex": "formula", "math": "formula", "svg": "diagram"}
+    outputs = {aliases.get(value, value) for value in outputs}
+    return not bool(outputs.intersection(_SITE_OTHER_RENDERERS))
+
+
+def _requested_outputs_from_machine_request(machine_request: Any) -> List[str]:
+    """Read output preferences from the actual request/interpretation envelope."""
+    root = machine_request if isinstance(machine_request, dict) else getattr(machine_request, "intent", {})
+    if not isinstance(root, dict):
+        return []
+    sources = [root]
+    nested = root.get("intent")
+    if isinstance(nested, dict):
+        sources.append(nested)
+    interpretation = root.get("interpretation")
+    if isinstance(interpretation, dict):
+        sources.append(interpretation)
+        nested_intent = interpretation.get("intent")
+        if isinstance(nested_intent, dict):
+            sources.append(nested_intent)
+    for source in sources:
+        values = source.get("requested_outputs")
+        if isinstance(values, (list, tuple, set)) and values:
+            return [str(value) for value in values]
+    return []
 
 
 _ELLIPTICAL_SITE_FOLLOWUP_RE = re.compile(
@@ -316,7 +378,7 @@ def _referenced_site_area_ids(context: Any) -> List[str]:
 def prepare_site_help_interpretation(
     interpretation: Dict[str, Any], query: str, question_sequence: Any = None, recent_context: Any = None
 ) -> bool:
-    """Bind site help to interpretation and require a concrete complementary route diagram."""
+    """Bind site help to Interpretation and select a diagram unless another format is preferred."""
     direct_match = is_site_help_query(query)
     referent_ids: List[str] = []
     if not direct_match and _ELLIPTICAL_SITE_FOLLOWUP_RE.search(str(query or "")):
@@ -332,25 +394,38 @@ def prepare_site_help_interpretation(
         interpretation["intent"] = intent
     outputs = intent.get("requested_outputs")
     outputs = list(outputs) if isinstance(outputs, (list, tuple, set)) else ["text"]
-    for output in ("text", "diagram"):
-        if output not in outputs:
-            outputs.append(output)
+    wants_diagram = _site_should_render_diagram(query, outputs)
+    if "text" not in outputs:
+        outputs.append("text")
+    if wants_diagram and "diagram" not in outputs:
+        outputs.append("diagram")
+    if not wants_diagram:
+        diagram_aliases = {"diagram", "svg", "schematic", "flowchart", "scene", "layout", "visual", "renderer_scene", "experimental_diagram"}
+        outputs = [output for output in outputs if str(output).lower().replace("-", "_") not in diagram_aliases]
     intent["requested_outputs"] = outputs
-    intent["wants_diagram"] = True
+    intent["wants_diagram"] = wants_diagram
     intent["site_navigation_help"] = True
     intent["adaptive_visual_policy"] = True
     caps = interpretation.get("routing_capabilities")
     caps = list(caps) if isinstance(caps, (list, tuple, set)) else []
-    for capability in ("april_site_help", "site_navigation", "user_guidance", "diagram", "geometry"):
+    for capability in ("april_site_help", "site_navigation", "user_guidance"):
         if capability not in caps:
             caps.append(capability)
+    if wants_diagram:
+        for capability in ("diagram", "geometry"):
+            if capability not in caps:
+                caps.append(capability)
+    else:
+        caps = [capability for capability in caps if str(capability).lower() not in {"diagram", "geometry"}]
     interpretation["routing_capabilities"] = caps
     if referent_ids:
         interpretation["site_navigation_referent"] = referent_ids
     interpretation["site_navigation_diagram_policy"] = {
-        "enabled": True,
+        "enabled": wants_diagram,
         "role": "complement the written navigation instructions",
-        "required_payload": "concrete nodes and directed edges",
+        "required_payload": "readable responsive SVG plus concrete nodes and directed edges",
+        "derive_nodes_from_query_relevant_map_routes": True,
+        "never_emit_empty_diagram_shell": True,
         "use_only_map_routes": True,
     }
     if isinstance(question_sequence, list):
@@ -361,32 +436,46 @@ def prepare_site_help_interpretation(
             step_outputs = list(step_outputs) if isinstance(step_outputs, (list, tuple, set)) else ["text"]
             if "text" not in step_outputs:
                 step_outputs.insert(0, "text")
-            if "diagram" not in step_outputs:
+            if wants_diagram and "diagram" not in step_outputs:
                 step_outputs.append("diagram")
+            if not wants_diagram:
+                diagram_aliases = {"diagram", "svg", "schematic", "flowchart", "scene", "layout", "visual", "renderer_scene", "experimental_diagram"}
+                step_outputs = [output for output in step_outputs if str(output).lower().replace("-", "_") not in diagram_aliases]
             item["output_types"] = step_outputs
     structure = interpretation.get("request_structure")
     if isinstance(structure, dict):
         structure["site_navigation_help"] = True
-        structure["site_navigation_diagram_required"] = True
+        structure["site_navigation_diagram_required"] = wants_diagram
     return True
 
 
 def _current_user_query(machine_request: Any) -> str:
-    """Best-effort extract of this turn's request without touching conversation memory."""
+    """Extract the current user text before generic orchestration goals or history."""
     if isinstance(machine_request, dict):
-        sources = [machine_request, machine_request.get("conversation") or {}]
+        root = machine_request
+        conversation = root.get("conversation") if isinstance(root.get("conversation"), dict) else {}
+        sources = [root, conversation]
+        fallback_goal = root.get("goal")
     else:
-        sources = [
-            {"goal": getattr(machine_request, "goal", "")},
-            getattr(machine_request, "conversation", {}) or {},
-        ]
+        conversation = getattr(machine_request, "conversation", {})
+        conversation = conversation if isinstance(conversation, dict) else {}
+        sources = [conversation]
+        fallback_goal = getattr(machine_request, "goal", "")
+
+    current_keys = ("current_request", "current_text", "query", "user_message", "message", "resolved_request")
+    # Never let `goal='answer_user_request'` mask the actual message. This was the
+    # reason the room could be selected but still receive no request-scoped site map.
     for source in sources:
         if not isinstance(source, dict):
             continue
-        for key in ("current_request", "current_text", "query", "user_message", "message", "goal"):
+        for key in current_keys:
             value = source.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()[:1200]
+    if isinstance(fallback_goal, str) and fallback_goal.strip() and fallback_goal.strip().lower() not in {
+        "answer_user_request", "answer request", "new request", "user request"
+    }:
+        return fallback_goal.strip()[:1200]
     return ""
 
 
@@ -405,6 +494,14 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
         selected_ids = referent_ids + [area_id for area_id in selected_ids if area_id not in referent_ids and area_id != "guide"]
     if not selected_ids:
         selected_ids = ["guide", "chat", "settings", "history"]
+    broad_self_help = bool(re.search(
+        r"(?:\b(?:april|април)\b.{0,100}\b(?:функци\w*|возможност\w*|устроен\w*|работа\w*|создан\w*|умеешь|умеет|можешь|может)\b|"
+        r"(?:what can april do|how does april work|how is april built))",
+        query,
+        re.IGNORECASE,
+    ))
+    if broad_self_help and not referent_ids:
+        selected_ids = ["chat", "settings", "history", "space", "guide"]
     # Add directly related routes so users can recover to the next useful section.
     areas_by_id = {str(area.get("id")): area for area in APRIL_SITE_MAP["areas"]}
     pending = list(selected_ids)
@@ -418,7 +515,7 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
         "schema": APRIL_SITE_MAP["schema"],
         "source": APRIL_SITE_MAP["source"],
         "matched_query": query[:240],
-        "areas": chosen[:3],
+        "areas": chosen[:5],
         "navigation_policy": APRIL_SITE_MAP["navigation_policy"][:4],
         "map_area_count": len(APRIL_SITE_MAP["areas"]),
     }
@@ -473,8 +570,13 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     route_rows: List[Dict[str, str]] = []
     seen_paths = set()
     for area in areas:
+        area_id = _text(area.get("id"))
         path = _text(area.get("path"))
         label = _text(area.get("label"))
+        # The map contains one admin-only reference for architecture/safety context;
+        # it must never become a clickable destination for ordinary users.
+        if area_id == "admin-support" or path.lower().rstrip("/") == "/admin-profile":
+            continue
         if not path or not label or "[" in path or "]" in path:
             if path == "/space/direct/[friendId]":
                 path = "/space"
@@ -484,7 +586,11 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         if path in seen_paths:
             continue
         seen_paths.add(path)
-        route_rows.append({"id": _text(area.get("id")) or f"route_{len(route_rows)+1}", "path": path, "label": label})
+        route_rows.append({
+            "id": area_id or f"route_{len(route_rows)+1}", "path": path, "label": label,
+            "purpose": _text(area.get("purpose")),
+            "steps": [str(step).strip() for step in area.get("steps", []) if str(step).strip()] if isinstance(area.get("steps"), list) else [],
+        })
         if len(route_rows) >= 5:
             break
     if not route_rows:
@@ -525,6 +631,63 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         if answer_key not in {"answer", "content"}:
             decoded[answer_key] = answer
 
+    # When a concrete area is named, state its verified route and next actions
+    # explicitly. This corrects an LLM-generated "I cannot find this page" claim
+    # when the canonical map does contain the destination.
+    query_for_routes = _current_user_query(machine_request).lower().replace("ё", "е")
+    targeted_ids = [
+        area_id for area_id, hints in _SITE_AREA_HINTS.items()
+        if any(hint in query_for_routes for hint in hints)
+    ]
+    if targeted_ids:
+        full_areas = {str(area.get("id")): area for area in APRIL_SITE_MAP.get("areas", []) if isinstance(area, dict)}
+        target_area = next((full_areas.get(area_id) for area_id in targeted_ids if full_areas.get(area_id) and area_id != "admin-support"), None)
+        if target_area:
+            target_path = _text(target_area.get("path"))
+            if target_path and "[" not in target_path and "]" not in target_path and target_path.lower().rstrip("/") != "/admin-profile":
+                target_label = _text(target_area.get("label")) or "Раздел April"
+                target_steps = target_area.get("steps") if isinstance(target_area.get("steps"), list) else []
+                safe_steps = [str(step).strip() for step in target_steps if str(step).strip()][:3]
+                guide_heading = "Путь по карте April" if heading == "Проверенные переходы" else "Verified route in April"
+                route_intro = f"**{guide_heading}:** [{target_label}]({target_path})."
+                if safe_steps:
+                    route_intro += "\n" + "\n".join(f"{index}. {step}" for index, step in enumerate(safe_steps, 1))
+                # Add the deterministic guide when a model misses the path or
+                # contradicts the verified map. If a route is already described
+                # correctly, leave the model's step sequence unchanged.
+                has_target_path = f"]({target_path})" in answer
+                contradicts_map = bool(re.search(
+                    r"(?:нет[^.\n]{0,140}(?:раздел|экрана|страниц|ссылк|приглашен)|"
+                    r"(?:раздел|экран|страниц|ссылк)[^.\n]{0,100}\bнет\b|"
+                    r"не\s+могу\s+(?:подтвердить|указать)[^.\n]{0,100}(?:существ|ссылк|путь)|"
+                    r"(?:такого|такой)\s+(?:раздела|страницы|ссылки)\s+нет|"
+                    r"cannot\s+(?:confirm|find)\s+(?:the\s+)?(?:page|section|link))",
+                    answer.lower(),
+                ))
+                if target_area.get("id") == "space":
+                    route_intro += "\nСтраница сообщества указана в проверенной карте сайта; отдельный URL-приглашение в доступной карте не указан."
+                if contradicts_map:
+                    # Remove only the sentence that denies the verified route; keep
+                    # other useful context and let the map-derived route text replace it.
+                    denial_sentence = re.compile(
+                        r"[^.!?\n]*(?:нет[^.!?\n]{0,140}(?:раздел|экрана|страниц|ссылк|приглашен)|"
+                        r"(?:раздел|экран|страниц|ссылк)[^.!?\n]{0,100}\bнет\b|"
+                        r"не\s+могу\s+(?:подтвердить|указать)[^.!?\n]{0,100}(?:существ|ссылк|путь)|"
+                        r"(?:такого|такой)\s+(?:раздела|страницы|ссылки)\s+нет|"
+                        r"cannot\s+(?:confirm|find)\s+(?:the\s+)?(?:page|section|link))[^.!?\n]*[.!?]?",
+                        re.IGNORECASE,
+                    )
+                    corrected = denial_sentence.sub("", answer)
+                    corrected = re.sub(r"(?:\n\s*){3,}", "\n\n", corrected).strip()
+                    if corrected:
+                        answer = corrected
+                if not has_target_path or contradicts_map:
+                    answer = answer.rstrip() + "\n\n" + route_intro
+                    decoded["answer"] = answer
+                    decoded["content"] = answer
+                    if answer_key not in {"answer", "content"}:
+                        decoded[answer_key] = answer
+
     # Build a route graph without duplicating the homepage. From the profile page,
     # the screenshot/map confirms quick links to Chat, History, Support and Community;
     # other selected destinations remain reachable from the main screen.
@@ -560,9 +723,11 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
             edges.append({"from": "april_home", "to": target, "label": "Открыть раздел"})
     diagram_payload = {
         "title": "Карта переходов April",
-        "description": "Главный экран и проверенные маршруты разделов, выбранные по вопросу пользователя.",
+        "description": "Главный экран и проверенные маршруты, отобранные по текущему вопросу пользователя.",
         "representation": "navigation_flow",
-        "layout": {"direction": "LR", "rankdir": "LR", "spacing": "comfortable"},
+        # The portrait layout stays readable on phone screens. SVG is generated
+        # from these same route nodes/edges; this is not a pre-baked topic diagram.
+        "layout": {"direction": "TB", "rankdir": "TB", "spacing": "comfortable", "responsive": True},
         "nodes": nodes,
         "edges": edges,
         "navigation_map_schema": site_map.get("schema", "april.site_navigation.v1"),
@@ -575,23 +740,36 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         if language.startswith(("ru", "uk")) or not language else
         "This diagram shows the starting screen and verified destinations relevant to your question. Use the links in the text; arrows explain navigation and do not click automatically."
     )
-    diagram_block = {
-        "type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer", "viewer": "DiagramRenderer",
-        "title": diagram_payload["title"], "payload": diagram_payload,
-        "explanation": diagram_explanation, "source_room": "C_IT_ROOM", "integrity_repaired": True,
-    }
-    existing_index = next((i for i, block in enumerate(blocks) if isinstance(block, dict) and _text(block.get("type") or block.get("artifact_type")).lower() == "diagram"), None)
-    if existing_index is None:
-        blocks.append(diagram_block)
-    else:
-        existing = blocks[existing_index]
-        merged = dict(existing)
-        merged.update(diagram_block)
-        # Keep per-step placement metadata if the model supplied it.
-        for key in ("step_index", "step_title", "sequence_index", "topic_group", "block_id"):
-            if key in existing:
-                merged[key] = existing[key]
-        blocks[existing_index] = merged
+    current_query_for_render = _current_user_query(machine_request)
+    requested_outputs_for_render = _requested_outputs_from_machine_request(machine_request)
+    render_navigation_diagram = _site_should_render_diagram(current_query_for_render, requested_outputs_for_render)
+    if render_navigation_diagram:
+        try:
+            from blocks.C_DIAGRAM_ROOM import ensure_readable_diagram_payload
+            diagram_payload = ensure_readable_diagram_payload(diagram_payload, title=diagram_payload["title"])
+        except Exception:
+            # Preserve the source node/edge payload if optional SVG conversion fails.
+            pass
+        diagram_renderer = str(diagram_payload.get("renderer") or "DiagramRenderer")
+        if (diagram_payload.get("svg") or diagram_payload.get("svg_payload")) and diagram_renderer in {"", "DiagramRenderer", "diagram"}:
+            diagram_renderer = "SvgBlock"
+        diagram_block = {
+            "type": "diagram", "artifact_type": "diagram", "renderer": diagram_renderer, "viewer": diagram_renderer,
+            "title": diagram_payload["title"], "payload": diagram_payload,
+            "explanation": diagram_explanation, "source_room": "C_IT_ROOM", "integrity_repaired": True,
+        }
+        existing_index = next((i for i, block in enumerate(blocks) if isinstance(block, dict) and _text(block.get("type") or block.get("artifact_type")).lower() == "diagram"), None)
+        if existing_index is None:
+            blocks.append(diagram_block)
+        else:
+            existing = blocks[existing_index]
+            merged = dict(existing)
+            merged.update(diagram_block)
+            # Keep per-step placement metadata if the model supplied it.
+            for key in ("step_index", "step_title", "sequence_index", "topic_group", "block_id"):
+                if key in existing:
+                    merged[key] = existing[key]
+            blocks[existing_index] = merged
     # Keep route links visible in the actual SceneContract text renderer, not
     # only in the top-level answer field. For a one-text-block answer, synchronize
     # that block; for multi-section answers, add a separate link block to avoid
@@ -647,16 +825,25 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
         prompt_fragments.extend([
             "Answer April interface-navigation questions from site_navigation_map; use the current question as the retrieval key.",
             "Give a clickable Markdown link using the exact relative path, then ordered steps with visible card/button labels.",
-            "Always complement site-navigation help with one concrete DiagramRenderer diagram (nodes + directed edges); the written answer remains primary.",
             "Never invent a base domain or unverified anchor. If a card's exact URL is unknown, link its known parent page and name the card to click.",
             "If a page is marked empty/unimplemented, state that limitation and offer the verified fallback route.",
         ])
+        query = _current_user_query(machine_request)
+        requested_outputs = _requested_outputs_from_machine_request(machine_request)
+        if _site_should_render_diagram(query, requested_outputs):
+            prompt_fragments.extend([
+                "Complement site-navigation help with one concrete DiagramRenderer diagram built from the query-relevant routes; the written instructions remain the main answer.",
+                "The diagram must contain a responsive mobile SVG generated from its route nodes/edges, real directed connections and concise labels. Never emit an empty renderer shell, a tiny corner graph, or a fixed unrelated template.",
+            ])
+    diagram_hint = help_active and _site_should_render_diagram(
+        _current_user_query(machine_request), _requested_outputs_from_machine_request(machine_request)
+    )
     return {
         "room": ROOM_ID,
         "knowledge_context": context,
         "prompt_fragments": prompt_fragments,
         "artifact_hints": {
-            "text": True, "code": True, "table": True, "links": True, "diagram": help_active, "graph": False,
+            "text": True, "code": True, "table": True, "links": True, "diagram": diagram_hint, "graph": False,
         },
     }
 
