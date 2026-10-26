@@ -252,16 +252,19 @@ def _normalize_table_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _normalize_diagram_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Keep diagram semantics structural: nodes/edges/layout, never keyword routing."""
+    """Canonicalize supplied structure and make concrete diagrams readable on mobile."""
     payload = dict(payload or {})
-    nodes = payload.get("nodes") or []
+    nodes = payload.get("nodes") or payload.get("components") or payload.get("vertices") or []
     edges = payload.get("edges") or []
+    connections = payload.get("connections") or []
     relations = payload.get("relations") or []
 
     if not isinstance(nodes, list):
         nodes = list(nodes.values()) if isinstance(nodes, dict) else [nodes]
     if not isinstance(edges, list):
         edges = list(edges.values()) if isinstance(edges, dict) else [edges]
+    if not isinstance(connections, list):
+        connections = list(connections.values()) if isinstance(connections, dict) else [connections]
     if not isinstance(relations, list):
         relations = list(relations.values()) if isinstance(relations, dict) else [relations]
 
@@ -278,7 +281,7 @@ def _normalize_diagram_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
                 canonical_nodes.append({"id": f"node_{i + 1}", "label": label, "type": "node"})
 
     canonical_edges = []
-    for edge in edges + relations:
+    for edge in edges + connections + relations:
         if not isinstance(edge, dict):
             continue
         source = edge.get("from") or edge.get("source") or edge.get("start")
@@ -292,13 +295,14 @@ def _normalize_diagram_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     payload["nodes"] = canonical_nodes
     payload["edges"] = canonical_edges
-    payload["layout"] = payload.get("layout") or {"direction": "LR"}
+    payload["components"] = payload.get("components") or deepcopy(canonical_nodes)
+    payload["layout"] = payload.get("layout") or {"direction": "TB", "rankdir": "TB", "responsive": True}
     payload["diagram_schema"] = "april.diagram.canonical.v2"
     existing_presentation = dict(payload.get("presentation") or {})
     concrete_renderer = (
         payload.get("renderer")
         or existing_presentation.get("renderer")
-        or "MessageTextBlock"
+        or "DiagramRenderer"
     )
     payload["representation"] = payload.get("representation") or (
         "geometric_figure"
@@ -312,6 +316,28 @@ def _normalize_diagram_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "payload_unchanged": True,
         "text_companion_required": True,
     }
+    # Use the existing C_DIAGRAM_ROOM as the single SVG builder. This is a local
+    # import to avoid a module import cycle (C_DIAGRAM_ROOM uses this contract).
+    try:
+        from blocks.C_DIAGRAM_ROOM import ensure_readable_diagram_payload
+        has_svg = any(str(payload.get(key) or "").strip() for key in ("svg", "svg_payload", "drawing"))
+        if (canonical_nodes and canonical_edges) or has_svg:
+            normalized = ensure_readable_diagram_payload(
+                payload,
+                title=str(payload.get("title") or payload.get("description") or "Схема"),
+            )
+            if isinstance(normalized, dict) and normalized:
+                payload.update(normalized)
+                if payload.get("svg") or payload.get("svg_payload"):
+                    if str(payload.get("renderer") or concrete_renderer) in {"", "DiagramRenderer", "diagram"}:
+                        payload["renderer"] = "SvgBlock"
+                    presentation = dict(payload.get("presentation") or {})
+                    presentation["renderer"] = payload.get("renderer") or presentation.get("renderer") or "SvgBlock"
+                    presentation["responsive"] = True
+                    payload["presentation"] = presentation
+    except Exception:
+        # A rendering repair failure must not drop or mutate the original source.
+        pass
     return payload
 
 
@@ -531,7 +557,7 @@ WEB_RENDERER_REGISTRY = {
     "relation_graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "series", "points", "labels", "title", "description"]},
     "relations": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "title", "description"]},
     "table": {"renderer": "TableBlock", "viewer": "TableBlock", "fallback_renderer": "", "payload_keys": ["rows", "columns", "headers", "data", "values", "items", "caption", "column_roles", "cell_roles", "wrap", "download"]},
-    "diagram": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["svg", "svg_payload", "drawing", "nodes", "edges", "relations", "elements", "shapes", "points", "source", "mermaid", "format", "layout", "direction"], "specialized_renderers": ["SvgBlock", "ArithmeticDiagram"]},
+    "diagram": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["svg", "svg_payload", "drawing", "nodes", "edges", "components", "vertices", "connections", "relations", "elements", "shapes", "points", "source", "mermaid", "format", "layout", "direction"], "specialized_renderers": ["SvgBlock", "ArithmeticDiagram"]},
     "image": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "items", "gallery", "sources", "src", "url", "image", "asset_url", "image_asset_url", "image_data_uri", "image_base64", "base64", "mime_type", "width", "height", "alt", "caption"]},
     "gallery": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "items", "gallery", "sources", "src", "url", "asset_url", "image_asset_url", "image_url", "image", "image_data_uri", "alt", "title", "caption", "source_url"]},
     "scene": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["elements", "svg", "images", "objects", "nodes", "edges", "title", "description"]},
@@ -1197,6 +1223,9 @@ def _artifact_canonical_render_blocks(artifact: BaseArtifact) -> List[Dict[str, 
         else getattr(render, "web_block", "")
         or ARTIFACT_BLOCK_MAP.get(artifact_type, "FunctionBlock")
     )
+    artifact_payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+    if artifact_type == "diagram" and str(artifact_payload.get("svg") or artifact_payload.get("svg_payload") or "").strip() and renderer in {"", "DiagramRenderer", "MessageTextBlock", "TextBlock", "MarkdownBlock"}:
+        renderer = "SvgBlock"
 
     priority = getattr(render, "priority", data.get("priority", 100))
     complexity = getattr(render, "complexity", data.get("complexity", "balanced"))
@@ -3442,7 +3471,9 @@ def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[st
                     candidates.append(nested_contract.get("payload"))
     candidates.extend((
         block.get("data"), block.get("artifact_payload"), block.get("table"),
-        block.get("graph"), block.get("diagram"), block.get("link"), block.get("payload"),
+        block.get("graph"), block.get("diagram"), block.get("link"),
+        block.get("content") if isinstance(block.get("content"), dict) else None,
+        block.get("payload"),
     ))
     merged: Dict[str, Any] = {}
     for candidate in candidates:
@@ -3558,7 +3589,14 @@ def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[st
             or bool(p.get("objects_3d") or p.get("spheres") or p.get("objects") or p.get("shapes") or p.get("meshes"))
         )
     if block_type == "diagram":
-        return bool(str(p.get("svg") or p.get("svg_payload") or p.get("drawing") or "").strip() or (isinstance(p.get("nodes"), list) and len(p["nodes"]) >= 2 and isinstance(p.get("edges"), list) and bool(p["edges"])) or (isinstance(p.get("elements"), list) and bool(p["elements"])) or (isinstance(p.get("shapes"), list) and bool(p["shapes"])))
+        diagram_nodes = p.get("nodes") or p.get("components") or p.get("vertices")
+        diagram_edges = p.get("edges") or p.get("connections") or p.get("relations")
+        return bool(
+            str(p.get("svg") or p.get("svg_payload") or p.get("drawing") or "").strip()
+            or (isinstance(diagram_nodes, list) and len(diagram_nodes) >= 2 and isinstance(diagram_edges, list) and bool(diagram_edges))
+            or (isinstance(p.get("elements"), list) and bool(p["elements"]))
+            or (isinstance(p.get("shapes"), list) and bool(p["shapes"]))
+        )
     if block_type in {"image", "gallery"}:
         images = p.get("images") or p.get("items") or p.get("gallery") or p.get("sources")
         if isinstance(images, list):
@@ -3866,6 +3904,67 @@ def prepare_render_blocks_for_room_dispatch(
     if ("formula" in requested or formulas_from_answer) and "formula" not in existing_types:
         if formulas_from_answer:
             prepared.append({"type": "formula", "artifact_type": "formula", "renderer": "FormulaRenderer", "viewer": "FormulaRenderer", "payload": {"formulas": formulas_from_answer, "formula": formulas_from_answer[0], "latex": formulas_from_answer[0]}})
+
+    # Adaptive diagrams complement substantial structured explanations only when
+    # no different visual form was explicitly requested. The outline is derived
+    # from this turn's real headings/paragraphs, never from fixed topic templates.
+    try:
+        from blocks.C_DIAGRAM_ROOM import (
+            build_answer_outline_payload as _build_answer_outline_payload,
+            ensure_readable_diagram_payload as _ensure_readable_diagram_payload,
+            should_add_adaptive_diagram as _should_add_adaptive_diagram,
+        )
+        present_diagrams = [
+            item for item in prepared
+            if isinstance(item, dict) and _scene_block_type(item) == "diagram"
+        ]
+        if not present_diagrams and _should_add_adaptive_diagram(current_request, source_answer, requested):
+            adaptive_payload = _build_answer_outline_payload(source_answer)
+            if adaptive_payload:
+                prepared.append({
+                    "type": "diagram", "artifact_type": "diagram",
+                    "renderer": "DiagramRenderer", "viewer": "DiagramRenderer",
+                    "title": adaptive_payload.get("title"), "payload": adaptive_payload,
+                    "description": adaptive_payload.get("description"),
+                    "source_room": "C_ARTIFACT_CONTRACT",
+                    "source": "same_turn_adaptive_answer_outline",
+                    "adaptive_visual": True,
+                })
+        # The canonical web diagram renderer was receiving node/edge-only graphs.
+        # On mobile those could collapse to tiny labels in the corner. Convert all
+        # concrete node/edge diagrams to a readable portrait SVG before the shared
+        # SceneContract sees them; preserve supplied SVG and all original fields.
+        for visual_block in prepared:
+            if not isinstance(visual_block, dict) or _scene_block_type(visual_block) != "diagram":
+                continue
+            direct_payload = visual_block.get("payload") if isinstance(visual_block.get("payload"), dict) else {}
+            raw_payload = direct_payload or _payload_for_render_block(visual_block, "diagram")
+            if not isinstance(raw_payload, dict) or not raw_payload:
+                continue
+            readable_payload = _ensure_readable_diagram_payload(
+                raw_payload,
+                title=str(visual_block.get("title") or raw_payload.get("title") or ""),
+            )
+            if readable_payload:
+                visual_block["payload"] = readable_payload
+                if readable_payload.get("svg") or readable_payload.get("svg_payload"):
+                    renderer = str(readable_payload.get("renderer") or visual_block.get("renderer") or "SvgBlock")
+                    if renderer in {"", "DiagramRenderer", "diagram"}:
+                        renderer = "SvgBlock"
+                    visual_block["renderer"] = renderer
+                    visual_block["viewer"] = renderer
+                    visual_block["diagram_layout_repaired"] = True
+    except Exception as _diagram_quality_error:
+        # Visual repair must never make the text response fail. SceneContract's
+        # existing payload validation remains the fallback if an unusual payload
+        # cannot be converted by this optional layout helper.
+        try:
+            print("[APRIL_DIAGRAM_LAYOUT_REPAIR] " + json.dumps({
+                "status": "fallback_to_existing_contract",
+                "error_type": type(_diagram_quality_error).__name__,
+            }, ensure_ascii=False, separators=(",", ":")), flush=True)
+        except Exception:
+            pass
 
     # Remove duplicates based on actual payload, not renderer metadata. Keep text
     # and each different selected representation in the same ordered response.
