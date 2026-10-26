@@ -2065,6 +2065,74 @@ def _continuation_marker(query: str) -> bool:
     )
 
 
+_EXPLICIT_FOLLOWUP_PATTERNS = (
+    # Russian continuation/addendum language, including common spelling errors.
+    r"\b(?:давай|давай-ка|пожалуйста|расскажи|поясни|можно)\s+(?:мне\s+)?(?:поинтересн\w*|поподробн\w*|подробн\w*|дальше|еще|продолж\w*|продол\w*|больше)\b",
+    r"\bуже\b.{0,90}\b(?:рассказ\w*|расказ\w*|росказ\w*|говорил\w*|обсуждал\w*|отвечал\w*)\b.{0,100}\b(?:давай|еще|дальше|поинтересн\w*|поподробн\w*|продолж\w*|продол\w*)\b",
+    r"\b(?:добав\w*|дополн\w*|долож\w*|доскажи\w*|досказ\w*|учти\w*|вдобавок|к\s+этому|еще\s+один\s+момент|и\s+еще)\b",
+    # Equivalent English phrasing.
+    r"\b(?:one more thing|to add to that|additionally|i forgot to mention|elaborate|tell me more|more interesting|make it more interesting|continue|go on)\b",
+)
+
+
+def _explicit_followup_signal(query: str) -> bool:
+    low = re.sub(r"\s+", " ", _text(query).lower().replace("ё", "е")).strip()
+    return bool(low and any(re.search(pattern, low, flags=re.IGNORECASE) for pattern in _EXPLICIT_FOLLOWUP_PATTERNS))
+
+
+def _explicit_followup_anchor(
+    query: str,
+    matches: list[dict[str, Any]],
+    latest_same_dialog: dict[str, Any] | None,
+    query_subjects: set[str],
+) -> dict[str, Any] | None:
+    """Resolve an explicit addendum to compatible same-dialog evidence only."""
+    if not _explicit_followup_signal(query):
+        return None
+    candidates = [
+        item for item in matches
+        if isinstance(item, dict)
+        and bool(item.get("same_dialog"))
+        and not item.get("is_pending_clarification")
+        and not item.get("subject_mismatch")
+    ]
+    if not candidates:
+        return latest_same_dialog if not query_subjects and isinstance(latest_same_dialog, dict) else None
+    if not query_subjects:
+        return latest_same_dialog if isinstance(latest_same_dialog, dict) else max(
+            candidates, key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0))
+        )
+
+    ranked: list[tuple[float, float, float, dict[str, Any]]] = []
+    for item in candidates:
+        item_subjects = set(item.get("subject_terms") or [])
+        subject_fit = max(
+            float(item.get("subject_overlap") or 0.0),
+            _subject_overlap(query_subjects, item_subjects),
+        )
+        topic_text = " ".join((
+            _text(item.get("topic")), _text(item.get("user") or item.get("user_text")),
+            _text(item.get("april") or item.get("april_text")),
+        ))
+        topic_fit = _topic_query_overlap(query, topic_text)
+        semantic_fit = max(
+            float(item.get("score") or 0.0),
+            float(item.get("context") or 0.0),
+            float(item.get("entity_overlap") or 0.0),
+            float(item.get("answer_overlap") or 0.0),
+            float(item.get("user_overlap") or 0.0),
+        )
+        # A named subject must actually match the selected dialogue. A score alone
+        # is not enough if the subject terms conflict or the topic is unrelated.
+        if subject_fit < 0.16 and topic_fit < 0.30:
+            continue
+        ranked.append((max(subject_fit, topic_fit, semantic_fit * 0.55), topic_fit, float(item.get("created_at") or 0), item))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda entry: (entry[0], entry[1], entry[2]), reverse=True)
+    return ranked[0][3]
+
+
 def _is_history_request(query: str) -> bool:
     low = _text(query).lower().replace("ё", "е")
     if not low:
@@ -3566,7 +3634,7 @@ _SECTION_TOPIC_NOISE = _SECTION_QUERY_NOISE | {
 # Keeping this separate from the general stop-word list prevents names and subject nouns
 # from being removed when selecting relevant memories.
 _HISTORY_QUERY_NOISE = _SECTION_TOPIC_NOISE | {
-    "говорил", "говорила", "говорили", "говорились", "общались", "обсуждали",
+    "говор", "говорил", "говорила", "говорили", "говорились", "общались", "обсуждали",
     "обсуждение", "обсуждении", "разговор", "разговора", "разговоре", "речь",
     "история", "истории", "диалог", "диалога", "диалоге", "общение", "общения",
     "сегодня", "вчера", "позавчера", "сейчас", "раньше", "тогда", "недавно",
@@ -3776,7 +3844,20 @@ def _select_history_context_pairs(
                 continue
             selected.append(_compact_pair(_candidate_score(query, row, dialog_id="")))
         if not selected:
-            selected = [_compact_pair(item) for item in eligible[:min(3, max(1, requested_topic_count))]]
+            # When the topic index is unavailable, don't return high-scoring but
+            # potentially stale candidates for a broad history request. Use the
+            # newest saved turns in chronological order so the overview reflects
+            # what the user actually discussed most recently.
+            ordered = sorted(
+                eligible,
+                key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)),
+            )
+            count = max(1, min(4, int(requested_topic_count or 4)))
+            chosen = ordered[-count:]
+            selected = [_compact_pair(item) for item in chosen]
+            matched_count = len(selected)
+            if selected:
+                method = "latest_dialogue_pairs"
 
     return selected, method, matched_count
 
@@ -4843,8 +4924,9 @@ def search_dialogue_context(
         if ranked_named_options:
             ranked_named_options.sort(key=lambda item: (item[0], item[1]), reverse=True)
             named_option_reanchor_score, _, named_option_reanchor_row = ranked_named_options[0]
+    explicit_followup_anchor = _explicit_followup_anchor(query, matches, latest_same_dialog, query_subjects)
     has_new_attachment = bool(query_modalities)
-    explicit_attachment_followup = has_new_attachment and reference_followup
+    explicit_attachment_followup = has_new_attachment and (reference_followup or explicit_followup_anchor is not None)
     user_operation = _user_operation_profile(
         query, query_interpretation,
         history_request=history_request,
@@ -5472,6 +5554,10 @@ def search_dialogue_context(
         continuation = True
     elif has_new_attachment and not explicit_attachment_followup:
         continuation = False
+    elif explicit_followup_anchor is not None:
+        # Explicit addenda can supersede a noisy semantic NEW label only when
+        # ranking found a compatible source inside this same dialogue.
+        continuation = True
     elif _is_section_request(query) and _explicit_section_number(query) is not None and rows:
         # A numbered section reference is a history pointer even when it contains
         # no topic nouns (e.g. "пункт 8"). Search memory instead of classifying it NEW.
@@ -5550,6 +5636,7 @@ def search_dialogue_context(
         and not semantic_active_branch_intent
         and not explicit_prior_pointer
         and not hot_work_followup
+        and not explicit_followup_anchor
         and (bool(query_subjects) or not reference_followup)
     )
     if self_contained_new_information:
@@ -5580,6 +5667,9 @@ def search_dialogue_context(
                 reference_followup=True,
                 query_modalities=query_modalities,
             )
+    elif explicit_followup_anchor is not None:
+        # Use the exact same-dialog source selected for an explicit continuation.
+        anchor = explicit_followup_anchor
     elif repair_active_branch and latest_same_dialog:
         repair_candidates = []
         for candidate in matches:
@@ -5787,6 +5877,24 @@ def search_dialogue_context(
         selected_for_context, history_selection_method, history_matched_count = _select_history_context_pairs(
             query, matches, topic_index, all_rows, requested_topic_count=history_limit
         )
+        if (
+            not selected_for_context
+            and broad_history_overview
+            and not time_filter.get("applied")
+        ):
+            recent_rows = [row for row in all_rows if isinstance(row, dict) and not _row_is_pending_clarification(row)]
+            recent_rows.sort(
+                key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
+                reverse=True,
+            )
+            for row in recent_rows[:4]:
+                selected_for_context.append(_compact_pair(_candidate_score(
+                    query, row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""),
+                    reference_followup=True, query_modalities=query_modalities,
+                )))
+            if selected_for_context:
+                history_selection_method = "recent_dialogue_fallback"
+                history_matched_count = max(history_matched_count, len(selected_for_context))
         _apr_timing_log(
             "history_pair_selection",
             user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
@@ -6940,6 +7048,8 @@ def search_dialogue_context(
         query_subject_terms=sorted(query_subjects)[:10], active_subject_conflict=bool(active_subject_conflict),
         semantic_subject_switch=bool(semantic_subject_switch),
         self_contained_new_information=bool(self_contained_new_information),
+        explicit_followup_matched=bool(explicit_followup_anchor),
+        explicit_followup_anchor_key=_apr_diag_ref(explicit_followup_anchor.get("message_id") if isinstance(explicit_followup_anchor, dict) else ""),
         hot_branch_candidate=bool(hot_branch_candidate),
         selection_followup_candidate=bool(
             (query_interpretation.get("features") or {}).get("selection_followup_candidate")
