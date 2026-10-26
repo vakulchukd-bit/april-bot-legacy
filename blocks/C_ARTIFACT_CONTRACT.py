@@ -4357,6 +4357,23 @@ def _fallback_render_explanation(block_type: str, block: Dict[str, Any], answer:
     block_title = str(_render_block_field(block, payload, "step_title", "title", "section") or "").strip()
     title = str(section or block_title).strip()
     title_for_text = f" «{title[:100]}»" if title else ""
+
+    # Generated-image answers already contain the narrative immediately before
+    # GalleryBlock. Do not repeat that entire narrative a second time below the
+    # image; keep this fallback to one concise, factual caption. Provider-authored
+    # explanations are still preserved by _ensure_render_explanations().
+    if block_type in {"image", "gallery"}:
+        generated_payload = str(payload.get("kind") or payload.get("source") or "").lower() in {"generated_image", "april_generated", "c_april_images_generator"}
+        generated = generated_payload or bool(block.get("generated")) or "c_april_images_generator" in str(block.get("source") or "").lower()
+        if generated:
+            if language == "uk":
+                return "Це згенерована ілюстрація за попереднім описом."
+            if language == "ru":
+                return "Это сгенерированная иллюстрация по предыдущему описанию."
+            if language == "fr":
+                return "Cette illustration a été générée à partir de la description précédente."
+            return "This is a generated illustration based on the preceding description."
+
     if language in {"es", "de", "it", "pl", "pt", "nl", "ja", "zh", "ko", "ar", "hi", "el"}:
         return _fallback_render_explanation_extended(block_type, block, answer, language)
     if context:
