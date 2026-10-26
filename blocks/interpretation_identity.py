@@ -355,6 +355,17 @@ def _detect_image_generation_request(text: str) -> bool:
     return bool(re.search(forward, low, flags=re.IGNORECASE) or re.search(reverse, low, flags=re.IGNORECASE))
 
 
+
+def _detect_explicit_portrait_generation_request(text: str) -> bool:
+    """Only treat portrait/photo as output when user asks to create or show one."""
+    low = _text(text).lower().replace("ё", "е")
+    if not low or _detect_image_modification(low):
+        return False
+    action = r"(?:сгенерир\w*|созда\w*|нарис\w*|изобраз\w*|покаж\w*|отобраз\w*|generate|create|draw|render|show|make)"
+    subject = r"(?:портрет\w*|portrait\w*|фотограф\w*|фото\b|photo\w*|снимок\w*)"
+    return bool(re.search(rf"\b{action}\b.{{0,100}}\b{subject}\b", low, re.IGNORECASE))
+
+
 def _detect_requested_outputs(text: str) -> list[str]:
     result: list[str] = []
     low = _text(text).lower()
@@ -366,13 +377,29 @@ def _detect_requested_outputs(text: str) -> list[str]:
     # The object-order-aware detector captures explicit image requests even
     # when users insert "мне", an adjective, or other polite filler.
     explicit_image_request = _detect_image_generation_request(low)
-    if explicit_image_request and "image" not in result:
+    explicit_portrait_request = _detect_explicit_portrait_generation_request(low)
+    if (explicit_image_request or explicit_portrait_request) and "image" not in result:
         result.append("image")
     if explicit_image_request:
         # The requested output is the picture itself. Do not also classify
         # words describing the picture (e.g. "картинку со схемой") as a
         # separate diagram, graph, formula, or table artifact.
         result = [kind for kind in result if kind not in {"diagram", "graph", "formula", "table"}]
+
+    # Catch compound/hyphenated programming requests such as "Python-код" even when
+    # the exact phrase is absent from the phrase table. A code noun alone is not enough.
+    has_code_noun = bool(re.search(
+        r"(?:\b(?:python|javascript|typescript|java|rust|go|c\+\+|c#)\s*[-–— ]\s*код\w*|"
+        r"\b(?:код\w*|скрипт\w*|code|script)\b)",
+        low, re.IGNORECASE,
+    ))
+    has_code_action = bool(re.search(
+        r"\b(?:напиш\w*|созда\w*|сгенерир\w*|покаж\w*|дай\w*|выдай\w*|исправ\w*|перепиш\w*|"
+        r"оптимизир\w*|улучш\w*|рефактор\w*|write|create|generate|show|give|provide|fix|rewrite|refactor|optimi[sz]e)\b",
+        low, re.IGNORECASE,
+    ))
+    if has_code_noun and has_code_action and "code" not in result:
+        result.append("code")
 
     # Common compound requests say "build a table and graph" only once. Recognize
     # the chart noun together with an explicit construction/visualization verb.
@@ -805,6 +832,35 @@ _HISTORY_MARKERS = (
     'wat hebben we besproken',
     'gespreksgeschiedenis',
 )
+
+_SITE_NAVIGATION_REQUEST_RE = re.compile(
+    r"(?:\bгде\b.{0,90}\b(?:вход|кнопк|ссылк|раздел|страниц|находится|расположен|открыть|посмотреть|найти|зайти)\b|"
+    r"\bкуда\b.{0,45}\b(?:зайти|нажать|перейти|открыть)\b|"
+    r"\bкак\b.{0,55}\b(?:попасть|зайти|открыть|перейти|найти|просмотреть)\b|"
+    r"покажи.{0,55}(?:куда|путь|интерфейс|меню|на\s+картинк|на\s+изображен|по\s+шагам)|"
+    r"проведи.{0,55}(?:интерфейс|сайт|раздел)|"
+    r"(?:where\s+(?:is|can\s+i|do\s+i)|how\s+do\s+i\s+(?:open|find|navigate)|show\s+me\s+where)"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+_SITE_NAVIGATION_TARGET_RE = re.compile(
+    r"(?:сообществ|community|истори\w*\s+диалог|saved\s+dialogues?|history|"
+    r"кабинет|профил|настройк|settings|account|help\s+center|справк|support|поддержк|"
+    r"тариф|premium|памят|удален\w*\s+аккаунт|privacy\s+policy|terms\s+of\s+service)",
+    re.IGNORECASE,
+)
+
+def _is_site_navigation_request(text: Any) -> bool:
+    """True for requests about where/how to use an April UI route, not history recall."""
+    source = _text(text).strip()
+    if not source:
+        return False
+    low = source.lower().replace("ё", "е")
+    if not _SITE_NAVIGATION_TARGET_RE.search(low):
+        return False
+    return bool(_SITE_NAVIGATION_REQUEST_RE.search(low))
+
+
 _HISTORY_COUNTS = {
     "один": 1, "одну": 1, "два": 2, "две": 2, "три": 3, "четыре": 4,
     "пять": 5, "шесть": 6, "семь": 7, "восемь": 8, "девять": 9, "десять": 10,
@@ -1513,6 +1569,20 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         relation_hint = "NEW"
         reason = "explicit_topic_introduction_overrides_continuation" if explicit_topic_introduction and (continuation_action or any(token in token_set for token in {"дальше", "прежнему", "прежней", "resume", "continue"})) else "no_prior_dialogue_intent_detected"
 
+    # UI navigation can mention “история диалога”, but it is not a request to retrieve prior conversation content.
+    site_navigation_request = _is_site_navigation_request(source)
+    if site_navigation_request:
+        primary_intent = "NEW_INFORMATION"
+        direction = "ANSWER_NEW_REQUEST"
+        topic_reference = "SITE_NAVIGATION"
+        time_scope = "UNSPECIFIED"
+        requires_memory = False
+        history_request = False
+        search_scope = "CURRENT_DIALOGUE"
+        intent_score = 0
+        relation_hint = "NEW"
+        reason = "site_navigation_request_overrides_history_keyword"
+
     # A compact feature vector makes routing inspectable; values are deterministic
     # feature activations, not neural embeddings or calibrated probabilities.
     features = {
@@ -1530,6 +1600,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "recent_reference": bool(recent_reference),
         "future_reference": bool(temporal_future),
         "interrogative": bool(interrogative),
+        "site_navigation_request": bool(site_navigation_request),
     }
     context_signature = _context_signature(source)
     intent_upper = _text(primary_intent).upper()
@@ -1571,6 +1642,8 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
 
 def _is_history_request(text: str) -> bool:
     low = _text(text).lower().replace("ё", "е")
+    if _is_site_navigation_request(text):
+        return False
     if any(marker.replace("ё", "е") in low for marker in _HISTORY_MARKERS):
         return True
     try:
@@ -1711,6 +1784,8 @@ def _split_request_sequence(text: str) -> list[str]:
     source = _text(text)
     if not source:
         return []
+    if _is_site_navigation_request(source):
+        return [source]
     if _looks_like_previous_answer_followup(source):
         return [source]
 
