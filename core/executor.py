@@ -243,6 +243,9 @@ def _compact_question_search(
         "relation": _text(context.get("relation") or "NEW").upper(),
         "history_request": history_request,
         "semantic_intent": _text(semantics.get("primary_intent") or ("HISTORY_RECALL" if history_request else "NEW_INFORMATION")),
+        "retrieval_profile": dict(context.get("retrieval_profile") or semantics.get("retrieval_profile") or {}),
+        "active_topic_seed": _text((context.get("retrieval_profile") or {}).get("active_topic_seed") or context.get("active_topic"))[:240],
+        "search_method": _text((context.get("retrieval_profile") or {}).get("search_method"))[:80],
         "search_direction": _text(semantics.get("direction") or ("SEARCH_DIALOGUE_HISTORY" if history_request else "ANSWER_NEW_REQUEST")),
         "time_scope": _text(semantics.get("time_scope") or "UNSPECIFIED"),
         "history_topics": history_topics,
@@ -1667,6 +1670,7 @@ async def execute(
             "window_hours": 12,
             "relation": dialogue_context["relation"],
             "relation_confidence": dialogue_context["relation_confidence"],
+            "retrieval_profile": dict(dialogue_context.get("retrieval_profile") or {}),
             "selected_pairs": (
                 dialogue_context.get("selected_pairs") or []
                 if (dialogue_context.get("relation") == "CONTINUE" or dialogue_context.get("history_request") or dialogue_context.get("contextual_history_match"))
