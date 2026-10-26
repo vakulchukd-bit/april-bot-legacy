@@ -17,6 +17,7 @@ No alternate route, room register or second memory store is created here.
 from __future__ import annotations
 
 from typing import Any
+import asyncio
 import base64
 import hashlib
 import json
@@ -101,6 +102,58 @@ def _stable_scene_id(identity: dict[str, str]) -> str:
     source = "|".join(parts).strip("|") or "missing-turn-identity"
     return "scene_" + hashlib.sha256(source.encode("utf-8")).hexdigest()[:24]
 
+
+
+
+def _has_concrete_image_source(block: Any) -> bool:
+    """Accept actual image/cache/vector sources; reject prompt-only image placeholders."""
+    if not isinstance(block, dict):
+        return False
+    source_prefixes = (
+        "data:image/", "blob:", "https://", "http://", "/api/v1/images/",
+        "/api/images/", "/images/", "/uploads/", "april-cache://",
+        "april_cached_visual://", "feather-asset://",
+    )
+    def visit(value: Any, key_hint: str = "", depth: int = 0) -> bool:
+        if depth > 7 or value is None:
+            return False
+        if isinstance(value, str):
+            candidate = value.strip()
+            low = candidate[:512].lower()
+            if low.startswith(source_prefixes):
+                return True
+            if re.search(r"<svg(?:\s|>)", candidate[:1024], re.IGNORECASE):
+                return True
+            if re.search(r"(?:^|\s)[^\s<>\"']+\.(?:png|jpe?g|webp|gif|avif|svg)(?:[?#]\S*)?$", candidate, re.IGNORECASE):
+                return True
+            if key_hint in {"base64", "image_base64", "imagebase64", "data"} and len(candidate) >= 256:
+                return bool(re.fullmatch(r"[A-Za-z0-9+/=\s]+", candidate))
+            return False
+        if isinstance(value, (list, tuple)):
+            return any(visit(item, key_hint, depth + 1) for item in value)
+        if not isinstance(value, dict):
+            return False
+        media_keys = {
+            "src", "url", "image_url", "imageurl", "asset_url", "asseturl", "uri",
+            "data_uri", "datauri", "image_data_uri", "imagedatauri", "image_base64",
+            "imagebase64", "base64", "svg", "svg_content", "svgcontent", "image",
+            "images", "gallery", "items", "sources", "source", "media", "visual",
+            "visuals", "payload", "data", "artifact", "artifacts", "content", "metadata",
+            "asset_name", "image_asset_name", "asset_path", "image_asset_path",
+        }
+        for key, child in value.items():
+            normalized = str(key).replace("-", "_").lower()
+            if normalized not in media_keys:
+                continue
+            if normalized in {"asset_name", "image_asset_name", "asset_path", "image_asset_path"}:
+                name = str(child or "").strip()
+                if name and re.search(r"\.(?:png|jpe?g|webp|gif|avif|svg)(?:[?#].*)?$", name, re.IGNORECASE):
+                    return True
+                continue
+            if visit(child, normalized, depth + 1):
+                return True
+        return False
+    return visit(block)
 
 def _is_structured_3d_graph_block(block: Any) -> bool:
     if not isinstance(block, dict):
@@ -1956,7 +2009,8 @@ async def execute(
                 "search": {"relation": "NEW", "total_pairs": 0, "candidate_count": 0},
             }
         else:
-            dialogue_context = prepare_dialogue_context(
+            dialogue_context = await asyncio.to_thread(
+                prepare_dialogue_context,
                 uid, current_text, query_interpretation=single_semantics, **search_kwargs
             )
         if question_sequence:
@@ -2157,7 +2211,8 @@ async def execute(
                         task_search["reason"] = "self_contained_new_topic_fast_path"
                         current_request_subject_context = task_context
                 else:
-                    task_context = prepare_dialogue_context(
+                    task_context = await asyncio.to_thread(
+                        prepare_dialogue_context,
                         uid, search_query, query_interpretation=task_semantics, **search_kwargs
                     )
                     if index == 0 and (
@@ -2586,6 +2641,19 @@ async def execute(
             "input_modalities": (interpretation.get("input") or {}).get("modalities", []),
         },
     )
+    # Contribute the navigation map through the same selected C-ARTIFACT room.
+    # The contribution is request-scoped; it does not create another route or memory store.
+    try:
+        if any(str(item.get("room") or "").lower() == "it" for item in selected_rooms):
+            from blocks.C_IT_ROOM import build_machine_contribution as _build_it_room_contribution
+            _it_contribution = _build_it_room_contribution(request)
+            _it_context = _it_contribution.get("knowledge_context") if isinstance(_it_contribution, dict) else None
+            if isinstance(_it_context, dict) and _it_context.get("site_help_requested"):
+                request.routing["room_knowledge_context"] = {"it": _it_context}
+    except Exception as _room_context_error:
+        # Navigation help must never prevent the normal answer path from running.
+        _apr_timing_log("room_knowledge_context_unavailable", None, error=type(_room_context_error).__name__)
+
     _apr_timing_log("machine_request_build", request_build_started,
         relation=dialogue_context.get("relation"), selected_pairs=len(dialogue_context.get("selected_pairs") or []),
         candidates=len(dialogue_context.get("candidates") or []), input_chars=len(current_text),
@@ -3108,7 +3176,20 @@ async def execute(
             artifact for artifact in raw_artifacts
             if str(artifact.get("type") or artifact.get("artifact_type") or "").lower() not in {"image", "generated_image"}
         ]
-
+    else:
+        # Image specs remain available in raw provider data for the generator,
+        # but a prompt-only block is not a Web image and must not become one.
+        raw_blocks = [
+            block for block in raw_blocks
+            if str(block.get("type") or block.get("artifact_type") or "").lower() not in {"image", "gallery"}
+            or _has_concrete_image_source(block)
+        ]
+        raw_artifacts = [
+            artifact for artifact in raw_artifacts
+            if str(artifact.get("type") or artifact.get("artifact_type") or "").lower()
+                not in {"image", "generated_image", "image_artifact", "image_data", "gallery"}
+            or _has_concrete_image_source(artifact)
+        ]
 
     packaged = package_provider_response(
         answer=answer,
