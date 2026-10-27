@@ -79,14 +79,20 @@ IT_PROVIDERS = [
 # Source-derived from routes and page actions in aprill-web-main archive.
 # Only describe existing functionality; do not promise a control absent from the UI.
 APRIL_SITE_MAP = {
-    "schema": "april.site_navigation.v1",
-    "source": "embedded April route map plus user-provided UI screenshots; some card-level URLs are unverified",
+    "schema": "april.site_navigation.v2",
+    "source": "audited aprill-web-main source archive plus user-provided screenshots; production deployment was not directly inspected; card-level URLs are only direct when explicitly listed below",
     "areas": [
         {
             "id": "chat", "path": "/", "label": "Основной чат April",
             "purpose": "Переписка с April; отправка текста и доступные элементы ввода, вложений и голоса; просмотр текстовых и мультимедийных блоков ответа.",
             "steps": ["Если в верхней панели видна кнопка Log in, войдите в Google-аккаунт; если уже видны имя/профиль, откройте его только для настроек.", "Введите полный вопрос в нижнее поле Message April / поле сообщения и нажмите стрелку отправки. Если в одном сообщении несколько связанных пунктов, April должна ответить на них по порядку, не превращая каждую фразу в отдельный новый диалог.", "Для голосового запроса нажмите микрофон и произнесите задачу; дождитесь распознавания и ответа.", "Для фотографии/документа нажмите скрепку, выберите Камера, Изображения или Файлы, убедитесь, что источник прикреплён, и только затем отправьте просьбу.", "Читайте обычный текст, а при наличии — соответствующие ему ссылки, диаграммы, таблицы, формулы, графики, код, файлы и изображения. Визуальный блок должен дополнять объяснение, а не заменять его.", "Если хотите уточнить предыдущий ответ, опишите желаемое продолжение естественными словами. Короткое «Жду» означает продолжить незавершённую задачу, а не спрашивать её заново."],
             "related": ["history", "settings", "guide"]
+        },
+        {
+            "id": "attachments", "path": "/", "label": "Прикрепить фото или файл к сообщению",
+            "purpose": "Это окно вложений внутри основного чата, а не отдельная страница и не генератор картинок. На экране чата скрепка находится слева от поля сообщения; открывается выбор Камера, Изображения или Файлы. После выбора вложение нужно проверить в черновике сообщения и отдельно отправить стрелкой.",
+            "steps": ["Откройте [основной чат April](/). Внизу экрана найдите поле ввода; слева от него находится значок скрепки.", "Нажмите скрепку. В открывшемся окне выберите Камера, чтобы сделать снимок, Изображения, чтобы выбрать фото с телефона, или Файлы, чтобы выбрать поддерживаемый документ.", "Подтвердите выбор и вернитесь в чат. Перед отправкой убедитесь, что вложение действительно появилось рядом с черновиком/в сообщении; открытие галереи само по себе не прикрепляет файл.", "Введите рядом конкретную задачу, например: «Посмотри, что изображено на фото» или «Добавь 200 евро на эту фотографию». Нажмите стрелку отправки. Для редактирования укажите, что нужно изменить; не просите создать новую картинку, если нужна правка исходника.", "Если в выборе нет нужного файла или приложение не вернуло вас в чат, отмените окно выбора и повторите шаги. Не утверждайте, что April уже получила изображение, пока оно не прикреплено и сообщение не отправлено."],
+            "related": ["chat", "image-controls", "guide"]
         },
         {
             "id": "image-controls", "path": "/", "label": "Действия с изображением в чате",
@@ -109,7 +115,7 @@ APRIL_SITE_MAP = {
         {
             "id": "settings", "path": "/settings", "label": "Настройки и профиль",
             "purpose": "Профиль и ник пользователя, язык интерфейса, April ID и (для активного тарифа) Premium ID, статус/тестовая активация Premium, поддержка Premium, выход и удаление April-аккаунта.",
-            "steps": ["Откройте [профиль и настройки](/settings). На профиле видны имя в чате и карточка CURRENT PLAN.", "В блоке USER измените имя в чате через Edit, если хотите поменять подпись рядом с сообщениями.", "В карточке CURRENT PLAN проверьте Free/Premium и строку Time remaining. На предоставленном скриншоте Premium — US$25 за 28 дней; Renew появляется за 24 часа до окончания, автоматических списаний нет.", "Используйте быстрые переходы в карточке тарифа: Chat with April — /, Dialog history — /history, Contact support — /insights?room=support, Community — /space.", "Для языка откройте блок выбора языка; настройка должна относиться к текущему April ID. Для ID откройте блок профиля и используйте кнопку копирования, если она отображается.", "Для выхода нажмите кнопку выхода. Удаление April-аккаунта доступно через /account-deletion и не удаляет аккаунт Google."],
+            "steps": ["Откройте [профиль и настройки](/settings). На профиле видны имя в чате и карточка CURRENT PLAN.", "В блоке USER измените имя в чате через Edit, если хотите поменять подпись рядом с сообщениями.", "В карточке CURRENT PLAN проверьте Free/Premium и строку Time remaining. В проверенной копии страницы /aprill тариф Premium за US$25 на 28 дней обозначен как planned, а оформление оплаты не активно. Не обещайте купить или продлить тариф, пока это явно не доступно в текущем интерфейсе; срок появления Renew сообщайте только при подтверждении кодом/экраном активной версии.", "Используйте быстрые переходы в карточке тарифа: Chat with April — /, Dialog history — /history, Contact support — /insights?room=support, Community — /space.", "Для языка откройте блок выбора языка; настройка должна относиться к текущему April ID. Для ID откройте блок профиля и используйте кнопку копирования, если она отображается.", "Для выхода нажмите кнопку выхода. Удаление April-аккаунта доступно через /account-deletion и не удаляет аккаунт Google."],
             "related": ["chat", "support", "deletion", "guide"]
         },
         {
@@ -192,8 +198,111 @@ APRIL_SITE_MAP = {
         "Не направляй обычных пользователей на административную страницу.",
         "Не обещай функции маршрута /memory или /tools: в текущем просмотренном архиве страницы пустые.",
         "Для действий с подпиской, выходом и удалением описывай только видимые кнопки, а если их расположение отличается — попроси скриншот текущего экрана.",
+        "Для каждого запроса называй действие, стартовый экран, точный контрол, ожидаемый экран после нажатия и следующий шаг; не ограничивайся одним названием раздела.",
+        "В составном запросе выполняй каждый подзапрос отдельно и по порядку, сохраняя его объект, действие, ограничения и ожидаемый результат.",
+        "Для инструкции по прикреплению изображения объясни скрепка → Камера/Изображения/Файлы → проверить вложение → написать задачу → отправить; не генерируй изображение вместо этой инструкции.",
+        "Всегда различай Free и Premium по матрице доступа; указывай, что матрица получена из снимка исходников, а не прямого просмотра боевого домена.",
     ],
 }
+
+# Task journeys connect the user's intent to a real screen, control, expected destination and next action.
+# They are authoritative guidance for the interpreter; they never claim that the room clicked a control.
+APRIL_USER_JOURNEYS = {
+    "attach_image": {
+        "aliases": ["добавить фото", "прикрепить картинку", "чтобы ты увидела фото", "добавить картинку для того чтобы", "в твоем пространстве добавить картинку", "загрузить изображение в чат", "paperclip", "attach image"],
+        "action": "GUIDE_ATTACH_IMAGE", "availability": "Free и Premium; пользователь вручную прикрепляет файл",
+        "steps": ["Откройте основной чат /.", "Внизу слева от поля сообщения нажмите скрепку.", "В окне выбора нажмите Камера для нового снимка, Изображения для фото из галереи, или Файлы для документа.", "Вернитесь в чат и убедитесь, что выбранное вложение отображается в черновике.", "Введите, что April должна сделать с этим материалом, и нажмите стрелку отправки."],
+        "finish": "Вложение должно быть прикреплено к отправленному сообщению. Само открытие галереи не отправляет файл.",
+    },
+    "inspect_image": {
+        "aliases": ["что на фото", "посмотри фото", "прочитай картинку", "анализ изображения", "объясни изображение"],
+        "action": "ANALYZE_ATTACHMENT", "availability": "Free и Premium для доступных поддерживаемых вложений; фактическая возможность зависит от типа и размера файла",
+        "steps": ["Прикрепите исходное фото через скрепку → Изображения.", "Дождитесь появления вложения в чате.", "Напишите конкретно, что определить/прочитать/сравнить, и отправьте."],
+        "finish": "April отвечает по прикреплённому источнику; если изображения в сообщении нет, она должна попросить прикрепить его, а не делать вид, что видит файл.",
+    },
+    "edit_image": {
+        "aliases": ["добавь сумму на фото", "добавь 200 евро на фото", "фото с монетами", "измени эту фотографию", "нарисуй на фото", "удали объект с изображения"],
+        "action": "EDIT_EXISTING_IMAGE", "availability": "Premium-only per current bot provider policy; source-image editing requires an actual referenced source",
+        "steps": ["Укажите, какое именно фото изменить, предпочтительно в том же диалоге.", "Опишите точное изменение и место на фото.", "Если исходник не найден в текущей ветке, прикрепите оригинал снова.", "После результата откройте меню действий в правом верхнем углу карточки изображения; выберите Скачать на устройство или Поделиться."],
+        "finish": "Не создавать постороннее изображение вместо редактирования источника. Если редактирование недоступно, объяснить это и не обещать завершённую правку.",
+    },
+    "download_image": {
+        "aliases": ["скачать картинку", "сохранить изображение", "поделиться картинкой", "download image", "share image"],
+        "action": "OPEN_IMAGE_ACTION_MENU", "availability": "Доступно для отрисованной карточки изображения, если меню есть в текущем интерфейсе",
+        "steps": ["Найдите нужную карточку изображения в чате.", "Нажмите квадратную кнопку в правом верхнем углу карточки.", "Выберите Скачать на устройство либо Поделиться.", "При скачивании проверьте папку загрузок/фото на устройстве."],
+        "finish": "Пользователь управляет существующим результатом; новая генерация не нужна.",
+    },
+    "resume_history": {
+        "aliases": ["найди старый диалог", "продолжить прошлый разговор", "история диалогов", "историю диалогов", "куда нажать чтобы открыть историю", "saved dialogues", "вернуться к теме"],
+        "action": "OPEN_DIALOGUE_HISTORY", "availability": "Premium-gated in uploaded web source snapshot",
+        "steps": ["Откройте /history или Settings → Dialog history.", "Найдите карточку по названию/фрагменту и дате, если она видна.", "Нажмите Continue this dialogue у нужной карточки.", "Если ищете тему по смыслу/времени, а не через список, спросите April в чате и назовите тему или временной диапазон."],
+        "finish": "Это сохранённая история; не путать её с кратковременным контекстом активного чата. Не говорить, что найден диалог, пока не выбрана совпадающая запись.",
+    },
+    "profile_language_plan": {
+        "aliases": ["сменить язык", "мой april id", "premium id", "какой у меня тариф", "сколько осталось premium", "выйти из аккаунта"],
+        "action": "OPEN_PROFILE_SETTINGS", "availability": "Free и Premium; платёжный checkout в просмотренном снимке обозначен как planned и не активен",
+        "steps": ["Нажмите профиль/имя пользователя в верхней панели или откройте /settings.", "В профиле выберите соответствующий блок: язык, USER, April ID/Premium ID или CURRENT PLAN.", "Для имени используйте Edit; для ID — Copy, если кнопка отображается.", "Для выхода используйте Exit/Log out. Для удаления April-аккаунта используйте отдельный маршрут /account-deletion."],
+        "finish": "Не обещать покупку/renew, если активная кнопка оплаты не подтверждена текущим экраном.",
+    },
+    "community": {
+        "aliases": ["сообщество", "найти пользователя", "добавить друга", "личный чат с пользователем", "community"],
+        "action": "OPEN_COMMUNITY", "availability": "Сообщество доступно через /space; действия зависят от входа и видимых элементов",
+        "steps": ["Откройте /space или Settings → Community.", "Просмотрите публичные записи либо раздел участников/поиска, если он отображается.", "Откройте карточку нужного человека и используйте доступное действие приглашения/личного чата.", "Не вводите URL /space/direct/[friendId] вручную: сначала выберите человека в сообществе."],
+        "finish": "Публичная запись и личный диалог — разные поверхности; не публиковать личные данные в открытом посте.",
+    },
+    "get_help": {
+        "aliases": ["где справка", "помощь по сайту", "карта сайта", "что умеет интерфейс", "help center", "how to use april"],
+        "action": "OPEN_HELP_INFORMATION", "availability": "Free и Premium; страницы с юридическими сведениями и инструкциями находятся в /aprill",
+        "steps": ["Откройте /aprill через логотип APRIL/Help & Information.", "Выберите карточку нужной темы: Help Center, How to Use April, Privacy Policy, Terms of Service, Plans & Payments, Account & Data Deletion или Contact Support.", "Если карточка не имеет подтверждённого отдельного URL, оставайтесь на родительской странице и следуйте указанной там ссылке."],
+        "finish": "Не придумывать отдельные URL карточек. Если нужная страница отсутствует или не работает, вернуться в чат / либо открыть поддержку /insights?room=support.",
+    },
+}
+
+APRIL_ACCESS_MATRIX = {
+    "free": ["Основной чат и поддерживаемые вложения", "Сообщество /space", "Профиль и настройки /settings", "Справка /aprill", "Активный контекст до 12 часов по проектной политике"],
+    "premium": ["Функции Free", "История диалогов /history — проверка Premium обязательна", "Редактирование существующих изображений согласно политике бота", "Активный контекст до 24 часов по проектной политике"],
+    "not_promised": ["Автоматический платёж/продление без доступной кнопки checkout", "Отдельная рабочая панель /memory или /tools — эти страницы пустые в исходном архиве", "Административная страница /Admin-profile для обычных пользователей"],
+    "source_note": "Матрица восстановлена по загруженным ZIP исходникам и скриншоту; боевой домен напрямую не инспектировался. Если текущий экран отличается, приоритет у фактического видимого экрана.",
+}
+
+
+def _select_user_journeys(query: str) -> list[dict]:
+    """Return a small relevant workflow excerpt without guessing unseen UI controls."""
+    low = _text(query).lower().replace("ё", "е")
+    result = []
+    if re.search(r"(?:создай|сгенерируй|нарисуй|изобрази)\s+(?:мне\s+)?(?:нов\w*\s+)?(?:картинк\w*|изображени\w*|иллюстраци\w*|\bimage\b|\bpicture\b)", low, re.I):
+        return []
+    if "_is_attachment_instruction_query" in globals() and _is_attachment_instruction_query(query):
+        journey = APRIL_USER_JOURNEYS.get("attach_image")
+        if isinstance(journey, dict):
+            result.append({"id": "attach_image", **journey})
+    existing_ids = {str(item.get("id")) for item in result if isinstance(item, dict)}
+    for journey_id, journey in APRIL_USER_JOURNEYS.items():
+        if journey_id in existing_ids:
+            continue
+        aliases = journey.get("aliases", [])
+        if any(str(alias).lower().replace("ё", "е") in low for alias in aliases):
+            result.append({"id": journey_id, **journey})
+            existing_ids.add(journey_id)
+    if not result:
+        ids = [area_id for score, area_id in _semantic_site_area_scores(low) if score >= 2.0]
+        mapping = {"attachments":"attach_image", "image-controls":"download_image", "history":"resume_history", "settings":"profile_language_plan", "space":"community", "guide":"get_help", "help-center":"get_help", "how-to-use":"get_help"}
+        for area_id in ids:
+            if area_id == "attachments" and not ("_is_attachment_instruction_query" in globals() and _is_attachment_instruction_query(query)):
+                continue
+            if area_id == "image-controls" and not re.search(r"(?:скача\w*|сохран\w*|поделит\w*|download|save|share)", low):
+                continue
+            if area_id == "space" and not re.search(r"(?:сообществ|community|пользоват|участник|друз|контакт|личн\w*\s+чат|private chat)", low):
+                continue
+            if area_id == "history" and not re.search(r"(?:истори|сохраненн\w*|стар\w*\s+диалог|предыдущ\w*\s+разговор|continue this dialogue|saved dialogues)", low):
+                continue
+            if area_id == "settings" and not re.search(r"(?:профил|кабинет|настройк|язык|april id|premium id|тариф|подписк|аккаунт|settings)", low):
+                continue
+            journey_id = mapping.get(area_id)
+            if journey_id and journey_id in APRIL_USER_JOURNEYS and APRIL_USER_JOURNEYS[journey_id] not in result:
+                result.append({"id": journey_id, **APRIL_USER_JOURNEYS[journey_id]})
+    return result[:3]
+
 
 # Screen blueprints reconstructed from the supplied April UI screenshots and existing route map.
 # They are knowledge records for retrieval/rendering, not route-specific answer templates.
@@ -218,7 +327,7 @@ APRIL_UI_BLUEPRINTS = {
     },
     "settings": {
         "screen_id": "profile", "screen_title": "Настройки и профиль",
-        "visible_controls": ["Google account", "Выйти", "April ID", "Premium ID", "Копировать", "Имя в пространстве", "Изменить", "CURRENT PLAN", "Time remaining", "Renew (появляется за 24 часа до окончания на предоставленном скриншоте)", "Chat with April", "Dialog history", "Contact support", "Community", "Удалить аккаунт", "Язык: Русский, English, Українська, выбрать другой язык"],
+        "visible_controls": ["Google account", "Выйти", "April ID", "Premium ID", "Копировать", "Имя в пространстве", "Изменить", "CURRENT PLAN", "Time remaining", "Renew (если эта кнопка доступна на текущем экране; наличие и срок появления не гарантируются снимком исходников)", "Chat with April", "Dialog history", "Contact support", "Community", "Удалить аккаунт", "Язык: Русский, English, Українська, выбрать другой язык"],
         "screen_flow": ["Открыть /settings через профиль/имя в верхней панели", "Проверить Google-аккаунт, April ID и Premium ID; копирование не раскрывает секреты", "Имя в пространстве меняется через Edit в USER", "В CURRENT PLAN проверить тариф и оставшееся время", "Использовать соответствующую быструю ссылку: Chat with April → /; Dialog history → /history; Contact support → /insights?room=support; Community → /space", "В блоке языка выбрать нужный язык; после выбора проверять, что активная метка соответствует выбору", "Выход завершает сессию; удаление April-аккаунта — отдельное подтверждаемое действие и не удаляет Google-аккаунт"],
         "semantic_concepts": ["профиль", "личный кабинет", "аккаунт", "выход", "сменить имя", "ник", "язык интерфейса", "поменять язык", "апрель id", "april id", "premium id", "копировать id", "тариф", "подписка", "оставшееся время", "продлить", "оплата", "renew", "выйти", "logout", "google account"]
     },
@@ -249,7 +358,7 @@ APRIL_UI_BLUEPRINTS = {
     "plans": {
         "screen_id": "profile", "screen_title": "Тарифы и платежи",
         "visible_controls": ["CURRENT PLAN", "Free/Premium", "Time remaining", "Renew"],
-        "screen_flow": ["Открыть /settings", "Посмотреть текущий тариф и оставшееся время", "Если кнопка Renew появилась, прочитать условия и подтвердить продление самостоятельно"],
+        "screen_flow": ["Открыть /settings", "Посмотреть текущий тариф и оставшееся время", "Если кнопка Renew действительно появилась в текущем интерфейсе, прочитать условия и подтвердить продление самостоятельно; если checkout отсутствует, объяснить, что покупка/продление сейчас не подтверждены"],
         "semantic_concepts": ["цена", "оплата", "подписка", "продлить", "renew", "сколько осталось", "Free", "Premium", "тариф"]
     },
     "deletion": {
@@ -287,6 +396,8 @@ for _area in APRIL_SITE_MAP.get("areas", []):
         _blueprint_key = "plans"
     elif _area_id == "chat":
         _blueprint_key = "chat"
+    elif _area_id == "attachments":
+        _blueprint_key = "attachments"
     elif _area_id == "image-controls":
         _blueprint_key = "image-controls"
     elif _area_id == "history":
@@ -305,7 +416,7 @@ _SITE_CONCEPT_ALIASES = {
     "history": ("старая беседа", "прошлый разговор", "старый чат", "вернуться к разговору", "восстановить тему", "продолжить беседу", "saved dialogue", "previous conversation", "resume"),
     "space": ("люди", "другие пользователи", "публичная переписка", "общий чат", "пост", "участник", "private chat", "community"),
     "settings": ("личный кабинет", "учётная запись", "параметры аккаунта", "поменять ник", "сменить имя", "язык интерфейса", "тариф", "подписка", "april id", "premium id"),
-    "attachments": ("скрепка", "прикрепить", "загрузить файл", "выбрать фото", "сфотографировать", "документ", "camera", "image picker", "file upload"),
+    "attachments": ("скрепка", "прикрепить", "прикрепить фото", "добавить картинку в чат", "добавить фото в чат", "загрузить фото", "загрузить файл", "выбрать фото", "сфотографировать", "документ", "camera", "image picker", "file upload", "attach an image", "upload a photo"),
     "image-controls": ("скачать картинку в чате", "сохранить изображение", "скопировать картинку из чата", "поделиться изображением", "меню изображения", "кнопка скачивания картинки", "download image", "save picture", "share image"),
     "help": ("инструкция", "документация", "частые вопросы", "правила сервиса", "как пользоваться", "справочный раздел", "help center", "how to use"),
     "support": ("пожаловаться", "обратиться за помощью", "сообщить об ошибке", "зависла", "залипла", "ошибка интерфейса", "support request"),
@@ -366,8 +477,9 @@ _SITE_HELP_SIGNALS = (
 # Keyword groups are semantic hints for choosing a small request-scoped excerpt.
 # The complete map above remains the canonical source; no user topic is hard-coded.
 _SITE_AREA_HINTS = {
-    "chat": ("главный чат", "основной чат", "чат с april", "chat", "написать april", "поле сообщения", "отправить вопрос", "вложен", "голос"),
-    "image-controls": ("картинк", "изображени", "фото", "скачат", "сохран", "скопир", "поделиться", "download", "save", "share", "кнопка действий"),
+    "chat": ("главный чат", "основной чат", "чат с april", "chat", "написать april", "поле сообщения", "отправить вопрос", "голос"),
+    "attachments": ("скрепк", "прикрепить фото", "добавить картинку в чат", "фото чтобы ты увидела", "фото чтобы ты увидел", "картинку чтобы ты увидела", "добавить картинку для того чтобы", "в твоем пространстве добавить картинку", "загрузить фото", "выбрать изображение", "камера", "image picker", "file upload"),
+    "image-controls": ("скачать картинку", "сохранить изображение", "скопировать картинку", "поделиться изображением", "меню изображения", "кнопка действий", "download image", "save picture", "share image"),
     "history": ("истор", "history", "сохраненн", "прошл", "старый диалог", "предыдущ", "восстанов", "продолж", "saved dialogues", "saved dialogs"),
     "memory": ("памят", "memory", "запом", "срок хранения", "окно памяти"),
     "settings": ("кабинет", "личный кабинет", "профил", "аккаунт", "account", "settings", "настройк", "язык", "language", "april id", "premium id", "тариф", "подпис", "premium", "free", "выйти", "выход", "logout", "продлен"),
@@ -462,11 +574,27 @@ _SITE_ROUTE_WORDS = (
 )
 
 
+def _is_attachment_instruction_query(query: Any) -> bool:
+    """Distinguish instructions for uploading media into chat from image editing/generation."""
+    low = str(query or "").strip().lower().replace("ё", "е")
+    if not low:
+        return False
+    media = bool(re.search(r"(?:картинк\w*|изображени\w*|фот\w*|снимк\w*|файл\w*|picture\w*|image\w*|photo\w*|file\w*)", low))
+    upload_action = bool(re.search(r"(?:прикреп\w*|добав\w*|загруз\w*|выбрат\w*|отправ\w*|attach\w*|upload\w*|add\w*|select\w*)", low))
+    how_to = bool(re.search(r"(?:расскаж\w*.{0,35}как|объясн\w*.{0,35}как|подскажи\w*.{0,35}как|^как\b|куда\s+нажать|по\s+шагам|how\s+(?:do\s+i|to)|show\s+me\s+how)", low, re.I | re.S))
+    chat_target = bool(re.search(r"(?:в\s+(?:тво[её]м|этот|основн\w*|главн\w*)\s+(?:пространств\w*|чат\w*|диалог\w*)|в\s+чат\w*|в\s+переписк\w*|чтобы\s+(?:ты|април\w*)\s+(?:увид\w*|получил\w*|прочитал\w*)|so\s+(?:you|april)\s+can\s+(?:see|view|read)|in\s+(?:the\s+)?chat)", low, re.I))
+    # Object placement/annotation refers to editing a photo, not uploading it.
+    edit_surface = bool(re.search(r"(?:на\s+(?:эту\s+|этой\s+|этот\s+|мою\s+)?(?:фот\w*|картинк\w*|изображени\w*)|добав\w*.{0,55}\b(?:евро|гривн|надпис|объект|стрелк)\b)", low, re.I | re.S))
+    return media and upload_action and chat_target and (how_to or bool(re.search(r"чтобы\s+(?:ты|април\w*)\s+(?:увид\w*|получил\w*)", low))) and not edit_surface
+
+
 def is_site_help_query(query: str) -> bool:
     """Detect April self-help/navigation questions independently of LLM classification."""
     low = str(query or "").strip().lower().replace("ё", "е")
     if not low:
         return False
+    if _is_attachment_instruction_query(low):
+        return True
     # Direct route/section names are enough: a user can simply type "Сообщество".
     if any(term in low for term in _SITE_ROUTE_WORDS):
         return True
@@ -712,7 +840,8 @@ def prepare_site_help_interpretation(
     outputs = intent.get("requested_outputs")
     outputs = list(outputs) if isinstance(outputs, (list, tuple, set)) else ["text"]
     source_image_edit = _interpretation_has_concrete_image_edit(interpretation)
-    navigation_visual_request = _site_navigation_picture_request(query, referent_ids)
+    attachment_help = _is_attachment_instruction_query(query)
+    navigation_visual_request = _site_navigation_picture_request(query, referent_ids) or attachment_help
     route_picture = navigation_visual_request and not source_image_edit
     explicit_raster = bool(_SITE_EXPLICIT_RASTER_REQUEST_RE.search(str(query or "")))
     # Free's source-image edit limitation must not be bypassed by turning an edit
@@ -902,6 +1031,7 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
     # Combine broad semantic similarity with route hints. Hints can clarify a
     # short UI noun, while map metadata permits paraphrases absent from a trigger list.
     score_by_id = {area_id: score for score, area_id in semantic_scores}
+    attachment_help = _is_attachment_instruction_query(query)
     direct_hint_ids = [area_id for area_id, hints in _SITE_AREA_HINTS.items() if any(hint in query for hint in hints)]
     for area_id in direct_hint_ids:
         score_by_id[area_id] = max(score_by_id.get(area_id, 0.0), 3.0)
@@ -909,10 +1039,12 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
     for area_id in direct_hint_ids:
         if area_id not in selected_ids:
             selected_ids.append(area_id)
-    # The attachment picker is a UI state, not its own route. It is described by
-    # the same map only when the user asks about attaching/choosing a media source.
-    if any(phrase in query for phrase in _SITE_CONCEPT_ALIASES.get("attachments", ())):
-        selected_ids.insert(0, "chat")
+    # The picker is a modal over /, but its own map node is required so the answer
+    # explains the exact attachment workflow rather than generic image controls.
+    if attachment_help:
+        selected_ids = ["attachments", "chat"]
+    elif any(phrase in query for phrase in _SITE_CONCEPT_ALIASES.get("attachments", ())):
+        selected_ids = ["attachments", "chat", *[value for value in selected_ids if value not in {"attachments", "chat"}]]
     intent = machine_request.get("intent") if isinstance(machine_request, dict) and isinstance(machine_request.get("intent"), dict) else getattr(machine_request, "intent", {})
     intent = intent if isinstance(intent, dict) else {}
     referent_ids = intent.get("site_navigation_referent") if isinstance(intent.get("site_navigation_referent"), list) else []
@@ -986,7 +1118,7 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
                 pending.append(related)
     # Specific route questions get only the profile gateway and requested destinations;
     # do not clutter their diagram with unrelated related routes such as Memory or Support.
-    query_targets = [area_id for area_id in selected_ids if area_id in {"settings", "chat", "history", "space", "support", "guide", "plans", "deletion", "privacy", "terms"}]
+    query_targets = [area_id for area_id in selected_ids if area_id in {"settings", "chat", "attachments", "image-controls", "history", "space", "support", "guide", "plans", "deletion", "privacy", "terms"}]
     if any(area_id not in {"settings", "chat", "guide"} for area_id in query_targets):
         pending = query_targets
     else:
@@ -1012,6 +1144,8 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
         "source": APRIL_SITE_MAP["source"],
         "matched_query": query[:240],
         "areas": chosen[:7],
+        "user_journeys": _select_user_journeys(query),
+        "access_matrix": APRIL_ACCESS_MATRIX,
         "screen_id": screen_id,
         "screen_blueprints": blueprints,
         "broad_self_help": bool(broad_self_help and not referent_ids),
@@ -1033,6 +1167,8 @@ def _site_screen_for_query(query: str, selected_area_ids: Any = None) -> str:
         low, re.IGNORECASE,
     ))
     shortcut_targets = ids.intersection({"history", "space", "support", "plans", "deletion", "privacy", "terms", "guide", "help-center", "how-to-use"})
+    if "attachments" in ids:
+        return "attachments"
     if "image-controls" in ids:
         return "chat"
     if "settings" in ids and shortcut_targets and (entry_request or len(shortcut_targets) > 1):
