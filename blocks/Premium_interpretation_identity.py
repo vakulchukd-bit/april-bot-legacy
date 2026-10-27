@@ -814,15 +814,28 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     # inference, so "show the table" can never accidentally invoke Images 2.0.
     table_noun = r"(?:\btable\b|\bтаблиц\w*)"
     table_action = (
-        r"(?:\b(?:show|display|build|create|make|prepare|construct|render|generate|draw|list|provide|present)\b|"
+        r"(?:\b(?:show|display|build|create|make|prepare|construct|render|generate|draw|list|provide|present|print|output|export)\b|"
         r"покаж\w*|отобраз\w*|постро\w*|созда\w*|сдела\w*|подготов\w*|сформир\w*|"
-        r"состав\w*|вывед\w*|представ\w*|нарис\w*)"
+        r"состав\w*|вывед\w*|вывел\w*|выдай\w*|выда\w*|распечат\w*|напечат\w*|"
+        r"представ\w*|нарис\w*|перечисл\w*|предостав\w*|выстав\w*|собер\w*|"
+        r"створи\w*|покажи|виведи\w*|надруку\w*|зроби\w*)"
     )
+    # Requests often contain an inflected table noun and an output verb in a
+    # different clause: "элементы в таблице, вывел каждый в своё окошко; выдай
+    # всю таблицу Менделеева". Check the full turn, not just exact phrase markers.
     table_request = bool(
-        re.search(table_action + r".{0,60}" + table_noun, low, flags=re.IGNORECASE)
-        or re.search(table_noun + r".{0,60}" + table_action, low, flags=re.IGNORECASE)
+        re.search(table_action + r".{0,100}" + table_noun, low, flags=re.IGNORECASE)
+        or re.search(table_noun + r".{0,100}" + table_action, low, flags=re.IGNORECASE)
     )
-    if table_request and "table" not in outputs:
+    table_grid_request = bool(re.search(
+        r"(?:периодическ\w*.{0,80}таблиц\w*|таблиц\w*.{0,80}(?:менделеев\w*|периодическ\w*)|"
+        r"(?:всю|полную|все\s+118|все\s+элемент\w*).{0,45}таблиц\w*|"
+        r"таблиц\w*.{0,80}(?:ячейк\w*|окошк\w*|порядков\w+\s+номер\w*|атомн\w+\s+номер\w*)|"
+        r"(?:show|display|list|print|give|provide|build|create).{0,60}(?:periodic\s+table)|"
+        r"(?:full\s+periodic\s+table).{0,50}(?:table|elements))",
+        low, re.IGNORECASE,
+    ))
+    if (table_request or table_grid_request) and "table" not in outputs:
         outputs.append("table")
 
     # Semantic drawing policy: ordinary requests to draw/create/show a picture
