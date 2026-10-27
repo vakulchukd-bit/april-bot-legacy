@@ -232,6 +232,21 @@ def _contains_marker(text: str, marker: str) -> bool:
     return phrase in low
 
 
+def _detect_contextual_image_edit(text: str) -> bool:
+    """Recognize image annotation by its action and target, without requiring 'edit image'."""
+    low = _text(text).lower().replace("ё", "е")
+    action = re.search(
+        r"(?:добав\w*|дорис\w*|нанес\w*|постав\w*|укаж\w*|покаж\w*|помет\w*|отмет\w*|"
+        r"выдел\w*|обвед\w*|подсвет\w*|передел\w*|исправ\w*|поправ\w*|перерис\w*|"
+        r"хочу\w*|хотел\w*|хотела|мне\s+нужно|мне\s+надо|пусть|чтобы|"
+        r"add|draw|mark|point|annotate|highlight|redo|revise|change|edit|modify|i\s+want|i(?:'d|\s+would)\s+like)", low, re.IGNORECASE)
+    target = re.search(
+        r"(?:стрелк\w*|указател\w*|маркер\w*|кнопк\w*|место\s+(?:нажатия|клик\w*)|куда\s+нажать|"
+        r"галоч\w*|цвет\w*|красн\w*|зелен\w*|фон\w*|надпис\w*|текст\w*|arrow|pointer|marker|button|click|red|green|highlight|circle|outline)",
+        low, re.IGNORECASE)
+    return bool(action and target)
+
+
 def _detect_image_modification(text: str) -> bool:
     """Detect a request to alter an existing image or diagram.
 
@@ -1258,10 +1273,14 @@ def _infer_dialogue_act_profile(
         "почему", "как это работает", "как это получается", "explain", "prove",
         "why does", "why is", "how does",
     )
-    acknowledgement = short and any(
+    waiting_acknowledgement = bool(re.fullmatch(
+        r"\s*(?:ну\s*)?(?:жду|ожидаю|жду\s+ответа|жду\s+результат\w*|ну\s+и\s+что|долго\??|ну\??|и\??|wait(?:ing)?|i\s*wait|still\s+waiting|waiting\s+for\s+(?:it|the\s+result|the\s+image))\s*[.!?…]*\s*",
+        low, re.IGNORECASE,
+    ))
+    acknowledgement = short and (waiting_acknowledgement or any(
         token in agreement_terms or any(token.startswith(root) for root in ("соглас", "правиль", "точн"))
         for token in tokens
-    ) and not any(token in rejection_terms or token in {"не", "никак", "ни"} for token in tokens)
+    )) and not any(token in rejection_terms or token in {"не", "никак", "ни"} for token in tokens)
     negation = short and (
         any(token in rejection_terms for token in tokens)
         or ("не" in token_set and bool(token_set & {"так", "то", "это", "совсем", "согласен", "согласна", "верно", "правильно"}))
@@ -1283,6 +1302,7 @@ def _infer_dialogue_act_profile(
         and not explicit_topic_introduction
         and (
             (acknowledgement and len(tokens) <= 4)
+            or waiting_acknowledgement
             or negation
             or correction
             or ((clarification or explanation_request) and short and not context_dependent_question)
@@ -1331,6 +1351,7 @@ def _infer_dialogue_act_profile(
         "context_dependent_reaction": context_dependent_reaction,
         "pragmatic_features": {
             "acknowledgement_or_agreement": bool(acknowledgement),
+            "waiting_acknowledgement": bool(waiting_acknowledgement),
             "negation_or_disagreement": bool(negation),
             "correction": bool(correction),
             "clarification_request": bool(clarification),
@@ -2150,8 +2171,10 @@ def build_interpretation(
         r"размер\w*\s+(?:кажд\w*\s+)?сторон\w*|размер\w*|измерен\w*)",
         request_text.lower().replace("ё", "е"),
     ))
+    contextual_source_edit = bool(has_user_source_image and _detect_contextual_image_edit(request_text))
     image_edit_restricted = bool(
         image_modification_requested
+        or contextual_source_edit
         or (has_user_source_image and compositing_requested and not structured_diagram_noun)
     )
     # Kept as an explicit false compatibility field for older prompt and
