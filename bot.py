@@ -74,10 +74,16 @@ CANONICAL_ROUTE_VERSION = "april_web_botru_exkrutor_v2_message_language"
 INPUT_NORMALIZATION_VERSION = "botru_input_normalization_v3_language_resolution"
 
 
-def _apr_timing_log(stage: str, started: float | None = None, **fields: Any) -> None:
+def _apr_timing_log(event_name: str | None = None, started: float | None = None, **fields: Any) -> None:
     """Low-overhead diagnostic timing; logging must never affect the request path."""
     try:
-        payload = {"component": "botru", "stage": stage}
+        # A metadata keyword named "stage" must never collide with the
+        # event-name argument or overwrite the canonical event stage.
+        if event_name is None:
+            event_name = str(fields.pop("stage", "unspecified"))
+        elif "stage" in fields:
+            fields["detail_stage"] = fields.pop("stage")
+        payload = {"component": "botru", "stage": (event_name or "unspecified")}
         if started is not None:
             payload["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
         payload.update(fields)
@@ -96,6 +102,54 @@ def _apr_diag_ref(value: Any) -> str:
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _apr_backend_failure_payload(data: Any, exc: BaseException) -> dict[str, Any]:
+    """Return a visible, localized chat fallback instead of an empty assistant bubble.
+
+    The technical exception is kept in server diagnostics; the user receives a
+    useful retry message in the language of the current message or UI preference.
+    """
+    envelope = data if isinstance(data, dict) else {}
+    user_text = _text(envelope.get("text") or envelope.get("message") or envelope.get("input") or envelope.get("content"))
+    requested_language = _text(envelope.get("language") or envelope.get("display_language"))
+    try:
+        language = _detect_message_language(user_text) or _detect_language("", requested_language)
+    except Exception:
+        language = ""
+    language = _normalize_language_code(language or requested_language or "en")
+    if language in {"uk", "ua"}:
+        message = "Вибачте, під час обробки сталася технічна помилка. Ваше повідомлення отримано, але відповідь не сформувалася. Спробуйте надіслати його ще раз — контекст цієї помилки не замінює вашу тему."
+    elif language == "ru":
+        message = "Извини, при обработке произошла техническая ошибка. Сообщение получено, но ответ не сформировался. Отправь запрос ещё раз — мы продолжим с твоей темы."
+    elif language == "en":
+        message = "Sorry, a technical error interrupted the response. Your message was received, but the answer was not completed. Please send it again and we will continue from your topic."
+    else:
+        # Keep the selected language code intact where possible; Russian text is a
+        # safe fallback only for an unsupported locale, not a translation claim.
+        message = "Sorry, a technical error interrupted the response. Your message was received, but the answer was not completed. Please try again."
+    _apr_timing_log(
+        "backend_failure_fallback_ready",
+        error_type=type(exc).__name__,
+        error_code="BACKEND_PROCESSING_FAILED",
+        language=language,
+        request_chars=len(user_text),
+    )
+    return {
+        "success": True,
+        "degraded": True,
+        "error_code": "BACKEND_PROCESSING_FAILED",
+        "answer": message,
+        "content": message,
+        "render_blocks": [{
+            "type": "text",
+            "renderer": "TextRenderer",
+            "viewer": "MessageTextBlock",
+            "text": message,
+            "content": message,
+        }],
+        "canonical_route": CANONICAL_CHAT_ROUTE,
+    }
 
 
 
@@ -2407,21 +2461,11 @@ class AprilHandler(BaseHTTPRequestHandler):
                 and _voice_attachment(attachments) is None
                 and _text(get_user_plan(canonical_user_id)).lower() == "premium"
             )
-            _apr_timing_log(
-                "premium_progress_stream_negotiation",
-                user_key=_apr_diag_ref(canonical_user_id),
-                enabled=wants_progress_stream,
-                accept=_text(self.headers.get("Accept"))[:120],
-                content_type=content_type[:80],
-                canonical_route=CANONICAL_CHAT_ROUTE,
-            )
             if wants_progress_stream:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
                 self.send_header("Transfer-Encoding", "chunked")
-                self.send_header("Cache-Control", "no-store, no-transform")
-                self.send_header("X-Accel-Buffering", "no")
-                self.send_header("Connection", "keep-alive")
+                self.send_header("Cache-Control", "no-store")
                 self.end_headers()
 
                 client_disconnected = False
@@ -2440,14 +2484,6 @@ class AprilHandler(BaseHTTPRequestHandler):
                         self.wfile.write(encoded)
                         self.wfile.write(b"\r\n")
                         self.wfile.flush()
-                        _apr_timing_log(
-                            "premium_progress_stream_event",
-                            event_type=_text(event.get("type"))[:24],
-                            stage=_text(event.get("stage"))[:36],
-                            has_message=bool(_text(event.get("message"))),
-                            elapsed_seconds=event.get("elapsed_seconds"),
-                            canonical_route=CANONICAL_CHAT_ROUTE,
-                        )
                         return True
                     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
                         client_disconnected = True
@@ -2470,30 +2506,14 @@ class AprilHandler(BaseHTTPRequestHandler):
                                 now_mono = time.monotonic()
                                 elapsed = round(now_mono - stream_started, 1)
                                 if not delay_notice_sent and elapsed >= 5.0:
-                                    language_hint = _text(data.get("display_language") or data.get("language") or data.get("preferred_language"))
+                                    language_hint = _text(data.get("display_language") or data.get("language")).lower()
                                     request_text = _text(data.get("text") or data.get("message") or data.get("input"))
-                                    # Use the language actually used in this message first;
-                                    # the saved UI language is only a fallback for ambiguous input.
-                                    response_language = _detect_language(request_text, language_hint)
-                                    delay_messages = {
-                                        "uk": "Відповідь ще формується. Спочатку з'явиться текст, а потрібні зображення чи діаграми додадуться слідом.",
-                                        "ru": "Ответ ещё формируется. Сначала появится текст, а нужные изображения или диаграммы добавятся следом.",
-                                        "en": "Your answer is still being prepared. The text will appear first; any requested images or diagrams will follow.",
-                                        "fr": "Votre réponse est en cours de préparation. Le texte apparaîtra d'abord, puis les images ou diagrammes demandés.",
-                                        "es": "Tu respuesta se está preparando. Primero aparecerá el texto y después las imágenes o los diagramas solicitados.",
-                                        "de": "Deine Antwort wird vorbereitet. Zuerst erscheint der Text, danach folgen die angeforderten Bilder oder Diagramme.",
-                                        "it": "La risposta è in preparazione. Prima apparirà il testo, poi le immagini o i diagrammi richiesti.",
-                                        "pl": "Odpowiedź jest przygotowywana. Najpierw pojawi się tekst, a potem wymagane obrazy lub diagramy.",
-                                        "pt": "Sua resposta está sendo preparada. O texto aparecerá primeiro; depois, as imagens ou diagramas solicitados.",
-                                        "nl": "Je antwoord wordt voorbereid. Eerst verschijnt de tekst; daarna volgen de gevraagde afbeeldingen of diagrammen.",
-                                        "ja": "回答を準備しています。まずテキストが表示され、その後、リクエストされた画像や図が表示されます。",
-                                        "zh": "正在准备回答。文本会先显示，随后显示所请求的图片或图表。",
-                                        "ko": "답변을 준비하고 있습니다. 먼저 텍스트가 표시되고, 이후 요청한 이미지나 다이어그램이 표시됩니다.",
-                                        "ar": "يتم إعداد الإجابة الآن. سيظهر النص أولاً، ثم الصور أو المخططات المطلوبة.",
-                                        "hi": "आपका उत्तर तैयार हो रहा है। पहले टेक्स्ट दिखेगा, फिर अनुरोधित चित्र या आरेख।",
-                                        "el": "Η απάντησή σας ετοιμάζεται. Πρώτα θα εμφανιστεί το κείμενο και έπειτα οι εικόνες ή τα διαγράμματα που ζητήσατε.",
-                                    }
-                                    delay_message = delay_messages.get(response_language, delay_messages.get(_normalize_language_code(language_hint), delay_messages["en"]))
+                                    if language_hint.startswith(("uk", "ua")):
+                                        delay_message = "Відповідь ще формується. Спочатку з'явиться текст, а потрібні зображення чи діаграми додадуться слідом."
+                                    elif language_hint.startswith("en") or (language_hint in {"", "auto"} and not re.search(r"[А-Яа-яЁёІіЇїЄєҐґ]", request_text)):
+                                        delay_message = "Your answer is still being prepared. The text will appear first; any requested images or diagrams will follow."
+                                    else:
+                                        delay_message = "Ответ ещё формируется. Сначала появится текст, а нужные изображения или диаграммы добавятся следом."
                                     write_progress_event({
                                         "type": "progress",
                                         "stage": "still_working",
@@ -2522,11 +2542,18 @@ class AprilHandler(BaseHTTPRequestHandler):
                         write_progress_event({"type": "answer", "status": status, "data": payload})
                 except Exception as stream_error:
                     traceback.print_exc()
+                    _apr_timing_log(
+                        "premium_stream_failed", error_type=type(stream_error).__name__,
+                        error=str(stream_error)[:240], user_key=_apr_diag_ref(canonical_user_id),
+                    )
                     if not client_disconnected:
+                        # HTTP headers were already committed as 200 for NDJSON. Keep
+                        # the final event consumable by the Web renderer and always
+                        # provide answer/content so a failure cannot create a blank bubble.
                         write_progress_event({
                             "type": "answer",
-                            "status": 500,
-                            "data": {"success": False, "error": _text(str(stream_error)) or "PREMIUM_STREAM_FAILED", "canonical_route": CANONICAL_CHAT_ROUTE},
+                            "status": 200,
+                            "data": _apr_backend_failure_payload(locals().get("data"), stream_error),
                         })
                 finally:
                     if not client_disconnected:
@@ -2547,7 +2574,11 @@ class AprilHandler(BaseHTTPRequestHandler):
                 serialized_answer_chars=len(_text(payload.get("answer"))) if isinstance(payload, dict) else 0)
         except Exception as exc:
             traceback.print_exc()
-            self._send_json(500, {"success": False, "error": str(exc), "canonical_route": CANONICAL_CHAT_ROUTE})
+            fallback = _apr_backend_failure_payload(locals().get("data"), exc)
+            # Preserve a readable answer for clients that render the JSON body even
+            # when the backend hit an internal exception. The error is still logged
+            # server-side and flagged as degraded in the payload.
+            self._send_json(200, fallback)
 
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[APRIL] {self.address_string()} - {fmt % args}", flush=True)
