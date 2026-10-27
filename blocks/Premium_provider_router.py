@@ -22,8 +22,8 @@ from blocks.Premium_C_ARTIFACT_CONTRACT import (
 
 
 MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-6-luna")
-# Premium answer ceiling is 12,000 output tokens. Allocate 60% to explanatory
-# text and 40% to concrete render payloads, both inside the same ceiling.
+# Premium answer ceiling is 12,000 output tokens. Renderers are relevance-driven;
+# there is no fixed text/render ratio, and the visible text answer must stay complete.
 PREMIUM_OUTPUT_TOKEN_LIMIT = 12000
 PREMIUM_RENDER_TOKEN_BUDGET = int(PREMIUM_OUTPUT_TOKEN_LIMIT * 0.40)
 PREMIUM_TEXT_TOKEN_BUDGET = PREMIUM_OUTPUT_TOKEN_LIMIT - PREMIUM_RENDER_TOKEN_BUDGET
@@ -52,7 +52,7 @@ NATURAL CONVERSATION AND USER INTENT:
 - For interface help, name the exact visible control/icon and its on-screen label, describe each tap in order, and distinguish actions confirmed in the April code/UI map from device/browser options that may vary. If the control is not present, say so instead of inventing it.
 - Answer each independent request in the order asked; keep dependent clauses together. If an elliptical follow-up clearly belongs to the current topic, use that topic and its artifacts. If the current branch lacks evidence, search the user's retained dialogue history by semantic subject and branch provenance; if no safe match exists, start a new topic rather than importing unrelated history.
 APRIL SITE NAVIGATION CONTEXT:
-When ROOM_KNOWLEDGE_CONTEXT contains site_navigation_map, answer interface-help questions from that map. Give a clickable Markdown link with the exact relative route, then visible card/button labels and clear ordered steps; if lost, offer the main chat link [April](/). Also emit one concrete diagram render block with renderer="DiagramRenderer" and a payload containing route nodes and directed edges. The diagram complements the text and never replaces the explanation. Use only map routes; do not invent the site origin or URL anchors. If a card has no verified direct URL, link its parent page and tell the user which card to click. Never claim to have clicked, changed a setting, purchased Premium, or deleted data for the user. Do not promise empty/unimplemented functions or route ordinary users to admin.
+When ROOM_KNOWLEDGE_CONTEXT contains site_navigation_map, answer interface-help questions from that map. Give a clickable Markdown link with the exact relative route, then visible card/button labels and clear ordered steps; if lost, offer the main chat link [April](/). Add a DiagramRenderer block only when the user explicitly asks for a diagram/visual route map or when the route relationships genuinely clarify the next action. A diagram must add navigation structure (for example, route-to-route transitions), not copy the prose steps or repeat the answer's headings. When a diagram does not add new information, return the text and links only. Use only map routes; do not invent the site origin or URL anchors. If a card has no verified direct URL, link its parent page and tell the user which card to click. Never claim to have clicked, changed a setting, purchased Premium, or deleted data for the user. Do not promise empty/unimplemented functions or route ordinary users to admin.
 
 IMAGE / MULTIMEDIA SEPARATION:
 The text answer is still the main answer. When image generation is explicitly requested, put only the requested visual subject/scene into the image-generation spec. Do not turn the whole explanation, tutorial, answer, code, table, diagram, or ordered steps into an image. Keep each requested explanatory or structured output in its own text/render block; put words inside the picture only when the user explicitly requests text within the image.
@@ -62,17 +62,18 @@ The text answer is still the main answer. When image generation is explicitly re
 - On a genuinely new topic, answer independently and do not import unrelated history. Make the answer naturally useful for a possible follow-up without artificially tying it to the previous subject. If the referent is genuinely ambiguous and no reliable anchor exists, ask one focused clarification rather than guessing.
 - Keep the input signal clean: prioritize CURRENT_REQUEST and lossless source values, then the strongest topic-specific context, then only background that changes the answer. Remove duplicate summaries, stale/irrelevant topics, redundant metadata and filler before compressing facts. Never silently omit a requested step, negate a constraint, alter a value, invent missing source data, or present an inference as a saved fact.
 - For explanatory, planning, troubleshooting, comparison, or multi-part requests, do not default to a short summary. Cover each requested part with the necessary rationale, concrete steps/examples, important limitations and a practical next action. Keep acknowledgements and simple factual replies short; never add padding merely to consume the token allowance.
-- Use headings, lists, tables and renderers only when they improve comprehension. Introduce each visual, explain its real meaning, and avoid repeating the same explanation in prose. For substantive multi-section answers, store concise ordered heading/summary entries in dialogue_memory_record.sections so the next turn can continue from uncovered material.
+- Use readable Markdown hierarchy for substantive answers: `##` for main sections and `###` for their subsections, with descriptive title-case headings rather than decorative ALL-CAPS labels. Keep topic and subtopic headings concise and distinct. Use lists, tables and renderers only when they improve comprehension. A visual must add a relationship, sequence, comparison, formula, source, or depiction not already made obvious by the prose. For substantive multi-section answers, store concise ordered heading/summary entries in dialogue_memory_record.sections so the next turn can continue from uncovered material.
 """.strip()
 
 # Reserve the same bounded recovery instruction before fitting the first request, so
 # a malformed/empty first result cannot make the retry exceed the input text budget.
 PREMIUM_RECOVERY_RULE = (
     "RECOVERY PASS after an empty, incomplete, malformed, or non-public output: generate a NEW complete JSON object from the original request. "
-    "Do not continue or quote cut-off JSON. Preserve every requested topic and required renderer. "
-    "Use concise complete explanations, about 60% prose and 40% useful render payloads when visuals are relevant; "
-    "keep the completed output under 12000 tokens, set content to an empty string when answer is complete, "
-    "keep internal_answer_en and summary short, interleave blocks by step_index, and close valid JSON."
+    "Do not continue or quote cut-off JSON. Preserve every requested topic and every explicitly requested renderer. "
+    "The text answer must remain complete and self-contained. Add a renderer only when requested or when it contributes concrete information "
+    "that is materially easier to understand visually; there is no prose/render ratio or renderer quota. Never repeat answer paragraphs or headings "
+    "inside diagrams. Keep the completed output under 12000 tokens, set content to an empty string when answer is complete, "
+    "keep internal_answer_en and summary short, interleave useful blocks by step_index, and close valid JSON."
 )
 
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -95,10 +96,10 @@ USER-VISIBLE ANSWER INTEGRITY IS A HARD REQUIREMENT:
   answer exclusively in that field. Keep it to at most one sentence and do not expand it beyond
   the visible answer. `summary` is metadata only and must remain short.
 - Required visual structures belong in separate typed `render_blocks` with concrete payloads.
-- PER-RENDER EXPLANATIONS (Premium): every non-text render block MUST include an `explanation` field in RETURN_LANGUAGE, with 1–3 specific sentences. Explain what this exact block shows and why it belongs in this answer: formulas (meaning of the equation and variables, and why it is relevant), links (destination/source and what information it supports), images (what is depicted and how it relates to the request; mention edits only when the input/output supports them), code (what file/functions do and what the proposed change adds or changes), tables (what columns/rows compare and the grounded takeaway), graphs (axes, represented values and the observed trend without inventing data), diagrams (components and relationships/flow). Use the actual payload and answer context, not generic filler. The Premium SceneContract will display this field in a separate text block immediately AFTER the corresponding renderer; do not create a duplicate standalone text block just to repeat the same explanation.
+- PER-RENDER EXPLANATIONS (Premium): every non-text render block MUST include an `explanation` field in RETURN_LANGUAGE, normally 1–2 specific sentences. Explain how to read or use this exact payload and what information it adds that the prose does not already show. For diagrams, identify the nodes/relationships or action sequence; do not restate the full numbered steps. For tables/graphs/formulas, name the columns/axes/variables and the visual takeaway without repeating the whole answer. For images, identify the depicted subject and its relation to the request; mention edits only when supported. For code, name the real file/functions and the concrete change. Use the actual payload, not generic filler. SceneContract displays this field immediately after the renderer, so keep it complementary and do not create a duplicate standalone explanation block.
 - SINGLE-OWNER PRESENTATION: keep `answer` and ordinary text blocks as the coherent overall narrative. Give each renderer a brief introduction/context there, but do not repeat its `explanation`, variable-by-variable interpretation, table takeaway, code walkthrough, image description, or graph trend elsewhere in the narrative. The detailed interpretation belongs immediately after its own renderer in that renderer's `explanation` field. Do not duplicate the same concrete render block or create multiple explanations for one renderer; retain the prose needed to explain the overall topic. Every mathematical expression that remains in prose must use explicit KaTeX-compatible delimiters (`\(...\)` inline or `\[...\]` display); never leave raw, unwrapped LaTeX commands in ordinary text.
-- RENDER COVERAGE: honor each step's output_types and emit each materially relevant requested renderer with a concrete payload. Target an overall allocation of about 60% explanatory text and 40% visual/structured render payloads when the request calls for visuals; this is a composition target, not a reason to omit needed explanation or invent visuals. Interleave each step's explanation with its corresponding formula/table/diagram/graph/image blocks in step_index order; do not collect all visuals at the end. Concept explanations may use a grounded network graph (representation="network", nodes+edges); numeric graphs require real data. Image requests require the C_APRIL_IMAGES_GENERATOR artifact signal, and links require real URLs.
-- PREMIUM OUTPUT BUDGET: max_output_tokens is exactly 12000 for each completed answer attempt. Allocate up to 4800 tokens (40%) to concrete visual/render payloads and about 7200 tokens (60%) to explanatory text, all inside the 12000-token ceiling. Do not try to fill the cap: finish valid JSON with room to spare, keep internal metadata concise, and compress duplicated prose before user-requested substance.
+- RENDER COVERAGE: honor each explicitly requested output type and emit a concrete payload when it materially helps. There is no fixed prose/render allocation and no renderer quota. Keep the complete explanation in text; diagrams show only relationships, structure or action order that is not already obvious from the prose. Interleave useful renderers with their related text by step_index. Concept explanations may use a grounded network graph (representation="network", nodes+edges) only when the relations are real and visually useful; numeric graphs require real data. Image requests require the C_APRIL_IMAGES_GENERATOR artifact signal, and links require real URLs.
+- PREMIUM OUTPUT BUDGET: max_output_tokens is exactly 12000 for each completed answer attempt. Do not try to fill the cap: finish valid JSON with room to spare, keep internal metadata concise, and compress duplicated prose before user-requested substance.
 - ADAPTIVE VISUALS: even when the user did not explicitly request a renderer, add a concrete table/diagram/graph/formula/code/link/image payload when it materially improves a substantial explanation. For an answer likely to exceed ~2000 tokens, consider an image spec only when an illustration materially clarifies the topic; it will be processed by C_APRIL_IMAGES_GENERATOR. Never call a generated illustration an authentic photograph.
 - TABLE INTEGRITY: never return an empty type="table" shell. Every table block needs populated columns/headers and at least one row. Prefer one record/entity per row and one fact per cell; never pack an entire multi-item list into a single cell when it can be structured as rows/cells. Keep tables readable on mobile.
 - COMPOSITE OUTPUTS: independent outputs in one request are cumulative, not alternatives. A request for a table and a photograph requires both the TableBlock payload and the image-generator specification; answer each request-sequence item in order.
@@ -206,7 +207,7 @@ Generation/editing is permission-based. Explicit image intent sets INTERPRETATIO
 When INTERPRETATION.wants_diagram=true and wants_image=false, fulfill simple drawing requests (geometry and common objects) as a structured diagram through the existing SceneContract route. Include concrete payload data the Web can render, preferably payload.svg or supported geometry/drawing elements/nodes+edges; do not return only a sentence claiming the drawing exists. Generic verbs such as "draw", "нарисуй", "show" or "покажи" do not authorize raster generation by themselves. Explicit picture/image/illustration/photo intent uses C_APRIL_IMAGES_GENERATOR when wants_image=true; an adaptive image candidate for a substantial answer may be used only after the processor validates and enables it.
 For analyze_image, analyze_file, or analyze_input tasks, answer in explanatory text and retain enough specific facts to support follow-up questions. Avoid generic one-sentence summaries when the user asks what an image/file contains.
 For a code modification request, return an explanatory text block followed by a separate render block with type="code", language, filename, and the complete corrected code. Preserve unaffected behavior; never replace required source lines with ellipses/placeholders. Do not claim a file was saved unless an actual file artifact is present. If a file artifact is explicitly requested, include its real content, but keep narrative/summary fields concise and do not repeat source code in any other prose field. For a request to explain code only, do not rewrite it unasked.
-Use render blocks that match each request-sequence step: type="code" for code, type="table" for tables, type="diagram" for diagrams, type="formula" for formulas, type="image" for generated images, and type="text" for explanations. When a diagram is requested, it must contain drawable data (SVG/elements or at least two nodes plus an edge), not only a line of text; for a multi-section explanation, a grounded outline diagram based on its real headings/sections is acceptable. Set step_index and step_title on blocks when several steps exist, and preserve step order. KaTeX-compatible LaTeX is mandatory for mathematical expressions; McDowell presentation metadata is mandatory for every scene. Always return a complete SceneContract-compatible structured answer.
+Use render blocks that match each request-sequence step: type="code" for code, type="table" for tables, type="diagram" for diagrams, type="formula" for formulas, type="image" for generated images, and type="text" for explanations. When a diagram is requested, it must contain drawable data (SVG/elements or at least two nodes plus an edge), not only a line of text. Do not turn the answer's existing headings or paragraphs into an outline diagram unless the user explicitly asks for an answer/topic map; a process diagram should show concise action labels or real relationships, while the prose carries the explanations. Set step_index and step_title on blocks when several steps exist, and preserve step order. KaTeX-compatible LaTeX is mandatory for mathematical expressions; McDowell presentation metadata is mandatory for every scene. Always return a complete SceneContract-compatible structured answer.
 
 CRITICAL ADAPTIVE GRAPH CONTRACT:
 - Treat INTERPRETATION.graph_policy as the request-side decision from dialogue understanding. Keep the selected graph family in the graph payload and do not make the Web renderer infer the user's intent.
@@ -301,13 +302,12 @@ You are April's single Provider in the existing canonical route. The processor o
 route/memory/identity or expose hidden reasoning.
 `answer` is the complete answer in RETURN_LANGUAGE; `content` may be empty because the normalizer fills it from `answer`; the normal text renderer must remain complete after normalization. `internal_answer_en` is at most one concise sentence, never the hidden place for the
 full explanation. Keep `summary` short and emit required visual structures as typed render blocks. Every non-text render block MUST include a specific `explanation` field in RETURN_LANGUAGE (1–3 sentences) explaining its meaning, relevance and how to interpret/use it: formula and variables; link destination and purpose; image subject/relation and only supported edits; code file/functions and changes; table comparison/takeaway; graph axes/data/trend; diagram parts/relationships. Premium SceneContract displays that explanation in a separate text block immediately after the renderer. Do not duplicate the same explanation in a second text block.
-Premium output ceiling: exactly 12000 tokens per complete answer attempt; target 7200 for explanation
-and 4800 for concrete visual/render payloads (60/40, both inside the total). Do not fill the cap for its
+Premium output ceiling: exactly 12000 tokens per complete answer attempt. Do not fill the cap for its
 own sake; finish valid JSON with headroom. `content` may be empty because the normalizer copies `answer`.
-Keep internal fields concise. Interleave step-specific text and its formula/table/diagram/graph/image block
+Keep internal fields concise. Interleave step-specific text and its requested/materially useful formula/table/diagram/graph/image block
 in REQUEST_SEQUENCE order. Never emit an empty table shell; rows and cells must carry real values.
-Composite output requests are cumulative. Generated illustrations are not authentic photographs.
-When multiple visual outputs are in C_ARTIFACT_RENDER_PLAN, provide concrete payloads for them; at least half of four-or-more requested visual types must render. Target a 60/40 text-to-render allocation when visuals are relevant; interleave typed blocks with the matching step in order. For non-numeric concepts use a grounded network graph, never fake numeric data. Images need the generator signal; links need real URLs.
+Composite output requests are cumulative, but there is no required renderer count or prose/render ratio: each visual must add concrete information, and the full explanation stays in the text answer. Generated illustrations are not authentic photographs.
+When multiple visual outputs are in C_ARTIFACT_RENDER_PLAN, render each one only when it is explicitly requested or materially useful and has a concrete payload. For non-numeric concepts use a grounded network graph only when relationships matter; never fake numeric data. Images need the generator signal; links need real URLs.
 Use CURRENT_REQUEST as the task. On CONTINUE, SELECTED_SECTION is the target when present; use
 its concise summary and selected anchor rather than full previous answers. When ACTIVE_WORK_BRANCH is
 active, it is the first context lane for the matched turn: keep current state and original task constraints
@@ -360,10 +360,8 @@ SYSTEM_PROMPT_MINIMAL = r"""
 April Provider: one canonical call; processor owns authenticated identity, memory and NEW/CONTINUE.
 `answer` is the complete user-facing answer in RETURN_LANGUAGE. `content` may be empty because the normalizer fills it from `answer`; keep the answer complete, but avoid duplicating it in the JSON. `internal_answer_en` is only a one-sentence internal translation, never the
 place for the full response; `summary` is short metadata. Emit requested structured renderers with
-concrete payloads and verify all numbered steps before returning. Each non-text renderer's `explanation` is its only detailed interpretation: briefly introduce the renderer in the narrative, but do not repeat its detailed explanation, table takeaway, code walkthrough, image description or graph trend in another text block. Keep only one render block and one linked explanation per concrete item. Any math expression left in prose must use explicit `\(...\)` inline or `\[...\]` display delimiters; never emit raw, unwrapped LaTeX commands. Premium output is capped at 12000
-tokens total, including up to 4800 tokens for render payloads and about 7200 for explanation, both within the total. Never emit an empty table shell. Composite outputs are cumulative; use adaptive
-visuals when materially useful, and label generated illustrations as generated, not authentic photos.
-When multiple visual outputs are requested, emit the materially relevant requested renderers with concrete payloads. Target about 60% explanatory text and 40% visual/render payloads when the request calls for visuals; this is an allocation target, not a rigid truncation rule. For multi-step requests, follow PRESENTATION_SEQUENCE when present; treat it as a deliverable checklist within the same turn, not separate memory lookups. Add step_index, step_title and sequence_index to each block where possible, interleave each section's text with that section's formula/table/diagram/graph/link/image, and preserve all steps. Start each prose section with a Markdown `##` heading matching the planned section title, so client rendering can keep section boundaries. Keep final_output=true as the final item. Never collect all visuals at the end or let a single infographic replace separate requested outputs. An experiments diagram covers only the experiments, not the whole answer. Do not invent measured values; for a time-series graph, linear estimates strictly between at least two supplied numeric endpoints are allowed only to fill requested missing dates, and every derived value must be labeled as an estimate rather than a measurement. Never extrapolate or derive a trend from one or zero numeric source values. Images require the generator signal and links require real URLs.
+concrete payloads and verify all numbered steps before returning. Each non-text renderer's `explanation` is its only detailed interpretation: briefly introduce the renderer in the narrative, but do not repeat its detailed explanation, table takeaway, code walkthrough, image description or graph trend in another text block. Keep only one render block and one linked explanation per concrete item. Any math expression left in prose must use explicit `\(...\)` inline or `\[...\]` display delimiters; never emit raw, unwrapped LaTeX commands. Premium output is capped at 12000 tokens total. Never emit an empty table shell or use a renderer quota. Composite outputs are cumulative; use adaptive visuals only when materially useful, and label generated illustrations as generated, not authentic photos.
+When multiple visual outputs are requested, emit only the requested or materially useful renderers with concrete payloads. There is no fixed text/render ratio or renderer quota; text remains the complete explanation, and each visual must add information rather than repeat the prose. For multi-step requests, follow PRESENTATION_SEQUENCE when present; treat it as a deliverable checklist within the same turn, not separate memory lookups. Add step_index, step_title and sequence_index to each block where possible, interleave each section's text with that section's formula/table/diagram/graph/link/image, and preserve all steps. Start each prose section with a Markdown `##` heading matching the planned section title, so client rendering can keep section boundaries. Keep final_output=true as the final item. Never collect all visuals at the end or let a single infographic replace separate requested outputs. An experiments diagram covers only the experiments, not the whole answer. Do not invent measured values; for a time-series graph, linear estimates strictly between at least two supplied numeric endpoints are allowed only to fill requested missing dates, and every derived value must be labeled as an estimate rather than a measurement. Never extrapolate or derive a trend from one or zero numeric source values. Images require the generator signal and links require real URLs.
 Answer CURRENT_REQUEST in RETURN_LANGUAGE. On CONTINUE, use SELECTED_SECTION as the target when present.
 When ACTIVE_WORK_BRANCH is active, it is the first retrieval/context lane for this matched turn. Preserve the
 latest task state and its original constraints before generic history search; choices/actions/edits/solution steps
@@ -1977,14 +1975,21 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "user": _semantic_compress(item.get("user"), max(_scaled_prompt_tokens(12), summary_budget // 2)),
                 "april": _semantic_compress(item.get("april"), max(_scaled_prompt_tokens(12), summary_budget)),
                 "topic": _semantic_compress(item.get("topic"), max(_scaled_prompt_tokens(8), summary_budget // 3)),
+                "message_id": item.get("message_id"),
+                "topic_id": item.get("topic_id"),
+                "origin_message_id": item.get("origin_message_id") or item.get("topic_origin_message_id"),
+                "same_dialog": item.get("same_dialog"),
                 "sections": [
                     {"h": _semantic_compress(sec.get("heading"), max(_scaled_prompt_tokens(8), summary_budget // 3)),
                      "s": _semantic_compress(sec.get("summary"), max(_scaled_prompt_tokens(12), summary_budget // 2)),
-                     "n": sec.get("order", section_index + 1)}
-                    for section_index, sec in enumerate((item.get("sections") or [])[:8])
+                     "n": sec.get("order", section_index + 1),
+                     "id": sec.get("message_id"),
+                     "src": sec.get("source_message_id") or sec.get("message_id"),
+                     "topic_id": sec.get("topic_id") or item.get("topic_id"),
+                     "origin_id": sec.get("topic_origin_message_id") or item.get("origin_message_id") or item.get("topic_origin_message_id")}
+                    for section_index, sec in enumerate((item.get("sections") or [])[:4])
                     if isinstance(sec, dict)
                 ],
-                "message_id": item.get("message_id"),
             }
             if item.get("preserve_source_text") is True:
                 compact_min_pair.update({
@@ -2399,9 +2404,103 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "PROTECTED_CURRENT_INPUT", "PROTECTED_STRUCTURED_DATA_EXTERNAL", "PROTECTED_STRUCTURED_DATA",
             "INTERPRETATION", "C_ARTIFACT_RENDER_PLAN", "SCENE_CONTRACT", "INPUT_MODALITIES",
             "ATTACHMENT_INDEX", "ATTACHMENT_COUNTS", "ROOM_KNOWLEDGE_CONTEXT", "DIALOGUE_RELATION",
-            "OUTPUT_BUDGET_POLICY", "HISTORY_REQUEST", "REQUESTED_OUTPUTS",
+            "OUTPUT_BUDGET_POLICY", "HISTORY_REQUEST", "HISTORY_TOPIC_COUNT", "HISTORY_TOPIC_MINIMUM",
+            "HISTORY_TIME_WINDOW", "CONTINUATION_GUIDANCE", "DIALOGUE_ANCHOR", "CONTINUATION_CONTEXT",
+            "DIALOGUE_HISTORY_TOPICS", "DIALOGUE_TOPIC_INDEX", "DIALOGUE_KNOWN_TOPIC_COUNT",
+            "DIALOGUE_TABLE_MARKDOWN", "SELECTED_SECTION", "CLARIFICATION_RESOLUTION", "ACTIVE_WORK_BRANCH",
+            "REQUESTED_OUTPUTS",
         )
         emergency = {key: minimal[key] for key in essential_keys if key in minimal}
+
+        # Final emergency compaction used to discard precisely the facts needed for
+        # memory recall. Expand the compact internal aliases into readable records
+        # and preserve the evidence while still keeping the token card bounded.
+        def _emergency_sections(value: Any, limit: int = 2) -> list[dict[str, Any]]:
+            result: list[dict[str, Any]] = []
+            for section in (value or [])[:limit] if isinstance(value, list) else []:
+                if not isinstance(section, dict):
+                    continue
+                row = {
+                    "heading": _clip(section.get("heading") or section.get("h"), 64),
+                    "summary": _clip(section.get("summary") or section.get("s"), 100),
+                }
+                for dest, keys in {
+                    "order": ("order", "n"), "message_id": ("message_id", "id"),
+                    "source_message_id": ("source_message_id", "src", "id"),
+                    "topic_id": ("topic_id",),
+                    "topic_origin_message_id": ("topic_origin_message_id", "origin_id"),
+                }.items():
+                    for key in keys:
+                        if section.get(key):
+                            row[dest] = section[key]
+                            break
+                result.append({k: v for k, v in row.items() if v not in (None, "", [], {})})
+            return result
+
+        for topic_key in ("DIALOGUE_HISTORY_TOPICS", "DIALOGUE_TOPIC_INDEX"):
+            raw_topics = emergency.get(topic_key)
+            if not isinstance(raw_topics, list):
+                continue
+            normalized_topics = []
+            for topic in raw_topics[:10]:
+                if not isinstance(topic, dict):
+                    continue
+                record = {
+                    "number": topic.get("number", topic.get("n")),
+                    "topic": _clip(topic.get("topic") or topic.get("t"), 100),
+                    "summary": _clip(topic.get("summary") or topic.get("s"), 150),
+                    "last_question": _clip(topic.get("last_question") or topic.get("q"), 96),
+                    "turns": topic.get("turns"),
+                    "topic_id": topic.get("topic_id") or topic.get("id"),
+                    "origin_message_id": topic.get("origin_message_id") or topic.get("origin_id"),
+                    "first_at": topic.get("first_at"),
+                    "last_at": topic.get("last_at"),
+                    "sections": _emergency_sections(topic.get("sections"), limit=2),
+                }
+                normalized_topics.append({k: v for k, v in record.items() if v not in (None, "", [], {})})
+            emergency[topic_key] = normalized_topics
+
+        raw_pairs = emergency.get("CONTINUATION_CONTEXT")
+        if isinstance(raw_pairs, list):
+            normalized_pairs = []
+            for pair in raw_pairs[:4]:
+                if not isinstance(pair, dict):
+                    continue
+                record = {
+                    "topic": _clip(pair.get("topic"), 96),
+                    "user": _clip(pair.get("user") or pair.get("source_user_text"), 240),
+                    "april": _clip(pair.get("april") or pair.get("source_april_text"), 420),
+                    "message_id": pair.get("message_id"),
+                    "topic_id": pair.get("topic_id"),
+                    "origin_message_id": pair.get("origin_message_id"),
+                    "same_dialog": pair.get("same_dialog"),
+                    "sections": _emergency_sections(pair.get("sections"), limit=2),
+                }
+                if pair.get("preserve_source_text") is True:
+                    record.update({
+                        "preserve_source_text": True,
+                        "source_user_text": _clip(pair.get("source_user_text"), 240),
+                        "source_april_text": _clip(pair.get("source_april_text"), 520),
+                        "source_user_text_complete": bool(pair.get("source_user_text_complete")) and len(_text(pair.get("source_user_text"))) <= 240,
+                        "source_april_text_complete": bool(pair.get("source_april_text_complete")) and len(_text(pair.get("source_april_text"))) <= 520,
+                        "source_content_complete": bool(pair.get("source_content_complete")) and len(_text(pair.get("source_user_text"))) <= 240 and len(_text(pair.get("source_april_text"))) <= 520,
+                        "source_text_origin": _clip(pair.get("source_text_origin") or "dialogue_memory", 40),
+                    })
+                normalized_pairs.append({k: v for k, v in record.items() if v not in (None, "", [], {})})
+            emergency["CONTINUATION_CONTEXT"] = normalized_pairs
+
+        if isinstance(emergency.get("DIALOGUE_TABLE_MARKDOWN"), str):
+            emergency["DIALOGUE_TABLE_MARKDOWN"] = _clip(emergency["DIALOGUE_TABLE_MARKDOWN"], 1200) if not emergency.get("DIALOGUE_HISTORY_TOPICS") else ""
+        if isinstance(emergency.get("CONTINUATION_GUIDANCE"), dict):
+            guidance = emergency["CONTINUATION_GUIDANCE"]
+            emergency["CONTINUATION_GUIDANCE"] = {
+                key: guidance[key] for key in (
+                    "mode", "semantic_intent", "search_direction", "topic_reference", "active_topic_seed",
+                    "selection_method", "selected_message_ids", "covered_sections", "selected_section",
+                    "coverage_policy", "avoid_cross_topic_injection", "do_not_repeat_completed_answer_or_artifact",
+                    "waiting_acknowledgement", "active_task_policy",
+                ) if key in guidance
+            }
         # Strip verbose room prose while retaining each verified path and enough
         # instructions to navigate. This field is needed for April self-help turns.
         rooms = emergency.get("ROOM_KNOWLEDGE_CONTEXT")
@@ -2434,11 +2533,50 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         # summaries may be shortened further because the exact request is preserved above.
         if not emergency.get("PROTECTED_CURRENT_INPUT"):
             emergency["CURRENT_REQUEST"] = _semantic_compress(emergency.get("CURRENT_REQUEST"), 64)
+        if emergency.get("HISTORY_REQUEST"):
+            history_evidence_present = bool(
+                emergency.get("DIALOGUE_HISTORY_TOPICS")
+                or emergency.get("DIALOGUE_TOPIC_INDEX")
+                or emergency.get("CONTINUATION_CONTEXT")
+                or emergency.get("DIALOGUE_TABLE_MARKDOWN")
+            )
+            empty_history_clause = (
+                "If all supplied topic indexes and pair records are empty, say that no matching entries exist in the retained history. "
+                if not history_evidence_present else
+                "Use the supplied records; do not claim the history is unavailable while any topic or pair evidence is present. "
+            )
+            emergency_task_guidance = (
+                "This is a history-recall task. USE the supplied DIALOGUE_HISTORY_TOPICS, DIALOGUE_TOPIC_INDEX, "
+                "CONTINUATION_CONTEXT, DIALOGUE_ANCHOR and HISTORY_TIME_WINDOW as factual evidence. "
+                "For a general overview, give a concise readable Markdown summary with one line per real topic, normally up to ten "
+                "and at least five when five or more distinct topics are supplied. For a named subject, prioritize matching topic "
+                "records and its selected pairs. " + empty_history_clause +
+                "Do not invent past topics. Respect the supplied time window and the Premium retention boundary."
+            )
+        elif (
+            emergency.get("DIALOGUE_RELATION") == "CONTINUE"
+            or bool(emergency.get("CONTINUATION_CONTEXT"))
+            or bool(emergency.get("SELECTED_SECTION") and any(
+                _text((emergency.get("SELECTED_SECTION") or {}).get(key))
+                for key in ("topic", "heading", "summary", "message_id")
+            ))
+            or bool((emergency.get("ACTIVE_WORK_BRANCH") or {}).get("active"))
+        ):
+            emergency_task_guidance = (
+                "This is a continuation-capable request. Match CURRENT_REQUEST to DIALOGUE_ANCHOR, CONTINUATION_CONTEXT, "
+                "SELECTED_SECTION and CONTINUATION_GUIDANCE. Continue from the specific prior point and add what is new; do not "
+                "repeat completed content or import unrelated history. If the evidence does not support continuation, answer as a new topic."
+            )
+        else:
+            emergency_task_guidance = "Treat CURRENT_REQUEST as a new topic and do not import unrelated earlier dialogue."
         emergency_system = (
             "April: answer CURRENT_REQUEST in RETURN_LANGUAGE. Preserve every REQUEST_SEQUENCE step and all protected source values. "
-            "When ROOM_KNOWLEDGE_CONTEXT provides April routes, give exact clickable relative links and steps, plus a concrete "
-            "DiagramRenderer route diagram with nodes and directed edges. Text remains the main answer. Return valid JSON with "
-            "answer, content, render_blocks, artifacts and dialogue_memory_record. Do not invent routes or data."
+            + emergency_task_guidance + " "
+            + "Use Markdown headings and short nested subsections for substantive multi-part answers. Renderers must complement the text: "
+            + "never create a diagram by copying prose or headings; add a diagram only when the user explicitly asks for one or a concrete "
+            + "process/relationship map materially clarifies the answer. For site help, use only verified ROOM_KNOWLEDGE_CONTEXT routes "
+            + "and output clickable relative links when applicable. Return valid JSON with answer, content, render_blocks, artifacts and "
+            + "dialogue_memory_record. Never invent routes, history, values or render payloads."
         )
         system = emergency_system
         minimal = emergency
@@ -4154,59 +4292,75 @@ def _premium_shape_diagram_payload(current_request: str) -> dict[str, Any] | Non
 
 
 def _premium_explanation_diagram_payload(current_request: str, answer: str) -> dict[str, Any] | None:
-    """Produce a grounded answer-outline diagram when a requested diagram is empty."""
+    """Build a diagram only for a diagram/outline/process the user actually requested.
+
+    The diagram summarizes relationships or action order; it must not clone answer
+    paragraphs or attach prose summaries to every node.
+    """
+    request = _text(current_request).lower().replace("ё", "е")
     body = _text(answer)
     if not body:
         return None
-    heading_matches = list(re.finditer(r"(?m)^\s{0,3}#{1,4}\s+([^\n#].{0,100})\s*$", body))
-    sections: list[dict[str, str]] = []
-    if len(heading_matches) >= 2:
-        for index, match in enumerate(heading_matches[:7]):
-            end = heading_matches[index + 1].start() if index + 1 < len(heading_matches) else len(body)
-            chunk = body[match.end():end]
-            chunk = re.sub(r"```.*?```", " ", chunk, flags=re.DOTALL)
-            chunk = re.sub(r"`([^`]*)`", r"\1", chunk)
-            chunk = re.sub(r"[*_>]+", "", chunk)
-            summary_match = re.search(r"[^.!?\n]{18,}[.!?]?", chunk)
-            summary = _clip(summary_match.group(0).strip() if summary_match else "", 105)
-            heading = _clip(re.sub(r"[*_`]", "", match.group(1)).strip(), 64)
-            sections.append({"heading": heading, "summary": summary})
-    if len(sections) < 2:
-        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", body) if part.strip()]
-        flattened = []
-        for part in paragraphs:
-            part = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", part)
-            part = re.sub(r"```.*?```", " ", part, flags=re.DOTALL)
-            part = re.sub(r"`([^`]*)`", r"\1", part)
-            part = re.sub(r"[*_>]+", "", part)
-            part = re.sub(r"^\s*(?:[-*+] |\d+[.)] )", "", part)
-            part = re.sub(r"\s+", " ", part).strip()
-            if len(part) >= 24:
-                flattened.append(part)
-        if len(flattened) < 2:
-            flattened = [part.strip() for part in re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", body)) if len(part.strip()) >= 24]
-        sections = [{"heading": f"Фрагмент {i + 1}" if re.search(r"[А-Яа-яЁё]", body) else f"Section {i + 1}", "summary": _clip(text, 105)} for i, text in enumerate(flattened[:6])]
-    sections = [item for item in sections if item.get("heading") or item.get("summary")][:7]
-    if len(sections) < 2:
+    wants_outline = bool(re.search(
+        r"(?:структур\w*\s+(?:ответ\w*|тем\w*|разговор\w*|обсужден\w*)|карта\s+(?:тем|разделов|мыслей|ответа)|mind\s*map|answer\s+outline|outline\s+of\s+the\s+answer)", request
+    ))
+    wants_process = bool(re.search(
+        r"(?:пошаг\w*|по\s+шагам|последовательност\w*|куда\s+нажать|как\s+(?:собрать|подключить|настроить|перейти|нажать|установить)|flowchart|workflow|process\s+diagram|схем\w*\s+(?:действий|процесс\w*|переход\w*))", request
+    ))
+    wants_diagram = bool(re.search(r"(?:диаграмм\w*|схем\w*|flowchart|diagram)", request))
+    if not (wants_outline or wants_process or wants_diagram):
         return None
-    is_ru = bool(re.search(r"[А-Яа-яЁё]", body))
-    nodes = []
-    for index, section in enumerate(sections, 1):
-        label = section["heading"]
-        if section.get("summary") and section["summary"].lower() not in label.lower():
-            label += "\n" + section["summary"]
-        nodes.append({"id": f"answer_section_{index}", "label": _clip(label, 170), "kind": "content_section", "order": index})
-    edges = [{"from": f"answer_section_{index}", "to": f"answer_section_{index + 1}", "label": "Далее" if is_ru else "Next"} for index in range(1, len(nodes))]
-    title = "Структура ответа" if is_ru else "Answer structure"
+
+    is_ru = bool(re.search(r"[А-Яа-яЁё]", request or body))
+    nodes: list[dict[str, Any]] = []
+    if wants_process:
+        lines = re.findall(r"(?m)^\s*(?:\d+[.)]|[-*+])\s+([^\n]+)", body)
+        labels = []
+        for line in lines:
+            text = re.sub(r"\[[^\]]+\]\([^)]*\)", lambda m: m.group(0).split("]", 1)[0][1:], line)
+            text = re.sub(r"[*_`#]", "", text)
+            text = re.sub(r"\s+", " ", text).strip()
+            # Keep an action label, not a copy of the explanatory step.
+            text = re.split(r"(?<=[.!?;])\s+|\s+—\s+|\s+–\s+", text, maxsplit=1)[0]
+            text = _clip(text, 58)
+            if text and text not in labels:
+                labels.append(text)
+            if len(labels) >= 7:
+                break
+        if len(labels) < 2:
+            return None
+        nodes = [{"id": f"action_{i}", "label": label, "kind": "action", "order": i} for i, label in enumerate(labels, 1)]
+        title = "Последовательность действий" if is_ru else "Action sequence"
+        description = "Короткая схема порядка действий; детали и пояснения остаются в тексте." if is_ru else "A compact action sequence; the details remain in the text answer."
+        representation = "action_flow"
+    elif wants_outline:
+        headings = re.findall(r"(?m)^\s{0,3}#{1,4}\s+([^\n#].{0,80})\s*$", body)
+        labels = []
+        for heading in headings[:7]:
+            label = _clip(re.sub(r"[*_`]", "", heading).strip(), 58)
+            if label and label not in labels:
+                labels.append(label)
+        if len(labels) < 2:
+            return None
+        nodes = [{"id": f"topic_{i}", "label": label, "kind": "topic", "order": i} for i, label in enumerate(labels, 1)]
+        title = "Карта разделов" if is_ru else "Topic outline"
+        description = "Только названия разделов и связи между ними; содержание объясняется в тексте." if is_ru else "Section labels and their relationships only; the text carries the explanation."
+        representation = "explicit_topic_outline"
+    else:
+        # A generic request for a diagram still needs real process/relationship
+        # data. Never synthesize a diagram by splitting unrelated prose paragraphs.
+        return None
+
+    edges = [{"from": nodes[i - 1]["id"], "to": nodes[i]["id"], "label": "Далее" if is_ru else "Next"} for i in range(1, len(nodes))]
     return {
         "title": title,
-        "description": "Схема повторяет разделы и порядок текущего текстового ответа; стрелки показывают порядок чтения, а не причинность.",
-        "representation": "explanation_outline",
-        "layout": {"direction": "LR", "rankdir": "LR", "spacing": "comfortable"},
+        "description": description,
+        "representation": representation,
+        "layout": {"direction": "TB" if wants_process else "LR", "rankdir": "TB" if wants_process else "LR", "spacing": "comfortable"},
         "nodes": nodes,
         "edges": edges,
-        "source": "answer_headings_or_paragraphs",
-        "illustrative_outline": True,
+        "source": "explicit_user_requested_complementary_diagram",
+        "illustrative_outline": bool(wants_outline),
         "renderer": "DiagramRenderer",
     }
 
