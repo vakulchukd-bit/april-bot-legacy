@@ -795,6 +795,17 @@ def _build_image_spec(
         clean.setdefault("height", 512)
         clean.setdefault("quality", "low")
         clean.setdefault("visual_context", {})
+        if not isinstance(clean.get("visual_context"), dict):
+            clean["visual_context"] = {}
+        # A screenshot-style April navigation illustration must be grounded in the
+        # existing screen blueprint. Do not let the image model invent unrelated UI.
+        _visual_source = interpretation.get("visual") if isinstance(interpretation.get("visual"), dict) else {}
+        _visual_brief = _visual_source.get("site_navigation_visual_brief") if isinstance(_visual_source.get("site_navigation_visual_brief"), dict) else None
+        if not _visual_brief and isinstance(interpretation.get("intent"), dict):
+            _nested_visual = interpretation["intent"].get("visual") if isinstance(interpretation["intent"].get("visual"), dict) else {}
+            _visual_brief = _nested_visual.get("site_navigation_visual_brief") if isinstance(_nested_visual.get("site_navigation_visual_brief"), dict) else None
+        if _visual_brief:
+            clean["visual_context"]["site_navigation_visual_brief"] = _visual_brief
         clean.setdefault("flow_id", identity["flow_id"])
         clean.setdefault("turn_id", identity["message_id"])
         clean.setdefault("user_id", identity["user_id"])
@@ -886,13 +897,23 @@ async def _edit_image_artifact(
         request_text = _text(intent.get("image_edit_instruction"))
     if not request_text:
         return None
-    edit_prompt = (
-        "Edit the supplied source image according to this exact user instruction: "
-        + request_text
-        + ". Preserve the original photograph and every unaffected detail, including composition, "
-          "background, perspective, lighting, and existing text. Apply only the requested changes. "
-          "Do not replace the source with a new scene or add unrequested objects."
-    )
+    edit_prompt_parts = [
+        "Edit the supplied source image according to this exact user instruction: " + request_text + ".",
+        "Preserve the source image and every unaffected detail, including composition, background, perspective, lighting, and existing text.",
+        "Apply only the requested change to the existing image. Do not replace the source with a new scene, redraw unrelated UI, add people/decorations, or invent controls.",
+        "When the instruction specifies a colour, match that colour exactly. A requested red arrow must be clearly red (#FF3030), not green, teal, or another accent colour.",
+        "Point the arrow at the specific control named by the user; keep it visibly separate from button text and do not obscure the label.",
+    ]
+    visual_context_data = interpretation.get("visual") if isinstance(interpretation.get("visual"), dict) else {}
+    ui_brief = visual_context_data.get("site_navigation_visual_brief") if isinstance(visual_context_data.get("site_navigation_visual_brief"), dict) else {}
+    if ui_brief:
+        try:
+            import json as _json
+            compact_ui_brief = _json.dumps(ui_brief, ensure_ascii=False, separators=(",", ":"))[:2600]
+            edit_prompt_parts.append("Verified April interface context (use only to identify the requested control, not to replace the source screenshot): " + compact_ui_brief)
+        except Exception:
+            pass
+    edit_prompt = " ".join(edit_prompt_parts)
     from blocks.C_APRIL_IMAGES_GENERATOR import edit_image_result
     result = await edit_image_result(source_bytes, edit_prompt, quality="low")
     if not isinstance(result, dict) or not result.get("success") or not result.get("image_bytes"):
@@ -1023,8 +1044,14 @@ def _looks_like_image_edit_request(value: Any) -> bool:
 
 
 def _looks_like_referential_image_edit(value: Any) -> bool:
-    """Only enable the latest-image fallback when the request points to a prior object."""
+    """Infer an image revision from the edit target and conversational context."""
     low = _text(value).lower().replace("ё", "е")
+    explicit_visual_revision = bool(
+        re.search(r"\b(?:передел\w*|исправ\w*|поправ\w*|перерис\w*|замени\w*|сделай\s+иначе|я\s+(?:же\s+)?просил\w*|я\s+(?:же\s+)?просила\w*|не\s+так|wrong|redo|revise|i\s+asked|change\s+it)\b", low, re.I)
+        and re.search(r"(?:стрелк\w*|указател\w*|pointer|arrow|цвет\w*|красн\w*|зелен\w*|red|green|кнопк\w*|подсвет\w*|выдел\w*|куда\s+нажать|highlight|marker)", low, re.I)
+    )
+    if explicit_visual_revision:
+        return True
     if not _looks_like_image_edit_request(low):
         return False
     return bool(re.search(
