@@ -4288,7 +4288,11 @@ def search_dialogue_context(
     search_started = time.perf_counter()
     uid = _uid(user_id)
     state = hydrate(uid)
-    all_rows = [row for row in (state.get("dialogue_pairs") or []) if isinstance(row, dict) and not _is_failed_provider_row(row)]
+    # Make per-search top-level copies. The cache is shared between request threads;
+    # this search annotates rows with derived topic provenance, so mutating cached row
+    # dictionaries directly could let concurrent turns overwrite one another's context.
+    # Nested JSON payloads remain shared read-only to avoid copying large image/diagram data.
+    all_rows = [dict(row) for row in (state.get("dialogue_pairs") or []) if isinstance(row, dict) and not _is_failed_provider_row(row)]
     # Keep this authenticated, already-pruned Premium 24h set for honest nearest-neighbor
     # lookup if an explicitly requested time interval contains no saved dialogue pairs.
     retained_rows = list(all_rows)
@@ -4598,11 +4602,53 @@ def search_dialogue_context(
         # original request rather than becoming the new active topic.
 
     candidate_started = time.perf_counter()
+    scoring_rows = rows
+    light_prefilter_used = False
+    needs_full_candidate_rank = bool(
+        history_request or needs_structured_search or _is_section_request(query)
+        or query_modalities or is_correction or is_short_acknowledgement
+        or reference_followup or explicit_artifact_followup or resume_key
+        or continuation_intent or pending_clarification
+    )
+    if len(rows) > 18 and not needs_full_candidate_rank:
+        # First pass considers every scoped row cheaply; the expensive scoring pass
+        # (partial-string ratios, answer/entity scoring and payload inspection) runs
+        # only on the strongest semantic candidates. The separate history fallback
+        # below scans all retained rows independently, so this is an optimization,
+        # not a limit on the user's searchable history.
+        query_tokens_light = _semantic_tokens(query)
+        lightweight_rank: list[tuple[float, float, dict[str, Any]]] = []
+        rank_now = time.time()
+        for row in rows:
+            light_text = _row_subject_text_lightweight(row)
+            light_tokens = _semantic_tokens(light_text)
+            light_subjects = _subject_tokens(light_text)
+            topic_fit = _topic_query_overlap(query, light_text)
+            token_fit = _concept_overlap(query_tokens_light, light_tokens)
+            subject_fit = _subject_overlap(query_subjects, light_subjects) if query_subjects else 0.0
+            created_at = float(row.get("created_at") or 0.0)
+            age = max(0.0, rank_now - created_at)
+            recency_fit = max(0.0, 1.0 - age / DIALOGUE_WINDOW_SECONDS)
+            light_score = 0.48 * topic_fit + 0.32 * subject_fit + 0.18 * token_fit + 0.02 * recency_fit
+            lightweight_rank.append((light_score, created_at, row))
+        lightweight_rank.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        scoring_rows = [item[2] for item in lightweight_rank[:18]]
+        # Keep the latest source in this exact dialogue available for the hot-branch
+        # arbiter even when the current request is a clear subject switch.
+        latest_same_dialog_row = max((row for row in rows if (
+            (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
+            or (not _text(row.get("dialog_id")) and _text(conversation_id) and _text(row.get("conversation_id")) == _text(conversation_id))
+        )), key=lambda row: (float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)), default=None)
+        if latest_same_dialog_row is not None:
+            seen_scoring_ids = {_text(row.get("message_id")) for row in scoring_rows}
+            if _text(latest_same_dialog_row.get("message_id")) not in seen_scoring_ids:
+                scoring_rows.append(latest_same_dialog_row)
+        light_prefilter_used = True
     matches = [_candidate_score(
         query, row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""),
         reference_followup=reference_followup, query_modalities=query_modalities,
         structured_evidence_required=needs_structured_search,
-    ) for row in rows]
+    ) for row in scoring_rows]
     # For participant-centered, subjectless questions, first rank factual evidence
     # written from the relevant speaker perspective; use the existing relevance and
     # recency ordering for all other turns. No fixed score gate is introduced.
@@ -4611,7 +4657,11 @@ def search_dialogue_context(
         int(item.get("participant_alignment") or 0) if not query_subjects else 0,
         float(item["score"]), float(item["recency"]), int(item["turn_index"])
     ), reverse=True)
-    _apr_timing_log("candidate_score_rank", candidate_started, candidates_scored=len(rows), matches=len(matches))
+    _apr_timing_log(
+        "candidate_score_rank", candidate_started,
+        total_scoped_rows=len(rows), candidates_scored=len(scoring_rows), matches=len(matches),
+        lightweight_prefilter=light_prefilter_used,
+    )
 
     # Build the index once and share it between topic ranking, pair selection and Provider.
     needs_section_index = bool(
@@ -6873,10 +6923,11 @@ def search_dialogue_context(
 
     # -------------------------------------------------------------------------
     # Canonical route arbitration (the same policy emitted by Interpretation).
-    # 1) An ambiguous/context-dependent turn uses the latest source in this exact
-    #    authenticated dialogue. 2) A distinct named subject may retrieve an older
-    #    row only through semantic subject overlap. 3) No match means NEW topic.
-    # A persisted active-work marker is never enough to resurrect an old branch.
+    # 1) Test the latest hot branch in the authenticated dialogue.
+    # 2) If it does not fit a named-subject request, search all retained dialogue
+    #    rows for this authenticated user using semantic evidence, not recency alone.
+    # 3) If no historical topic matches, start a clean NEW topic.
+    # A persisted active-work marker alone never resurrects an old branch.
     # -------------------------------------------------------------------------
     routing_policy = query_interpretation.get("routing_policy") if isinstance(query_interpretation.get("routing_policy"), dict) else {}
     route_policy_version = _text(routing_policy.get("version"))
@@ -7015,28 +7066,34 @@ def search_dialogue_context(
         route_decision = "ACTIVE_BRANCH_FIRST"
     elif (
         not route_blocked
-        and latest_route_row
         and route_query_subjects
-        and route_subject_conflict
-        and not contextual_antecedent
         and not query_modalities
     ):
-        # Distinct named subject: find an older source by subject overlap, never by
-        # recency alone. The answer is a new operation, with only the matched source
-        # available for grounding. If no match reaches the semantic threshold, do
-        # not pass any old pair to the model.
+        # The active-branch test above has already failed. Search the user's full
+        # retained history even if the query subject does not mathematically conflict
+        # with the latest row; a standalone request can still resume an older topic.
+        # Matching is semantic, not recency-only. A miss creates a clean new topic.
         named_history_candidates = []
-        for historical_row in scoped_rows:
+        # Important: `scoped_rows` is optimized for the current dialog. Once the
+        # active branch fails, the fallback must search every retained dialogue for
+        # this authenticated Premium user, not just the current dialog plus a small
+        # prefiltered subset. This is the second phase of the canonical route.
+        for historical_row in all_rows:
             if not isinstance(historical_row, dict) or _row_is_pending_clarification(historical_row):
                 continue
-            if _text(historical_row.get("message_id")) == _text(latest_route_row.get("message_id")):
+            latest_route_id = _text((latest_route_row or {}).get("message_id"))
+            if latest_route_id and _text(historical_row.get("message_id")) == latest_route_id:
                 continue
-            row_subjects = _row_subject_tokens(historical_row)
+            row_subject_text = search_subject_text(historical_row)
+            row_subjects = _subject_tokens(row_subject_text)
             subject_score = _subject_overlap(route_query_subjects, row_subjects) if row_subjects else 0.0
-            if subject_score < 0.34:
-                continue
-            topic_text = " ".join((_row_subject_text_lightweight(historical_row), _topic_label_lightweight(historical_row)))
+            topic_text = " ".join((row_subject_text, search_topic_label(historical_row)))
             topic_score = _topic_query_overlap(query, topic_text) if topic_text.strip() else 0.0
+            # Accept either a grounded subject overlap or a strong topic-phrase hit.
+            # The second gate catches inflections and paraphrases without allowing
+            # recency alone to resurrect an unrelated branch.
+            if subject_score < 0.34 and topic_score < 0.50:
+                continue
             historical_candidate = _candidate_score(
                 query, historical_row,
                 dialog_id=str(dialog_id or ""),
@@ -7276,6 +7333,7 @@ def search_dialogue_context(
         contextual_antecedent=bool(contextual_antecedent),
         underspecified_turn=bool(underspecified_turn),
         selected_pairs=len(selected_for_context),
+        history_scope="all_retained_dialogue_pairs_after_active_miss",
         selected_message_keys=[_apr_diag_ref(item.get("message_id")) for item in selected_for_context if isinstance(item, dict)],
     )
 
