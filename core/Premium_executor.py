@@ -25,6 +25,7 @@ import os
 import re
 import time
 import uuid
+from html.parser import HTMLParser
 
 from blocks.Premium_C_ARTIFACT_CONTRACT import (
     MachineRequest,
@@ -61,6 +62,167 @@ from blocks.Premium_state_manager import (
 PROCESSOR_VERSION = "april_premium_exkrutor_single_route_v6_hot_work_branch_priority"
 CANONICAL_ROUTE = "/api/v1/chat"
 
+
+
+class _AprilHtmlTableParser(HTMLParser):
+    """Small, dependency-free parser for model-returned HTML tables.
+
+    The parser only reads table structure; it never executes markup or forwards HTML
+    to the browser. Colspans are expanded into empty grid cells so the existing
+    TableBlock can display compact tables (including an 18-column periodic table).
+    """
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[str]] = []
+        self.header_rows: list[bool] = []
+        self._row: list[str] | None = None
+        self._cell_parts: list[str] | None = None
+        self._cell_span = 1
+        self._cell_is_header = False
+        self._row_has_header = False
+        self._table_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        name = tag.lower()
+        attr = {str(key).lower(): value for key, value in attrs}
+        if name == "table":
+            self._table_depth += 1
+        if self._table_depth <= 0:
+            return
+        if name == "tr":
+            self._row = []
+            self._row_has_header = False
+        elif name in {"th", "td"} and self._row is not None:
+            self._cell_parts = []
+            self._cell_is_header = name == "th"
+            if self._cell_is_header:
+                self._row_has_header = True
+            try:
+                self._cell_span = max(1, min(36, int(attr.get("colspan") or 1)))
+            except (TypeError, ValueError, OverflowError):
+                self._cell_span = 1
+        elif name == "br" and self._cell_parts is not None:
+            self._cell_parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._cell_parts is not None:
+            self._cell_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        name = tag.lower()
+        if self._table_depth <= 0:
+            return
+        if name in {"th", "td"} and self._cell_parts is not None and self._row is not None:
+            value = "".join(self._cell_parts)
+            lines = [re.sub(r"[\t\r ]+", " ", part).strip() for part in value.split("\n")]
+            value = "\n".join(part for part in lines if part)
+            self._row.append(value)
+            for _ in range(self._cell_span - 1):
+                self._row.append("")
+            self._cell_parts = None
+            self._cell_span = 1
+            self._cell_is_header = False
+        elif name == "tr" and self._row is not None:
+            if self._row and any(cell.strip() for cell in self._row):
+                self.rows.append(self._row)
+                self.header_rows.append(self._row_has_header)
+            self._row = None
+            self._row_has_header = False
+        elif name == "table":
+            self._table_depth -= 1
+
+
+def _extract_html_table_blocks(answer: str) -> tuple[str, list[dict[str, Any]]]:
+    """Recover real table payloads from literal HTML emitted inside a text block.
+
+    Returns the explanatory prose with table markup removed and zero or more
+    renderer-ready table blocks. Empty or malformed markup is left untouched.
+    """
+    if not isinstance(answer, str) or "<table" not in answer.lower():
+        return answer, []
+    matches = list(re.finditer(r"<table\b[^>]*>.*?</table\s*>", answer, flags=re.IGNORECASE | re.DOTALL))
+    if not matches:
+        return answer, []
+    blocks: list[dict[str, Any]] = []
+    for index, match in enumerate(matches[:4], 1):
+        source = match.group(0)
+        parser = _AprilHtmlTableParser()
+        try:
+            parser.feed(source)
+            parser.close()
+        except Exception:
+            continue
+        rows = parser.rows
+        if not rows:
+            continue
+        width = max((len(row) for row in rows), default=0)
+        if width < 1:
+            continue
+        # Avoid pathological model markup creating huge browser tables.
+        width = min(width, 36)
+        rows = [list(row[:width]) + [""] * max(0, width - len(row)) for row in rows]
+        header_flags = list(parser.header_rows[:len(rows)])
+        # Periodic-table HTML sometimes starts with a single <th colspan="18">
+        # title. It is a title row, not a data row or 18-column header; drop it
+        # while retaining the next actual group/header row when present.
+        title_only_header_rows = {
+            i for i, (row, is_header) in enumerate(zip(rows, header_flags))
+            if width > 2 and i == 0 and is_header and sum(1 for cell in row if str(cell).strip()) == 1
+        }
+        if title_only_header_rows:
+            rows = [row for i, row in enumerate(rows) if i not in title_only_header_rows]
+            header_flags = [flag for i, flag in enumerate(header_flags) if i not in title_only_header_rows]
+        headers = [f"Группа {column}" for column in range(1, width + 1)] if width == 18 else [f"Столбец {column}" for column in range(1, width + 1)]
+        # When a real header row exists, preserve the labels instead of synthesizing them.
+        header_index = next((
+            i for i, is_header in enumerate(header_flags)
+            if is_header and i < len(rows) and (sum(1 for cell in rows[i] if str(cell).strip()) >= 2 or width <= 2)
+        ), None)
+        if header_index is not None and header_index < len(rows):
+            headers = [str(cell or f"Столбец {i + 1}") for i, cell in enumerate(rows[header_index])]
+            rows = [row for i, row in enumerate(rows) if i != header_index]
+        if not rows:
+            continue
+        is_periodic = width == 18 and any(re.search(r"\b(?:Водород|Гелий|Hydrogen|Helium)\b", cell, re.IGNORECASE) for row in rows for cell in row)
+        title = "Периодическая таблица химических элементов" if is_periodic else ("Таблица из ответа" if len(matches) == 1 else f"Таблица {index} из ответа")
+        payload = {
+            "type": "table",
+            "artifact_type": "table",
+            "title": title,
+            "caption": "Каждая ячейка сохранена как отдельная ячейка таблицы." if is_periodic else "Таблица восстановлена из структурной HTML-разметки ответа.",
+            "headers": headers,
+            "columns": headers,
+            "rows": rows,
+            "column_roles": [],
+            "cell_roles": [],
+            "width_policy": "adaptive",
+            "wrap": True,
+            "download": True,
+            "table_schema": "april.table.scene.v3",
+            "recovery_source": "provider_html_table_to_canonical_tableblock",
+        }
+        blocks.append({
+            "type": "table",
+            "artifact_type": "table",
+            "renderer": "TableBlock",
+            "viewer": "TableBlock",
+            "title": title,
+            "payload": payload,
+            "table": payload,
+            "source_room": "C_TABLE_ROOM",
+            "integrity_repaired": True,
+            "explanation": "Таблица показана отдельным интерактивным блоком; её можно сортировать, скачать в CSV или поделиться ею через меню действий.",
+            "step_index": 1,
+        })
+    if not blocks:
+        return answer, []
+    prose = answer
+    for match in reversed(matches):
+        prose = prose[:match.start()] + "\n" + prose[match.end():]
+    prose = re.sub(r"\n{3,}", "\n\n", prose).strip()
+    if not prose:
+        prose = "Готово — таблица вынесена в отдельный табличный блок ниже."
+    return prose, blocks
 
 def _apr_timing_log(stage: str, started: float | None = None, **fields: Any) -> None:
     """Low-overhead diagnostic timing; logging must never affect the request path."""
@@ -3452,6 +3614,88 @@ async def execute(
             "content": answer,
         }]
         raw["artifacts"] = []
+
+    # Recover HTML tables emitted into prose or text render blocks. This is a
+    # post-provider compatibility repair: an actual table must never reach React
+    # as literal <table>/<td> tags. Existing text/table blocks are kept distinct.
+    _original_answer = answer
+    _recovered_prose, _recovered_tables = _extract_html_table_blocks(answer)
+    _recovery_source_kind = "answer" if _recovered_tables else ""
+    _recovery_source_index: int | None = None
+    _recovery_source_key = "content"
+    if not _recovered_tables:
+        _candidate_blocks = raw.get("render_blocks") if isinstance(raw.get("render_blocks"), list) else []
+        for _block_index, _candidate in enumerate(_candidate_blocks):
+            if not isinstance(_candidate, dict):
+                continue
+            _kind = _text(_candidate.get("type") or _candidate.get("artifact_type") or _candidate.get("renderer")).lower()
+            if _kind not in {"text", "markdown", "message", "message_text", "message_text_block", "answer"}:
+                continue
+            _key = next((key for key in ("content", "text", "markdown") if isinstance(_candidate.get(key), str) and _candidate.get(key)), "content")
+            _candidate_text = _text(_candidate.get(_key))
+            _clean_candidate, _candidate_tables = _extract_html_table_blocks(_candidate_text)
+            if _candidate_tables:
+                _recovered_prose = _clean_candidate
+                _recovered_tables = _candidate_tables
+                _recovery_source_kind = "render_block"
+                _recovery_source_index = _block_index
+                _recovery_source_key = _key
+                break
+
+    if _recovered_tables:
+        _existing_blocks = raw.get("render_blocks") if isinstance(raw.get("render_blocks"), list) else []
+        _table_blocks_exist = any(
+            isinstance(_block, dict)
+            and _text(_block.get("type") or _block.get("artifact_type") or _block.get("renderer")).lower()
+                in {"table", "tableblock", "table_block"}
+            for _block in _existing_blocks
+        )
+        if _recovery_source_kind == "answer":
+            answer = _recovered_prose
+            raw["answer"] = answer
+            raw["content"] = answer
+            raw["summary"] = _text(raw.get("summary") or answer[:180])[:180]
+        _synced_blocks = []
+        for _block_index, _block in enumerate(_existing_blocks):
+            if not isinstance(_block, dict):
+                continue
+            _copy = dict(_block)
+            _kind = _text(_copy.get("type") or _copy.get("artifact_type") or _copy.get("renderer") or "text").lower()
+            _is_text = _kind in {"text", "markdown", "message", "message_text", "message_text_block", "answer"}
+            if _is_text and _recovery_source_kind == "answer":
+                _key = next((key for key in ("content", "text", "markdown") if key in _copy), "content")
+                _copy[_key] = answer
+                _copy["content"] = answer
+                _copy["text"] = answer
+                _synced_blocks.append(_copy)
+                _recovery_source_kind = "answer_synced"
+                continue
+            if _is_text and _recovery_source_index == _block_index:
+                _copy[_recovery_source_key] = _recovered_prose
+                _copy["content"] = _recovered_prose
+                _copy["text"] = _recovered_prose
+            _synced_blocks.append(_copy)
+        if not any(isinstance(_block, dict) and _text(_block.get("type") or _block.get("artifact_type")).lower() in {"text", "markdown", "message", "message_text", "message_text_block", "answer"} for _block in _synced_blocks):
+            _synced_blocks.insert(0, {
+                "type": "text", "artifact_type": "text", "renderer": "MessageTextBlock",
+                "viewer": "MessageTextBlock", "content": answer if _recovery_source_index is None else _original_answer,
+                "text": answer if _recovery_source_index is None else _original_answer,
+                "source_room": "C_TABLE_ROOM", "integrity_repaired": True,
+            })
+        # If a structured TableBlock already exists, keep it and only remove raw HTML
+        # from prose. Otherwise inject the reconstructed table payload exactly once.
+        if not _table_blocks_exist:
+            _synced_blocks.extend(_recovered_tables)
+        raw["render_blocks"] = _synced_blocks
+        _apr_timing_log(
+            "html_table_recovered_to_tableblock",
+            None,
+            count=(0 if _table_blocks_exist else len(_recovered_tables)),
+            existing_table_block=_table_blocks_exist,
+            source=_recovery_source_kind,
+            row_counts=[len(block.get("payload", {}).get("rows", [])) for block in _recovered_tables],
+            header_counts=[len(block.get("payload", {}).get("headers", [])) for block in _recovered_tables],
+        )
 
     # The existing TextModule participates only as the canonical response
     # packaging/sanitization layer; it never creates a second Provider call.
