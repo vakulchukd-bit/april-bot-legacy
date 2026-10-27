@@ -213,6 +213,7 @@ _IMAGE_EDIT_ACTION_RE = re.compile(
 _IMAGE_EDIT_TARGET_RE = re.compile(
     r"(?:галоч\w*|отметк\w*|фон\w*|качеств\w*|ярче|светлее|темнее|резкост\w*|"
     r"контраст\w*|цвет\w*|надпис\w*|текст\w*|логотип\w*|объект\w*|"
+    r"монет\w*|банкнот\w*|купюр\w*|евро|деньг\w*|доллар\w*|гривн\w*|ценник\w*|"
     r"реалистич\w*|красив\w*|лишн\w*|размыти\w*|тень\w*|яркост\w*|"
     r"мяч\w*|игрушк\w*|предмет\w*|котен\w*|котён\w*|стрелк\w*|указател\w*|маркер\w*|"
     r"кнопк\w*|точк\w*|област\w*|место\s+(?:нажатия|клик\w*)|куда\s+нажать|навигац\w*|"
@@ -420,6 +421,14 @@ def _detect_image_modification(text: str) -> bool:
     if re.search(rf"\b{action}\b.{{0,120}}?\b(?:на|в|по|с|из|к)\s+(?:эт\w*\s+)?{image_target}", low, re.IGNORECASE | re.DOTALL):
         return True
     if re.search(rf"\b(?:на|в|по|с|из|к)\s+(?:эт\w*\s+)?{image_target}.{{0,80}}?\b{action}\b", low, re.IGNORECASE | re.DOTALL):
+        return True
+    # Common conversational Russian orders omit a preposition before the image:
+    # "измени эту фотку", "добавь на неё сумму", "я про фото с монетами — добавь...".
+    # Require an explicit edit verb and an image noun within the same short turn so
+    # ordinary mentions like "расскажи про фото" do not become editing requests.
+    if re.search(rf"\b{action}\b.{{0,100}}?\b(?:этот|эта|эту|этом|этой|эти|те|ту|мое|мою|мой|предыдущ\w*)?\s*{image_target}", low, re.IGNORECASE | re.DOTALL):
+        return True
+    if re.search(rf"\b{image_target}\b.{{0,140}}?\b{action}\b", low, re.IGNORECASE | re.DOTALL):
         return True
     return False
 
@@ -3475,6 +3484,35 @@ def build_interpretation(
         r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b)",
         normalized_visual_request,
     ))
+    # A status complaint asks what happened to an earlier image; it is not a
+    # request to create a substitute illustration. Keep it text-only so a failed
+    # edit can never turn "Так где фотка?" into an unrelated new image.
+    image_status_request = bool(re.search(
+        r"(?:\b(?:так\s+)?где\b.{0,55}?(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|image|photo|picture)"
+        r"|\bкуда\s+(?:дел\w*|пропал\w*|исчез\w*).{0,45}?(?:фото|картинк\w*|изображени\w*)"
+        r"|\b(?:фото|фотк\w*|картинк\w*|изображени\w*).{0,35}?(?:пропал\w*|исчез\w*|не\s+(?:появил\w*|загрузил\w*|показал\w*|видно))"
+        r"|\b(?:не\s+вижу|не\s+появил\w*|не\s+загрузил\w*|не\s+показал\w*).{0,45}?(?:фото|картинк\w*|изображени\w*|image|photo|picture)\b"
+        r"|\bwhere\s+(?:is|did|has)\b.{0,45}?(?:photo|picture|image)\b)",
+        normalized_visual_request, re.IGNORECASE | re.DOTALL,
+    )) and not explicit_new_image and not explicit_image_edit
+    if image_status_request:
+        requested_outputs = [item for item in requested_outputs if _text(item).lower() != "image"]
+        for sequence_item in question_sequence:
+            if isinstance(sequence_item, dict):
+                sequence_item["output_types"] = [
+                    _text(name).lower() for name in (sequence_item.get("output_types") or [])
+                    if _text(name).lower() != "image"
+                ] or ["text"]
+        presentation_sequence = [
+            item for item in presentation_sequence
+            if isinstance(item, dict) and any(_text(name).lower() != "image" for name in (item.get("output_types") or []))
+        ]
+        for sequence_item in presentation_sequence:
+            sequence_item["output_types"] = [
+                _text(name).lower() for name in (sequence_item.get("output_types") or [])
+                if _text(name).lower() != "image"
+            ] or ["text"]
+
     retrieval_language = bool(re.search(
         r"\b(?:покаж\w*|верни|восстанов\w*|подним\w*|открой|выведи|отобраз\w*|обещал|долж\н\w*|не\s+увидел|не\s+показал|не\s+загрузил\w*|пропал\w*|где\s+(?:мое|моя|моё|его|ее|её|фото|картинк\w*)|show|restore|recover|bring\s+back|didn.?t\s+see|not\s+shown|missing)\b",
         normalized_visual_request,
@@ -3490,7 +3528,12 @@ def build_interpretation(
     # A short "where is his photo?" follow-up is an image deliverable even when
     # no prior output asset was saved. Reuse the saved asset when available;
     # otherwise let the image-generation path create the missing portrait.
-    image_followup = relation == "CONTINUE" and short_image_reference and not ui_instruction_request
+    image_followup = (
+        relation == "CONTINUE"
+        and short_image_reference
+        and not ui_instruction_request
+        and not image_status_request
+    )
     reuse_saved_image = image_followup and has_saved_output_image
     if image_followup and "image" not in requested_outputs:
         requested_outputs.append("image")
@@ -3586,7 +3629,7 @@ def build_interpretation(
     if _is_code_modification_request(original or text) and has_file:
         task = "modify_code"
 
-    if has_original_image and task == "answer_request":
+    if has_original_image and task == "answer_request" and not image_status_request:
         task = "analyze_image"
 
     result = {
@@ -3624,7 +3667,9 @@ def build_interpretation(
             "source_asset_role": next((_text(item.get("asset_role") or "user_input") for item in visual_context if _text(item.get("image_url") or item.get("data_uri"))), ""),
             "image_edit_instruction": original or text if image_edit_requested else "",
             "reuse_saved_image": bool(reuse_saved_image),
-            "explicit_generation_request": bool(wants_image and not reuse_saved_image and not image_edit_requested),
+            "image_status_request": bool(image_status_request),
+            "has_saved_output_image": bool(has_saved_output_image),
+            "explicit_generation_request": bool(wants_image and not reuse_saved_image and not image_edit_requested and not image_status_request),
             "adaptive_visual_policy": True,
             "wants_file": wants_file,
             "wants_links": wants_links,
