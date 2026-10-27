@@ -909,10 +909,6 @@ async def _edit_image_artifact(
     visual_context: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     """Edit the selected source image through the existing GPT Image edit route."""
-    selected = _select_image_edit_source(visual_context or [])
-    if not selected:
-        return None
-    source_bytes, source_mime, source_item = selected
     intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
     input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
     request_text = _text(input_data.get("original_request") or input_data.get("normalized_request"))
@@ -920,6 +916,10 @@ async def _edit_image_artifact(
         request_text = _text(intent.get("image_edit_instruction"))
     if not request_text:
         return None
+    selected = _select_image_edit_source(visual_context or [], request_text=request_text)
+    if not selected:
+        return None
+    source_bytes, source_mime, source_item = selected
     edit_prompt_parts = [
         "Edit the supplied source image according to this exact user instruction: " + request_text + ".",
         "Preserve the source image and every unaffected detail, including composition, background, perspective, lighting, and existing text.",
@@ -1081,8 +1081,9 @@ def _looks_like_referential_image_edit(value: Any) -> bool:
         r"(?:\b(?:на|в|по|с)\s+(?:этом|этой|этих|этот|эта|эти)\s+(?:фото\b|фотограф\w*|картинк\w*|"
         r"изображени\w*|иллюстрац\w*|рисунк\w*|снимк\w*|канистр\w*|этикетк\w*)|"
         r"\bк\s+(?:этой|той|такой)\s+иллюстрац\w*|"
-        r"\b(?:ту|эту|предыдущую|прошлую)\s+(?:иллюстрац\w*|картинк\w*|изображени\w*)\b|"
-        r"\b(?:на|в)\s+(?:ней|нем|н[её]м|них|этом|этой)\b|"
+        r"\b(?:ту|эту|предыдущую|прошлую)\s+(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|иллюстрац\w*|картинк\w*|изображени\w*)\b|"
+        r"\bпро\s+(?:то\s+)?(?:фото\b|фотограф\w*|фотк\w*)\b|"
+        r"\b(?:на|в)\s+(?:ней|нее|неё|нем|нём|н[её]м|них|этом|этой)\b|"
         r"\b(?:this|that)\s+(?:photo|image|picture|illustration|drawing|canister|label)\b|\b(?:on it|in it|on this one)\b)",
         low, re.IGNORECASE,
     ))
@@ -1099,14 +1100,67 @@ def _decode_image_source_item(item: dict[str, Any]) -> tuple[bytes, str] | None:
     return None
 
 
-def _select_image_edit_source(visual_context: list[dict[str, Any]]) -> tuple[bytes, str, dict[str, Any]] | None:
-    """Prefer a current upload, then April's latest output, then a recalled user image."""
+def _select_image_edit_source(
+    visual_context: list[dict[str, Any]],
+    *,
+    request_text: str = "",
+) -> tuple[bytes, str, dict[str, Any]] | None:
+    """Select the source matching the user's reference, not simply the latest raster.
+
+    User-uploaded photos are the default edit source. An April-generated image wins
+    only when the user explicitly points to the generated result. This prevents a
+    recent unrelated image from replacing an older photograph that the user named.
+    """
     candidates = [item for item in (visual_context or []) if isinstance(item, dict)]
-    ranked = sorted(candidates, key=lambda item: (
-        0 if not item.get("recalled_from_memory") else 1,
-        0 if _text(item.get("asset_role")).lower() in {"april_output", "assistant_output", "generated"} else 1,
+    low_request = _text(request_text).lower().replace("ё", "е")
+    prefers_generated = bool(re.search(
+        r"(?:ты\s+(?:создал\w*|сгенерир\w*|нарис\w*|сделал\w*)|"
+        r"(?:сгенерированн\w*|созданн\w*)\s+тобой|твой\s+(?:рисунок|результат|рендер)|"
+        r"последн\w*\s+(?:картинк\w*|изображени\w*|иллюстрац\w*)|"
+        r"(?:the\s+)?(?:image|picture|photo)\s+(?:you\s+)?(?:made|generated|created)|"
+        r"latest\s+(?:generated\s+)?(?:image|picture|photo))",
+        low_request, re.IGNORECASE,
     ))
-    for item in ranked:
+    subject_hints = (
+        "монет", "банкнот", "купюр", "калькулятор", "телефон", "стол", "деньг",
+        "канистр", "этикетк", "автомобил", "машин", "кот", "собак", "хаски",
+        "кружк", "документ", "паспорт", "чек", "квитанц",
+    )
+    request_subjects = [term for term in subject_hints if term in low_request]
+    decoded_candidates = [item for item in candidates if _decode_image_source_item(item)]
+    relevance_by_id: dict[int, int] = {}
+    for item in decoded_candidates:
+        summary = " ".join(
+            _text(item.get(key)) for key in ("analysis_summary", "filename", "prompt", "caption", "alt")
+        ).lower().replace("ё", "е")
+        relevance_by_id[id(item)] = sum(1 for term in request_subjects if term in summary)
+    has_current_user_upload = any(
+        not bool(item.get("recalled_from_memory"))
+        and _text(item.get("asset_role") or "user_input").lower() not in {"april_output", "assistant_output", "generated"}
+        for item in decoded_candidates
+    )
+    if request_subjects and not prefers_generated and not has_current_user_upload and decoded_candidates:
+        # If the user explicitly names a source subject (e.g. "the photo with coins")
+        # and none of the recalled image sidecars match it, don't modify an unrelated
+        # generated result merely because it is the newest saved raster.
+        if not any(relevance_by_id.get(id(item), 0) > 0 for item in decoded_candidates):
+            return None
+
+    def rank(item: dict[str, Any]) -> tuple[int, int, int, int]:
+        role = _text(item.get("asset_role")).lower()
+        is_output = role in {"april_output", "assistant_output", "generated"}
+        is_current = not bool(item.get("recalled_from_memory"))
+        summary = " ".join(
+            _text(item.get(key)) for key in ("analysis_summary", "filename", "prompt", "caption", "alt")
+        ).lower().replace("ё", "е")
+        relevance = sum(1 for term in request_subjects if term in summary)
+        role_rank = 0 if (is_output if prefers_generated else not is_output) else 1
+        # A current upload always beats a recalled item; then match the indicated
+        # subject and choose the requested source role.
+        sequence = int(item.get("sequence_index") or 9999)
+        return (0 if is_current else 1, -relevance, role_rank, sequence)
+
+    for item in sorted(candidates, key=rank):
         decoded = _decode_image_source_item(item)
         if decoded:
             raw, mime = decoded
@@ -1127,7 +1181,8 @@ def _explicit_prior_asset_reference(value: Any) -> bool:
         "ту иллюстрацию, которую ты нарисовала", "ту иллюстрацию, которую ты нарисовал",
         "ту картинку, которую ты нарисовала", "ту картинку, которую ты нарисовал",
         "которую ты мне нарисовала", "которую ты мне нарисовал", "которую ты создала",
-        "на ней", "на нем", "на нём", "эту канистру",
+        "на ней", "на нее", "на неё", "на нем", "на нём", "эту канистру",
+        "фото с монет", "фотку с монет", "фотография с монет", "про фотку с монет",
         "this canister", "this photo", "this image", "this illustration", "that illustration", "on it",
         "that image", "previous image", "previous photo", "the earlier file",
         "the file i sent", "the image i sent", "compare with", "compare to previous",
@@ -1391,7 +1446,21 @@ def _restore_selected_assets(
     required.
     """
     has_current_asset = bool(visual_context or file_inputs or file_contents)
-    if has_current_asset and not _explicit_prior_asset_reference(current_request):
+    explicit_asset_reference = _explicit_prior_asset_reference(current_request)
+    referential_edit = _looks_like_referential_image_edit(current_request)
+    # A recalled generated output is not necessarily the source being referenced.
+    # Continue into source retrieval for image edits even when the current branch
+    # contains a different restored raster (for example, a prior accidental image).
+    current_has_user_upload = any(
+        isinstance(item, dict)
+        and _text(item.get("asset_role") or "user_input").lower() not in {"april_output", "assistant_output", "generated"}
+        and not bool(item.get("recalled_from_memory"))
+        and _decode_image_source_item(item)
+        for item in (visual_context or [])
+    )
+    if has_current_asset and current_has_user_upload and not explicit_asset_reference:
+        return visual_context, attachments, file_inputs, file_contents, []
+    if has_current_asset and not explicit_asset_reference and not referential_edit:
         return visual_context, attachments, file_inputs, file_contents, []
 
     selected = dialogue_context.get("selected_pairs") or []
@@ -1405,6 +1474,52 @@ def _restore_selected_assets(
     message_ids = list(dict.fromkeys(message_ids))[:8]
 
     relation = _text(dialogue_context.get("relation")).upper()
+    # A selected active branch can point at a recent generated image while the
+    # user explicitly describes an earlier photo. Add the same-conversation image
+    # candidates before restoring bytes, ranking by source-subject evidence.
+    if referential_edit:
+        candidates = [item for item in (dialogue_context.get("candidates") or []) if isinstance(item, dict)]
+        request_low = _text(current_request).lower().replace("ё", "е")
+        subject_terms = [
+            term for term in (
+                "монет", "банкнот", "купюр", "калькулятор", "телефон", "стол", "деньг",
+                "канистр", "этикетк", "автомобил", "машин", "кот", "собак", "хаски",
+                "документ", "паспорт", "чек", "квитанц", "телевизор", "ноутбук",
+            ) if term in request_low
+        ]
+        ranked_candidates: list[tuple[int, float, str]] = []
+        for candidate in candidates:
+            if not bool(candidate.get("same_dialog")):
+                continue
+            modalities = set(candidate.get("row_modalities") or [])
+            if "image" not in modalities:
+                continue
+            candidate_id = _text(candidate.get("message_id"))
+            if not candidate_id:
+                continue
+            try:
+                created_at = float(candidate.get("created_at") or 0)
+            except (TypeError, ValueError, OverflowError):
+                created_at = 0.0
+            if created_at and (time.time() - created_at > 24 * 60 * 60 or created_at > time.time() + 60):
+                continue
+            evidence = " ".join(
+                _text(candidate.get(key)) for key in ("topic", "user", "april", "attachment_evidence", "memory_summary")
+            ).lower().replace("ё", "е")
+            hits = sum(1 for term in subject_terms if term in evidence)
+            ranked_candidates.append((hits, created_at, candidate_id))
+        if ranked_candidates:
+            ranked_candidates.sort(key=lambda part: (part[0], part[1]), reverse=True)
+            has_subject_match = bool(subject_terms and any(item[0] > 0 for item in ranked_candidates))
+            extra_ids = [
+                item[2] for item in ranked_candidates
+                if (item[0] > 0 if has_subject_match else True)
+            ][:6]
+            # Put semantically aligned historical source turns first, then the
+            # active branch. This is still account- and dialog-scoped, and asset
+            # bytes are subsequently fetched only for these selected message IDs.
+            message_ids = list(dict.fromkeys(extra_ids + message_ids))[:8]
+
     # Semantic search can label a referential edit as NEW when the user's current
     # sentence names a visible object (e.g. "на этой канистре") but the previous
     # turn's user text was only "Что здесь?". In that narrow case, restore the most
@@ -1412,7 +1527,6 @@ def _restore_selected_assets(
     # A generic "draw on a photo" request must never silently borrow an older image:
     # when no source is attached, the Premium Interpreter decides whether the user
     # wants a new image or explicitly refers to a particular existing source.
-    referential_edit = _looks_like_referential_image_edit(current_request)
     fallback_used = False
     if relation != "CONTINUE" and not (not has_current_asset and referential_edit):
         return visual_context, attachments, file_inputs, file_contents, []
@@ -3454,13 +3568,18 @@ async def execute(
 
     image_result = None
     image_results: list[dict[str, Any]] = []
+    image_generation_failed = False
     image_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    is_image_edit_operation = bool(
+        image_intent.get("image_operation") == "edit"
+        or _text(image_intent.get("task")) == "edit_image"
+    )
     if image_intent.get("wants_image") and (
         not bool(provider_metadata.get("provider_fallback"))
-        or image_intent.get("image_operation") == "edit"
+        or is_image_edit_operation
     ):
         image_started = time.perf_counter()
-        if image_intent.get("image_operation") == "edit" or _text(image_intent.get("task")) == "edit_image":
+        if is_image_edit_operation:
             try:
                 image_result = await _edit_image_artifact(interpretation, visual_context or [])
             except Exception as image_edit_error:
@@ -3470,6 +3589,15 @@ async def execute(
                     source_available=bool((interpretation.get("intent") or {}).get("source_image_available")),
                 )
                 image_result = None
+            if image_result is None:
+                # An edit is a constrained operation on the selected source. Never
+                # call the generator as a fallback: that creates a new, unrelated
+                # image and detaches the active branch from the user's photograph.
+                _apr_timing_log(
+                    "image_edit_no_generation_fallback", None,
+                    message_key=_apr_diag_ref(identity.get("message_id")),
+                    source_message_key=_apr_diag_ref(image_intent.get("source_asset_message_id")),
+                )
         elif image_intent.get("reuse_saved_image"):
             saved_output = next((
                 item for item in restored_assets
@@ -3521,13 +3649,30 @@ async def execute(
                     "reused": True,
                 }
                 _apr_timing_log("saved_image_reuse", None, reused=True, image_bytes=len(saved_bytes), message_key=_apr_diag_ref((saved_output or {}).get("asset_message_id")))
-        if image_result is None:
-            image_result = await _generate_image_artifact(
-                interpretation,
-                raw,
-                identity,
-            )
-        if isinstance(image_result, dict) and image_result.get("success", True):
+        if image_result is None and not is_image_edit_operation and not image_intent.get("image_status_request"):
+            try:
+                image_result = await _generate_image_artifact(
+                    interpretation,
+                    raw,
+                    identity,
+                )
+            except Exception as image_generation_error:
+                image_generation_failed = True
+                image_result = None
+                _apr_timing_log(
+                    "image_generation_failed", None,
+                    error=type(image_generation_error).__name__,
+                    message_key=_apr_diag_ref(identity.get("message_id")),
+                )
+            if isinstance(image_result, dict) and not image_result.get("success", True):
+                image_generation_failed = True
+                _apr_timing_log(
+                    "image_generation_failed", None,
+                    error=_text(image_result.get("error_code") or image_result.get("error") or "IMAGE_GENERATION_FAILED")[:120],
+                    message_key=_apr_diag_ref(identity.get("message_id")),
+                )
+                image_result = None
+        if isinstance(image_result, dict) and image_result.get("success", True) and image_result.get("image_bytes"):
             image_results = [image_result]
 
         # A single user turn may explicitly request several pictures or split into
@@ -3711,6 +3856,51 @@ async def execute(
                 "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
                 "content": answer,
             })
+
+    elif image_intent.get("image_status_request"):
+        # This request asks about a prior render, not for a new one. When no output
+        # was saved, say so plainly; never make an unrelated image to fill the gap.
+        saved_output_available = bool(image_intent.get("has_saved_output_image"))
+        if not saved_output_available:
+            input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
+            language = _text(input_data.get("display_language") or "").lower()
+            if language in {"uk", "ua", "uk-ua"}:
+                answer = "Вихідне фото збережене в історії діалогу, але попередня спроба редагування не завершилася, тому готового зміненого зображення немає. Я не підмінятиму його випадковою картинкою."
+            elif language in {"en", "en-us", "en-gb"}:
+                answer = "The source photo remains in the conversation history, but the previous edit did not finish, so there is no completed edited image yet. I will not substitute an unrelated picture."
+            else:
+                answer = "Исходное фото осталось в истории диалога, но предыдущая попытка редактирования не завершилась, поэтому готового изменённого изображения нет. Я не буду подменять его случайной картинкой."
+        packaged["answer"] = answer
+        packaged["content"] = answer
+        packaged["summary"] = answer[:180]
+        packaged["artifacts"] = [item for item in (packaged.get("artifacts") or []) if _text(item.get("type") or item.get("artifact_type")).lower() not in {"image", "generated_image"}]
+        packaged["render_blocks"] = [{
+            "type": "text",
+            "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
+            "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
+            "content": answer,
+            "text": answer,
+        }]
+
+    elif image_generation_failed or (image_intent.get("wants_image") and not image_result and not image_intent.get("reuse_saved_image")):
+        input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
+        language = _text(input_data.get("display_language") or "").lower()
+        if language in {"uk", "ua", "uk-ua"}:
+            answer = "Не вдалося створити зображення цього разу. Запит збережено в діалозі; можна повторити генерацію."
+        elif language in {"en", "en-us", "en-gb"}:
+            answer = "The image could not be generated this time. Your request has been saved in the conversation; you can retry the generation."
+        else:
+            answer = "Не удалось создать изображение в этот раз. Запрос сохранён в диалоге; можно повторить генерацию."
+        packaged["answer"] = answer
+        packaged["content"] = answer
+        packaged["summary"] = answer[:180]
+        text_block = next((block for block in (packaged.get("render_blocks") or []) if isinstance(block, dict) and _text(block.get("type") or block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}), None)
+        if text_block is None:
+            text_block = {"type": "text", "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"), "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock")}
+            packaged["render_blocks"] = [text_block]
+        text_block["content"] = answer
+        text_block["text"] = answer
+        packaged["artifacts"] = [item for item in (packaged.get("artifacts") or []) if _text(item.get("type") or item.get("artifact_type")).lower() not in {"image", "generated_image"}]
 
     if gratitude_only:
         # User reaction is a dialogue act, not a command to replay the referenced graph,
