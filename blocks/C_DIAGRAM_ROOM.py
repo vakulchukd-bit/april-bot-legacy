@@ -1497,39 +1497,45 @@ def build_answer_outline_payload(answer: str, *, language: str = "") -> dict[str
 
 
 def should_add_adaptive_diagram(request: str, answer: str, requested_outputs: Any) -> bool:
-    """Add a diagram only when it complements the answer and respects the requested format."""
+    """Only add an adaptive diagram when explicit intent and real structure agree."""
     low_request = _text(request).lower().replace("ё", "е")
-    low_answer = _text(answer).lower()
+    body = _text(answer)
     outputs = {str(item or "").strip().lower().replace("-", "_") for item in (requested_outputs or []) if str(item or "").strip()}
-    explicit_diagram = bool(re.search(r"(?:диаграмм\w*|схем\w*|flowchart|diagram)", low_request)) or "diagram" in outputs
     explicit_no = bool(re.search(
         r"(?:только\s+текст|без\s+(?:схем|диаграмм|визуализац)|не\s+(?:нужна|нужно|надо)\s+(?:схема|диаграмма)|no\s+(?:diagram|visual)|text\s+only)",
         low_request,
     ))
+    if explicit_no:
+        return False
+    wants_outline = bool(re.search(
+        r"(?:структур\w*\s+(?:ответ\w*|тем\w*|разговор\w*|обсужден\w*)|карта\s+(?:тем|разделов|мыслей|ответа)|mind\s*map|answer\s+outline|outline\s+of\s+the\s+answer)",
+        low_request,
+    ))
+    wants_process = bool(re.search(
+        r"(?:пошаг\w*|по\s+шагам|последовательност\w*|куда\s+нажать|как\s+(?:собрать|подключить|настроить|перейти|нажать|установить)|flowchart|workflow|process\s+diagram|схем\w*\s+(?:действий|процесс\w*|переход\w*))",
+        low_request,
+    ))
+    explicit_diagram = bool(re.search(r"(?:диаграмм\w*|схем\w*|flowchart|diagram)", low_request))
+    if not (wants_outline or wants_process or explicit_diagram):
+        # The interpreter's requested_outputs can be broad or inferred; it is not
+        # permission to generate a redundant outline that repeats the answer.
+        return False
     explicit_other_only = bool(re.search(
         r"(?:только\s+(?:ссылк\w*|код|таблиц\w*|изображен\w*|картинк\w*|график\w*|формул\w*|файл\w*)|"
         r"only\s+(?:a\s+)?(?:link|code|table|image|graph|formula|file))",
         low_request,
     ))
-    if explicit_no or (explicit_other_only and not explicit_diagram):
+    if explicit_other_only and not explicit_diagram:
         return False
-    # Another renderer explicitly requested by the user wins when no diagram was
-    # requested. If the user explicitly asks for both a diagram and (say) a table,
-    # an absent/empty diagram must still be recovered instead of silently lost.
     competing = outputs.intersection({"image", "gallery", "code", "table", "graph", "formula", "link", "file"})
     if competing and not explicit_diagram:
         return False
-    if len(_text(answer)) < (360 if explicit_diagram else 450):
-        return False
-    heading_count = len(re.findall(r"(?m)^\s{0,3}#{1,4}\s+", answer))
-    paragraph_count = sum(1 for part in re.split(r"\n\s*\n", answer) if len(part.strip()) >= 55)
-    numbered_steps = len(re.findall(r"(?m)^\s*\d+[.)]\s+", answer))
-    if heading_count >= 3 or paragraph_count >= 4 or numbered_steps >= 5:
-        # Don't add a redundant outline if the user already requested a visual
-        # and it is not a diagram; that intent was handled above.
-        return True
-    # No fixed subject/keyword list: eligibility comes from structure of this turn.
-    return False
+    if wants_process:
+        return len(re.findall(r"(?m)^\s*(?:\d+[.)]|[-*+])\s+\S", body)) >= 2
+    if wants_outline:
+        return len(re.findall(r"(?m)^\s{0,3}#{1,4}\s+", body)) >= 2 and len(body) >= 120
+    # A generic “diagram” request only qualifies with real action sequence data.
+    return len(re.findall(r"(?m)^\s*(?:\d+[.)]|[-*+])\s+\S", body)) >= 2
 
 
 class DiagramRoom:
