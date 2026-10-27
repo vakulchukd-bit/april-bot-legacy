@@ -332,17 +332,30 @@ def _contains_marker(text: str, marker: str) -> bool:
 
 
 def _is_ui_instruction_request(text: Any) -> bool:
-    """Recognize instructions about operating an existing image, not creating one.
+    """Recognize help operating the existing app/account, not image generation.
 
-    This guard has priority over generic verbs such as "show", "point out" and
-    "image": otherwise "show me how to download the picture in this chat" can
-    accidentally call the paid image generator instead of explaining the UI.
+    This takes priority over generic visual verbs. Mentions of a picture, buttons,
+    or "show me" inside instructions must not trigger a paid raster-image request.
     """
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
     media = r"(?:картинк\w*|изображени\w*|фото\b|фотограф\w*|снимк\w*|рисунок\w*|image\w*|picture\w*|photo\w*|visual\w*)"
     operation = r"(?:скача\w*|загруз\w*\s+на\s+устройств\w*|сохран\w*|скопир\w*|встав\w*|откро\w*|увелич\w*|поделит\w*|пересла\w*|download\w*|save\w*|copy\w*|paste\w*|open\w*|share\w*)"
+    account_ui = bool(re.search(
+        r"(?:переключ\w*\s+(?:язык|языка)|смен\w*\s+язык|измен\w*\s+язык|выбрат\w*\s+язык|"
+        r"язык\w*.{0,35}(?:кабинет\w*|профил\w*|настройк\w*|аккаунт\w*)|"
+        r"(?:кабинет\w*|профил\w*|настройк\w*|аккаунт\w*).{0,45}(?:язык|локализац\w*)|"
+        r"where\s+(?:do\s+i\s+)?click|what\s+(?:button|menu)\s+(?:do\s+i\s+)?click|"
+        r"change\s+(?:the\s+)?language|switch\s+(?:the\s+)?language|account\s+settings|profile\s+settings)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    navigation_cue = bool(re.search(
+        r"(?:куда\s+(?:надо\s+)?нажат\w*|что\s+нажать|куда\s+кликнут\w*|по\s+шагам|покажи\w*.{0,30}(?:оба\s+вариант\w*|шаг\w*|куда\s+нажать)|"
+        r"нажми\w*.{0,35}(?:кабинет\w*|профил\w*|настройк\w*|язык)|"
+        r"how\s+to\s+navigat|step[- ]by[- ]step|click\s+path)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
     how_to = bool(re.search(
         rf"(?:как|подскажи\w*\s+как|объясни\w*\s+как|покажи\w*\s+как|how\s+(?:do\s+i|to)|explain\s+how|show\s+me\s+how).{{0,100}}?{operation}.{{0,100}}?{media}"
         rf"|{operation}.{{0,70}}?{media}.{{0,45}}?(?:в\s+(?:чате|април\w*|приложени\w*)|из\s+чата|на\s+устройств\w*|in\s+(?:this\s+)?chat|from\s+(?:this\s+)?chat|on\s+(?:my\s+)?device)",
@@ -352,7 +365,34 @@ def _is_ui_instruction_request(text: Any) -> bool:
         r"(?:кнопк\w*|значок\w*|меню\s+действи\w*|из\s+чата|в\s+чате\s+april|в\s+интерфейс\w*|нажать|куда\s+нажать|с\s+телефон\w*|на\s+телефон\w*|на\s+устройств\w*)",
         low, re.IGNORECASE,
     ))
-    return how_to or (explicit_ui_terms and bool(re.search(rf"{operation}.{{0,100}}?{media}|{media}.{{0,100}}?{operation}", low, re.I | re.S)))
+    return account_ui or navigation_cue or how_to or (
+        explicit_ui_terms and bool(re.search(rf"{operation}.{{0,100}}?{media}|{media}.{{0,100}}?{operation}", low, re.I | re.S))
+    )
+
+
+def _is_structured_visual_explanation_request(text: Any) -> bool:
+    """Distinguish a formula/diagram explanation from editing or generating a photo."""
+    low = _text(text).lower().replace("ё", "е")
+    has_math = bool(re.search(
+        r"(?:формул\w*|уравнен\w*|equation\w*|formula\w*|e\s*=\s*m\s*c|\bmc\s*\^?\s*2\b)", low, re.I
+    ))
+    if not has_math:
+        return False
+    existing_image = bool(re.search(
+        r"(?:на\s+(?:эт\w*|мо\w*|присланн\w*|загруженн\w*|прикрепленн\w*)\s*(?:картинк\w*|фото\w*|изображени\w*)|"
+        r"(?:эт\w*|присланн\w*|загруженн\w*|прикрепленн\w*)\s+(?:картинк\w*|фото\w*|изображени\w*)|"
+        r"on\s+(?:this|the uploaded|the attached|my)\s+(?:image|photo|picture))", low, re.I
+    ))
+    explicit_new_picture = bool(re.search(
+        r"(?:созда\w*|сгенерир\w*|нарис\w*|изобраз\w*|generate|create|draw).{0,45}(?:картинк\w*|изображени\w*|иллюстраци\w*|\bimage\b|\bpicture\b|\billustration\b)",
+        low, re.I | re.S
+    ))
+    visual_explanation = bool(re.search(
+        r"(?:на\s+картинк\w*|наглядн\w*|визуальн\w*|визуализир\w*.{0,50}(?:формул\w*|уравнен\w*)|"
+        r"show.{0,45}(?:formula|equation).{0,30}(?:visually|in\s+(?:an?\s+)?image|as\s+a\s+diagram)|visuali[sz]e.{0,45}(?:formula|equation))",
+        low, re.I | re.S
+    ))
+    return visual_explanation and not existing_image and not explicit_new_picture
 
 
 def _detect_image_modification(text: str) -> bool:
@@ -363,7 +403,7 @@ def _detect_image_modification(text: str) -> bool:
     Whether the source bytes are available is decided later by build_interpretation.
     """
     low = _text(text).lower().replace("ё", "е")
-    if _is_ui_instruction_request(low):
+    if _is_ui_instruction_request(low) or _is_structured_visual_explanation_request(low):
         return False
     if any(_contains_marker(low, marker.replace("ё", "е")) for marker in _IMAGE_MODIFICATION_MARKERS):
         return True
@@ -394,7 +434,7 @@ def _detect_image_generation_request(text: str) -> bool:
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
-    if _is_ui_instruction_request(low):
+    if _is_ui_instruction_request(low) or _is_structured_visual_explanation_request(low):
         return False
     if _detect_image_modification(low):
         return True
@@ -588,9 +628,13 @@ def _detect_requested_outputs(text: str) -> list[str]:
         if any(_contains_marker(low, marker) for marker in markers):
             result.append(output)
     if ui_instruction_request:
-        # A reference to an existing image in a how-to question is not an image
-        # deliverable, regardless of generic "show/point out" words.
+        # Existing-media / account-navigation guidance is never a generated image.
         result = [kind for kind in result if kind != "image"]
+        if re.search(
+            r"(?:оба\s+вариант\w*|по\s+шагам|куда\s+(?:надо\s+)?нажат\w*|что\s+нажать|step[- ]by[- ]step|both\s+options|where\s+to\s+click)",
+            low, re.IGNORECASE,
+        ) and "diagram" not in result:
+            result.append("diagram")
 
     # A plain image/photo mention is input context, not an output request.
     # The object-order-aware detector captures explicit image requests even
@@ -699,6 +743,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     outputs = list(dict.fromkeys(explicit_outputs or ["text"]))
     explicit_image_request = _detect_image_generation_request(low)
     portrait_request = _detect_portrait_request(low)
+    structured_visual_explanation = _is_structured_visual_explanation_request(low)
 
     comparison = bool(re.search(
         r"\b(?:compare|comparison|compare\s+with|versus|vs\.?|differences?\s+between|pros\s+and\s+cons)\b"
@@ -732,6 +777,8 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     # illustrative image. These cues are independent and cumulative, not exclusive.
     if formula_cue and "formula" not in outputs:
         outputs.append("formula")
+    if structured_visual_explanation and "diagram" not in outputs:
+        outputs.append("diagram")
     if application_cue and "table" not in outputs:
         outputs.append("table")
     if appearance_cue and "image" not in outputs:
@@ -789,6 +836,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         and "image" not in outputs
         and not any(kind in outputs for kind in ("diagram", "graph", "table", "formula", "code", "file", "link"))
         and not _is_ui_instruction_request(low)
+        and not structured_visual_explanation
         and _has_drawable_subject(low)
     ):
         outputs.append("image")
