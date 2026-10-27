@@ -85,7 +85,7 @@ APRIL_SITE_MAP = {
         {
             "id": "chat", "path": "/", "label": "Основной чат April",
             "purpose": "Переписка с April; отправка текста и доступные элементы ввода, вложений и голоса; просмотр текстовых и мультимедийных блоков ответа.",
-            "steps": ["Откройте основной экран через значок/ссылку April или путь /. ", "Введите вопрос в поле сообщения; для вложения используйте доступный элемент прикрепления. ", "После отправки читайте пояснение и открывайте отдельные блоки ответа."],
+            "steps": ["Если в верхней панели видна кнопка Log in, войдите в Google-аккаунт; если уже видны имя/профиль, откройте его только для настроек.", "Введите полный вопрос в нижнее поле Message April / поле сообщения и нажмите стрелку отправки. Если в одном сообщении несколько связанных пунктов, April должна ответить на них по порядку, не превращая каждую фразу в отдельный новый диалог.", "Для голосового запроса нажмите микрофон и произнесите задачу; дождитесь распознавания и ответа.", "Для фотографии/документа нажмите скрепку, выберите Камера, Изображения или Файлы, убедитесь, что источник прикреплён, и только затем отправьте просьбу.", "Читайте обычный текст, а при наличии — соответствующие ему ссылки, диаграммы, таблицы, формулы, графики, код, файлы и изображения. Визуальный блок должен дополнять объяснение, а не заменять его.", "Если хотите уточнить предыдущий ответ, опишите желаемое продолжение естественными словами. Короткое «Жду» означает продолжить незавершённую задачу, а не спрашивать её заново."],
             "related": ["history", "settings", "guide"]
         },
         {
@@ -120,8 +120,8 @@ APRIL_SITE_MAP = {
         },
         {
             "id": "support", "path": "/insights?room=support", "label": "Contact Support / Поддержка",
-            "purpose": "Просмотр истории обращений и ответов техподдержки. Карточка Contact Support находится на странице Help & Information; отправка обращения доступна Premium по правилам показанного интерфейса.",
-            "steps": ["Откройте [Help & Information](/aprill) и нажмите Contact Support, либо откройте [раздел поддержки](/insights?room=support).", "В профиле можно также открыть [настройки](/settings) и секцию поддержки, если она отображается.", "Не открывайте административный профиль: он предназначен не для обычных пользователей."],
+            "purpose": "Просмотр истории обращений и ответов техподдержки. Карточка Contact Support находится на странице Help & Information; возможность отправить обращение зависит от доступного пользователю тарифа и состояния аккаунта.",
+            "steps": ["Откройте [Help & Information](/aprill) и нажмите Contact Support, либо используйте проверенный [раздел поддержки](/insights?room=support). На предоставленном скриншоте техническая поддержка указана для Premium; для публичных инструкций доступны Help Center и How to Use April.", "Опишите конкретный сбой: страницу/действие, ожидаемый результат, фактический результат и примерное время. Для ошибки рендера приложите скриншот проблемного блока; не отправляйте пароли, API-ключи или секреты.", "Если ответ пустой, индикатор не останавливается или кнопка не срабатывает: сначала дождитесь завершения запроса; если состояние явно зависло — обновите страницу один раз и проверьте, сохранился ли диалог. Если ошибка повторяется, опишите её в обращении поддержки.", "Если ответ неполный или повторяется, уточните именно пропущенную часть в том же диалоге. При просьбе о доработке изображения укажите объект, место и нужный результат естественными словами; слово «изменить» не является обязательным.", "Если нужна именно старая беседа, откройте [Историю диалогов](/history); она отличается от обращения в техподдержку.", "Не открывайте административный профиль: он предназначен не для обычных пользователей."],
             "related": ["settings", "guide", "admin-support"]
         },
         {
@@ -188,6 +188,161 @@ APRIL_SITE_MAP = {
         "Для действий с подпиской, выходом и удалением описывай только видимые кнопки, а если их расположение отличается — попроси скриншот текущего экрана.",
     ],
 }
+
+# Screen blueprints reconstructed from the supplied April UI screenshots and existing route map.
+# They are knowledge records for retrieval/rendering, not route-specific answer templates.
+APRIL_UI_BLUEPRINTS = {
+    "chat": {
+        "screen_id": "chat", "screen_title": "Основной чат April",
+        "visible_controls": ["APRIL header", "profile / Log in", "paperclip attachment", "message field", "send arrow", "microphone"],
+        "screen_flow": ["Верхняя панель April и профиль", "Рабочая область разговора", "Нижняя панель: вложение, поле сообщения, отправка и голос", "Если ответ неполный или не по запросу, уточнить пропущенную часть в той же беседе; не требуется повторять всю задачу или использовать конкретную команду-слово", "Для правки созданного изображения сослаться на картинку из текущего контекста и описать желаемый вид, объект и цвет; при наличии оригинала и разрешённого тарифа править источник, а не заменять его декоративной картинкой", "Если ответ пустой/завис, дождаться окончания операции и один раз обновить страницу; при повторении перейти в Contact Support из профиля или справки"],
+        "semantic_concepts": ["написать April", "отправить вопрос", "пустой чат", "поле ввода", "голосовое сообщение", "начать беседу", "ответ завис", "крутится индикатор", "пустой ответ", "не отвечает", "продолжи", "я жду", "покажи на этой картинке", "image annotation", "message", "send", "microphone", "login", "log in"]
+    },
+    "attachments": {
+        "screen_id": "attachments", "screen_title": "Добавить вложение",
+        "visible_controls": ["Скрепка слева от поля сообщения", "Камера", "Изображения", "Файлы", "крестик вверху", "Отмена"],
+        "screen_flow": ["Открыть основной чат /", "Нажать скрепку слева от поля сообщения", "В модальном окне выбрать Камера для нового снимка, Изображения для выбора фото или Файлы для документа", "Закрыть крестиком/Отмена без прикрепления или вернуться к сообщению и отправить его", "Убедиться, что выбранный файл действительно появился во вложениях, прежде чем просить April анализировать/редактировать его", "Если нужен указатель на существующей картинке, сформулировать, какой объект и каким цветом отметить. При наличии источника и доступного тарифа выполняется редактирование этого источника; иначе April должна честно предложить поддерживаемую схему и объяснить ограничение"],
+        "semantic_concepts": ["скрепка", "вложение", "прикрепить документ", "загрузить фото", "выбрать изображение", "открыть камеру", "файл в чат", "куда нажать чтобы прикрепить", "файл не прикрепляется", "изображение не загрузилось", "почему вложение не отправляется", "attachment", "upload", "camera", "image picker", "file picker", "cancel"]
+    },
+    "settings": {
+        "screen_id": "profile", "screen_title": "Настройки и профиль",
+        "visible_controls": ["Google account", "Выйти", "April ID", "Premium ID", "Копировать", "Имя в пространстве", "Изменить", "CURRENT PLAN", "Time remaining", "Renew (появляется за 24 часа до окончания на предоставленном скриншоте)", "Chat with April", "Dialog history", "Contact support", "Community", "Удалить аккаунт", "Язык: Русский, English, Українська, выбрать другой язык"],
+        "screen_flow": ["Открыть /settings через профиль/имя в верхней панели", "Проверить Google-аккаунт, April ID и Premium ID; копирование не раскрывает секреты", "Имя в пространстве меняется через Edit в USER", "В CURRENT PLAN проверить тариф и оставшееся время", "Использовать соответствующую быструю ссылку: Chat with April → /; Dialog history → /history; Contact support → /insights?room=support; Community → /space", "В блоке языка выбрать нужный язык; после выбора проверять, что активная метка соответствует выбору", "Выход завершает сессию; удаление April-аккаунта — отдельное подтверждаемое действие и не удаляет Google-аккаунт"],
+        "semantic_concepts": ["профиль", "личный кабинет", "аккаунт", "выход", "сменить имя", "ник", "язык интерфейса", "поменять язык", "апрель id", "april id", "premium id", "копировать id", "тариф", "подписка", "оставшееся время", "продлить", "оплата", "renew", "выйти", "logout", "google account"]
+    },
+    "history": {
+        "screen_id": "history", "screen_title": "Saved dialogues / История диалогов",
+        "visible_controls": ["Saved dialogues", "карточка диалога", "дата и время", "фрагмент разговора", "Continue this dialogue", "Memory Status"],
+        "screen_flow": ["Открыть /history напрямую или через Settings / профайл → CURRENT PLAN → Dialog history.", "Просмотреть карточки по заголовку, фрагменту разговора и дате/времени; в предоставленном скриншоте отдельного поля поиска на странице не видно, поэтому не обещать несуществующую кнопку.", "Нажать Continue this dialogue у конкретной карточки, а не просто открыть другую карточку.", "Продолжить в исходной теме; краткое «Жду», «а дальше?» или правка ответа должны продолжать связанную активную задачу, а не заставлять пользователя повторять запрос.", "Если требуется найти тему по смыслу или времени, попросить April в основном чате найти её в доступной истории; не утверждать, что это кнопка веб-интерфейса."],
+        "semantic_concepts": ["старый разговор", "предыдущая беседа", "восстановить диалог", "вернуться к теме", "сохранённые сообщения", "история переписки", "saved conversation", "resume dialogue"]
+    },
+    "community": {
+        "screen_id": "community", "screen_title": "April · Community / Сообщество",
+        "visible_controls": ["Personal profile", "публичные карточки сообщений", "FREE/PREMIUM", "Private chat", "Delete your message", "paperclip", "поле сообщения", "send arrow"],
+        "screen_flow": ["Открыть сообщество", "Для публичной записи ввести текст в нижнее поле и отправить", "Для личного разговора нажать Private chat в карточке пользователя", "Свой пост можно удалить через Delete your message"],
+        "semantic_concepts": ["люди", "другие пользователи", "публичная переписка", "пост", "участник", "личное сообщение", "private chat", "community post"]
+    },
+    "help": {
+        "screen_id": "help", "screen_title": "Help & Information / Помощь и информация",
+        "visible_controls": ["Help Center", "How to Use April", "Privacy Policy", "Terms of Service", "Plans & Payments", "Account & Data Deletion", "Contact Support"],
+        "screen_flow": ["Открыть /aprill", "Выбрать карточку по теме", "Если у карточки нет подтверждённого отдельного URL, открыть её с родительской страницы"],
+        "semantic_concepts": ["справка", "инструкция", "руководство", "частые вопросы", "правила сервиса", "конфиденциальность", "платежи", "удаление данных", "техподдержка", "help", "documentation"]
+    },
+    "support": {
+        "screen_id": "support", "screen_title": "Contact Support / Поддержка",
+        "visible_controls": ["история обращений", "ответы техподдержки", "Contact Support"],
+        "screen_flow": ["Открыть карточку Contact Support в справке или быстрый переход профиля", "Просмотреть историю обращений и ответы"],
+        "semantic_concepts": ["жалоба", "пожаловаться", "ошибка", "не работает", "зависло", "сообщить о проблеме", "обращение", "support ticket"]
+    },
+    "plans": {
+        "screen_id": "profile", "screen_title": "Тарифы и платежи",
+        "visible_controls": ["CURRENT PLAN", "Free/Premium", "Time remaining", "Renew"],
+        "screen_flow": ["Открыть /settings", "Посмотреть текущий тариф и оставшееся время", "Если кнопка Renew появилась, прочитать условия и подтвердить продление самостоятельно"],
+        "semantic_concepts": ["цена", "оплата", "подписка", "продлить", "renew", "сколько осталось", "Free", "Premium", "тариф"]
+    },
+    "deletion": {
+        "screen_id": "deletion", "screen_title": "Account & Data Deletion",
+        "visible_controls": ["пояснение об удалении", "подтверждение удаления April-аккаунта"],
+        "screen_flow": ["Открыть /account-deletion", "Прочитать перечень удаляемых данных", "Подтвердить только если намерены удалить аккаунт April; аккаунт Google не удаляется"],
+        "semantic_concepts": ["стереть данные", "удалить профиль", "удаление аккаунта", "privacy request", "delete account"]
+    },
+    "legal": {
+        "screen_id": "legal", "screen_title": "Юридические документы",
+        "visible_controls": ["Privacy Policy", "Terms of Service"],
+        "screen_flow": ["Открыть нужный документ из справки или перейти по проверенному адресу"],
+        "semantic_concepts": ["права пользователя", "правила", "условия", "личные данные", "конфиденциальность"]
+    },
+}
+
+# Attach the relevant screen model to the existing canonical map. Duplicate parent
+# paths remain separate cards (for example all seven help cards use /aprill).
+for _area in APRIL_SITE_MAP.get("areas", []):
+    if not isinstance(_area, dict):
+        continue
+    _area_id = str(_area.get("id") or "")
+    _blueprint_key = _area_id
+    if _area_id in {"guide", "help-center", "how-to-use", "privacy", "terms"}:
+        _blueprint_key = "help" if _area_id in {"guide", "help-center", "how-to-use"} else "legal"
+    elif _area_id == "space":
+        _blueprint_key = "community"
+    elif _area_id == "direct":
+        _blueprint_key = "community"
+    elif _area_id == "support":
+        _blueprint_key = "support"
+    elif _area_id == "deletion":
+        _blueprint_key = "deletion"
+    elif _area_id == "plans":
+        _blueprint_key = "plans"
+    elif _area_id == "chat":
+        _blueprint_key = "chat"
+    elif _area_id == "history":
+        _blueprint_key = "history"
+    elif _area_id in {"settings", "memory"}:
+        _blueprint_key = "settings"
+    if _blueprint_key in APRIL_UI_BLUEPRINTS:
+        _area["ui_blueprint"] = APRIL_UI_BLUEPRINTS[_blueprint_key]
+        _area["visible_controls"] = list(APRIL_UI_BLUEPRINTS[_blueprint_key].get("visible_controls", []))
+        _area["semantic_concepts"] = list(APRIL_UI_BLUEPRINTS[_blueprint_key].get("semantic_concepts", []))
+
+_SITE_STOPWORDS = {
+    "а", "и", "или", "но", "в", "во", "на", "к", "ко", "по", "из", "за", "с", "со", "у", "от", "до", "для", "про", "при", "что", "как", "где", "куда", "мне", "меня", "моя", "мой", "мое", "мои", "тебе", "тебя", "ты", "вы", "вас", "это", "этот", "эта", "эту", "там", "тут", "есть", "будет", "быть", "ли", "пожалуйста", "подскажи", "покажи", "расскажи", "объясни", "можно", "нужно", "надо", "април", "april", "please", "tell", "show", "where", "how", "can", "could", "the", "to", "in", "on", "at", "and", "or", "is", "are", "me", "my", "you", "your"
+}
+_SITE_CONCEPT_ALIASES = {
+    "history": ("старая беседа", "прошлый разговор", "старый чат", "вернуться к разговору", "восстановить тему", "продолжить беседу", "saved dialogue", "previous conversation", "resume"),
+    "space": ("люди", "другие пользователи", "публичная переписка", "общий чат", "пост", "участник", "private chat", "community"),
+    "settings": ("личный кабинет", "учётная запись", "параметры аккаунта", "поменять ник", "сменить имя", "язык интерфейса", "тариф", "подписка", "april id", "premium id"),
+    "attachments": ("скрепка", "прикрепить", "загрузить файл", "выбрать фото", "сфотографировать", "документ", "camera", "image picker", "file upload"),
+    "help": ("инструкция", "документация", "частые вопросы", "правила сервиса", "как пользоваться", "справочный раздел", "help center", "how to use"),
+    "support": ("пожаловаться", "обратиться за помощью", "сообщить об ошибке", "зависла", "залипла", "ошибка интерфейса", "support request"),
+    "deletion": ("стереть информацию", "удалить профиль", "удалить сведения", "delete account", "data deletion"),
+}
+
+def _site_words(value: Any) -> set[str]:
+    text = str(value or "").lower().replace("ё", "е")
+    words = re.findall(r"[a-zа-яіїєґ0-9]+", text, flags=re.IGNORECASE)
+    return {word for word in words if len(word) > 2 and word not in _SITE_STOPWORDS}
+
+def _semantic_site_area_scores(query: str) -> list[tuple[float, str]]:
+    """Rank existing map entries from the request plus their visible UI semantics.
+
+    Phrase/synonym matches are evidence, not required literal commands. The same
+    retrieval handles colloquial phrasing such as 'старый разговор', 'прицепить
+    документ', or 'поменять ник' and keeps each matching child card distinct.
+    """
+    q = str(query or "").lower().replace("ё", "е").strip()
+    q_words = _site_words(q)
+    if not q_words:
+        return []
+    concept_ids: set[str] = set()
+    for concept_id, phrases in _SITE_CONCEPT_ALIASES.items():
+        if any(phrase in q for phrase in phrases):
+            concept_ids.add(concept_id)
+    scored: list[tuple[float, str]] = []
+    for area in APRIL_SITE_MAP.get("areas", []):
+        if not isinstance(area, dict):
+            continue
+        area_id = str(area.get("id") or "")
+        if area_id == "admin-support":
+            continue
+        blueprint = area.get("ui_blueprint") if isinstance(area.get("ui_blueprint"), dict) else {}
+        fields = [area.get("label"), area.get("purpose"), area.get("path"), *area.get("steps", []), *area.get("visible_controls", []), *area.get("semantic_concepts", []), *blueprint.get("screen_flow", []), *blueprint.get("semantic_concepts", [])]
+        searchable = " ".join(str(item) for item in fields if item)
+        a_words = _site_words(searchable)
+        intersection = q_words & a_words
+        # Normalize common Russian inflections lightly: 'диалогами/диалога',
+        # 'профиле/профиля', etc. Do not do fuzzy matching on stop-words.
+        stem_hits = sum(1 for qword in q_words if len(qword) >= 4 and any(aword.startswith(qword[:5]) or qword.startswith(aword[:5]) for aword in a_words if len(aword) >= 4))
+        score = (len(intersection) * 1.35) + (stem_hits * 0.45)
+        if any(str(area.get("label") or "").lower().replace("ё", "е") in q or str(area.get("path") or "").lower() == q for _ in [0]):
+            score += 5.0
+        if area_id in concept_ids:
+            score += 4.0
+        if any(str(phrase).lower().replace("ё", "е") in q for phrase in _SITE_AREA_HINTS.get(area_id, ())):
+            score += 2.0
+        if score > 0:
+            scored.append((score, area_id))
+    scored.sort(key=lambda item: (-item[0], next((i for i, area in enumerate(APRIL_SITE_MAP["areas"]) if area.get("id") == item[1]), 999)))
+    return scored
 
 _SITE_HELP_SIGNALS = (
     "site_navigation", "april_site_help", "user_guidance", "interface_help"
@@ -256,7 +411,19 @@ def _site_navigation_picture_request(query: str, referenced_area_ids: Any = None
         r"(?:where\s+(?:is|do\s+i|can\s+i)|how\s+do\s+i\s+(?:open|find|navigate)).{0,100}(?:picture|image|diagram))",
         low, re.IGNORECASE,
     ))
-    return asks_visual_path
+    asks_to_annotate_ui_path = bool(
+        re.search(
+            r"(?:на\s+(?:этой\s+|присланной\s+|предыдущей\s+)?(?:картинк\w*|изображени\w*|скриншот\w*)|"
+            r"(?:this|the|attached|previous)\s+(?:picture|image|screenshot))",
+            low, re.IGNORECASE,
+        )
+        and re.search(
+            r"(?:стрелк\w*|указател\w*|куда\s+нажать|показ\w*\s+путь|истори\w*\s+диалог\w*|"
+            r"сообществ\w*|community|saved\s+dialogues?|history|кнопк\w*)",
+            low, re.IGNORECASE,
+        )
+    )
+    return asks_visual_path or asks_to_annotate_ui_path or bool(_SITE_EXPLICIT_RASTER_REQUEST_RE.search(low))
 
 
 _SITE_ROUTE_WORDS = (
@@ -287,6 +454,10 @@ def is_site_help_query(query: str) -> bool:
     ))
     if april_self_help:
         return True
+    semantic_scores = _semantic_site_area_scores(low)
+    semantic_ui_target = any(score >= 2.8 for score, area_id in semantic_scores if area_id != "admin-support")
+    if semantic_ui_target and (_SITE_NAVIGATION_ACTION_RE.search(low) or re.search(r"(?:помог\w*|запутал\w*|не\s+нахожу|не\s+могу\s+найти|как\s+работает|куда\s+пройти|что\s+нажать|where|how\s+do\s+i)", low, re.IGNORECASE)):
+        return True
     ui_target = bool(re.search(
         r"(?:кабинет|профил|аккаунт|раздел|кнопк|меню|сайт|интерфейс|страниц|истор|диалог|сообществ|"
         r"тариф|подписк|памят|удален|поддержк|функци|возможност|как работает|как устроен|умеет|умеешь|"
@@ -302,6 +473,13 @@ _SITE_NO_DIAGRAM_RE = re.compile(
     re.IGNORECASE,
 )
 _SITE_EXPLICIT_DIAGRAM_RE = re.compile(r"(?:диаграмм\w*|схем\w*|diagram|flowchart)", re.IGNORECASE)
+_SITE_EXPLICIT_RASTER_REQUEST_RE = re.compile(
+    r"(?:нарису\w*|созда\w*|сгенериру\w*|изобрази\w*)\s+(?:мне\s+)?(?:картинк\w*|изображени\w*|скриншот\w*|экран\w*|интерфейс\w*|picture|image|screenshot|screen|interface)|"
+    r"(?:покажи\s+(?:это|путь|интерфейс|меню|куда).{0,70}на\s+(?:картинк\w*|изображени\w*|скриншот\w*))|"
+    r"(?:draw|create|generate|make)\s+(?:me\s+)?(?:a\s+)?(?:picture|image|screenshot|screen|interface)|"
+    r"show\s+(?:me\s+)?(?:this|the\s+path|the\s+interface).{0,60}(?:in\s+an?\s+image|as\s+an?\s+image|screenshot)",
+    re.IGNORECASE,
+)
 _SITE_OTHER_RENDERERS = {"image", "gallery", "code", "table", "graph", "formula", "link", "file", "3d_graph"}
 
 
@@ -416,6 +594,76 @@ def _referenced_site_area_ids(context: Any) -> List[str]:
     return ids[:4]
 
 
+def _interpretation_has_concrete_image_edit(interpretation: Any) -> bool:
+    """True only when Interpretation has selected the image-edit path and a source exists."""
+    if not isinstance(interpretation, dict):
+        return False
+    intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    visual = interpretation.get("visual") if isinstance(interpretation.get("visual"), dict) else {}
+    edit_selected = bool(
+        intent.get("image_edit_requested")
+        or intent.get("image_operation") == "edit"
+        or intent.get("task") == "edit_image"
+        or visual.get("edit_required")
+    )
+    if not edit_selected:
+        return False
+    requested_outputs = intent.get("requested_outputs")
+    if not isinstance(requested_outputs, (list, tuple, set)):
+        requested_outputs = interpretation.get("requested_outputs")
+    if isinstance(requested_outputs, (list, tuple, set)) and requested_outputs:
+        normalized_outputs = {str(value or "").strip().lower().replace("-", "_") for value in requested_outputs}
+        image_outputs = {"image", "gallery", "generated_image", "image_gallery"}
+        # An edit flag alone is insufficient: the selected plan/interpretation must
+        # actually authorize the image renderer. Otherwise site navigation falls back
+        # to verified links and SVG instead of disappearing behind an unavailable edit.
+        if not normalized_outputs.intersection(image_outputs):
+            return False
+    if intent.get("source_image_available") is True or visual.get("source_image_available") is True:
+        return True
+    items = visual.get("items") if isinstance(visual.get("items"), list) else []
+    return any(
+        isinstance(item, dict)
+        and any(
+            isinstance(item.get(key), str) and item.get(key).startswith("data:image/")
+            for key in ("image_url", "data_uri", "src", "image_data_uri", "_content_data_uri")
+        )
+        for item in items
+    )
+
+
+def _site_navigation_visual_brief(query: str, referenced_area_ids: Any = None) -> Dict[str, Any]:
+    """Small, source-grounded drawing brief for explicit raster UI walkthroughs."""
+    scores = _semantic_site_area_scores(str(query or "").lower().replace("ё", "е"))
+    ids = [area_id for score, area_id in scores if score >= 2.8]
+    if isinstance(referenced_area_ids, (list, tuple, set)):
+        ids = [str(item) for item in referenced_area_ids if str(item)] + [item for item in ids if item not in referenced_area_ids]
+    screen = _site_screen_for_query(query, ids)
+    blueprint_key = screen if screen in APRIL_UI_BLUEPRINTS else "settings"
+    blueprint = APRIL_UI_BLUEPRINTS[blueprint_key]
+    full_areas = {str(item.get("id")): item for item in APRIL_SITE_MAP.get("areas", []) if isinstance(item, dict)}
+    routes = []
+    for area_id in ids[:5]:
+        item = full_areas.get(area_id)
+        if item and item.get("path") and "[" not in str(item.get("path")) and "/Admin-profile" != item.get("path"):
+            routes.append({"label": _text(item.get("label")), "path": _text(item.get("path")), "steps": list(item.get("steps") or [])[:3]})
+    return {
+        "purpose": "Create a clear April web-app navigation aid, not generic decorative artwork.",
+        "screen_id": screen,
+        "screen_title": _text(blueprint.get("screen_title")),
+        "visible_controls": list(blueprint.get("visible_controls") or [])[:18],
+        "screen_flow": list(blueprint.get("screen_flow") or [])[:8],
+        "verified_routes": routes,
+        "visual_rules": [
+            "Match April's dark interface, rounded cards, mint-green accents, and realistic mobile-app proportions.",
+            "Show only controls and labels listed in this brief; do not invent tabs, user photos, or decorative subjects.",
+            "Use a prominent red arrow pointing at the named destination when the user asks where to tap.",
+            "Keep labels readable; if the interface has several steps, use two numbered consecutive panels rather than squeezing them into one tiny map.",
+            "The image illustrates navigation; text links and the SVG route diagram remain the authoritative routes.",
+        ],
+    }
+
+
 def prepare_site_help_interpretation(
     interpretation: Dict[str, Any], query: str, question_sequence: Any = None, recent_context: Any = None
 ) -> bool:
@@ -435,20 +683,60 @@ def prepare_site_help_interpretation(
         interpretation["intent"] = intent
     outputs = intent.get("requested_outputs")
     outputs = list(outputs) if isinstance(outputs, (list, tuple, set)) else ["text"]
-    route_picture = _site_navigation_picture_request(query, referent_ids)
+    source_image_edit = _interpretation_has_concrete_image_edit(interpretation)
+    navigation_visual_request = _site_navigation_picture_request(query, referent_ids)
+    route_picture = navigation_visual_request and not source_image_edit
+    explicit_raster = bool(_SITE_EXPLICIT_RASTER_REQUEST_RE.search(str(query or "")))
+    # Free's source-image edit limitation must not be bypassed by turning an edit
+    # request into a newly generated substitute image. SVG route guidance remains available.
+    if intent.get("image_edit_restricted") or intent.get("task") == "image_edit_restricted":
+        explicit_raster = False
+    visual = interpretation.get("visual")
+    if not isinstance(visual, dict):
+        visual = {}
+        interpretation["visual"] = visual
+    if navigation_visual_request and (source_image_edit or intent.get("image_edit_restricted") or intent.get("task") == "image_edit_restricted"):
+        # Pass the map into the authorized image-edit path, or provide an SVG fallback
+        # if this plan deliberately removes image output. Never suppress all visual guidance.
+        visual["site_navigation_visual_brief"] = _site_navigation_visual_brief(query, referent_ids)
+        visual["site_navigation_annotation"] = True
+    if navigation_visual_request and (intent.get("image_edit_restricted") or intent.get("task") == "image_edit_restricted") and not source_image_edit:
+        intent["site_navigation_edit_fallback"] = {
+            "reason": "source_image_edit_not_available_in_current_plan",
+            "message": "Честно объясни, что текущий пакет не разрешает редактировать исходное изображение; не создавай отдельную картинку вместо правки. Дай понятную SVG-схему нужного маршрута и ссылку [Настройки и профиль](/settings), где пользователь может проверить текущий тариф и условия Premium. Не выдумывай отдельную страницу или кнопку покупки, если её нет в подтверждённой карте.",
+        }
     if route_picture:
-        # Keep the user's request for a visual explanation, but use the route-aware SVG renderer.
-        outputs = [output for output in outputs if str(output).lower().replace("-", "_") not in {"image", "gallery", "generated_image", "image_gallery"}]
-        intent["wants_image"] = False
-        intent["explicit_generation_request"] = False
-        intent["image_operation"] = "none"
-        visual = interpretation.get("visual")
-        if isinstance(visual, dict):
-            visual["generation_required"] = False
-            visual["wants_image"] = False
-            visual["generator"] = ""
-            visual["image_model"] = ""
-    wants_diagram = _site_should_render_diagram(query, outputs)
+        # Navigation uses a deterministic screenshot-like SVG by default. If the
+        # user explicitly asks for a raster picture/screenshot, retain the existing
+        # image generator too and pass it the same source-derived UI brief. If a
+        # real source image is being edited, its edit contract takes precedence.
+        if explicit_raster:
+            if "image" not in outputs:
+                outputs.append("image")
+            intent["wants_image"] = True
+            intent["explicit_generation_request"] = True
+            if isinstance(visual, dict):
+                visual["generation_required"] = True
+                visual["wants_image"] = True
+                visual["site_navigation_visual_brief"] = _site_navigation_visual_brief(query, referent_ids)
+        else:
+            outputs = [output for output in outputs if str(output).lower().replace("-", "_") not in {"image", "gallery", "generated_image", "image_gallery"}]
+            intent["wants_image"] = False
+            intent["explicit_generation_request"] = False
+            intent["image_operation"] = "none"
+            if isinstance(visual, dict):
+                visual["generation_required"] = False
+                visual["wants_image"] = False
+                visual["generator"] = ""
+                visual["image_model"] = ""
+    wants_diagram = _site_should_render_diagram(query, outputs) and not source_image_edit
+    if source_image_edit:
+        # The image edit is the requested visual deliverable; keep text and verified
+        # route links, but don't add a redundant UI diagram unless explicitly requested.
+        explicitly_requested_diagram = bool(_SITE_EXPLICIT_DIAGRAM_RE.search(query))
+        wants_diagram = explicitly_requested_diagram
+        if not wants_diagram:
+            outputs = [value for value in outputs if str(value).lower().replace("-", "_") not in {"diagram", "svg", "schematic", "flowchart", "scene", "layout", "visual", "renderer_scene", "experimental_diagram"}]
     if "text" not in outputs:
         outputs.insert(0, "text")
     if wants_diagram and "diagram" not in outputs:
@@ -479,6 +767,11 @@ def prepare_site_help_interpretation(
         "role": "complement the written navigation instructions",
         "required_payload": "readable responsive SVG plus concrete nodes and directed edges",
         "derive_nodes_from_query_relevant_map_routes": True,
+        "screen_fidelity": "use existing APRIL_UI_BLUEPRINTS and source-confirmed relative paths; never invent controls or route names",
+        "annotate_existing_source_image_when_authorized": True,
+        "requested_arrow_colour_is_exact": True,
+        "one_diagram_per_logical_stage_only": True,
+        "split_long_routes_into_sequential_non_repeating_stages": True,
         "never_emit_empty_diagram_shell": True,
         "use_only_map_routes": True,
     }
@@ -496,7 +789,10 @@ def prepare_site_help_interpretation(
                 diagram_aliases = {"diagram", "svg", "schematic", "flowchart", "scene", "layout", "visual", "renderer_scene", "experimental_diagram"}
                 step_outputs = [output for output in step_outputs if str(output).lower().replace("-", "_") not in diagram_aliases]
             if route_picture:
-                step_outputs = [output for output in step_outputs if str(output).lower().replace("-", "_") not in {"image", "gallery", "generated_image", "image_gallery"}]
+                if not explicit_raster:
+                    step_outputs = [output for output in step_outputs if str(output).lower().replace("-", "_") not in {"image", "gallery", "generated_image", "image_gallery"}]
+                elif "image" not in step_outputs:
+                    step_outputs.append("image")
                 if "diagram" not in step_outputs:
                     step_outputs.append("diagram")
                 item["outputs"] = step_outputs
@@ -511,7 +807,7 @@ def prepare_site_help_interpretation(
         structure["site_navigation_diagram_required"] = wants_diagram
         if route_picture:
             structure["history_request"] = False
-            structure["requested_outputs"] = ["text", "diagram"]
+            structure["requested_outputs"] = ["text", "diagram", *(["image"] if explicit_raster else [])]
             for sequence_key in ("question_sequence", "presentation_sequence", "answer_sequence"):
                 seq = structure.get(sequence_key)
                 if isinstance(seq, list):
@@ -520,15 +816,23 @@ def prepare_site_help_interpretation(
                             continue
                         key = "output_types" if "output_types" in item or sequence_key == "question_sequence" else "outputs"
                         child_outputs = item.get(key) if isinstance(item.get(key), list) else ["text"]
-                        child_outputs = [value for value in child_outputs if str(value).lower().replace("-", "_") not in {"image", "gallery", "generated_image", "image_gallery"}]
+                        if not explicit_raster:
+                            child_outputs = [value for value in child_outputs if str(value).lower().replace("-", "_") not in {"image", "gallery", "generated_image", "image_gallery"}]
+                        elif "image" not in child_outputs:
+                            child_outputs.append("image")
                         if "text" not in child_outputs: child_outputs.insert(0, "text")
                         if "diagram" not in child_outputs: child_outputs.append("diagram")
                         item[key] = child_outputs
     if route_picture:
-        intent["task"] = "answer_request" if intent.get("task") in {"generate_image", "create_image", "image_generation"} else intent.get("task", "answer_request")
-        intent["wants_image"] = False
+        if not explicit_raster:
+            intent["task"] = "answer_request" if intent.get("task") in {"generate_image", "create_image", "image_generation"} else intent.get("task", "answer_request")
+            intent["wants_image"] = False
+            intent["requested_outputs"] = ["text", "diagram"]
+        else:
+            intent["wants_image"] = True
+            intent["explicit_generation_request"] = True
+            intent["requested_outputs"] = ["text", "diagram", "image"]
         intent["wants_diagram"] = True
-        intent["requested_outputs"] = ["text", "diagram"]
     return True
 
 
@@ -566,9 +870,21 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
     """Return only the relevant routes for prompt efficiency; preserve the full map in this room."""
     query = _current_user_query(machine_request).lower().replace("ё", "е")
     selected_ids: list[str] = []
-    for area_id, hints in _SITE_AREA_HINTS.items():
-        if any(hint in query for hint in hints):
+    semantic_scores = _semantic_site_area_scores(query)
+    # Combine broad semantic similarity with route hints. Hints can clarify a
+    # short UI noun, while map metadata permits paraphrases absent from a trigger list.
+    score_by_id = {area_id: score for score, area_id in semantic_scores}
+    direct_hint_ids = [area_id for area_id, hints in _SITE_AREA_HINTS.items() if any(hint in query for hint in hints)]
+    for area_id in direct_hint_ids:
+        score_by_id[area_id] = max(score_by_id.get(area_id, 0.0), 3.0)
+    selected_ids = [area_id for score, area_id in semantic_scores if score_by_id.get(area_id, score) >= 2.8]
+    for area_id in direct_hint_ids:
+        if area_id not in selected_ids:
             selected_ids.append(area_id)
+    # The attachment picker is a UI state, not its own route. It is described by
+    # the same map only when the user asks about attaching/choosing a media source.
+    if any(phrase in query for phrase in _SITE_CONCEPT_ALIASES.get("attachments", ())):
+        selected_ids.insert(0, "chat")
     intent = machine_request.get("intent") if isinstance(machine_request, dict) and isinstance(machine_request.get("intent"), dict) else getattr(machine_request, "intent", {})
     intent = intent if isinstance(intent, dict) else {}
     referent_ids = intent.get("site_navigation_referent") if isinstance(intent.get("site_navigation_referent"), list) else []
@@ -586,12 +902,52 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
             selected_ids = ["settings"] + targets + [area_id for area_id in selected_ids if area_id not in {"settings", *targets, "guide", "memory"}]
     broad_self_help = bool(re.search(
         r"(?:\b(?:april|април)\b.{0,100}\b(?:функци\w*|возможност\w*|устроен\w*|работа\w*|создан\w*|умеешь|умеет|можешь|может)\b|"
+        r"\b(?:функци\w*|возможност\w*|устроен\w*|как\s+работа\w*|как\s+устроен\w*)\b.{0,100}\b(?:april|април)\b|"
         r"(?:what can april do|how does april work|how is april built))",
         query,
         re.IGNORECASE,
     ))
+    # Specific destinations are resolved from meaning-bearing entities first;
+    # generic words such as "куда нажать" must not pull support/chat/help into an
+    # otherwise single-destination route. The full site map remains available for
+    # broad self-help questions, while this diagram stays request-scoped.
+    destination_patterns = {
+        "history": r"(?:истори\w*\s+диалог\w*|saved\s+dialogues?|previous\s+conversation|стар\w*\s+бесед\w*|продолж\w*\s+(?:стар\w*\s+)?диалог\w*)",
+        "space": r"(?:сообществ\w*|community|публичн\w*\s+чат\w*)",
+        "support": r"(?:техподдерж\w*|поддержк\w*|contact\s+support|support\s+(?:ticket|request)|пожаловаться|сообщить\s+об\s+ошибке)",
+        "deletion": r"(?:удален\w*\s+аккаунт\w*|account\s+deletion|delete\s+(?:my\s+)?account)",
+        "privacy": r"(?:политик\w*\s+конфиденциальност\w*|privacy\s+policy)",
+        "terms": r"(?:услови\w*\s+использован\w*|terms\s+of\s+service)",
+        "plans": r"(?:тариф\w*|стоимост\w*\s+premium|цена\s+premium|plans\s*(?:&|and)\s*payments|продл\w*\s+premium)",
+        "settings": r"(?:настройк\w*|личн\w*\s+кабинет|профил\w*|april\s+id|premium\s+id|settings|profile)",
+        "memory": r"(?:памят\w*|memory\b)",
+        "chat": r"(?:основн\w*\s+чат|chat\s+with\s+april|главн\w*\s+чат)",
+        "guide": r"(?:help\s*(?:&|and)\s*information|справк\w*|центр\s+помощи|help\s+center|how\s+to\s+use\s+april)",
+    }
+    specific_targets = []
+    for area_id, pattern in destination_patterns.items():
+        match = re.search(pattern, query, re.IGNORECASE)
+        if match:
+            specific_targets.append((match.start(), area_id))
+    specific_targets.sort(key=lambda item: item[0])
+    specific_ids = [area_id for _, area_id in specific_targets]
+    entry_request = bool(re.search(
+        r"(?:где.{0,50}(?:вход|кнопк|ссылк)|куда\s+нажать|как\s+(?:попасть|перейти|открыть|зайти)|"
+        r"покажи.{0,70}(?:куда|путь|стрелк)|из\s+профил|быстрый\s+переход|quick\s+link|from\s+(?:the\s+)?profile)",
+        query, re.IGNORECASE,
+    ))
+    quick_link_targets = {"history", "space", "support", "plans", "deletion"}
+    if specific_ids and not broad_self_help and not referent_ids:
+        if entry_request and set(specific_ids).intersection(quick_link_targets):
+            # The supplied profile screenshot shows History, Community and Support
+            # as quick links under CURRENT PLAN; display that gateway + destinations.
+            selected_ids = ["settings"] + [value for value in specific_ids if value != "settings"]
+        else:
+            selected_ids = specific_ids
     if broad_self_help and not referent_ids:
-        selected_ids = ["chat", "settings", "history", "space", "guide"]
+        # The screenshot-confirmed CURRENT PLAN panel has four profile shortcuts.
+        # The Help & Information page is shown as a second, separate screen below.
+        selected_ids = ["chat", "settings", "history", "support", "space", "guide"]
     # Add directly related routes so users can recover to the next useful section.
     areas_by_id = {str(area.get("id")): area for area in APRIL_SITE_MAP["areas"]}
     pending = list(selected_ids)
@@ -608,14 +964,69 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
     else:
         pending = query_targets + [area_id for area_id in pending if area_id not in query_targets]
     chosen = [areas_by_id[area_id] for area_id in pending if area_id in areas_by_id]
+    selected_ids_final = [str(area.get("id")) for area in chosen]
+    screen_id = _site_screen_for_query(query, selected_ids_final)
+    blueprints = []
+    seen_blueprints = set()
+    for area in chosen:
+        blueprint = area.get("ui_blueprint") if isinstance(area.get("ui_blueprint"), dict) else None
+        if blueprint:
+            key = str(blueprint.get("screen_id") or "")
+            if key and key not in seen_blueprints:
+                seen_blueprints.add(key)
+                blueprints.append(blueprint)
+    # Attachment picker is a modal over the chat, but its controls are documented
+    # from the screenshot and are not advertised as a separate route.
+    if screen_id == "attachments":
+        blueprints = [APRIL_UI_BLUEPRINTS["attachments"]] + [item for item in blueprints if item.get("screen_id") == "chat"]
     return {
         "schema": APRIL_SITE_MAP["schema"],
         "source": APRIL_SITE_MAP["source"],
         "matched_query": query[:240],
-        "areas": chosen[:5],
+        "areas": chosen[:7],
+        "screen_id": screen_id,
+        "screen_blueprints": blueprints,
+        "broad_self_help": bool(broad_self_help and not referent_ids),
         "navigation_policy": APRIL_SITE_MAP["navigation_policy"][:4],
         "map_area_count": len(APRIL_SITE_MAP["areas"]),
     }
+
+
+def _site_screen_for_query(query: str, selected_area_ids: Any = None) -> str:
+    """Choose the screenshot-faithful UI screen that best explains this request."""
+    low = str(query or "").lower().replace("ё", "е")
+    ids = {str(value) for value in (selected_area_ids or [])} if isinstance(selected_area_ids, (list, tuple, set)) else set()
+    # Profile/CURRENT PLAN is the real gateway for known shortcuts, but use it only
+    # when the user asks where to enter/click or requests a multi-destination map.
+    # A request about continuing a saved dialogue should show the History screen.
+    entry_request = bool(re.search(
+        r"(?:где.{0,50}(?:вход|кнопк|ссылк|истори|сообществ|поддержк)|куда\s+нажать|как\s+(?:попасть|перейти|открыть|зайти)|"
+        r"покажи.{0,70}(?:куда|путь|стрелк)|из\s+профил|быстрый\s+переход|quick\s+link|from\s+(?:the\s+)?profile)",
+        low, re.IGNORECASE,
+    ))
+    shortcut_targets = ids.intersection({"history", "space", "support", "plans", "deletion", "privacy", "terms", "guide", "help-center", "how-to-use"})
+    if "settings" in ids and shortcut_targets and (entry_request or len(shortcut_targets) > 1):
+        return "profile"
+    # A source-image annotation is handled by the image-edit branch, not this screen map.
+    if any(term in low for term in ("скрепк", "прикреп", "вложен", "камера", "изображения", "файлы", "camera", "attachment", "file picker", "upload")):
+        return "attachments"
+    if ids.intersection({"guide", "help-center", "how-to-use", "privacy", "terms"}) or any(term in low for term in ("help & information", "справка", "центр помощи", "privacy policy", "terms of service", "how to use april")):
+        return "help"
+    if "space" in ids or "direct" in ids or any(term in low for term in ("сообществ", "community", "private chat", "публичн", "участник", "пост пользователя")):
+        return "community"
+    if "deletion" in ids:
+        return "deletion"
+    if "history" in ids or any(term in low for term in ("saved dialogues", "история диалогов", "старый разговор", "вернуться к переписке")):
+        # Show profile only for an entry/shortcut request; content questions about
+        # resuming/locating a saved thread should show the actual History screen.
+        return "profile" if "settings" in ids and (entry_request or len(shortcut_targets) > 1) else "history"
+    if "settings" in ids or "plans" in ids or any(term in low for term in ("личный кабинет", "профиль", "подписк", "april id", "premium id", "renew", "язык интерфейса")):
+        return "profile"
+    if "support" in ids or any(term in low for term in ("техподдерж", "contact support", "обращение в поддержку")):
+        return "support"
+    if "chat" in ids:
+        return "chat"
+    return "profile" if ids else "help"
 
 
 def _site_help_requested(machine_request: Any) -> bool:
@@ -656,8 +1067,17 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     if not context:
         context = get_context(machine_request)
     site_map = context.get("site_navigation_map") if isinstance(context, dict) else None
-    if not isinstance(site_map, dict):
-        return decoded
+    # Always re-rank the canonical map for the current turn. A full room-map
+    # contribution may contain every route; rendering all of it for a one-button
+    # request creates a cluttered diagram and steals focus from the requested path.
+    request_scoped_map = _select_site_map_excerpt(machine_request)
+    if isinstance(request_scoped_map, dict) and isinstance(request_scoped_map.get("areas"), list) and request_scoped_map.get("areas"):
+        site_map = request_scoped_map
+    if not isinstance(site_map, dict) or not isinstance(site_map.get("areas"), list) or not site_map.get("areas"):
+        # The route map is local and deterministic; use it directly if a room
+        # contribution was omitted by upstream orchestration instead of silently
+        # returning an unstructured navigation answer.
+        site_map = _select_site_map_excerpt(machine_request)
     areas = [area for area in (site_map.get("areas") or []) if isinstance(area, dict)]
     if not areas:
         return decoded
@@ -665,7 +1085,7 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     # Build a unique list of safe, known relative routes. Never expose a dynamic
     # placeholder such as /space/direct/[friendId] as a literal clickable URL.
     route_rows: List[Dict[str, str]] = []
-    seen_paths = set()
+    seen_area_ids = set()
     for area in areas:
         area_id = _text(area.get("id"))
         path = _text(area.get("path"))
@@ -680,15 +1100,16 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
                 label = "Личный диалог через сообщество"
             else:
                 continue
-        if path in seen_paths:
+        if area_id and area_id in seen_area_ids:
             continue
-        seen_paths.add(path)
+        if area_id:
+            seen_area_ids.add(area_id)
         route_rows.append({
             "id": area_id or f"route_{len(route_rows)+1}", "path": path, "label": label,
             "purpose": _text(area.get("purpose")),
             "steps": [str(step).strip() for step in area.get("steps", []) if str(step).strip()] if isinstance(area.get("steps"), list) else [],
         })
-        if len(route_rows) >= 5:
+        if len(route_rows) >= 7:
             break
     if not route_rows:
         return decoded
@@ -717,8 +1138,15 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     # when the selected excerpt only contains a deep-link destination.
     if not any(row["path"] == "/" for row in route_rows):
         route_rows.insert(0, {"id": "chat", "path": "/", "label": "Основной чат April"})
-        route_rows = route_rows[:5]
-    missing_links = [row for row in route_rows if f"]({row['path']})" not in answer]
+        route_rows = route_rows[:7]
+    missing_links = []
+    linked_paths = set(re.findall(r"\]\((/[^)]+)\)", answer))
+    seen_missing_paths = set()
+    for row in route_rows:
+        path = row["path"]
+        if path not in linked_paths and path not in seen_missing_paths:
+            missing_links.append(row)
+            seen_missing_paths.add(path)
     if missing_links:
         label_path_pairs = " · ".join(f"[{row['label']}]({row['path']})" for row in missing_links)
         addition = f"\n\n**{heading}:** {label_path_pairs}."
@@ -823,43 +1251,106 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
             if answer_key not in {"answer", "content"}:
                 decoded[answer_key] = answer
 
-    # Build a route graph without duplicating the homepage. From the profile page,
-    # the screenshot/map confirms quick links to Chat, History, Support and Community;
-    # other selected destinations remain reachable from the main screen.
-    nodes: List[Dict[str, Any]] = [{"id": "april_home", "label": "Главный экран April\n/", "kind": "start", "href": "/"}]
-    edges: List[Dict[str, Any]] = []
-    node_by_area: Dict[str, str] = {"chat": "april_home"}
-    for index, row in enumerate(route_rows, 1):
-        if row["path"] == "/":
-            node_by_area[row["id"]] = "april_home"
-            continue
-        node_id = re.sub(r"[^a-zA-Z0-9_-]+", "_", row["id"] or f"route_{index}").strip("_") or f"route_{index}"
-        if node_id == "april_home":
-            node_id = f"route_{index}"
-        # Keep IDs unique if two map areas share the same parent-page URL.
-        existing_ids = {item["id"] for item in nodes}
-        if node_id in existing_ids:
-            node_id = f"{node_id}_{index}"
-        nodes.append({"id": node_id, "label": f"{row['label']}\n{row['path']}", "kind": "page", "href": row["path"]})
-        node_by_area[row["id"]] = node_id
-    settings_node = node_by_area.get("settings")
-    if settings_node:
-        edges.append({"from": "april_home", "to": settings_node, "label": "Открыть профиль/настройки"})
-        for area_id, edge_label in (("chat", "Chat with April"), ("history", "Dialog history"), ("support", "Contact support"), ("space", "Community")):
-            target = node_by_area.get(area_id)
-            if target and target != settings_node:
-                edges.append({"from": settings_node, "to": target, "label": edge_label})
-    for area_id, target in node_by_area.items():
-        if area_id == "settings" or target == "april_home":
-            continue
-        # Avoid duplicate edges where the profile's confirmed shortcuts already lead
-        # to the destination; otherwise show a safe recovery path from the homepage.
-        if not any(edge["to"] == target for edge in edges):
-            edges.append({"from": "april_home", "to": target, "label": "Открыть раздел"})
+    # Build a route graph without duplicating the homepage. Filter nodes by the
+    # actual current screen; for example /aprill is a separate help page, not a
+    # shortcut card inside the screenshot-confirmed profile/CURRENT PLAN panel.
+    current_route_query = _current_user_query(machine_request)
+    all_selected_area_ids = [str(area.get("id") or "") for area in areas if isinstance(area, dict)]
+    screen_id = _site_screen_for_query(current_route_query, all_selected_area_ids)
+    pointer_requested = bool(re.search(r"(?:стрелк\w*|указател\w*|укаж\w*|отмет\w*|подсвет\w*|arrow|pointer|point\s+to)", current_route_query, re.IGNORECASE))
+    pointer_target = ""
+    if re.search(r"(?:истори\w*\s+диалог\w*|saved\s+dialogues?|\bhistory\b)", current_route_query, re.IGNORECASE):
+        pointer_target = "history"
+    elif re.search(r"(?:сообществ\w*|community)", current_route_query, re.IGNORECASE):
+        pointer_target = "space"
+    elif re.search(r"(?:поддержк\w*|contact\s+support|\bsupport\b)", current_route_query, re.IGNORECASE):
+        pointer_target = "support"
+    elif re.search(r"(?:настройк\w*|профил\w*|settings|profile)", current_route_query, re.IGNORECASE):
+        pointer_target = "settings"
+    if screen_id == "profile":
+        if pointer_requested and pointer_target:
+            # A pointer request should show only the profile gateway and named
+            # target; the general chat shortcut is not a second competing target.
+            diagram_route_rows = [row for row in route_rows if row.get("id") in {"settings", pointer_target}]
+        else:
+            diagram_route_rows = [row for row in route_rows if row.get("id") in {"settings", "chat", "history", "space", "support"}]
+    else:
+        diagram_route_rows = list(route_rows)
+
+    # Profile maps start at /settings, not at the chat homepage. This prevents
+    # a false settings -> homepage -> settings loop and keeps quick links faithful
+    # to the screenshot's CURRENT PLAN card.
+    if screen_id == "profile":
+        profile_row = next((row for row in diagram_route_rows if row.get("id") == "settings"), None)
+        nodes: List[Dict[str, Any]] = []
+        edges: List[Dict[str, Any]] = []
+        node_by_area: Dict[str, str] = {}
+        if profile_row:
+            nodes.append({"id": "settings", "label": "Настройки и профиль\n/settings", "kind": "start", "href": "/settings"})
+            node_by_area["settings"] = "settings"
+        for index, row in enumerate(diagram_route_rows, 1):
+            if row.get("id") == "settings":
+                continue
+            node_id = re.sub(r"[^a-zA-Z0-9_-]+", "_", row.get("id") or f"route_{index}").strip("_") or f"route_{index}"
+            if node_id in {node.get("id") for node in nodes}:
+                node_id = f"{node_id}_{index}"
+            nodes.append({"id": node_id, "label": f"{row['label']}\n{row['path']}", "kind": "page", "href": row["path"]})
+            node_by_area[row["id"]] = node_id
+            if profile_row:
+                edge_labels = {"chat": "Chat with April", "history": "Dialog history", "support": "Contact support", "space": "Community"}
+                edges.append({"from": "settings", "to": node_id, "label": edge_labels.get(row.get("id"), "Открыть раздел")})
+    else:
+        nodes = [{"id": "april_home", "label": "Главный экран April\n/", "kind": "start", "href": "/"}]
+        edges = []
+        node_by_area = {"chat": "april_home"}
+        for index, row in enumerate(diagram_route_rows, 1):
+            if row["path"] == "/":
+                node_by_area[row["id"]] = "april_home"
+                continue
+            node_id = re.sub(r"[^a-zA-Z0-9_-]+", "_", row["id"] or f"route_{index}").strip("_") or f"route_{index}"
+            if node_id == "april_home":
+                node_id = f"route_{index}"
+            existing_ids = {item["id"] for item in nodes}
+            if node_id in existing_ids:
+                node_id = f"{node_id}_{index}"
+            nodes.append({"id": node_id, "label": f"{row['label']}\n{row['path']}", "kind": "page", "href": row["path"]})
+            node_by_area[row["id"]] = node_id
+        settings_node = node_by_area.get("settings")
+        if settings_node:
+            edges.append({"from": "april_home", "to": settings_node, "label": "Открыть профиль/настройки"})
+            for area_id, edge_label in (("chat", "Chat with April"), ("history", "Dialog history"), ("support", "Contact support"), ("space", "Community")):
+                target = node_by_area.get(area_id)
+                if target and target != settings_node:
+                    edges.append({"from": settings_node, "to": target, "label": edge_label})
+        for area_id, target in node_by_area.items():
+            if area_id == "settings" or target == "april_home":
+                continue
+            if not any(edge["to"] == target for edge in edges):
+                edges.append({"from": "april_home", "to": target, "label": "Открыть раздел"})
+
+    selected_area_ids = [str(row.get("id") or "") for row in diagram_route_rows]
+    screen_titles = {
+        "profile": "Настройки и профиль · Быстрые переходы",
+        "chat": "Основной чат April",
+        "history": "Saved dialogues / История диалогов",
+        "community": "April · Community / Сообщество",
+        "help": "Help & Information / Помощь и информация",
+        "attachments": "Добавить вложение",
+        "support": "Contact Support / Поддержка",
+        "deletion": "Удаление аккаунта April",
+        "plans": "Тарифы и платежи",
+        "legal": "Правила и конфиденциальность",
+    }
+    blueprint_title = _text((site_map.get("screen_blueprints") or [{}])[0].get("screen_title")) if isinstance((site_map.get("screen_blueprints") or [{}])[0], dict) else ""
+    diagram_title = screen_titles.get(screen_id, blueprint_title or "Карта переходов April")
     diagram_payload = {
-        "title": "Карта переходов April",
-        "description": "Главный экран и проверенные маршруты, отобранные по текущему вопросу пользователя.",
+        "title": diagram_title,
+        "description": "Схема построена по проверенным маршрутам и видимым элементам интерфейса April; не является управляющим действием.",
         "representation": "navigation_flow",
+        "screen_id": screen_id,
+        "selected_route_ids": selected_area_ids,
+        "matched_query": current_route_query[:260],
+        "screen_blueprints": site_map.get("screen_blueprints", []),
         # The portrait layout stays readable on phone screens. SVG is generated
         # from these same route nodes/edges; this is not a pre-baked topic diagram.
         "layout": {"direction": "TB", "rankdir": "TB", "spacing": "comfortable", "responsive": True},
@@ -868,10 +1359,34 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         "navigation_map_schema": site_map.get("schema", "april.site_navigation.v1"),
         "renderer": "DiagramRenderer",
     }
+    if pointer_requested:
+        target_id = ""
+        if re.search(r"(?:истори\w*\s+диалог\w*|saved\s+dialogues?|\bhistory\b)", current_route_query, re.IGNORECASE):
+            target_id = "history"
+        elif re.search(r"(?:сообществ\w*|community)", current_route_query, re.IGNORECASE):
+            target_id = "space"
+        elif re.search(r"(?:поддержк\w*|contact\s+support|\bsupport\b)", current_route_query, re.IGNORECASE):
+            target_id = "support"
+        elif re.search(r"(?:настройк\w*|профил\w*|settings|profile)", current_route_query, re.IGNORECASE):
+            target_id = "settings"
+        elif selected_area_ids:
+            target_id = selected_area_ids[-1]
+        if target_id:
+            diagram_payload["highlight_target_id"] = target_id
+            if re.search(r"(?:красн\w*\s+стрелк|стрелк\w*.{0,40}красн\w*|\bred\s+arrow\b|arrow.{0,30}red)", current_route_query, re.IGNORECASE):
+                diagram_payload["highlight_color"] = "#ff3030"
+            elif re.search(r"(?:зел[её]н\w*\s+стрелк|стрелк\w*.{0,40}зел[её]н\w*|\bgreen\s+arrow\b)", current_route_query, re.IGNORECASE):
+                diagram_payload["highlight_color"] = "#38d989"
+            else:
+                diagram_payload["highlight_color"] = "#58d7a6"
     blocks = decoded.get("render_blocks")
     blocks = list(blocks) if isinstance(blocks, list) else []
     # A prompt/caption-only image block is not a rendered image. On route guidance it is almost always the LLM trying to send a fake raster substitute for a concrete UI map.
     query_for_visual_policy = _current_user_query(machine_request)
+    request_intent = machine_request.get("intent", {}) if isinstance(machine_request, dict) else getattr(machine_request, "intent", {})
+    request_intent = request_intent if isinstance(request_intent, dict) else {}
+    request_interpretation = request_intent.get("interpretation") if isinstance(request_intent.get("interpretation"), dict) else request_intent
+    source_image_edit = _interpretation_has_concrete_image_edit(request_interpretation)
     if _site_help_requested(machine_request):
         def _has_site_image_source(value: Any, depth: int = 0) -> bool:
             if depth > 5:
@@ -901,7 +1416,7 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     )
     current_query_for_render = _current_user_query(machine_request)
     requested_outputs_for_render = _requested_outputs_from_machine_request(machine_request)
-    render_navigation_diagram = _site_should_render_diagram(current_query_for_render, requested_outputs_for_render)
+    render_navigation_diagram = _site_should_render_diagram(current_query_for_render, requested_outputs_for_render) and not source_image_edit
     if render_navigation_diagram:
         try:
             from blocks.C_DIAGRAM_ROOM import ensure_readable_diagram_payload
@@ -917,18 +1432,66 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
             "title": diagram_payload["title"], "payload": diagram_payload,
             "explanation": diagram_explanation, "source_room": "C_IT_ROOM", "integrity_repaired": True,
         }
-        existing_index = next((i for i, block in enumerate(blocks) if isinstance(block, dict) and _text(block.get("type") or block.get("artifact_type")).lower() == "diagram"), None)
-        if existing_index is None:
+        diagram_aliases = {"diagram", "diagramrenderer", "diagram_renderer", "svg", "svgblock", "mermaid", "flowchart", "scene", "layout"}
+        existing_indices = [i for i, block in enumerate(blocks) if isinstance(block, dict) and _text(block.get("type") or block.get("artifact_type") or block.get("renderer")).lower().replace("-", "_") in diagram_aliases]
+        if not existing_indices:
             blocks.append(diagram_block)
         else:
+            existing_index = existing_indices[0]
             existing = blocks[existing_index]
-            merged = dict(existing)
-            merged.update(diagram_block)
-            # Keep per-step placement metadata if the model supplied it.
+            # Replace the full payload; merging would preserve a stale circuit's
+            # top-level nodes/edges and could draw an unrelated transistor schema.
+            replacement = dict(diagram_block)
             for key in ("step_index", "step_title", "sequence_index", "topic_group", "block_id"):
                 if key in existing:
-                    merged[key] = existing[key]
-            blocks[existing_index] = merged
+                    replacement[key] = existing[key]
+            blocks[existing_index] = replacement
+            for duplicate_index in reversed(existing_indices[1:]):
+                del blocks[duplicate_index]
+
+        # A broad site tour uses two consecutive, non-identical views: the first
+        # shows profile shortcuts, the second shows the real Help & Information
+        # cards. Do not append this overview to a focused arrow/route request or
+        # when an authorized source-image edit is the requested visual deliverable.
+        if bool(site_map.get("broad_self_help")) and screen_id == "profile" and not pointer_requested and not source_image_edit:
+            full_area_index = {str(area.get("id")): area for area in APRIL_SITE_MAP.get("areas", []) if isinstance(area, dict)}
+            help_ids = ["guide", "help-center", "how-to-use", "privacy", "terms", "plans", "deletion", "support"]
+            help_nodes = []
+            help_edges = []
+            for help_id in help_ids:
+                area = full_area_index.get(help_id)
+                if not area:
+                    continue
+                help_nodes.append({
+                    "id": help_id,
+                    "label": f"{_text(area.get('label'))}\n{_text(area.get('path'))}",
+                    "kind": "page", "href": _text(area.get("path")),
+                })
+            if len(help_nodes) >= 3:
+                for help_node in help_nodes[1:]:
+                    help_edges.append({"from": help_nodes[0]["id"], "to": help_node["id"], "label": "Карточка справки"})
+                help_payload = {
+                    "title": "Help & Information / Справка и документы",
+                    "description": "Вторая часть карты: карточки справки, документы, тарифы и удаление данных. Это отдельная страница, не кнопки внутри профиля.",
+                    "representation": "navigation_flow", "screen_id": "help",
+                    "selected_route_ids": help_ids, "matched_query": current_route_query[:260],
+                    "navigation_map_schema": site_map.get("schema", "april.site_navigation.v1"),
+                    "layout": {"direction": "TB", "rankdir": "TB", "spacing": "comfortable", "responsive": True},
+                    "nodes": help_nodes, "edges": help_edges, "renderer": "SvgBlock", "viewer": "SvgBlock",
+                }
+                try:
+                    from blocks.C_DIAGRAM_ROOM import ensure_readable_diagram_payload
+                    help_payload = ensure_readable_diagram_payload(help_payload, title=help_payload["title"])
+                except Exception:
+                    pass
+                if help_payload.get("svg") or help_payload.get("svg_payload"):
+                    blocks.append({
+                        "type": "diagram", "artifact_type": "diagram", "renderer": "SvgBlock", "viewer": "SvgBlock",
+                        "title": help_payload["title"], "payload": help_payload,
+                        "explanation": "Этап 2 из 2. Эта схема продолжает карту профиля и показывает отдельную страницу справки — без повторения быстрых переходов профиля.",
+                        "source_room": "C_IT_ROOM", "step_index": 2, "sequence_index": 2,
+                        "step_title": "Этап 2. Справка и документы", "integrity_repaired": True,
+                    })
     # Keep route links visible in the actual SceneContract text renderer, not
     # only in the top-level answer field. For a one-text-block answer, synchronize
     # that block; for multi-section answers, add a separate link block to avoid
@@ -991,8 +1554,9 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
         requested_outputs = _requested_outputs_from_machine_request(machine_request)
         if _site_should_render_diagram(query, requested_outputs):
             prompt_fragments.extend([
-                "Complement site-navigation help with one concrete DiagramRenderer diagram built from the query-relevant routes; the written instructions remain the main answer.",
-                "The diagram must contain a responsive mobile SVG generated from its route nodes/edges, real directed connections and concise labels. Never emit an empty renderer shell, a tiny corner graph, or a fixed unrelated template.",
+                "Complement site-navigation help with a screenshot-faithful April UI diagram built from the query-relevant screen blueprint; keep the written steps primary and never invent controls not present in that blueprint.",
+                "Use one portrait/mobile SVG for a short path; for a long procedure use two ordered, non-repeating diagrams that continue the route. Keep visible card/button labels and exact verified relative paths.",
+                "A source-image edit request takes precedence over a route diagram. Never replace an image-edit task with a generic map. Empty SVG/diagram shells must be dropped before SceneContract.",
             ])
     diagram_hint = help_active and _site_should_render_diagram(
         _current_user_query(machine_request), _requested_outputs_from_machine_request(machine_request)
