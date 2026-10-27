@@ -4515,8 +4515,25 @@ def search_dialogue_context(
         _text(row.get("message_id")) == resume_key
         or (resume_key.startswith("legacy-memory-") and resume_key == f"legacy-memory-{_text(row.get('id'))}")
     )), None) if resume_key else None
+    low_query_for_assets = _text(query).lower().replace("ё", "е")
+    image_noun_pattern = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b)"
+    image_edit_action_pattern = r"(?:измен\w*|отредактир\w*|модифицир\w*|добав\w*|дорис\w*|убер\w*|удал\w*|замен\w*|передел\w*|поправ\w*|исправ\w*|перерис\w*|\bedit\b|\bmodify\b|\badd\b|\bremove\b|\breplace\b|\bredraw\b)"
+    image_reference_pattern = rf"(?:{image_noun_pattern}|\b(?:на\s+(?:ней|нее|неё|нем|нём|них)|эту\s+(?:фотограф\w*|фотк\w*|картинк\w*|иллюстрац\w*|изображени\w*)|this\s+(?:photo|image|picture)|on\s+it)\b)"
+    # A visual correction can refer to an earlier image without uploading it again.
+    # Treat that as an image retrieval operation so continuation narrowing does not
+    # collapse the search to the latest unrelated generated render in the hot branch.
+    image_edit_reference = bool(
+        re.search(rf"\b{image_edit_action_pattern}\b.{{0,140}}?{image_reference_pattern}", low_query_for_assets, re.I | re.S)
+        or re.search(rf"{image_reference_pattern}.{{0,140}}?\b{image_edit_action_pattern}\b", low_query_for_assets, re.I | re.S)
+    )
+    explicit_new_visual = bool(re.search(
+        r"\b(?:создай|сгенерир\w*|нарису\w*|изобрази|generate|create|draw)\b.{0,45}(?:нов\w*\s+)?(?:картинк\w*|изображени\w*|фото\b|\bimage\b|\bphoto\b|\bpicture\b)",
+        low_query_for_assets, re.I | re.S,
+    ))
+    if explicit_new_visual:
+        image_edit_reference = False
     query_modalities = {modality for modality, enabled in (
-        ("image", bool(has_image)), ("file", bool(has_file)), ("voice", bool(has_voice)),
+        ("image", bool(has_image or image_edit_reference)), ("file", bool(has_file)), ("voice", bool(has_voice)),
     ) if enabled}
     needs_structured_search = bool(
         _structured_work_requested(query, query_interpretation, query_modalities)
@@ -4548,6 +4565,7 @@ def search_dialogue_context(
         temporal_match_count=time_filter.get("matched_rows"),
         temporal_neighbor_sides=sum(1 for side in (time_filter.get("neighbors") or {}).values() if isinstance(side, dict)),
         temporal_outside_retention=bool(time_filter.get("outside_retention_window")),
+        image_edit_reference=bool(image_edit_reference),
     )
 
     scope_started = time.perf_counter()
@@ -4626,6 +4644,7 @@ def search_dialogue_context(
         and not time_filter.get("applied")
         and not resume_key
         and not (has_image or has_file)
+        and not image_edit_reference
         and rows
     )
     if should_narrow_continuation:
