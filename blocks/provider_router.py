@@ -1170,6 +1170,30 @@ def _select_protected_structured_data(
     return []
 
 
+def _should_preserve_current_request_verbatim(value: Any) -> bool:
+    """Keep the original wording of short turns; it carries negation and intent cues.
+
+    The request sequence may summarize independent steps, but CURRENT_REQUEST is
+    the authoritative user utterance. For short messages it costs little to keep
+    the exact source rather than dropping corrections such as “not photos”.
+    Longer UI/navigation requests are also preserved when they fit a conservative
+    character bound; large structured requests still use existing lossless paths.
+    """
+    source = _text(value)
+    if not source:
+        return False
+    if len(source) <= 520:
+        return True
+    ui_help = bool(re.search(
+        r"(?:куда\s+наж|где.{0,60}(?:кноп|наход|раздел|ссылк)|покажи.{0,70}(?:куда|путь|карт|схем|стрелк)|"
+        r"по\s+шагам|пошаг|сообществ|истори\w*\s+диалог|отблагодар\w*|поблагодар\w*|пожалова\w*|жалоб\w*|"
+        r"free.{0,35}premium|premium.{0,35}free|как\s+(?:устроен\w*|пользова\w*|работа\w*).{0,60}april|"
+        r"where.{0,60}(?:click|button|find)|step[- ]by[- ]step|how.{0,60}(?:use|navigate).{0,60}april)",
+        source, re.IGNORECASE | re.DOTALL,
+    ))
+    return len(source) <= 1200 and ui_help
+
+
 def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: int = 0) -> tuple[str, str, int, str]:
     """Fit system prompt + dynamic JSON card + attachment labels to the token budget."""
     data = json.loads(json.dumps(structured, ensure_ascii=False))
@@ -1181,6 +1205,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     source_current_request = _text(data.get("CURRENT_REQUEST"))
     source_new_request = _text(data.get("NEW_DIALOGUE_REQUEST"))
     sequence = data.get("REQUEST_SEQUENCE") if isinstance(data.get("REQUEST_SEQUENCE"), list) else []
+    preserve_current_verbatim = _should_preserve_current_request_verbatim(source_current_request)
     interpretation_card = data.get("INTERPRETATION") if isinstance(data.get("INTERPRETATION"), dict) else {}
     scene_plan = data.get("C_ARTIFACT_RENDER_PLAN") if isinstance(data.get("C_ARTIFACT_RENDER_PLAN"), list) else []
     wants_graph = bool(interpretation_card.get("wants_graph")) or any(
@@ -1199,7 +1224,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 continue
             if is_single_3d_scene_task:
                 item["request"] = "Use CURRENT_REQUEST as the complete 3D scene specification; every clause is a constraint for this one graph artifact."
-            else:
+            elif not (preserve_current_verbatim and len(sequence) <= 6):
                 item["request"] = _semantic_compress(item.get("request"), MAX_TOPIC_PROMPT_TOKENS - 24)
             if item.get("search_query"):
                 item["search_query"] = _semantic_compress(item.get("search_query"), 100)
@@ -1253,7 +1278,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 ]
         data["REQUEST_SEQUENCE"] = sequence
     current_limit = (820 if is_single_3d_scene_task else max(1, MAX_TOPIC_PROMPT_TOKENS - 24)) if len(sequence) <= 1 else max(1, min(MAX_TOPIC_PROMPT_TOKENS - 8, 420, max(24, MAX_PROMPT_TOKENS // 4)))
-    data["CURRENT_REQUEST"] = _semantic_compress(source_current_request, current_limit)
+    data["CURRENT_REQUEST"] = source_current_request if preserve_current_verbatim else _semantic_compress(source_current_request, current_limit)
     if is_single_3d_scene_task:
         data["NEW_DIALOGUE_REQUEST"] = "Same as CURRENT_REQUEST; preserve all scene constraints."
     elif source_new_request and source_new_request == source_current_request:
@@ -1374,10 +1399,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     sequence = data.get("REQUEST_SEQUENCE") if isinstance(data.get("REQUEST_SEQUENCE"), list) else []
     topic_target = min(MAX_TOPIC_PROMPT_TOKENS - 24, max(48, (MAX_PROMPT_TOKENS // max(1, len(sequence))) - 30))
     for item in sequence:
-        if isinstance(item, dict):
+        if isinstance(item, dict) and not (preserve_current_verbatim and len(sequence) <= 6):
             item["request"] = _semantic_compress(item.get("request"), topic_target)
     data["REQUEST_SEQUENCE"] = sequence
-    data["CURRENT_REQUEST"] = _semantic_compress(data.get("CURRENT_REQUEST"), min(540, topic_target))
+    data["CURRENT_REQUEST"] = data.get("CURRENT_REQUEST") if preserve_current_verbatim else _semantic_compress(data.get("CURRENT_REQUEST"), min(540, topic_target))
     if data.get("NEW_DIALOGUE_REQUEST") == structured.get("CURRENT_REQUEST"):
         data["NEW_DIALOGUE_REQUEST"] = "Same as CURRENT_REQUEST; use the current task text above."
     else:
@@ -1579,7 +1604,11 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             }
             seq.append({
                 "i": item.get("step_index", idx + 1),
-                "q": _semantic_compress(item.get("request"), max(8, share)),
+                "q": (
+                    "Same as CURRENT_REQUEST; preserve the complete original user wording."
+                    if preserve_current_verbatim and len(original_sequence) == 1
+                    else _semantic_compress(item.get("request"), max(8, share))
+                ),
                 "o": outputs,
                 "r": task_search.get("relation", "NEW"),
                 "p": bool(item.get("inherits_current_request_subject")),
@@ -1677,7 +1706,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             assets_min.append(row)
         return {
             "AUTHENTICATED_IDENTITY": identity_min,
-            "CURRENT_REQUEST": _semantic_compress(data.get("CURRENT_REQUEST"), current_budget),
+            "CURRENT_REQUEST": data.get("CURRENT_REQUEST") if preserve_current_verbatim else _semantic_compress(data.get("CURRENT_REQUEST"), current_budget),
             "RETURN_LANGUAGE": data.get("RETURN_LANGUAGE") or "en",
             "INTERPRETATION": keep_intent,
             "DIALOGUE_RELATION": data.get("DIALOGUE_RELATION") or "NEW",
@@ -1834,7 +1863,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     # progressively lowering text per topic instead of dropping topics.
     for tiny_topic_budget in (24, 18, 14, 10, 8, 6, 4, 3, 2, 1):
         minimal = build_minimal(48, tiny_topic_budget, 6, minimum_history_pair)
-        minimal["CURRENT_REQUEST"] = _semantic_compress(data.get("CURRENT_REQUEST"), 48)
+        minimal["CURRENT_REQUEST"] = data.get("CURRENT_REQUEST") if preserve_current_verbatim else _semantic_compress(data.get("CURRENT_REQUEST"), 48)
         if len(original_sequence) > 35:
             compact_lines = []
             for idx, item in enumerate(original_sequence):
@@ -1869,7 +1898,13 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             minimal["REQUEST_SEQUENCE"] = [
                 {
                     "i": item.get("step_index", idx + 1),
-                    "q": _semantic_compress(item.get("request"), tiny_topic_budget),
+                    "q": (
+                        "Same as CURRENT_REQUEST; preserve the complete original user wording."
+                        if preserve_current_verbatim and len(original_sequence) == 1
+                        else _text(item.get("request"))
+                        if preserve_current_verbatim and len(original_sequence) <= 6
+                        else _semantic_compress(item.get("request"), tiny_topic_budget)
+                    ),
                     "o": (item.get("output_types") or ["text"])[0] if isinstance(item.get("output_types") or ["text"], list) and len(item.get("output_types") or ["text"]) == 1 else (item.get("output_types") or ["text"]),
                     "r": ((item.get("dialogue_search") or {}).get("relation", "NEW") if isinstance(item.get("dialogue_search"), dict) else "NEW"),
                     "p": bool(item.get("inherits_current_request_subject")),
@@ -1969,10 +2004,11 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         for step in minimal["REQUEST_SEQUENCE"]:
             if isinstance(step, dict):
                 key = "q" if "q" in step else "request"
-                if step.get(key):
+                if step.get(key) and not (preserve_current_verbatim and len(minimal["REQUEST_SEQUENCE"]) <= 6):
                     step[key] = _semantic_compress(step.get(key), 2)
         current_limit = 24 if minimal.get("PROTECTED_CURRENT_INPUT") else 48
-        minimal["CURRENT_REQUEST"] = _semantic_compress(minimal.get("CURRENT_REQUEST"), current_limit)
+        if not preserve_current_verbatim:
+            minimal["CURRENT_REQUEST"] = _semantic_compress(minimal.get("CURRENT_REQUEST"), current_limit)
         minimal["NEW_DIALOGUE_REQUEST"] = "Same as CURRENT_REQUEST"
         card = _json_card(minimal)
         total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
@@ -2033,7 +2069,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             emergency["REQUEST_SEQUENCE"] = small_sequence
         # The protected current input is never rewritten. Ordinary duplicated
         # summaries may be shortened further because the exact request is preserved above.
-        if not emergency.get("PROTECTED_CURRENT_INPUT"):
+        if not emergency.get("PROTECTED_CURRENT_INPUT") and not preserve_current_verbatim:
             emergency["CURRENT_REQUEST"] = _semantic_compress(emergency.get("CURRENT_REQUEST"), 64)
         emergency_system = (
             "April: answer CURRENT_REQUEST in RETURN_LANGUAGE. Preserve every REQUEST_SEQUENCE step and all protected source values. "
