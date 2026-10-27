@@ -1370,7 +1370,23 @@ april_images_generator = AprilImagesGenerator()
 
 
 async def generate_from_spec(spec: dict[str, Any], *, variant: str = "provider_spec") -> dict[str, Any]:
-    return await april_images_generator.generate_from_spec(spec, variant=variant)
+    """Fail closed with a typed result instead of throwing through the chat route.
+
+    Provider moderation, quota, and transport errors must finish the Premium turn
+    with a non-empty response; they must not leave the Web renderer in pending state.
+    """
+    try:
+        return await april_images_generator.generate_from_spec(spec, variant=variant)
+    except Exception as exc:
+        code = type(exc).__name__
+        # Do not log the full prompt or user image details here.
+        print("[APRIL_IMAGE_GENERATOR_FAILURE] " + json.dumps({
+            "variant": variant,
+            "error_type": code,
+            "error": str(exc)[:240],
+            "success": False,
+        }, ensure_ascii=False, separators=(",", ":"), default=str), flush=True)
+        return {"success": False, "error_code": code, "error": str(exc)[:240], "variant": variant}
 
 
 async def generate_image(prompt: str, size: str = "512x512", quality: str = "low") -> Optional[bytes]:
@@ -1393,7 +1409,17 @@ async def edit_image(image_bytes: bytes, prompt: str, quality: str = "low") -> O
 
 
 async def edit_image_result(image_bytes: bytes, prompt: str, quality: str = "low") -> dict[str, Any]:
-    return await april_images_generator.edit(image_bytes, prompt, quality=quality)
+    """Return an explicit failure for edit/provider exceptions, never an unhandled error."""
+    try:
+        return await april_images_generator.edit(image_bytes, prompt, quality=quality)
+    except Exception as exc:
+        code = type(exc).__name__
+        print("[APRIL_IMAGE_EDIT_FAILURE] " + json.dumps({
+            "error_type": code,
+            "error": str(exc)[:240],
+            "success": False,
+        }, ensure_ascii=False, separators=(",", ":"), default=str), flush=True)
+        return {"success": False, "error_code": code, "error": str(exc)[:240], "operation": "edit"}
 
 
 __all__ = [
