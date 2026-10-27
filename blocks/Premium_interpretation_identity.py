@@ -2097,9 +2097,13 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
             "intent_score": 0, "features": {}, "reason": "empty_request",
         "routing_policy": {
             "version": "hot_branch_then_semantic_history_v1",
-            "order": ["ACTIVE_BRANCH_RELEVANCE", "MATCHED_HISTORY", "NEW_TOPIC"],
+            "order": ["ACTIVE_BRANCH_RELEVANCE", "ALL_RETAINED_HISTORY_SEMANTIC_MATCH", "NEW_TOPIC"],
+            "active_branch_must_match_semantically": True,
+            "history_fallback_on_active_branch_miss": True,
+            "history_scope": "ALL_AUTHENTICATED_DIALOGUE_WITHIN_RETENTION",
+            "new_topic_only_after_history_miss": True,
             "ambiguous_turn": "LATEST_SAME_DIALOG_TURN",
-            "named_subject_conflict": "SEARCH_MATCHING_HISTORY",
+            "named_subject_conflict": "SEARCH_ALL_MATCHING_HISTORY",
             "history_miss": "NEW_TOPIC",
             "cross_topic_injection": "DISALLOW",
         },
@@ -2544,9 +2548,13 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         # retained history only on conflict, and a clean new topic on a history miss.
         "routing_policy": {
             "version": "hot_branch_then_semantic_history_v1",
-            "order": ["ACTIVE_BRANCH_RELEVANCE", "MATCHED_HISTORY", "NEW_TOPIC"],
+            "order": ["ACTIVE_BRANCH_RELEVANCE", "ALL_RETAINED_HISTORY_SEMANTIC_MATCH", "NEW_TOPIC"],
+            "active_branch_must_match_semantically": True,
+            "history_fallback_on_active_branch_miss": True,
+            "history_scope": "ALL_AUTHENTICATED_DIALOGUE_WITHIN_RETENTION",
+            "new_topic_only_after_history_miss": True,
             "ambiguous_turn": "LATEST_SAME_DIALOG_TURN",
-            "named_subject_conflict": "SEARCH_MATCHING_HISTORY",
+            "named_subject_conflict": "SEARCH_ALL_MATCHING_HISTORY",
             "history_miss": "NEW_TOPIC",
             "cross_topic_injection": "DISALLOW",
         },
@@ -2914,18 +2922,38 @@ def build_question_sequence(
     parent_outputs = _enhance_requested_outputs(text, _detect_requested_outputs(text))
     pieces = _split_request_sequence(text)
     parent_signature = parent.get("context_signature") if isinstance(parent.get("context_signature"), dict) else _context_signature(text)
+    parent_participants = parent_signature.get("participant_references") if isinstance(parent_signature.get("participant_references"), dict) else {}
     parent_is_self_contained_new = bool(
         parent.get("primary_intent") == "NEW_INFORMATION"
         and not parent.get("requires_memory")
         and not parent.get("history_request")
         and not parent.get("explicit_topic_switch")
+        and not parent_signature.get("reference_terms")
+        and not parent_participants.get("interlocutor_reference")
+        and not parent_participants.get("shared_reference")
     )
-    # Substantive NEW turns introduce their current subject even when the verb is
-    # outside the narrow introduction whitelist (e.g. "придумай названия для кафе").
-    # Historical/continuation requests never use this turn-local subject inheritance.
+    first_piece_signature = _context_signature(pieces[0]) if pieces else {}
+    first_piece_intent = interpret_request_semantics(pieces[0]) if pieces else {}
+    first_piece_participants = first_piece_signature.get("participant_references") if isinstance(first_piece_signature.get("participant_references"), dict) else {}
+    first_piece_is_turn_root = bool(
+        pieces
+        and first_piece_intent.get("primary_intent") == "NEW_INFORMATION"
+        and not first_piece_intent.get("requires_memory")
+        and not first_piece_intent.get("history_request")
+        and not first_piece_intent.get("explicit_topic_switch")
+        and first_piece_signature.get("has_explicit_subject")
+        and not first_piece_signature.get("reference_terms")
+        and not first_piece_participants.get("interlocutor_reference")
+        and not first_piece_participants.get("shared_reference")
+    )
+    # A compound turn can be labeled as continuation because a later clause uses
+    # a pronoun ("draw a project ... and explain how to assemble it"). Resolve the
+    # first substantive clause independently; if it is a self-contained subject,
+    # dependent clauses inherit that root only after its normal memory search runs.
     parent_introduces_subject = bool(
         _has_explicit_topic_introduction(text)
         or (parent_is_self_contained_new and parent_signature.get("has_explicit_subject"))
+        or first_piece_is_turn_root
     )
     subject_intro_seen = False
     for index, item in enumerate(pieces, start=1):
@@ -2944,7 +2972,16 @@ def build_question_sequence(
             r"предпочесть|оценить|сравнить|стоит\s+взять|should\s+i\s+choose|choose|pick)\b",
             item_low, flags=re.IGNORECASE | re.DOTALL,
         ))
-        item_has_anaphor = item_has_anaphor or evaluative_dependency
+        # Generic alternative/display clauses have an implicit object supplied by
+        # the preceding request: "show both versions", "покажи оба варианта".
+        # Treat them as dependent only when a prior clause has introduced the
+        # turn's subject; they must not independently start a new topic.
+        alternative_dependency = bool(re.search(
+            r"\b(?:оба|обе|обоих|все|эти|такие|both|all)\s+(?:вариант\w*|способ\w*|пример\w*|пункт\w*|решени\w*|верси\w*|option\w*|version\w*|approach\w*|way\w*)\b"
+            r"|\b(?:покажи|покажите|нарисуй|сделай|объясни|сравни|show|draw|make|explain|compare)\b.{0,28}\b(?:оба|обе|все|both|all)\b",
+            item_low, flags=re.IGNORECASE | re.DOTALL,
+        ))
+        item_has_anaphor = item_has_anaphor or evaluative_dependency or alternative_dependency
         preceding_clause = " ".join(pieces[:index - 1])
         preceding_signature = _context_signature(preceding_clause) if preceding_clause else {}
         preceding_has_subject = bool(
@@ -2961,7 +2998,10 @@ def build_question_sequence(
         )
         # The first clause owns the subject for this turn even when its task verb is
         # uncommon. Executor uses this metadata for a safe NEW-topic fast path.
-        if index == 1 and parent_is_self_contained_new and parent_signature.get("has_explicit_subject"):
+        if index == 1 and (
+            (parent_is_self_contained_new and parent_signature.get("has_explicit_subject"))
+            or first_piece_is_turn_root
+        ):
             item_introduces_subject = True
         # Per-question output signals must use the same semantic enhancement as
         # the turn-level contract. Without this, INTERPRETATION could request a
