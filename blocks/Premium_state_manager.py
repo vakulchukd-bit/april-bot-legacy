@@ -7112,6 +7112,156 @@ def search_dialogue_context(
         history_selection_method = "underspecified_latest_same_dialog"
         route_decision = "ACTIVE_BRANCH_FIRST"
 
+    # A route decision identifies the right topic, but a single selected pair often
+    # lacks the source turn containing the user's original constraints or a table,
+    # graph, code block, or generated asset. Expand only the identified topic branch.
+    # This is deliberately bounded and never falls back to unrelated recent history.
+    branch_context_expanded = False
+    branch_route_kind = (
+        "ACTIVE_BRANCH_FIRST" if relation == "CONTINUE" and not history_request
+        else "MATCHED_HISTORY" if contextual_history_match and selected_for_context and not history_request
+        else ""
+    )
+    if (
+        branch_route_kind
+        and selected_for_context
+        and not history_request
+        and not time_filter.get("applied")
+    ):
+        branch_seed_id = _text((anchor or {}).get("message_id") or selected_for_context[-1].get("message_id"))
+        branch_pool = current_dialog_rows if branch_route_kind == "ACTIVE_BRANCH_FIRST" else [
+            row for row in all_rows
+            if isinstance(row, dict)
+            and not _row_is_pending_clarification(row)
+            and not _is_failed_provider_row(row)
+        ]
+        branch_seed_row = next((row for row in branch_pool if _text(row.get("message_id")) == branch_seed_id), None)
+        if branch_seed_row:
+            seed_topic_id = _text(branch_seed_row.get("topic_id"))
+            seed_origin_id = _text(branch_seed_row.get("topic_origin_message_id"))
+            if not seed_origin_id and active_work_branch:
+                seed_origin_id = _text(active_work_branch.get("origin_message_id"))
+            seed_subjects = _row_subject_tokens(branch_seed_row)
+            seed_topic_text = " ".join((_row_subject_text_lightweight(branch_seed_row), _topic_label_lightweight(branch_seed_row)))
+            exact_branch_rows = []
+            semantic_branch_rows = []
+            for row in branch_pool:
+                if not isinstance(row, dict) or _row_is_pending_clarification(row) or _is_failed_provider_row(row):
+                    continue
+                row_id = _text(row.get("message_id"))
+                row_topic_id = _text(row.get("topic_id"))
+                row_origin_id = _text(row.get("topic_origin_message_id"))
+                same_topic_id = bool(seed_topic_id and row_topic_id and seed_topic_id == row_topic_id)
+                same_origin = bool(seed_origin_id and (row_origin_id == seed_origin_id or row_id == seed_origin_id))
+                if row_id == branch_seed_id or same_topic_id or same_origin:
+                    exact_branch_rows.append(row)
+                    continue
+                # Legacy rows may not have topic_id/origin metadata. Use conservative
+                # semantic similarity only when the subjects don't contradict each other.
+                row_subjects = _row_subject_tokens(row)
+                subject_similarity = _subject_overlap(seed_subjects, row_subjects) if seed_subjects and row_subjects else 0.0
+                subject_conflict = _subject_conflicts(seed_subjects, row_subjects)
+                row_topic_text = " ".join((_row_subject_text_lightweight(row), _topic_label_lightweight(row)))
+                title_similarity = _topic_query_overlap(seed_topic_text, row_topic_text) if seed_topic_text and row_topic_text else 0.0
+                if not subject_conflict and (subject_similarity >= 0.52 or title_similarity >= 0.62):
+                    semantic_branch_rows.append(row)
+
+            # When the active branch has no persisted provenance (legacy rows), or
+            # the current branch is thin, search the full authenticated retained
+            # dialogue window for semantically matching source turns. A history row
+            # is eligible only when the subject does not conflict and the topic text
+            # independently aligns; recency alone is never enough to import it.
+            if branch_route_kind == "ACTIVE_BRANCH_FIRST":
+                exact_branch_ids = {_text(row.get("message_id")) for row in exact_branch_rows}
+                seed_subjects_for_history = seed_subjects or _subject_tokens(query)
+                seed_topic_for_history = seed_topic_text or _text(query)
+                for row in all_rows:
+                    if not isinstance(row, dict) or _row_is_pending_clarification(row) or _is_failed_provider_row(row):
+                        continue
+                    row_id = _text(row.get("message_id"))
+                    if not row_id or row_id in exact_branch_ids:
+                        continue
+                    row_subjects = _row_subject_tokens(row)
+                    if _subject_conflicts(seed_subjects_for_history, row_subjects):
+                        continue
+                    subject_similarity = _subject_overlap(seed_subjects_for_history, row_subjects) if row_subjects else 0.0
+                    row_topic_text = " ".join((_row_subject_text_lightweight(row), _topic_label_lightweight(row)))
+                    seed_topic_similarity = _topic_query_overlap(seed_topic_for_history, row_topic_text) if row_topic_text else 0.0
+                    query_topic_similarity = _topic_query_overlap(query, row_topic_text) if row_topic_text else 0.0
+                    if (
+                        (subject_similarity >= 0.46 and max(seed_topic_similarity, query_topic_similarity) >= 0.38)
+                        or seed_topic_similarity >= 0.60
+                        or query_topic_similarity >= 0.55
+                    ):
+                        semantic_branch_rows.append(row)
+
+            branch_rows = exact_branch_rows + [
+                row for row in semantic_branch_rows
+                if _text(row.get("message_id")) not in {_text(item.get("message_id")) for item in exact_branch_rows}
+            ]
+            if branch_rows:
+                root_row = next((row for row in branch_rows if seed_origin_id and _text(row.get("message_id")) == seed_origin_id), None)
+                if root_row is None and seed_topic_id:
+                    root_row = next((row for row in branch_rows if _text(row.get("topic_id")) == seed_topic_id), None)
+                scored_branch = []
+                seen_branch_ids = set()
+                for row in branch_rows:
+                    row_id = _text(row.get("message_id"))
+                    if not row_id or row_id in seen_branch_ids:
+                        continue
+                    seen_branch_ids.add(row_id)
+                    candidate = _candidate_score(
+                        query, row,
+                        dialog_id=str(dialog_id or ""),
+                        conversation_id=str(conversation_id or ""),
+                        reference_followup=(branch_route_kind == "ACTIVE_BRANCH_FIRST"),
+                        query_modalities=query_modalities,
+                        structured_evidence_required=needs_structured_search,
+                    )
+                    richness = int(candidate.get("structured_data_richness") or 0)
+                    has_saved_asset = bool(candidate.get("row_modalities")) or bool(candidate.get("attachment_evidence"))
+                    must_keep = row_id == branch_seed_id or (root_row and row_id == _text(root_row.get("message_id")))
+                    rank = float(candidate.get("score") or 0.0) + min(0.20, richness * 0.006) + (0.06 if has_saved_asset else 0.0) + (0.40 if must_keep else 0.0)
+                    scored_branch.append((rank, row, candidate, must_keep))
+                # Keep the topic root and selected anchor first, then the most useful
+                # related evidence. Return them chronologically for understandable context.
+                scored_branch.sort(key=lambda item: (item[0], float(item[1].get("created_at") or 0.0)), reverse=True)
+                chosen = [item for item in scored_branch if item[3]]
+                chosen_ids = {_text(item[1].get("message_id")) for item in chosen}
+                for item in scored_branch:
+                    item_id = _text(item[1].get("message_id"))
+                    if item_id not in chosen_ids and len(chosen) < 6:
+                        chosen.append(item)
+                        chosen_ids.add(item_id)
+                chosen = chosen[:6]
+                chosen.sort(key=lambda item: (float(item[1].get("created_at") or 0.0), int(item[1].get("turn_index") or 0)))
+                expanded_pairs = [_compact_pair(item[2]) for item in chosen]
+                if expanded_pairs:
+                    selected_for_context = expanded_pairs
+                    branch_context_expanded = len(expanded_pairs) > 1
+                    selected_from_prior_dialogue = any(
+                        _text(item[1].get("dialog_id")) and _text(item[1].get("dialog_id")) != _text(dialog_id)
+                        for item in chosen if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], dict)
+                    )
+                    if branch_route_kind == "ACTIVE_BRANCH_FIRST" and selected_from_prior_dialogue:
+                        history_selection_method = "active_branch_semantic_history_branch_context"
+                    elif branch_route_kind == "ACTIVE_BRANCH_FIRST":
+                        history_selection_method = "same_dialog_topic_branch_context"
+                    else:
+                        history_selection_method = "semantic_history_topic_branch_context"
+                    _apr_timing_log(
+                        "topic_branch_context_expanded",
+                        user_key=_apr_diag_ref(uid),
+                        route_decision=route_decision,
+                        branch_route_kind=branch_route_kind,
+                        branch_seed_message_key=_apr_diag_ref(branch_seed_id),
+                        branch_root_message_key=_apr_diag_ref(_text(root_row.get("message_id")) if root_row else seed_origin_id),
+                        candidate_rows=len(branch_rows),
+                        selected_pairs=len(expanded_pairs),
+                        structured_search=bool(needs_structured_search),
+                        method=history_selection_method,
+                    )
+
     _apr_timing_log(
         "route_arbitration",
         user_key=_apr_diag_ref(uid),
@@ -7172,7 +7322,7 @@ def search_dialogue_context(
         "anchor_message_id": _text((anchor or {}).get("message_id"))[:120],
         "selected_message_ids": [
             _text(item.get("message_id"))[:120]
-            for item in selected_for_context[:5]
+            for item in selected_for_context[:8]
             if isinstance(item, dict) and _text(item.get("message_id"))
         ],
         "contextual_history_match": bool(contextual_history_match),
@@ -7194,7 +7344,7 @@ def search_dialogue_context(
         "active_topic_seed": _text(active_topic)[:240] if relation == "CONTINUE" else "",
         "prefer_active_branch": bool(relation == "CONTINUE" and not history_request and not new_topic_request and not query_interpretation.get("explicit_topic_switch")),
         "prefer_named_history": bool(history_request or contextual_history_match or (relation == "CONTINUE" and bool(selected_section))),
-        "selected_message_ids": [_text(item.get("message_id"))[:120] for item in (selected_for_context or [])[:5] if isinstance(item, dict) and _text(item.get("message_id"))],
+        "selected_message_ids": [_text(item.get("message_id"))[:120] for item in (selected_for_context or [])[:8] if isinstance(item, dict) and _text(item.get("message_id"))],
         "avoid_cross_topic_injection": True,
         "coverage_policy": "recall_requested_history" if history_request else ("continue_uncovered_sections" if relation == "CONTINUE" else "answer_new_request"),
         "query_composition": "current_request_plus_interpreter_profile_and_active_branch" if relation == "CONTINUE" else "current_request_and_interpreter_profile",
@@ -7294,7 +7444,7 @@ def search_dialogue_context(
         "active_topic": active_topic,
         "anchor": anchor_payload,
         "matches": matches[:max(1, int(limit or 12))] if matches else [],
-        "selected": selected_for_context[:4 if (history_request or resume_anchor_row or repair_active_branch or (explicit_artifact_followup and artifact_source_row)) else 2],
+        "selected": selected_for_context[:6 if (history_request or resume_anchor_row or repair_active_branch or (explicit_artifact_followup and artifact_source_row) or branch_context_expanded) else 2],
         "history_topics": history_topics,
         "topic_index": topic_index,
         "known_topic_count": len(topics),
