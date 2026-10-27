@@ -2431,7 +2431,8 @@ def _merge_compact_summaries(existing: Any, incoming: Any, limit: int = 640) -> 
 
 
 def _build_topic_index(
-    rows: list[dict[str, Any]], *, include_sections: bool = True, include_structured: bool = True
+    rows: list[dict[str, Any]], *, include_sections: bool = True, include_structured: bool = True,
+    include_pending: bool = False,
 ) -> list[dict[str, Any]]:
     """Build a 24-hour topic/section index from the canonical persisted pairs.
 
@@ -2443,7 +2444,15 @@ def _build_topic_index(
         return []
 
     ordered = sorted(
-        [row for row in rows if isinstance(row, dict) and not _row_is_pending_clarification(row)],
+        [
+            row for row in rows
+            if isinstance(row, dict)
+            and (include_pending or not _row_is_pending_clarification(row))
+            # History-recall prompts are navigation requests, not topics. Indexing
+            # them as ordinary subjects makes the next overview retrieve the old
+            # failed overview answer again and creates a self-reinforcing loop.
+            and not _is_history_recall_question(_text(row.get("user_text")))
+        ],
         key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
     )
     groups: list[dict[str, Any]] = []
@@ -3730,8 +3739,66 @@ def _topic_query_overlap(query: str, topic: str) -> float:
     return _fuzzy_token_overlap(query_tokens, topic_tokens) if query_tokens else 0.0
 
 
+def _is_broad_history_overview_query(query: str) -> bool:
+    """Recognize overview/recall prompts that ask about the conversation itself.
+
+    Such prompts must use the chronological topic inventory, not lexical matching
+    against the words "April", "talked", or "today" in old answers. A named subject
+    (for example, "what did we discuss about Einstein") remains subject-specific.
+    """
+    low = re.sub(r"\s+", " ", _text(query).lower().replace("ё", "е")).strip(" .,!?:;—-")
+    if not low:
+        return False
+    named_subject = bool(re.search(
+        r"(?:\bпро\s+[\w\u0080-\uffff]+|\bо(?!\s+(?:чем|чём|том|этом|нашем|нашей|наших)\b)\s+[\w\u0080-\uffff]+|"
+        r"\bоб\s+(?!этом\b)[\w\u0080-\uffff]+|\b(?:насчет|касательно|относительно|по поводу)\s+[\w\u0080-\uffff]+|"
+        r"\b(?:about|regarding|concerning)\s+(?!today\b|yesterday\b|now\b|recently\b|earlier\b|this\s+(?:week|month|year)\b)[a-z\u0080-\uffff]+)",
+        low,
+    ))
+    if named_subject:
+        return False
+    patterns = (
+        r"(?:^|\b)(?:о чем|о чём) (?:мы\s+)?(?:(?:сегодня|вчера|недавно|за\s+последнее\s+время)\s+)?(?:говорили|обсуждали|общались|разговаривали)(?:\s+(?:сегодня|вчера|недавно))?",
+        r"(?:^|\b)(?:что мы\s+(?:(?:сегодня|вчера|недавно|за\s+последнее\s+время)\s+)?(?:обсуждали|говорили|делали|решили|успели))",
+        r"(?:^|\b)(?:напомни|вспомни|покажи|перечисли|суммируй|резюмируй)\w*.{0,55}(?:разговор|переписк|обсуждени|истори|темы|диалог)",
+        r"(?:^|\b)(?:покажи|суммируй|резюмируй)\w*.{0,35}(?:истори\w* диалог|истори\w* переписк|наши темы)",
+        r"(?:^|\b)(?:what did we (?:talk|discuss) about|what have we discussed|what were we talking about|summari[sz]e our conversation|recap our conversation|what did we do today)",
+        r"(?:^|\b)(?:remind me what we (?:said|discussed|worked on)|show me our conversation history)",
+    )
+    if any(re.search(pattern, low, re.IGNORECASE | re.DOTALL) for pattern in patterns):
+        return True
+    # Compact generic phrasings such as "история диалога за сегодня" and
+    # "наши темы за день" are overview requests too.
+    return bool(re.search(
+        r"(?:истори\w* (?:диалог\w*|переписк\w*)|наши темы|темы разговора).{0,35}(?:сегодня|вчера|за день|за неделю|today|yesterday|this week)?$",
+        low,
+        re.IGNORECASE,
+    ))
+
+
+def _is_history_recall_question(query: str) -> bool:
+    """Return true for user turns whose purpose is to recall earlier dialogue.
+
+    Subject-specific recall still searches for its named topic, but the recall
+    question itself must not become a new topic in the dialogue index.
+    """
+    if _is_broad_history_overview_query(query):
+        return True
+    low = re.sub(r"\s+", " ", _text(query).lower().replace("ё", "е")).strip()
+    return bool(re.search(
+        r"(?:\bчто\s+(?:мы\s+)?(?:сегодня\s+|вчера\s+|раньше\s+)?(?:говорили|обсуждали|решили|делали)\b|"
+        r"\b(?:напомни|вспомни|резюмируй|суммируй)\b.{0,90}(?:мы\s+)?(?:говорили|обсуждали|делали|решили|проекта|разговор|переписк|тему|темы|истори)\b|"
+        r"\bwhat did we (?:talk|discuss|decide|work on)\b|\bwhat have we discussed\b|"
+        r"\b(?:recap|summari[sz]e)\b.{0,50}\b(?:our conversation|what we discussed|our discussion)\b|"
+        r"\bshow me\b.{0,35}\b(?:our|the)\s+(?:conversation|dialogue|chat)\s+history\b)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+
+
 def _history_query_topic_tokens(query: str) -> set[str]:
     """Extract subject-bearing words from a history request, excluding recall wording and times."""
+    if _is_broad_history_overview_query(query):
+        return set()
     return {
         token for token in (_semantic_tokens(query) - _HISTORY_QUERY_NOISE)
         if not token.isdigit() and len(token) > 2
@@ -3780,10 +3847,15 @@ def _select_history_context_pairs(
     all_rows: list[dict[str, Any]],
     *,
     requested_topic_count: int = 10,
+    broad_overview: bool = False,
 ) -> tuple[list[dict[str, Any]], str, int]:
     """Select grounded pairs for history recall even though its relation remains NEW."""
-    tokens = _history_query_topic_tokens(query)
+    tokens = set() if broad_overview else _history_query_topic_tokens(query)
     eligible = [item for item in matches if isinstance(item, dict) and not item.get("is_pending_clarification")]
+    if broad_overview:
+        substantive = [item for item in eligible if not _is_history_recall_question(_text(item.get("user") or item.get("user_text")))]
+        if substantive:
+            eligible = substantive
     selected: list[dict[str, Any]] = []
     method = "topic_index_overview"
     matched_count = 0
@@ -4611,6 +4683,7 @@ def search_dialogue_context(
         history_request and (
             bool(query_interpretation.get("history_inventory_request"))
             or _text(query_interpretation.get("primary_intent")).upper() == "HISTORY_SUMMARY"
+            or _is_broad_history_overview_query(query)
             or not _history_query_topic_tokens(query)
         )
     )
@@ -4685,6 +4758,7 @@ def search_dialogue_context(
         all_rows,
         include_sections=needs_section_index,
         include_structured=needs_structured_search,
+        include_pending=history_request,
     )
     requested_limit = query_interpretation.get("requested_topic_count")
     history_limit = max(1, min(10, int(requested_limit or _history_topic_limit(query, 10))))
@@ -4740,6 +4814,7 @@ def search_dialogue_context(
         history_request and (
             query_interpretation.get("history_inventory_request")
             or _text(query_interpretation.get("primary_intent")).upper() == "HISTORY_SUMMARY"
+            or _is_broad_history_overview_query(query)
             or not history_query_tokens
         )
     )
@@ -5400,7 +5475,7 @@ def search_dialogue_context(
                 active_work_row_index = -1
                 active_work_has_marker = False
 
-    if new_work_root_request or unrelated_active_work_topic:
+    if (new_work_root_request or unrelated_active_work_topic) and not history_request:
         hot_work_followup = False
         if new_work_root_request:
             hot_work_match_reason = "self_contained_new_work_root"
@@ -5954,14 +6029,21 @@ def search_dialogue_context(
     contextual_history_match = False
     if history_request:
         selected_for_context, history_selection_method, history_matched_count = _select_history_context_pairs(
-            query, matches, topic_index, all_rows, requested_topic_count=history_limit
+            query, matches, topic_index, all_rows,
+            requested_topic_count=history_limit,
+            broad_overview=broad_history_overview,
         )
         if (
             not selected_for_context
             and broad_history_overview
             and not time_filter.get("applied")
         ):
-            recent_rows = [row for row in all_rows if isinstance(row, dict) and not _row_is_pending_clarification(row)]
+            recent_rows = [
+                row for row in all_rows
+                if isinstance(row, dict)
+                and not _row_is_pending_clarification(row)
+                and not _is_history_recall_question(_text(row.get("user_text")))
+            ]
             recent_rows.sort(
                 key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
                 reverse=True,
