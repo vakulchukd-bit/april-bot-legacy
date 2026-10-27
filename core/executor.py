@@ -681,6 +681,17 @@ def _build_image_spec(
         clean.setdefault("height", 512)
         clean.setdefault("quality", "low")
         clean.setdefault("visual_context", {})
+        if not isinstance(clean.get("visual_context"), dict):
+            clean["visual_context"] = {}
+        # A screenshot-style April navigation illustration must be grounded in the
+        # existing screen blueprint. Do not let the image model invent unrelated UI.
+        _visual_source = interpretation.get("visual") if isinstance(interpretation.get("visual"), dict) else {}
+        _visual_brief = _visual_source.get("site_navigation_visual_brief") if isinstance(_visual_source.get("site_navigation_visual_brief"), dict) else None
+        if not _visual_brief and isinstance(interpretation.get("intent"), dict):
+            _nested_visual = interpretation["intent"].get("visual") if isinstance(interpretation["intent"].get("visual"), dict) else {}
+            _visual_brief = _nested_visual.get("site_navigation_visual_brief") if isinstance(_nested_visual.get("site_navigation_visual_brief"), dict) else None
+        if _visual_brief:
+            clean["visual_context"]["site_navigation_visual_brief"] = _visual_brief
         clean.setdefault("flow_id", identity["flow_id"])
         clean.setdefault("turn_id", identity["message_id"])
         clean.setdefault("user_id", identity["user_id"])
