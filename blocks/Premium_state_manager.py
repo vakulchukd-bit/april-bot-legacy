@@ -3896,7 +3896,7 @@ def _select_history_context_pairs(
         if not selected:
             # Secondary bridge: a topic-index entry may identify the matching turn
             # even if the old row's text/translation fields differ from the new query.
-            topic_ranked = _rank_history_topics(query, topic_index, 4)
+            topic_ranked = _rank_history_topics(query, topic_index, 4, fallback=False)
             row_by_id = {_text(row.get("message_id")): row for row in all_rows if _text(row.get("message_id"))}
             for topic in topic_ranked:
                 row = row_by_id.get(_text(topic.get("message_id")))
